@@ -7,6 +7,12 @@ from .catalog_pagination import catalog_page_size, decode_catalog_cursor, encode
 from .postgres_common import NotFoundError, PostgresServiceError, ValidationError, canonical_fingerprint, postgres_error_details
 from .postgres_concurrency import postgres_execution
 from .query_type_capabilities import catalog_capabilities
+from .view_provenance import (
+    derive_column_provenance,
+    derive_join_provenance,
+    derive_sql_stages,
+    unavailable_sql_stages,
+)
 
 
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -564,7 +570,6 @@ class PostgresCatalogMixin:
             "canAlter": bool(relation_row.get("is_owner") or relation_row.get("can_set_role")),
             "canRefresh": descriptor["kind"] == "materialized_view" and bool(relation_row.get("can_refresh")),
         }
-        descriptor["columnProvenance"] = {"status": "unavailable", "reason": "not_supported"}
         if descriptor["kind"] == "materialized_view":
             index_rows = self._execute_rows(connection, """
                 /* concurrent_refresh_index */
@@ -596,7 +601,81 @@ class PostgresCatalogMixin:
             connection, profile_id, current, namespace, relation, descriptor["kind"],
             descriptor["fingerprint"], relation_row["live_oid"], dependents=True,
         )
+        descriptor.update(self._view_provenance(connection, descriptor, view_definition))
         return descriptor
+
+    def _view_provenance(
+        self, connection: Any, descriptor: dict[str, Any], view_definition: Any,
+    ) -> dict[str, dict[str, Any]]:
+        if descriptor["kind"] not in {"view", "materialized_view"}:
+            return {
+                "columnProvenance": {"status": "unavailable", "reason": "not_supported"},
+                "joinPredicates": {"status": "unavailable", "reason": "not_supported"},
+                "sqlStages": unavailable_sql_stages(descriptor["fingerprint"], "not_supported"),
+            }
+        if not isinstance(view_definition, str) or not view_definition:
+            return {
+                "columnProvenance": {"status": "unavailable", "reason": "definition_unavailable"},
+                "joinPredicates": {"status": "unavailable", "reason": "definition_unavailable"},
+                "sqlStages": unavailable_sql_stages(descriptor["fingerprint"], "definition_unavailable"),
+            }
+        dependencies = descriptor["dependencies"]
+        if dependencies["page"]["hasMore"]:
+            return {
+                "columnProvenance": {"status": "unavailable", "reason": "too_many_sources"},
+                "joinPredicates": {"status": "unavailable", "reason": "too_many_sources"},
+                "sqlStages": unavailable_sql_stages(descriptor["fingerprint"], "too_many_sources"),
+            }
+        identities = dependencies["items"]
+        namespaces = [item["namespace"] for item in identities]
+        relations = [item["relation"] for item in identities]
+        source_rows = self._execute_rows(connection, """
+            /* view_provenance_source_columns */
+            WITH requested(namespace_name, relation_name) AS (
+                SELECT namespace_item.namespace_name, relation_item.relation_name
+                FROM pg_catalog.unnest(%s::text[]) WITH ORDINALITY AS namespace_item(namespace_name, position)
+                JOIN pg_catalog.unnest(%s::text[]) WITH ORDINALITY AS relation_item(relation_name, position)
+                  USING (position)
+            )
+            SELECT namespace.nspname AS namespace,
+                   relation.relname AS relation_name,
+                   CASE WHEN relation.relkind = 'r' THEN 'table'
+                        WHEN relation.relkind = 'p' THEN 'partitioned_table'
+                        WHEN relation.relkind = 'v' THEN 'view'
+                        WHEN relation.relkind = 'm' THEN 'materialized_view'
+                        ELSE 'foreign_table' END AS relation_kind,
+                   attribute.attname AS column_name,
+                   attribute.attnum AS ordinal,
+                   pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) AS data_type
+            FROM requested
+            JOIN pg_catalog.pg_namespace namespace ON namespace.nspname = requested.namespace_name
+            JOIN pg_catalog.pg_class relation ON relation.relnamespace = namespace.oid
+                 AND relation.relname = requested.relation_name
+                 AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+            JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid = relation.oid
+                 AND attribute.attnum > 0 AND NOT attribute.attisdropped
+            ORDER BY namespace.nspname, relation.relname, attribute.attnum
+        """, (namespaces, relations)) if identities else []
+        rows_by_source: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in source_rows:
+            rows_by_source.setdefault((row["namespace"], row["relation_name"]), []).append({
+                "name": row["column_name"], "type": row["data_type"], "ordinal": int(row["ordinal"]),
+            })
+        sources = [{
+            **identity,
+            "columns": rows_by_source.get((identity["namespace"], identity["relation"]), []),
+        } for identity in identities]
+        arguments = {
+            "current_namespace": descriptor["namespace"],
+            "relation_fingerprint": descriptor["fingerprint"],
+        }
+        return {
+            "columnProvenance": derive_column_provenance(
+                view_definition, descriptor["columns"], sources, **arguments,
+            ),
+            "joinPredicates": derive_join_provenance(view_definition, sources, **arguments),
+            "sqlStages": derive_sql_stages(view_definition, sources, **arguments),
+        }
 
     def _relation_lineage(
         self, connection: Any, profile_id: str, database: str, namespace: str, relation: str,

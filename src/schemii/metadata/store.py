@@ -14,7 +14,7 @@ from ..migration_contract import has_full_schema_completeness_proof
 from .validation import bounded_json, identity
 
 
-_TERMINAL_OPERATION_STATES = {"succeeded", "failed", "uncertain"}
+_TERMINAL_OPERATION_STATES = {"succeeded", "failed", "uncertain", "cancelled"}
 _TERMINAL_MIGRATION_STATES = {"succeeded", "failed", "uncertain"}
 _HEX_DIGEST = frozenset("0123456789abcdef")
 
@@ -257,7 +257,7 @@ class MetadataStore:
             cursor.execute(
                 """INSERT INTO metadata_console_settings
                    (application_id, revision, write_intent, default_mode, statement_limit, row_page_size)
-                   VALUES (%s, 1, 'disabled', 'managed_read', 20, 100)
+                   VALUES (%s, 1, 'disabled', 'managed_read', 100, 100)
                    ON CONFLICT (application_id) DO NOTHING""",
                 (application,),
             )
@@ -284,7 +284,7 @@ class MetadataStore:
         if write_intent not in {"disabled", "enabled"} or default_mode not in {"managed_read", "managed", "explicit", "autocommit"}:
             raise MetadataStoreError("invalid_metadata", "Console settings values are invalid", status=400)
         invalid_limits = (
-            isinstance(statement_limit, bool) or not isinstance(statement_limit, int) or not 1 <= statement_limit <= 20
+            isinstance(statement_limit, bool) or not isinstance(statement_limit, int) or not 1 <= statement_limit <= 100
             or isinstance(row_page_size, bool) or not isinstance(row_page_size, int) or not 1 <= row_page_size <= 500
         )
         if invalid_limits:
@@ -455,6 +455,26 @@ class MetadataStore:
             )
         return {"chatId": str(chat), "externalSessionId": external, "displayTitle": title}
 
+    def set_chat_conversation_title(self, chat_id: str, conversation_title: str, *, overwrite: bool = False) -> dict[str, Any]:
+        chat = _uuid(chat_id, "chat_id")
+        title = _chat_title(conversation_title)
+        with self._transaction() as cursor:
+            row = self._lock_chat(cursor, chat)
+            if _row_value(row, "state", 1) != "active":
+                raise MetadataStoreError("chat_inactive", "AI chat is not active", status=409)
+            cursor.execute(
+                """UPDATE metadata_chats
+                   SET conversation_title = %s, updated_at = clock_timestamp()
+                   WHERE chat_id = %s AND (%s OR conversation_title IS NULL)
+                   RETURNING conversation_title""",
+                (title, chat, overwrite),
+            )
+            updated = cursor.fetchone()
+            if updated is None:
+                cursor.execute("SELECT conversation_title FROM metadata_chats WHERE chat_id = %s", (chat,))
+                updated = cursor.fetchone()
+        return {"chatId": str(chat), "conversationTitle": _row_value(updated, "conversation_title", 0)}
+
     def activate_chat(
         self,
         chat_id: str,
@@ -549,7 +569,8 @@ class MetadataStore:
                 """SELECT c.chat_id, c.application_id, c.resource_kind, c.resource_id,
                           c.external_session_id, c.state, c.created_at, c.updated_at, c.deleted_at,
                           t.target_id, t.profile_id, t.database_name, t.namespace_name,
-                          t.profile_fingerprint, t.connected_target_fingerprint, c.display_title
+                           t.profile_fingerprint, t.connected_target_fingerprint, c.display_title,
+                           c.conversation_title
                    FROM metadata_chats c LEFT JOIN metadata_targets t USING (chat_id)
                    WHERE c.chat_id = %s""",
                 (chat,),
@@ -576,7 +597,8 @@ class MetadataStore:
                 """SELECT c.chat_id, c.application_id, c.resource_kind, c.resource_id,
                           c.external_session_id, c.state, c.created_at, c.updated_at, c.deleted_at,
                           t.target_id, t.profile_id, t.database_name, t.namespace_name,
-                          t.profile_fingerprint, t.connected_target_fingerprint, c.display_title
+                           t.profile_fingerprint, t.connected_target_fingerprint, c.display_title,
+                           c.conversation_title
                    FROM metadata_chats c LEFT JOIN metadata_targets t USING (chat_id)
                    WHERE (%s::text IS NULL OR c.resource_kind = %s::text)
                       AND (%s::text IS NULL OR c.resource_id = %s::text)
@@ -731,7 +753,8 @@ class MetadataStore:
         with self._transaction(write=False) as cursor:
             cursor.execute(
                 """SELECT proposal_id, chat_id, capability, policy_revision, binding, action,
-                          state, created_at, expires_at, revoked_at, revocation_reason, revocation_evidence
+                           state, created_at, expires_at, revoked_at, revocation_reason, revocation_evidence,
+                           cancellation_requested_at
                    FROM metadata_proposals WHERE proposal_id = %s""",
                 (proposal,),
             )
@@ -747,7 +770,8 @@ class MetadataStore:
         with self._transaction(write=False) as cursor:
             cursor.execute(
                 """SELECT proposal_id, chat_id, capability, policy_revision, binding, action,
-                          state, created_at, expires_at, revoked_at, revocation_reason, revocation_evidence
+                           state, created_at, expires_at, revoked_at, revocation_reason, revocation_evidence,
+                           cancellation_requested_at
                    FROM metadata_proposals WHERE chat_id = %s
                      AND (cardinality(%s::text[]) = 0 OR state = ANY(%s::text[]))
                    ORDER BY created_at DESC, proposal_id DESC LIMIT %s""",
@@ -755,6 +779,76 @@ class MetadataStore:
             )
             rows = cursor.fetchall()
         return [_proposal_record(row) for row in rows]
+
+    def request_proposal_cancellation(
+        self, proposal_id: str, chat_id: str, *, expected_application: str, expected_resource_kind: str,
+    ) -> dict[str, Any]:
+        proposal = _uuid(proposal_id, "proposal_id")
+        chat = _uuid(chat_id, "chat_id")
+        application = identity(expected_application, "expected_application")
+        resource_kind = identity(expected_resource_kind, "expected_resource_kind")
+        with self._transaction() as cursor:
+            cursor.execute(
+                """SELECT p.chat_id, p.state, p.cancellation_requested_at, c.application_id, c.resource_kind
+                   FROM metadata_proposals p JOIN metadata_chats c USING (chat_id)
+                   WHERE p.proposal_id = %s FOR UPDATE OF p""",
+                (proposal,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise MetadataStoreError("proposal_not_found", "Proposal was not found", status=404)
+            if _row_value(row, "chat_id", 0) != chat:
+                raise MetadataStoreError("authority_binding_mismatch", "Authority record belongs to another chat", status=403)
+            if (_row_value(row, "application_id", 3), _row_value(row, "resource_kind", 4)) != (application, resource_kind):
+                raise MetadataStoreError("authority_binding_mismatch", "Authority record belongs to another application resource", status=403)
+            proposal_state = _row_value(row, "state", 1)
+            cursor.execute(
+                "SELECT operation_id, state FROM metadata_operations WHERE proposal_id = %s FOR UPDATE",
+                (proposal,),
+            )
+            operation = cursor.fetchone()
+            if operation is None:
+                if proposal_state == "cancelled":
+                    return {"requested": True, "proposalState": "cancelled", "operationId": None, "operationState": None}
+                if proposal_state != "ready":
+                    return {"requested": False, "proposalState": proposal_state, "operationId": None, "operationState": None}
+                cursor.execute(
+                    "UPDATE metadata_proposals SET state = 'cancelled', cancellation_requested_at = clock_timestamp() WHERE proposal_id = %s",
+                    (proposal,),
+                )
+                self._audit(cursor, self._application_for_chat(cursor, chat), "proposal", proposal, "ready", "cancelled", "query_cancellation_requested")
+                return {"requested": True, "proposalState": "cancelled", "operationId": None, "operationState": None}
+            operation_id = _row_value(operation, "operation_id", 0)
+            operation_state = _row_value(operation, "state", 1)
+            if operation_state not in {"ready", "running"}:
+                return {
+                    "requested": False, "proposalState": proposal_state,
+                    "operationId": str(operation_id), "operationState": operation_state,
+                }
+            cursor.execute(
+                "UPDATE metadata_proposals SET cancellation_requested_at = COALESCE(cancellation_requested_at, clock_timestamp()) WHERE proposal_id = %s",
+                (proposal,),
+            )
+            if operation_state == "ready":
+                error = {"code": "execution_cancelled", "message": "AI query was cancelled before execution started"}
+                cursor.execute(
+                    "INSERT INTO metadata_operation_outcomes (outcome_id, operation_id, state, error) VALUES (%s, %s, 'cancelled', %s::jsonb)",
+                    (uuid.uuid4(), operation_id, _json(error)),
+                )
+                cursor.execute(
+                    "UPDATE metadata_operations SET state = 'cancelled', updated_at = clock_timestamp() WHERE operation_id = %s",
+                    (operation_id,),
+                )
+                self._audit(cursor, self._application_for_chat(cursor, chat), "operation", operation_id, "ready", "cancelled", "query_cancellation_requested")
+                return {
+                    "requested": True, "proposalState": proposal_state,
+                    "operationId": str(operation_id), "operationState": "cancelled",
+                }
+            self._audit(cursor, self._application_for_chat(cursor, chat), "operation", operation_id, operation_state, operation_state, "query_cancellation_requested")
+            return {
+                "requested": True, "proposalState": proposal_state,
+                "operationId": str(operation_id), "operationState": operation_state,
+            }
 
     def authorize_and_create_operation(
         self,
@@ -777,7 +871,7 @@ class MetadataStore:
         with self._transaction() as cursor:
             cursor.execute(
                 """SELECT chat_id, capability, policy_revision, state, binding,
-                          expires_at > clock_timestamp() AS current
+                           expires_at > clock_timestamp() AS current, cancellation_requested_at
                    FROM metadata_proposals WHERE proposal_id = %s FOR UPDATE""",
                 (proposal,),
             )
@@ -785,6 +879,8 @@ class MetadataStore:
             if row is None:
                 raise MetadataStoreError("proposal_not_found", "Proposal was not found", status=404)
             state = _row_value(row, "state", 3)
+            if state == "cancelled" or _row_optional(row, "cancellation_requested_at", 6) is not None:
+                raise MetadataStoreError("proposal_cancelled", "Proposal execution was cancelled", status=409)
             if state == "authorized":
                 cursor.execute("SELECT operation_id, state FROM metadata_operations WHERE proposal_id = %s", (proposal,))
                 existing = cursor.fetchone()
@@ -891,9 +987,9 @@ class MetadataStore:
         with self._transaction(write=False) as cursor:
             cursor.execute(
                 """SELECT o.operation_id, o.proposal_id, o.chat_id, o.capability, o.state,
-                          o.created_at, o.updated_at, a.attempt_id, a.worker_id, a.lease_expires_at,
-                          x.state AS outcome_state, x.result, x.error
-                   FROM metadata_operations o
+                           o.created_at, o.updated_at, a.attempt_id, a.worker_id, a.lease_expires_at,
+                           x.state AS outcome_state, x.result, x.error, p.cancellation_requested_at
+                    FROM metadata_operations o JOIN metadata_proposals p USING (proposal_id)
                    LEFT JOIN metadata_operation_attempts a ON a.operation_id = o.operation_id AND a.state = 'running'
                    LEFT JOIN metadata_operation_outcomes x ON x.operation_id = o.operation_id
                    WHERE o.operation_id = %s""",
@@ -955,9 +1051,9 @@ class MetadataStore:
         with self._transaction(write=False) as cursor:
             cursor.execute(
                 """SELECT o.operation_id, o.proposal_id, o.chat_id, o.capability, o.state,
-                          o.created_at, o.updated_at, a.attempt_id, a.worker_id, a.lease_expires_at,
-                          x.state AS outcome_state, x.result, x.error
-                   FROM metadata_operations o
+                           o.created_at, o.updated_at, a.attempt_id, a.worker_id, a.lease_expires_at,
+                           x.state AS outcome_state, x.result, x.error, p.cancellation_requested_at
+                    FROM metadata_operations o JOIN metadata_proposals p USING (proposal_id)
                    LEFT JOIN metadata_operation_attempts a ON a.operation_id = o.operation_id AND a.state = 'running'
                    LEFT JOIN metadata_operation_outcomes x ON x.operation_id = o.operation_id
                    WHERE o.chat_id = %s AND (cardinality(%s::text[]) = 0 OR o.state = ANY(%s::text[]))
@@ -974,12 +1070,22 @@ class MetadataStore:
         attempt = uuid.uuid4()
         lease = _seconds(lease_seconds, "lease_seconds", maximum=3600)
         with self._transaction() as cursor:
+            cursor.execute(
+                """SELECT p.cancellation_requested_at FROM metadata_proposals p
+                   JOIN metadata_operations o USING (proposal_id) WHERE o.operation_id = %s FOR UPDATE OF p""",
+                (operation,),
+            )
+            proposal_row = cursor.fetchone()
+            if proposal_row is None:
+                raise MetadataStoreError("operation_not_found", "Operation was not found", status=404)
             cursor.execute("SELECT state, chat_id FROM metadata_operations WHERE operation_id = %s FOR UPDATE", (operation,))
             row = cursor.fetchone()
             if row is None:
                 raise MetadataStoreError("operation_not_found", "Operation was not found", status=404)
             if _row_value(row, "state", 0) != "ready":
                 raise MetadataStoreError("operation_not_claimable", "Operation is not ready for execution", status=409)
+            if _row_optional(proposal_row, "cancellation_requested_at", 0) is not None:
+                raise MetadataStoreError("proposal_cancelled", "Proposal execution was cancelled", status=409)
             cursor.execute(
                 """INSERT INTO metadata_operation_attempts
                    (attempt_id, operation_id, worker_id, claim_token_hash, lease_expires_at)
@@ -1036,6 +1142,7 @@ class MetadataStore:
                     (uuid.uuid4(), operation, _json(error)),
                 )
                 cursor.execute("UPDATE metadata_operations SET state = 'uncertain', updated_at = clock_timestamp() WHERE operation_id = %s AND state = 'running'", (operation,))
+                self._scrub_operation_results(cursor, operation, "operation_abandoned")
                 self._audit(cursor, self._application_for_chat(cursor, _row_value(row, "chat_id", 2)), "operation", operation, "running", "uncertain", "lease_abandoned_reconcile_only")
         return [str(_row_value(row, "operation_id", 1)) for row in rows]
 
@@ -1061,6 +1168,7 @@ class MetadataStore:
                 (uuid.uuid4(), operation, _json(error)),
             )
             cursor.execute("UPDATE metadata_operations SET state = 'uncertain', updated_at = clock_timestamp() WHERE operation_id = %s AND state = 'running'", (operation,))
+            self._scrub_operation_results(cursor, operation, "operation_abandoned")
             cursor.execute("SELECT chat_id FROM metadata_operations WHERE operation_id = %s", (operation,))
             chat_id = _row_value(cursor.fetchone(), "chat_id", 0)
             self._audit(cursor, self._application_for_chat(cursor, chat_id), "operation", operation, "running", "uncertain", "lease_lost_reconcile_only")
@@ -1109,9 +1217,36 @@ class MetadataStore:
             raise MetadataStoreError("invalid_metadata", "ttl_seconds is invalid", status=400)
         safe_binding = bounded_json(binding, "binding", self.max_json_bytes)
         safe_payload = bounded_json(payload, "payload", self.max_json_bytes)
+        operation = None if safe_binding.get("operationId") is None else _uuid(safe_binding["operationId"], "operationId")
         byte_count = len(_json(safe_payload).encode("utf-8"))
         result_ref = uuid.uuid4()
         with self._transaction() as cursor:
+            if operation is not None:
+                cursor.execute(
+                    """SELECT p.chat_id, p.cancellation_requested_at FROM metadata_proposals p
+                       JOIN metadata_operations o USING (proposal_id)
+                       WHERE o.operation_id = %s FOR UPDATE OF p""",
+                    (operation,),
+                )
+                proposal_row = cursor.fetchone()
+                if proposal_row is None or str(_row_value(proposal_row, "chat_id", 0)) != str(chat):
+                    raise MetadataStoreError("authority_binding_mismatch", "Query result operation binding is invalid", status=403)
+                if _row_optional(proposal_row, "cancellation_requested_at", 1) is not None:
+                    raise MetadataStoreError("proposal_cancelled", "Cancelled operation cannot create a query result", status=409)
+                cursor.execute(
+                    """SELECT o.state, o.chat_id, EXISTS (
+                           SELECT 1 FROM metadata_operation_attempts a
+                           WHERE a.operation_id = o.operation_id AND a.state = 'running'
+                             AND a.lease_expires_at >= clock_timestamp()
+                       ) AS active_claim
+                       FROM metadata_operations o WHERE o.operation_id = %s FOR UPDATE""",
+                    (operation,),
+                )
+                operation_row = cursor.fetchone()
+                if operation_row is None or str(_row_value(operation_row, "chat_id", 1)) != str(chat):
+                    raise MetadataStoreError("authority_binding_mismatch", "Query result operation binding is invalid", status=403)
+                if _row_value(operation_row, "state", 0) != "running" or not _row_value(operation_row, "active_claim", 2):
+                    raise MetadataStoreError("operation_not_running", "Query result operation no longer owns an active execution claim", status=409)
             cursor.execute("SELECT state FROM metadata_chats WHERE chat_id = %s FOR UPDATE", (chat,))
             chat_row = cursor.fetchone()
             if chat_row is None:
@@ -1149,8 +1284,13 @@ class MetadataStore:
                 raise MetadataStoreError("result_not_found", "Query result was not found", status=404)
             stored_binding = _json_value(_row_value(row, "binding", 1))
             comparable_binding = stored_binding
-            if isinstance(stored_binding, dict) and "policyBinding" in stored_binding and "policyBinding" not in safe_binding:
-                comparable_binding = {key: value for key, value in stored_binding.items() if key != "policyBinding"}
+            if isinstance(stored_binding, dict):
+                server_only = {
+                    key for key in ("policyBinding", "operationId")
+                    if key in stored_binding and key not in safe_binding
+                }
+                if server_only:
+                    comparable_binding = {key: value for key, value in stored_binding.items() if key not in server_only}
             if str(_row_value(row, "chat_id", 0)) != str(chat) or comparable_binding != safe_binding:
                 raise MetadataStoreError("result_binding_mismatch", "Query result binding does not match", status=403)
             if _row_value(row, "state", 2) != "ready" or not _row_value(row, "current", 3):
@@ -1795,15 +1935,28 @@ class MetadataStore:
             row = cursor.fetchone()
             if row is None or not secrets.compare_digest(str(_row_value(row, "claim_token_hash", 2)), _token_hash(token)):
                 raise MetadataStoreError("invalid_claim", "Execution claim is invalid", status=409)
+            operation_id = _row_value(row, "operation_id", 0)
+            if finish_state in {"succeeded", "failed"}:
+                cursor.execute(
+                    """SELECT p.cancellation_requested_at FROM metadata_operations o
+                       JOIN metadata_proposals p USING (proposal_id) WHERE o.operation_id = %s FOR UPDATE OF p""",
+                    (operation_id,),
+                )
+                cancellation = cursor.fetchone()
+                if cancellation is not None and _row_optional(cancellation, "cancellation_requested_at", 0) is not None:
+                    finish_state = "cancelled"
+                    result = None
+                    error = {"code": "execution_cancelled", "message": "AI query was cancelled"}
+                    self._scrub_operation_results(cursor, operation_id, "operation_cancelled")
             if _row_value(row, "state", 1) != "running":
                 if finish_state is not None and _row_value(row, "state", 1) == finish_state:
                     operation_id = _row_value(row, "operation_id", 0)
                     cursor.execute("SELECT state, result, error FROM metadata_operation_outcomes WHERE operation_id = %s", (operation_id,))
                     outcome = cursor.fetchone()
                     if outcome is not None and _json_value(_row_value(outcome, "result", 1)) == result and _json_value(_row_value(outcome, "error", 2)) == error:
-                        return {"operationId": str(operation_id), "attemptId": str(attempt), "state": finish_state, "resolutionOwner": False}
+                        return {"operationId": str(operation_id), "attemptId": str(attempt), "state": finish_state,
+                                "result": result, "error": error, "resolutionOwner": False}
                 raise MetadataStoreError("operation_not_running", "Execution attempt is no longer running", status=409)
-            operation_id = _row_value(row, "operation_id", 0)
             if finish_state is None:
                 cursor.execute(
                     """UPDATE metadata_operation_attempts SET heartbeat_at = clock_timestamp(),
@@ -1830,7 +1983,25 @@ class MetadataStore:
             cursor.execute("SELECT chat_id FROM metadata_operations WHERE operation_id = %s", (operation_id,))
             chat_id = _row_value(cursor.fetchone(), "chat_id", 0)
             self._audit(cursor, self._application_for_chat(cursor, chat_id), "operation", operation_id, "running", finish_state, "operation_finished")
-        return {"operationId": str(operation_id), "attemptId": str(attempt), "state": finish_state}
+        return {"operationId": str(operation_id), "attemptId": str(attempt), "state": finish_state,
+                "result": result, "error": error}
+
+    @staticmethod
+    def _scrub_operation_results(cursor: Any, operation_id: uuid.UUID, reason: str) -> None:
+        cursor.execute(
+            """UPDATE metadata_query_result_references SET state = 'revoked', revoked_at = clock_timestamp(),
+                      revocation_reason = %s
+               WHERE state = 'ready' AND binding ? 'operationId' AND binding ->> 'operationId' = %s""",
+            (reason, str(operation_id)),
+        )
+        cursor.execute(
+            """UPDATE metadata_query_result_payloads p SET payload = '{}'::jsonb, byte_count = 2,
+                      scrubbed_at = clock_timestamp()
+               FROM metadata_query_result_references r
+               WHERE p.result_ref_id = r.result_ref_id AND r.binding ? 'operationId'
+                 AND r.binding ->> 'operationId' = %s""",
+            (str(operation_id),),
+        )
 
     def _result_transition(self, delivery_id: str, token: str, required: str, target: str, *, scrub: bool = False) -> dict[str, Any]:
         delivery = _uuid(delivery_id, "delivery_id")
@@ -1923,7 +2094,7 @@ def _console_settings_record(row: Any) -> dict[str, Any]:
         "statementLimit": int(_row_value(row, "statement_limit", 4)),
         "rowPageSize": int(_row_value(row, "row_page_size", 5)),
         "inheritance": "none",
-        "maxima": {"statementLimit": 20, "rowPageSize": 500},
+        "maxima": {"statementLimit": 100, "rowPageSize": 500},
         "createdAt": _iso_datetime(_row_value(row, "created_at", 6)),
         "updatedAt": _iso_datetime(_row_value(row, "updated_at", 7)),
     }
@@ -1940,6 +2111,16 @@ def canonical_review_digest(review_payload: dict[str, Any]) -> str:
 def _bounded_text(value: Any, field: str, maximum: int) -> str:
     if not isinstance(value, str) or not 1 <= len(value) <= maximum:
         raise MetadataStoreError("invalid_metadata", f"{field} is invalid", status=400)
+    return value
+
+
+def _chat_title(value: Any) -> str:
+    if (
+        not isinstance(value, str) or not value or value != value.strip()
+        or len(value) > 80 or len(value.encode("utf-8")) > 80
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise MetadataStoreError("invalid_metadata", "conversation_title is invalid", status=400)
     return value
 
 
@@ -2018,7 +2199,8 @@ def _chat_record(row: Any) -> dict[str, Any]:
             "createdAt": _iso_datetime(_row_value(row, "created_at", 6)),
             "updatedAt": _iso_datetime(_row_value(row, "updated_at", 7)),
             "deletedAt": _iso_datetime(_row_value(row, "deleted_at", 8)), "target": target,
-            "displayTitle": _row_value(row, "display_title", 15)}
+            "displayTitle": _row_value(row, "display_title", 15),
+            "conversationTitle": _row_optional(row, "conversation_title", 16)}
 
 
 def _proposal_record(row: Any) -> dict[str, Any]:
@@ -2029,7 +2211,8 @@ def _proposal_record(row: Any) -> dict[str, Any]:
             "expiresAt": _iso_datetime(_row_value(row, "expires_at", 8)),
             "revokedAt": _iso_datetime(_row_optional(row, "revoked_at", 9)),
             "revocationReason": _row_optional(row, "revocation_reason", 10),
-            "revocationEvidence": _json_value(_row_optional(row, "revocation_evidence", 11))}
+            "revocationEvidence": _json_value(_row_optional(row, "revocation_evidence", 11)),
+            "cancellationRequestedAt": _iso_datetime(_row_optional(row, "cancellation_requested_at", 12))}
 
 
 def _operation_record(row: Any) -> dict[str, Any]:
@@ -2043,7 +2226,8 @@ def _operation_record(row: Any) -> dict[str, Any]:
                 "leaseExpiresAt": _iso_datetime(_row_value(row, "lease_expires_at", 9))},
             "outcome": None if _row_value(row, "outcome_state", 10) is None else {
                 "state": _row_value(row, "outcome_state", 10), "result": _json_value(_row_value(row, "result", 11)),
-                "error": _json_value(_row_value(row, "error", 12))}}
+                "error": _json_value(_row_value(row, "error", 12))},
+            "cancellationRequested": _row_optional(row, "cancellation_requested_at", 13) is not None}
 
 
 def _plan_record(row: Any, *, include_private: bool) -> dict[str, Any]:

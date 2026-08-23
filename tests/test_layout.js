@@ -25,6 +25,10 @@ assert.doesNotMatch(source.slice(initializationStart, initializationEnd), /fitDi
 const openSchemaSource = source.slice(openSchemaStart, openSchemaEnd);
 assert.match(openSchemaSource, /\{ fit = false \}/, "opening a saved schema must preserve its viewport by default");
 assert.match(openSchemaSource, /view = clone\(schema\.layout\.layers\.tables\.viewport\)/, "opening a saved schema must restore its viewport");
+assert.match(openSchemaSource, /restoreViewsRuntimeLayout\(schema\)/, "opening a saved schema must restore the Views viewport and objects");
+assert.doesNotMatch(openSchemaSource, /fitViewsCanvas\s*\(/, "opening a saved schema must not fit the Views canvas");
+assert.match(source.slice(initializationStart, initializationEnd), /restoreViewsRuntimeLayout\(schema\)/, "startup must restore the Views layout without fitting it");
+assert.match(source, /function persistSchemaRecord[\s\S]*schemaForStorage\([\s\S]*\{ views: \{ viewport: viewsView, objects: viewsObjects \} \}/, "the revision/layout-token queue must persist the active Views runtime overlay");
 
 const context = vm.createContext({ JSON });
 vm.runInContext(`
@@ -125,6 +129,33 @@ assert.equal(storedV2.layout.layers.tables.objects.table_accounts.customObject, 
 assert.equal(storedV2.layout.layers.tables.viewport.customViewport, 3);
 assert.deepEqual(JSON.parse(JSON.stringify(storedV2.layout.layers.views)), JSON.parse(JSON.stringify(versionTwo.layout.layers.views)));
 
+const viewsOnly = context.schemaForStorage(migratedV2, null, {
+  views: {
+    viewport: { x: 101, y: 202, zoom: 1.1 },
+    objects: { view_summary: { x: 303, y: 404 } }
+  }
+});
+const tablesBeforeViewsWrite = context.schemaForStorage(migratedV2).layout.layers.tables;
+assert.deepEqual(JSON.parse(JSON.stringify(viewsOnly.layout.layers.tables)), JSON.parse(JSON.stringify(tablesBeforeViewsWrite)), "Views writes preserve the complete Tables layer");
+assert.deepEqual(JSON.parse(JSON.stringify(viewsOnly.layout.layers.views.viewport)), { x: 101, y: 202, zoom: 1.1, customViewport: 6 });
+assert.deepEqual(JSON.parse(JSON.stringify(viewsOnly.layout.layers.views.objects.view_summary)), {
+  x: 303, y: 404, color: "#123456", customObject: 5
+});
+assert.equal(viewsOnly.layout.layers.views.customLayer, 4);
+
+const both = context.schemaForStorage(migratedV2, { x: 501, y: 502, zoom: .8 }, {
+  tables: { customLayerUpdate: true },
+  views: { viewport: { x: 601, y: 602, zoom: .7 }, objects: { stage_one: { x: 700, y: 800, custom: true } } }
+});
+const roundTrip = context.migrateSchema(JSON.parse(JSON.stringify(both)));
+assert.deepEqual(JSON.parse(JSON.stringify(roundTrip.layout.layers.tables.viewport)), { x: 501, y: 502, zoom: .8, customViewport: 3 });
+assert.equal(roundTrip.layout.layers.tables.customLayerUpdate, true);
+assert.deepEqual(JSON.parse(JSON.stringify(roundTrip.layout.layers.views.viewport)), { x: 601, y: 602, zoom: .7, customViewport: 6 });
+assert.deepEqual(JSON.parse(JSON.stringify(roundTrip.layout.layers.views.objects.stage_one)), { x: 700, y: 800, custom: true });
+assert.equal(roundTrip.layout.layers.views.objects.view_summary.customObject, 5);
+
+const previousWithViews = JSON.parse(JSON.stringify(runtime));
+previousWithViews.layout = JSON.parse(JSON.stringify(migratedV2.layout));
 const renamed = context.preserveTableLayout({
   postgres: { namespace: "public" },
   tables: [{
@@ -136,7 +167,7 @@ const renamed = context.preserveTableLayout({
       { id: "fresh_extra", name: "external_column", type: "text", ordinal: 4, refreshed: true }
     ]
   }]
-}, runtime);
+}, previousWithViews);
 assert.equal(renamed.tables[0].x, 321);
 assert.equal(renamed.tables[0].y, 654);
 assert.equal(renamed.tables[0].color, "#65a9ff");
@@ -144,5 +175,6 @@ assert.deepEqual(Array.from(renamed.tables[0].columns, column => column.name), [
   "created_at", "id", "contact_email", "external_column"
 ]);
 assert.equal(renamed.tables[0].columns.every(column => column.refreshed), true);
+assert.deepEqual(JSON.parse(JSON.stringify(renamed.layout.layers.views)), JSON.parse(JSON.stringify(migratedV2.layout.layers.views)), "PostgreSQL semantic refresh preserves the complete Views layer exactly");
 
 console.log("Layout overlay tests passed");

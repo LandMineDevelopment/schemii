@@ -22,6 +22,10 @@ def _grant_mode(mode: str) -> str:
 class SchemiiMetadataAuthority:
     """Schemii authority coordinator backed exclusively by transactional metadata."""
 
+    application_id = "schemii"
+    resource_kind = "schema"
+    query_action_type = "schema_read_query"
+
     def __init__(self, store: MetadataStore, *, worker_id: str, lease_seconds: int = 90):
         self.store = store
         self.worker_id = worker_id
@@ -101,7 +105,9 @@ class SchemiiMetadataAuthority:
             "id": chat["chatId"],
             "schemaId": chat["resourceId"],
             "externalSessionId": chat["externalSessionId"],
-            "title": chat["displayTitle"],
+            "title": chat.get("conversationTitle") or chat["displayTitle"],
+            "contextTitle": chat["displayTitle"],
+            "conversationTitle": chat.get("conversationTitle"),
             "target": {} if target is None else {
                 "profileId": target["profileId"],
                 "database": target["databaseName"],
@@ -115,6 +121,14 @@ class SchemiiMetadataAuthority:
             "agentPolicyRevisionId": current.get("agentPolicyRevisionId"),
             "grants": grants,
         }
+
+    def initialize_conversation_title(self, chat_id: str, title: str) -> dict[str, Any]:
+        self.store.set_chat_conversation_title(chat_id, title, overwrite=False)
+        return self.get_chat(chat_id)
+
+    def rename_conversation(self, chat_id: str, title: str) -> dict[str, Any]:
+        self.store.set_chat_conversation_title(chat_id, title, overwrite=True)
+        return self.get_chat(chat_id)
 
     def list_chats(self, schema_id: str, target: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         records = self.store.list_chats(resource_kind="schema", resource_id=schema_id, states=["active"])
@@ -214,10 +228,20 @@ class SchemiiMetadataAuthority:
             "action": record["action"], "policyBinding": binding["policyBinding"],
             "authorizationTarget": binding["authorizationTarget"],
             "schemaConcurrency": binding["schemaConcurrency"],
+            "cancellationRequested": record.get("cancellationRequestedAt") is not None,
         }
 
     def pending_proposals(self, chat_id: str) -> list[dict[str, Any]]:
-        return [self.proposal(item["proposalId"], chat_id) for item in self.store.list_proposals(chat_id, states=["ready", "authorized"])]
+        return [self.proposal(item["proposalId"], chat_id) for item in self.store.list_proposals(chat_id, states=["ready", "authorized", "cancelled"])]
+
+    def request_query_cancellation(self, proposal_id: str, chat_id: str) -> dict[str, Any]:
+        proposal = self.proposal(proposal_id, chat_id)
+        if proposal["action"].get("type") != self.query_action_type:
+            raise MetadataStoreError("operation_not_cancellable", "Only running AI queries can be cancelled", status=409)
+        return self.store.request_proposal_cancellation(
+            proposal_id, chat_id,
+            expected_application=self.application_id, expected_resource_kind=self.resource_kind,
+        )
 
     def authorize_and_claim(
         self,
@@ -265,6 +289,7 @@ class SchemiiMetadataAuthority:
             "id": record["operationId"], "proposalId": record["proposalId"], "state": record["state"],
             "result": outcome.get("result"), "error": outcome.get("error"),
             "reconcileRequired": record["state"] == "uncertain",
+            "cancellationRequested": bool(record.get("cancellationRequested")),
         }
 
     def operation_for_proposal(self, proposal_id: str, chat_id: str) -> dict[str, Any] | None:
@@ -284,7 +309,10 @@ class SchemiiMetadataAuthority:
                 raise
             # The exact token and outcome make this metadata-only retry idempotent.
             finished = self.store.finish_operation(attempt_id, claim_token, state, result=result, error=error)
-        return {"id": finished["operationId"], "state": finished["state"], "result": result, "error": error}
+        return {
+            "id": finished["operationId"], "state": finished["state"],
+            "result": finished.get("result"), "error": finished.get("error"),
+        }
 
     def resolve_operation(self, operation_id: str, chat_id: str, state: str, *, result=None, error=None) -> dict[str, Any]:
         self.operation(operation_id, chat_id)

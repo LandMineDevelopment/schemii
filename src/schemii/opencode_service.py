@@ -108,6 +108,26 @@ def _bounded_text(value: Any, maximum: int, label: str, *, optional: bool = Fals
     return value
 
 
+def _normalize_tool_purposes(value: Any) -> Any:
+    """Bound model-authored descriptions without changing executable action fields."""
+    if isinstance(value, list):
+        return [_normalize_tool_purposes(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    normalized = {}
+    for key, item in value.items():
+        if key != "purpose" or not isinstance(item, str):
+            normalized[key] = _normalize_tool_purposes(item)
+            continue
+        description = " ".join(item.split())
+        encoded = description.encode("utf-8")
+        if len(encoded) > 500:
+            suffix = "…"
+            description = encoded[:500 - len(suffix.encode("utf-8"))].decode("utf-8", "ignore").rstrip() + suffix
+        normalized[key] = description
+    return normalized
+
+
 class OpenCodeService:
     """Small, fixed-surface client for the OpenCode 1.18.15 HTTP API."""
 
@@ -517,6 +537,26 @@ class OpenCodeService:
             payload["model"] = latest_model
         return payload
 
+    def session_title_seed(self, session_id: Any) -> str | None:
+        session_id = self.verify_session(session_id)
+        result = self._request("GET", f"/session/{quote(session_id, safe='')}/message?limit={MAX_HISTORY_MESSAGES}")
+        if not isinstance(result, list):
+            raise OpenCodeServiceError(502, "opencode_error", "OpenCode returned invalid session messages")
+        for item in result[-MAX_HISTORY_MESSAGES:]:
+            if not isinstance(item, dict) or item.get("info", {}).get("role") != "user" or not isinstance(item.get("parts"), list):
+                continue
+            text = "\n".join(
+                part["text"] for part in item["parts"]
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            )
+            marker = "\n\nUser request:\n"
+            if marker in text:
+                text = text.split(marker, 1)[1]
+            text = self._history_text(text, 16 * 1024)
+            if text:
+                return text
+        return None
+
     @staticmethod
     def _history_text(value: Any, maximum: int) -> str:
         if not isinstance(value, str) or maximum <= 0:
@@ -801,7 +841,7 @@ class OpenCodeService:
         action_type = self.tool_action_types.get(tool_name)
         if action_type is None:
             return None
-        action = copy.deepcopy(arguments)
+        action = _normalize_tool_purposes(copy.deepcopy(arguments))
         if any(key in action for key in ("type", "action", "requiresApproval", "requiresConfirmation", "readOnly", "destructive", "requiresPasswordEntry")):
             return None
         action["type"] = action_type

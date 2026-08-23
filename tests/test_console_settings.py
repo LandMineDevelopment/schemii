@@ -53,7 +53,7 @@ def settings_row(application="schemii", revision=1):
     now = datetime.now(timezone.utc)
     return {
         "application_id": application, "revision": revision, "write_intent": "disabled",
-        "default_mode": "managed_read", "statement_limit": 20, "row_page_size": 100,
+        "default_mode": "managed_read", "statement_limit": 100, "row_page_size": 100,
         "created_at": now, "updated_at": now,
     }
 
@@ -85,7 +85,7 @@ class ConsoleSettingsTests(unittest.TestCase):
 
         with self.assertRaises(MetadataStoreError) as invalid:
             MetadataStore(lambda: Connection([])).update_console_settings("schemii", 1, {
-                "writeIntent": "enabled", "defaultMode": "managed", "statementLimit": 21, "rowPageSize": 50,
+                "writeIntent": "enabled", "defaultMode": "managed", "statementLimit": 101, "rowPageSize": 50,
             })
         self.assertEqual(invalid.exception.code, "invalid_metadata")
 

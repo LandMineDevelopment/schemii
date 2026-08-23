@@ -95,11 +95,11 @@ Result resources carry exact execution, statement/result index, console/transact
 
 ### Durable Human Settings
 
-`GET/PUT /api/postgres/console/settings` stores one application-scoped optimistic revision with `writeIntent`, `defaultMode`, `statementLimit`, and `rowPageSize`. Defaults are disabled write intent, `managed_read`, 20 statements, and 100 rows per page. Settings do not expire and do not inherit between Schemii and Schemer. A write execution binds the exact current settings revision and profile fingerprint. These settings express human Console intent only; they cannot authorize AI, elevate the selected PostgreSQL role, or bypass product policy. The retired write-grant endpoints return `410 console_write_grants_retired`.
+`GET/PUT /api/postgres/console/settings` stores one application-scoped optimistic revision with `writeIntent`, `defaultMode`, `statementLimit`, and `rowPageSize`. Defaults are disabled write intent, `managed_read`, 100 statements, and 100 rows per page. Settings do not expire and do not inherit between Schemii and Schemer. A write execution binds the exact current settings revision and profile fingerprint. These settings express human Console intent only; they cannot authorize AI, elevate the selected PostgreSQL role, or bypass product policy. The retired write-grant endpoints return `410 console_write_grants_retired`.
 
 ### Limits And Diagnostics
 
-- Scripts contain 1-20 top-level statements, subject to a lower durable user setting, and at most 100,000 characters.
+- Scripts contain 1-100 top-level statements, subject to the durable user-selected limit, and at most 100,000 characters.
 - Pages are user-selectable within the operator maximum; results allow at most 100 columns, 64 KiB per cell, 256 KiB per row, 1 MiB response metadata, 50 notices, and 8 KiB notice text.
 - One execution runs per `consoleId`; process admission separately enforces global, Console-class, and exact-target capacities.
 - Explicit transactions default to at most four active resources, five idle minutes, and a 30-minute absolute lifetime. Operators may narrow or raise these within validated hard maxima using `SCHEMII_CONSOLE_TRANSACTION_MAXIMUM`, `SCHEMII_CONSOLE_TRANSACTION_IDLE_SECONDS`, and `SCHEMII_CONSOLE_TRANSACTION_LIFETIME_SECONDS`; idle must not exceed lifetime.
@@ -149,9 +149,13 @@ The shared catalog contains tables, partitioned tables, ordinary views, material
 - advisory current-role permissions: `canSelect`, `canAlter`, and materialized-only `canRefresh`;
 - an initial page of direct dependencies and dependents plus the dedicated exact-source continuation route, including verified cross-namespace read-only identities;
 - `materialized`: population and qualifying unique-index-based concurrent-refresh eligibility for materialized views, or `not_applicable` for other kinds;
-- `columnProvenance`: always `{status:"unavailable", reason:"not_supported"}`.
+- `columnProvenance`: a relation-fingerprint-bound `available` or `partial` envelope of ordered outputs, bounded expressions, derivation classifications, and exact direct-source column identities, or an explicit `unavailable` reason;
+- `joinPredicates`: an independently fingerprinted, relation-fingerprint-bound `available` or `partial` envelope of ordered joins, normalized bounded conditions, join types, root-versus-nested query scope, and verified column-equality endpoints, or an explicit `unavailable` reason.
+- `sqlStages`: a version-1, relation-fingerprint-bound envelope whose order semantics are `syntactic_dependency`. Available or partial envelopes contain at most 128 real query-local `cte`, `derived_table`, or `query_block` stages and exactly one unnamed, nonrecursive, parentless outer-SELECT `query_block`. Unavailable envelopes contain no stages and an explicit reason.
 
-`expectedKind` and optional `expectedFingerprint` cause `relation_changed` if live metadata differs. Foreign tables are inspectable read sources, but the dedicated view mutation route still accepts only ordinary and materialized views. PostgreSQL dependency metadata is relation-level only. No output-column mappings are inferred.
+Each SQL stage has a stable `stageId`, contiguous `displayOrdinal`, kind, nullable parent stage, recursion flag, `lifetime:"query"`, stage dependencies, bounded SQL, ordered output expressions, ordered inputs, and ordered join/where/having predicates. An input points either to another declared stage or to an exact profile/database/namespace/relation/kind identity in the verified dependency snapshot; an optional SQL alias belongs to that input reference. The browser rejects unknown stage references, dependency mismatches, relation sources outside the verified dependencies, invalid fingerprints, non-contiguous order, multiple or malformed root query blocks, and breached bounds. Display order is dependency-aware presentation order and does not describe PostgreSQL execution order. CTEs, derived tables, and the outer SELECT query block are query-local syntax, not PostgreSQL temporary tables or a claim about runtime execution order.
+
+`expectedKind` and optional `expectedFingerprint` cause `relation_changed` if live metadata differs. Foreign tables are inspectable read sources, but the dedicated view mutation route still accepts only ordinary and materialized views. PostgreSQL dependency metadata remains relation-level only. Schemii therefore analyzes the bounded `pg_get_viewdef` PostgreSQL query with SQLGlot and validates every resulting leaf and join endpoint against source columns read in the same repeatable-read transaction. It classifies outputs as `direct`, `expression`, `aggregate`, `window`, or `constant`. The join analyzer preserves normalized full conditions but promotes only verified column-to-column equality predicates; unsupported terms remain explicitly partial, and `NATURAL JOIN` is never presented as a verified inferred key. The analyzers are application capabilities, not PostgreSQL permissions or guarantees: unsupported SQL, unresolved leaves, or breached source, output, predicate, expression, definition, or envelope limits return partial/unavailable envelopes instead of guessed mappings. Each envelope has its own fingerprint and remains bound to the relation fingerprint; neither alters Schemer's saved source fingerprint contract.
 
 The live frontend:
 
@@ -159,9 +163,20 @@ The live frontend:
 - applies case-insensitive typed search to already loaded cards without rerendering the workspace;
 - combines search with All, Views, and Materialized kind filters;
 - shows the selected view, exact output fields, direct lineage, and a compact impact summary;
-- expands supported same- or cross-namespace source descriptors in place and respects reduced motion;
+- renders one focusable, pan/zoom graphical lineage canvas in semantic source-to-local-stage-to-root-query-block-to-final-view-to-consumer order;
+- routes every verified physical input through its applicable CTE/derived stages and the available root query block; it never adds a source-to-final bypass or a conceptual fallback stage;
+- presents the root query block as a compact join hub: visible alias and join summaries retain verified endpoints and partial reasons, while full WHERE/HAVING and selected-projection evidence remains available through its `More query logic` disclosure;
+- uses generous deterministic fallback columns and vertically balanced lanes without saving fallback coordinates, while persisted Views positions remain authoritative;
+- routes labels on their owning segments in a dedicated foreground SVG layer, converges every root input at one visible query-block port, and uses separately styled available, partial, active, and active-partial SVG arrowheads at destination endpoints;
+- gives source, CTE/derived, query-block, final-view, and consumer cards titled drag surfaces while preserving clickable controls and column lists;
+- makes source relations, verified join rows, the query block, mapped source columns, and output columns ordinary selectable controls; source, join, block, and output focus derives paths only from verified stage inputs, join endpoints, and projection contributors, visibly de-emphasizes unrelated context, and can be cleared without changing the viewport or saving layout;
+- keeps read-only catalog and lineage state across layout-only revision/token advances for the same saved schema and exact PostgreSQL target, while mutation preview/apply continues to require the latest full revision and layout token;
+- keeps the final view card's all-input projection detail and exact selected bounded expression;
+- proactively loads supported same- or cross-namespace source descriptors and keeps their actual columns visible on each source card, labeling every mapped column with each output that consumes it;
+- constrains source-column rows to the card width, keeps long identities and projections bounded, and permits vertical column scrolling without a horizontal scrollbar;
 - opens an idempotent read-only relation inspector for supported relation kinds without turning lineage into write authority;
-- makes a definition read-only when it is unavailable or advisory `canAlter` is false.
+- makes a definition read-only when it is unavailable; advisory `canAlter` remains explanatory and PostgreSQL authorizes preview/apply.
+- supports arrow-key pan, visible fit/zoom controls, reduced motion, crisp layout-rasterized text at fractional zoom, and invariant world coordinates on mobile rather than document reflow.
 
 ## Full-Schema Migration Completeness
 
@@ -248,7 +263,7 @@ The implemented storage serializer normalizes saved layouts to version 2 while p
 }
 ```
 
-Version-1 `tables` and `view` fields migrate into `layers.tables`. Existing version-2 `layers.views`, including object records, viewport, and extension fields, is preserved by browser table-layout serialization. The current live Views workspace does not position cards on a saved canvas or update the Views viewport.
+Version-1 `tables` and `view` fields migrate into `layers.tables`. Existing version-2 `layers.views`, including object records, viewport, and extension fields, is preserved by browser table-layout serialization. The live Views workspace reads and writes only its own viewport and explicitly dragged object positions through the existing layout-token queue. Deterministic fallback positions and selection changes are browser presentation state and are never saved.
 
 All stored layout is user-owned. The schema `revision`, protocol-2 layout token, `schema_conflict`, and `layout_conflict` cover the complete version-2 layout. Either conflict requires refresh; no stale tab may overwrite either layer. View mutation preview/apply requires the complete current token, and post-commit synchronization does not regenerate, normalize, or otherwise change layout.
 

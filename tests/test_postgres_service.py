@@ -4,7 +4,9 @@ import os
 import stat
 import sys
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -508,7 +510,8 @@ class PostgresServiceTests(unittest.TestCase):
                 {"column_name": "total", "data_type": "numeric(12,2)", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
             ],
         }
-        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=responses))
+        connection = Connection(responses=responses)
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
         first = service.inspect_relation("local", "demo", "reporting", "order_summary")
         second = service.inspect_relation("local", "demo", "reporting", "order_summary")
         self.assertEqual(first["kind"], "view")
@@ -534,6 +537,44 @@ class PostgresServiceTests(unittest.TestCase):
         definition_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed_definition))
         self.assertNotEqual(first["fingerprint"], definition_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
 
+    def test_relation_inspection_derives_verified_output_column_provenance(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{
+                "catalog_kind": "v", "relation_kind": "view",
+                "view_definition": "SELECT o.id AS order_id, o.subtotal + o.tax AS gross_total FROM sales.orders o",
+            }],
+            "a.attname AS column_name": [
+                {"column_name": "order_id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"},
+                {"column_name": "gross_total", "data_type": "numeric", "nullable": True, "ordinal": 2, "type_category": "N", "type_name": "numeric"},
+            ],
+            "relation_dependencies": [{"namespace": "sales", "relation_name": "orders", "relation_kind": "table"}],
+            "view_provenance_source_columns": [
+                {"namespace": "sales", "relation_name": "orders", "relation_kind": "table", "column_name": "id", "ordinal": 1, "data_type": "bigint"},
+                {"namespace": "sales", "relation_name": "orders", "relation_kind": "table", "column_name": "subtotal", "ordinal": 2, "data_type": "numeric"},
+                {"namespace": "sales", "relation_name": "orders", "relation_kind": "table", "column_name": "tax", "ordinal": 3, "data_type": "numeric"},
+            ],
+        }
+        connection = Connection(responses=responses)
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+
+        result = service.inspect_relation("local", "demo", "reporting", "order_summary")
+
+        provenance = result["columnProvenance"]
+        self.assertEqual(provenance["status"], "available")
+        self.assertEqual([item["derivation"] for item in provenance["outputs"]], ["direct", "expression"])
+        self.assertEqual(provenance["outputs"][0]["inputs"][0]["columnName"], "id")
+        self.assertEqual([item["columnName"] for item in provenance["outputs"][1]["inputs"]], ["subtotal", "tax"])
+        self.assertEqual(result["joinPredicates"]["status"], "available")
+        self.assertEqual(result["joinPredicates"]["joins"], [])
+        self.assertEqual(result["sqlStages"]["status"], "available")
+        self.assertEqual(
+            [stage["kind"] for stage in result["sqlStages"]["stages"]], ["query_block"],
+        )
+        source_query = next(sql for sql, _ in connection.executed if "view_provenance_source_columns" in sql)
+        self.assertIn("WITH ORDINALITY", source_query)
+        self.assertNotIn("unnest(%s::text[], %s::text[])", source_query)
+
     def test_foreign_table_inspection_is_a_read_source_with_advisory_select(self):
         responses = {
             "SELECT current_database() AS database": [{"database": "demo", "server_version_num": 160000}],
@@ -556,6 +597,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertTrue(descriptor["permissions"]["canSelect"])
         self.assertRegex(descriptor["fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(descriptor["definition"], {"status": "unavailable", "reason": "not_supported"})
+        self.assertEqual(descriptor["sqlStages"]["status"], "unavailable")
+        self.assertEqual(descriptor["sqlStages"]["reason"], "not_supported")
         self.assertEqual(descriptor["dependencies"]["status"], "available")
         self.assertEqual(descriptor["dependencies"]["items"], [])
         self.assertFalse(descriptor["dependencies"]["page"]["hasMore"])
@@ -598,7 +641,7 @@ class PostgresServiceTests(unittest.TestCase):
             "canSelect": True, "isOwner": False, "inheritsOwner": False, "canSetRole": False,
             "canAlter": False, "canRefresh": False,
         })
-        self.assertEqual(result["columnProvenance"], {"status": "unavailable", "reason": "not_supported"})
+        self.assertEqual(result["columnProvenance"], {"status": "unavailable", "reason": "no_outputs"})
         self.assertEqual(result["materialized"], {"status": "unavailable", "reason": "not_applicable"})
         self.assertEqual(result["dependencies"]["status"], "available")
         self.assertEqual(
@@ -698,6 +741,42 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(result["dependents"]["items"], [])
         self.assertEqual(connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         self.assertEqual(connection.rollbacks, 1)
+
+    def test_relation_fingerprint_does_not_include_sql_stage_analysis(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{
+                "catalog_kind": "v", "relation_kind": "view",
+                "view_definition": "WITH selected AS (SELECT id FROM sales.orders) SELECT id FROM selected",
+            }],
+            "a.attname AS column_name": [{
+                "column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1,
+                "type_category": "N", "type_name": "int8",
+            }],
+            "relation_dependencies": [{"namespace": "sales", "relation_name": "orders", "relation_kind": "table"}],
+            "view_provenance_source_columns": [{
+                "namespace": "sales", "relation_name": "orders", "relation_kind": "table",
+                "column_name": "id", "ordinal": 1, "data_type": "bigint",
+            }],
+        }
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: Connection(responses=responses),
+        )
+        original = service.inspect_relation("local", "demo", "reports", "selected_orders")
+        self.assertEqual(original["sqlStages"]["status"], "available")
+        self.assertEqual(original["sqlStages"]["stages"][0]["name"], "selected")
+        replacement = {
+            "status": "unavailable", "reason": "analysis_failed", "version": 1,
+            "orderSemantics": "syntactic_dependency", "stages": [],
+            "relationFingerprint": original["fingerprint"], "fingerprint": "f" * 64,
+        }
+
+        with patch("schemii.postgres_catalog.derive_sql_stages", return_value=replacement):
+            changed_analysis = service.inspect_relation("local", "demo", "reports", "selected_orders")
+
+        self.assertEqual(original["fingerprint"], changed_analysis["fingerprint"])
+        self.assertNotEqual(original["sqlStages"], changed_analysis["sqlStages"])
 
     def test_relation_lineage_pages_cross_namespace_table_and_foreign_dependents_and_rejects_stale_cursor(self):
         base = {
@@ -1231,6 +1310,72 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertFalse(any("statement_timeout" in sql for sql, _ in connection.executed))
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
+
+    def test_read_only_sql_cancellation_reaches_postgres_and_waits_for_rollback(self):
+        started = threading.Event()
+        cancelled = threading.Event()
+        query = "SELECT pg_sleep(30)"
+
+        class CancellationDiagnostic:
+            message_primary = "canceling statement due to user request"
+
+        class CancellationError(Exception):
+            sqlstate = "57014"
+            diag = CancellationDiagnostic()
+
+        class BlockingCursor(Cursor):
+            def execute(self, sql, params=()):
+                if sql == query:
+                    started.set()
+                    if not cancelled.wait(2):
+                        raise RuntimeError("cancellation did not reach the connection")
+                    raise CancellationError()
+                return super().execute(sql, params)
+
+        class BlockingConnection(Connection):
+            def cursor(self):
+                return BlockingCursor(self)
+
+            def cancel(self):
+                cancelled.set()
+
+        connection = BlockingConnection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "SELECT EXISTS": [{"exists": True}],
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+        outcome = []
+
+        def execute():
+            try:
+                service.execute_read_only_sql("local", "public", query, operation_id="operation-query")
+            except Exception as error:
+                outcome.append(error)
+
+        worker = threading.Thread(target=execute)
+        worker.start()
+        self.assertTrue(started.wait(1))
+        self.assertEqual(service.cancel_read_only_sql("operation-query"), {"requested": True})
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcome[0].code, "execution_cancelled")
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertTrue(connection.closed)
+
+    def test_read_only_sql_honors_cancellation_before_connection_attachment(self):
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: connections.append(Connection()) or connections[-1],
+        )
+        service.cancel_read_only_sql("operation-before-connect")
+
+        with self.assertRaises(PostgresServiceError) as caught:
+            service.execute_read_only_sql("local", "public", "SELECT 1", operation_id="operation-before-connect")
+
+        self.assertEqual(caught.exception.code, "execution_cancelled")
+        self.assertEqual(connections, [])
 
     def test_read_only_sql_accepts_show_and_keeps_the_result_contract(self):
         statement = "SHOW lock_timeout"

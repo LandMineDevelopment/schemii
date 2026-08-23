@@ -14,7 +14,7 @@ assert.match(shared, /path\.startsWith\("\/api\/ai\/"\)/, "AI traffic must stay 
 assert.doesNotMatch(shared, /fetch\([^)]*(?:opencode|8080|provider\.)/i, "the browser must not call Schemii, OpenCode, or providers directly");
 assert.match(shared, /localStorage\.setItem\(storageKey, normalized\)/, "browser storage may remember only a validated provider/model preference");
 assert.equal((shared.match(/localStorage\.setItem\(/g) || []).length, 1, "provider credentials must never enter browser storage");
-for (const safeAssignment of [/body\.textContent = String\(text/, /body\.textContent = part\.text/, /summary\.textContent = normalized\.summary/]) assert.match(shared, safeAssignment, "untrusted model content and proposals must render through textContent");
+for (const safeAssignment of [/body\.textContent = value/, /body\.textContent = part\.text/, /summary\.textContent = normalized\.summary/]) assert.match(shared, safeAssignment, "untrusted model content and proposals must render through textContent");
 assert.doesNotMatch(shared, /innerHTML|eval\(|new Function/, "the AI renderer must not interpret model output as code or HTML");
 assert.match(shared, /\/activity`[\s\S]*getReader\(\)/, "Schemer AI needs bounded same-origin live activity");
 assert.match(shared, /event\.type === "part"/, "Schemer AI must render bounded activity parts");
@@ -37,7 +37,9 @@ assert.match(html, /value="data"[\s\S]*data-ai-query-warning/, "Schemer must exp
 assert.doesNotMatch(html, /allow-session/, "Schemer must require confirmation for every analytic query");
 assert.match(source, /action\.type === "read_query"[\s\S]*action\.readOnly !== true[\s\S]*expectedRevision[\s\S]*buttonLabel: "Review & run query"/, "query proposals must be strict, read-only, revision-bound, and inert");
 assert.match(shared, /confirm\(`\$\{normalized\.summary\}\$\{consequence\}\\n\\nConfirm this reviewed action\?`\)/, "every Schemer operation must require one post-review confirmation with destructive wording when needed");
-assert.match(shared, /function beginProposalOperation[\s\S]*button\.textContent = "Running\.\.\."[\s\S]*const activity = beginProposalOperation\(card\)[\s\S]*activity\.finish\("completed"\)[\s\S]*activity\.finish\(operationSucceeded \? "warning" : "failed"\)/, "Schemer proposals must show live and authoritative terminal operation timing through the shared renderer");
+assert.match(shared, /function beginProposalOperation[\s\S]*button\.textContent = "Running\.\.\."[\s\S]*const activity = beginProposalOperation\(card,[\s\S]*activity\.finish\("completed"\)[\s\S]*activity\.finish\(cancelled \? "cancelled" : operationSucceeded \? "warning" : "failed"\)/, "Schemer proposals must show live and authoritative terminal operation timing through the shared renderer");
+assert.match(shared, /normalized\.action\?\.type === "read_query"[\s\S]*onCancel: \(\) => cancelProposal\(proposal\)/, "Schemer analytic queries must expose the shared Stop action only while running");
+assert.match(styles, /\.ai-action-progress\.cancelled[\s\S]*\.ai-action-cancel/, "Schemer query cancellation needs a distinct terminal state and Stop control");
 assert.match(source, /function schemerAiTargetLabel[\s\S]*toolbarTargetExplicit \? "selected" : "suggested"/, "Schemer AI must name whether its exact toolbar target was selected or merely suggested");
 assert.match(source, /result\?\.kind === "sql_result"[\s\S]*persistedAfter[\s\S]*appendQueryResult\(result\.display\)[\s\S]*resultRef: result\.resultRef/, "approved result references must retain local dashboard safety checks before follow-up delivery");
 assert.doesNotMatch(source, /queryResult: boundedSchemerAiQueryResult\(result\)/, "browser-owned rows must not be submitted as AI query provenance");

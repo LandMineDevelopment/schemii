@@ -219,10 +219,27 @@ class MetadataStoreTests(unittest.TestCase):
             for migration in migrations
         ]])
         store = MetadataStore(lambda: connection)
-        self.assertEqual(store.health(), {"ok": True, "version": 7, "expectedVersion": 7})
+        self.assertEqual(store.health(), {"ok": True, "version": 10, "expectedVersion": 10})
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
+
+    def test_chat_conversation_title_initialization_and_rename_are_durable(self):
+        chat_id = str(uuid.uuid4())
+        connection = FakeConnection(rows=[
+            {"application_id": "schemii", "state": "active"},
+            {"conversation_title": "Build varied slate assignments"},
+        ])
+        store = MetadataStore(lambda: connection)
+
+        result = store.set_chat_conversation_title(chat_id, "Build varied slate assignments")
+
+        self.assertEqual(result["conversationTitle"], "Build varied slate assignments")
+        update = next(item for item in connection.cursor_value.executions if "SET conversation_title" in item[0])
+        self.assertEqual(update[1][2], False)
+
+        with self.assertRaises(MetadataStoreError):
+            store.set_chat_conversation_title(chat_id, "Invalid\ntitle", overwrite=True)
 
     def test_policy_update_is_transactional_and_increments_locked_revision(self):
         connection = FakeConnection(rows=[{"state": "active"}, {"revision": 2}, {"application_id": "schemii"}])
@@ -237,7 +254,11 @@ class MetadataStoreTests(unittest.TestCase):
 
     def test_claim_operation_creates_hashed_single_attempt(self):
         operation_id = uuid.uuid4()
-        connection = FakeConnection(rows=[{"state": "ready", "chat_id": uuid.uuid4()}, {"application_id": "schemii"}])
+        connection = FakeConnection(rows=[
+            {"cancellation_requested_at": None},
+            {"state": "ready", "chat_id": uuid.uuid4()},
+            {"application_id": "schemii"},
+        ])
         result = MetadataStore(lambda: connection).claim_operation(str(operation_id), "worker-1")
         self.assertEqual(result["state"], "running")
         insert = next(item for item in connection.cursor_value.executions if "INSERT INTO metadata_operation_attempts" in item[0])

@@ -249,8 +249,9 @@ class PostgresConsoleTests(unittest.TestCase):
             with self.subTest(sql=sql), self.assertRaises(PostgresServiceError) as error:
                 split_console_statements(sql)
             self.assertEqual(error.exception.code, "unsupported_transaction_control")
+        self.assertEqual(len(split_console_statements(";".join("SELECT 1" for _ in range(100)))), 100)
         with self.assertRaises(PostgresServiceError) as error:
-            split_console_statements(";".join("SELECT 1" for _ in range(21)))
+            split_console_statements(";".join("SELECT 1" for _ in range(101)))
         self.assertEqual(error.exception.code, "too_many_statements")
 
     def test_ai_console_policy_enforces_raw_statement_bound_before_connection(self):

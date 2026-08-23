@@ -68,7 +68,7 @@ TARGET = {
 class MetadataRepositoryMigrationTests(unittest.TestCase):
     def test_0002_is_additive_and_adds_repository_evidence(self):
         migrations = packaged_migrations()
-        self.assertEqual([migration.version for migration in migrations], [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual([migration.version for migration in migrations], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         sql = resources.files("schemii.metadata.migrations").joinpath("0002_authority_repository.sql").read_text()
         self.assertIn("ADD COLUMN binding jsonb", sql)
         self.assertIn("lease_expires_at", sql)
@@ -95,6 +95,19 @@ class MetadataRepositoryMigrationTests(unittest.TestCase):
         reservations = resources.files("schemii.metadata.migrations").joinpath("0007_console_execution_reservations.sql").read_text()
         self.assertIn("'reserved', 'running'", reservations)
         self.assertNotIn("DROP TABLE", reservations)
+        cancellation = resources.files("schemii.metadata.migrations").joinpath("0008_ai_query_cancellation.sql").read_text()
+        self.assertIn("cancellation_requested_at", cancellation)
+        self.assertIn("'cancelled'", cancellation)
+        self.assertIn("metadata_query_results_operation", cancellation)
+        self.assertNotIn("DROP TABLE", cancellation)
+        console_limit = resources.files("schemii.metadata.migrations").joinpath("0009_console_statement_limit.sql").read_text()
+        self.assertIn("statement_limit BETWEEN 1 AND 100", console_limit)
+        self.assertNotIn("UPDATE metadata_console_settings", console_limit)
+        self.assertNotIn("DROP TABLE", console_limit)
+        chat_titles = resources.files("schemii.metadata.migrations").joinpath("0010_chat_conversation_titles.sql").read_text()
+        self.assertIn("ADD COLUMN conversation_title", chat_titles)
+        self.assertIn("octet_length(conversation_title) <= 80", chat_titles)
+        self.assertNotIn("DROP TABLE", chat_titles)
 
 
 class MetadataRepositoryContractTests(unittest.TestCase):
@@ -130,7 +143,8 @@ class MetadataRepositoryContractTests(unittest.TestCase):
         statements = [sql for sql, _ in connection.cursor_value.executions]
         self.assertTrue(any("state = 'abandoned'" in sql for sql in statements))
         self.assertTrue(any("'uncertain'" in sql and "metadata_operation_outcomes" in sql for sql in statements))
-        self.assertFalse(any("state = 'ready'" in sql for sql in statements))
+        self.assertTrue(any("scrubbed_at = clock_timestamp()" in sql for sql in statements))
+        self.assertFalse(any("UPDATE metadata_operations SET state = 'ready'" in sql for sql in statements))
 
     def test_cleanup_bounds_private_payload_redaction_as_well_as_deletes(self):
         connection = FakeConnection(rowcounts=[3, 0, 0, 0])
@@ -482,7 +496,7 @@ class MetadataRepositoryContractTests(unittest.TestCase):
         sql = "\n".join(item[0] for item in connection.cursor_value.executions)
         self.assertIn("state = 'abandoned'", sql)
         self.assertIn("state = 'uncertain'", sql)
-        self.assertNotIn("state = 'ready'", sql)
+        self.assertNotIn("UPDATE metadata_operations SET state = 'ready'", sql)
 
     def test_heartbeat_renews_live_lease_and_rejects_expired_update(self):
         token = "claim"
@@ -501,11 +515,128 @@ class MetadataRepositoryContractTests(unittest.TestCase):
         connection = FakeConnection(rows=[{
             "operation_id": operation, "state": "succeeded",
             "claim_token_hash": hashlib.sha256(token.encode()).hexdigest(), "lease_expires_at": datetime.now(timezone.utc),
-        }, {"state": "succeeded", "result": result_payload, "error": None}])
+        }, {"cancellation_requested_at": None}, {"state": "succeeded", "result": result_payload, "error": None}])
         result = MetadataStore(lambda: connection).finish_operation(
             str(attempt), token, "succeeded", result=result_payload,
         )
         self.assertFalse(result["resolutionOwner"])
+
+    def test_running_query_cancellation_is_durable_and_terminal_success_is_suppressed(self):
+        chat = uuid.uuid4()
+        proposal = uuid.uuid4()
+        operation = uuid.uuid4()
+        cancellation_connection = FakeConnection(rows=[
+            {"chat_id": chat, "state": "authorized", "cancellation_requested_at": None, "application_id": "schemii", "resource_kind": "schema"},
+            {"operation_id": operation, "state": "running"},
+            {"application_id": "schemii"},
+        ])
+
+        cancellation = MetadataStore(lambda: cancellation_connection).request_proposal_cancellation(
+            str(proposal), str(chat), expected_application="schemii", expected_resource_kind="schema",
+        )
+
+        self.assertEqual(cancellation, {
+            "requested": True, "proposalState": "authorized",
+            "operationId": str(operation), "operationState": "running",
+        })
+        cancellation_sql = "\n".join(sql for sql, _ in cancellation_connection.cursor_value.executions)
+        self.assertIn("cancellation_requested_at = COALESCE", cancellation_sql)
+
+        token = "claim"
+        attempt = uuid.uuid4()
+        finished_connection = FakeConnection(rows=[
+            {"operation_id": operation, "state": "running", "claim_token_hash": hashlib.sha256(token.encode()).hexdigest(), "lease_expires_at": datetime.now(timezone.utc)},
+            {"cancellation_requested_at": datetime.now(timezone.utc)},
+            {"chat_id": chat},
+            {"application_id": "schemii"},
+        ])
+        finished = MetadataStore(lambda: finished_connection).finish_operation(
+            str(attempt), token, "succeeded", result={"kind": "sql_result"},
+        )
+
+        self.assertEqual((finished["state"], finished["result"], finished["error"]["code"]),
+                         ("cancelled", None, "execution_cancelled"))
+        terminal_sql = "\n".join(sql for sql, _ in finished_connection.cursor_value.executions)
+        self.assertIn("metadata_operation_outcomes", terminal_sql)
+        self.assertIn("UPDATE metadata_operations SET state", terminal_sql)
+        self.assertIn("revocation_reason = %s", terminal_sql)
+        self.assertTrue(any(params and params[0] == "operation_cancelled" for _, params in finished_connection.cursor_value.executions))
+        self.assertIn("scrubbed_at = clock_timestamp()", terminal_sql)
+
+    def test_query_cancellation_before_operation_creation_prevents_dispatch(self):
+        chat = uuid.uuid4()
+        proposal = uuid.uuid4()
+        connection = FakeConnection(rows=[
+            {"chat_id": chat, "state": "ready", "cancellation_requested_at": None, "application_id": "schemii", "resource_kind": "schema"},
+            None,
+            {"application_id": "schemii"},
+        ])
+
+        cancellation = MetadataStore(lambda: connection).request_proposal_cancellation(
+            str(proposal), str(chat), expected_application="schemii", expected_resource_kind="schema",
+        )
+
+        self.assertEqual(cancellation["proposalState"], "cancelled")
+        self.assertIsNone(cancellation["operationId"])
+        sql = "\n".join(statement for statement, _ in connection.cursor_value.executions)
+        self.assertIn("state = 'cancelled', cancellation_requested_at = clock_timestamp()", sql)
+
+    def test_query_cancellation_enforces_application_resource_ownership(self):
+        chat = uuid.uuid4()
+        connection = FakeConnection(rows=[{
+            "chat_id": chat, "state": "ready", "cancellation_requested_at": None,
+            "application_id": "schemer", "resource_kind": "dashboard",
+        }])
+
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: connection).request_proposal_cancellation(
+                str(uuid.uuid4()), str(chat),
+                expected_application="schemii", expected_resource_kind="schema",
+            )
+
+        self.assertEqual(caught.exception.code, "authority_binding_mismatch")
+
+    def test_cancelled_ready_operation_cannot_be_claimed(self):
+        operation = uuid.uuid4()
+        connection = FakeConnection(rows=[
+            {"cancellation_requested_at": datetime.now(timezone.utc)},
+            {"state": "ready", "chat_id": uuid.uuid4()},
+        ])
+
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: connection).claim_operation(str(operation), "worker")
+
+        self.assertEqual(caught.exception.code, "proposal_cancelled")
+
+    def test_operation_bound_result_remains_consumable_without_browser_operation_authority(self):
+        chat = uuid.uuid4()
+        binding = {"resource": "schema_one", "revision": 4, "access": "data"}
+        stored_binding = {"operationId": str(uuid.uuid4()), "policyBinding": {"policyRevision": 2}, **binding}
+        connection = FakeConnection(rows=[
+            {"chat_id": chat, "binding": stored_binding, "state": "ready", "current": True, "payload": {"rows": [[1]]}},
+            {"application_id": "schemii"},
+        ])
+
+        reserved = MetadataStore(lambda: connection).reserve_result(str(uuid.uuid4()), str(chat), binding)
+
+        self.assertEqual(reserved["payload"], {"rows": [[1]]})
+        self.assertEqual(reserved["state"], "reserved")
+
+    def test_abandoned_operation_cannot_create_a_result_after_cleanup(self):
+        chat = uuid.uuid4()
+        operation = uuid.uuid4()
+        connection = FakeConnection(rows=[
+            {"chat_id": chat, "cancellation_requested_at": None},
+            {"state": "uncertain", "chat_id": chat, "active_claim": False},
+        ])
+
+        with self.assertRaises(MetadataStoreError) as caught:
+            MetadataStore(lambda: connection).create_result(
+                str(chat), {"operationId": str(operation), "resource": "schema_one"}, {"rows": [[1]]},
+            )
+
+        self.assertEqual(caught.exception.code, "operation_not_running")
+        self.assertFalse(any("INSERT INTO metadata_query_result_references" in sql for sql, _ in connection.cursor_value.executions))
 
     def test_stale_delivery_recovery_scrubs_post_dispatch_payload_and_audits(self):
         delivery = uuid.uuid4()

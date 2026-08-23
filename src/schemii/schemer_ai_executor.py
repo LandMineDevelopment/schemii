@@ -42,10 +42,10 @@ class SchemerAiExecutor:
         if action_type == "read_query":
             if profile is None or any(action.get(key) != authorization_target[key] for key in ("profileId", "database", "namespace")):
                 raise PostgresServiceError(409, "action_target_changed", "Query target no longer matches the proposal")
-            result = self.service.execute_read_only_sql(profile["id"], authorization_target["namespace"], action.get("sql"), database=profile["dbname"], expected_profile_fingerprint=self.service.profile_context_fingerprint(profile["id"]), allow_explain=False, max_rows=min(100, rows_disclosed), max_columns=50, max_result_bytes=256 * 1024, operation_timeout_ms=bounds.get("operationTimeoutMs"))
+            result = self.service.execute_read_only_sql(profile["id"], authorization_target["namespace"], action.get("sql"), database=profile["dbname"], expected_profile_fingerprint=self.service.profile_context_fingerprint(profile["id"]), allow_explain=False, max_rows=min(100, rows_disclosed), max_columns=50, max_result_bytes=256 * 1024, operation_timeout_ms=bounds.get("operationTimeoutMs"), operation_id=operation_id)
             if versioned_policy:
                 self.authority.consume_bound(operation_id, "rowsDisclosed", len(result.get("rows", [])), {"kind": "sql_result"})
-            reference = self.authority.create_result(chat["id"], {"resource": chat["dashboardId"], "target": authorization_target, "revision": record["revision"], "access": "data", "policyBinding": policy_binding}, bounded_ai_query_result(result, max_rows=min(100, rows_disclosed), max_columns=50, max_bytes=48 * 1024))
+            reference = self.authority.create_result(chat["id"], {"operationId": operation_id, "resource": chat["dashboardId"], "target": authorization_target, "revision": record["revision"], "access": "data", "policyBinding": policy_binding}, bounded_ai_query_result(result, max_rows=min(100, rows_disclosed), max_columns=50, max_bytes=48 * 1024))
             return {"kind": "sql_result", "display": result, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
         if action_type == "dashboard_open":
             target = self.dashboard_store.get(action.get("dashboardId"))

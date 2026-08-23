@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .schemer_ai_actions import normalize_schemer_action
 from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMaintenanceConfig, OperationLeaseLost
-from .ai_http import AiHttpRouter, authority_call, issue_ai_proposals
+from .ai_http import AiHttpRouter, ai_conversation_title, authority_call, ensure_ai_conversation_title, issue_ai_proposals
 from .dashboard_store import DashboardStore, DashboardStoreError
 from .http_common import make_local_app_handler, metadata_profile_dependencies
 from .schema_store import SchemaStore
@@ -210,6 +210,12 @@ def make_handler(
         settings_handler=lambda handler, body: authority_call(
             handler, ai_authority.get_settings if body is None else lambda: ai_authority.update_settings(body),
         ),
+        cancellation_handler=lambda handler, current_service, session_id, proposal_id: handler._ai_cancel_proposal(
+            current_service, session_id, proposal_id,
+        ),
+        title_handler=lambda handler, current_service, session_id, body: handler._ai_title(
+            current_service, session_id, body,
+        ),
     )
     ai_executor = SchemerAiExecutor(
         service, dashboard_store, ai_authority,
@@ -317,6 +323,20 @@ def make_handler(
                 ai_authority.finish_delete(session_id)
                 return result
             return self._ai_call(delete)
+
+        def _ai_title(self, current_ai_service, session_id: str, body: dict):
+            if set(body) != {"title"}:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "AI chat title fields are invalid"}})
+            try:
+                title = ai_conversation_title(body.get("title"), truncate=False)
+            except ValueError as error:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": str(error)}})
+
+            def rename():
+                self._ai_chat(session_id)
+                return self._public_ai_chat(ai_authority.rename_conversation(session_id, title))
+
+            return self._ai_call(rename)
 
         def _authorize_dashboard(self) -> bool:
             return self._authorize_local_api("Dashboard API", "Dashboard session token is missing or invalid")
@@ -541,6 +561,7 @@ def make_handler(
                 reservation = None
                 delivery_state = "reserved"
                 chat = self._ai_chat(session_id)
+                chat = ai_authority.initialize_conversation_title(session_id, ai_conversation_title(text))
                 dashboard_id = chat["dashboardId"]
                 access_level = chat["accessLevel"]
                 target = chat["target"] or None
@@ -619,8 +640,10 @@ def make_handler(
                             continue
                         identity = identities.get(chat["externalSessionId"])
                         if identity is not None:
+                            chat = ensure_ai_conversation_title(current_ai_service, ai_authority, chat)
                             sessions.append({
                                 **self._public_ai_chat(chat),
+                                "contextTitle": chat["contextTitle"],
                                 "createdAt": identity.get("createdAt"),
                                 "updatedAt": identity.get("updatedAt"),
                             })
@@ -632,8 +655,10 @@ def make_handler(
                 pending = []
                 for proposal in ai_authority.pending_proposals(session_id):
                     operation_record = ai_authority.operation_for_proposal(proposal["id"], session_id)
-                    if operation_record is None or operation_record["state"] in {"running", "uncertain"}:
-                        pending.append({"proposalId": proposal["id"], "sessionId": session_id, "action": proposal["action"], "policyBinding": proposal["policyBinding"]})
+                    if operation_record is None or operation_record["state"] in {"running", "uncertain"} or (
+                        operation_record["state"] == "cancelled" and operation_record.get("cancellationRequested")
+                    ):
+                        pending.append({"proposalId": proposal["id"], "sessionId": session_id, "action": proposal["action"], "policyBinding": proposal["policyBinding"], "operation": operation_record, "cancellationRequested": proposal.get("cancellationRequested", False)})
                 return {**result, "pendingProposals": pending}
 
             return self._ai_call(history)
@@ -655,6 +680,18 @@ def make_handler(
 
         def _ai_operation_status(self, current_ai_service, session_id: str, operation_id: str):
             return authority_call(self, lambda: {"operation": ai_authority.operation(operation_id, session_id)})
+
+        def _ai_cancel_proposal(self, current_ai_service, session_id: str, proposal_id: str):
+            def cancel():
+                cancellation = ai_authority.request_query_cancellation(proposal_id, session_id)
+                operation_id = cancellation.get("operationId")
+                if cancellation.get("requested") and operation_id and cancellation.get("operationState") == "running":
+                    service.cancel_read_only_sql(operation_id)
+                operation = None if operation_id is None else ai_authority.operation(operation_id, session_id)
+                if operation is not None and operation["state"] != "running":
+                    service.release_read_only_sql(operation_id)
+                return {"cancellation": cancellation, "operation": operation}
+            return authority_call(self, cancel)
 
         def _ai_execute_proposal(self, current_ai_service, session_id: str, proposal_id: str, body: dict):
             if set(body) != {"confirmation"}:
@@ -703,6 +740,8 @@ def make_handler(
                 finally:
                     if ai_maintenance is not None:
                         ai_maintenance.release(attempt_id)
+                    if action.get("type") == "read_query":
+                        service.release_read_only_sql(operation["id"])
             try:
                 if proposal_record["schemaConcurrency"] != schema_concurrency or proposal_record["authorizationTarget"] != authorization_target:
                     raise DashboardStoreError(409, "dashboard_changed", "Proposal authority binding changed; request a fresh proposal")

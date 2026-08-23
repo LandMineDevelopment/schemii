@@ -21,7 +21,7 @@ This is the Phase 0 inventory of authority-relevant persistence and wire contrac
 
 ## AI wire contracts
 
-Current shared routes include status/auth, versioned agent settings GET/PUT, session creation/list/history/activity/delete, messages, proposal execute/reconcile, and operation status. Claim/finalize/release proposal routes no longer exist.
+Current shared routes include status/auth, versioned agent settings GET/PUT, session creation/list/history/activity/delete, durable conversation-title rename through `PUT /api/ai/sessions/{chatId}/title`, messages, proposal execute/reconcile, proposal-bound query cancellation, and operation status. Query cancellation is `DELETE /api/ai/sessions/{chatId}/proposals/{proposalId}/execution`; it durably records intent before signalling the process-local Psycopg connection so pre-attachment races fail closed. Claim/finalize/release proposal routes no longer exist.
 
 Target changes:
 

@@ -6,6 +6,7 @@ const LAYOUT_SAVE_DELAY_MS = 750;
 const WHEEL_ZOOM_IDLE_MS = 140;
 const POINTER_MOVE_THRESHOLD_PX = 3;
 const CANVAS_KEYBOARD_PAN_STEP_PX = 24;
+const VIEWS_QUERY_INPUT_ANCHOR_Y = 128;
 
 function clampZoom(value, maximum = MAX_ZOOM) {
   return Math.min(maximum, Math.max(MIN_ZOOM, value));
@@ -306,6 +307,8 @@ let relationshipPairDragIndex = null;
 let objectIconMenuTargets = [];
 let inspectorObjectFocusTimer = null;
 let view = { x: 45, y: 35, zoom: 1 };
+let viewsView = { x: 45, y: 35, zoom: 1 };
+let viewsObjects = {};
 let dragState = null;
 let tablePressState = null;
 let panState = null;
@@ -319,6 +322,10 @@ let editingFunctionId = null;
 let saveTimer = null;
 let saveQueue = Promise.resolve();
 let wheelZoomTimer = null;
+let viewsWheelZoomTimer = null;
+let viewsPanState = null;
+let viewsNodeDragState = null;
+let viewsSuppressClick = false;
 let toastTimer = null;
 let onboardingController = null;
 let serverStopped = false;
@@ -381,7 +388,10 @@ let viewsPrototypeState = {
   layer: "tables",
   catalogOpen: false,
   inspectedRelation: null,
-  expandedSources: new Set(),
+  selectedOutputOrdinal: null,
+  selectedSourceKey: null,
+  selectedSourceColumn: null,
+  flowFocus: null,
   activePane: "lineage",
   paneTimer: null,
   sideTimer: null,
@@ -508,6 +518,10 @@ function viewsBindingKey(binding) {
   return binding ? [binding.schemaId, binding.revision, binding.layoutToken, binding.profileId, binding.database, binding.namespace].join("\u0000") : "";
 }
 
+function viewsCatalogTargetKey(binding) {
+  return binding ? [binding.schemaId, binding.profileId, binding.database, binding.namespace].join("\u0000") : "";
+}
+
 function requireExactTarget(payload, binding, relation = null) {
   if (!payload || payload.profileId !== binding.profileId || payload.database !== binding.database || payload.namespace !== binding.namespace
       || (relation !== null && payload.relation !== relation)) throw new Error("PostgreSQL returned a different Views target. Refresh the saved schema before continuing");
@@ -547,14 +561,174 @@ function validateRelationDescriptor(payload, binding, relation, expectedIdentity
   if (!payload.permissions || payload.permissions.status !== "available" || typeof payload.permissions.advisory !== "boolean"
       || (payload.permissions.role !== null && typeof payload.permissions.role !== "string") || typeof payload.permissions.canSelect !== "boolean"
       || typeof payload.permissions.canAlter !== "boolean" || typeof payload.permissions.canRefresh !== "boolean") throw new Error("PostgreSQL returned an invalid permissions envelope");
-  if (!payload.columnProvenance || payload.columnProvenance.status !== "unavailable" || payload.columnProvenance.reason !== "not_supported") throw new Error("PostgreSQL returned an invalid provenance envelope");
   if (payload.kind === "materialized_view") {
     if (!payload.materialized || payload.materialized.status !== "available" || typeof payload.materialized.populated !== "boolean" || typeof payload.materialized.concurrentRefreshEligible !== "boolean") throw new Error("PostgreSQL returned invalid materialized-view metadata");
   } else if (!unavailable(payload.materialized)) throw new Error("PostgreSQL returned an invalid materialization envelope");
   const target = { namespace: payload.namespace, relation, kind: payload.kind, fingerprint: payload.fingerprint };
   const dependencyPage = validateLineageEnvelope(payload.dependencies, binding, target, "dependencies", "Upstream");
   const dependentPage = validateLineageEnvelope(payload.dependents, binding, target, "dependents", "Downstream");
-  return { ...payload, columns, dependencies: dependencyPage.items, dependents: dependentPage.items, lineage: { dependencies: dependencyPage, dependents: dependentPage } };
+  const provenance = validateViewColumnProvenance(payload.columnProvenance, payload.fingerprint, columns, dependencyPage.items, binding);
+  const joins = validateViewJoinPredicates(payload.joinPredicates, payload.fingerprint, dependencyPage.items, binding);
+  const sqlStages = validateViewSqlStages(payload.sqlStages, payload.fingerprint, dependencyPage.items, binding);
+  return { ...payload, columns, columnProvenance: provenance, joinPredicates: joins, sqlStages, dependencies: dependencyPage.items, dependents: dependentPage.items, lineage: { dependencies: dependencyPage, dependents: dependentPage } };
+}
+
+function validateSqlExpression(value, label) {
+  const available = value?.status === "available" && typeof value.sql === "string" && value.sql.length > 0
+    && new TextEncoder().encode(value.sql).length <= 4096;
+  const unavailable = value?.status === "unavailable" && typeof value.reason === "string" && value.reason.length > 0;
+  if (!available && !unavailable) throw new Error(`The server returned an invalid ${label} expression`);
+  return { ...value };
+}
+
+function validateViewSqlStages(value, relationFingerprint, dependencies, binding) {
+  const fingerprintValid = typeof value?.fingerprint === "string" && /^[0-9a-f]{64}$/.test(value.fingerprint);
+  const commonValid = value?.version === 1 && value.orderSemantics === "syntactic_dependency"
+    && value.relationFingerprint === relationFingerprint && fingerprintValid && Array.isArray(value.stages);
+  if (!commonValid || new TextEncoder().encode(JSON.stringify(value)).length > 256 * 1024) throw new Error("The server returned an invalid SQL-stage envelope");
+  if (value.status === "unavailable") {
+    if (!value.reason || typeof value.reason !== "string" || value.stages.length !== 0
+        || (value.detail !== undefined && typeof value.detail !== "string")) throw new Error("The server returned an invalid unavailable SQL-stage envelope");
+    return { ...value, stages: [] };
+  }
+  if (!["available", "partial"].includes(value.status) || value.stages.length > 128
+      || (value.reasons !== undefined && (!Array.isArray(value.reasons) || value.reasons.some(reason => typeof reason !== "string" || !reason)))) {
+    throw new Error("The server returned an invalid SQL-stage envelope");
+  }
+  const relationSources = new Set(dependencies.map(item => relationIdentityKey(item)));
+  const stageIds = new Set();
+  for (const [index, stage] of value.stages.entries()) {
+    if (!stage || typeof stage.stageId !== "string" || !stage.stageId || stageIds.has(stage.stageId)
+        || stage.displayOrdinal !== index + 1 || !["cte", "derived_table", "query_block"].includes(stage.kind)) {
+      throw new Error("The server returned an invalid SQL stage identity");
+    }
+    stageIds.add(stage.stageId);
+  }
+  let predicateCount = 0;
+  const stages = value.stages.map((stage, stageIndex) => {
+    if ((stage.name !== undefined && (typeof stage.name !== "string" || !stage.name))
+        || (stage.parentStageId !== null && !stageIds.has(stage.parentStageId)) || stage.parentStageId === stage.stageId
+        || typeof stage.recursive !== "boolean" || stage.lifetime !== "query"
+        || !Array.isArray(stage.dependsOnStageIds) || stage.dependsOnStageIds.length > 128
+        || new Set(stage.dependsOnStageIds).size !== stage.dependsOnStageIds.length
+        || stage.dependsOnStageIds.some(stageId => !stageIds.has(stageId))
+        || stage.dependsOnStageIds.some(stageId => stageId !== stage.stageId && value.stages.findIndex(item => item.stageId === stageId) >= stageIndex)
+        || stage.recursive !== stage.dependsOnStageIds.includes(stage.stageId)
+        || !Array.isArray(stage.outputColumns) || stage.outputColumns.length > 512
+        || !Array.isArray(stage.inputs) || stage.inputs.length > 128
+        || !["available", "partial"].includes(stage.mappingStatus)
+        || (stage.reasons !== undefined && (!Array.isArray(stage.reasons) || stage.reasons.some(reason => typeof reason !== "string" || !reason)))) {
+      throw new Error("The server returned invalid SQL stage metadata");
+    }
+    const sql = validateSqlExpression(stage.sql, "SQL stage");
+    const outputColumns = stage.outputColumns.map((column, index) => {
+      if (!column || column.ordinal !== index + 1 || (column.name !== null && (typeof column.name !== "string" || !column.name))
+          || typeof column.nameSource !== "string" || !column.nameSource) throw new Error("The server returned an invalid SQL stage output");
+      return { ...column, expression: validateSqlExpression(column.expression, "SQL stage output") };
+    });
+    const inputStageIds = new Set();
+    const inputs = stage.inputs.map((input, index) => {
+      if (!input || input.inputOrdinal !== index + 1 || (input.referenceAlias !== null && (typeof input.referenceAlias !== "string" || !input.referenceAlias)) || !input.source) {
+        throw new Error("The server returned an invalid SQL stage input");
+      }
+      if (input.source.type === "stage") {
+        if (!stageIds.has(input.source.stageId)) throw new Error("The server returned an unknown SQL stage reference");
+        inputStageIds.add(input.source.stageId);
+      } else if (input.source.type === "relation") {
+        if (input.source.profileId !== binding.profileId || input.source.database !== binding.database
+            || !relationSources.has(relationIdentityKey(input.source))) throw new Error("The server returned a SQL stage input outside verified dependencies");
+      } else {
+        throw new Error("The server returned an invalid SQL stage source");
+      }
+      return { ...input, source: { ...input.source } };
+    });
+    if ([...inputStageIds].some(stageId => !stage.dependsOnStageIds.includes(stageId))
+        || stage.dependsOnStageIds.some(stageId => !inputStageIds.has(stageId))) throw new Error("The server returned inconsistent SQL stage dependencies");
+    const validatePredicates = (items, label) => {
+      if (!Array.isArray(items)) throw new Error(`The server returned invalid ${label} predicates`);
+      predicateCount += items.length;
+      if (predicateCount > 512) throw new Error("The server returned too many SQL stage predicates");
+      return items.map((item, index) => {
+        if (!item || item.ordinal !== index + 1) throw new Error(`The server returned an invalid ${label} predicate`);
+        return { ...item, expression: validateSqlExpression(item.expression, label) };
+      });
+    };
+    return {
+      ...stage, sql, outputColumns, inputs,
+      joinPredicates: validatePredicates(stage.joinPredicates, "join"),
+      wherePredicates: validatePredicates(stage.wherePredicates, "where"),
+      havingPredicates: validatePredicates(stage.havingPredicates, "having"),
+    };
+  });
+  const queryBlocks = stages.filter(stage => stage.kind === "query_block");
+  if (queryBlocks.length !== 1 || queryBlocks[0] !== stages.at(-1) || queryBlocks[0].parentStageId !== null || queryBlocks[0].recursive
+      || queryBlocks[0].name !== undefined || stages.some(stage => stage.stageId !== queryBlocks[0].stageId && stage.dependsOnStageIds.includes(queryBlocks[0].stageId))) {
+    throw new Error("The server returned an invalid root query block");
+  }
+  return { ...value, stages };
+}
+
+function validateViewColumnProvenance(value, relationFingerprint, columns, dependencies, binding) {
+  if (value?.status === "unavailable" && typeof value.reason === "string" && value.reason) return value;
+  if (!value || !["available", "partial"].includes(value.status) || value.relationFingerprint !== relationFingerprint
+      || typeof value.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.fingerprint)
+      || !Array.isArray(value.outputs) || value.outputs.length !== columns.length) throw new Error("The server returned an invalid provenance envelope");
+  const sources = new Set(dependencies.map(item => relationIdentityKey(item)));
+  const outputs = value.outputs.map((output, index) => {
+    const column = columns[index];
+    const availableExpression = output?.expression?.status === "available" && typeof output.expression.sql === "string" && output.expression.sql.length > 0;
+    const unavailableExpression = output?.expression?.status === "unavailable" && typeof output.expression.reason === "string" && output.expression.reason;
+    if (!output || output.outputName !== column.name || output.outputOrdinal !== column.ordinal
+        || !["direct", "expression", "aggregate", "window", "constant", "unknown"].includes(output.derivation)
+        || !["available", "partial", "unavailable"].includes(output.mappingStatus)
+        || (!availableExpression && !unavailableExpression) || !Array.isArray(output.inputs) || output.inputs.length > 128
+        || (output.reason !== undefined && (typeof output.reason !== "string" || !output.reason))) throw new Error("The server returned invalid output-column provenance");
+    const inputs = output.inputs.map(input => {
+      if (!input || input.database !== binding.database || typeof input.namespace !== "string" || !input.namespace
+          || typeof input.relation !== "string" || !input.relation || !["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(input.kind)
+          || typeof input.columnName !== "string" || !input.columnName || !Number.isInteger(input.columnOrdinal) || input.columnOrdinal < 1
+          || !sources.has(relationIdentityKey(input))) throw new Error("The server returned provenance outside the verified upstream relations");
+      return { ...input };
+    });
+    return { ...output, inputs };
+  });
+  return { ...value, outputs };
+}
+
+function validateViewJoinPredicates(value, relationFingerprint, dependencies, binding) {
+  if (value?.status === "unavailable" && typeof value.reason === "string" && value.reason) return value;
+  if (!value || !["available", "partial"].includes(value.status) || value.relationFingerprint !== relationFingerprint
+      || typeof value.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(value.fingerprint)
+      || !Array.isArray(value.joins) || value.joins.length > 128) throw new Error("The server returned an invalid join-provenance envelope");
+  const sources = new Set(dependencies.map(item => relationIdentityKey(item)));
+  let predicateCount = 0;
+  const endpoint = item => {
+    if (!item || item.database !== binding.database || typeof item.referenceAlias !== "string" || !item.referenceAlias
+        || typeof item.referenceColumnName !== "string" || !item.referenceColumnName
+        || typeof item.namespace !== "string" || !item.namespace || typeof item.relation !== "string" || !item.relation
+        || !["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(item.kind)
+        || typeof item.columnName !== "string" || !item.columnName || !Number.isInteger(item.columnOrdinal) || item.columnOrdinal < 1
+        || !sources.has(relationIdentityKey(item))) throw new Error("The server returned join provenance outside the verified upstream relations");
+    return { ...item };
+  };
+  const joins = value.joins.map((join, index) => {
+    const availableCondition = join?.condition?.status === "available" && typeof join.condition.sql === "string" && join.condition.sql.length > 0;
+    const unavailableCondition = join?.condition?.status === "unavailable" && typeof join.condition.reason === "string" && join.condition.reason;
+    if (!join || join.joinOrdinal !== index + 1 || !["root", "nested"].includes(join.queryScope) || !["inner", "left", "right", "full", "cross"].includes(join.joinType)
+        || !["on", "using", "natural", "none"].includes(join.conditionKind) || typeof join.rightReferenceAlias !== "string"
+        || !["available", "partial"].includes(join.mappingStatus) || (!availableCondition && !unavailableCondition)
+        || !Array.isArray(join.predicates) || join.predicates.length > 64
+        || (join.reasons !== undefined && (!Array.isArray(join.reasons) || join.reasons.some(reason => typeof reason !== "string" || !reason)))) throw new Error("The server returned invalid join provenance");
+    predicateCount += join.predicates.length;
+    if (predicateCount > 512) throw new Error("The server returned too many join predicates");
+    const predicates = join.predicates.map((predicate, predicateIndex) => {
+      if (!predicate || predicate.predicateOrdinal !== predicateIndex + 1 || predicate.operator !== "eq"
+          || predicate.expression?.status !== "available" || typeof predicate.expression.sql !== "string" || !predicate.expression.sql) throw new Error("The server returned an invalid join predicate");
+      return { ...predicate, left: endpoint(predicate.left), right: endpoint(predicate.right) };
+    });
+    return { ...join, predicates };
+  });
+  return { ...value, joins };
 }
 
 function relationIdentityKey(identity) {
@@ -567,7 +741,7 @@ function descriptorToView(descriptor) {
     fingerprint: descriptor.fingerprint, columns: descriptor.columns, sources: descriptor.dependencies, dependents: descriptor.dependents,
     query: descriptor.definition.status === "available" ? descriptor.definition.sql : "", definition: descriptor.definition,
     owner: descriptor.owner, permissions: descriptor.permissions, materialized: descriptor.materialized,
-    provenance: { availability: "unavailable", reason: "Column provenance is unavailable from PostgreSQL; source columns are shown without invented output mappings." },
+    provenance: descriptor.columnProvenance, joins: descriptor.joinPredicates, sqlStages: descriptor.sqlStages,
   };
 }
 
@@ -584,7 +758,7 @@ async function inspectViewsRelation(identity, { knownFingerprint = null, select 
   const query = new URLSearchParams({ database: binding.database, namespace: identity.namespace, relation: identity.relation, expectedKind: identity.kind });
   if (knownFingerprint) query.set("expectedFingerprint", knownFingerprint);
   const payload = await postgresRequest(`/api/postgres/profiles/${encodeURIComponent(binding.profileId)}/relation?${query}`, { method: "GET" });
-  if (generation !== viewsPrototypeState.relationGenerations.get(identityKey) || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return null;
+  if (generation !== viewsPrototypeState.relationGenerations.get(identityKey) || viewsCatalogTargetKey(binding) !== viewsCatalogTargetKey(activeViewsBinding())) return null;
   const descriptor = validateRelationDescriptor(payload, binding, identity.relation, identity);
   for (const direction of ["dependencies", "dependents"]) {
     const envelope = descriptor.lineage[direction];
@@ -608,7 +782,7 @@ async function inspectViewsRelation(identity, { knownFingerprint = null, select 
     envelope.truncated = false;
     envelope.page = { ...envelope.page, returned: descriptor[direction].length, hasMore: false, nextCursor: null };
   }
-  if (generation !== viewsPrototypeState.relationGenerations.get(identityKey) || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return null;
+  if (generation !== viewsPrototypeState.relationGenerations.get(identityKey) || viewsCatalogTargetKey(binding) !== viewsCatalogTargetKey(activeViewsBinding())) return null;
   viewsPrototypeState.descriptors.set(identityKey, descriptor);
   if (select && ["view", "materialized_view"].includes(descriptor.kind)) {
     const index = viewsPrototypeState.views.findIndex(item => item.id === descriptor.relation);
@@ -617,6 +791,13 @@ async function inspectViewsRelation(identity, { knownFingerprint = null, select 
     viewsPrototypeState.selectedId = descriptor.relation;
   }
   return descriptor;
+}
+
+async function hydrateViewsSourceDescriptors(viewItem) {
+  const targetKey = viewsCatalogTargetKey(activeViewsBinding());
+  const missing = (viewItem?.sources ?? []).filter(source => canInspectViewsRelation(source) && !viewsPrototypeState.descriptors.has(relationIdentityKey(source)));
+  await Promise.allSettled(missing.map(source => inspectViewsRelation(source)));
+  return targetKey === viewsCatalogTargetKey(activeViewsBinding());
 }
 
 async function loadViewsCatalog({ preserveSelection = true } = {}) {
@@ -637,7 +818,7 @@ async function loadViewsCatalog({ preserveSelection = true } = {}) {
   }
   try {
     const payload = await postgresProfileRepository.relationCatalog(binding.profileId, binding.database, binding.namespace);
-    if (generation !== viewsPrototypeState.catalogGeneration || viewsBindingKey(binding) !== viewsBindingKey(activeViewsBinding())) return;
+    if (generation !== viewsPrototypeState.catalogGeneration || viewsCatalogTargetKey(binding) !== viewsCatalogTargetKey(activeViewsBinding())) return;
     requireExactTarget(payload, binding);
     if (!Array.isArray(payload.relations)) throw new Error("PostgreSQL returned an invalid Views catalog");
     const catalog = payload.relations.map(item => {
@@ -648,15 +829,20 @@ async function loadViewsCatalog({ preserveSelection = true } = {}) {
     const previousFingerprint = viewsPrototypeState.views.find(item => item.id === previous)?.fingerprint ?? null;
     viewsPrototypeState.views = catalog.map(item => ({ id: item.name, name: item.name, namespace: binding.namespace, kind: item.kind, columns: [], sources: [], dependents: [], loading: true }));
     viewsPrototypeState.selectedId = catalog.some(item => item.name === previous) ? previous : catalog[0]?.name ?? null;
+    viewsPrototypeState.selectedOutputOrdinal = null;
+    viewsPrototypeState.selectedSourceKey = null;
+    viewsPrototypeState.selectedSourceColumn = null;
+    viewsPrototypeState.flowFocus = null;
     viewsPrototypeState.descriptors.clear();
     viewsPrototypeState.inspectedRelation = null;
     viewsPrototypeState.catalogOpen = false;
     viewsPrototypeState.loading = false;
-    viewsPrototypeState.targetKey = viewsBindingKey(binding);
+    viewsPrototypeState.targetKey = viewsCatalogTargetKey(binding);
     if (viewsPrototypeState.layer === "views") renderViewsPrototype();
     if (viewsPrototypeState.selectedId) {
       const selected = catalog.find(item => item.name === viewsPrototypeState.selectedId);
       await inspectViewsRelation({ database: binding.database, namespace: binding.namespace, relation: selected.name, kind: selected.kind }, { knownFingerprint: previousFingerprint, select: true });
+      await hydrateViewsSourceDescriptors(selectedPrototypeView());
       if (generation === viewsPrototypeState.catalogGeneration && viewsPrototypeState.layer === "views") renderViewsPrototype();
     }
   } catch (error) {
@@ -735,8 +921,14 @@ function updateWorkspaceRail() {
   elements.toolRail.dataset.workspace = workspace;
   elements.toolRail.querySelectorAll("[data-rail-workspace]").forEach(control => {
     const context = control.dataset.railWorkspace;
-    control.hidden = context !== "context" && context !== workspace;
+    control.hidden = context !== "context" && context !== workspace && !(context === "canvas" && ["tables", "views"].includes(workspace));
   });
+  const canvasName = workspace === "views" ? "view lineage" : "schema diagram";
+  for (const [id, action] of [["#fit-button", "Fit"], ["#zoom-in-button", "Zoom in"], ["#zoom-out-button", "Zoom out"]]) {
+    const control = document.querySelector(id);
+    control.setAttribute("aria-label", `${action} ${canvasName}`);
+    control.dataset.tooltip = `${action} ${canvasName}`;
+  }
   const selectedView = selectedPrototypeView();
   elements.viewsBrowseButton.classList.toggle("active", workspace === "views" && viewsPrototypeState.catalogOpen);
   elements.viewsBrowseButton.disabled = !selectedView || viewsPrototypeState.loading;
@@ -773,71 +965,46 @@ function canInspectViewsRelation(identity) {
   return ["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(identity.kind);
 }
 
-function prototypeSourceExpansionKey(viewId, source) {
-  return `${viewId}\u0000${source.namespace}\u0000${source.relation}\u0000${source.kind}`;
-}
-
 function prototypeSourceColumnProjections() {
-  return null;
+  const [selected, source, columnName] = arguments;
+  return prototypeColumnLineage(selected).outputs.filter(output => output.inputs.some(input => (
+    input.database === source.database && input.namespace === source.namespace && input.relation === source.relation
+      && input.kind === source.kind && input.columnName === columnName
+  )));
 }
 
-function prototypeSourceCard(source, selected, index) {
+function prototypeSourceCard(source, selected) {
   const inspectable = canInspectViewsRelation(source);
   const sourceView = viewsPrototypeState.views.find(viewItem => viewItem.id === source.relation && viewItem.namespace === source.namespace);
   const relation = viewsPrototypeState.descriptors.get(relationIdentityKey(source));
-  const expanded = inspectable && viewsPrototypeState.expandedSources.has(prototypeSourceExpansionKey(selected.id, source));
-  const detailsId = `prototype-source-columns-${index}`;
-  const columns = relation?.columns ?? sourceView?.columns ?? [];
+  const sourceKey = relationIdentityKey(source);
+  const selectedSource = viewsPrototypeState.flowFocus?.kind === "source" && viewsPrototypeState.flowFocus.sourceKey === sourceKey;
+  const mappedInputs = prototypeColumnLineage(selected).outputs.flatMap(output => output.inputs).filter(input => (
+    input.database === source.database && input.namespace === source.namespace && input.relation === source.relation && input.kind === source.kind
+  ));
+  const mappedNames = [...new Set(mappedInputs.map(input => input.columnName))];
+  const columns = relation?.columns ?? sourceView?.columns ?? mappedInputs.map(input => ({ name: input.columnName, type: "Mapped source column", ordinal: input.columnOrdinal }));
+  const activeOutput = selectedPrototypeOutput(selected);
   const columnRows = columns.map(column => {
-    return `<li class="prototype-source-column unavailable"><span><strong>${escapeHtml(column.name)}</strong><small>${escapeHtml(column.type)}</small></span><span class="prototype-source-projections"><em>Mapping unavailable</em></span></li>`;
+    const projections = prototypeSourceColumnProjections(selected, source, column.name);
+    const relevant = activeOutput ? projections.some(output => output.outputOrdinal === activeOutput.outputOrdinal) : false;
+    const mapped = projections.length > 0;
+    const transformed = projections.some(output => output.derivation !== "direct");
+    const className = mapped ? (transformed ? "transformed" : "direct") : "unavailable";
+    const labels = mapped ? projections.map(output => `→ ${output.outputName}`).join(" · ") : "Not projected";
+    const columnIdentity = `<strong>${escapeHtml(column.name)}</strong><small>${escapeHtml(column.type)}</small>`;
+    const selectableColumn = mapped
+      ? `<button class="prototype-source-column-select" type="button" data-flow-source="${escapeHtml(sourceKey)}" data-flow-source-column="${escapeHtml(column.name)}" data-view-output="${projections[0].outputOrdinal}" aria-label="Inspect ${escapeHtml(column.name)} to ${escapeHtml(projections[0].outputName)}">${columnIdentity}</button>`
+      : `<span>${columnIdentity}</span>`;
+    return `<li class="prototype-source-column ${className} ${activeOutput && !relevant ? "dimmed" : ""}">${selectableColumn}<span class="prototype-source-projections"><em>${escapeHtml(labels)}</em></span></li>`;
   }).join("");
-  return `<article class="prototype-source-expandable ${expanded ? "expanded" : ""}">
-    <button class="prototype-source-summary ${viewsPrototypeState.inspectedRelation === relationIdentityKey(source) ? "selected" : ""}" type="button" ${inspectable ? `data-toggle-source-columns="${escapeHtml(relationIdentityKey(source))}" aria-expanded="${expanded}" aria-controls="${detailsId}" aria-label="${expanded ? "Collapse" : "Expand"} columns for ${escapeHtml(source.relation)}"` : `disabled aria-label="Inspection unavailable for ${escapeHtml(source.relation)}"`}>
+  return `<article class="prototype-source-expandable ${selectedSource ? "flow-selected" : ""}">
+    <button class="prototype-source-summary ${viewsPrototypeState.inspectedRelation === sourceKey ? "inspected" : ""}" type="button" data-select-flow-source="${escapeHtml(sourceKey)}" aria-pressed="${selectedSource}" aria-label="Show transformation logic from ${escapeHtml(source.namespace)}.${escapeHtml(source.relation)}">
       <span>${sourceView ? prototypeKindIcon(sourceView) : '<svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="5" rx="6" ry="2.5"/><path d="M4 5v7c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V5"/></svg>'}</span>
-      <small>${escapeHtml(prototypeKindLabel(source))}</small><strong>${escapeHtml(source.namespace)}.${escapeHtml(source.relation)}</strong>${inspectable ? '<i aria-hidden="true">⌄</i>' : '<i aria-hidden="true">Inspection unavailable</i>'}
+      <small>${escapeHtml(prototypeKindLabel(source))} · ${mappedNames.length} projected</small><strong>${escapeHtml(source.namespace)}.${escapeHtml(source.relation)}</strong>
     </button>
-    ${inspectable ? `<div class="prototype-source-columns" id="${detailsId}" ${expanded ? "" : "hidden"}>${columnRows ? `<ul>${columnRows}</ul>` : '<p>Loading actual source columns...</p>'}<div class="prototype-source-legend"><span>Column provenance unavailable</span></div><button class="prototype-source-inspect" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(source))}">Inspect relation</button></div>` : ""}
+    <div class="prototype-source-columns">${columnRows ? `<ul>${columnRows}</ul>` : '<p>No mapped source columns</p>'}${mappedNames.length ? '<div class="prototype-source-legend"><span>Direct</span><span class="transformed">Transformed</span></div>' : ""}${inspectable ? `<button class="prototype-source-inspect" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(source))}">Inspect relation</button>` : ""}</div>
   </article>`;
-}
-
-function togglePrototypeSourceColumns(button) {
-  const source = selectedPrototypeView()?.sources.find(item => relationIdentityKey(item) === button.dataset.toggleSourceColumns);
-  if (!source || !canInspectViewsRelation(source)) return;
-  const key = prototypeSourceExpansionKey(viewsPrototypeState.selectedId, source);
-  const card = button.closest(".prototype-source-expandable");
-  const details = document.getElementById(button.getAttribute("aria-controls"));
-  const expanding = button.getAttribute("aria-expanded") !== "true";
-  if (!card || !details) return;
-
-  if (expanding) viewsPrototypeState.expandedSources.add(key);
-  else viewsPrototypeState.expandedSources.delete(key);
-  button.setAttribute("aria-expanded", String(expanding));
-  button.setAttribute("aria-label", `${expanding ? "Collapse" : "Expand"} columns for ${source.relation}`);
-  card.classList.toggle("expanded", expanding);
-  const wasHidden = details.hidden;
-  if (expanding && wasHidden) details.hidden = false;
-  const currentHeight = wasHidden ? 0 : details.getBoundingClientRect().height;
-  details.getAnimations().forEach(animation => animation.cancel());
-
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    details.hidden = !expanding;
-    return;
-  }
-
-  const startHeight = currentHeight;
-  const endHeight = expanding ? details.offsetHeight : 0;
-  const animation = details.animate([
-    { height: `${startHeight}px`, opacity: expanding ? 0 : 1, transform: expanding ? "translateY(-5px)" : "translateY(0)" },
-    { height: `${endHeight}px`, opacity: expanding ? 1 : 0, transform: expanding ? "translateY(0)" : "translateY(-5px)" },
-  ], { duration: 220, easing: "cubic-bezier(.22,1,.36,1)" });
-  animation.finished.then(() => {
-    if (button.getAttribute("aria-expanded") === "false") details.hidden = true;
-  }).catch(() => {});
-  if (expanding && !viewsPrototypeState.descriptors.has(relationIdentityKey(source))) {
-    inspectViewsRelation(source).then(() => {
-      if (button.isConnected && button.getAttribute("aria-expanded") === "true") renderViewsPrototype();
-    }).catch(error => showToast(error.message));
-  }
 }
 
 function prototypeViewCard(viewItem, extraClass = "") {
@@ -848,49 +1015,371 @@ function prototypeViewCard(viewItem, extraClass = "") {
   </button>`;
 }
 
-function renderPrototypeViewInspector(viewItem) {
-  return `<aside class="prototype-view-inspector">
-    <header><div><span class="eyebrow">Selected definition</span><h3>${escapeHtml(viewItem.name)}</h3></div><span class="prototype-kind-badge ${viewItem.kind}">${escapeHtml(prototypeKindLabel(viewItem))}</span></header>
-    <section><span class="prototype-section-label">Lineage</span><div class="prototype-lineage-summary"><span>${viewItem.sources.length} sources</span><b>&rarr;</b><strong>${escapeHtml(viewItem.name)}</strong><b>&rarr;</b><span>${viewItem.dependents.length} dependents</span></div></section>
-    <section><span class="prototype-section-label">Output columns</span><div class="prototype-column-chips">${viewItem.columns.map(column => `<span>${escapeHtml(column)}</span>`).join("")}</div></section>
-    <section class="prototype-definition-summary"><span class="prototype-section-label">Raw definition</span><pre>${escapeHtml(prototypeViewDefinition(viewItem))}</pre></section>
-    <footer><button class="button button-ghost" type="button" data-prototype-duplicate="${escapeHtml(viewItem.id)}">Duplicate</button><button class="button button-primary" type="button" data-prototype-edit="${escapeHtml(viewItem.id)}">Edit definition</button></footer>
-  </aside>`;
+function prototypeColumnLineage(viewItem) {
+  if (viewItem?.provenance && ["available", "partial"].includes(viewItem.provenance.status)) return viewItem.provenance;
+  return {
+    status: "unavailable",
+    reason: viewItem?.provenance?.reason || "not_supported",
+    outputs: (viewItem?.columns ?? []).map(column => ({
+      outputName: column.name, outputOrdinal: column.ordinal, derivation: "unknown", mappingStatus: "unavailable",
+      expression: { status: "unavailable", reason: viewItem?.provenance?.reason || "not_supported" }, inputs: [],
+    })),
+  };
 }
 
-function prototypeEdgeClass(from, to) {
-  const selected = selectedPrototypeView();
-  return from === selected.id || to === selected.id || (to === selected.id && selected.sources.includes(from)) || (from === selected.id && selected.dependents.includes(to)) ? "active" : "muted";
+function selectedPrototypeOutput(viewItem = selectedPrototypeView()) {
+  const outputs = prototypeColumnLineage(viewItem).outputs;
+  return outputs.find(output => output.outputOrdinal === viewsPrototypeState.selectedOutputOrdinal) ?? outputs[0] ?? null;
 }
 
-function renderTwinCanvasConcept() {
-  const selected = selectedPrototypeView();
-  const [orderSummary, customerLifetime, dailyRevenue] = viewsPrototypeState.views;
-  return `<div class="views-canvas-concept">
-    <section class="prototype-lineage-canvas" aria-label="Synthetic view dependency canvas">
-      <div class="prototype-canvas-grid"></div>
-      <svg class="prototype-dependency-lines" viewBox="0 0 920 590" preserveAspectRatio="none" aria-hidden="true">
-        <path class="${prototypeEdgeClass("orders", "order_summary")}" d="M175 116 C245 116 265 126 350 126"/><path class="${prototypeEdgeClass("customers", "order_summary")}" d="M175 272 C255 272 270 145 350 145"/>
-        <path class="${prototypeEdgeClass("orders", "customer_lifetime")}" d="M175 116 C250 116 270 330 350 330"/><path class="${prototypeEdgeClass("customers", "customer_lifetime")}" d="M175 272 C250 272 275 350 350 350"/><path class="${prototypeEdgeClass("payments", "customer_lifetime")}" d="M175 430 C255 430 275 370 350 370"/>
-        <path class="${prototypeEdgeClass("order_summary", "daily_revenue")}" d="M540 136 C610 136 615 235 685 235"/><path class="${prototypeEdgeClass("payments", "daily_revenue")}" d="M175 430 C455 430 520 255 685 255"/><path class="${prototypeEdgeClass("daily_revenue", "finance_dashboard")}" d="M865 245 C885 245 895 245 915 245"/>
-      </svg>
-      <div class="prototype-source-card active-${selected.sources.includes("orders")}" style="--px:28px;--py:78px"><small>Table</small><strong>orders</strong><span>7 columns</span></div>
-      <div class="prototype-source-card active-${selected.sources.includes("customers")}" style="--px:28px;--py:234px"><small>Table</small><strong>customers</strong><span>6 columns</span></div>
-      <div class="prototype-source-card active-${selected.sources.includes("payments")}" style="--px:28px;--py:392px"><small>Table</small><strong>payments</strong><span>5 columns</span></div>
-      <div class="prototype-card-position" style="--px:350px;--py:88px">${prototypeViewCard(orderSummary)}</div>
-      <div class="prototype-card-position" style="--px:350px;--py:302px">${prototypeViewCard(customerLifetime)}</div>
-      <div class="prototype-card-position" style="--px:685px;--py:197px">${prototypeViewCard(dailyRevenue)}</div>
-      <div class="prototype-dependent-card active-${selected.dependents.includes("finance_dashboard")}" style="--px:885px;--py:214px"><small>Dashboard source</small><strong>finance_dashboard</strong></div>
-      <div class="prototype-canvas-controls"><span>Selected lineage stays bright</span><button type="button">-</button><b>92%</b><button type="button">+</button></div>
-    </section>
-    ${renderPrototypeViewInspector(selected)}
+function selectedPrototypeSource(viewItem = selectedPrototypeView()) {
+  if (!viewItem?.sources?.length) return null;
+  const explicit = viewItem.sources.find(source => relationIdentityKey(source) === viewsPrototypeState.selectedSourceKey);
+  if (explicit) return explicit;
+  const output = selectedPrototypeOutput(viewItem);
+  const firstInput = output?.inputs?.[0];
+  return (firstInput ? prototypeInputIdentity(viewItem, firstInput) : null) ?? viewItem.sources[0];
+}
+
+function prototypeDerivationLabel(derivation) {
+  return ({ direct: "Direct", expression: "Expression", aggregate: "Aggregate", window: "Window", constant: "Constant", unknown: "Unavailable" })[derivation] || "Unavailable";
+}
+
+function prototypeOutputButton(viewItem, column) {
+  const output = prototypeColumnLineage(viewItem).outputs.find(item => item.outputOrdinal === column.ordinal);
+  const selected = ["source", "output"].includes(viewsPrototypeState.flowFocus?.kind) && output?.outputOrdinal === viewsPrototypeState.selectedOutputOrdinal;
+  return `<button class="views-output-column ${selected ? "selected" : ""}" type="button" aria-pressed="${selected}" data-view-output="${column.ordinal}"><span><strong>${escapeHtml(column.name)}</strong><small>${escapeHtml(column.type)}</small></span><em class="derivation-${escapeHtml(output?.derivation || "unknown")}">${escapeHtml(prototypeDerivationLabel(output?.derivation || "unknown"))}</em></button>`;
+}
+
+function prototypeInputIdentity(viewItem, input) {
+  return viewItem.sources.find(source => source.database === input.database && source.namespace === input.namespace
+    && source.relation === input.relation && source.kind === input.kind);
+}
+
+function prototypeOutputType(viewItem, output) {
+  return viewItem.columns.find(column => column.ordinal === output?.outputOrdinal)?.type || "PostgreSQL type unavailable";
+}
+
+function prototypeMappingLabel(output) {
+  if (!output || output.mappingStatus === "unavailable") return "Mapping unavailable";
+  return output.mappingStatus === "available" ? "Verified mapping" : "Partial mapping";
+}
+
+function prototypeJoinLineage(viewItem) {
+  if (viewItem?.joins && ["available", "partial"].includes(viewItem.joins.status)) return viewItem.joins;
+  return { status: "unavailable", reason: viewItem?.joins?.reason || "not_supported", joins: [] };
+}
+
+function prototypeEndpointMatchesSource(endpoint, source) {
+  return endpoint?.database === source?.database && endpoint?.namespace === source?.namespace
+    && endpoint?.relation === source?.relation && endpoint?.kind === source?.kind;
+}
+
+function prototypeJoinTouchesSource(join, source) {
+  return !source || join.predicates.some(predicate => prototypeEndpointMatchesSource(predicate.left, source) || prototypeEndpointMatchesSource(predicate.right, source));
+}
+
+function renderViewsProjectionDetail(viewItem, selectedSource) {
+  const output = selectedPrototypeOutput(viewItem);
+  if (!output) return '<div class="views-projection-detail unavailable"><strong>Select an output column</strong></div>';
+  const selectedColumn = viewsPrototypeState.selectedSourceColumn;
+  const expression = output.expression.status === "available" ? output.expression.sql : `Expression unavailable: ${output.expression.reason}`;
+  const inputs = output.inputs.length ? output.inputs.map(input => {
+    const sourceSelected = prototypeEndpointMatchesSource(input, selectedSource);
+    const columnSelected = sourceSelected && selectedColumn === input.columnName;
+    return `<span class="${sourceSelected ? "source-selected" : ""} ${columnSelected ? "column-selected" : ""}">${escapeHtml(input.relation)}.${escapeHtml(input.columnName)}</span>`;
+  }).join("") : '<span class="constant">No source columns</span>';
+  return `<div class="views-projection-detail ${output.mappingStatus}" aria-label="Exact projection for ${escapeHtml(output.outputName)}"><header><small>${escapeHtml(prototypeMappingLabel(output))}</small><strong>${escapeHtml(output.outputName)}</strong></header><div>${inputs}</div><code>${escapeHtml(expression)}</code></div>`;
+}
+
+function renderFlowViewHero(selected, selectedIdentity) {
+  const selectedFields = selected.columns.map(column => prototypeOutputButton(selected, column)).join("");
+  return `<article class="prototype-focus-hero">${renderViewsNodeHandle("Final view")}<button class="prototype-focus-identity ${viewsPrototypeState.inspectedRelation === selectedIdentity ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(selectedIdentity)}">${prototypeKindIcon(selected)}<span><small>${escapeHtml(prototypeKindLabel(selected))}</small><h3>${escapeHtml(selected.namespace)}.${escapeHtml(selected.name)}</h3></span></button><div class="prototype-focus-fields" role="group" aria-label="Selectable view output columns">${selectedFields || '<span class="prototype-focus-field"><strong>Loading output contract...</strong></span>'}</div>${renderViewsProjectionDetail(selected, selectedPrototypeSource(selected))}</article>`;
+}
+
+function renderViewsNodeHandle(label) {
+  return `<div class="views-node-handle" data-views-node-handle title="Drag ${escapeHtml(label)}" aria-label="Drag ${escapeHtml(label)}"><span>${escapeHtml(label)}</span><svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="4" cy="3" r="1"/><circle cx="10" cy="3" r="1"/><circle cx="4" cy="7" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="4" cy="11" r="1"/><circle cx="10" cy="11" r="1"/></svg></div>`;
+}
+
+function viewsNodePosition(key, fallback) {
+  const saved = viewsObjects[key];
+  return {
+    x: Number.isFinite(saved?.x) ? saved.x : fallback.x,
+    y: Number.isFinite(saved?.y) ? saved.y : fallback.y,
+  };
+}
+
+function estimateViewsSourceNodeHeight(source, viewItem) {
+  const descriptor = viewsPrototypeState.descriptors.get(relationIdentityKey(source));
+  const sourceView = viewsPrototypeState.views.find(item => item.name === source.relation && item.namespace === source.namespace && item.kind === source.kind);
+  const mappedCount = new Set(prototypeColumnLineage(viewItem).outputs.flatMap(output => output.inputs)
+    .filter(input => prototypeEndpointMatchesSource(input, source)).map(input => input.columnName)).size;
+  const columnCount = descriptor?.columns.length ?? Math.max(sourceView?.columns.length ?? 0, mappedCount);
+  return 129 + Math.min(220, columnCount * 35);
+}
+
+function viewsRectsOverlap(first, second, gap = 40) {
+  return first.x < second.x + second.width + gap && first.x + first.width + gap > second.x
+    && first.y < second.y + second.height + gap && first.y + first.height + gap > second.y;
+}
+
+function viewsUnsavedSourcePosition(fallback, height, occupied) {
+  const verticalStep = height + 120;
+  const candidates = [
+    fallback,
+    { x: fallback.x + 340, y: fallback.y },
+    { x: fallback.x - 340, y: fallback.y },
+    { x: fallback.x, y: fallback.y - verticalStep },
+    { x: fallback.x, y: fallback.y + verticalStep },
+  ];
+  const available = candidates.find(candidate => !occupied.some(rect => viewsRectsOverlap({ ...candidate, width: 280, height }, rect)));
+  if (available) return available;
+  const bottom = occupied.reduce((value, rect) => Math.max(value, rect.y + rect.height), fallback.y);
+  return { x: fallback.x, y: bottom + 120 };
+}
+
+function selectedSqlStages(viewItem) {
+  return viewItem?.sqlStages ?? { status: "unavailable", reason: "not_supported", stages: [] };
+}
+
+function clearViewsFlowFocus() {
+  viewsPrototypeState.flowFocus = null;
+  viewsPrototypeState.selectedOutputOrdinal = null;
+  viewsPrototypeState.selectedSourceKey = null;
+  viewsPrototypeState.selectedSourceColumn = null;
+}
+
+function buildViewsLineageModel(viewItem) {
+  const binding = activeViewsBinding();
+  const stagesEnvelope = selectedSqlStages(viewItem);
+  const stages = ["available", "partial"].includes(stagesEnvelope.status) ? stagesEnvelope.stages : [];
+  const rootStage = stages.find(stage => stage.kind === "query_block") ?? null;
+  const localStages = stages.filter(stage => stage.kind !== "query_block");
+  const stageDepth = new Map();
+  const stageById = new Map(stages.map(stage => [stage.stageId, stage]));
+  const depthFor = (stageId, visiting = new Set()) => {
+    if (stageDepth.has(stageId)) return stageDepth.get(stageId);
+    if (visiting.has(stageId)) return 0;
+    visiting.add(stageId);
+    const stage = stageById.get(stageId);
+    const dependencies = (stage?.dependsOnStageIds ?? []).filter(id => id !== stageId);
+    const depth = dependencies.length ? 1 + Math.max(...dependencies.map(id => depthFor(id, visiting))) : 0;
+    visiting.delete(stageId);
+    stageDepth.set(stageId, depth);
+    return depth;
+  };
+  localStages.forEach(stage => depthFor(stage.stageId));
+  const maxDepth = localStages.length ? Math.max(...localStages.map(stage => stageDepth.get(stage.stageId) ?? 0)) : -1;
+  const laneY = (index, count, height, gap, center = 560) => center - (count * height + Math.max(0, count - 1) * gap) / 2 + index * (height + gap);
+  const nodes = [];
+  const nodeBySource = new Map();
+  const sourceSpecs = viewItem.sources.map((source, index) => {
+    const key = `relation:${relationIdentityKey(source)}`;
+    return { key, source, index, width: 280, height: estimateViewsSourceNodeHeight(source, viewItem), fallback: { x: 80, y: laneY(index, viewItem.sources.length, 200, 120) } };
+  });
+  const occupiedSources = sourceSpecs.flatMap(spec => {
+    const saved = viewsObjects[spec.key];
+    return Number.isFinite(saved?.x) && Number.isFinite(saved?.y) ? [{ x: saved.x, y: saved.y, width: spec.width, height: spec.height }] : [];
+  });
+  sourceSpecs.forEach(spec => {
+    const saved = viewsObjects[spec.key];
+    const position = Number.isFinite(saved?.x) && Number.isFinite(saved?.y)
+      ? { x: saved.x, y: saved.y }
+      : viewsUnsavedSourcePosition(spec.fallback, spec.height, occupiedSources);
+    const node = { key: spec.key, kind: "source", source: spec.source, index: spec.index, width: spec.width, height: spec.height, ...position };
+    nodes.push(node);
+    nodeBySource.set(relationIdentityKey(spec.source), node);
+    if (!(Number.isFinite(saved?.x) && Number.isFinite(saved?.y))) occupiedSources.push({ ...position, width: spec.width, height: spec.height });
+  });
+  const stagesByDepth = new Map();
+  localStages.forEach(stage => {
+    const depth = stageDepth.get(stage.stageId) ?? 0;
+    const lane = stagesByDepth.get(depth) ?? [];
+    lane.push(stage);
+    stagesByDepth.set(depth, lane);
+  });
+  localStages.forEach((stage, index) => {
+    const depth = stageDepth.get(stage.stageId) ?? 0;
+    const lane = stagesByDepth.get(depth);
+    const laneIndex = lane.indexOf(stage);
+    const key = `stage:${stage.stageId}`;
+    nodes.push({ key, kind: "stage", stage, index, width: 310, height: 350, ...viewsNodePosition(key, { x: 680 + depth * 620, y: laneY(laneIndex, lane.length, 350, 150) }) });
+  });
+  const rootX = 680 + (maxDepth + 1) * 620;
+  const rootKey = rootStage ? `stage:${rootStage.stageId}` : null;
+  if (rootStage) nodes.push({ key: rootKey, kind: "query_block", stage: rootStage, width: 360, height: 340, ...viewsNodePosition(rootKey, { x: rootX, y: 250 }) });
+  const finalIdentity = { database: binding.database, namespace: viewItem.namespace, relation: viewItem.name, kind: viewItem.kind };
+  const finalKey = `view:${relationIdentityKey(finalIdentity)}`;
+  const finalNode = { key: finalKey, kind: "view", identity: finalIdentity, width: 330, height: 440, ...viewsNodePosition(finalKey, { x: rootX + 680, y: 340 }) };
+  nodes.push(finalNode);
+  viewItem.dependents.forEach((dependent, index) => {
+    const key = `consumer:${relationIdentityKey(dependent)}`;
+    nodes.push({ key, kind: "consumer", dependent, index, width: 260, height: 100, ...viewsNodePosition(key, { x: finalNode.x + 600, y: laneY(index, viewItem.dependents.length, 100, 90) }) });
+  });
+  const nodeByKey = new Map(nodes.map(node => [node.key, node]));
+  const edges = [];
+  for (const stage of stages) {
+    for (const input of stage.inputs) {
+      const from = input.source.type === "stage" ? `stage:${input.source.stageId}` : nodeBySource.get(relationIdentityKey(input.source))?.key;
+      const to = `stage:${stage.stageId}`;
+      if (!from || !nodeByKey.has(from) || !nodeByKey.has(to)) continue;
+      edges.push({ id: `input:${stage.stageId}:${input.inputOrdinal}`, from, to, labels: input.referenceAlias ? [`Alias ${input.referenceAlias}`] : [], status: stage.mappingStatus, kind: stage.kind === "query_block" ? "root-input" : "stage-input" });
+    }
+  }
+  if (rootKey) edges.push({ id: `result:${rootStage.stageId}`, from: rootKey, to: finalKey, labels: ["Defines final view"], status: rootStage.mappingStatus, kind: "result" });
+  viewItem.dependents.forEach((dependent, index) => edges.push({ id: `consumer:${index}`, from: finalKey, to: `consumer:${relationIdentityKey(dependent)}`, labels: [], status: "available", kind: "consumer" }));
+
+  const incoming = new Map(nodes.map(node => [node.key, []]));
+  edges.forEach(edge => incoming.get(edge.to)?.push(edge));
+  const sourceKeysForNode = (key, visiting = new Set()) => {
+    const node = nodeByKey.get(key);
+    if (node?.kind === "source") return new Set([relationIdentityKey(node.source)]);
+    if (!node || visiting.has(key)) return new Set();
+    visiting.add(key);
+    const result = new Set();
+    for (const edge of incoming.get(key) ?? []) sourceKeysForNode(edge.from, visiting).forEach(sourceKey => result.add(sourceKey));
+    visiting.delete(key);
+    return result;
+  };
+  edges.forEach(edge => { edge.sourceKeys = [...sourceKeysForNode(edge.from)]; });
+  const joins = prototypeJoinLineage(viewItem);
+  const focus = viewsPrototypeState.flowFocus;
+  const focusSources = new Set();
+  const activeJoinOrdinals = new Set();
+  if (focus?.kind === "source") {
+    focusSources.add(focus.sourceKey);
+    for (const join of joins.joins) {
+      if (!join.predicates.some(predicate => relationIdentityKey(predicate.left) === focus.sourceKey || relationIdentityKey(predicate.right) === focus.sourceKey)) continue;
+      activeJoinOrdinals.add(join.joinOrdinal);
+      join.predicates.forEach(predicate => { focusSources.add(relationIdentityKey(predicate.left)); focusSources.add(relationIdentityKey(predicate.right)); });
+    }
+  } else if (focus?.kind === "join") {
+    const join = joins.joins.find(item => item.joinOrdinal === focus.joinOrdinal);
+    if (join) {
+      activeJoinOrdinals.add(join.joinOrdinal);
+      join.predicates.forEach(predicate => { focusSources.add(relationIdentityKey(predicate.left)); focusSources.add(relationIdentityKey(predicate.right)); });
+    }
+  } else if (focus?.kind === "query_block" && rootKey) {
+    sourceKeysForNode(rootKey).forEach(sourceKey => focusSources.add(sourceKey));
+    joins.joins.filter(join => join.queryScope === "root").forEach(join => activeJoinOrdinals.add(join.joinOrdinal));
+  } else if (focus?.kind === "output") {
+    const output = prototypeColumnLineage(viewItem).outputs.find(item => item.outputOrdinal === focus.outputOrdinal);
+    output?.inputs.forEach(input => focusSources.add(relationIdentityKey(input)));
+    for (const join of joins.joins) {
+      if (join.predicates.some(predicate => focusSources.has(relationIdentityKey(predicate.left)) || focusSources.has(relationIdentityKey(predicate.right)))) activeJoinOrdinals.add(join.joinOrdinal);
+    }
+  }
+  const focused = Boolean(focus);
+  for (const edge of edges) {
+    const selectedResult = edge.kind === "result" && (focus?.kind !== "source" || edge.sourceKeys.some(sourceKey => focusSources.has(sourceKey)));
+    edge.emphasis = !focused ? "" : edge.kind !== "consumer" && (selectedResult || edge.sourceKeys.some(sourceKey => focusSources.has(sourceKey))) ? "active" : "muted";
+  }
+  const activeNodeKeys = new Set(edges.filter(edge => edge.emphasis === "active").flatMap(edge => [edge.from, edge.to]));
+  focusSources.forEach(sourceKey => { const node = nodeBySource.get(sourceKey); if (node) activeNodeKeys.add(node.key); });
+  nodes.forEach(node => { node.emphasis = !focused ? "" : activeNodeKeys.has(node.key) ? "active" : "muted"; });
+  const focusLabel = focus?.kind === "source" ? `Source focus: ${nodeBySource.get(focus.sourceKey)?.source.relation ?? "verified relation"}`
+    : focus?.kind === "join" ? `Join focus: condition ${focus.joinOrdinal}`
+      : focus?.kind === "query_block" ? "Query-block focus: all verified inputs"
+        : focus?.kind === "output" ? `Output focus: ${prototypeColumnLineage(viewItem).outputs.find(item => item.outputOrdinal === focus.outputOrdinal)?.outputName ?? "projection"}` : "";
+  return { nodes, nodeByKey, edges, stagesEnvelope, stageById, rootStage, rootKey, finalKey, focus, focusSources, activeJoinOrdinals, focusLabel };
+}
+
+function viewsEdgeMarkup(edge, model) {
+  const from = model.nodeByKey.get(edge.from);
+  const to = model.nodeByKey.get(edge.to);
+  if (!from || !to || from.key === to.key) return { path: "", label: "" };
+  const outgoing = model.edges.filter(item => item.from === edge.from);
+  const incoming = model.edges.filter(item => item.to === edge.to);
+  const fromIndex = outgoing.indexOf(edge);
+  const toIndex = incoming.indexOf(edge);
+  const fromX = from.x + from.width;
+  const fromY = from.y + Math.min(from.height - 34, 66 + fromIndex * 34);
+  const toX = to.x;
+  const toY = edge.kind === "root-input" ? to.y + VIEWS_QUERY_INPUT_ANCHOR_Y : to.y + Math.min(to.height - 34, 66 + toIndex * 34);
+  const bend = Math.max(90, Math.abs(toX - fromX) * .42);
+  const path = `M ${fromX} ${fromY} C ${fromX + bend} ${fromY}, ${toX - bend} ${toY}, ${toX} ${toY}`;
+  const label = edge.labels[0];
+  const labelX = fromX + (toX - fromX) * .56;
+  const labelY = fromY + (toY - fromY) * .56 - 15;
+  const marker = edge.emphasis === "active" ? (edge.status === "partial" ? "views-arrow-active-partial" : "views-arrow-active") : edge.status === "partial" ? "views-arrow-partial" : "views-arrow-available";
+  return {
+    path: `<g class="views-lineage-edge ${edge.status} ${edge.kind || "dependency"} ${edge.emphasis}"><path d="${path}" marker-end="url(#${marker})"/></g>`,
+    label: label ? `<g class="views-edge-label ${edge.status} ${edge.emphasis}" transform="translate(${labelX} ${labelY})"><title>${escapeHtml(edge.labels.join(" · "))}</title><rect x="-72" y="-12" width="144" height="24" rx="5"/><text text-anchor="middle" y="3">${escapeHtml(label.length > 32 ? `${label.slice(0, 31)}...` : label)}</text></g>` : "",
+  };
+}
+
+function viewsEdgesMarkup(model) {
+  const markup = model.edges.map(edge => viewsEdgeMarkup(edge, model));
+  return `${viewsEdgeDefinitions()}${markup.map(item => item.path).join("")}<g class="views-edge-label-layer">${markup.map(item => item.label).join("")}</g>`;
+}
+
+function renderViewsStageCard(stage) {
+  const label = stage.name || `Derived ${stage.displayOrdinal}`;
+  const outputs = stage.outputColumns.slice(0, 8).map(column => `<li><span class="column-port"></span><strong>${escapeHtml(column.name ?? "Unnamed expression")}</strong><small>${escapeHtml(column.nameSource.replaceAll("_", " "))}</small></li>`).join("");
+  const predicates = [["Join", stage.joinPredicates], ["Where", stage.wherePredicates], ["Having", stage.havingPredicates]].flatMap(([kind, items]) => items.map(item => `<span><b>${kind}</b>${escapeHtml(item.expression.status === "available" ? item.expression.sql : `Unavailable: ${item.expression.reason}`)}</span>`)).join("");
+  const reasons = (stage.reasons ?? []).map(reason => `<span>${escapeHtml(reason.replaceAll("_", " "))}</span>`).join("");
+  return `<article class="views-stage-card ${stage.mappingStatus}">${renderViewsNodeHandle(`${stage.kind === "cte" ? "CTE" : "Derived table"}: ${label}`)}<header><span><small>${stage.kind === "cte" ? "CTE" : "Derived table"} · ${String(stage.displayOrdinal).padStart(2, "0")}</small><strong>${escapeHtml(label)}</strong></span><em>Query lifetime${stage.recursive ? " · recursive" : ""}</em></header><ul>${outputs || '<li><strong>No resolved outputs</strong></li>'}</ul>${stage.outputColumns.length > 8 ? `<p>+${stage.outputColumns.length - 8} more outputs</p>` : ""}<div class="views-stage-predicates">${predicates || '<span>No stage predicates</span>'}</div>${reasons ? `<div class="views-stage-reasons">${reasons}</div>` : ""}<details><summary>Stage SQL</summary><code>${escapeHtml(stage.sql.status === "available" ? stage.sql.sql : `Unavailable: ${stage.sql.reason}`)}</code></details></article>`;
+}
+
+function renderViewsQueryBlockCard(stage, viewItem, model) {
+  const joins = prototypeJoinLineage(viewItem);
+  const rootJoins = joins.joins.filter(join => join.queryScope === "root");
+  const joinRows = rootJoins.map(join => {
+    const selected = model.focus?.kind === "join" && model.focus.joinOrdinal === join.joinOrdinal;
+    const participating = model.activeJoinOrdinals.has(join.joinOrdinal);
+    const endpoints = join.predicates.length ? join.predicates.map(predicate => (
+      `<span title="${escapeHtml(`${predicate.left.namespace}.${predicate.left.relation}.${predicate.left.columnName} = ${predicate.right.namespace}.${predicate.right.relation}.${predicate.right.columnName}`)}"><b>${escapeHtml(predicate.left.referenceAlias)}.${escapeHtml(predicate.left.referenceColumnName)}</b><i>=</i><b>${escapeHtml(predicate.right.referenceAlias)}.${escapeHtml(predicate.right.referenceColumnName)}</b></span>`
+    )).join("") : '<span class="unverified">No verified source endpoints</span>';
+    const condition = join.condition.status === "available" ? join.condition.sql : `Condition unavailable: ${join.condition.reason}`;
+    const conditionDetail = join.mappingStatus === "available" && join.predicates.length ? "" : `<code>${escapeHtml(condition)}</code>`;
+    const reasons = (join.reasons ?? []).map(reason => `<em>${escapeHtml(reason.replaceAll("_", " "))}</em>`).join("");
+    return `<button class="views-query-join ${join.mappingStatus} ${participating ? "active" : ""} ${selected ? "selected" : ""}" type="button" data-select-query-join="${join.joinOrdinal}" aria-pressed="${selected}" title="${escapeHtml(condition)}"><header><strong>${escapeHtml(join.joinType.toUpperCase())} JOIN</strong><small>alias ${escapeHtml(join.rightReferenceAlias || "unavailable")}</small></header><div>${endpoints}</div>${conditionDetail}${reasons ? `<footer>${reasons}</footer>` : ""}</button>`;
+  }).join("");
+  const inputAliases = stage.inputs.map(input => {
+    const endpoint = input.source.type === "relation"
+      ? `${input.source.namespace}.${input.source.relation}`
+      : model.stageById.get(input.source.stageId)?.name || `${model.stageById.get(input.source.stageId)?.kind?.replaceAll("_", " ") ?? "query-local stage"} ${model.stageById.get(input.source.stageId)?.displayOrdinal ?? ""}`;
+    return `<span title="${escapeHtml(endpoint)}"><b>${escapeHtml(input.referenceAlias || "No alias")}</b><small>${escapeHtml(endpoint.split(".").at(-1))}</small></span>`;
+  }).join("");
+  const filters = [["Where", stage.wherePredicates], ["Having", stage.havingPredicates]].flatMap(([label, predicates]) => predicates.map(predicate => `<span><b>${label}</b><code>${escapeHtml(predicate.expression.status === "available" ? predicate.expression.sql : `Unavailable: ${predicate.expression.reason}`)}</code></span>`)).join("");
+  const filterCount = stage.wherePredicates.length + stage.havingPredicates.length;
+  const output = selectedPrototypeOutput(viewItem);
+  const projectionExpression = output?.expression.status === "available" ? output.expression.sql : output ? `Unavailable: ${output.expression.reason}` : "No output projection selected";
+  const projectionInputs = output?.inputs.map(input => `<span>${escapeHtml(input.referenceAlias || input.relation)}.${escapeHtml(input.referenceColumnName || input.columnName)}</span>`).join("") || '<span>Constant or unresolved projection</span>';
+  const stageReasons = (stage.reasons ?? []).map(reason => `<span>${escapeHtml(reason.replaceAll("_", " "))}</span>`).join("");
+  return `<article class="views-query-block-card ${stage.mappingStatus}">${renderViewsNodeHandle("Root query block")}<button class="views-query-block-title" type="button" data-select-query-block="${escapeHtml(stage.stageId)}" aria-pressed="${model.focus?.kind === "query_block"}"><span><small>Outer SELECT · query-local</small><strong>Root query</strong></span><em>${stage.inputs.length} inputs · ${rootJoins.length} joins</em></button><div class="views-query-overview"><span><b>${stage.inputs.length}</b><small>Inputs</small></span><span><b>${rootJoins.length}</b><small>Joins</small></span><span><b>${filterCount}</b><small>Filters</small></span></div><div class="views-query-aliases" aria-label="Verified input aliases">${inputAliases || '<span><small>No verified inputs</small></span>'}</div><section class="views-query-joins"><header><strong>Join logic</strong><small>${joins.status}</small></header>${joinRows || '<p>No joins in this SELECT</p>'}</section><details class="views-query-more"><summary><span>More query logic</span><small>${filterCount} filters · projection ${escapeHtml(output?.outputName || "unavailable")}</small></summary><div><section class="views-query-filters"><header><strong>Filters</strong></header>${filters || '<span><code>No WHERE or HAVING predicates</code></span>'}</section><section class="views-query-projection"><header><strong>Selected projection</strong><small>${output ? `${output.outputOrdinal} of ${viewItem.columns.length}` : "Unavailable"}</small></header><b>${escapeHtml(output?.outputName || "No output")}</b><div>${projectionInputs}</div><code>${escapeHtml(projectionExpression)}</code></section>${stageReasons ? `<div class="views-stage-reasons">${stageReasons}</div>` : ""}</div></details></article>`;
+}
+
+function renderViewsConsumerCard(dependent) {
+  const identity = relationIdentityKey(dependent);
+  return `<article class="views-consumer-card">${renderViewsNodeHandle(`Consumer: ${dependent.relation}`)}<button type="button" data-prototype-relation="${escapeHtml(identity)}" ${canInspectViewsRelation(dependent) ? "" : "disabled"}><small>${escapeHtml(prototypeKindLabel(dependent))}</small><strong>${escapeHtml(dependent.namespace)}.${escapeHtml(dependent.relation)}</strong></button></article>`;
+}
+
+function renderViewsLineageCanvas(viewItem, selectedIdentity) {
+  const model = buildViewsLineageModel(viewItem);
+  const sourceNodes = model.nodes.filter(node => node.kind === "source").map(node => `<div class="views-lineage-node source ${node.emphasis}" data-views-node-key="${escapeHtml(node.key)}" style="left:${node.x}px;top:${node.y}px">${renderViewsNodeHandle(`Source: ${node.source.relation}`)}${prototypeSourceCard(node.source, viewItem)}</div>`).join("");
+  const stageNodes = model.nodes.filter(node => node.kind === "stage").map(node => `<div class="views-lineage-node stage ${node.emphasis}" data-views-node-key="${escapeHtml(node.key)}" style="left:${node.x}px;top:${node.y}px">${renderViewsStageCard(node.stage)}</div>`).join("");
+  const rootNode = model.rootKey ? model.nodeByKey.get(model.rootKey) : null;
+  const rootMarkup = rootNode ? `<div class="views-lineage-node query-block ${rootNode.emphasis}" data-views-node-key="${escapeHtml(rootNode.key)}" style="left:${rootNode.x}px;top:${rootNode.y}px"><span class="views-query-input-port" aria-hidden="true"></span>${renderViewsQueryBlockCard(rootNode.stage, viewItem, model)}</div>` : "";
+  const finalNode = model.nodeByKey.get(model.finalKey);
+  const finalMarkup = `<div class="views-lineage-node final ${finalNode.emphasis}" data-views-node-key="${escapeHtml(finalNode.key)}" style="left:${finalNode.x}px;top:${finalNode.y}px">${renderFlowViewHero(viewItem, selectedIdentity)}</div>`;
+  const consumerNodes = model.nodes.filter(node => node.kind === "consumer").map(node => `<div class="views-lineage-node consumer ${node.emphasis}" data-views-node-key="${escapeHtml(node.key)}" style="left:${node.x}px;top:${node.y}px">${renderViewsConsumerCard(node.dependent)}</div>`).join("");
+  const stageStatus = model.stagesEnvelope.status === "unavailable"
+    ? `SQL stages unavailable: ${model.stagesEnvelope.reason}`
+    : `${model.stagesEnvelope.stages.length} query-local stage${model.stagesEnvelope.stages.length === 1 ? "" : "s"}, including root SELECT · ${model.stagesEnvelope.status}`;
+  const joinStatus = prototypeJoinLineage(viewItem);
+  const evidence = joinStatus.status === "unavailable" ? `Join evidence unavailable: ${joinStatus.reason}` : `${joinStatus.joins.length} join condition${joinStatus.joins.length === 1 ? "" : "s"} · ${joinStatus.status}`;
+  return `<div id="views-lineage-panel" class="views-lineage-viewport" tabindex="0" aria-label="View lineage canvas. Use arrow keys to pan." aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowUp Shift+ArrowDown Shift+ArrowLeft Shift+ArrowRight">
+    <div class="views-canvas-grid"></div><div class="views-lineage-stage"><svg class="views-lineage-edges" viewBox="-4000 -4000 12000 12000" aria-hidden="true">${viewsEdgesMarkup(model)}</svg>${sourceNodes}${stageNodes}${rootMarkup}${finalMarkup}${consumerNodes}</div>
+    <div class="views-evidence-status" role="status"><span>${escapeHtml(model.focusLabel || stageStatus)}</span>${model.focusLabel ? '<button type="button" data-clear-views-focus>Clear focus</button>' : `<span>${escapeHtml(evidence)}</span><small>Stage order is syntactic dependency order, not execution order.</small>`}</div>
+    <div class="views-canvas-controls" aria-label="Views canvas controls"><button type="button" data-views-fit aria-label="Fit view lineage">Fit</button><button type="button" data-views-zoom-out aria-label="Zoom out view lineage">−</button><output data-views-zoom aria-label="Views zoom level">${Math.round(viewsView.zoom * 100)}%</output><button type="button" data-views-zoom-in aria-label="Zoom in view lineage">+</button></div>
   </div>`;
 }
 
 function renderLineageFocusConcept() {
   const selected = selectedPrototypeView();
   const binding = activeViewsBinding();
-  if (selected && viewsPrototypeState.targetKey !== viewsBindingKey(binding)) {
+  if (selected && viewsPrototypeState.targetKey !== viewsCatalogTargetKey(binding)) {
     viewsPrototypeState.views = [];
     viewsPrototypeState.selectedId = null;
     viewsPrototypeState.descriptors.clear();
@@ -904,26 +1393,15 @@ function renderLineageFocusConcept() {
         : viewsPrototypeState.error || "No views or materialized views exist in the saved namespace.";
     return `<div class="views-focus-shell"><div class="views-focus-concept"><section class="prototype-focus-lineage views-live-state"><strong>${escapeHtml(message)}</strong></section></div></div>`;
   }
-  const selectedFields = selected.columns.map(column => {
-    return `<span class="prototype-focus-field"><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span></span>`;
-  }).join("");
-  const sourceCards = selected.sources.length
-    ? selected.sources.map((source, index) => prototypeSourceCard(source, selected, index)).join("")
-    : '<div class="prototype-source-unavailable"><strong>No upstream relations</strong><span>The live PostgreSQL catalog reports no relation dependencies.</span></div>';
-  const dependents = selected.dependents.length
-    ? selected.dependents.map(dependent => `<button class="dependent ${viewsPrototypeState.inspectedRelation === relationIdentityKey(dependent) ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(dependent))}" ${canInspectViewsRelation(dependent) ? "" : "disabled"}><span>&rarr;</span><small>Downstream ${escapeHtml(prototypeKindLabel(dependent))}${canInspectViewsRelation(dependent) ? "" : " · inspection unavailable"}</small><strong>${escapeHtml(dependent.namespace)}.${escapeHtml(dependent.relation)}</strong></button>`).join("")
-    : '<article class="dependent empty"><span>&rarr;</span><small>Downstream</small><strong>No downstream objects</strong></article>';
   const selectedIdentity = relationIdentityKey({ database: binding.database, namespace: selected.namespace, relation: selected.name, kind: selected.kind });
-  const relationMap = `<div class="prototype-relations-map"><div class="prototype-focus-sources"><header><span>Upstream</span><small>${selected.sources.length} relations</small></header>${sourceCards}</div><div class="prototype-focus-arrows" aria-hidden="true"><i></i></div><button class="prototype-focus-hero ${viewsPrototypeState.inspectedRelation === selectedIdentity ? "selected" : ""}" type="button" data-prototype-relation="${escapeHtml(selectedIdentity)}"><span class="prototype-focus-identity">${prototypeKindIcon(selected)}<span><small>${escapeHtml(prototypeKindLabel(selected))}</small><h3>${escapeHtml(selected.name)}</h3></span></span><span class="prototype-focus-fields">${selectedFields || '<span class="prototype-focus-field"><strong>Loading output contract...</strong></span>'}</span><p>${selected.columns.length} projected columns · inspect output contract</p></button><div class="prototype-focus-arrows outbound" aria-hidden="true"><i></i></div><div class="prototype-focus-dependents"><header><span>Downstream</span><small>${selected.dependents.length} consumers</small></header>${dependents}</div></div>`;
-  const lineageContent = `${relationMap}${renderPrototypeImpactSummary(selected)}`;
   const sideOpen = viewsPrototypeState.catalogOpen || viewsPrototypeState.inspectedRelation;
   const sidePanel = viewsPrototypeState.inspectedRelation ? renderPrototypeRelationInspector(viewsPrototypeState.inspectedRelation) : prototypeCatalogPanel();
   return `<div class="views-focus-shell ${sideOpen ? "catalog-open" : ""}">
     <aside class="prototype-view-catalog prototype-focus-catalog ${viewsPrototypeState.inspectedRelation ? "relation-inspector" : ""}" aria-label="${viewsPrototypeState.inspectedRelation ? "Read-only relation inspector" : "View catalog"}" aria-hidden="${!sideOpen}" ${sideOpen ? "" : "inert"}>${sidePanel}</aside>
     <div class="views-focus-concept" data-active-pane="${viewsPrototypeState.activePane}">
       <section class="prototype-focus-lineage">
-        <header class="views-lineage-head"><button class="views-pane-heading" type="button" data-views-pane="lineage" aria-expanded="${viewsPrototypeState.activePane === "lineage"}"><span class="eyebrow">Live PostgreSQL catalog</span><span><strong>View lineage</strong><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></span><small>${escapeHtml(selected.namespace)}.${escapeHtml(selected.name)}</small></button></header>
-        <div class="prototype-lineage-body" ${viewsPrototypeState.activePane === "lineage" ? "" : "hidden"}><div class="prototype-focus-flow">${lineageContent}</div></div>
+        <header class="views-lineage-head"><button class="views-pane-heading" type="button" data-views-pane="lineage" aria-expanded="${viewsPrototypeState.activePane === "lineage"}"><span class="eyebrow">Verified PostgreSQL lineage</span><span><strong>View lineage</strong><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></span><small>${escapeHtml(selected.namespace)}.${escapeHtml(selected.name)}</small></button><span class="views-lineage-order">Sources → query-local SQL stages → final view → consumers</span></header>
+        <div class="prototype-lineage-body" ${viewsPrototypeState.activePane === "lineage" ? "" : "hidden"}>${renderViewsLineageCanvas(selected, selectedIdentity)}</div>
       </section>
       <section class="prototype-focus-definition"><button class="views-pane-heading" type="button" data-views-pane="definition" aria-expanded="${viewsPrototypeState.activePane === "definition"}"><span><span class="eyebrow">Reviewed PostgreSQL definition</span><strong>PostgreSQL definition</strong></span><span class="prototype-kind-badge ${prototypeKindClass(selected)}">${escapeHtml(prototypeKindLabel(selected))}</span></button><div class="prototype-focus-definition-content" ${viewsPrototypeState.activePane === "definition" ? "" : "hidden"}><textarea class="prototype-definition-editor" data-prototype-definition-editor aria-label="Editable PostgreSQL view definition" spellcheck="false" ${selected.definition?.status === "available" ? "" : "readonly"}>${escapeHtml(prototypeViewDefinition(selected))}</textarea><footer><span data-prototype-draft-status>${selected.definition?.status === "available" ? "Live definition; advisory privileges do not gate preview; PostgreSQL authorizes apply" : "Definition unavailable"}</span><div class="prototype-definition-actions"><button class="button button-primary" type="button" data-commit-prototype-definition ${selected.definition?.status === "available" ? "" : "disabled"}>Preview changes</button></div></footer></div></section>
     </div>
@@ -941,8 +1419,11 @@ function renderPrototypeRelationInspector(identityKey) {
   const relationship = identity.relation === selected.id ? `${selected.sources.length} upstream · ${selected.dependents.length} downstream` : selected.sources.some(item => relationIdentityKey(item) === identityKey) ? `Source of ${selected.name}` : `Consumes ${selected.name}`;
   const owner = descriptor.owner.status === "available" ? descriptor.owner.name : `Unavailable: ${descriptor.owner.reason}`;
   const materialized = descriptor.materialized.status === "available" ? `Populated ${descriptor.materialized.populated ? "yes" : "no"} · concurrent refresh ${descriptor.materialized.concurrentRefreshEligible ? "eligible" : "unavailable"}` : "Not applicable";
+  const provenance = ["available", "partial"].includes(descriptor.columnProvenance.status)
+    ? `${descriptor.columnProvenance.outputs.filter(output => output.mappingStatus === "available").length} of ${descriptor.columnProvenance.outputs.length} output mappings verified${descriptor.columnProvenance.status === "partial" ? "; remaining mappings are partial" : ""}.`
+    : `Unavailable: ${descriptor.columnProvenance.reason}.`;
   const mutationReason = identity.namespace !== binding.namespace ? `Read-only: ${identity.namespace} is outside the active saved namespace ${binding.namespace}.` : !["view", "materialized_view"].includes(identity.kind) ? `Read-only: ${prototypeKindLabel(identity).toLowerCase()} is not editable in the Views workspace.` : "Read-only lineage inspection; mutation remains bound to the selected saved-namespace view.";
-  return `<header><span><span class="eyebrow">Live relation inspector</span><strong>${escapeHtml(identity.relation)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Namespace</dt><dd>${escapeHtml(identity.namespace)}</dd></div><div><dt>Kind</dt><dd>${escapeHtml(prototypeKindLabel(identity))}</dd></div><div><dt>Lineage role</dt><dd>${escapeHtml(relationship)}</dd></div><div><dt>Owner</dt><dd>${escapeHtml(owner)}</dd></div><div><dt>Advisory privileges</dt><dd>Select ${descriptor.permissions.canSelect ? "yes" : "no"} · alter ${descriptor.permissions.canAlter ? "yes" : "no"}; PostgreSQL authorizes requests</dd></div><div><dt>Materialized</dt><dd>${escapeHtml(materialized)}</dd></div></dl><p>${escapeHtml(mutationReason)}</p></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${descriptor.columns.length}</span>${descriptor.columns.map(column => `<article><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span><small>${column.nullable ? "Nullable" : "Not null"}</small></article>`).join("")}</section><section><span class="prototype-section-label">Column provenance</span><div class="prototype-column-chips"><small>Unavailable from PostgreSQL. No source-to-output mappings are inferred.</small></div></section><footer>Verified live catalog snapshot</footer>`;
+  return `<header><span><span class="eyebrow">Live relation inspector</span><strong>${escapeHtml(identity.relation)}</strong></span><button class="shared-icon-button" type="button" data-close-prototype-side aria-label="Close relation inspector"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg></button></header><section><span class="prototype-section-label">Identity</span><dl class="prototype-relation-identity"><div><dt>Namespace</dt><dd>${escapeHtml(identity.namespace)}</dd></div><div><dt>Kind</dt><dd>${escapeHtml(prototypeKindLabel(identity))}</dd></div><div><dt>Lineage role</dt><dd>${escapeHtml(relationship)}</dd></div><div><dt>Owner</dt><dd>${escapeHtml(owner)}</dd></div><div><dt>Advisory privileges</dt><dd>Select ${descriptor.permissions.canSelect ? "yes" : "no"} · alter ${descriptor.permissions.canAlter ? "yes" : "no"}; PostgreSQL authorizes requests</dd></div><div><dt>Materialized</dt><dd>${escapeHtml(materialized)}</dd></div></dl><p>${escapeHtml(mutationReason)}</p></section><section class="prototype-relation-columns"><span class="prototype-section-label">Columns · ${descriptor.columns.length}</span>${descriptor.columns.map(column => `<article><strong>${escapeHtml(column.name)}</strong><span>${escapeHtml(column.type)}</span><small>${column.nullable ? "Nullable" : "Not null"}</small></article>`).join("")}</section><section><span class="prototype-section-label">Column provenance</span><div class="prototype-column-chips"><small>${escapeHtml(provenance)}</small></div></section><footer>Verified live catalog snapshot</footer>`;
 }
 
 function renderPrototypeImpactSummary(viewItem) {
@@ -952,18 +1433,14 @@ function renderPrototypeImpactSummary(viewItem) {
   return `<section class="prototype-impact-compact" aria-label="Change impact"><header><span>Change impact</span><small>Migration readiness</small></header><div><button type="button" ${upstream && canInspectViewsRelation(upstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(upstream))}"` : "disabled"}><strong>${viewItem.sources.length}</strong><span>Upstream</span></button><button type="button" data-prototype-relation="${escapeHtml(relationIdentityKey(identity))}"><strong>${viewItem.columns.length}</strong><span>Outputs</span></button><button type="button" ${downstream && canInspectViewsRelation(downstream) ? `data-prototype-relation="${escapeHtml(relationIdentityKey(downstream))}"` : "disabled"}><strong>${viewItem.dependents.length}</strong><span>Consumers</span></button><article><span>Review</span><strong>${viewItem.kind === "materialized_view" ? "Recreate and refresh" : "Replacement preview"}</strong></article></div></section>`;
 }
 
-function renderCatalogWorkbenchConcept() {
-  const selected = selectedPrototypeView();
-  return `<div class="views-catalog-concept">
-    <aside class="prototype-view-catalog"><header><span class="eyebrow">Relation browser</span><strong>Views</strong><input aria-label="Filter prototype views" placeholder="Filter views..."/></header><div class="prototype-catalog-filters"><button class="active" type="button">All</button><button type="button">Views</button><button type="button">Materialized</button></div><div>${viewsPrototypeState.views.map(viewItem => prototypeViewCard(viewItem, "catalog-row")).join("")}</div></aside>
-    <section class="prototype-workbench-main"><div class="prototype-workbench-lineage"><header><span><span class="eyebrow">Dependency workbench</span><strong>${escapeHtml(selected.name)}</strong></span><span>${selected.sources.length} incoming · ${selected.dependents.length} outgoing</span></header><div class="prototype-workbench-flow"><div>${selected.sources.map(source => `<button type="button"><small>Source</small><strong>${escapeHtml(source)}</strong></button>`).join("")}</div><span class="prototype-flow-arrow">&rarr;</span><div class="prototype-workbench-selected">${prototypeKindIcon(selected)}<small>${escapeHtml(prototypeKindLabel(selected))}</small><strong>${escapeHtml(selected.name)}</strong></div><span class="prototype-flow-arrow">&rarr;</span><div>${(selected.dependents.length ? selected.dependents : ["No dependents"]).map(item => `<button type="button"><small>Dependent</small><strong>${escapeHtml(item)}</strong></button>`).join("")}</div></div></div>
-      <div class="prototype-workbench-editor"><header><span><span class="eyebrow">Definition dock</span><strong>Raw CREATE statement</strong></span><button class="button button-ghost" type="button" data-prototype-edit="${escapeHtml(selected.id)}">Edit</button></header><pre>${escapeHtml(prototypeViewDefinition(selected))}</pre><footer><span>${selected.columns.length} output columns</span><div class="prototype-column-chips">${selected.columns.map(column => `<span>${escapeHtml(column)}</span>`).join("")}</div></footer></div>
-    </section>
-  </div>`;
-}
-
 function renderViewsPrototype() {
+  if (viewsPrototypeState.layer === "views") {
+    elements.mainLayout.scrollLeft = 0;
+    elements.mainLayout.scrollTop = 0;
+  }
   elements.viewsConceptStage.innerHTML = renderLineageFocusConcept();
+  applyViewsView();
+  if (viewsPrototypeState.layer === "views" && viewsPrototypeState.activePane === "lineage") requestAnimationFrame(renderViewsCanvasEdges);
   updateWorkspaceRail();
   updateHistoryControls();
 }
@@ -1097,11 +1574,17 @@ function setDesignLayer(layer) {
     button.setAttribute("aria-pressed", String(active));
   });
   if (viewsOpen) {
+    elements.mainLayout.scrollLeft = 0;
+    elements.mainLayout.scrollTop = 0;
     elements.viewsPrototypeWorkspace.hidden = false;
     renderViewsPrototype();
-    if (viewsPrototypeState.targetKey !== viewsBindingKey(activeViewsBinding()) || viewsPrototypeState.error) loadViewsCatalog({ preserveSelection: false });
+    if (viewsPrototypeState.targetKey !== viewsCatalogTargetKey(activeViewsBinding()) || viewsPrototypeState.error) loadViewsCatalog({ preserveSelection: false });
     elements.mainLayout.classList.add("views-layer-open", "views-layer-entering");
-    requestAnimationFrame(() => elements.viewsPrototypeWorkspace.classList.add("open"));
+    requestAnimationFrame(() => {
+      elements.mainLayout.scrollLeft = 0;
+      elements.mainLayout.scrollTop = 0;
+      elements.viewsPrototypeWorkspace.classList.add("open");
+    });
     viewsPrototypeState.layerTimer = setTimeout(() => elements.mainLayout.classList.remove("views-layer-entering"), 300);
     return;
   }
@@ -1233,6 +1716,7 @@ async function reloadActiveSchemaRecord() {
   writeSchemaLibrary(library);
   schema = migrateSchema(clone(record.schema));
   view = clone(schema.layout.layers.tables.viewport);
+  restoreViewsRuntimeLayout(schema);
   render();
 }
 
@@ -2388,7 +2872,7 @@ async function shutdownSchemii() {
   }
 }
 
-function schemaForStorage(schemaValue, viewState = null) {
+function schemaForStorage(schemaValue, viewState = null, layerUpdates = null) {
   const stored = clone(schemaValue);
   const sourceLayout = stored.layout && typeof stored.layout === "object" ? stored.layout : {};
   const sourceLayers = sourceLayout.layers && typeof sourceLayout.layers === "object" ? sourceLayout.layers : {};
@@ -2396,6 +2880,8 @@ function schemaForStorage(schemaValue, viewState = null) {
   const sourceTableLayout = sourceTableLayer.objects && typeof sourceTableLayer.objects === "object"
     ? sourceTableLayer.objects
     : sourceLayout.tables && typeof sourceLayout.tables === "object" ? sourceLayout.tables : {};
+  const tableUpdate = layerUpdates?.tables && typeof layerUpdates.tables === "object" ? layerUpdates.tables : {};
+  const viewsUpdate = layerUpdates?.views && typeof layerUpdates.views === "object" ? layerUpdates.views : {};
   const tableLayout = clone(sourceTableLayout);
   for (const table of stored.tables) {
     tableLayout[table.id] = {
@@ -2411,15 +2897,43 @@ function schemaForStorage(schemaValue, viewState = null) {
     delete table.y;
     delete table.color;
   }
-  const viewport = clone(viewState ?? sourceTableLayer.viewport ?? sourceLayout.view ?? { x: 45, y: 35, zoom: 1 });
+  if (tableUpdate.objects && typeof tableUpdate.objects === "object") {
+    for (const [objectId, objectUpdate] of Object.entries(tableUpdate.objects)) {
+      tableLayout[objectId] = objectUpdate && typeof objectUpdate === "object"
+        ? { ...(tableLayout[objectId] && typeof tableLayout[objectId] === "object" ? tableLayout[objectId] : {}), ...clone(objectUpdate) }
+        : clone(objectUpdate);
+    }
+  }
+  const viewport = clone(viewState ?? tableUpdate.viewport ?? sourceTableLayer.viewport ?? sourceLayout.view ?? { x: 45, y: 35, zoom: 1 });
+  const sourceViewsLayer = sourceLayers.views && typeof sourceLayers.views === "object" ? sourceLayers.views : {};
+  const sourceViewsObjects = sourceViewsLayer.objects && typeof sourceViewsLayer.objects === "object" ? sourceViewsLayer.objects : {};
+  const sourceViewsViewport = sourceViewsLayer.viewport && typeof sourceViewsLayer.viewport === "object" ? sourceViewsLayer.viewport : { x: 45, y: 35, zoom: 1 };
+  const viewsLayoutObjects = clone(sourceViewsObjects);
+  if (viewsUpdate.objects && typeof viewsUpdate.objects === "object") {
+    for (const [objectId, objectUpdate] of Object.entries(viewsUpdate.objects)) {
+      viewsLayoutObjects[objectId] = objectUpdate && typeof objectUpdate === "object"
+        ? { ...(viewsLayoutObjects[objectId] && typeof viewsLayoutObjects[objectId] === "object" ? viewsLayoutObjects[objectId] : {}), ...clone(objectUpdate) }
+        : clone(objectUpdate);
+    }
+  }
   stored.layout = { ...sourceLayout, version: 2, layers: {
     ...sourceLayers,
-    tables: { ...sourceTableLayer, objects: tableLayout, viewport: { ...(sourceTableLayer.viewport ?? {}), ...viewport } },
-    views: sourceLayers.views && typeof sourceLayers.views === "object" ? sourceLayers.views : { objects: {}, viewport: { x: 45, y: 35, zoom: 1 } }
+    tables: { ...sourceTableLayer, ...tableUpdate, objects: tableLayout, viewport: { ...(sourceTableLayer.viewport ?? {}), ...viewport } },
+    views: {
+      ...sourceViewsLayer, ...viewsUpdate,
+      objects: viewsLayoutObjects,
+      viewport: { ...clone(sourceViewsViewport), ...(viewsUpdate.viewport && typeof viewsUpdate.viewport === "object" ? clone(viewsUpdate.viewport) : {}) },
+    }
   } };
   delete stored.layout.tables;
   delete stored.layout.view;
   return stored;
+}
+
+function restoreViewsRuntimeLayout(schemaValue) {
+  const layer = schemaValue?.layout?.layers?.views;
+  viewsView = clone(layer?.viewport && typeof layer.viewport === "object" ? layer.viewport : { x: 45, y: 35, zoom: 1 });
+  viewsObjects = clone(layer?.objects && typeof layer.objects === "object" ? layer.objects : {});
 }
 
 function readSchemaLibrary() {
@@ -2596,6 +3110,7 @@ async function initializeSchemaLibrary() {
     schemaLibrary = { activeId: activeSchemaId, schemas: records };
     schema = migrateSchema(clone(records.find(record => record.id === activeSchemaId).schema));
     view = clone(schema.layout.layers.tables.viewport);
+    restoreViewsRuntimeLayout(schema);
     try { postgresState.profiles = await postgresProfileRepository.list(); } catch { postgresState.profiles = []; }
     elements.saveStatus.textContent = "Saved to file";
     render();
@@ -2603,6 +3118,7 @@ async function initializeSchemaLibrary() {
     activeSchemaId = "schema_unsaved";
     schemaLibrary = { activeId: activeSchemaId, schemas: [{ id: activeSchemaId, schema: clone(schema), updatedAt: new Date().toISOString() }] };
     schema = migrateSchema(clone(schema));
+    restoreViewsRuntimeLayout(schema);
     elements.saveStatus.textContent = "File server offline";
     render();
     showToast("Run python3 server.py to save schema files");
@@ -3112,7 +3628,11 @@ function persistSchemaRecord(schemaId, schemaValue) {
       id: schemaId,
       revision: record?.revision ?? 0,
       layoutToken: record?.layoutToken,
-      schema: schemaForStorage(schemaValue, schemaId === activeSchemaId ? view : schemaValue.layout?.layers?.tables?.viewport),
+      schema: schemaForStorage(
+        schemaValue,
+        schemaId === activeSchemaId ? view : schemaValue.layout?.layers?.tables?.viewport,
+        schemaId === activeSchemaId ? { views: { viewport: viewsView, objects: viewsObjects } } : null,
+      ),
       updatedAt: record?.updatedAt ?? new Date().toISOString()
     };
     const result = await putRecordFile(savedRecord);
@@ -3262,6 +3782,10 @@ function resetSchemaSession() {
   marqueeState = null;
   clearTimeout(wheelZoomTimer);
   wheelZoomTimer = null;
+  clearTimeout(viewsWheelZoomTimer);
+  viewsWheelZoomTimer = null;
+  viewsPanState = null;
+  viewsNodeDragState = null;
   relationSource = null;
   relationMode = false;
   undoStack = [];
@@ -3305,6 +3829,7 @@ async function createSchemaProject(projectName) {
   activeSchemaId = newSchemaId;
   schema = newSchema;
   view = { x: 45, y: 35, zoom: 1 };
+  restoreViewsRuntimeLayout(schema);
   resetSchemaSession();
   elements.saveStatus.textContent = "Saved to file";
   if (elements.schemaDialog.open) elements.schemaDialog.close();
@@ -3334,6 +3859,7 @@ async function openSchema(schemaId, { fit = false } = {}) {
   library.activeId = activeSchemaId;
   writeSchemaLibrary(library);
   view = clone(schema.layout.layers.tables.viewport);
+  restoreViewsRuntimeLayout(schema);
   resetSchemaSession();
   if (elements.schemaDialog.open) elements.schemaDialog.close();
   render();
@@ -3367,7 +3893,7 @@ async function deleteSavedSchema(schemaId) {
 document.querySelector("#export-conflicted-schema").addEventListener("click", () => {
   if (!schemaSaveQuarantine) return;
   const name = (schemaSaveQuarantine.schema.projectName || "schema-local-edits").replace(/[^A-Za-z0-9_-]+/g, "-");
-  exportFile(`${name}-conflict.json`, JSON.stringify({ id: schemaSaveQuarantine.schemaId, capturedAt: schemaSaveQuarantine.capturedAt, schema: schemaForStorage(schemaSaveQuarantine.schema, view) }, null, 2), "application/json");
+  exportFile(`${name}-conflict.json`, JSON.stringify({ id: schemaSaveQuarantine.schemaId, capturedAt: schemaSaveQuarantine.capturedAt, schema: schemaForStorage(schemaSaveQuarantine.schema, view, { views: { viewport: viewsView, objects: viewsObjects } }) }, null, 2), "application/json");
 });
 
 document.querySelector("#refresh-conflicted-schema").addEventListener("click", async () => {
@@ -4960,6 +5486,100 @@ function fitDiagram() {
   applyView();
 }
 
+function viewsEdgeDefinitions() {
+  return '<defs><marker id="views-arrow-available" class="views-arrow-available" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0 0 12 6 0 12Z" fill="#b7d3e8"/></marker><marker id="views-arrow-partial" class="views-arrow-partial" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0 0 12 6 0 12Z" fill="#f0b66f"/></marker><marker id="views-arrow-active" class="views-arrow-active" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="12" refY="6.5" orient="auto"><path d="M0 0 13 6.5 0 13Z" fill="#d9ceff"/></marker><marker id="views-arrow-active-partial" class="views-arrow-active-partial" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" refX="12" refY="6.5" orient="auto"><path d="M0 0 13 6.5 0 13Z" fill="#ffd28f"/></marker></defs>';
+}
+
+function renderViewsCanvasEdges() {
+  const selected = selectedPrototypeView();
+  const edges = elements.viewsConceptStage.querySelector(".views-lineage-edges");
+  if (!selected || !edges) return;
+  const model = measureViewsLineageModel(buildViewsLineageModel(selected));
+  edges.innerHTML = viewsEdgesMarkup(model);
+}
+
+function applyViewsView() {
+  const viewport = elements.viewsConceptStage.querySelector(".views-lineage-viewport");
+  const stage = viewport?.querySelector(".views-lineage-stage");
+  const grid = viewport?.querySelector(".views-canvas-grid");
+  if (!viewport || !stage || !grid) return;
+  const pixelRatio = window.devicePixelRatio || 1;
+  const renderedX = Math.round(viewsView.x * pixelRatio) / pixelRatio;
+  const renderedY = Math.round(viewsView.y * pixelRatio) / pixelRatio;
+  stage.style.zoom = String(viewsView.zoom);
+  stage.style.transform = `translate(${renderedX / viewsView.zoom}px, ${renderedY / viewsView.zoom}px)`;
+  const gridSize = 24 * viewsView.zoom;
+  grid.style.backgroundSize = `${gridSize}px ${gridSize}px, ${gridSize}px ${gridSize}px`;
+  grid.style.backgroundPosition = `${renderedX}px ${renderedY}px`;
+  viewport.querySelectorAll("[data-views-zoom]").forEach(output => { output.textContent = `${Math.round(viewsView.zoom * 100)}%`; });
+}
+
+function measureViewsLineageModel(model) {
+  const viewport = elements.viewsConceptStage.querySelector(".views-lineage-viewport");
+  if (!viewport) return model;
+  const nodeElements = [...viewport.querySelectorAll("[data-views-node-key]")];
+  for (const node of model.nodes) {
+    const element = nodeElements.find(candidate => candidate.dataset.viewsNodeKey === node.key);
+    if (!element) continue;
+    if (element.offsetWidth > 0) node.width = element.offsetWidth;
+    if (element.offsetHeight > 0) node.height = element.offsetHeight;
+  }
+  return model;
+}
+
+function saveViewsLayout() {
+  if (activeSchemaId) saveSchema(LAYOUT_SAVE_DELAY_MS);
+}
+
+function fitViewsCanvas() {
+  const selected = selectedPrototypeView();
+  const viewport = elements.viewsConceptStage.querySelector(".views-lineage-viewport");
+  if (!selected || !viewport) return;
+  const nodes = measureViewsLineageModel(buildViewsLineageModel(selected)).nodes;
+  if (!nodes.length) return;
+  const bounds = nodes.reduce((result, node) => ({
+    minX: Math.min(result.minX, node.x), minY: Math.min(result.minY, node.y),
+    maxX: Math.max(result.maxX, node.x + node.width), maxY: Math.max(result.maxY, node.y + node.height),
+  }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  const padding = 70;
+  const rect = viewport.getBoundingClientRect();
+  const width = Math.max(1, bounds.maxX - bounds.minX);
+  const height = Math.max(1, bounds.maxY - bounds.minY);
+  viewsView.zoom = clampZoom(Math.min((rect.width - padding * 2) / width, (rect.height - padding * 2) / height), 1.2);
+  viewsView.x = (rect.width - width * viewsView.zoom) / 2 - bounds.minX * viewsView.zoom;
+  viewsView.y = (rect.height - height * viewsView.zoom) / 2 - bounds.minY * viewsView.zoom;
+  applyViewsView();
+  saveViewsLayout();
+}
+
+function setViewsZoom(nextZoom, centerX = null, centerY = null, transient = false) {
+  const viewport = elements.viewsConceptStage.querySelector(".views-lineage-viewport");
+  if (!viewport) return false;
+  const rect = viewport.getBoundingClientRect();
+  const cursorX = centerX ?? rect.width / 2;
+  const cursorY = centerY ?? rect.height / 2;
+  const oldZoom = viewsView.zoom;
+  const newZoom = clampZoom(nextZoom);
+  if (newZoom === oldZoom) return false;
+  viewsView.x = cursorX - (cursorX - viewsView.x) * (newZoom / oldZoom);
+  viewsView.y = cursorY - (cursorY - viewsView.y) * (newZoom / oldZoom);
+  viewsView.zoom = newZoom;
+  applyViewsView();
+  if (!transient) {
+    clearTimeout(viewsWheelZoomTimer);
+    viewsWheelZoomTimer = null;
+    saveViewsLayout();
+  }
+  return true;
+}
+
+function finishViewsWheelZoom() {
+  if (viewsWheelZoomTimer === null) return;
+  clearTimeout(viewsWheelZoomTimer);
+  viewsWheelZoomTimer = null;
+  saveViewsLayout();
+}
+
 function setZoom(nextZoom, centerX, centerY, transient = false) {
   const rect = elements.workspace.getBoundingClientRect();
   const cursorX = centerX ?? rect.width / 2;
@@ -5302,6 +5922,7 @@ async function importSqlFile(file) {
     activeSchemaId = importedSchemaId;
     schema = importedSchema;
     view = { x: 45, y: 35, zoom: 1 };
+    restoreViewsRuntimeLayout(schema);
     resetSchemaSession();
     elements.saveStatus.textContent = "Saved to file";
     render();
@@ -5609,6 +6230,7 @@ async function testPostgresProfile(profileId) {
 }
 
 function preserveTableLayout(importedSchema, previousSchema) {
+  const previousViewsLayer = previousSchema?.layout?.layers?.views;
   const positions = new Map(previousSchema.tables.map(table => [`${table.namespace ?? previousSchema.postgres?.namespace ?? ""}.${table.name}`, table]));
   const positionsByOid = new Map(previousSchema.tables.filter(table => table.postgres?.liveOid != null).map(table => [String(table.postgres.liveOid), table]));
   for (const table of importedSchema.tables) {
@@ -5629,6 +6251,11 @@ function preserveTableLayout(importedSchema, previousSchema) {
       }
       table.columns = [...ordered, ...available];
     }
+  }
+  if (previousViewsLayer && typeof previousViewsLayer === "object") {
+    const importedLayout = importedSchema.layout && typeof importedSchema.layout === "object" ? importedSchema.layout : {};
+    const importedLayers = importedLayout.layers && typeof importedLayout.layers === "object" ? importedLayout.layers : {};
+    importedSchema.layout = { ...importedLayout, version: 2, layers: { ...importedLayers, views: clone(previousViewsLayer) } };
   }
   return importedSchema;
 }
@@ -5661,6 +6288,7 @@ async function importPostgresSchema() {
     activeSchemaId = importedSchemaId;
     schema = imported;
     view = { x: 45, y: 35, zoom: 1 };
+    restoreViewsRuntimeLayout(schema);
     resetSchemaSession();
     elements.saveStatus.textContent = "Saved to file";
     elements.postgresDialog.close();
@@ -6314,7 +6942,9 @@ function renderAiAction(proposal, context) {
   const type = aiActionType(action);
   if (type === "schema_read_query" || type === "raw_write") {
     const sql = document.createElement("pre");
-    sql.textContent = String(aiActionPayload(action).sql ?? "");
+    const sqlText = String(aiActionPayload(action).sql ?? "");
+    sql.textContent = sqlText;
+    aiAssistant.appendCopyControl(sql, sqlText, "Copy SQL proposal");
     card.append(sql);
   } else if (AI_POSTGRES_ACTIONS.has(type)) {
     const payload = aiActionPayload(action);
@@ -6328,12 +6958,14 @@ function renderAiAction(proposal, context) {
       : type === "create_view_preview"
         ? `${targetReview}\n${String(payload.definition ?? "")}`
         : `${targetReview}\nReviewed plan: ${String(payload.planId ?? "")}${payload.rowCount != null ? `\nSubmitted rows: ${payload.rowCount}` : ""}${payload.effectsDigest ? `\nEffects digest: ${payload.effectsDigest}` : ""}\n${payload.reviewedPlan?.kind === "insert_rows" ? `${JSON.stringify(payload.reviewedPlan.rows ?? [], null, 2)}\n\nReviewed effects (secondary writes are not counted):\n${(payload.reviewedPlan.effects ?? []).map(effect => `${effect.kind} [${effect.certainty}]: ${effect.summary} (${effect.objectCount}; ${effect.complete ? "complete" : "truncated"})`).join("\n")}` : String(payload.reviewedPlan?.steps?.[0]?.sql ?? "")}`;
+    aiAssistant.appendCopyControl(review, review.textContent, "Copy proposal details");
     card.append(review);
   } else {
     const payload = aiActionPayload(action);
     const review = document.createElement("pre");
     review.className = "ai-action-review";
     review.textContent = JSON.stringify(payload, null, 2);
+    aiAssistant.appendCopyControl(review, review.textContent, "Copy proposal details");
     card.append(review);
     if (type === "delete_element" && Array.isArray(payload.impact)) {
       detail.textContent = `${payload.reason} This deletes ${payload.impact.length} saved object${payload.impact.length === 1 ? "" : "s"}; review the exact impact below.`;
@@ -6439,6 +7071,7 @@ async function handleSchemiiAiOperationResult(result, context) {
     schemaLibrary = { activeId: activeSchemaId, schemas: records };
     schema = migrateSchema(clone(refreshed.schema));
     view = clone(schema.layout.layers.tables.viewport);
+    restoreViewsRuntimeLayout(schema);
     resetSchemaSession();
     render();
     elements.saveStatus.textContent = "Saved to file";
@@ -6545,6 +7178,7 @@ async function handleSchemiiAiOperationResult(result, context) {
     if (activeSchemaId === refreshed.id) {
       schema = migrateSchema(clone(refreshed.schema));
       view = clone(schema.layout.layers.tables.viewport);
+      restoreViewsRuntimeLayout(schema);
       resetSchemaSession();
       render();
     }
@@ -6611,7 +7245,10 @@ async function executeAiReadQuery(proposal, context, card, button) {
   if (!context.profileId || !context.namespace || currentTarget.profileId !== context.profileId || currentTarget.namespace !== context.namespace) return detailAiActionError(card, "The selected PostgreSQL profile or namespace changed");
   button.disabled = true;
   button.textContent = "Running...";
-  const activity = aiAssistant.beginProposalOperation(card, { runningLabel: "Running query", completedLabel: "Query completed", failedLabel: "Query failed", warningLabel: "Query completed; display failed" });
+  const activity = aiAssistant.beginProposalOperation(card, {
+    runningLabel: "Running query", completedLabel: "Query completed", failedLabel: "Query failed",
+    warningLabel: "Query completed; display failed", onCancel: () => aiAssistant.cancelProposal(proposal),
+  });
   let operationSucceeded = false;
   try {
     const revision = schemaLibrary.schemas.find(item => item.id === context.schemaId)?.revision;
@@ -6633,9 +7270,11 @@ async function executeAiReadQuery(proposal, context, card, button) {
       if (!aiAssistant.renderError(error)) detailAiActionError(card, `The query completed, but follow-up analysis failed: ${error.message}`);
     }
   } catch (error) {
-    activity.finish(operationSucceeded ? "warning" : "failed");
-    button.disabled = operationSucceeded;
-    button.textContent = operationSucceeded ? "Ran query" : "Run query";
+    const cancelled = aiAssistant.isCancellationError(error);
+    activity.finish(cancelled ? "cancelled" : operationSucceeded ? "warning" : "failed");
+    button.disabled = operationSucceeded || cancelled;
+    button.textContent = cancelled ? "Cancelled" : operationSucceeded ? "Ran query" : "Run query";
+    if (cancelled) return;
     if (aiAssistant.renderError(error)) return;
     detailAiActionError(card, error.message);
     if (operationSucceeded) return;
@@ -7503,9 +8142,9 @@ elements.relationTool.addEventListener("click", () => setRelationMode(!relationM
 document.querySelector("#cancel-relationship").addEventListener("click", () => setRelationMode(false));
 elements.undoButton.addEventListener("click", undo);
 elements.redoButton.addEventListener("click", redo);
-document.querySelector("#fit-button").addEventListener("click", fitDiagram);
-document.querySelector("#zoom-in-button").addEventListener("click", () => setZoom(view.zoom * 1.15));
-document.querySelector("#zoom-out-button").addEventListener("click", () => setZoom(view.zoom / 1.15));
+document.querySelector("#fit-button").addEventListener("click", () => activeRailWorkspace() === "views" ? fitViewsCanvas() : fitDiagram());
+document.querySelector("#zoom-in-button").addEventListener("click", () => activeRailWorkspace() === "views" ? setViewsZoom(viewsView.zoom * 1.15) : setZoom(view.zoom * 1.15));
+document.querySelector("#zoom-out-button").addEventListener("click", () => activeRailWorkspace() === "views" ? setViewsZoom(viewsView.zoom / 1.15) : setZoom(view.zoom / 1.15));
 
 elements.projectName.addEventListener("input", event => {
   checkpointHistory("project-name");
@@ -7596,16 +8235,196 @@ elements.viewsBrowseButton.addEventListener("click", () => setPrototypeViewCatal
 elements.viewsCreateButton.addEventListener("click", () => openPrototypeViewEditor());
 elements.viewsRefreshButton.addEventListener("click", () => { void loadViewsCatalog(); });
 elements.viewsDeleteButton.addEventListener("click", deleteSelectedPrototypeView);
+elements.viewsConceptStage.addEventListener("pointerdown", event => {
+  const viewport = event.target.closest(".views-lineage-viewport");
+  if (!viewport) return;
+  const handle = event.target.closest("[data-views-node-handle]");
+  const nodeElement = handle?.closest("[data-views-node-key]");
+  if (handle && nodeElement && event.button === 0) {
+    event.preventDefault();
+    viewport.focus({ preventScroll: true });
+    const key = nodeElement.dataset.viewsNodeKey;
+    const node = buildViewsLineageModel(selectedPrototypeView()).nodeByKey.get(key);
+    if (!node) return;
+    viewsNodeDragState = {
+      pointerId: event.pointerId, key, nodeElement,
+      startX: event.clientX, startY: event.clientY, x: node.x, y: node.y,
+      previous: Object.prototype.hasOwnProperty.call(viewsObjects, key) ? clone(viewsObjects[key]) : null,
+      moved: false,
+    };
+    viewport.setPointerCapture(event.pointerId);
+    viewport.classList.add("node-dragging");
+    return;
+  }
+  if (event.target.closest("button,input,textarea,select,a[href],details,[contenteditable=true],[data-views-node-key]")) return;
+  if (!(event.button === 0 || event.button === 1 || event.pointerType === "touch")) return;
+  event.preventDefault();
+  viewport.focus({ preventScroll: true });
+  viewsPanState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: viewsView.x, y: viewsView.y, moved: false };
+  viewport.setPointerCapture(event.pointerId);
+  viewport.classList.add("panning");
+});
+elements.viewsConceptStage.addEventListener("pointermove", event => {
+  const viewport = elements.viewsConceptStage.querySelector(".views-lineage-viewport");
+  if (viewsNodeDragState?.pointerId === event.pointerId) {
+    const pointerDeltaX = event.clientX - viewsNodeDragState.startX;
+    const pointerDeltaY = event.clientY - viewsNodeDragState.startY;
+    if (!viewsNodeDragState.moved && Math.hypot(pointerDeltaX, pointerDeltaY) <= POINTER_MOVE_THRESHOLD_PX) return;
+    viewsNodeDragState.moved = true;
+    const deltaX = pointerDeltaX / viewsView.zoom;
+    const deltaY = pointerDeltaY / viewsView.zoom;
+    const x = viewsNodeDragState.x + deltaX;
+    const y = viewsNodeDragState.y + deltaY;
+    viewsObjects[viewsNodeDragState.key] = { ...(viewsObjects[viewsNodeDragState.key] ?? {}), x, y };
+    viewsNodeDragState.nodeElement.style.left = `${x}px`;
+    viewsNodeDragState.nodeElement.style.top = `${y}px`;
+    renderViewsCanvasEdges();
+    return;
+  }
+  if (!viewsPanState || viewsPanState.pointerId !== event.pointerId) return;
+  if (!viewsPanState.moved && Math.hypot(event.clientX - viewsPanState.startX, event.clientY - viewsPanState.startY) <= POINTER_MOVE_THRESHOLD_PX) return;
+  viewsPanState.moved = true;
+  viewsView.x = viewsPanState.x + event.clientX - viewsPanState.startX;
+  viewsView.y = viewsPanState.y + event.clientY - viewsPanState.startY;
+  applyViewsView();
+  viewport?.classList.add("panning");
+});
+elements.viewsConceptStage.addEventListener("pointerup", event => {
+  const viewport = elements.viewsConceptStage.querySelector(".views-lineage-viewport");
+  if (viewsNodeDragState?.pointerId === event.pointerId) {
+    const moved = viewsNodeDragState.moved;
+    viewsNodeDragState = null;
+    viewport?.classList.remove("node-dragging");
+    if (moved) {
+      viewsSuppressClick = true;
+      saveViewsLayout();
+    }
+  }
+  if (viewsPanState?.pointerId === event.pointerId) {
+    const moved = viewsPanState.moved;
+    viewsPanState = null;
+    viewport?.classList.remove("panning");
+    if (moved) {
+      viewsSuppressClick = true;
+      saveViewsLayout();
+    }
+  }
+});
+elements.viewsConceptStage.addEventListener("pointercancel", event => {
+  const viewport = elements.viewsConceptStage.querySelector(".views-lineage-viewport");
+  if (viewsNodeDragState?.pointerId === event.pointerId) {
+    if (viewsNodeDragState.previous) viewsObjects[viewsNodeDragState.key] = viewsNodeDragState.previous;
+    else delete viewsObjects[viewsNodeDragState.key];
+    viewsNodeDragState = null;
+    renderViewsPrototype();
+  }
+  if (viewsPanState?.pointerId === event.pointerId) {
+    viewsView.x = viewsPanState.x;
+    viewsView.y = viewsPanState.y;
+    viewsPanState = null;
+    applyViewsView();
+  }
+  viewport?.classList.remove("node-dragging", "panning");
+});
+elements.viewsConceptStage.addEventListener("wheel", event => {
+  const viewport = event.target.closest(".views-lineage-viewport");
+  if (!viewport || event.target.closest(".prototype-source-columns,.prototype-focus-fields,.views-stage-card details,.views-query-block-card details")) return;
+  event.preventDefault();
+  const rect = viewport.getBoundingClientRect();
+  if (!setViewsZoom(viewsView.zoom * (event.deltaY > 0 ? .9 : 1.1), event.clientX - rect.left, event.clientY - rect.top, true)) return;
+  clearTimeout(viewsWheelZoomTimer);
+  viewsWheelZoomTimer = setTimeout(finishViewsWheelZoom, WHEEL_ZOOM_IDLE_MS);
+}, { passive: false });
 elements.viewsConceptStage.addEventListener("click", event => {
+  if (viewsSuppressClick) {
+    viewsSuppressClick = false;
+    return;
+  }
   const paneToggle = event.target.closest("[data-views-pane]");
   const catalogToggle = event.target.closest("[data-toggle-prototype-catalog]");
+  const output = event.target.closest("[data-view-output]");
+  const sourceColumn = event.target.closest("[data-flow-source-column]");
+  const sourceSelect = event.target.closest("[data-select-flow-source]");
+  const queryJoin = event.target.closest("[data-select-query-join]");
+  const queryBlock = event.target.closest("[data-select-query-block]");
+  if (event.target.closest("[data-clear-views-focus]")) {
+    clearViewsFlowFocus();
+    renderViewsPrototype();
+    elements.viewsConceptStage.querySelector(".views-lineage-viewport")?.focus({ preventScroll: true });
+    return;
+  }
+  if (event.target.closest("[data-views-fit]")) return fitViewsCanvas();
+  if (event.target.closest("[data-views-zoom-in]")) return setViewsZoom(viewsView.zoom * 1.15);
+  if (event.target.closest("[data-views-zoom-out]")) return setViewsZoom(viewsView.zoom / 1.15);
+  if (queryJoin) {
+    const joinOrdinal = Number(queryJoin.dataset.selectQueryJoin);
+    if (!prototypeJoinLineage(selectedPrototypeView()).joins.some(join => join.joinOrdinal === joinOrdinal)) return;
+    viewsPrototypeState.flowFocus = { kind: "join", joinOrdinal };
+    renderViewsPrototype();
+    elements.viewsConceptStage.querySelector(`[data-select-query-join="${joinOrdinal}"]`)?.focus({ preventScroll: true });
+    return;
+  }
+  if (queryBlock) {
+    const root = selectedSqlStages(selectedPrototypeView()).stages.find(stage => stage.kind === "query_block");
+    if (!root || root.stageId !== queryBlock.dataset.selectQueryBlock) return;
+    viewsPrototypeState.flowFocus = { kind: "query_block", stageId: root.stageId };
+    renderViewsPrototype();
+    elements.viewsConceptStage.querySelector(`[data-select-query-block="${CSS.escape(root.stageId)}"]`)?.focus({ preventScroll: true });
+    return;
+  }
+  if (sourceSelect) {
+    const selected = selectedPrototypeView();
+    const source = selected?.sources.find(item => relationIdentityKey(item) === sourceSelect.dataset.selectFlowSource);
+    if (!source) return;
+    viewsPrototypeState.selectedSourceKey = relationIdentityKey(source);
+    viewsPrototypeState.selectedSourceColumn = null;
+    viewsPrototypeState.flowFocus = { kind: "source", sourceKey: relationIdentityKey(source) };
+    const projections = prototypeColumnLineage(selected).outputs.filter(item => item.inputs.some(input => prototypeEndpointMatchesSource(input, source)));
+    if (projections.length && !projections.some(item => item.outputOrdinal === viewsPrototypeState.selectedOutputOrdinal)) {
+      viewsPrototypeState.selectedOutputOrdinal = projections[0].outputOrdinal;
+    }
+    renderViewsPrototype();
+    elements.viewsConceptStage.querySelector(`[data-select-flow-source="${CSS.escape(viewsPrototypeState.selectedSourceKey)}"]`)?.focus({ preventScroll: true });
+    return;
+  }
+  if (output) {
+    if (sourceColumn) {
+      viewsPrototypeState.selectedSourceKey = sourceColumn.dataset.flowSource;
+      viewsPrototypeState.selectedSourceColumn = sourceColumn.dataset.flowSourceColumn;
+    }
+    viewsPrototypeState.selectedOutputOrdinal = Number(output.dataset.viewOutput);
+    viewsPrototypeState.flowFocus = sourceColumn
+      ? { kind: "source", sourceKey: sourceColumn.dataset.flowSource }
+      : { kind: "output", outputOrdinal: viewsPrototypeState.selectedOutputOrdinal };
+    if (!sourceColumn) {
+      viewsPrototypeState.selectedSourceColumn = null;
+      const selected = selectedPrototypeView();
+      const selectedOutput = selectedPrototypeOutput(selected);
+      const currentSource = selectedPrototypeSource(selected);
+      if (selectedOutput?.inputs.length && !selectedOutput.inputs.some(input => prototypeEndpointMatchesSource(input, currentSource))) {
+        const matchingSource = selected.sources.find(source => prototypeEndpointMatchesSource(selectedOutput.inputs[0], source));
+        if (matchingSource) viewsPrototypeState.selectedSourceKey = relationIdentityKey(matchingSource);
+      }
+    }
+    renderViewsPrototype();
+    const selectedControl = sourceColumn
+      ? [...elements.viewsConceptStage.querySelectorAll(`[data-flow-source-column="${CSS.escape(viewsPrototypeState.selectedSourceColumn)}"]`)].find(control => control.dataset.flowSource === viewsPrototypeState.selectedSourceKey && control.offsetParent !== null)
+      : [...elements.viewsConceptStage.querySelectorAll(`[data-view-output="${viewsPrototypeState.selectedOutputOrdinal}"]`)].find(control => control.offsetParent !== null);
+    selectedControl?.focus({ preventScroll: true });
+    return;
+  }
+  if (event.target.matches(".views-lineage-viewport,.views-canvas-grid,.views-lineage-stage")) {
+    if (!viewsPrototypeState.flowFocus) return;
+    clearViewsFlowFocus();
+    renderViewsPrototype();
+    elements.viewsConceptStage.querySelector(".views-lineage-viewport")?.focus({ preventScroll: true });
+    return;
+  }
   if (paneToggle) return toggleViewsActivePane(paneToggle.dataset.viewsPane);
   if (catalogToggle) {
     setPrototypeViewCatalogOpen(!viewsPrototypeState.catalogOpen);
     return;
   }
-  const sourceToggle = event.target.closest("[data-toggle-source-columns]");
-  if (sourceToggle) return togglePrototypeSourceColumns(sourceToggle);
   if (event.target.closest("[data-refresh-views]")) return loadViewsCatalog();
   const kindFilter = event.target.closest("[data-view-kind-filter]");
   if (kindFilter) {
@@ -7644,10 +8463,13 @@ elements.viewsConceptStage.addEventListener("click", event => {
   if (duplicateButton) return openPrototypeViewEditor(duplicateButton.dataset.prototypeDuplicate, true);
   if (!viewCard) return;
   viewsPrototypeState.selectedId = viewCard.dataset.prototypeViewId;
-  viewsPrototypeState.expandedSources.clear();
+  viewsPrototypeState.selectedOutputOrdinal = null;
+  viewsPrototypeState.selectedSourceKey = null;
+  viewsPrototypeState.selectedSourceColumn = null;
+  viewsPrototypeState.flowFocus = null;
   const selected = viewsPrototypeState.views.find(item => item.id === viewsPrototypeState.selectedId);
   renderViewsPrototype();
-  if (selected?.loading) inspectViewsRelation({ database: activeViewsBinding().database, namespace: selected.namespace, relation: selected.name, kind: selected.kind }, { select: true }).then(renderViewsPrototype).catch(error => showToast(error.message));
+  if (selected?.loading) inspectViewsRelation({ database: activeViewsBinding().database, namespace: selected.namespace, relation: selected.name, kind: selected.kind }, { select: true }).then(async () => { await hydrateViewsSourceDescriptors(selectedPrototypeView()); renderViewsPrototype(); }).catch(error => showToast(error.message));
 });
 elements.viewsConceptStage.addEventListener("input", event => {
   const definitionEditor = event.target.closest("[data-prototype-definition-editor]");
@@ -7666,6 +8488,16 @@ elements.viewsConceptStage.addEventListener("input", event => {
   });
 });
 elements.viewsConceptStage.addEventListener("keydown", event => {
+  const viewport = event.target.closest(".views-lineage-viewport");
+  const delta = canvasKeyboardPanDelta(event.key, event.shiftKey);
+  if (viewport && event.target === viewport && delta && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    viewsView.x += delta.x;
+    viewsView.y += delta.y;
+    applyViewsView();
+    saveViewsLayout();
+    return;
+  }
   if (!event.target.closest("[data-prototype-definition-editor]") || !(event.ctrlKey || event.metaKey)) return;
   const key = event.key.toLowerCase();
   if (key === "z") {
@@ -7737,13 +8569,14 @@ elements.prototypeViewCommitForm.addEventListener("submit", async event => {
       viewsPrototypeState.views = viewsPrototypeState.views.filter(item => item.id !== result.deleted.relation);
       viewsPrototypeState.selectedId = viewsPrototypeState.views[Math.min(deletedIndex, viewsPrototypeState.views.length - 1)]?.id ?? null;
       viewsPrototypeState.inspectedRelation = null;
-      viewsPrototypeState.expandedSources.clear();
       await loadViewsCatalog({ preserveSelection: true });
       showToast(result.deleted.kind === "materialized_view" ? "Materialized view and its stored rows deleted" : "View deleted");
     } else {
       viewsPrototypeState.selectedId = result.descriptor.relation;
       const appliedIndex = viewsPrototypeState.views.findIndex(item => item.id === result.descriptor.relation);
-      if (appliedIndex >= 0) viewsPrototypeState.views[appliedIndex] = descriptorToView(validateRelationDescriptor(result.descriptor, activeViewsBinding(), result.descriptor.relation, result.descriptor.kind));
+      if (appliedIndex >= 0) viewsPrototypeState.views[appliedIndex] = descriptorToView(validateRelationDescriptor(result.descriptor, activeViewsBinding(), result.descriptor.relation, {
+        database: result.descriptor.database, namespace: result.descriptor.namespace, relation: result.descriptor.relation, kind: result.descriptor.kind,
+      }));
       await loadViewsCatalog({ preserveSelection: true });
       showToast("View changes applied and saved schema synchronized");
     }

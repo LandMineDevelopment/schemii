@@ -35,7 +35,8 @@ class FakeSchemerAuthority(FakeSchemiiAuthority):
         }[access_level]
         self.chats[chat_id] = {
             "id": chat_id, "dashboardId": dashboard_id, "externalSessionId": external_id,
-            "title": "Dashboard chat", "target": target or {}, "accessLevel": access_level,
+            "title": "Dashboard chat", "contextTitle": "Dashboard chat", "conversationTitle": None,
+            "target": target or {}, "accessLevel": access_level,
             "capabilities": capabilities, "policyRevision": 1, "state": "active",
         }
         return self.get_chat(chat_id)
@@ -46,7 +47,7 @@ class FakeSchemerAuthority(FakeSchemiiAuthority):
         return {"chatId": chat_id}
 
     def bind_external_session(self, chat_id, external_id, title):
-        self.chats[chat_id].update({"externalSessionId": external_id, "title": title})
+        self.chats[chat_id].update({"externalSessionId": external_id, "title": title, "contextTitle": title, "conversationTitle": None})
 
     def activate_chat(self, chat_id, target, access_level):
         current = self.chats[chat_id]
@@ -140,6 +141,23 @@ class SchemerServerTests(unittest.TestCase):
         operation = json.loads(self.request(path, "POST", execute, authorized=True)[1])["operation"]
         self.assertTrue(operation["result"]["dashboardId"].startswith("dashboard_"))
         self.assertEqual(self.dashboard_store.get(operation["result"]["dashboardId"])["dashboard"]["title"], "Operations")
+
+    def test_ai_analytic_query_cancellation_uses_shared_operation_boundary(self):
+        proposal = self.authority.create_proposal(
+            "ses_1", {"type": "read_query", "sql": "SELECT pg_sleep(30)"},
+            {"policyRevision": 1}, {}, {},
+        )
+        operation, _ = self.authority.authorize_and_claim(proposal["id"], "ses_1", 1, None)
+
+        status, body, _ = self.request(
+            f"/api/ai/sessions/ses_1/proposals/{proposal['id']}/execution", "DELETE", authorized=True,
+        )
+
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["cancellation"]["requested"])
+        self.assertEqual(payload["operation"]["id"], operation["id"])
+        self.assertIn(("cancel_read_only_sql", operation["id"]), self.service.calls)
 
     def test_ai_lease_loss_after_dashboard_write_is_uncertain_and_not_replayed(self):
         self.authority.put_chat("ses_1", "dashboard_mercury", "ses_1", access_level="metadata")
@@ -424,11 +442,21 @@ class SchemerServerTests(unittest.TestCase):
 
         status, body, _ = self.request(f"/api/ai/sessions?{correct}", authorized=True)
         self.assertEqual(status, 200)
-        self.assertEqual([item["id"] for item in json.loads(body)["sessions"]], ["ses_1"])
+        session = json.loads(body)["sessions"][0]
+        self.assertEqual(session["id"], "ses_1")
+        self.assertEqual(session["title"], "Add events")
+        self.assertEqual(session["contextTitle"], "Dashboard chat")
         self.assertEqual(self.request(f"/api/ai/sessions?{wrong}", authorized=True)[0], 200)
         self.assertEqual(json.loads(self.request(f"/api/ai/sessions?{wrong}", authorized=True)[1])["sessions"], [])
         self.assertEqual(self.request(f"/api/ai/sessions/ses_1/messages?{wrong}", authorized=True)[0], 409)
         self.assertEqual(self.request(f"/api/ai/sessions/ses_1/messages?{correct}", authorized=True)[0], 200)
+
+    def test_ai_chat_title_can_be_renamed(self):
+        path = "/api/ai/sessions/ses_1/title"
+        status, body, _ = self.request(path, "PUT", {"title": "Revenue dashboard revisions"}, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["title"], "Revenue dashboard revisions")
+        self.assertEqual(self.authority.get_chat("ses_1")["conversationTitle"], "Revenue dashboard revisions")
 
     def test_profile_writes_use_shared_router_and_redact_password(self):
         profile = {

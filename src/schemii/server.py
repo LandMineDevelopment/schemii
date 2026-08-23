@@ -14,7 +14,7 @@ from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMainten
 from .schemii_ai_actions import normalize_schemii_action
 from .ai_tool_contracts import effective_schemii_contract
 from .ai_schema_mutations import apply_schema_actions, destructive_impact
-from .ai_http import AiHttpRouter, authority_call, issue_ai_proposals
+from .ai_http import AiHttpRouter, ai_conversation_title, authority_call, ensure_ai_conversation_title, issue_ai_proposals
 from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, MetadataStoreError
 from .secret_file import read_secret_file
 from .migration_execution import DurableMigrationCoordinator
@@ -350,6 +350,12 @@ def make_handler(
         settings_handler=lambda handler, body: authority_call(
             handler, ai_authority.get_settings if body is None else lambda: ai_authority.update_settings(body),
         ),
+        cancellation_handler=lambda handler, current_service, session_id, proposal_id: handler._ai_cancel_proposal(
+            current_service, session_id, proposal_id,
+        ),
+        title_handler=lambda handler, current_service, session_id, body: handler._ai_title(
+            current_service, session_id, body,
+        ),
     )
     def bound_ai_policy(chat, action, *, origin="model"):
         capability, _ = effective_schemii_contract(action)
@@ -459,6 +465,21 @@ def make_handler(
                 ai_authority.finish_delete(session_id)
                 return result
             return self._ai_call(delete)
+
+        def _ai_title(self, current_ai_service, session_id: str, body: dict):
+            if set(body) != {"title"}:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": "AI chat title fields are invalid"}})
+            try:
+                title = ai_conversation_title(body.get("title"), truncate=False)
+            except ValueError as error:
+                return self.send_json(400, {"error": {"code": "validation_error", "message": str(error)}})
+
+            def rename():
+                self._ai_chat(current_ai_service, session_id)
+                chat = ai_authority.rename_conversation(session_id, title)
+                return {"id": chat["id"], "title": chat["title"], "contextTitle": chat["contextTitle"]}
+
+            return self._ai_call(rename)
 
         def _ai_policy(self, current_ai_service, session_id, body):
             def policy():
@@ -693,6 +714,7 @@ def make_handler(
                 reservation = None
                 delivery_state = "reserved"
                 chat = self._ai_chat(current_ai_service, session_id)
+                chat = ai_authority.initialize_conversation_title(session_id, ai_conversation_title(text))
                 schema_id = chat["schemaId"]
                 access_level = _ai_access(chat["capabilities"])
                 target = chat["target"]
@@ -828,7 +850,8 @@ def make_handler(
                         identity = identities.get(chat["externalSessionId"])
                         if set(chat["capabilities"]) != set(_ai_capabilities(access_level)) or identity is None:
                             continue
-                        sessions.append({**identity, "id": chat["id"], "title": chat["title"], "schemaId": chat["schemaId"], "target": chat["target"], "capabilities": chat["capabilities"], "approvals": chat["approvals"], "policyRevision": chat["policyRevision"]})
+                        chat = ensure_ai_conversation_title(current_ai_service, ai_authority, chat)
+                        sessions.append({**identity, "id": chat["id"], "title": chat["title"], "contextTitle": chat["contextTitle"], "schemaId": chat["schemaId"], "target": chat["target"], "capabilities": chat["capabilities"], "approvals": chat["approvals"], "policyRevision": chat["policyRevision"]})
                     return {"sessions": sessions}
                 chat = self._ai_chat(current_ai_service, session_id, supplied)
                 schema_id = chat["schemaId"]
@@ -837,8 +860,10 @@ def make_handler(
                 pending = []
                 for proposal in ai_authority.pending_proposals(session_id):
                     operation = ai_authority.operation_for_proposal(proposal["id"], session_id)
-                    if operation is None or operation["state"] in {"running", "uncertain"}:
-                        pending.append({"proposalId": proposal["id"], "sessionId": session_id, "action": proposal["action"], "policyBinding": proposal["policyBinding"]})
+                    if operation is None or operation["state"] in {"running", "uncertain"} or (
+                        operation["state"] == "cancelled" and operation.get("cancellationRequested")
+                    ):
+                        pending.append({"proposalId": proposal["id"], "sessionId": session_id, "action": proposal["action"], "policyBinding": proposal["policyBinding"], "operation": operation, "cancellationRequested": proposal.get("cancellationRequested", False)})
                 return {**result, "pendingProposals": pending}
 
             return self._ai_call(history)
@@ -869,6 +894,18 @@ def make_handler(
                 self._ai_chat(current_ai_service, session_id)
                 return {"operation": ai_authority.operation(operation_id, session_id)}
             return authority_call(self, status)
+
+        def _ai_cancel_proposal(self, current_ai_service, session_id: str, proposal_id: str):
+            def cancel():
+                cancellation = ai_authority.request_query_cancellation(proposal_id, session_id)
+                operation_id = cancellation.get("operationId")
+                if cancellation.get("requested") and operation_id and cancellation.get("operationState") == "running":
+                    service.cancel_read_only_sql(operation_id)
+                operation = None if operation_id is None else ai_authority.operation(operation_id, session_id)
+                if operation is not None and operation["state"] != "running":
+                    service.release_read_only_sql(operation_id)
+                return {"cancellation": cancellation, "operation": operation}
+            return authority_call(self, cancel)
 
         def _ai_execute_proposal(self, current_ai_service, session_id: str, proposal_id: str, body: dict):
             allowed = {"confirmation", "policyRevision"}
@@ -937,6 +974,8 @@ def make_handler(
                 finally:
                     if ai_maintenance is not None:
                         ai_maintenance.release(attempt_id)
+                    if action.get("type") == "schema_read_query":
+                        service.release_read_only_sql(operation["id"])
             try:
                 result = self._execute_schemii_action(
                     action, session_id, schema_id, record, profile, authorization_target,

@@ -15,6 +15,10 @@ CAPABILITIES = ("metadata", "dashboard", "data")
 class SchemerMetadataAuthority(SchemiiMetadataAuthority):
     """Schemer chat and execution authority backed exclusively by metadata PostgreSQL."""
 
+    application_id = "schemer"
+    resource_kind = "dashboard"
+    query_action_type = "read_query"
+
     def __init__(self, store: MetadataStore, *, worker_id: str, lease_seconds: int = 90):
         super().__init__(store, worker_id=worker_id, lease_seconds=lease_seconds)
 
@@ -83,7 +87,9 @@ class SchemerMetadataAuthority(SchemiiMetadataAuthority):
             "id": chat["chatId"],
             "dashboardId": chat["resourceId"],
             "externalSessionId": chat["externalSessionId"],
-            "title": chat["displayTitle"],
+            "title": chat.get("conversationTitle") or chat["displayTitle"],
+            "contextTitle": chat["displayTitle"],
+            "conversationTitle": chat.get("conversationTitle"),
             "accessLevel": access_level,
             "target": {} if target is None else {
                 "profileId": target["profileId"],
@@ -96,6 +102,14 @@ class SchemerMetadataAuthority(SchemiiMetadataAuthority):
             "policySnapshot": policy if policy.get("version") == 2 else None,
             "agentPolicyRevisionId": current.get("agentPolicyRevisionId"),
         }
+
+    def initialize_conversation_title(self, chat_id: str, title: str) -> dict[str, Any]:
+        self.store.set_chat_conversation_title(chat_id, title, overwrite=False)
+        return self.get_chat(chat_id)
+
+    def rename_conversation(self, chat_id: str, title: str) -> dict[str, Any]:
+        self.store.set_chat_conversation_title(chat_id, title, overwrite=True)
+        return self.get_chat(chat_id)
 
     def list_chats(self, dashboard_id: str | None = None) -> list[dict[str, Any]]:
         records = self.store.list_chats(

@@ -63,8 +63,8 @@ class FakePostgresService:
         self.ai_write_results = {}
         self.console_settings_value = {
             "application": "test", "revision": 1, "writeIntent": "disabled", "defaultMode": "managed_read",
-            "statementLimit": 20, "rowPageSize": 100, "inheritance": "none",
-            "maxima": {"statementLimit": 20, "rowPageSize": 500},
+            "statementLimit": 100, "rowPageSize": 100, "inheritance": "none",
+            "maxima": {"statementLimit": 100, "rowPageSize": 500},
         }
 
     def list_profiles(self):
@@ -113,6 +113,13 @@ class FakePostgresService:
     def execute_read_only_sql(self, profile_id, namespace, statement, **policy):
         self.calls.append(("execute_read_only_sql", profile_id, namespace, statement, policy))
         return {"columns": [{"name": "answer"}], "rows": [[1]], "rowCount": 1, "truncated": False}
+
+    def cancel_read_only_sql(self, operation_id):
+        self.calls.append(("cancel_read_only_sql", operation_id))
+        return {"requested": True}
+
+    def release_read_only_sql(self, operation_id):
+        self.calls.append(("release_read_only_sql", operation_id))
 
     def execute_console(self, profile_id, body, binding, server_id, policy=None):
         self.calls.append(("execute_console", profile_id, body, binding, server_id, policy))

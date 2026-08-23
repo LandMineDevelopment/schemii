@@ -459,12 +459,66 @@
 
     function removeEmptyState() { elements.messages.querySelector(".ai-empty-state")?.remove(); }
 
+    async function copyChatText(text) {
+      const value = String(text ?? "");
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+      } catch { /* Fall back for browsers that deny the Clipboard API. */ }
+      const field = document.createElement("textarea");
+      field.value = value; field.readOnly = true; field.tabIndex = -1;
+      field.style.position = "fixed"; field.style.opacity = "0"; field.style.pointerEvents = "none";
+      document.body.append(field); field.select();
+      try {
+        if (!document.execCommand?.("copy")) throw new Error("Copy is unavailable");
+      } finally {
+        field.remove();
+      }
+    }
+
+    function selectedTextWithin(surface) {
+      const selection = window.getSelection?.();
+      if (!selection || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) return "";
+      if (!surface.contains(selection.anchorNode) || !surface.contains(selection.focusNode)) return "";
+      return selection.toString();
+    }
+
+    function appendCopyControl(surface, text, label) {
+      surface.classList.add("ai-copy-surface");
+      const button = shared.createIconButton({ icon: "copy", label, tooltip: label, className: "ai-copy-button", placement: "left" });
+      let pointerSelection = "";
+      button.addEventListener("pointerdown", () => { pointerSelection = selectedTextWithin(surface); });
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const selected = pointerSelection || selectedTextWithin(surface); pointerSelection = "";
+          await copyChatText(selected || text); button.setAttribute("aria-label", "Copied"); button.dataset.tooltip = "Copied"; button.classList.add("copied");
+        } catch {
+          button.setAttribute("aria-label", "Copy failed"); button.dataset.tooltip = "Copy failed"; button.classList.add("failed");
+        } finally {
+          button.disabled = false;
+          setTimeout(() => {
+            if (!button.isConnected) return;
+            button.setAttribute("aria-label", label); button.dataset.tooltip = label; button.classList.remove("copied", "failed");
+          }, 1800);
+        }
+      });
+      surface.append(button);
+      return button;
+    }
+
+    function appendMessageCopyControl(body, text, role) {
+      return appendCopyControl(body, text, role === "assistant" ? "Copy assistant message" : role === "tool" ? "Copy query result message" : "Copy your message");
+    }
+
     function appendMessage(role, text) {
       removeEmptyState();
       const message = document.createElement("article"); message.className = `ai-message ${role}`;
       const label = document.createElement("span"); label.textContent = role === "assistant" ? "Assistant" : role === "tool" ? "Query result" : "You";
-      const body = document.createElement("p"); body.textContent = String(text ?? "");
-      message.append(label, body); elements.messages.append(message); scrollToEnd();
+      const value = String(text ?? ""); const body = document.createElement("p"); body.textContent = value;
+      appendMessageCopyControl(body, value, role); message.append(label, body); elements.messages.append(message); scrollToEnd();
       return message;
     }
 
@@ -497,6 +551,15 @@
       elements.messages.append(card); scrollToEnd(); return true;
     }
 
+    function renderProposalDiagnostic(diagnostic) {
+      if (diagnostic?.code !== "proposal_validation_failed" || typeof diagnostic.message !== "string") return;
+      removeEmptyState();
+      const card = document.createElement("section"); card.className = "ai-error-card ai-proposal-diagnostic"; card.setAttribute("role", "alert");
+      const title = document.createElement("strong"); title.textContent = "Proposal not created";
+      const message = document.createElement("p"); message.textContent = diagnostic.message;
+      card.append(title, message); elements.messages.append(card);
+    }
+
     function operationError(operation, fallback = "The operation did not succeed") {
       const payload = operation?.error;
       const error = new Error(payload?.message || fallback);
@@ -506,6 +569,10 @@
         if (window.SchemiiShared.formatApiError) error.message = window.SchemiiShared.formatApiError(error, fallback);
       }
       return error;
+    }
+
+    function isCancellationError(error) {
+      return ["execution_cancelled", "proposal_cancelled"].includes(error?.code);
     }
 
     function appendQueryResult(result) {
@@ -564,18 +631,39 @@
       const indicator = document.createElement("span"); indicator.className = "ai-action-progress-indicator"; indicator.setAttribute("aria-hidden", "true");
       const status = document.createElement("span"); status.className = "ai-action-progress-status"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); status.setAttribute("aria-atomic", "true"); status.textContent = labels.runningLabel || "Running proposal";
       const elapsed = document.createElement("time"); elapsed.className = "ai-action-progress-time"; elapsed.setAttribute("aria-hidden", "true"); elapsed.textContent = "0.0s";
-      progress.append(indicator, status, elapsed); card.append(progress); card.classList.add("running"); card.setAttribute("aria-busy", "true"); scrollToEnd();
+      const cancel = typeof labels.onCancel === "function" ? document.createElement("button") : null;
+      if (cancel) {
+        cancel.type = "button"; cancel.className = "button button-ghost ai-action-cancel"; cancel.textContent = labels.cancelLabel || "Stop";
+        cancel.setAttribute("aria-label", labels.cancelAriaLabel || "Cancel running query");
+      }
+      progress.append(indicator, status, elapsed); if (cancel) progress.append(cancel);
+      card.append(progress); card.classList.add("running"); card.setAttribute("aria-busy", "true"); scrollToEnd();
       const activity = { elapsed, startedAt }; proposalActivities.add(activity);
       if (proposalActivityTimer === null) proposalActivityTimer = setInterval(tickProposalActivities, 100);
-      let finished = false;
+      let finished = false; let cancellationRequested = false;
+      cancel?.addEventListener("click", async () => {
+        if (finished || cancellationRequested) return;
+        cancellationRequested = true; cancel.disabled = true; progress.classList.add("cancelling");
+        status.textContent = labels.cancellingLabel || "Requesting cancellation";
+        try {
+          const response = await labels.onCancel();
+          if (response?.cancellation?.requested === false) status.textContent = labels.alreadyFinishedLabel || "Query already finished; loading its result";
+          else status.textContent = labels.cancellationRequestedLabel || "Cancelling query and waiting for rollback";
+        } catch (error) {
+          cancellationRequested = false; cancel.disabled = false; progress.classList.remove("cancelling");
+          status.textContent = labels.cancelFailedLabel || "Cancellation failed; query is still running";
+          labels.onCancelError?.(error);
+        }
+      });
       return {
         finish(outcome = "completed") {
           if (finished) return; finished = true;
           elapsed.textContent = formatDuration(performance.now() - startedAt); proposalActivities.delete(activity); tickProposalActivities();
-          const failed = outcome === "failed"; const warning = outcome === "warning";
-          progress.className = `ai-action-progress ${failed ? "failed" : warning ? "warning" : "completed"}`;
-          const terminalLabel = failed ? (labels.failedLabel || "Proposal failed") : warning ? (labels.warningLabel || "Proposal completed; refresh failed") : (labels.completedLabel || "Proposal completed");
+          const failed = outcome === "failed"; const warning = outcome === "warning"; const cancelled = outcome === "cancelled";
+          progress.className = `ai-action-progress ${failed ? "failed" : warning ? "warning" : cancelled ? "cancelled" : "completed"}`;
+          const terminalLabel = failed ? (labels.failedLabel || "Proposal failed") : warning ? (labels.warningLabel || "Proposal completed; refresh failed") : cancelled ? (labels.cancelledLabel || "Query cancelled") : (labels.completedLabel || "Proposal completed");
           status.textContent = `${terminalLabel} in ${elapsed.textContent}`;
+          if (cancel) cancel.hidden = true;
           card.classList.remove("running"); card.removeAttribute("aria-busy");
           elapsed.setAttribute("datetime", `PT${Math.max(0, (performance.now() - startedAt) / 1000).toFixed(3)}S`);
         }
@@ -680,6 +768,13 @@
       });
     }
 
+    async function cancelProposal(proposal) {
+      if (!proposal?.proposalId || !proposal?.sessionId) throw new Error("The proposal authority is unavailable");
+      return request(`/api/ai/sessions/${encodeURIComponent(proposal.sessionId)}/proposals/${encodeURIComponent(proposal.proposalId)}/execution`, {
+        method: "DELETE",
+      });
+    }
+
     function proposalContextIsCurrent(capture) {
       const currentAccess = elements.access.value;
       const currentCapture = getContext(currentAccess);
@@ -729,6 +824,33 @@
       return { operation };
     }
 
+    function renderCancellationRecovery(proposal) {
+      const card = document.createElement("section"); card.className = "ai-action-card";
+      const title = document.createElement("strong"); title.textContent = "Read-only query";
+      const detail = document.createElement("p"); detail.textContent = "Cancellation was requested. Waiting for PostgreSQL rollback and the durable operation outcome.";
+      card.append(title, detail); elements.messages.append(card);
+      const activity = beginProposalOperation(card, {
+        runningLabel: "Cancelling query", cancelledLabel: "Query cancelled",
+        warningLabel: "Cancellation outcome requires reconciliation", failedLabel: "Cancellation status failed",
+      });
+      void (async () => {
+        try {
+          const response = proposal.operation == null
+            ? { operation: { state: "cancelled" } }
+            : proposal.operation.state === "running"
+            ? await waitForOperation(proposal, proposal.operation)
+            : { operation: proposal.operation };
+          if (response.operation?.state === "cancelled") activity.finish("cancelled");
+          else if (response.operation?.state === "uncertain") activity.finish("warning");
+          else if (response.operation?.state === "succeeded") activity.finish("completed");
+          else activity.finish("failed");
+        } catch (error) {
+          activity.finish("failed");
+          const message = document.createElement("p"); message.className = "ai-action-error"; message.textContent = error.message; card.append(message);
+        }
+      })();
+    }
+
     function renderGenericAction(proposal, capture) {
       const action = proposal.action;
       let normalized;
@@ -738,13 +860,17 @@
       const title = document.createElement("strong"); title.textContent = normalized.title;
       const summary = document.createElement("p"); summary.textContent = normalized.summary;
       card.append(title, summary);
-      if (normalized.review) { const review = document.createElement("pre"); review.textContent = normalized.review; card.append(review); }
+      if (normalized.review) { const review = document.createElement("pre"); review.textContent = normalized.review; appendCopyControl(review, normalized.review, "Copy proposal details"); card.append(review); }
       const button = document.createElement("button"); button.type = "button"; button.className = "button button-primary"; button.textContent = normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
       button.addEventListener("click", async () => {
         const consequence = normalized.destructive ? "\n\nThis action is destructive and cannot be undone." : "";
         if (!confirm(`${normalized.summary}${consequence}\n\nConfirm this reviewed action?`)) return;
         card.querySelectorAll(".ai-action-error").forEach(error => error.remove()); button.disabled = true; button.textContent = "Running...";
-        const activity = beginProposalOperation(card);
+        const cancellableQuery = normalized.action?.type === "read_query";
+        const activity = beginProposalOperation(card, cancellableQuery ? {
+          runningLabel: "Running query", completedLabel: "Query completed", failedLabel: "Query failed",
+          onCancel: () => cancelProposal(proposal),
+        } : {});
         let operationSucceeded = false;
         try {
           const response = await executeProposal(proposal, capture);
@@ -756,10 +882,11 @@
           activity.finish("completed");
           button.textContent = appliedLabel || normalized.appliedLabel || "Applied"; card.classList.add("applied");
         } catch (error) {
-          activity.finish(operationSucceeded ? "warning" : "failed");
-          button.disabled = operationSucceeded;
-          button.textContent = operationSucceeded ? "Completed" : normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
-          if (!renderStructuredError(error)) { const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail); }
+          const cancelled = isCancellationError(error);
+          activity.finish(cancelled ? "cancelled" : operationSucceeded ? "warning" : "failed");
+          button.disabled = operationSucceeded || cancelled;
+          button.textContent = cancelled ? "Cancelled" : operationSucceeded ? "Completed" : normalized.buttonLabel || (normalized.destructive ? "Review deletion" : "Review & confirm");
+          if (!cancelled && !renderStructuredError(error)) { const detail = document.createElement("p"); detail.className = "ai-action-error"; detail.textContent = error.message; card.append(detail); }
         }
       });
       card.append(button); elements.messages.append(card);
@@ -773,6 +900,7 @@
         else if (part?.type === "tool" || part?.type === "skill") renderToolPart(part);
       }
       if (!renderedText && response.text) appendMessage("assistant", response.text);
+      for (const diagnostic of response.proposalDiagnostics ?? []) renderProposalDiagnostic(diagnostic);
       for (const item of response.proposals ?? []) {
         const proposal = { ...item, sessionId };
         if (proposal.operation) {
@@ -863,7 +991,11 @@
           if (message.role === "assistant") renderResponse({ parts: message.parts ?? [], text: message.text ?? "", actions: [], proposals: [] }, null, session.id);
         }
         const restoredCapture = getContext(elements.access.value);
-        for (const proposal of history.pendingProposals ?? []) renderAction?.(proposal, restoredCapture, api);
+        for (const proposal of history.pendingProposals ?? []) {
+          if (proposal.cancellationRequested || proposal.operation?.cancellationRequested) renderCancellationRecovery(proposal);
+          else if (renderAction) renderAction(proposal, restoredCapture, api);
+          else renderGenericAction(proposal, restoredCapture);
+        }
         if (!elements.messages.children.length) appendMessage("assistant", "This saved conversation has no displayable messages.");
         const resumable = binding.key == null || binding.key === currentKey;
         state.sessionId = resumable ? session.id : null; state.contextKey = resumable ? currentKey : null;
@@ -891,22 +1023,50 @@
           const item = document.createElement("article"); item.className = `ai-history-item${session.id === state.sessionId ? " current" : ""}`;
           const copy = document.createElement("div"); copy.className = "ai-history-copy";
           const title = document.createElement("strong"); title.textContent = binding.title;
-          const date = document.createElement("span"); date.textContent = `${formatHistoryDate(session.updatedAt ?? session.createdAt)}${session.id === state.sessionId ? " / Current" : ""}`;
+          const saved = `${formatHistoryDate(session.updatedAt ?? session.createdAt)}${session.id === state.sessionId ? " / Current" : ""}`;
+          const contextTitle = typeof session.contextTitle === "string" && session.contextTitle && session.contextTitle !== binding.title ? session.contextTitle : "";
+          const date = document.createElement("span"); date.textContent = contextTitle ? `${contextTitle} · ${saved}` : saved;
           const open = document.createElement("button"); open.type = "button"; open.className = "button button-ghost"; open.textContent = session.id === state.sessionId ? "Reopen" : "Open"; open.addEventListener("click", () => restoreSession(session, binding, historyQuery, historyKey));
+          const rename = shared.createIconButton({ icon: "edit", label: `Rename chat “${binding.title}”`, className: "ai-history-rename", placement: "left" });
+          rename.addEventListener("click", () => {
+            if (copy.querySelector(".ai-history-rename-form")) return;
+            const form = document.createElement("form"); form.className = "ai-history-rename-form";
+            const input = document.createElement("input"); input.type = "text"; input.maxLength = 80; input.value = binding.title; input.setAttribute("aria-label", "Chat title");
+            const save = document.createElement("button"); save.type = "submit"; save.className = "button button-primary"; save.textContent = "Save";
+            const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "button button-ghost"; cancel.textContent = "Cancel";
+            const status = document.createElement("span"); status.className = "ai-history-rename-status"; status.setAttribute("role", "status");
+            const finish = () => {
+              form.remove(); title.hidden = false; date.hidden = false; rename.hidden = false; open.disabled = false; remove.disabled = false;
+              rename.setAttribute("aria-label", `Rename chat “${binding.title}”`); rename.dataset.tooltip = rename.getAttribute("aria-label");
+            };
+            cancel.addEventListener("click", finish);
+            form.addEventListener("submit", async event => {
+              event.preventDefault(); const nextTitle = input.value.trim();
+              if (!nextTitle) { status.textContent = "Enter a title."; input.focus(); return; }
+              save.disabled = true; cancel.disabled = true; status.textContent = "Saving…";
+              try {
+                const updated = await request(`/api/ai/sessions/${encodeURIComponent(session.id)}/title`, { method: "PUT", body: JSON.stringify({ title: nextTitle }) });
+                session.title = updated.title; binding.title = updated.title; title.textContent = updated.title; finish();
+              } catch (error) {
+                save.disabled = false; cancel.disabled = false; status.textContent = error.message; input.focus();
+              }
+            });
+            form.append(input, save, cancel, status); title.hidden = true; date.hidden = true; rename.hidden = true; open.disabled = true; remove.disabled = true; copy.append(form); input.focus(); input.select();
+          });
           const remove = document.createElement("button"); remove.type = "button"; remove.className = "button button-ghost ai-history-delete"; remove.textContent = "Delete";
           remove.addEventListener("click", async () => {
             if (!confirm(`Permanently delete chat “${binding.title}”?`)) return;
             await request(`/api/ai/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
             if (state.sessionId === session.id) resetConversation(); await renderHistory();
           });
-          copy.append(title, date); item.append(copy, open, remove); elements.historyList.append(item);
+          copy.append(title, date); item.append(copy, rename, open, remove); elements.historyList.append(item);
         }
       } catch (error) { loading.textContent = `Could not load chat history: ${error.message}`; }
     }
 
     const api = Object.freeze({
-      appendMessage, appendQueryResult, renderResponse, sendMessage, scrollToEnd, invalidateContext,
-      executeProposal, beginProposalOperation, proposalContextIsCurrent, openSettings, operationError, renderError: renderStructuredError,
+      appendMessage, appendQueryResult, appendCopyControl, renderResponse, sendMessage, scrollToEnd, invalidateContext,
+      executeProposal, cancelProposal, beginProposalOperation, proposalContextIsCurrent, openSettings, operationError, isCancellationError, renderError: renderStructuredError,
       get accessLevel() { return elements.access.value; }, get state() { return state; }, get settings() { return state.settings; },
     });
 

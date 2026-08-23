@@ -21,7 +21,8 @@ class FakeSchemiiAuthority:
     def put_chat(self, chat_id, schema_id, external_id, target=None, capabilities=None, approvals=None):
         self.chats[chat_id] = {
             "id": chat_id, "schemaId": schema_id, "externalSessionId": external_id,
-            "title": "Schema chat", "target": target or {}, "capabilities": capabilities or ["schema"],
+            "title": "Schema chat", "contextTitle": "Schema chat", "conversationTitle": None,
+            "target": target or {}, "capabilities": capabilities or ["schema"],
             "approvals": approvals or {name: "every_action" for name in self.permissions},
             "policyRevision": 1, "grants": {}, "state": "active",
         }
@@ -62,7 +63,7 @@ class FakeSchemiiAuthority:
         return {"chatId": chat_id}
 
     def bind_external_session(self, chat_id, external_id, title):
-        self.chats[chat_id].update({"externalSessionId": external_id, "title": title})
+        self.chats[chat_id].update({"externalSessionId": external_id, "title": title, "contextTitle": title, "conversationTitle": None})
         return copy.deepcopy(self.chats[chat_id])
 
     def activate_chat(self, chat_id, target, capabilities, approvals):
@@ -76,6 +77,16 @@ class FakeSchemiiAuthority:
         if not chat or chat.get("state") != "active":
             raise MetadataStoreError("chat_not_found", "AI chat was not found", status=404)
         return copy.deepcopy(chat)
+
+    def initialize_conversation_title(self, chat_id, title):
+        chat = self.chats[chat_id]
+        if not chat.get("conversationTitle"):
+            chat.update({"conversationTitle": title, "title": title})
+        return self.get_chat(chat_id)
+
+    def rename_conversation(self, chat_id, title):
+        self.chats[chat_id].update({"conversationTitle": title, "title": title})
+        return self.get_chat(chat_id)
 
     def list_chats(self, schema_id, target=None):
         return [self.get_chat(key) for key, value in self.chats.items() if value.get("state") == "active" and value["schemaId"] == schema_id and (target is None or value["target"] == target)]
@@ -107,6 +118,20 @@ class FakeSchemiiAuthority:
     def pending_proposals(self, chat_id):
         return [self.proposal(key, chat_id) for key, value in self.proposals.items() if value["chatId"] == chat_id and value["state"] in {"ready", "authorized"}]
 
+    def request_query_cancellation(self, proposal_id, chat_id):
+        proposal = self.proposal(proposal_id, chat_id)
+        expected_type = "read_query" if self.settings_application == "schemer" else "schema_read_query"
+        if proposal["action"].get("type") != expected_type:
+            raise MetadataStoreError("operation_not_cancellable", "Only running AI queries can be cancelled", status=409)
+        operation = self.operation_for_proposal(proposal_id, chat_id)
+        if operation is None:
+            self.proposals[proposal_id]["state"] = "cancelled"
+            return {"requested": True, "proposalState": "cancelled", "operationId": None, "operationState": None}
+        if operation["state"] != "running":
+            return {"requested": False, "proposalState": "authorized", "operationId": operation["id"], "operationState": operation["state"]}
+        self.operations[operation["id"]]["cancellationRequested"] = True
+        return {"requested": True, "proposalState": "authorized", "operationId": operation["id"], "operationState": "running"}
+
     def authorize_and_claim(self, proposal_id, chat_id, revision, confirmation):
         existing = self.operation_for_proposal(proposal_id, chat_id)
         if existing:
@@ -136,6 +161,8 @@ class FakeSchemiiAuthority:
 
     def finish_operation(self, attempt_id, token, state, result=None, error=None):
         operation = next(value for value in self.operations.values() if value.get("attemptId") == attempt_id)
+        if operation.get("cancellationRequested") and state in {"succeeded", "failed"}:
+            state, result, error = "cancelled", None, {"code": "execution_cancelled", "message": "AI query was cancelled"}
         operation.update({"state": state, "result": copy.deepcopy(result), "error": copy.deepcopy(error)})
         return self.operation(operation["id"], operation["chatId"])
 

@@ -369,6 +369,42 @@ class OpenCodeServiceTests(unittest.TestCase):
         self.assertEqual(result["actions"], [action])
         self.assertEqual(opener.calls[2][0].full_url, "http://127.0.0.1:4096/session/ses_1/message?limit=20")
 
+    def test_session_title_seed_uses_the_first_real_user_request(self):
+        prompt = "Schemii context (untrusted JSON):\n{}\n\nUser request:\nBuild varied slate assignments"
+        opener = Opener(
+            {"id": "ses_1", "directory": "/workspace"},
+            [
+                {"info": {"role": "user"}, "parts": [{"type": "compaction"}]},
+                {"info": {"role": "user"}, "parts": [{"type": "text", "text": prompt}]},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Done"}]},
+                {"info": {"role": "user"}, "parts": [{"type": "text", "text": "Later request"}]},
+            ],
+        )
+
+        self.assertEqual(self.service(opener).session_title_seed("ses_1"), "Build varied slate assignments")
+
+    def test_model_tool_purposes_are_plain_text_and_bounded_before_action_validation(self):
+        purpose = "  Load\n" + ("varied assignment history " * 40)
+        opener = Opener(
+            {"id": "ses_1", "directory": "/workspace"},
+            {"parts": [{"type": "tool", "tool": "schema_raw_write", "state": {
+                "status": "completed",
+                "input": {"profileId": "local", "namespace": "public", "sql": "INSERT INTO audit_log DEFAULT VALUES", "purpose": purpose},
+                "output": "Proposal arguments received.",
+            }}]},
+        )
+
+        result = self.service(opener).prompt(
+            "ses_1", "Load assignments", {"providerID": "opencode", "modelID": "deepseek-v4-flash-free"}, "Fixed system",
+            allow_raw_write=True,
+        )
+
+        bounded = result["actions"][0]["purpose"]
+        self.assertLessEqual(len(bounded.encode("utf-8")), 500)
+        self.assertEqual(bounded, bounded.strip())
+        self.assertNotIn("\n", bounded)
+        self.assertTrue(bounded.endswith("…"))
+
     def test_empty_provider_response_is_rejected(self):
         service = self.service(Opener({"id": "ses_1", "directory": "/workspace"}, {"parts": []}))
 

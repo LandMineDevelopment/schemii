@@ -132,17 +132,17 @@
           <button class="rail-button" id="redo-button" type="button" data-tooltip="Redo (Ctrl/Cmd+Shift+Z)" aria-label="Redo" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 4 4-4 4M19 11h-7a6 6 0 0 0-6 6"/></svg>
           </button>
-          <div class="rail-divider" data-rail-workspace="tables"></div>
-          <button class="rail-button" id="fit-button" type="button" data-rail-workspace="tables" data-tooltip="Fit diagram" aria-label="Fit diagram">
+          <div class="rail-divider" data-rail-workspace="canvas"></div>
+          <button class="rail-button" id="fit-button" type="button" data-rail-workspace="canvas" data-tooltip="Fit active canvas" aria-label="Fit active canvas">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
           </button>
-          <button class="rail-button" id="zoom-in-button" type="button" data-rail-workspace="tables" data-tooltip="Zoom in" aria-label="Zoom in">
+          <button class="rail-button" id="zoom-in-button" type="button" data-rail-workspace="canvas" data-tooltip="Zoom in active canvas" aria-label="Zoom in active canvas">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M10.5 7.5v6M7.5 10.5h6"/></svg>
           </button>
-          <button class="rail-button" id="zoom-out-button" type="button" data-rail-workspace="tables" data-tooltip="Zoom out" aria-label="Zoom out">
+          <button class="rail-button" id="zoom-out-button" type="button" data-rail-workspace="canvas" data-tooltip="Zoom out active canvas" aria-label="Zoom out active canvas">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M7.5 10.5h6"/></svg>
           </button>
-          <div class="rail-divider" data-rail-workspace="tables"></div>
+          <div class="rail-divider" data-rail-workspace="canvas"></div>
           <button class="rail-button" id="functions-button" type="button" data-tooltip="Manage functions" aria-label="Manage functions">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4 19 4 19 9 5 9Z M5 15 19 15 19 20 5 20Z M12 9v6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>
           </button>
@@ -223,7 +223,7 @@
           <div class="zoom-display" id="zoom-display">100%</div>
         </section>
 
-        <section class="views-prototype-workspace" id="views-prototype-workspace" aria-label="Views layer prototype" hidden inert>
+        <section class="views-prototype-workspace" id="views-prototype-workspace" aria-label="Views workspace" hidden inert>
           <div class="views-concept-stage" id="views-concept-stage"></div>
         </section>
 

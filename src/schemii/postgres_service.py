@@ -38,6 +38,7 @@ from .postgres_catalog import PostgresCatalogMixin
 from .postgres_connections import PostgresConnectionMixin
 from .postgres_safety import namespace_lock_keys
 from .postgres_console import ConsolePolicy, PostgresConsole, single_sql_statement, top_level_semicolons
+from .postgres_cancellation import ReadOnlyQueryCancellationRegistry
 from .postgres_concurrency import PostgresExecutionController, postgres_execution
 from .postgres_migrations import PostgresMigrationFacade
 from .relation_source import RelationSourceValidationError, normalize_relation_source
@@ -316,6 +317,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             transaction_idle_seconds=console_transaction_idle_seconds,
             transaction_lifetime_seconds=console_transaction_lifetime_seconds,
         )
+        self._read_query_cancellations = ReadOnlyQueryCancellationRegistry()
         self._ensure_config_dir()
 
     def set_migration_coordinator(self, coordinator: Any) -> None:
@@ -347,6 +349,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     def cancel_console(self, profile_id: str, execution_id: Any, binding: str, server_id: str) -> dict[str, Any]:
         return self._console.cancel(profile_id, execution_id, binding, server_id)
+
+    def cancel_read_only_sql(self, operation_id: str) -> dict[str, bool]:
+        return self._read_query_cancellations.request(operation_id)
+
+    def release_read_only_sql(self, operation_id: str) -> None:
+        self._read_query_cancellations.release(operation_id)
 
     def console_execution_status(self, profile_id: str, execution_id: Any, console_id: Any,
                                  database: Any, namespace: Any, binding: str, server_id: str) -> dict[str, Any]:
@@ -394,6 +402,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         return self._console.revoke_write_grant(profile_id, grant_id, binding, server_id)
 
     def close(self) -> None:
+        self._read_query_cancellations.close()
         self._console.close()
         self._execution_controller.close()
 
@@ -1292,6 +1301,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         max_columns: int = 100,
         max_result_bytes: int = 1024 * 1024,
         operation_timeout_ms: int | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         namespace = self._validate_namespace(namespace)
         profile = self._profile(profile_id)
@@ -1306,6 +1316,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             raise ValueError("SQL result limits must be positive integers")
         if operation_timeout_ms is not None and (isinstance(operation_timeout_ms, bool) or not isinstance(operation_timeout_ms, int) or operation_timeout_ms < 1):
             raise ValueError("operation_timeout_ms must be a positive integer or None")
+        if operation_id is not None and (not isinstance(operation_id, str) or not operation_id or len(operation_id) > 128):
+            raise ValueError("operation_id must be a non-empty bounded string or None")
         if not isinstance(statement, str) or not statement.strip():
             raise ValidationError("sql must be a non-empty string")
         if "\x00" in statement or len(statement) > 100_000:
@@ -1314,9 +1326,14 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         if not allow_explain and re.match(r"^\s*EXPLAIN\b", statement, re.I):
             raise ValidationError("EXPLAIN is not allowed for this read-only query")
 
-        connection = self._connect_profile(profile)
+        connection = None
         cursor = None
         try:
+            if operation_id is not None and self._read_query_cancellations.reserve(operation_id):
+                raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled before PostgreSQL execution started")
+            connection = self._connect_profile(profile)
+            if operation_id is not None and self._read_query_cancellations.attach(operation_id, connection):
+                raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled before PostgreSQL execution started")
             cursor = connection.cursor()
             cursor.execute("SET TRANSACTION READ ONLY")
             narrow_statement_timeout(cursor, operation_timeout_ms)
@@ -1376,24 +1393,37 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             base["limitEvents"] = limited["limitEvents"]
             if len(json.dumps(base, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_result_bytes:
                 raise PostgresServiceError(422, "sql_result_too_large", "SQL result metadata exceeds the byte limit")
+            if operation_id is not None and self._read_query_cancellations.requested(operation_id):
+                raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled")
             return base
         except PostgresServiceError:
             raise
         except Exception as exc:
             details = postgres_error_details(exc, phase="execute", operation="read_sql", rollback={"attempted": True})
+            if operation_id is not None and self._read_query_cancellations.requested(operation_id):
+                raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled", details) from exc
             message = "Read-only SQL query failed"
             if details["postgres"].get("sqlstate") == "57014":
                 message = "PostgreSQL canceled the read-only query under its configured timeout policy"
             raise PostgresServiceError(422, "sql_query_failed", message, details) from exc
         finally:
-            if cursor is not None:
-                close = getattr(cursor, "close", None)
-                if close:
-                    close()
-            rollback = getattr(connection, "rollback", None)
-            if rollback:
-                rollback()
-            self._close(connection)
+            try:
+                if cursor is not None:
+                    close = getattr(cursor, "close", None)
+                    if close:
+                        close()
+            finally:
+                try:
+                    rollback = getattr(connection, "rollback", None) if connection is not None else None
+                    if rollback:
+                        rollback()
+                finally:
+                    try:
+                        if connection is not None:
+                            self._close(connection)
+                    finally:
+                        if operation_id is not None:
+                            self._read_query_cancellations.release(operation_id)
 
     # ---- introspection --------------------------------------------------
 

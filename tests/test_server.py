@@ -56,6 +56,10 @@ class FakeAIService:
         self.calls.append(("session_messages", session_id))
         return {"messages": [{"role": "user", "text": "Add events"}]}
 
+    def session_title_seed(self, session_id):
+        self.calls.append(("session_title_seed", session_id))
+        return "Add events"
+
     def delete_session(self, session_id):
         self.calls.append(("delete_session", session_id))
         return {"deleted": True}
@@ -691,9 +695,26 @@ class ServerTests(unittest.TestCase):
                 status, body, _ = self.request(path, authorized=True)
                 self.assertEqual(status, 200)
                 self.assertNotIn("secret", body.decode().lower())
+                if path.startswith("/api/ai/sessions?"):
+                    session = json.loads(body)["sessions"][0]
+                    self.assertEqual(session["title"], "Add events")
+                    self.assertEqual(session["contextTitle"], "Schema chat")
 
         self.assertIn(("list_sessions",), self.ai_service.calls)
         self.assertIn(("session_messages", "ses_1"), self.ai_service.calls)
+
+    def test_ai_chat_title_can_be_renamed_without_changing_context(self):
+        path = "/api/ai/sessions/ses_1/title"
+        self.assertEqual(self.request(path, "PUT", {"title": "Hiring data load"})[0], 403)
+
+        status, body, _ = self.request(path, "PUT", {"title": "Hiring data load"}, authorized=True)
+
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["title"], "Hiring data load")
+        self.assertEqual(payload["contextTitle"], "Schema chat")
+        self.assertEqual(self.authority.get_chat("ses_1")["conversationTitle"], "Hiring data load")
+        self.assertEqual(self.request(path, "PUT", {"title": "x" * 81}, authorized=True)[0], 400)
 
     def test_ai_activity_stream_requires_session_and_returns_only_normalized_events(self):
         path = "/api/ai/sessions/ses_1/activity"
@@ -748,6 +769,7 @@ class ServerTests(unittest.TestCase):
         status, body, _ = self.request("/api/ai/sessions/ses_1/messages", "POST", payload, authorized=True)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["text"], "Proposed.")
+        self.assertEqual(self.authority.get_chat("ses_1")["title"], "Add an audit column")
         call = self.ai_service.calls[-1]
         self.assertEqual(call[0:2], ("prompt", "ses_1"))
         self.assertEqual(call[3], model)
@@ -811,6 +833,75 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(repeated["id"], operation["id"])
         reconciled = json.loads(self.request(path + "/reconcile", "POST", execute_body, authorized=True)[1])["operation"]
         self.assertEqual(reconciled["id"], operation["id"])
+
+    def test_ai_query_cancellation_is_proposal_bound_and_reaches_postgres(self):
+        proposal = self.authority.create_proposal(
+            "ses_1", {"type": "schema_read_query", "sql": "SELECT pg_sleep(30)"},
+            {"policyRevision": 1}, {}, {},
+        )
+        operation, _ = self.authority.authorize_and_claim(proposal["id"], "ses_1", 1, None)
+
+        status, body, _ = self.request(
+            f"/api/ai/sessions/ses_1/proposals/{proposal['id']}/execution", "DELETE", authorized=True,
+        )
+
+        payload = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["cancellation"]["requested"])
+        self.assertEqual(payload["operation"]["id"], operation["id"])
+        self.assertIn(("cancel_read_only_sql", operation["id"]), self.service.calls)
+        finished = self.authority.finish_operation(
+            operation["attemptId"], operation["claimToken"], "succeeded", result={"kind": "sql_result"},
+        )
+        self.assertEqual((finished["state"], finished["error"]["code"]), ("cancelled", "execution_cancelled"))
+
+        non_query = self.authority.create_proposal(
+            "ses_1", {"type": "connection_setup"}, {"policyRevision": 1}, {}, {},
+        )
+        status, body, _ = self.request(
+            f"/api/ai/sessions/ses_1/proposals/{non_query['id']}/execution", "DELETE", authorized=True,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"]["code"], "operation_not_cancellable")
+
+    def test_ai_query_cancellation_does_not_require_an_active_resource_chat(self):
+        proposal = self.authority.create_proposal(
+            "ses_1", {"type": "schema_read_query", "sql": "SELECT pg_sleep(30)"},
+            {"policyRevision": 1}, {}, {},
+        )
+        operation, _ = self.authority.authorize_and_claim(proposal["id"], "ses_1", 1, None)
+        self.authority.chats["ses_1"]["state"] = "deleting"
+
+        status, body, _ = self.request(
+            f"/api/ai/sessions/ses_1/proposals/{proposal['id']}/execution", "DELETE", authorized=True,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["cancellation"]["requested"])
+        self.assertIn(("cancel_read_only_sql", operation["id"]), self.service.calls)
+
+    def test_ai_query_cancellation_releases_a_late_process_registry_entry(self):
+        proposal = self.authority.create_proposal(
+            "ses_1", {"type": "schema_read_query", "sql": "SELECT pg_sleep(30)"},
+            {"policyRevision": 1}, {}, {},
+        )
+        operation, _ = self.authority.authorize_and_claim(proposal["id"], "ses_1", 1, None)
+
+        def finish_during_cancel(operation_id):
+            self.service.calls.append(("cancel_read_only_sql", operation_id))
+            self.authority.operations[operation_id].update({
+                "state": "cancelled", "result": None,
+                "error": {"code": "execution_cancelled", "message": "AI query was cancelled"},
+            })
+            return {"requested": True}
+
+        self.service.cancel_read_only_sql = finish_during_cancel
+        status, _, _ = self.request(
+            f"/api/ai/sessions/ses_1/proposals/{proposal['id']}/execution", "DELETE", authorized=True,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIn(("release_read_only_sql", operation["id"]), self.service.calls)
 
     def test_ai_execution_lease_loss_is_uncertain_and_does_not_replay(self):
         self.store.save(

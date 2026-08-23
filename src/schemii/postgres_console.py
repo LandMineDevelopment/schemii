@@ -13,7 +13,7 @@ from .postgres_common import NotFoundError, PostgresServiceError, ValidationErro
 from .result_limits import ResultLimitError, ResultLimiter, ResultLimits, json_utf8_size
 
 
-MAX_STATEMENTS = 20
+MAX_STATEMENTS = 100
 MAX_SCRIPT_CHARS = 100_000
 MAX_ROWS_PER_RESULT = 500
 MAX_COLUMNS_PER_RESULT = 100

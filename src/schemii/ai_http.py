@@ -12,16 +12,55 @@ from .opencode_service import OpenCodeService, OpenCodeServiceError
 AI_MAX_BODY_SIZE = 128 * 1024
 AI_AUTH_PATH = re.compile(r"^/api/ai/auth/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$")
 AI_SESSION_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})(?:/(messages))?$")
+AI_SESSION_TITLE_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/title$")
 AI_ACTIVITY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/activity$")
 AI_PROPOSAL_PATH = re.compile(
     r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/proposals/"
     r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/(execute|reconcile)$"
+)
+AI_PROPOSAL_EXECUTION_PATH = re.compile(
+    r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/proposals/"
+    r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/execution$"
 )
 AI_OPERATION_PATH = re.compile(
     r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/operations/"
     r"([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/status$"
 )
 AI_POLICY_PATH = re.compile(r"^/api/ai/sessions/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})/policy$")
+
+
+def ai_conversation_title(value: Any, *, truncate: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ValueError("AI chat title is invalid")
+    normalized = " ".join(value.split())
+    if not normalized or any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise ValueError("AI chat title is invalid")
+    title = normalized.lstrip("#*- ").strip() or normalized
+    encoded = title.encode("utf-8")
+    if len(encoded) <= 80:
+        return title
+    if not truncate:
+        raise ValueError("AI chat title is too long")
+    suffix = "…"
+    prefix = encoded[:80 - len(suffix.encode("utf-8"))].decode("utf-8", "ignore").rstrip()
+    if " " in prefix:
+        candidate = prefix.rsplit(" ", 1)[0].rstrip(" .,:;-")
+        if len(candidate) >= 24:
+            prefix = candidate
+    return prefix + suffix
+
+
+def ensure_ai_conversation_title(service: OpenCodeService, authority: Any, chat: dict[str, Any]) -> dict[str, Any]:
+    if chat.get("conversationTitle"):
+        return chat
+    try:
+        seed = service.session_title_seed(chat["externalSessionId"])
+        if not seed:
+            return chat
+        title = ai_conversation_title(seed)
+    except (OpenCodeServiceError, ValueError):
+        return chat
+    return authority.initialize_conversation_title(chat["id"], title)
 
 
 class AiHttpRouter:
@@ -40,6 +79,8 @@ class AiHttpRouter:
         policy_handler: Callable[[Any, OpenCodeService, str, dict[str, Any] | None], Any] | None = None,
         proposal_operations: frozenset[str] | None = None,
         settings_handler: Callable[[Any, dict[str, Any] | None], Any] | None = None,
+        cancellation_handler: Callable[[Any, OpenCodeService, str, str], Any] | None = None,
+        title_handler: Callable[[Any, OpenCodeService, str, dict[str, Any]], Any] | None = None,
     ):
         self.service = service
         self.message_handler = message_handler
@@ -52,6 +93,8 @@ class AiHttpRouter:
         self.policy_handler = policy_handler
         self.proposal_operations = proposal_operations or frozenset({"execute", "reconcile"})
         self.settings_handler = settings_handler
+        self.cancellation_handler = cancellation_handler
+        self.title_handler = title_handler
 
     @staticmethod
     def _authorize(handler) -> bool:
@@ -117,6 +160,20 @@ class AiHttpRouter:
                 else:
                     self.settings_handler(handler, body)
             return True
+        title_match = AI_SESSION_TITLE_PATH.fullmatch(path)
+        if title_match and self.title_handler is not None:
+            if not self._authorize(handler):
+                return True
+            service = self._require_service(handler)
+            if service is None:
+                return True
+            body = handler._body_or_error(AI_MAX_BODY_SIZE)
+            if body is not None:
+                if not isinstance(body, dict):
+                    handler.send_json(400, {"error": {"code": "validation_error", "message": "AI chat title request must be an object"}})
+                else:
+                    self.title_handler(handler, service, title_match.group(1), body)
+            return True
         policy_match = AI_POLICY_PATH.fullmatch(path)
         if not policy_match or self.policy_handler is None:
             return False
@@ -132,7 +189,6 @@ class AiHttpRouter:
             else:
                 self.policy_handler(handler, service, policy_match.group(1), body)
         return True
-
     def handle_post(self, handler, path: str) -> bool:
         if not path.startswith("/api/ai/"):
             return False
@@ -175,7 +231,8 @@ class AiHttpRouter:
     def handle_delete(self, handler, path: str) -> bool:
         auth_match = AI_AUTH_PATH.fullmatch(path)
         session_match = AI_SESSION_PATH.fullmatch(path)
-        if not auth_match and not (session_match and session_match.group(2) is None):
+        execution_match = AI_PROPOSAL_EXECUTION_PATH.fullmatch(path)
+        if not auth_match and not execution_match and not (session_match and session_match.group(2) is None):
             return False
         if not self._authorize(handler):
             return True
@@ -184,6 +241,11 @@ class AiHttpRouter:
             return True
         if auth_match:
             handler._ai_call(lambda: service.delete_api_key(auth_match.group(1)))
+        elif execution_match:
+            if self.cancellation_handler is None:
+                handler.send_json(404, {"error": {"code": "not_found", "message": "Unknown API path"}})
+            else:
+                self.cancellation_handler(handler, service, execution_match.group(1), execution_match.group(2))
         else:
             if self.delete_session_handler is None:
                 handler._ai_call(lambda: service.delete_session(session_match.group(1)))
@@ -222,13 +284,16 @@ def issue_ai_proposals(authority, response, *, application, session_id, resource
     if not isinstance(response, dict):
         return response
     normalized_actions = []
+    rejected_actions = 0
     for action in response.get("actions", []):
         if not isinstance(action, dict):
+            rejected_actions += 1
             continue
         if normalize_action is not None:
             try:
                 action = normalize_action(action, access)
             except (TypeError, ValueError):
+                rejected_actions += 1
                 continue
         normalized_actions.append(action)
     batch_types = set(batch_action_types or ())
@@ -259,6 +324,12 @@ def issue_ai_proposals(authority, response, *, application, session_id, resource
     result = dict(response)
     result.pop("actions", None)
     result["proposals"] = issued
+    if rejected_actions:
+        product = "Schemii" if application == "schemii" else "Schemer"
+        result["proposalDiagnostics"] = [{
+            "code": "proposal_validation_failed",
+            "message": f"{product} did not create a proposal because the model returned invalid proposal details. No action was queued; ask the assistant to try again.",
+        }]
     return result
 
 

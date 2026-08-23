@@ -74,10 +74,10 @@ class SchemiiAiExecutor:
         if action_type == "schema_read_query":
             if profile is None or action.get("profileId") != authorization_target.get("profileId") or action.get("namespace") != authorization_target.get("namespace"):
                 raise PostgresServiceError(409, "action_target_changed", "Query target no longer matches the proposal")
-            result = service.execute_read_only_sql(profile["id"], authorization_target["namespace"], action.get("sql"), database=profile.get("dbname"), expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]), allow_explain=False, max_rows=min(100, rows_disclosed), max_columns=50, max_result_bytes=256 * 1024, operation_timeout_ms=operation_timeout)
+            result = service.execute_read_only_sql(profile["id"], authorization_target["namespace"], action.get("sql"), database=profile.get("dbname"), expected_profile_fingerprint=service.profile_context_fingerprint(profile["id"]), allow_explain=False, max_rows=min(100, rows_disclosed), max_columns=50, max_result_bytes=256 * 1024, operation_timeout_ms=operation_timeout, operation_id=operation_id)
             if versioned_policy:
                 authority.consume_bound(operation_id, "rowsDisclosed", len(result.get("rows", [])), {"kind": "sql_result"})
-            reference = authority.create_result(session_id, {"resource": schema_id, "target": authorization_target, "revision": record["revision"], "access": "data", "policyBinding": policy_binding}, bounded_ai_query_result(result, max_rows=min(50, rows_disclosed), max_columns=50, max_bytes=24 * 1024))
+            reference = authority.create_result(session_id, {"operationId": operation_id, "resource": schema_id, "target": authorization_target, "revision": record["revision"], "access": "data", "policyBinding": policy_binding}, bounded_ai_query_result(result, max_rows=min(50, rows_disclosed), max_columns=50, max_bytes=24 * 1024))
             return {"kind": "sql_result", "display": result, "resultRef": reference["id"], "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target}
         if action_type == "data_read":
             source = action.get("source")

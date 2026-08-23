@@ -16,6 +16,7 @@ for (const html of [schemiiHtml, schemerHtml]) {
   assert.match(html, /\/shared\/postgres-console\.css/, "both applications must use shared Console styles");
 }
 assert.match(shared, /Managed read[\s\S]*Managed all-or-nothing[\s\S]*Explicit transaction[\s\S]*Autocommit \/ maintenance/);
+assert.match(shared, /max="100" data-console-statement-limit/, "shared Console settings must allow up to 100 statements");
 assert.match(shared, /data-console-profile[\s\S]*data-console-database[\s\S]*data-console-namespace/, "exact target must stay visible");
 assert.match(shared, /activeTransaction[\s\S]*guardTargetChange[\s\S]*Commit or roll back/, "active transactions must guard target changes");
 assert.match(shared, /Outcome unknown[\s\S]*console\/executions\/[\s\S]*Do not replay/, "transport loss must reconcile through status without replay");
