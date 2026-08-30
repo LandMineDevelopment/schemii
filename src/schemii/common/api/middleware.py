@@ -7,6 +7,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 
 LOCAL_PROTOTYPE_HOSTS = ("127.0.0.1", "localhost")
+FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map"))
 
 
 FRONTEND_CONTENT_SECURITY_POLICY = "; ".join(
@@ -40,7 +41,7 @@ def install_api_middleware(application: FastAPI) -> None:
         path = request.url.path
         if path.startswith("/assets/"):
             response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
-        elif path == "/":
+        elif path in FRONTEND_DOCUMENT_PATHS:
             response.headers["Cache-Control"] = "no-cache"
         else:
             response.headers["Cache-Control"] = "no-store"
@@ -50,7 +51,7 @@ def install_api_middleware(application: FastAPI) -> None:
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        if path == "/" or path.startswith("/assets/"):
+        if path in FRONTEND_DOCUMENT_PATHS or path.startswith("/assets/"):
             response.headers["Content-Security-Policy"] = FRONTEND_CONTENT_SECURITY_POLICY
         response.headers["X-Request-ID"] = request_id
         return response

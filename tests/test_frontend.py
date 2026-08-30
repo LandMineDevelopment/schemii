@@ -20,12 +20,38 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "connect-src 'self'" in response.headers["content-security-policy"]
     assert '<script type="module" src="assets/app.js"></script>' in response.text
+    assert 'href="/api-map"' in response.text
     assert "<script>" not in response.text
 
     head = api.head("/")
     assert head.status_code == 200
     assert head.content == b""
     assert head.headers["content-type"].startswith("text/html")
+
+
+def test_live_api_map_is_served_by_the_existing_application() -> None:
+    api = TestClient(create_app(), base_url="http://localhost")
+
+    response = api.get("/api-map")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert "default-src 'self'" in response.headers["content-security-policy"]
+    assert "connect-src 'self'" in response.headers["content-security-policy"]
+    assert '<script type="module" src="/assets/api-map.js"></script>' in response.text
+    assert 'href="/assets/api-map.css"' in response.text
+    assert "http://" not in response.text
+    assert "https://" not in response.text
+
+    head = api.head("/api-map")
+    assert head.status_code == 200
+    assert head.content == b""
+    assert head.headers["content-type"].startswith("text/html")
+
+    schema = api.get("/openapi.json").json()
+    assert "/api-map" not in schema["paths"]
 
 
 def test_local_prototype_rejects_untrusted_host_headers() -> None:
@@ -112,3 +138,17 @@ def test_frontend_uses_only_the_active_same_origin_api_contract() -> None:
     assert "cache: \"no-store\"" in api_source
     assert "http://" not in api_source
     assert "https://" not in api_source
+
+
+def test_api_map_uses_only_the_live_same_origin_openapi_contract() -> None:
+    map_source = (
+        files("schemii.schemii")
+        .joinpath("web", "assets", "api-map.js")
+        .read_text(encoding="utf-8")
+    )
+
+    assert 'fetch("/openapi.json"' in map_source
+    assert 'credentials: "same-origin"' in map_source
+    assert 'cache: "no-store"' in map_source
+    assert "http://" not in map_source
+    assert "https://" not in map_source

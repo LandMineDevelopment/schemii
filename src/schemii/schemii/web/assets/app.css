@@ -120,8 +120,8 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
   box-shadow: 0 16px 42px rgba(0, 0, 0, .55);
 }
 .menu-wide { width: 190px; }
-.menu-surface button { min-height: 34px; padding: 0 9px; border: 0; border-radius: 4px; color: #cbd3dd; text-align: left; background: transparent; font-size: 10px; cursor: pointer; }
-.menu-surface button:hover, .menu-surface button:focus-visible { color: var(--accent); outline: 0; background: #211b0f; }
+.menu-surface button, .menu-surface a { display: flex; min-height: 34px; align-items: center; padding: 0 9px; border: 0; border-radius: 4px; color: #cbd3dd; text-align: left; text-decoration: none; background: transparent; font-size: 10px; cursor: pointer; }
+.menu-surface button:hover, .menu-surface button:focus-visible, .menu-surface a:hover, .menu-surface a:focus-visible { color: var(--accent); outline: 0; background: #211b0f; }
 .menu-surface .danger-text { color: #e39198; }
 .menu-surface .danger-text:hover { color: #ffc1c6; background: var(--danger-bg); }
 
