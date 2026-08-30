@@ -73,7 +73,7 @@ def client() -> tuple[TestClient, FakePostgresGateway]:
         postgres=postgres,
         workspaces=workspaces,
     )
-    return TestClient(create_app(services)), postgres
+    return TestClient(create_app(services), base_url="http://localhost"), postgres
 
 
 def create_connection(api: TestClient, password="database secret") -> dict:
@@ -146,7 +146,11 @@ def test_unexpected_errors_keep_safe_runtime_headers() -> None:
     def failure():
         raise RuntimeError("private failure details")
 
-    api = TestClient(application, raise_server_exceptions=False)
+    api = TestClient(
+        application,
+        base_url="http://localhost",
+        raise_server_exceptions=False,
+    )
     response = api.get("/test-only-failure")
 
     assert response.status_code == 500
@@ -206,10 +210,35 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
         "updatedAt",
     }
 
+    revised_connection = api.patch(
+        f"/api/v1/connections/{connection['id']}",
+        json={"expectedRevision": 1, "name": "Reporting revised"},
+    )
+    assert revised_connection.status_code == 200
+    calls_before_connection_conflict = len(postgres.connections)
+    connection_conflict = api.put(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/layout",
+        json={
+            "expectedRevision": 1,
+            "expectedConnectionRevision": 1,
+            "tables": [],
+        },
+    )
+    assert connection_conflict.status_code == 409
+    assert connection_conflict.json()["error"] == {
+        "code": "connection_conflict",
+        "message": "The workspace connection changed before the layout could be saved",
+        "retryable": False,
+        "requestId": connection_conflict.headers["x-request-id"],
+        "details": {"currentRevision": 2},
+    }
+    assert len(postgres.connections) == calls_before_connection_conflict
+
     unknown = api.put(
         f"/api/v1/schemii/workspaces/{workspace['id']}/layout",
         json={
             "expectedRevision": 1,
+            "expectedConnectionRevision": 2,
             "tables": [{"name": "not_live", "x": 10, "y": 20}],
         },
     )
@@ -220,6 +249,7 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
         f"/api/v1/schemii/workspaces/{workspace['id']}/layout",
         json={
             "expectedRevision": 1,
+            "expectedConnectionRevision": 2,
             "tables": [{"name": "customers", "x": 10.5, "y": 20}],
         },
     )
@@ -232,6 +262,7 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
         f"/api/v1/schemii/workspaces/{workspace['id']}/layout",
         json={
             "expectedRevision": 1,
+            "expectedConnectionRevision": 2,
             "tables": [{"name": "not_live", "x": 0, "y": 0}],
         },
     )

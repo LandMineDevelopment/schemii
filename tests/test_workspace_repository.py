@@ -46,6 +46,7 @@ def test_workspace_and_aggregate_position_counts_are_bounded() -> None:
         first.id,
         SchemiiWorkspaceLayoutUpdate(
             expected_revision=1,
+            expected_connection_revision=1,
             tables=[TablePosition(name="orders", x=0, y=0)],
         ),
     )
@@ -56,6 +57,7 @@ def test_workspace_and_aggregate_position_counts_are_bounded() -> None:
             second.id,
             SchemiiWorkspaceLayoutUpdate(
                 expected_revision=1,
+                expected_connection_revision=1,
                 tables=[TablePosition(name="customers", x=0, y=0)],
             ),
         )

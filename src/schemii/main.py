@@ -15,6 +15,7 @@ from schemii.common.connections.service import ConnectionService
 from schemii.common.metadata import MetadataRepositories, create_metadata_repositories
 from schemii.common.postgres import PostgresGateway, PsycopgPostgresGateway
 from schemii.schemer.routes import router as schemer_router
+from schemii.schemii.frontend import install_schemii_frontend
 from schemii.schemii.routes import router as schemii_router
 from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
@@ -81,6 +82,8 @@ def create_app(services: ApplicationServices | None = None) -> FastAPI:
 
     for router in PRODUCT_ROUTERS:
         application.include_router(router)
+
+    install_schemii_frontend(application)
 
     return application
 

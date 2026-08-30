@@ -46,6 +46,7 @@ class SchemiiWorkspaceCreate(ApiModel):
 
 class SchemiiWorkspaceLayoutUpdate(ApiModel):
     expected_revision: Annotated[int, Field(strict=True, ge=1)]
+    expected_connection_revision: Annotated[int, Field(strict=True, ge=1)]
     tables: list[TablePosition] = Field(max_length=10_000)
 
     @model_validator(mode="after")

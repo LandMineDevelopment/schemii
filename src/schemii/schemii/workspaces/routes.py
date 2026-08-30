@@ -150,6 +150,13 @@ def update_workspace_layout(
             principal.user_id,
             workspace.connection_id,
         ) as connection:
+            if connection.revision != body.expected_connection_revision:
+                raise ApiProblem(
+                    409,
+                    "connection_conflict",
+                    "The workspace connection changed before the layout could be saved",
+                    details={"currentRevision": connection.revision},
+                )
             if connection.database != workspace.database:
                 raise ApiProblem(
                     409,
