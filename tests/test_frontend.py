@@ -20,6 +20,9 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "connect-src 'self'" in response.headers["content-security-policy"]
     assert '<script type="module" src="assets/app.js"></script>' in response.text
+    assert 'href="assets/ui.css"' in response.text
+    assert 'data-ui-icon="database"' in response.text
+    assert 'id="table-inspector-toggle"' in response.text
     assert 'href="/api-map"' in response.text
     assert "<script>" not in response.text
 
@@ -41,10 +44,13 @@ def test_live_api_map_is_served_by_the_existing_application() -> None:
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "connect-src 'self'" in response.headers["content-security-policy"]
     assert '<script type="module" src="/assets/api-map.js"></script>' in response.text
+    assert 'href="/assets/ui.css"' in response.text
     assert 'href="/assets/api-map.css"' in response.text
     assert 'id="api-canvas"' in response.text
     assert 'id="list-view-button"' in response.text
     assert 'id="canvas-view-button"' in response.text
+    assert 'id="group-index-toggle"' in response.text
+    assert 'id="operation-inspector-toggle"' in response.text
     assert "http://" not in response.text
     assert "https://" not in response.text
 
@@ -155,3 +161,18 @@ def test_api_map_uses_only_the_live_same_origin_openapi_contract() -> None:
     assert 'cache: "no-store"' in map_source
     assert "http://" not in map_source
     assert "https://" not in map_source
+
+
+def test_frontends_share_the_visual_component_and_dock_pane_contract() -> None:
+    assets = files("schemii.schemii").joinpath("web", "assets")
+    ui_source = assets.joinpath("ui.js").read_text(encoding="utf-8")
+    ui_styles = assets.joinpath("ui.css").read_text(encoding="utf-8")
+    app_source = assets.joinpath("app.js").read_text(encoding="utf-8")
+    map_source = assets.joinpath("api-map.js").read_text(encoding="utf-8")
+
+    assert "export class DockPane" in ui_source
+    assert "export const ICONS" in ui_source
+    assert 'data-ui-dock-state="minimized"' in ui_styles
+    assert "new DockPane" in app_source
+    assert map_source.count("new DockPane") == 2
+    assert "getViewportInsets" in assets.joinpath("canvas.js").read_text(encoding="utf-8")

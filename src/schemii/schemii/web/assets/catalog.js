@@ -77,24 +77,13 @@ export function renderCatalogStats(container, catalog) {
   }
 }
 
-export function renderInspector({ inspector, empty, content, table, catalog }) {
+export function renderInspector({ inspector, empty, content, title = null, table, catalog }) {
   inspector.classList.toggle("is-empty", !table);
   empty.hidden = Boolean(table);
   content.hidden = !table;
   replace(content);
+  if (title) title.textContent = table?.name || "Table inspector";
   if (!table || !catalog) return;
-
-  const head = element("header", { className: "inspector-head" });
-  const heading = element("div");
-  heading.append(element("small", { text: "Read-only table inspector" }), element("h2", { text: table.name }));
-  const actions = element("div", { className: "inspector-actions" });
-  actions.append(
-    unavailableButton("table-rows", "Rows"),
-    unavailableButton("table-edit", "Edit"),
-    unavailableButton("table-delete", "Delete"),
-  );
-  head.append(heading, actions);
-  content.append(head);
 
   const identity = section("Table identity", 0);
   identity.append(metadataGrid([

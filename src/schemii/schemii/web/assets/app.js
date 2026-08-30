@@ -11,6 +11,7 @@ import {
 } from "./catalog.js";
 import { element, emptyPanel, errorPanel, formatTimestamp, replace } from "./dom.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
+import { DockPane, downloadContent, initializeUi } from "./ui.js";
 
 const byId = id => document.getElementById(id);
 
@@ -41,6 +42,10 @@ const elements = {
   zoomInButton: byId("zoom-in-button"),
   zoomOutButton: byId("zoom-out-button"),
   inspector: byId("inspector"),
+  inspectorBody: byId("table-inspector-body"),
+  inspectorToggle: byId("table-inspector-toggle"),
+  inspectorClose: byId("table-inspector-close"),
+  inspectorTitle: byId("table-inspector-title"),
   inspectorEmpty: byId("inspector-empty"),
   inspectorContent: byId("inspector-content"),
   catalogStats: byId("catalog-stats"),
@@ -108,6 +113,21 @@ const elements = {
   toast: byId("toast"),
 };
 
+initializeUi();
+
+const inspectorPane = new DockPane({
+  container: elements.mainLayout,
+  pane: elements.inspector,
+  body: elements.inspectorBody,
+  toggle: elements.inspectorToggle,
+  dismiss: elements.inspectorClose,
+  side: "right",
+  expandedLabel: "Minimize table inspector",
+  minimizedLabel: "Expand table inspector",
+  getRestoreFocusTarget: () => document.querySelector(`.table-card[data-table-name="${CSS.escape(state.selectedTableName || "")}"]`) || elements.canvas,
+});
+inspectorPane.setAvailable(false);
+
 const state = {
   startupComplete: false,
   session: null,
@@ -162,6 +182,9 @@ const canvas = new CatalogCanvas({
   layer: elements.tablesLayer,
   lines: elements.relationshipLines,
   zoomOutput: elements.zoomOutput,
+  getViewportInsets: () => ({
+    right: inspectorPane.containerState() === "expanded" || inspectorPane.containerState() === "minimized" ? 360 : 20,
+  }),
   onSelect: selectTable,
   onPositionsChanged: positionsChanged,
   onRelationshipVisibilityChanged: (shown, available) => {
@@ -227,7 +250,7 @@ function updateHeader() {
 }
 
 function stateCard(mark, title, copy, actionLabel, onAction, loading = false) {
-  const card = element("div", { className: `state-card${loading ? " loading" : ""}` });
+  const card = element("div", { className: `state-card ui-state surface${loading ? " loading" : ""}` });
   card.append(element("span", { text: mark }), element("strong", { text: title }), element("p", { text: copy }));
   if (actionLabel && onAction) {
     const action = element("button", { type: "button", text: actionLabel });
@@ -361,7 +384,7 @@ async function loadConnections() {
 }
 
 function openConnections() {
-  document.querySelectorAll(".action-menu[open]").forEach(menu => menu.removeAttribute("open"));
+  document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
   renderConnections();
   openDialog(elements.connectionsDialog);
 }
@@ -605,7 +628,7 @@ async function loadWorkspaces() {
 
 function openWorkspaces() {
   state.workspaceDialogGeneration += 1;
-  document.querySelectorAll(".action-menu[open]").forEach(menu => menu.removeAttribute("open"));
+  document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
   renderWorkspaces();
   renderWorkspaceConnectionOptions();
   openDialog(elements.workspacesDialog);
@@ -897,9 +920,12 @@ function selectTable(name) {
     inspector: elements.inspector,
     empty: elements.inspectorEmpty,
     content: elements.inspectorContent,
+    title: elements.inspectorTitle,
     table,
     catalog: state.catalog,
   });
+  if (table) inspectorPane.reveal();
+  else inspectorPane.setAvailable(false, { reset: true });
 }
 
 function positionsChanged() {
@@ -1012,7 +1038,10 @@ function renderCatalogSurfaces() {
   renderCatalogStats(elements.catalogStats, state.catalog);
   const selectedTable = state.catalog?.tables.find(table => table.name === state.selectedTableName) || null;
   if (!selectedTable) state.selectedTableName = null;
-  renderInspector({ inspector: elements.inspector, empty: elements.inspectorEmpty, content: elements.inspectorContent, table: selectedTable, catalog: state.catalog });
+  renderInspector({ inspector: elements.inspector, empty: elements.inspectorEmpty, content: elements.inspectorContent, title: elements.inspectorTitle, table: selectedTable, catalog: state.catalog });
+  if (selectedTable) {
+    if (!inspectorPane.available) inspectorPane.reveal();
+  } else inspectorPane.setAvailable(false, { reset: true });
   const selectedView = allViews(state.catalog).find(view => view.name === state.selectedViewName && view.catalogKind === state.selectedViewKind) || null;
   if (!selectedView) {
     state.selectedViewName = null;
@@ -1099,21 +1128,13 @@ function setLayer(layer) {
 }
 
 function downloadCatalog() {
-  document.querySelectorAll(".action-menu[open]").forEach(menu => menu.removeAttribute("open"));
+  document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
   if (!state.catalog) {
     showToast("No live catalog is loaded. Open a workspace first.");
     return;
   }
-  const blob = new Blob([`${JSON.stringify(state.catalog, null, 2)}\n`], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
   const safeTarget = `${state.catalog.database}-${state.catalog.namespace}`.replace(/[^a-zA-Z0-9._-]+/g, "-");
-  link.href = url;
-  link.download = `${safeTarget}-catalog.json`;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+  downloadContent(`${JSON.stringify(state.catalog, null, 2)}\n`, `${safeTarget}-catalog.json`, "application/json");
   showToast("Live catalog JSON downloaded.");
 }
 
@@ -1158,7 +1179,7 @@ function bindEvents() {
   elements.saveLayoutButton.addEventListener("click", saveLayoutImmediately);
   elements.downloadCatalogButton.addEventListener("click", downloadCatalog);
   elements.introductionButton.addEventListener("click", () => {
-    document.querySelectorAll(".action-menu[open]").forEach(menu => menu.removeAttribute("open"));
+    document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
     openDialog(elements.introductionDialog);
   });
   elements.fitButton.addEventListener("click", () => {

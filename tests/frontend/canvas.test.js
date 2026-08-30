@@ -112,23 +112,25 @@ class AttributeTarget {
   remove() {}
 }
 
-function fixture() {
+function fixture({ getViewportInsets = () => ({}) } = {}) {
   const host = new PointerTarget();
   const stage = { style: {} };
   const zoomOutput = {};
   const frames = new FrameScheduler();
   let savedPositionCount = 0;
+  let selectionCount = 0;
   const canvas = new CatalogCanvas({
     canvas: host,
     stage,
     layer: { replaceChildren() {} },
     lines: { replaceChildren() {} },
     zoomOutput,
-    onSelect() {},
+    onSelect() { selectionCount += 1; },
     onPositionsChanged() {
       savedPositionCount += 1;
     },
     onRelationshipVisibilityChanged() {},
+    getViewportInsets,
     scheduleFrame: callback => frames.schedule(callback),
     cancelFrame: frame => frames.cancel(frame),
   });
@@ -144,6 +146,7 @@ function fixture() {
     frames,
     handle,
     savedPositionCount: () => savedPositionCount,
+    selectionCount: () => selectionCount,
   };
 }
 
@@ -296,6 +299,25 @@ test("fit uses cached card geometry without layout reads", () => {
   }
 });
 
+test("fit reserves space reported by the active dock layout", () => {
+  const { canvas } = fixture({ getViewportInsets: () => ({ right: 42 }) });
+  canvas.catalog.tables[0].columns = [];
+  let receivedInsets = null;
+  canvas.viewport.fitBounds = (_bounds, insets) => {
+    receivedInsets = insets;
+    return true;
+  };
+  const previousWindow = globalThis.window;
+  try {
+    globalThis.window = { matchMedia: () => ({ matches: false }) };
+    assert.equal(canvas.fit(), true);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+  assert.equal(receivedInsets.right, 42);
+});
+
 test("clearing a catalog cancels a pending drag frame without stale writes", () => {
   const { canvas, card, frames, handle, savedPositionCount } = fixture();
   handle.dispatch("pointerdown", { clientX: 10, clientY: 20 });
@@ -348,4 +370,14 @@ test("selection updates only the previous and next cards in a large catalog", ()
   assert.deepEqual(changedCards.map(([name]) => name), ["orders", "table_1999"]);
   assert.equal(canvas.cards.get("orders").attributes.get("aria-pressed"), "false");
   assert.equal(canvas.cards.get("table_1999").attributes.get("aria-pressed"), "true");
+});
+
+test("an explicit same-table selection notifies the inspector without redrawing selection", () => {
+  const { canvas, selectionCount } = fixture();
+  canvas.tableByName.set("orders", { name: "orders" });
+  canvas.selectedName = "orders";
+
+  canvas.select("orders", { notify: true });
+
+  assert.equal(selectionCount(), 1);
 });

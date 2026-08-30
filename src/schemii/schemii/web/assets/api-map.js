@@ -1,4 +1,5 @@
 import { ApiGraph } from "./api-graph.js";
+import { DockPane, initializeUi, setControlLoading } from "./ui.js";
 
 const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "options", "head", "trace"];
 const METHOD_ORDER = new Map(HTTP_METHODS.map((method, index) => [method, index]));
@@ -313,6 +314,8 @@ const uiState = {
 };
 
 let apiGraph = null;
+let groupPane = null;
+let operationPane = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -350,22 +353,23 @@ function setSelected(operationId, { reveal = false } = {}) {
     renderOperationDetail(operation);
     uiState.detailSignature = signature;
   }
+  if (reveal || operationPane?.available === false) operationPane?.reveal();
   if (reveal && window.matchMedia("(max-width: 1180px)").matches) {
-    const inspector = byId("operation-detail");
+    const inspector = byId("operation-inspector");
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     inspector.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
-    inspector.querySelector("h2")?.focus({ preventScroll: true });
+    byId("selected-operation-title")?.focus({ preventScroll: true });
   }
 }
 
 function renderOperationDetail(operation) {
   const empty = byId("operation-empty");
   const detail = byId("operation-detail");
-  const inspector = detail.closest(".operation-inspector");
   if (!operation) {
     empty.hidden = false;
     detail.hidden = true;
-    inspector.setAttribute("aria-labelledby", "operation-title");
+    byId("operation-pane-title").textContent = "Select an operation";
+    operationPane?.setAvailable(false, { reset: true });
     uiState.detailSignature = null;
     replace(detail);
     return;
@@ -373,6 +377,7 @@ function renderOperationDetail(operation) {
 
   empty.hidden = true;
   detail.hidden = false;
+  byId("operation-pane-title").textContent = operation.summary;
   const header = element("header", { className: "detail-head" });
   const identity = element("div");
   const methodPath = element("div", { className: "detail-operation" });
@@ -461,7 +466,6 @@ function renderOperationDetail(operation) {
   responses.append(responseList);
   body.append(responses);
   replace(detail, header, body);
-  inspector.setAttribute("aria-labelledby", "selected-operation-title");
 }
 
 function groupIdentifier(name, index) {
@@ -607,7 +611,7 @@ function renderMap({
     const node = document.querySelector(`.api-canvas-node[data-node-key="${CSS.escape(restoreCanvasKey)}"]`);
     (node || byId("route-search")).focus({ preventScroll: true });
   } else if (restoreInspectorElement && !restoreInspectorElement.isConnected) {
-    byId("operation-detail").querySelector("h2")?.focus({ preventScroll: true });
+    byId("selected-operation-title")?.focus({ preventScroll: true });
   }
 }
 
@@ -680,7 +684,7 @@ async function loadContract() {
   window.clearTimeout(uiState.refreshTimer);
   uiState.refreshTimer = null;
   const refresh = byId("refresh-map");
-  refresh.disabled = true;
+  setControlLoading(refresh, true, { loadingLabel: "Refreshing contract" });
   const initialLoad = !uiState.model;
   setContractStatus(initialLoad ? "Checking active contract" : "Checking for contract changes");
   const state = byId("map-state");
@@ -743,12 +747,40 @@ async function loadContract() {
     else showLoadError(displayedError);
   } finally {
     uiState.loading = false;
-    refresh.disabled = false;
+    setControlLoading(refresh, false);
     scheduleContractRefresh();
   }
 }
 
 function start() {
+  initializeUi();
+  groupPane = new DockPane({
+    container: byId("api-map-workspace"),
+    pane: byId("group-index"),
+    body: byId("group-index-body"),
+    toggle: byId("group-index-toggle"),
+    side: "left",
+    expandedLabel: "Collapse route groups",
+    minimizedLabel: "Expand route groups",
+    getRestoreFocusTarget: () => byId("route-search"),
+    onStateChange: () => apiGraph?.refreshGeometry(),
+  });
+  operationPane = new DockPane({
+    container: byId("api-map-workspace"),
+    pane: byId("operation-inspector"),
+    body: byId("operation-inspector-body"),
+    toggle: byId("operation-inspector-toggle"),
+    dismiss: byId("operation-inspector-close"),
+    side: "right",
+    expandedLabel: "Minimize operation inspector",
+    minimizedLabel: "Expand operation inspector",
+    getRestoreFocusTarget: () => {
+      const selector = uiState.view === "canvas" ? ".api-operation-card" : ".operation-node";
+      return document.querySelector(`${selector}[data-operation-id="${CSS.escape(uiState.selectedId || "")}"]`) || byId("route-search");
+    },
+    onStateChange: () => apiGraph?.refreshGeometry(),
+  });
+  operationPane.setAvailable(false);
   uiState.view = new URLSearchParams(window.location.search).get("view") === "canvas" ? "canvas" : "list";
   apiGraph = new ApiGraph({
     host: byId("api-canvas"),

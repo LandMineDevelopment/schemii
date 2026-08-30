@@ -6,14 +6,15 @@
     <meta name="theme-color" content="#0b0e13" />
     <title>Schemii</title>
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="assets/ui.css" />
     <link rel="stylesheet" href="assets/app.css" />
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
-        <div class="brand" aria-label="Schemii">
-          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="brand-copy"><strong>Schemii</strong><small>PostgreSQL schema explorer</small></span>
+      <header class="topbar ui-topbar">
+        <div class="brand ui-brand" aria-label="Schemii">
+          <span class="brand-mark ui-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="brand-copy ui-brand-copy"><strong>Schemii</strong><small>PostgreSQL schema explorer</small></span>
         </div>
 
         <button class="workspace-identity" id="workspace-identity" type="button" data-unavailable="workspace-naming" aria-label="Workspace identity and naming">
@@ -22,38 +23,22 @@
         </button>
 
         <nav class="top-actions" aria-label="Application actions">
-          <button class="icon-button" id="new-workspace-button" type="button" title="New workspace" aria-label="New workspace">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14"/></svg>
-          </button>
-          <button class="icon-button" id="connections-button" type="button" title="PostgreSQL connections" aria-label="PostgreSQL connections">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="5" rx="6.5" ry="2.5"/><path d="M3.5 5v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V5M3.5 10v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-5"/></svg>
-          </button>
-          <button class="icon-button" id="workspaces-button" type="button" title="Workspaces" aria-label="Workspaces">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h5l1.7 2H17v8.5H3z"/><path d="M6 11h8M10 8.5v5"/></svg>
-          </button>
-          <button class="icon-button" id="refresh-catalog-button" type="button" title="Refresh live catalog" aria-label="Refresh live catalog">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 7a6.5 6.5 0 1 0 .5 5M16 3.5V7h-3.5"/></svg>
-          </button>
-          <button class="icon-button" id="save-layout-button" type="button" title="Save layout" aria-label="Save layout" disabled>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.5h10l2 2v11H4zM7 3.5V8h6V3.5M7 16.5v-5h6v5"/></svg>
-          </button>
-          <button class="icon-button" type="button" data-unavailable="sql-upload" title="Upload SQL" aria-label="Upload SQL">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 12V3M6.5 6.5 10 3l3.5 3.5M4 14v2h12v-2"/></svg>
-          </button>
-          <details class="action-menu">
-            <summary class="icon-button" title="Download" aria-label="Download">
-              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14v2h12v-2"/></svg>
-            </summary>
-            <div class="menu-surface">
+          <button class="ui-icon-button" id="new-workspace-button" type="button" data-ui-icon="add" title="New workspace" aria-label="New workspace"></button>
+          <button class="ui-icon-button" id="connections-button" type="button" data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
+          <button class="ui-icon-button" id="workspaces-button" type="button" data-ui-icon="workspaces" title="Workspaces" aria-label="Workspaces"></button>
+          <button class="ui-icon-button" id="refresh-catalog-button" type="button" data-ui-icon="refresh" title="Refresh live catalog" aria-label="Refresh live catalog"></button>
+          <button class="ui-icon-button" id="save-layout-button" type="button" data-ui-icon="save" title="Save layout" aria-label="Save layout" disabled></button>
+          <button class="ui-icon-button" type="button" data-ui-icon="upload" data-unavailable="sql-upload" title="Upload SQL" aria-label="Upload SQL"></button>
+          <details class="ui-menu">
+            <summary class="ui-icon-button" data-ui-icon="download" title="Download" aria-label="Download"></summary>
+            <div class="ui-menu__surface">
               <button id="download-catalog-button" type="button">Download live catalog JSON</button>
               <button type="button" data-unavailable="sql-export">Export SQL</button>
             </div>
           </details>
-          <details class="action-menu">
-            <summary class="icon-button" title="Help and app controls" aria-label="Help and app controls">
-              <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M7.8 7.6A2.4 2.4 0 0 1 10 6.2c1.4 0 2.4.8 2.4 2 0 1.7-2.4 1.8-2.4 3.5M10 14.5h.01"/></svg>
-            </summary>
-            <div class="menu-surface menu-wide">
+          <details class="ui-menu">
+            <summary class="ui-icon-button" data-ui-icon="help" title="Help and app controls" aria-label="Help and app controls"></summary>
+            <div class="ui-menu__surface menu-wide">
               <a href="/api-map">Open live API map</a>
               <button id="introduction-button" type="button">Show introduction</button>
               <button type="button" data-unavailable="restore-examples">Restore examples</button>
@@ -65,54 +50,32 @@
 
       <main class="main-layout" id="main-layout">
         <nav class="layer-switch" aria-label="Workspace layer">
-          <button class="active" type="button" data-layer="tables" aria-pressed="true" title="Tables">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="4" width="13" height="12" rx="1.5"/><path d="M3.5 8h13M8 8v8M12.5 8v8"/></svg><span>Tables</span>
+          <button class="active" type="button" data-layer="tables" data-ui-icon-leading="tables" aria-pressed="true" title="Tables">
+            <span>Tables</span>
           </button>
-          <button type="button" data-layer="views" aria-pressed="false" title="Views">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/></svg><span>Views</span>
+          <button type="button" data-layer="views" data-ui-icon-leading="views" aria-pressed="false" title="Views">
+            <span>Views</span>
           </button>
-          <button type="button" data-layer="sql" aria-pressed="false" title="SQL">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.5" width="14" height="11" rx="1.5"/><path d="m6 8 2 2-2 2M10.5 12h3.5"/></svg><span>SQL</span>
+          <button type="button" data-layer="sql" data-ui-icon-leading="sql" aria-pressed="false" title="SQL">
+            <span>SQL</span>
           </button>
         </nav>
 
         <aside class="tool-rail" aria-label="Workspace tools">
-          <button type="button" data-unavailable="table-create" title="Create table" aria-label="Create table">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M9 10v9M15 10v9"/></svg>
-          </button>
-          <button type="button" data-unavailable="relationship-create" title="Create relationship" aria-label="Create relationship">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="M8.5 7h3a3 3 0 0 1 3 3v4a3 3 0 0 0 3 3"/></svg>
-          </button>
+          <button type="button" data-ui-icon="tables" data-unavailable="table-create" title="Create table" aria-label="Create table"></button>
+          <button type="button" data-ui-icon="relationship" data-unavailable="relationship-create" title="Create relationship" aria-label="Create relationship"></button>
           <span class="rail-divider" aria-hidden="true"></span>
-          <button type="button" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-4 4 4 4M5 11h7a6 6 0 0 1 6 6"/></svg>
-          </button>
-          <button type="button" data-unavailable="semantic-redo" title="Semantic redo" aria-label="Semantic redo">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 4 4-4 4M19 11h-7a6 6 0 0 0-6 6"/></svg>
-          </button>
+          <button type="button" data-ui-icon="undo" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo"></button>
+          <button type="button" data-ui-icon="redo" data-unavailable="semantic-redo" title="Semantic redo" aria-label="Semantic redo"></button>
           <span class="rail-divider" aria-hidden="true"></span>
-          <button id="fit-button" type="button" title="Fit tables" aria-label="Fit tables">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/></svg>
-          </button>
-          <button id="zoom-in-button" type="button" title="Zoom in" aria-label="Zoom in">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M10.5 7.5v6M7.5 10.5h6"/></svg>
-          </button>
-          <button id="zoom-out-button" type="button" title="Zoom out" aria-label="Zoom out">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4M7.5 10.5h6"/></svg>
-          </button>
+          <button id="fit-button" type="button" data-ui-icon="fit" title="Fit tables" aria-label="Fit tables"></button>
+          <button id="zoom-in-button" type="button" data-ui-icon="zoom-in" title="Zoom in" aria-label="Zoom in"></button>
+          <button id="zoom-out-button" type="button" data-ui-icon="zoom-out" title="Zoom out" aria-label="Zoom out"></button>
           <span class="rail-divider" aria-hidden="true"></span>
-          <button id="functions-button" type="button" title="Functions and procedures" aria-label="Functions and procedures">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v5H5zM5 15h14v5H5zM12 9v6"/></svg>
-          </button>
-          <button id="objects-button" type="button" title="Browse database objects" aria-label="Browse database objects">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v6H5zM13 5h6v6h-6zM5 13h6v6H5zM13 13h6v6h-6z"/></svg>
-          </button>
-          <button id="postgres-button" type="button" title="PostgreSQL connections" aria-label="PostgreSQL connections">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
-          </button>
-          <button type="button" data-unavailable="ai-assistant" title="AI schema assistant" aria-label="AI schema assistant">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5h12v10H9l-3 3v-13Z"/><path d="M9 9h6M9 12h4"/></svg>
-          </button>
+          <button id="functions-button" type="button" data-ui-icon="routines" title="Functions and procedures" aria-label="Functions and procedures"></button>
+          <button id="objects-button" type="button" data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
+          <button id="postgres-button" type="button" data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
+          <button type="button" data-ui-icon="assistant" data-unavailable="ai-assistant" title="AI schema assistant" aria-label="AI schema assistant"></button>
         </aside>
 
         <section class="tables-workspace layer-panel" id="tables-workspace" data-layer-panel="tables" aria-label="Table diagram">
@@ -133,16 +96,30 @@
             <output class="zoom-output" id="zoom-output" aria-label="Canvas zoom">100%</output>
           </div>
 
-          <aside class="inspector is-empty" id="inspector" aria-label="Table inspector">
-            <div class="inspector-empty" id="inspector-empty">
-              <span class="empty-glyph" aria-hidden="true">
-                <svg viewBox="0 0 48 48"><rect x="7" y="8" width="34" height="31" rx="4"/><path d="M7 18h34M17 18v21M30 18v21"/></svg>
-              </span>
-              <h2>Nothing selected</h2>
-              <p>Select a live table to inspect columns, constraints, indexes, triggers, and relationships.</p>
-              <dl class="catalog-stats" id="catalog-stats"></dl>
+          <aside class="inspector ui-dock-pane" id="inspector" aria-labelledby="table-inspector-title">
+            <header class="ui-dock-pane__header">
+              <button class="ui-dock-pane__toggle" id="table-inspector-toggle" type="button" aria-controls="table-inspector-body" aria-expanded="true">
+                <span class="ui-eyebrow">Read-only table inspector</span>
+                <strong id="table-inspector-title">Table inspector</strong>
+              </button>
+              <div class="ui-dock-pane__actions">
+                <button class="ui-icon-button compact" type="button" data-ui-icon="tables" data-unavailable="table-rows" aria-label="Browse table rows"></button>
+                <button class="ui-icon-button compact" type="button" data-ui-icon="edit" data-unavailable="table-edit" aria-label="Edit table"></button>
+                <button class="ui-icon-button compact danger" type="button" data-ui-icon="delete" data-unavailable="table-delete" aria-label="Delete table"></button>
+                <button class="ui-icon-button compact" id="table-inspector-close" type="button" data-ui-icon="close" aria-label="Close table inspector"></button>
+              </div>
+            </header>
+            <div class="ui-dock-pane__body" id="table-inspector-body">
+              <div class="inspector-empty" id="inspector-empty">
+                <span class="empty-glyph" aria-hidden="true">
+                  <svg viewBox="0 0 48 48"><rect x="7" y="8" width="34" height="31" rx="4"/><path d="M7 18h34M17 18v21M30 18v21"/></svg>
+                </span>
+                <h2>Nothing selected</h2>
+                <p>Select a live table to inspect columns, constraints, indexes, triggers, and relationships.</p>
+                <dl class="catalog-stats ui-stat-grid" id="catalog-stats"></dl>
+              </div>
+              <div id="inspector-content" hidden></div>
             </div>
-            <div id="inspector-content" hidden></div>
           </aside>
         </section>
 
@@ -158,7 +135,7 @@
             <div class="views-list" id="views-list"></div>
           </aside>
           <article class="view-detail" id="view-detail">
-            <div class="empty-panel"><span>VIEW</span><strong>No view selected</strong><p>Open a workspace, then select an ordinary or materialized view from its live catalog.</p></div>
+            <div class="empty-panel ui-state surface"><span>VIEW</span><strong>No view selected</strong><p>Open a workspace, then select an ordinary or materialized view from its live catalog.</p></div>
           </article>
           <nav class="view-actions" aria-label="View actions">
             <button type="button" data-unavailable="view-create">Create view</button>
@@ -198,17 +175,17 @@
       </main>
     </div>
 
-    <dialog class="app-dialog manager-dialog" id="connections-dialog" aria-labelledby="connections-title">
-      <div class="dialog-shell">
-        <header class="dialog-head"><div><small>PostgreSQL</small><h2 id="connections-title">Connections</h2><p>Connection metadata and credentials are held by the active server process.</p></div><button type="button" data-close-dialog aria-label="Close connections">×</button></header>
+    <dialog class="ui-dialog manager-dialog" id="connections-dialog" aria-labelledby="connections-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>PostgreSQL</small><h2 id="connections-title">Connections</h2><p>Connection metadata and credentials are held by the active server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connections"></button></header>
         <div class="dialog-toolbar"><span id="connections-count">Loading connections</span><button id="reload-connections-button" type="button">Reload</button><button class="primary" id="add-connection-button" type="button">New connection</button></div>
         <div class="manager-list" id="connections-list" aria-live="polite"></div>
       </div>
     </dialog>
 
-    <dialog class="app-dialog editor-dialog" id="connection-editor-dialog" aria-labelledby="connection-editor-title">
-      <form class="dialog-shell" id="connection-form">
-        <header class="dialog-head"><div><small>PostgreSQL target</small><h2 id="connection-editor-title">Connection</h2><p id="connection-editor-copy">Enter connection metadata for the active server process.</p></div><button type="button" data-close-dialog aria-label="Close connection editor">×</button></header>
+    <dialog class="ui-dialog editor-dialog" id="connection-editor-dialog" aria-labelledby="connection-editor-title">
+      <form class="ui-dialog__shell" id="connection-form">
+        <header class="ui-dialog__head"><div><small>PostgreSQL target</small><h2 id="connection-editor-title">Connection</h2><p id="connection-editor-copy">Enter connection metadata for the active server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connection editor"></button></header>
         <div class="form-grid">
           <label class="span-2"><span>Connection name</span><input id="connection-name" name="name" required maxlength="128" autocomplete="off" /></label>
           <label class="span-2"><span>Host</span><input id="connection-host" name="host" required maxlength="255" autocomplete="off" /></label>
@@ -221,13 +198,13 @@
           <label class="check-row span-2" id="remove-credential-row" hidden><input id="remove-credential" type="checkbox" /><span>Remove the credential currently stored by the server</span></label>
         </div>
         <div class="form-status" id="connection-form-status" aria-live="polite"></div>
-        <footer class="dialog-actions"><button id="reload-editor-connection" type="button" hidden>Reload server version</button><button type="button" data-close-dialog>Cancel</button><button class="primary" id="save-connection-button" type="submit">Save connection</button></footer>
+        <footer class="ui-dialog__actions"><button id="reload-editor-connection" type="button" hidden>Reload server version</button><button type="button" data-close-dialog>Cancel</button><button class="primary" id="save-connection-button" type="submit">Save connection</button></footer>
       </form>
     </dialog>
 
-    <dialog class="app-dialog manager-dialog" id="workspaces-dialog" aria-labelledby="workspaces-title">
-      <div class="dialog-shell">
-        <header class="dialog-head"><div><small>Live catalog targets</small><h2 id="workspaces-title">Workspaces</h2><p>Each workspace binds one connection, database, and PostgreSQL namespace for this server process.</p></div><button type="button" data-close-dialog aria-label="Close workspaces">×</button></header>
+    <dialog class="ui-dialog manager-dialog" id="workspaces-dialog" aria-labelledby="workspaces-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Live catalog targets</small><h2 id="workspaces-title">Workspaces</h2><p>Each workspace binds one connection, database, and PostgreSQL namespace for this server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>
         <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button id="reload-workspaces-button" type="button">Reload</button></div>
         <div class="manager-list" id="workspaces-list" aria-live="polite"></div>
         <form class="workspace-form" id="workspace-form">
@@ -241,26 +218,26 @@
       </div>
     </dialog>
 
-    <dialog class="app-dialog catalog-dialog" id="functions-dialog" aria-labelledby="functions-title">
-      <div class="dialog-shell">
-        <header class="dialog-head"><div><small>Live PostgreSQL catalog</small><h2 id="functions-title">Functions and procedures</h2><p>Definitions are read-only and come from the open workspace catalog.</p></div><button type="button" data-close-dialog aria-label="Close functions">×</button></header>
+    <dialog class="ui-dialog catalog-dialog" id="functions-dialog" aria-labelledby="functions-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Live PostgreSQL catalog</small><h2 id="functions-title">Functions and procedures</h2><p>Definitions are read-only and come from the open workspace catalog.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close functions"></button></header>
         <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="functions-search" type="search" autocomplete="off" /></label><span id="functions-count">No catalog loaded</span><button type="button" data-unavailable="function-mutation">Create or edit</button></div>
         <div class="catalog-browser-list" id="functions-list"></div>
       </div>
     </dialog>
 
-    <dialog class="app-dialog catalog-dialog" id="objects-dialog" aria-labelledby="objects-title">
-      <div class="dialog-shell">
-        <header class="dialog-head"><div><small>Live PostgreSQL catalog</small><h2 id="objects-title">Database objects</h2><p>Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.</p></div><button type="button" data-close-dialog aria-label="Close database objects">×</button></header>
+    <dialog class="ui-dialog catalog-dialog" id="objects-dialog" aria-labelledby="objects-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Live PostgreSQL catalog</small><h2 id="objects-title">Database objects</h2><p>Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
         <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button type="button" data-unavailable="database-object-mutation">Mutate object</button></div>
         <div class="catalog-browser-list" id="objects-list"></div>
-        <footer class="dialog-actions"><button type="button" data-unavailable="migration-preview">Preview migration</button><button class="primary" type="button" data-unavailable="migration-apply">Apply migration</button></footer>
+        <footer class="ui-dialog__actions"><button type="button" data-unavailable="migration-preview">Preview migration</button><button class="primary" type="button" data-unavailable="migration-apply">Apply migration</button></footer>
       </div>
     </dialog>
 
-    <dialog class="app-dialog intro-dialog" id="introduction-dialog" aria-labelledby="introduction-title">
-      <div class="dialog-shell">
-        <header class="dialog-head"><div><small>Active frontend</small><h2 id="introduction-title">Explore a live PostgreSQL schema</h2></div><button type="button" data-close-dialog aria-label="Close introduction">×</button></header>
+    <dialog class="ui-dialog intro-dialog" id="introduction-dialog" aria-labelledby="introduction-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Active frontend</small><h2 id="introduction-title">Explore a live PostgreSQL schema</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close introduction"></button></header>
         <div class="intro-grid">
           <article><span>01</span><h3>Connect</h3><p>Create a PostgreSQL connection. Credentials remain server-side and are never returned to this page.</p></article>
           <article><span>02</span><h3>Open</h3><p>Create a workspace for an exact database and namespace, then load its live catalog.</p></article>
@@ -268,27 +245,27 @@
           <article><span>04</span><h3>Recover</h3><p>If a layout revision conflicts, local positions remain on screen until you explicitly reload the server layout.</p></article>
         </div>
         <div class="runtime-note"><strong>Process-scoped storage</strong><span>The active API reports in-memory persistence. Connections, workspaces, and layouts do not survive a server restart.</span></div>
-        <footer class="dialog-actions"><button class="primary" type="button" data-close-dialog>Start exploring</button></footer>
+        <footer class="ui-dialog__actions"><button class="primary" type="button" data-close-dialog>Start exploring</button></footer>
       </div>
     </dialog>
 
-    <dialog class="app-dialog unavailable-dialog" id="unavailable-dialog" aria-labelledby="unavailable-title">
-      <div class="dialog-shell">
-        <header class="dialog-head"><div><small>Backend capability unavailable</small><h2 id="unavailable-title">Capability unavailable</h2></div><button type="button" data-close-dialog aria-label="Close capability notice">×</button></header>
+    <dialog class="ui-dialog unavailable-dialog" id="unavailable-dialog" aria-labelledby="unavailable-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Backend capability unavailable</small><h2 id="unavailable-title">Capability unavailable</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close capability notice"></button></header>
         <div class="unavailable-copy"><span class="unavailable-mark" aria-hidden="true">API</span><div><p id="unavailable-description"></p><strong>This capability needs an update to the active backend and API contract.</strong><code id="unavailable-id"></code></div></div>
-        <footer class="dialog-actions"><button class="primary" type="button" data-close-dialog>Close</button></footer>
+        <footer class="ui-dialog__actions"><button class="primary" type="button" data-close-dialog>Close</button></footer>
       </div>
     </dialog>
 
-    <dialog class="app-dialog confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
-      <div class="dialog-shell">
-        <header class="dialog-head"><div><small>Confirm action</small><h2 id="confirm-title">Confirm</h2></div><button type="button" data-confirm-cancel aria-label="Cancel confirmation">×</button></header>
+    <dialog class="ui-dialog confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Confirm action</small><h2 id="confirm-title">Confirm</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-confirm-cancel aria-label="Cancel confirmation"></button></header>
         <p id="confirm-message"></p>
-        <footer class="dialog-actions"><button type="button" data-confirm-cancel>Cancel</button><button class="danger" id="confirm-action" type="button">Delete</button></footer>
+        <footer class="ui-dialog__actions"><button type="button" data-confirm-cancel>Cancel</button><button class="danger" id="confirm-action" type="button">Delete</button></footer>
       </div>
     </dialog>
 
-    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <div class="ui-toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script type="module" src="assets/app.js"></script>
   </body>
 </html>

@@ -51,7 +51,7 @@ export function errorPanel(error, { retryLabel, onRetry } = {}) {
 }
 
 export function emptyPanel(mark, title, copy, action = null) {
-  const panel = element("div", { className: "empty-panel" });
+  const panel = element("div", { className: "empty-panel ui-state surface" });
   panel.append(element("span", { text: mark }), element("strong", { text: title }), element("p", { text: copy }));
   if (action) panel.append(action);
   return panel;

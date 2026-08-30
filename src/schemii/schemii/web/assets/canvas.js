@@ -51,6 +51,7 @@ export class CatalogCanvas {
     onSelect,
     onPositionsChanged,
     onRelationshipVisibilityChanged,
+    getViewportInsets = () => ({}),
     scheduleFrame = callback => window.requestAnimationFrame(callback),
     cancelFrame = frame => window.cancelAnimationFrame(frame),
   }) {
@@ -62,6 +63,7 @@ export class CatalogCanvas {
     this.onSelect = onSelect;
     this.onPositionsChanged = onPositionsChanged;
     this.onRelationshipVisibilityChanged = onRelationshipVisibilityChanged;
+    this.getViewportInsets = getViewportInsets;
     this.catalog = null;
     this.positions = new Map();
     this.cards = new Map();
@@ -182,7 +184,7 @@ export class CatalogCanvas {
         );
         card.append(row);
       }
-      card.addEventListener("click", () => this.select(table.name));
+      card.addEventListener("click", () => this.select(table.name, { notify: true }));
       card.addEventListener("keydown", event => this.handleCardKeydown(event, table.name));
       this.cards.set(table.name, card);
       this.layer.append(card);
@@ -191,11 +193,12 @@ export class CatalogCanvas {
     this.drawRelationships();
   }
 
-  select(name, { focus = false } = {}) {
+  select(name, { focus = false, notify = false } = {}) {
     if (!this.tableByName.has(name)) return;
     const selectionChanged = this.selectedName !== name;
     if (!selectionChanged) {
       if (focus) this.cards.get(name)?.focus();
+      if (notify) this.onSelect(name);
       return;
     }
     const previousName = this.selectedName;
@@ -250,7 +253,7 @@ export class CatalogCanvas {
   }
 
   focusTable(name) {
-    this.select(name, { focus: true });
+    this.select(name, { focus: true, notify: true });
   }
 
   startDrag(event, name, card) {
@@ -298,7 +301,7 @@ export class CatalogCanvas {
     if (!this.interactive) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      this.select(name);
+      this.select(name, { notify: true });
       return;
     }
     const delta = {
@@ -439,7 +442,9 @@ export class CatalogCanvas {
   }
 
   zoomBy(amount) {
-    const reserved = window.matchMedia("(max-width: 680px)").matches ? 0 : 340;
+    const reserved = window.matchMedia("(max-width: 680px)").matches
+      ? 0
+      : Math.max(0, Number(this.getViewportInsets().right) || 0);
     const centerX = Math.max(120, (this.canvas.clientWidth - reserved) / 2);
     const centerY = this.canvas.clientHeight / 2;
     const bounds = this.canvas.getBoundingClientRect();
@@ -463,7 +468,7 @@ export class CatalogCanvas {
     const mobile = window.matchMedia("(max-width: 680px)").matches;
     const left = mobile ? 18 : 75;
     const top = 65;
-    const right = mobile ? 18 : 360;
+    const right = mobile ? 18 : Math.max(20, Number(this.getViewportInsets().right) || 20);
     const bottom = mobile ? 75 : 35;
     return this.viewport.fitBounds({ minX, minY, maxX, maxY }, {
       left,

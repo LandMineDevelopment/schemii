@@ -6,56 +6,63 @@
     <meta name="theme-color" content="#0b0e13" />
     <title>Schemii API map</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/ui.css" />
     <link rel="stylesheet" href="/assets/api-map.css" />
   </head>
   <body>
     <div class="map-shell">
-      <header class="map-topbar">
-        <a class="map-brand" href="/" aria-label="Return to Schemii">
-          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span><strong>Schemii</strong><small>Live API map</small></span>
+      <header class="map-topbar ui-topbar">
+        <a class="map-brand ui-brand" href="/" aria-label="Return to Schemii">
+          <span class="brand-mark ui-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="ui-brand-copy"><strong>Schemii</strong><small>Live API map</small></span>
         </a>
-        <nav class="map-links" aria-label="API resources">
-          <a href="/">Schema explorer</a>
-          <a href="/docs">Swagger</a>
-          <a href="/redoc">ReDoc</a>
-          <a href="/openapi.json">OpenAPI JSON</a>
+        <div class="api-topology-title">
+          <span class="ui-eyebrow">Generated from the active server</span>
+          <div><h1 id="map-title">API topology</h1><small id="map-description">Loading the current OpenAPI contract…</small></div>
+        </div>
+        <dl class="map-stats ui-stat-grid" aria-label="API contract totals">
+          <div><dt>Paths</dt><dd id="path-count">—</dd></div>
+          <div><dt>Operations</dt><dd id="operation-count">—</dd></div>
+          <div><dt>Groups</dt><dd id="group-count">—</dd></div>
+          <div><dt>Schemas</dt><dd id="schema-count">—</dd></div>
+        </dl>
+        <label class="map-search ui-search">
+          <span class="sr-only">Filter routes</span>
+          <input id="route-search" type="search" autocomplete="off" placeholder="Filter method, path, group, or schema" />
+        </label>
+        <nav class="map-links" aria-label="API map actions">
+          <button class="ui-icon-button" id="refresh-map" type="button" data-ui-icon="refresh" aria-label="Refresh contract"></button>
+          <details class="ui-menu">
+            <summary class="ui-icon-button" data-ui-icon="more" aria-label="API resources"></summary>
+            <div class="ui-menu__surface">
+              <a href="/">Schema explorer</a>
+              <a href="/docs">Swagger</a>
+              <a href="/redoc">ReDoc</a>
+              <a href="/openapi.json">OpenAPI JSON</a>
+            </div>
+          </details>
         </nav>
       </header>
 
       <main class="map-main">
-        <section class="map-hero" aria-labelledby="map-title">
-          <div class="hero-copy">
-            <span class="eyebrow">Generated from the active server</span>
-            <h1 id="map-title">API topology</h1>
-            <p id="map-description">Loading the current OpenAPI contract…</p>
-          </div>
-          <dl class="map-stats" aria-label="API contract totals">
-            <div><dt>Paths</dt><dd id="path-count">—</dd></div>
-            <div><dt>Operations</dt><dd id="operation-count">—</dd></div>
-            <div><dt>Groups</dt><dd id="group-count">—</dd></div>
-            <div><dt>Schemas</dt><dd id="schema-count">—</dd></div>
-          </dl>
-          <div class="map-controls">
-            <label class="map-search">
-              <span>Filter routes</span>
-              <input id="route-search" type="search" autocomplete="off" placeholder="Method, path, group, or schema" />
-            </label>
-            <button id="refresh-map" type="button">Refresh contract</button>
-          </div>
-        </section>
-
-        <section class="map-workspace" aria-label="API route graph">
-          <aside class="group-index" aria-labelledby="group-index-title">
-            <header>
-              <span class="eyebrow">Contract index</span>
-              <h2 id="group-index-title">Route groups</h2>
+        <section class="map-workspace" id="api-map-workspace" aria-label="API route graph">
+          <aside class="group-index ui-dock-pane" id="group-index" aria-labelledby="group-index-title">
+            <header class="ui-dock-pane__header">
+              <div class="ui-dock-pane__title">
+                <span class="ui-eyebrow">Contract index</span>
+                <strong id="group-index-title">Route groups</strong>
+              </div>
+              <div class="ui-dock-pane__actions">
+                <button class="ui-icon-button compact" id="group-index-toggle" type="button" data-ui-icon="collapse" aria-controls="group-index-body" aria-expanded="true" aria-label="Collapse route groups"></button>
+              </div>
             </header>
-            <div class="api-root-node">
-              <span class="root-pulse" aria-hidden="true"></span>
-              <span><strong id="api-root-title">Schemii API</strong><small id="api-root-version">Active contract</small></span>
+            <div class="ui-dock-pane__body" id="group-index-body">
+              <div class="api-root-node">
+                <span class="root-pulse" aria-hidden="true"></span>
+                <span><strong id="api-root-title">Schemii API</strong><small id="api-root-version">Active contract</small></span>
+              </div>
+              <nav id="group-links" aria-label="Route groups"></nav>
             </div>
-            <nav id="group-links" aria-label="Route groups"></nav>
           </aside>
 
           <section class="route-graph" aria-labelledby="route-graph-title">
@@ -65,7 +72,7 @@
                 <h2 id="route-graph-title">Groups and operations</h2>
               </div>
               <div class="surface-actions">
-                <div class="map-view-switch" role="group" aria-label="API map view">
+                <div class="map-view-switch ui-segmented" role="group" aria-label="API map view">
                   <button id="list-view-button" type="button" aria-pressed="true">Overview</button>
                   <button id="canvas-view-button" type="button" aria-pressed="false">Canvas</button>
                 </div>
@@ -82,7 +89,7 @@
                 </div>
               </div>
             </header>
-            <div class="map-state" id="map-state" role="status" aria-live="polite">
+            <div class="map-state ui-state" id="map-state" role="status" aria-live="polite">
               <span class="state-spinner" aria-hidden="true"></span>
               <strong>Loading the active API contract</strong>
               <p>Reading <code>/openapi.json</code> from this Schemii process.</p>
@@ -104,13 +111,24 @@
             </div>
           </section>
 
-          <aside class="operation-inspector" aria-labelledby="operation-title" aria-live="polite">
-            <div class="inspector-empty" id="operation-empty">
-              <span class="empty-mark" aria-hidden="true">API</span>
-              <h2 id="operation-title">Select an operation</h2>
-              <p>Choose a route to inspect its parameters, request contract, and documented responses.</p>
+          <aside class="operation-inspector ui-dock-pane" id="operation-inspector" aria-labelledby="operation-pane-title" aria-live="polite">
+            <header class="ui-dock-pane__header">
+              <button class="ui-dock-pane__toggle" id="operation-inspector-toggle" type="button" aria-controls="operation-inspector-body" aria-expanded="true">
+                <span class="ui-eyebrow">Operation inspector</span>
+                <strong id="operation-pane-title">Select an operation</strong>
+              </button>
+              <div class="ui-dock-pane__actions">
+                <button class="ui-icon-button compact" id="operation-inspector-close" type="button" data-ui-icon="close" aria-label="Close operation inspector"></button>
+              </div>
+            </header>
+            <div class="ui-dock-pane__body" id="operation-inspector-body">
+              <div class="inspector-empty ui-state" id="operation-empty">
+                <span class="empty-mark" aria-hidden="true">API</span>
+                <h2 id="operation-title">Select an operation</h2>
+                <p>Choose a route to inspect its parameters, request contract, and documented responses.</p>
+              </div>
+              <div id="operation-detail" hidden></div>
             </div>
-            <div id="operation-detail" hidden></div>
           </aside>
         </section>
       </main>
