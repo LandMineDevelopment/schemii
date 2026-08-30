@@ -84,6 +84,12 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 1px solid 
 
 .route-graph { min-height: calc(100vh - 214px); }
 .surface-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+.surface-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.map-view-switch, .api-canvas-tools { display: flex; align-items: center; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: #0d1218; }
+.map-view-switch button, .api-canvas-tools button { min-width: 30px; height: 27px; padding: 0 8px; border: 0; border-radius: 4px; color: #7e8b9a; background: transparent; font-size: 8px; cursor: pointer; }
+.map-view-switch button:hover, .api-canvas-tools button:hover { color: var(--text); background: var(--panel-3); }
+.map-view-switch button[aria-pressed="true"] { color: var(--accent); background: #211b0f; box-shadow: inset 0 0 0 1px #4f4225; }
+.api-canvas-tools output { min-width: 42px; color: #9da9b7; text-align: center; font: 8px ui-monospace, monospace; }
 .surface-status { display: grid; justify-items: end; gap: 4px; }
 .surface-head output { flex: none; color: #a0abb8; font: 9px ui-monospace, monospace; }
 .surface-status span { color: #8190a0; font-size: 8px; }
@@ -117,6 +123,52 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 1px solid 
 .operation-copy small { color: var(--muted); font: 8px ui-monospace, monospace; }
 .operation-arrow { color: #596675; font-size: 14px; }
 .operation-node.selected .operation-arrow { color: var(--accent); }
+
+.api-canvas { position: relative; height: max(590px, calc(100vh - 274px)); min-height: 590px; overflow: hidden; cursor: grab; touch-action: none; }
+.api-canvas.panning { cursor: grabbing; }
+.api-canvas-grid { position: absolute; inset: 0; pointer-events: none; background-image: linear-gradient(rgba(91, 106, 124, .065) 1px, transparent 1px), linear-gradient(90deg, rgba(91, 106, 124, .065) 1px, transparent 1px), radial-gradient(circle at 48% 45%, rgba(48, 64, 82, .13), transparent 44%); background-size: 24px 24px, 24px 24px, 100% 100%; }
+.api-canvas-stage { position: absolute; width: 1px; height: 1px; overflow: visible; transform-origin: 0 0; }
+.api-canvas-lines { position: absolute; inset: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.api-canvas-nodes { position: absolute; inset: 0; }
+.api-canvas-node { position: absolute; overflow: hidden; border: 1px solid #35404d; border-radius: 8px; color: var(--text); background: #121820; box-shadow: 0 14px 32px rgba(0, 0, 0, .33); cursor: default; user-select: none; transition: opacity .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.api-canvas-node:hover { border-color: #566576; }
+.api-canvas-node.selected { z-index: 5; border-color: var(--accent); box-shadow: 0 0 0 1px rgba(244, 185, 66, .22), 0 18px 40px rgba(0, 0, 0, .42); }
+.api-canvas-node.dimmed { opacity: .28; }
+.api-canvas-node.dragging { z-index: 8; transition: none; will-change: transform; }
+.api-operation-card { display: grid; width: 280px; min-height: 104px; grid-template-columns: minmax(0, 1fr); }
+.api-schema-card { display: grid; width: 240px; min-height: 88px; background: #111a24; }
+.api-node-head { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; border-bottom: 1px solid #29333f; background: linear-gradient(180deg, #1a2029, #151b23); cursor: grab; }
+.api-node-head:active { cursor: grabbing; }
+.api-node-kind { min-width: 0; overflow: hidden; color: #7e8b9b; font-size: 7px; text-overflow: ellipsis; text-transform: uppercase; letter-spacing: .1em; white-space: nowrap; }
+.api-node-path { margin: 9px 10px 0; overflow: hidden; color: #cdd5df; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.api-node-title { min-width: 0; margin: 6px 10px 0; overflow: hidden; color: #e1e6eb; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.api-node-meta { margin: 5px 10px 9px; color: #718091; font-size: 8px; }
+.schema-node-glyph { display: grid; width: 27px; height: 22px; place-items: center; border: 1px solid #3b5068; border-radius: 4px; color: #91c5f7; background: #101e2b; font: 800 8px ui-monospace, monospace; }
+.schema-title { margin-top: 10px; color: #b9daf8; font: 700 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.api-edge { color: #647182; opacity: .64; transition: opacity .15s ease; }
+.api-edge.dimmed { opacity: .08; }
+.api-edge.active { opacity: 1; }
+.api-edge-shadow, .api-edge-line { fill: none; }
+.api-edge-shadow { stroke: #07090c; stroke-width: 5; }
+.api-edge-line { stroke: currentColor; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.api-edge-request { color: #b192ef; }
+.api-edge-parameter { color: #65a9ff; }
+.api-edge-response { color: #71d49a; }
+.api-edge-schema { color: #718093; }
+.api-arrow { fill: currentColor; }
+.api-arrow-request { color: #b192ef; }
+.api-arrow-parameter { color: #65a9ff; }
+.api-arrow-response { color: #71d49a; }
+.api-arrow-schema { color: #718093; }
+.api-canvas-legend { position: absolute; z-index: 4; right: 12px; bottom: 11px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px 10px; max-width: 330px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; color: #778493; background: rgba(13, 18, 24, .94); font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
+.api-canvas-legend span::before { display: inline-block; width: 13px; height: 2px; margin: 0 5px 2px 0; content: ""; background: currentColor; }
+.api-canvas-legend .legend-request { color: #b192ef; }
+.api-canvas-legend .legend-parameter { color: #65a9ff; }
+.api-canvas-legend .legend-response { color: #71d49a; }
+.api-canvas-legend .legend-schema { color: #8997a8; }
+.api-canvas-hint { position: absolute; z-index: 4; bottom: 12px; left: 12px; display: flex; align-items: center; gap: 6px; margin: 0; color: #596574; font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
+.api-canvas-hint kbd { padding: 2px 4px; border: 1px solid #343d49; border-bottom-width: 2px; border-radius: 3px; color: #8190a0; background: #141a21; font-family: inherit; }
+.api-canvas-hint span { width: 2px; height: 2px; border-radius: 50%; background: #4d5967; }
 
 .map-state { display: grid; min-height: 320px; place-content: center; justify-items: center; gap: 8px; padding: 30px; color: #778391; text-align: center; }
 .map-state strong { color: #cbd3dc; font-size: 12px; }
@@ -169,6 +221,7 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 1px solid 
   .map-controls { grid-column: 1 / -1; }
   .map-workspace { grid-template-columns: 190px minmax(410px, 1fr); }
   .operation-inspector { position: relative; top: auto; max-height: none; grid-column: 1 / -1; }
+  .surface-actions { flex-wrap: wrap; }
   #operation-detail { display: grid; grid-template-columns: 320px minmax(0, 1fr); }
   .detail-head { position: relative; border-right: 1px solid var(--line); border-bottom: 0; }
   .return-routes { display: block; }
@@ -188,6 +241,11 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 1px solid 
   .group-index nav { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); padding-left: 11px; }
   .api-root-node::after, .group-index nav a::before { display: none; }
   .route-graph { min-height: 360px; margin-bottom: 9px; }
+  .surface-head { align-items: flex-start; flex-direction: column; }
+  .surface-actions { width: 100%; justify-content: space-between; }
+  .surface-status { margin-left: auto; }
+  .api-canvas { height: 620px; min-height: 620px; }
+  .api-canvas-hint { display: none; }
   .route-group { grid-template-columns: 1fr; }
   .group-node { border-right: 0; border-bottom: 1px solid #29333f; }
   .group-node::after { display: none; }
@@ -208,6 +266,9 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 1px solid 
   .map-links a:first-child { display: none; }
   .map-stats div { min-width: 0; padding: 8px 4px; }
   .surface-head { align-items: flex-start; }
+  .surface-actions { align-items: flex-end; }
+  .surface-status { max-width: 110px; }
+  .api-canvas-legend { right: 7px; bottom: 7px; left: 7px; justify-content: center; }
   .route-groups { padding: 7px; }
   .operation-route { align-items: flex-start; flex-direction: column; gap: 5px; }
   .operation-route code { width: 100%; white-space: normal; overflow-wrap: anywhere; }
@@ -217,4 +278,5 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 1px solid 
 
 @media (prefers-reduced-motion: reduce) {
   .state-spinner { animation: none; }
+  .api-canvas-node, .api-edge { transition: none; }
 }

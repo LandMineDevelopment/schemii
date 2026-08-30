@@ -64,10 +64,22 @@
                 <span class="eyebrow">OpenAPI paths</span>
                 <h2 id="route-graph-title">Groups and operations</h2>
               </div>
-              <div class="surface-status">
-                <output id="filter-summary" aria-live="polite">Loading routes</output>
-                <span id="contract-status">Checking active contract</span>
-                <span class="sr-only" id="contract-alert" role="status" aria-live="polite"></span>
+              <div class="surface-actions">
+                <div class="map-view-switch" role="group" aria-label="API map view">
+                  <button id="list-view-button" type="button" aria-pressed="true">Overview</button>
+                  <button id="canvas-view-button" type="button" aria-pressed="false">Canvas</button>
+                </div>
+                <div class="api-canvas-tools" id="api-canvas-tools" hidden>
+                  <button id="api-canvas-fit" type="button">Fit</button>
+                  <button id="api-canvas-zoom-out" type="button" aria-label="Zoom out">−</button>
+                  <output id="api-canvas-zoom" aria-label="API canvas zoom">100%</output>
+                  <button id="api-canvas-zoom-in" type="button" aria-label="Zoom in">+</button>
+                </div>
+                <div class="surface-status">
+                  <output id="filter-summary" aria-live="polite">Loading routes</output>
+                  <span id="contract-status">Checking active contract</span>
+                  <span class="sr-only" id="contract-alert" role="status" aria-live="polite"></span>
+                </div>
               </div>
             </header>
             <div class="map-state" id="map-state" role="status" aria-live="polite">
@@ -76,6 +88,20 @@
               <p>Reading <code>/openapi.json</code> from this Schemii process.</p>
             </div>
             <div class="route-groups" id="route-groups"></div>
+            <div class="api-canvas" id="api-canvas" tabindex="0" aria-label="API operation and schema canvas" hidden>
+              <div class="api-canvas-grid" aria-hidden="true"></div>
+              <div class="api-canvas-stage" id="api-canvas-stage">
+                <svg class="api-canvas-lines" id="api-canvas-lines" aria-hidden="true"></svg>
+                <div class="api-canvas-nodes" id="api-canvas-nodes"></div>
+              </div>
+              <div class="api-canvas-legend" aria-label="Relationship legend">
+                <span class="legend-parameter">Parameter</span>
+                <span class="legend-request">Request</span>
+                <span class="legend-response">Response</span>
+                <span class="legend-schema">Schema reference</span>
+              </div>
+              <p class="api-canvas-hint"><kbd>Drag canvas</kbd> pan <span></span><kbd>Drag node</kbd> move <span></span><kbd>Arrows</kbd> move focused node</p>
+            </div>
           </section>
 
           <aside class="operation-inspector" aria-labelledby="operation-title" aria-live="polite">

@@ -1,3 +1,5 @@
+import { ApiGraph } from "./api-graph.js";
+
 const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "options", "head", "trace"];
 const METHOD_ORDER = new Map(HTTP_METHODS.map((method, index) => [method, index]));
 const CONTRACT_REFRESH_INTERVAL = 30_000;
@@ -147,12 +149,12 @@ function responseModel(specification, status, response) {
   };
 }
 
-function mergedParameters(specification, pathItem, operation) {
+function mergedParameterSources(specification, pathItem, operation) {
   const parameters = new Map();
   const add = parameter => {
     const source = resolveLocalReference(specification, parameter);
     const key = `${text(source.in, "unknown")}:${text(source.name, "unnamed")}`;
-    parameters.set(key, parameterModel(specification, source));
+    parameters.set(key, source);
   };
   if (Array.isArray(pathItem.parameters)) pathItem.parameters.forEach(add);
   if (Array.isArray(operation.parameters)) operation.parameters.forEach(add);
@@ -176,12 +178,19 @@ function statusSort([left], [right]) {
 function operationModel(specification, path, method, pathItem, operation) {
   const source = asRecord(operation);
   const requestBody = resolveLocalReference(specification, source.requestBody);
-  const parameters = mergedParameters(specification, pathItem, source);
+  const parameterSources = mergedParameterSources(specification, pathItem, source);
+  const parameters = parameterSources.map(parameter => parameterModel(specification, parameter));
   const responses = Object.entries(asRecord(source.responses))
     .sort(statusSort)
     .map(([status, response]) => responseModel(specification, status, response));
   const requestSchemas = contentSchemaLabels(requestBody.content);
   const responseSchemas = unique(responses.flatMap(response => response.schemas));
+  const parameterSchemaReferences = unique(parameterSources.flatMap(parameter => collectSchemaNames(parameter)));
+  const requestSchemaReferences = collectSchemaNames(requestBody.content);
+  const responseSchemaReferences = unique(Object.values(asRecord(source.responses)).flatMap(response => {
+    const resolved = resolveLocalReference(specification, response);
+    return collectSchemaNames(resolved.content);
+  }));
   const tags = Array.isArray(source.tags) && source.tags.length
     ? source.tags.map(tag => text(tag, "ungrouped"))
     : ["ungrouped"];
@@ -201,13 +210,20 @@ function operationModel(specification, path, method, pathItem, operation) {
       schemas: requestSchemas,
     },
     responses,
-    schemas: unique([...requestSchemas, ...responseSchemas]),
+    schemas: unique([...parameterSchemaReferences, ...requestSchemas, ...responseSchemas]),
+    graph: {
+      parameterSchemas: parameterSchemaReferences,
+      requestSchemas: requestSchemaReferences,
+      responseSchemas: responseSchemaReferences,
+    },
   };
 }
 
 export function buildApiMapModel(document) {
   const specification = asRecord(document);
   const paths = asRecord(specification.paths);
+  const componentSchemas = asRecord(specification.components?.schemas);
+  const componentSchemaNames = new Set(Object.keys(componentSchemas));
   const tagMetadata = new Map(
     (Array.isArray(specification.tags) ? specification.tags : [])
       .map(tag => [text(tag?.name), text(tag?.description)])
@@ -243,7 +259,13 @@ export function buildApiMapModel(document) {
     version: text(specification.info?.version, "Unversioned"),
     description: text(specification.info?.description, "OpenAPI contract from the active server."),
     pathCount: Object.keys(paths).length,
-    schemaCount: Object.keys(asRecord(specification.components?.schemas)).length,
+    schemaCount: componentSchemaNames.size,
+    schemas: Object.entries(componentSchemas).map(([name, schema]) => ({
+      name,
+      kind: schemaLabel(schema) || "schema",
+      description: text(asRecord(schema).description),
+      references: collectSchemaNames(schema).filter(reference => componentSchemaNames.has(reference) && reference !== name),
+    })),
     operations,
     groups: [...groupsByTag.values()],
   };
@@ -286,7 +308,11 @@ const uiState = {
   loading: false,
   refreshTimer: null,
   detailSignature: null,
+  view: "list",
+  canvasFitted: false,
 };
+
+let apiGraph = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -318,6 +344,7 @@ function setSelected(operationId, { reveal = false } = {}) {
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-pressed", selected ? "true" : "false");
   });
+  apiGraph?.setSelectedOperation(operationId);
   const signature = JSON.stringify(operation);
   if (signature !== uiState.detailSignature) {
     renderOperationDetail(operation);
@@ -361,6 +388,10 @@ function renderOperationDetail(operation) {
     attrs: { type: "button" },
   });
   returnButton.addEventListener("click", () => {
+    if (uiState.view === "canvas" && apiGraph?.focusOperation(operation.id)) {
+      if (window.matchMedia("(max-width: 1180px)").matches) scrollCanvasIntoView();
+      return;
+    }
     const selected = document.querySelector(`.operation-node[data-operation-id="${CSS.escape(operation.id)}"]`);
     selected?.scrollIntoView({ block: "center" });
     selected?.focus({ preventScroll: true });
@@ -438,7 +469,45 @@ function groupIdentifier(name, index) {
   return `group-${index + 1}-${slug}`;
 }
 
-function renderMap({ restoreOperationFocus = null, restoreInspectorElement = null, restoreGroupHref = null } = {}) {
+function setMapView(view) {
+  if (view !== "list" && view !== "canvas") return;
+  uiState.view = view;
+  const canvasActive = view === "canvas";
+  byId("list-view-button").setAttribute("aria-pressed", canvasActive ? "false" : "true");
+  byId("canvas-view-button").setAttribute("aria-pressed", canvasActive ? "true" : "false");
+  byId("api-canvas-tools").hidden = !canvasActive;
+  byId("route-graph-title").textContent = canvasActive ? "Operations and schemas" : "Groups and operations";
+  const hasVisibleOperations = visibleOperations().length > 0;
+  byId("route-groups").hidden = canvasActive || !hasVisibleOperations;
+  byId("api-canvas").hidden = !canvasActive || !hasVisibleOperations;
+  apiGraph?.setActive(canvasActive && hasVisibleOperations);
+  if (!canvasActive || !hasVisibleOperations) return;
+  window.requestAnimationFrame(() => {
+    apiGraph?.refreshGeometry();
+    if (uiState.canvasFitted) return;
+    uiState.canvasFitted = Boolean(apiGraph?.fitSelection() || apiGraph?.fit());
+  });
+}
+
+function scrollCanvasIntoView() {
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  byId("api-canvas").scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+}
+
+function chooseMapView(view) {
+  setMapView(view);
+  const url = new URL(window.location.href);
+  if (view === "canvas") url.searchParams.set("view", "canvas");
+  else url.searchParams.delete("view");
+  window.history.replaceState(null, "", url);
+}
+
+function renderMap({
+  restoreOperationFocus = null,
+  restoreInspectorElement = null,
+  restoreGroupHref = null,
+  restoreCanvasKey = null,
+} = {}) {
   const model = uiState.model;
   if (!model) return;
   const query = uiState.query;
@@ -460,6 +529,13 @@ function renderMap({ restoreOperationFocus = null, restoreInspectorElement = nul
       element("span", { textContent: group.name }),
       element("small", { textContent: String(operations.length) }),
     );
+    indexLink.addEventListener("click", event => {
+      if (uiState.view !== "canvas") return;
+      event.preventDefault();
+      if (apiGraph?.focusGroup(group.name) && window.matchMedia("(max-width: 760px)").matches) {
+        scrollCanvasIntoView();
+      }
+    });
     groupLinks.append(indexLink);
 
     const section = element("section", {
@@ -515,15 +591,21 @@ function renderMap({ restoreOperationFocus = null, restoreInspectorElement = nul
   if (!shownIds.has(uiState.selectedId)) {
     uiState.selectedId = shown[0]?.id || null;
   }
+  apiGraph?.setVisibleOperations(shownIds, { filtering: Boolean(query) });
   if (uiState.selectedId) setSelected(uiState.selectedId);
   else renderOperationDetail(null);
+  setMapView(uiState.view);
   if (restoreGroupHref) {
     const link = [...byId("group-links").querySelectorAll("a")]
       .find(candidate => candidate.getAttribute("href") === restoreGroupHref);
     (link || byId("route-search")).focus({ preventScroll: true });
   } else if (restoreOperationFocus) {
-    const operation = document.querySelector(`.operation-node[data-operation-id="${CSS.escape(restoreOperationFocus)}"]`);
+    const selector = uiState.view === "canvas" ? ".api-operation-card" : ".operation-node";
+    const operation = document.querySelector(`${selector}[data-operation-id="${CSS.escape(restoreOperationFocus)}"]`);
     (operation || byId("route-search")).focus({ preventScroll: true });
+  } else if (restoreCanvasKey) {
+    const node = document.querySelector(`.api-canvas-node[data-node-key="${CSS.escape(restoreCanvasKey)}"]`);
+    (node || byId("route-search")).focus({ preventScroll: true });
   } else if (restoreInspectorElement && !restoreInspectorElement.isConnected) {
     byId("operation-detail").querySelector("h2")?.focus({ preventScroll: true });
   }
@@ -532,10 +614,13 @@ function renderMap({ restoreOperationFocus = null, restoreInspectorElement = nul
 function showLoadError(error) {
   uiState.model = null;
   uiState.selectedId = null;
+  uiState.canvasFitted = false;
+  apiGraph?.clear();
   replace(byId("group-links"));
   replace(byId("route-groups"));
   byId("group-links").hidden = false;
   byId("route-groups").hidden = false;
+  byId("api-canvas").hidden = true;
   renderOperationDetail(null);
   byId("map-description").textContent = "The active OpenAPI contract is currently unavailable.";
   byId("api-root-title").textContent = "Schemii API";
@@ -575,7 +660,7 @@ function showRefreshError(error) {
   setContractStatus("Refresh failed · showing last contract", true);
   byId("contract-status").title = error instanceof Error ? error.message : "The refresh request failed";
   byId("group-links").hidden = false;
-  byId("route-groups").hidden = false;
+  setMapView(uiState.view);
 }
 
 function applyContractMetadata(model) {
@@ -632,18 +717,20 @@ async function loadContract() {
       const activeElement = document.activeElement;
       const restoreOperationFocus = activeElement?.closest?.(".operation-node")?.dataset.operationId || null;
       const restoreGroupHref = activeElement?.closest?.("#group-links a")?.getAttribute("href") || null;
+      const restoreCanvasKey = activeElement?.closest?.(".api-canvas-node")?.dataset.nodeKey || null;
       const restoreInspectorElement = activeElement && byId("operation-detail").contains(activeElement)
         ? activeElement
         : null;
       const model = buildApiMapModel(specification);
       if (!model.operations.length) throw new Error("The OpenAPI document does not contain any operations");
+      apiGraph?.setModel(model);
       uiState.model = model;
-      uiState.contractFingerprint = fingerprint;
       if (!model.operations.some(operation => operation.id === uiState.selectedId)) {
         uiState.selectedId = model.operations[0].id;
       }
       applyContractMetadata(model);
-      renderMap({ restoreOperationFocus, restoreInspectorElement, restoreGroupHref });
+      renderMap({ restoreOperationFocus, restoreInspectorElement, restoreGroupHref, restoreCanvasKey });
+      uiState.contractFingerprint = fingerprint;
     }
     const checkedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     byId("contract-status").removeAttribute("title");
@@ -662,11 +749,30 @@ async function loadContract() {
 }
 
 function start() {
+  uiState.view = new URLSearchParams(window.location.search).get("view") === "canvas" ? "canvas" : "list";
+  apiGraph = new ApiGraph({
+    host: byId("api-canvas"),
+    stage: byId("api-canvas-stage"),
+    nodeLayer: byId("api-canvas-nodes"),
+    lines: byId("api-canvas-lines"),
+    zoomOutput: byId("api-canvas-zoom"),
+    onSelectOperation: operationId => setSelected(operationId, { reveal: true }),
+  });
   byId("route-search").addEventListener("input", event => {
     uiState.query = event.target.value.trim().toLowerCase();
     renderMap();
   });
   byId("refresh-map").addEventListener("click", loadContract);
+  byId("list-view-button").addEventListener("click", () => chooseMapView("list"));
+  byId("canvas-view-button").addEventListener("click", () => chooseMapView("canvas"));
+  byId("api-canvas-fit").addEventListener("click", () => {
+    if (apiGraph.fit()) uiState.canvasFitted = true;
+  });
+  byId("api-canvas-zoom-in").addEventListener("click", () => apiGraph.zoomBy(0.1));
+  byId("api-canvas-zoom-out").addEventListener("click", () => apiGraph.zoomBy(-0.1));
+  window.addEventListener("resize", () => {
+    if (uiState.view === "canvas") apiGraph.refreshGeometry();
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") loadContract();
     else {
@@ -674,6 +780,7 @@ function start() {
       uiState.refreshTimer = null;
     }
   });
+  setMapView(uiState.view);
   loadContract();
 }
 

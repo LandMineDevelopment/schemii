@@ -1,4 +1,5 @@
 import { element, replace } from "./dom.js";
+import { GraphViewport } from "./graph-viewport.js";
 
 const CARD_WIDTH = 270;
 const HEADER_HEIGHT = 48;
@@ -6,8 +7,6 @@ const COLUMN_HEIGHT = 35;
 const MAX_CARD_COLUMNS = 40;
 const MAX_DIAGRAM_RELATIONSHIPS = 1000;
 const MAX_COORDINATE = 1_000_000;
-const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 1.7;
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -63,8 +62,6 @@ export class CatalogCanvas {
     this.onSelect = onSelect;
     this.onPositionsChanged = onPositionsChanged;
     this.onRelationshipVisibilityChanged = onRelationshipVisibilityChanged;
-    this.scheduleFrame = scheduleFrame;
-    this.cancelFrame = cancelFrame;
     this.catalog = null;
     this.positions = new Map();
     this.cards = new Map();
@@ -76,15 +73,31 @@ export class CatalogCanvas {
     this.measuredCardWidth = CARD_WIDTH;
     this.selectedName = null;
     this.interactive = true;
-    this.view = { x: 75, y: 70, zoom: 1 };
-    this.drag = null;
-    this.pan = null;
-    this.canvas.addEventListener("pointerdown", event => this.startPan(event));
-    this.canvas.addEventListener("pointermove", event => this.movePan(event));
-    this.canvas.addEventListener("pointerup", event => this.endPan(event));
-    this.canvas.addEventListener("pointercancel", event => this.endPan(event));
-    this.canvas.addEventListener("wheel", event => this.handleWheel(event), { passive: false });
-    this.applyView();
+    this.viewport = new GraphViewport({
+      host: canvas,
+      stage,
+      zoomOutput,
+      initialView: { x: 75, y: 70, zoom: 1 },
+      canStartPan: event => !event.target?.closest?.(".table-card, .catalog-state, .conflict-banner"),
+      scheduleFrame,
+      cancelFrame,
+    });
+  }
+
+  get view() {
+    return this.viewport.view;
+  }
+
+  set view(value) {
+    this.viewport.setView(value);
+  }
+
+  get drag() {
+    return this.viewport.drag;
+  }
+
+  get pan() {
+    return this.viewport.pan;
   }
 
   clear() {
@@ -241,109 +254,44 @@ export class CatalogCanvas {
   }
 
   startDrag(event, name, card) {
-    if (!this.interactive || this.drag || event.button !== 0) return;
-    event.preventDefault();
+    if (!this.interactive) return;
     const position = this.positions.get(name);
-    const dragHandle = event.currentTarget;
-    const pointerId = event.pointerId;
-    this.drag = {
-      pointerId,
-      name,
-      card,
-      handle: dragHandle,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: position.x,
-      originY: position.y,
-      x: position.x,
-      y: position.y,
-      renderedX: position.x,
-      renderedY: position.y,
-      moved: false,
-      frame: null,
-      cleanup: null,
-    };
-    card.classList.add("dragging");
-    dragHandle.setPointerCapture(pointerId);
-    const move = moveEvent => this.moveDrag(moveEvent);
-    const cleanup = () => {
-      dragHandle.removeEventListener("pointermove", move);
-      dragHandle.removeEventListener("pointerup", end);
-      dragHandle.removeEventListener("pointercancel", end);
-      dragHandle.removeEventListener("lostpointercapture", end);
-    };
-    const end = endEvent => this.endDrag(endEvent);
-    this.drag.cleanup = cleanup;
-    dragHandle.addEventListener("pointermove", move);
-    dragHandle.addEventListener("pointerup", end);
-    dragHandle.addEventListener("pointercancel", end);
-    dragHandle.addEventListener("lostpointercapture", end);
-    this.select(name);
-  }
-
-  moveDrag(event) {
-    if (!this.drag || event.pointerId !== this.drag.pointerId) return;
-    event.preventDefault();
-    const x = clamp(this.drag.originX + (event.clientX - this.drag.startX) / this.view.zoom, -MAX_COORDINATE, MAX_COORDINATE);
-    const y = clamp(this.drag.originY + (event.clientY - this.drag.startY) / this.view.zoom, -MAX_COORDINATE, MAX_COORDINATE);
-    if (!this.drag.moved && Math.abs(x - this.drag.originX) <= 1 && Math.abs(y - this.drag.originY) <= 1) return;
-    this.drag.moved = true;
-    this.drag.x = x;
-    this.drag.y = y;
-    this.scheduleDragRender();
-  }
-
-  scheduleDragRender() {
-    const drag = this.drag;
-    if (!drag || drag.frame !== null) return;
-    drag.frame = this.scheduleFrame(() => {
-      if (this.drag !== drag) return;
-      drag.frame = null;
-      this.renderDrag(drag);
+    if (!position) return;
+    this.viewport.beginNodeDrag(event, {
+      key: name,
+      element: card,
+      position,
+      constrain: candidate => ({
+        x: clamp(candidate.x, -MAX_COORDINATE, MAX_COORDINATE),
+        y: clamp(candidate.y, -MAX_COORDINATE, MAX_COORDINATE),
+      }),
+      onStart: () => this.select(name),
+      onFrame: () => this.drawRelationships(name),
+      onCommit: next => {
+        this.positions.set(name, next);
+        this.onPositionsChanged();
+      },
     });
   }
 
+  moveDrag(event) {
+    this.viewport.moveNodeDrag(event);
+  }
+
+  scheduleDragRender() {
+    this.viewport.scheduleNodeDragRender();
+  }
+
   renderDrag(drag, { commit = false } = {}) {
-    const geometryChanged = drag.x !== drag.renderedX || drag.y !== drag.renderedY;
-    if (commit) {
-      drag.card.style.left = `${drag.x}px`;
-      drag.card.style.top = `${drag.y}px`;
-      drag.card.style.transform = "";
-    } else {
-      drag.card.style.transform = `translate3d(${drag.x - drag.originX}px, ${drag.y - drag.originY}px, 0)`;
-    }
-    if (geometryChanged) {
-      this.drawRelationships(drag.name);
-      drag.renderedX = drag.x;
-      drag.renderedY = drag.y;
-    }
+    this.viewport.renderNodeDrag(drag, { commit });
   }
 
   endDrag(event) {
-    if (!this.drag || event.pointerId !== this.drag.pointerId) return;
-    const drag = this.drag;
-    drag.cleanup?.();
-    if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
-    if (drag.frame !== null) this.cancelFrame(drag.frame);
-    const changed = drag.x !== drag.originX || drag.y !== drag.originY;
-    if (drag.moved) {
-      if (changed) this.positions.set(drag.name, { x: drag.x, y: drag.y });
-      this.renderDrag(drag, { commit: true });
-    }
-    drag.card.classList.remove("dragging");
-    this.drag = null;
-    if (changed) this.onPositionsChanged();
+    this.viewport.endNodeDrag(event);
   }
 
   discardDrag() {
-    if (!this.drag) return;
-    const drag = this.drag;
-    drag.cleanup?.();
-    if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
-    if (drag.frame !== null) this.cancelFrame(drag.frame);
-    drag.card.classList.remove("dragging");
-    drag.card.style.transform = "";
-    this.drag = null;
+    this.viewport.cancelNodeDrag();
   }
 
   handleCardKeydown(event, name) {
@@ -396,8 +344,7 @@ export class CatalogCanvas {
   }
 
   positionFor(name) {
-    if (this.drag?.name === name) return { x: this.drag.x, y: this.drag.y };
-    return this.positions.get(name);
+    return this.viewport.dragPosition(name) || this.positions.get(name);
   }
 
   drawRelationships(changedTable = null) {
@@ -466,9 +413,7 @@ export class CatalogCanvas {
   }
 
   applyView() {
-    this.stage.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.zoom})`;
-    this.zoomOutput.value = `${Math.round(this.view.zoom * 100)}%`;
-    this.zoomOutput.textContent = `${Math.round(this.view.zoom * 100)}%`;
+    this.viewport.applyView();
   }
 
   setInteractive(interactive) {
@@ -478,41 +423,19 @@ export class CatalogCanvas {
   }
 
   startPan(event) {
-    if (event.button !== 0 || event.target.closest(".table-card, .catalog-state, .conflict-banner")) return;
-    event.preventDefault();
-    this.pan = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: this.view.x,
-      originY: this.view.y,
-    };
-    this.canvas.classList.add("panning");
-    this.canvas.setPointerCapture(event.pointerId);
+    this.viewport.startPan(event);
   }
 
   movePan(event) {
-    if (!this.pan || event.pointerId !== this.pan.pointerId) return;
-    this.view.x = this.pan.originX + event.clientX - this.pan.startX;
-    this.view.y = this.pan.originY + event.clientY - this.pan.startY;
-    this.applyView();
+    this.viewport.movePan(event);
   }
 
   endPan(event) {
-    if (!this.pan || event.pointerId !== this.pan.pointerId) return;
-    this.pan = null;
-    this.canvas.classList.remove("panning");
+    this.viewport.endPan(event);
   }
 
   handleWheel(event) {
-    event.preventDefault();
-    if (event.ctrlKey || event.metaKey) {
-      this.zoomAt(event.deltaY < 0 ? 0.1 : -0.1, event.clientX, event.clientY);
-      return;
-    }
-    this.view.x -= event.deltaX;
-    this.view.y -= event.deltaY;
-    this.applyView();
+    this.viewport.handleWheel(event);
   }
 
   zoomBy(amount) {
@@ -524,16 +447,7 @@ export class CatalogCanvas {
   }
 
   zoomAt(amount, clientX, clientY) {
-    const next = clamp(this.view.zoom + amount, MIN_ZOOM, MAX_ZOOM);
-    const bounds = this.canvas.getBoundingClientRect();
-    const pointX = clientX - bounds.left;
-    const pointY = clientY - bounds.top;
-    const worldX = (pointX - this.view.x) / this.view.zoom;
-    const worldY = (pointY - this.view.y) / this.view.zoom;
-    this.view.x = pointX - worldX * next;
-    this.view.y = pointY - worldY * next;
-    this.view.zoom = next;
-    this.applyView();
+    return this.viewport.zoomAt(amount, clientX, clientY);
   }
 
   fit() {
@@ -551,11 +465,12 @@ export class CatalogCanvas {
     const top = 65;
     const right = mobile ? 18 : 360;
     const bottom = mobile ? 75 : 35;
-    const width = Math.max(120, this.canvas.clientWidth - left - right);
-    const height = Math.max(120, this.canvas.clientHeight - top - bottom);
-    const zoom = clamp(Math.min(width / Math.max(1, maxX - minX), height / Math.max(1, maxY - minY)) * 0.9, MIN_ZOOM, 1.25);
-    this.view = { x: left + (width - (maxX - minX) * zoom) / 2 - minX * zoom, y: top + (height - (maxY - minY) * zoom) / 2 - minY * zoom, zoom };
-    this.applyView();
-    return true;
+    return this.viewport.fitBounds({ minX, minY, maxX, maxY }, {
+      left,
+      top,
+      right,
+      bottom,
+      maxZoom: 1.25,
+    });
   }
 }

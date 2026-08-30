@@ -42,6 +42,9 @@ def test_live_api_map_is_served_by_the_existing_application() -> None:
     assert "connect-src 'self'" in response.headers["content-security-policy"]
     assert '<script type="module" src="/assets/api-map.js"></script>' in response.text
     assert 'href="/assets/api-map.css"' in response.text
+    assert 'id="api-canvas"' in response.text
+    assert 'id="list-view-button"' in response.text
+    assert 'id="canvas-view-button"' in response.text
     assert "http://" not in response.text
     assert "https://" not in response.text
 
