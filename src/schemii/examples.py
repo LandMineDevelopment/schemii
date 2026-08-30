@@ -172,6 +172,8 @@ class ExampleInstaller:
         config_dir: str | os.PathLike[str],
         mode: str,
         postgres_profile: dict[str, Any] | None = None,
+        *,
+        manage_postgres_profile: bool = True,
     ):
         if mode not in EXAMPLE_MODES:
             raise ValueError("SCHEMII_EXAMPLES must be off, local, or all")
@@ -180,6 +182,7 @@ class ExampleInstaller:
         self.config_dir = Path(config_dir)
         self.mode = mode
         self.postgres_profile = postgres_profile
+        self.manage_postgres_profile = manage_postgres_profile
         self.marker_path = self.config_dir / "examples_initialized.json"
 
     def expected_components(self) -> list[str]:
@@ -228,13 +231,18 @@ class ExampleInstaller:
         expected_redacted = {key: value for key, value in self.postgres_profile.items() if key != "password"}
         existing = profiles.get(POSTGRES_PROFILE_ID)
         if existing is None:
+            if not self.manage_postgres_profile:
+                result["errors"].append({"component": "postgres", "message": "The shared tutorial connection was not initialized"})
+                return False
             self.service.save_profile(POSTGRES_PROFILE_ID, self.postgres_profile)
             result["installed"].append(POSTGRES_PROFILE_ID)
         elif any(existing.get(key) != value for key, value in expected_redacted.items()):
             result["errors"].append({"component": "postgres", "message": "The reserved tutorial connection ID contains different settings"})
             return False
-        else:
+        elif self.manage_postgres_profile:
             self.service.save_profile(POSTGRES_PROFILE_ID, self.postgres_profile)
+            result["preserved"].append(POSTGRES_PROFILE_ID)
+        else:
             result["preserved"].append(POSTGRES_PROFILE_ID)
 
         connection = self.service.test_profile(POSTGRES_PROFILE_ID)
@@ -289,22 +297,36 @@ class ExampleInstaller:
         )
 
 
+def postgres_example_profile_from_environment() -> dict[str, Any]:
+    try:
+        port = int(os.environ.get("SCHEMII_EXAMPLE_POSTGRES_PORT", "5432"))
+    except ValueError as error:
+        raise ValueError("SCHEMII_EXAMPLE_POSTGRES_PORT must be an integer") from error
+    return {
+        "name": "Mercury Books: Included PostgreSQL",
+        "host": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_HOST", "postgres"),
+        "port": port,
+        "dbname": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_DB", "schemii"),
+        "user": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_USER", "schemii"),
+        "password": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_PASSWORD", "schemii-local"),
+        "sslmode": "disable",
+        "timeout": 10,
+    }
+
+
+def initialize_postgres_example_profile(service: PostgresService, profile: dict[str, Any]) -> dict[str, Any]:
+    profiles = {item["id"]: item for item in service.list_profiles()}
+    existing = profiles.get(POSTGRES_PROFILE_ID)
+    expected = {key: value for key, value in profile.items() if key != "password"}
+    if existing is not None and any(existing.get(key) != value for key, value in expected.items()):
+        raise ValueError("The reserved tutorial connection ID contains different settings")
+    return service.save_profile(POSTGRES_PROFILE_ID, profile)
+
+
 def installer_from_environment(service: PostgresService, store: SchemaStore, config_dir: str | os.PathLike[str]) -> ExampleInstaller:
     mode = os.environ.get("SCHEMII_EXAMPLES", "off")
-    profile = None
-    if mode == "all":
-        try:
-            port = int(os.environ.get("SCHEMII_EXAMPLE_POSTGRES_PORT", "5432"))
-        except ValueError as error:
-            raise ValueError("SCHEMII_EXAMPLE_POSTGRES_PORT must be an integer") from error
-        profile = {
-            "name": "Mercury Books: Included PostgreSQL",
-            "host": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_HOST", "postgres"),
-            "port": port,
-            "dbname": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_DB", "schemii"),
-            "user": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_USER", "schemii"),
-            "password": os.environ.get("SCHEMII_EXAMPLE_POSTGRES_PASSWORD", "schemii-local"),
-            "sslmode": "disable",
-            "timeout": 10,
-        }
-    return ExampleInstaller(service, store, config_dir, mode, profile)
+    owner = os.environ.get("SCHEMII_EXAMPLE_PROFILE_OWNER", "application")
+    if owner not in {"application", "initializer"}:
+        raise ValueError("SCHEMII_EXAMPLE_PROFILE_OWNER must be application or initializer")
+    profile = postgres_example_profile_from_environment() if mode == "all" else None
+    return ExampleInstaller(service, store, config_dir, mode, profile, manage_postgres_profile=owner == "application")

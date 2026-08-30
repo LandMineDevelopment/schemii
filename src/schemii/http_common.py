@@ -7,10 +7,11 @@ from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .http_access import HttpAccessPolicy, request_is_allowed
+from .http_limits import MAX_BODY_SIZE
 from .postgres_service import PostgresService, PostgresServiceError
 
 
-MAX_BODY_SIZE = 5 * 1024 * 1024
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
     "style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; "
@@ -74,22 +75,13 @@ def metadata_profile_dependencies(authority: object, profile_id: str) -> dict[st
     return result
 
 
-def is_local_request(client_host: str, host_header: str, origin: str | None, behind_loopback_proxy: bool) -> bool:
-    host = host_header.rsplit(":", 1)[0].strip("[]").lower()
-    return (
-        (behind_loopback_proxy or client_host in {"127.0.0.1", "::1"})
-        and host in {"localhost", "127.0.0.1", "::1"}
-        and (not origin or urlparse(origin).hostname in {"localhost", "127.0.0.1", "::1"})
-    )
-
-
 def make_local_app_handler(
     web_dir: Path,
     postgres_service: PostgresService,
     session_token: str,
     *,
     server_id: str,
-    behind_loopback_proxy: bool = False,
+    access_policy: HttpAccessPolicy = HttpAccessPolicy(),
 ):
     class LocalAppHandler(SimpleHTTPRequestHandler):
         service = postgres_service
@@ -110,6 +102,14 @@ def make_local_app_handler(
                     return
                 raise
 
+        def parse_request(self):
+            if not super().parse_request():
+                return False
+            if request_is_allowed(self.client_address[0], self.headers, access_policy):
+                return True
+            self.send_json(403, {"error": {"code": "forbidden", "message": "The request is forbidden"}})
+            return False
+
         def send_response(self, code, message=None):
             self._response_started = True
             super().send_response(code, message)
@@ -119,13 +119,22 @@ def make_local_app_handler(
             self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
             super().end_headers()
 
-        def send_json(self, status: int, payload):
-            if status >= 400:
+        def send_json(self, status: int, payload, *, normalize_error: bool = True):
+            if status >= 400 and normalize_error:
                 payload = api_error_payload(status, payload)
             content = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def send_bytes(self, status: int, content: bytes, content_type: str, headers: dict[str, str] | None = None):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(content)
 
@@ -165,12 +174,7 @@ def make_local_app_handler(
             return self._send_shared_asset(path)
 
         def _is_local_request(self) -> bool:
-            return is_local_request(
-                self.client_address[0],
-                self.headers.get("Host", ""),
-                self.headers.get("Origin"),
-                behind_loopback_proxy,
-            )
+            return request_is_allowed(self.client_address[0], self.headers, access_policy)
 
         def _authorize_postgres(self) -> bool:
             return self._authorize_local_api("PostgreSQL API", "PostgreSQL session token is missing or invalid")
@@ -192,8 +196,10 @@ def make_local_app_handler(
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError as exc:
                 raise ValueError("Invalid content length") from exc
-            if length <= 0 or length > maximum:
-                raise ValueError("Request body is empty or too large")
+            if length <= 0:
+                raise ValueError("Request body is empty")
+            if length > maximum:
+                raise OverflowError("Request body exceeds the byte limit")
             if self.headers.get_content_type() != "application/json":
                 raise TypeError("Content-Type must be application/json")
             try:
@@ -206,6 +212,9 @@ def make_local_app_handler(
                 body = self._read_json(maximum)
             except TypeError as error:
                 self.send_json(415, {"error": {"code": "invalid_content_type", "message": str(error)}})
+                return None
+            except OverflowError as error:
+                self.send_json(413, {"error": {"code": "request_too_large", "message": str(error), "limit": maximum}})
                 return None
             except ValueError as error:
                 self.send_json(400, {"error": {"code": "invalid_request", "message": str(error)}})

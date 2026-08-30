@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   python:
     name: Python (${{ matrix.os }})
@@ -13,8 +16,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
@@ -27,7 +32,7 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          foreach ($script in @("start.ps1", "uninstall.ps1")) {
+          foreach ($script in @("start.ps1", "uninstall.ps1", "tests/test_start_recovery.ps1", "tests/test_legacy_volume_adoption.ps1")) {
             $tokens = $null
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile(
@@ -38,32 +43,71 @@ jobs:
               exit 1
             }
           }
-
+      - name: Test PowerShell coordinated recovery
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./tests/test_start_recovery.ps1
+      - name: Test PowerShell legacy volume adoption
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./tests/test_legacy_volume_adoption.ps1
   javascript:
     name: JavaScript
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+      - name: Install pinned browser for Chromium contracts
+        shell: bash
+        run: |
+          npx --yes @puppeteer/browsers@3.2.1 install chrome@151.0.7922.138 --path "$RUNNER_TEMP/chrome"
+          chromium_bin="$(find "$RUNNER_TEMP/chrome" -type f -name chrome -perm -111 -print -quit)"
+          test -n "$chromium_bin"
+          echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
       - run: node --check src/schemii/web/app.js
+      - run: node --check src/schemii/schemer_web/app.js
       - run: for test_file in tests/test_*.js; do node "$test_file" || exit 1; done
+        env:
+          SCHEMII_REQUIRE_CHROMIUM: "1"
 
-  docker:
-    name: Docker
+  artifacts:
+    name: Immutable artifacts
     runs-on: ubuntu-latest
+    needs: [python, javascript]
+    timeout-minutes: 60
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       - name: Create Compose test secret files
         run: |
           install -d -m 700 "$RUNNER_TEMP/schemii-credentials"
+          printf '%s\n' ci-smoke > "$RUNNER_TEMP/schemii-credentials/instance"
+          chmod 600 "$RUNNER_TEMP/schemii-credentials/instance"
           for name in metadata_bootstrap_password metadata_migration_password metadata_schemii_password metadata_schemer_password opencode_password; do
             install -m 600 /dev/null "$RUNNER_TEMP/schemii-credentials/$name"
             openssl rand -hex 32 > "$RUNNER_TEMP/schemii-credentials/$name"
           done
           echo "SCHEMII_CREDENTIAL_DIR=$RUNNER_TEMP/schemii-credentials" >> "$GITHUB_ENV"
-      - run: bash -n start.sh uninstall.sh docker/runtime-secret-entrypoint.sh docker/metadata/001_roles.sh docker/metadata/secret-entrypoint.sh docker/postgres/seed.sh ai/secret-entrypoint.sh
+      - name: Validate Bash syntax
+        shell: bash
+        run: bash -n start.sh uninstall.sh scripts/*.sh docker/recovery.sh docker/runtime-secret-entrypoint.sh docker/metadata/001_roles.sh docker/metadata/secret-entrypoint.sh docker/postgres/seed.sh ai/secret-entrypoint.sh
+      - name: Reject private database and runtime artifacts
+        run: python scripts/check-release-hygiene.py
+      - name: Validate GitHub Actions workflows
+        run: docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 -color
       - run: docker compose config
       - run: docker compose -f compose.yaml -f compose.local-db.yaml config
       - run: docker compose -f compose.yaml -f compose.postgres.yaml config
@@ -72,29 +116,137 @@ jobs:
       - run: docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml config
       - run: docker compose -f compose.yaml -f compose.postgres.yaml -f compose.schemer.yaml config
       - run: docker compose -f compose.yaml -f compose.postgres.yaml -f compose.ai.yaml -f compose.schemer.yaml -f compose.schemer.ai.yaml config
+      - run: SCHEMII_INSTANCE=ci-recovery docker compose -f compose.yaml -f compose.recovery.yaml config
       - name: Validate embedded OpenCode JSON
         run: python -m json.tool ai/workspace/opencode.json > /dev/null && python -m json.tool ai/schemer-workspace/opencode.json > /dev/null
-      - run: docker compose -f compose.yaml -f compose.ai.yaml build opencode
+      - name: Prepare exact build identity and Python packages
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check build==1.4.0
+          version=$(tr -d '\r\n' < VERSION)
+          revision='${{ github.sha }}'
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$revision")"
+          printf '%s\n' "$revision" > src/schemii/build_revision.txt
+          python -m build --outdir dist
+          printf 'version=%s\nrevision=%s\n' "$version" "$revision" >> "$GITHUB_OUTPUT"
+          printf 'SCHEMII_EXPECTED_VERSION=%s\nSCHEMII_EXPECTED_REVISION=%s\n' "$version" "$revision" >> "$GITHUB_ENV"
+      - name: Verify Python package artifacts
+        run: |
+          scripts/test-python-artifacts.sh \
+            "$PWD/dist" \
+            "$PWD" \
+            '${{ steps.identity.outputs.version }}' \
+            '${{ steps.identity.outputs.revision }}' \
+            "$RUNNER_TEMP/package-environments"
+      - name: Build immutable image set once
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          REVISION: ${{ steps.identity.outputs.revision }}
+          SOURCE: https://github.com/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          docker build --pull \
+            --build-arg SCHEMII_VERSION="$VERSION" \
+            --build-arg SCHEMII_REVISION="$REVISION" \
+            --build-arg SCHEMII_SOURCE="$SOURCE" \
+            -t "schemii:$VERSION-$REVISION" -t schemii:local .
+          docker build --pull \
+            --build-arg SCHEMII_VERSION="$VERSION" \
+            --build-arg SCHEMII_REVISION="$REVISION" \
+            --build-arg SCHEMII_SOURCE="$SOURCE" \
+            -t "schemii-metadata-postgres:$VERSION-$REVISION" -t schemii-metadata-postgres:local docker/metadata
+          docker build --pull \
+            --build-arg SCHEMII_VERSION="$VERSION" \
+            --build-arg SCHEMII_REVISION="$REVISION" \
+            --build-arg SCHEMII_SOURCE="$SOURCE" \
+            -t "schemii-opencode:$VERSION-$REVISION" -t schemii-opencode:1.18.15-local ai
+      - name: Verify immutable image identity
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          REVISION: ${{ steps.identity.outputs.revision }}
+        run: |
+          set -euo pipefail
+          for image in schemii:local schemii-metadata-postgres:local schemii-opencode:1.18.15-local; do
+            [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image")" == "$VERSION" ]]
+            [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$REVISION" ]]
+          done
+          docker run --rm --entrypoint python schemii:local -c \
+            "from schemii.build_identity import build_identity; assert build_identity() == {'version': '$VERSION', 'revision': '$REVISION'}"
+          [[ "$(docker run --rm --entrypoint cat schemii-metadata-postgres:local /opt/schemii-release-version)" == "$VERSION" ]]
+          [[ "$(docker run --rm --entrypoint cat schemii-metadata-postgres:local /opt/schemii-release-revision)" == "$REVISION" ]]
       - name: Validate embedded OpenCode config, skills, and tools
         run: |
-          docker run --rm -v "$PWD/ai/workspace:/workspace:ro" -w /workspace schemii-opencode:1.18.15-local debug agent build > /dev/null
-          docker run --rm -v "$PWD/ai/schemer-workspace:/workspace-schemer:ro" -w /workspace-schemer schemii-opencode:1.18.15-local debug agent build > /dev/null
-      - run: docker compose build
+          password_mount="type=bind,src=$SCHEMII_CREDENTIAL_DIR/opencode_password,dst=/run/secrets/opencode_password,readonly"
+          docker run --rm --mount "$password_mount" -v "$PWD/ai/workspace:/workspace:ro" -w /workspace schemii-opencode:1.18.15-local debug agent build > /dev/null
+          docker run --rm --mount "$password_mount" -v "$PWD/ai/schemer-workspace:/workspace-schemer:ro" -w /workspace-schemer schemii-opencode:1.18.15-local debug agent build > /dev/null
       - name: Test metadata credential privileges and lifecycle
         env:
           SCHEMII_RUN_DOCKER_INTEGRATION: "1"
         run: python -m unittest tests.test_metadata_credentials_live
-      - name: Smoke test container health
+      - name: Test trusted HTTP ingress boundary
+        env:
+          SCHEMII_RUN_DOCKER_INTEGRATION: "1"
+          SCHEMII_IMAGE: schemii:local
         run: |
-          docker compose up -d
-          container_id="$(docker compose ps -q schemii)"
-          for attempt in $(seq 1 60); do
-            health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
-            [ "$health" = healthy ] && exit 0
-            [ "$health" = unhealthy ] && exit 1
-            sleep 1
-          done
-          exit 1
-      - name: Stop smoke-test stack
-        if: always()
-        run: docker compose down
+          python -m unittest tests.test_ingress_security
+      - name: Smoke all fresh application topologies through the shared harness
+        env:
+          SCHEMII_SMOKE_PROJECT: ci-smoke
+        run: |
+          SCHEMII_HOST_PORT=18080 SCHEMER_HOST_PORT=18081 scripts/smoke-compose.sh schemii no-ai --no-build
+          SCHEMII_HOST_PORT=18082 SCHEMER_HOST_PORT=18083 scripts/smoke-compose.sh schemii ai --no-build
+          SCHEMII_HOST_PORT=18084 SCHEMER_HOST_PORT=18085 scripts/smoke-compose.sh schemer no-ai --no-build
+          SCHEMII_HOST_PORT=18086 SCHEMER_HOST_PORT=18087 scripts/smoke-compose.sh schemer ai --no-build
+      - name: Assemble and inspect release candidate
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          REVISION: ${{ steps.identity.outputs.revision }}
+        run: |
+          set -euo pipefail
+          rm -rf release
+          mkdir release
+          prefix="schemii-$VERSION-$REVISION"
+          epoch=$(git show -s --format=%ct "$REVISION")
+          git ls-files -z | tar --null --files-from=- --sort=name --mtime="@$epoch" \
+            --owner=0 --group=0 --numeric-owner --transform="s,^,$prefix/," -cf "$RUNNER_TEMP/source.tar"
+          gzip -n < "$RUNNER_TEMP/source.tar" > "release/$prefix-source.tar.gz"
+          tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+            -C dist -cf "$RUNNER_TEMP/python-packages.tar" .
+          gzip -n < "$RUNNER_TEMP/python-packages.tar" > "release/$prefix-python-packages.tar.gz"
+          docker save "schemii:$VERSION-$REVISION" | gzip -n > "release/$prefix-application-linux-amd64.tar.gz"
+          docker save "schemii-metadata-postgres:$VERSION-$REVISION" | gzip -n > "release/$prefix-metadata-linux-amd64.tar.gz"
+          docker save "schemii-opencode:$VERSION-$REVISION" | gzip -n > "release/$prefix-opencode-linux-amd64.tar.gz"
+          python scripts/inspect-release-artifacts.py \
+            --source "release/$prefix-source.tar.gz" \
+            --packages "release/$prefix-python-packages.tar.gz" \
+            --image "application=release/$prefix-application-linux-amd64.tar.gz" \
+            --image "metadata=release/$prefix-metadata-linux-amd64.tar.gz" \
+            --image "opencode=release/$prefix-opencode-linux-amd64.tar.gz"
+          python scripts/release-manifest.py create \
+            --release-dir release \
+            --version "$VERSION" \
+            --revision "$REVISION" \
+            --platform linux/amd64 \
+            --application-image "schemii:$VERSION-$REVISION" \
+            --metadata-image "schemii-metadata-postgres:$VERSION-$REVISION" \
+            --opencode-image "schemii-opencode:$VERSION-$REVISION"
+          (cd release && sha256sum * > SHA256SUMS)
+          python scripts/release-manifest.py verify --release-dir release --version "$VERSION" --revision "$REVISION"
+      - name: Upload immutable release candidate
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate-${{ steps.identity.outputs.revision }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Attest immutable release candidate
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: release/*

@@ -1,0 +1,211 @@
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful main-branch CI run containing the immutable release candidate
+        required: true
+        type: string
+      version:
+        description: Exact VERSION value to publish
+        required: true
+        type: string
+      confirmation:
+        description: Type PROMOTE to publish the candidate and create its release tag
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  attestations: write
+  contents: write
+  id-token: write
+  packages: write
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote tested artifacts
+    runs-on: ubuntu-latest
+    environment: production-release
+    timeout-minutes: 30
+    steps:
+      - name: Validate explicit promotion and candidate run
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          VERSION: ${{ inputs.version }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CONFIRMATION" == PROMOTE ]] || { printf 'Promotion confirmation must be exactly PROMOTE.\n' >&2; exit 1; }
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { printf 'Candidate run ID must be numeric.\n' >&2; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'Version must use X.Y.Z form.\n' >&2; exit 1; }
+          run_json=$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID")
+          [[ "$(jq -r .conclusion <<< "$run_json")" == success ]]
+          [[ "$(jq -r .event <<< "$run_json")" == push ]]
+          [[ "$(jq -r .head_branch <<< "$run_json")" == "$DEFAULT_BRANCH" ]]
+          [[ "$(jq -r .head_repository.full_name <<< "$run_json")" == "$REPOSITORY" ]]
+          [[ "$(jq -r .path <<< "$run_json")" == .github/workflows/ci.yml ]]
+          revision=$(jq -r .head_sha <<< "$run_json")
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          printf 'revision=%s\n' "$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.candidate.outputs.revision }}
+          persist-credentials: false
+      - name: Download exact CI candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          REVISION: ${{ steps.candidate.outputs.revision }}
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "release-candidate-$REVISION" --dir release
+      - name: Verify candidate hashes, identity, and provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ steps.candidate.outputs.revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/release-manifest.py verify --release-dir release --version "$VERSION" --revision "$REVISION"
+          (cd release && sha256sum --check SHA256SUMS)
+          for artifact in release/*; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"
+          done
+          [[ "$(tr -d '\r\n' < VERSION)" == "$VERSION" ]]
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'Release v%s already exists.\n' "$VERSION" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            printf 'Tag v%s already exists.\n' "$VERSION" >&2
+            exit 1
+          fi
+      - name: Load and re-inspect candidate images
+        env:
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ steps.candidate.outputs.revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in release/*-linux-amd64.tar.gz; do gzip -dc "$archive" | docker load; done
+          application_id=$(jq -r .images.application.id release/release-manifest.json)
+          metadata_id=$(jq -r .images.metadata.id release/release-manifest.json)
+          opencode_id=$(jq -r .images.opencode.id release/release-manifest.json)
+          for id in "$application_id" "$metadata_id" "$opencode_id"; do docker image inspect "$id" >/dev/null; done
+          prefix="schemii-$VERSION-$REVISION"
+          python scripts/inspect-release-artifacts.py \
+            --source "release/$prefix-source.tar.gz" \
+            --packages "release/$prefix-python-packages.tar.gz" \
+            --image "application=release/$prefix-application-linux-amd64.tar.gz" \
+            --image "metadata=release/$prefix-metadata-linux-amd64.tar.gz" \
+            --image "opencode=release/$prefix-opencode-linux-amd64.tar.gz"
+          docker run --rm --entrypoint python "$application_id" -c \
+            "from schemii.build_identity import build_identity; assert build_identity() == {'version': '$VERSION', 'revision': '$REVISION'}"
+      - name: Publish exact image IDs without rebuilding
+        id: publish
+        env:
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ steps.candidate.outputs.revision }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          repository=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          package_name() {
+            case "$1" in
+              application) printf '%s\n' application ;;
+              metadata) printf '%s\n' metadata-postgres ;;
+              opencode) printf '%s\n' opencode ;;
+            esac
+          }
+          for component in application metadata opencode; do
+            id=$(jq -r ".images.$component.id" release/release-manifest.json)
+            reference="ghcr.io/$repository/$(package_name "$component")"
+            for tag in "$VERSION" "$REVISION"; do
+              existing_manifest=$(docker buildx imagetools inspect "$reference:$tag" --raw 2>/dev/null || true)
+              if [[ -n "$existing_manifest" ]]; then
+                existing_config=$(jq -r '.config.digest // empty' <<< "$existing_manifest")
+                if [[ -z "$existing_config" || "$existing_config" != "$id" ]]; then
+                  printf 'Registry tag %s:%s already identifies another image or index.\n' "$reference" "$tag" >&2
+                  exit 1
+                fi
+              fi
+            done
+          done
+          for component in application metadata opencode; do
+            id=$(jq -r ".images.$component.id" release/release-manifest.json)
+            package=$(package_name "$component")
+            reference="ghcr.io/$repository/$package"
+            for tag in "$VERSION" "$REVISION"; do
+              docker tag "$id" "$reference:$tag"
+              docker push "$reference:$tag"
+            done
+            digest="sha256:$(docker buildx imagetools inspect "$reference:$VERSION" --raw | sha256sum | cut -d ' ' -f 1)"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s_name=%s\n%s_digest=%s\n' "$component" "$reference" "$component" "$digest" >> "$GITHUB_OUTPUT"
+          done
+      - name: Record published registry digests
+        env:
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ steps.candidate.outputs.revision }}
+          APPLICATION_NAME: ${{ steps.publish.outputs.application_name }}
+          APPLICATION_DIGEST: ${{ steps.publish.outputs.application_digest }}
+          METADATA_NAME: ${{ steps.publish.outputs.metadata_name }}
+          METADATA_DIGEST: ${{ steps.publish.outputs.metadata_digest }}
+          OPENCODE_NAME: ${{ steps.publish.outputs.opencode_name }}
+          OPENCODE_DIGEST: ${{ steps.publish.outputs.opencode_digest }}
+        run: |
+          jq -n \
+            --arg version "$VERSION" --arg revision "$REVISION" \
+            --arg application "$APPLICATION_NAME" \
+            --arg applicationDigest "$APPLICATION_DIGEST" \
+            --arg metadata "$METADATA_NAME" \
+            --arg metadataDigest "$METADATA_DIGEST" \
+            --arg opencode "$OPENCODE_NAME" \
+            --arg opencodeDigest "$OPENCODE_DIGEST" \
+            '{version: $version, revision: $revision, images: {application: {name: $application, digest: $applicationDigest}, metadata: {name: $metadata, digest: $metadataDigest}, opencode: {name: $opencode, digest: $opencodeDigest}}}' \
+            > published-images.json
+      - name: Attest published application image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ steps.publish.outputs.application_name }}
+          subject-digest: ${{ steps.publish.outputs.application_digest }}
+          push-to-registry: true
+      - name: Attest published metadata image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ steps.publish.outputs.metadata_name }}
+          subject-digest: ${{ steps.publish.outputs.metadata_digest }}
+          push-to-registry: true
+      - name: Attest published OpenCode image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ steps.publish.outputs.opencode_name }}
+          subject-digest: ${{ steps.publish.outputs.opencode_digest }}
+          push-to-registry: true
+      - name: Attest published image manifest
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: published-images.json
+      - name: Create release from the promoted artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ steps.candidate.outputs.revision }}
+        run: |
+          gh release create "v$VERSION" release/* published-images.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$REVISION" \
+            --title "Schemii $VERSION" \
+            --generate-notes

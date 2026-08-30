@@ -1,16 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "schemii"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A standalone PostgreSQL schema designer, introspection tool, and migration workbench"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "LandMineDevelopment" }]
 requires-python = ">=3.10"
-dependencies = ["psycopg[binary]>=3.1,<4", "sqlglot>=28.10,<29"]
+dependencies = [
+    "psycopg[binary]==3.3.4",
+    "sqlglot==28.10.1",
+    "tzdata==2025.2; platform_system == 'Windows'",
+]
 
 [project.urls]
 Homepage = "https://github.com/LandMineDevelopment/schemii"
@@ -25,8 +29,11 @@ schemer = "schemii.schemer_server:main"
 package-dir = {"" = "src"}
 include-package-data = true
 
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
 [tool.setuptools.package-data]
-schemii = ["web/*", "schemer_web/*", "shared_web/*", "metadata/migrations/*.sql"]
+schemii = ["build_revision.txt", "web/*", "schemer_web/*", "shared_web/*", "metadata/migrations/*.sql"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

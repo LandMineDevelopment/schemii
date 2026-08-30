@@ -16,9 +16,15 @@
 - [x] Return existing operation state for duplicate execute requests.
 - [x] Provide execute, status, and lost-response reconciliation routes.
 - [x] Execute AI SQL only from the canonical proposal stored by the server.
+- [x] Recompute each canonical action's capability and approval floor during authorization.
 - [x] Separate SQL completion from optional model analysis.
 - [x] Reject privileged PostgreSQL roles and `EXPLAIN` for AI SQL.
 - [x] Keep uncertain model-result delivery reserved rather than redisclosing rows.
+- [x] Keep Schemer query rows out of durable operation outcomes while retaining bounded execution evidence.
+- [x] Propagate operation timeout and cancellation identity through complete-widget validation queries.
+- [x] Run Schemer PostgreSQL work from revision snapshots without holding dashboard locks, then recheck the revision at final mutation.
+- [x] Track new Schemer dashboard operations before mutation and archive receipts before rollover/deletion; leave unwitnessed legacy absence uncertain and never replay.
+- [x] Report dashboard-record and receipt-archive corruption through Schemer readiness.
 
 ## Browser Boundary
 
@@ -27,6 +33,7 @@
 - [x] Remove session-wide AI SQL approval.
 - [x] Poll a concurrently running operation instead of repeating it.
 - [x] Accept only allow-listed client commands and result kinds.
+- [x] Flush or block pending Schemer edits and verify the persisted dashboard revision before AI execution.
 
 ## Temporarily Disabled Actions
 

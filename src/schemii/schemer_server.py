@@ -10,10 +10,13 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .ai_execution import AiExecutionRunner, known_failure
 from .schemer_ai_actions import normalize_schemer_action
-from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMaintenanceConfig, OperationLeaseLost
+from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMaintenanceConfig
 from .ai_http import AiHttpRouter, ai_conversation_title, authority_call, ensure_ai_conversation_title, issue_ai_proposals
 from .dashboard_store import DashboardStore, DashboardStoreError
+from .dashboard_slicer import SlicerValidationError, compose_dashboard_slicers
+from .http_access import HttpAccessPolicy, http_access_policy
 from .http_common import make_local_app_handler, metadata_profile_dependencies
 from .schema_store import SchemaStore
 from .opencode_service import OpenCodeService, OpenCodeServiceError
@@ -31,6 +34,7 @@ from .postgres_http import (
     PostgresHttpMixin,
 )
 from .postgres_service import PostgresService, PostgresServiceError
+from .postgres_common import canonical_fingerprint
 from .postgres_console import ConsolePolicy
 from .schemer_ai import (
     SCHEMER_AI_SKILLS,
@@ -43,9 +47,14 @@ from .schemer_ai_executor import SchemerAiExecutor
 from .widget_query import QueryValidationError, normalize_query
 from .query_type_capabilities import snapshot_column
 from .readiness import readiness_report
+from .legacy_source_upgrade import (
+    DEFAULT_LEGACY_SOURCE_UPGRADE_TTL_SECONDS,
+    MAX_LEGACY_SOURCE_UPGRADE_REQUEST_BODY_BYTES,
+    LegacySourceUpgrade,
+)
 
 
-def _configured_ai_widget(service, action, operation_id, widget_count):
+def _configured_ai_widget(service, action, operation_id, widget_count, *, operation_timeout_ms=None):
     source = action["source"]
     descriptor = service.inspect_relation(source["profileId"], source["database"], source["namespace"], source["relation"], source["kind"], source["fingerprint"])
     columns = [snapshot_column(column) for column in descriptor["columns"]]
@@ -78,7 +87,10 @@ def _configured_ai_widget(service, action, operation_id, widget_count):
         selected_query["measures"] = [measures[0]] if action["visualizationMode"] == "donut" else measures
     selected_ids = {item["id"] for item in selected_query["dimensions"]} | {item["id"] for item in selected_query["measures"]}
     selected_query["sort"] = [item for item in selected_query["sort"] if item["targetId"] in selected_ids]
-    result = service.execute_widget_query(source["profileId"], verified_source, selected_query)
+    result = service.execute_widget_query(
+        source["profileId"], verified_source, selected_query,
+        operation_timeout_ms=operation_timeout_ms, operation_id=operation_id,
+    )
     if action["visualizationMode"] in {"bar", "line", "donut"}:
         values = [row[index] for row in result.get("rows", []) for index in range(1, len(row))]
         try:
@@ -93,7 +105,7 @@ def _configured_ai_widget(service, action, operation_id, widget_count):
             raise PostgresServiceError(409, "invalid_visualization", "Query result cannot render the selected non-negative chart")
         if action["visualizationMode"] == "line" and not numeric:
             raise PostgresServiceError(409, "invalid_visualization", "Line chart results require at least one finite non-null point")
-    return {"id": widget_id, "kind": "aggregate_report", "title": action["title"], "layout": {"desktop": {"x": 0, "y": 0, "w": 4, "h": 3}, "mobile": {"order": widget_count, "h": 3}}, "configuration": {"source": verified_source, "query": query, "table": table, "visualization": visualization, **({"detail": detail} if columns else {})}}
+    return {"id": widget_id, "kind": "aggregate_report", "title": action["title"], "configuration": {"source": verified_source, "query": query, "table": table, "visualization": visualization, **({"detail": detail} if columns else {})}}
 
 
 def _saved_widget_projection(configuration):
@@ -112,8 +124,24 @@ def _saved_widget_projection(configuration):
         "measures": [item for item in query["measures"] if item["id"] in measure_ids],
         "sort": [item for item in query["sort"] if item["targetId"] in target_ids],
     }
+
+
+def _saved_widget_result_authority(configuration, kind, effective_query=None, slicer_lineage=None):
+    payload = {
+        "kind": kind,
+        "source": configuration["source"],
+        "query": effective_query if effective_query is not None else _saved_widget_projection(configuration),
+        "slicerLineage": slicer_lineage or [],
+    }
+    if kind == "detail":
+        payload["detail"] = configuration.get("detail")
+    return canonical_fingerprint(payload)
+
+
+def _dashboard_widget_preview_authority(configuration):
+    return canonical_fingerprint({"kind": "dashboard_widget_preview", "source": configuration["source"]})
 from .schemer_examples import mercury_dashboard_from_service
-from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, postgres_runtime_config, run_server, validate_static_directory
+from .server_runtime import begin_http_shutdown, parse_port, postgres_runtime_config, run_server, validate_static_directory
 from .postgres_concurrency import PostgresExecutionController
 
 
@@ -188,11 +216,12 @@ def make_handler(
     ai_service: OpenCodeService | None = None,
     dependency_schema_store: SchemaStore | None = None,
     behind_loopback_proxy: bool = False,
+    access_policy: HttpAccessPolicy | None = None,
     ai_maintenance: AiOperationMaintenance | None = None,
+    legacy_source_upgrade_ttl_seconds: int | None = None,
 ):
-    base_handler = make_local_app_handler(
-        web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
-    )
+    access_policy = access_policy or HttpAccessPolicy(behind_loopback_proxy=behind_loopback_proxy)
+    base_handler = make_local_app_handler(web_dir, service, session_token, server_id=server_id, access_policy=access_policy)
     ai_router = AiHttpRouter(
         ai_service,
         lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body),
@@ -221,6 +250,16 @@ def make_handler(
         service, dashboard_store, ai_authority,
         catalog_sources=_ai_catalog_sources, configured_widget=_configured_ai_widget,
     )
+    ai_execution = AiExecutionRunner(ai_authority, ai_maintenance)
+    if legacy_source_upgrade_ttl_seconds is None:
+        raw_upgrade_ttl = os.environ.get("SCHEMER_LEGACY_SOURCE_UPGRADE_TTL_SECONDS", str(DEFAULT_LEGACY_SOURCE_UPGRADE_TTL_SECONDS))
+        try:
+            legacy_source_upgrade_ttl_seconds = int(raw_upgrade_ttl)
+        except ValueError as error:
+            raise ValueError("SCHEMER_LEGACY_SOURCE_UPGRADE_TTL_SECONDS must be a positive integer") from error
+    legacy_source_upgrade = LegacySourceUpgrade(
+        service, dashboard_store, ttl_seconds=legacy_source_upgrade_ttl_seconds,
+    )
 
     class SchemerHandler(PostgresHttpMixin, base_handler):
         postgres_console_policy = ConsolePolicy(allow_write=True, human_write_intent=True)
@@ -244,6 +283,8 @@ def make_handler(
             temporal_series_guard=lambda handler, body: handler._postgres_temporal_series_guard(body),
             saved_widget_query=lambda handler, profile_id, body: handler._postgres_saved_widget_query(profile_id, body),
             saved_widget_detail=lambda handler, profile_id, body: handler._postgres_saved_widget_detail(profile_id, body),
+            dashboard_widget_preview=lambda handler, profile_id, body: handler._postgres_dashboard_widget_preview(profile_id, body),
+            structured_result_guard=lambda handler, binding: handler._postgres_structured_result_guard(binding),
         )
 
         def _ai_create_session(self, current_ai_service, body):
@@ -368,52 +409,130 @@ def make_handler(
                 detail = error.payload["error"]
                 raise PostgresServiceError(error.status, detail["code"], detail["message"]) from error
 
-        def _saved_widget(self, profile_id, body):
+        @staticmethod
+        def _compose_slicers(record, widget, query):
+            try:
+                return compose_dashboard_slicers(
+                    record["dashboard"]["widgets"], record["dashboard"]["slicers"], widget["id"], query,
+                )
+            except SlicerValidationError as error:
+                status = 422 if error.code == "slicer_query_limit" else 409 if error.code == "saved_widget_changed" else 400
+                raise PostgresServiceError(status, error.code, str(error), error.details or None) from error
+
+        def _saved_widget(self, profile_id, body, *, require_query=True):
             dashboard_id = body.get("dashboardId")
             expected_revision = body.get("expectedRevision")
             widget_id = body.get("widgetId")
             if not isinstance(dashboard_id, str) or isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or not isinstance(widget_id, str):
                 raise PostgresServiceError(400, "validation_error", "Saved widget binding is invalid")
             try:
-                guard = dashboard_store.guard_revision(dashboard_id, expected_revision)
-                record = guard.__enter__()
+                with dashboard_store.guard_revision(dashboard_id, expected_revision) as record:
+                    widget = next((item for item in record["dashboard"]["widgets"] if item["id"] == widget_id), None)
+                    configuration = widget.get("configuration", {}) if widget else {}
             except DashboardStoreError as error:
                 detail = error.payload["error"]
                 raise PostgresServiceError(error.status, detail["code"], detail["message"]) from error
-            widget = next((item for item in record["dashboard"]["widgets"] if item["id"] == widget_id), None)
-            configuration = widget.get("configuration", {}) if widget else {}
-            if not widget or configuration.get("source", {}).get("profileId") != profile_id or not isinstance(configuration.get("query"), dict):
-                guard.__exit__(None, None, None)
+            if (
+                not widget
+                or configuration.get("source", {}).get("profileId") != profile_id
+                or require_query and not isinstance(configuration.get("query"), dict)
+            ):
                 raise PostgresServiceError(409, "saved_widget_changed", "The saved widget source or query is no longer available")
-            return guard, configuration
+            return record, widget, configuration
 
         def _postgres_saved_widget_query(self, profile_id, body):
-            guard, configuration = self._saved_widget(profile_id, body)
-            try:
-                return service.execute_widget_query(profile_id, configuration["source"], _saved_widget_projection(configuration))
-            finally:
-                guard.__exit__(None, None, None)
+            record, widget, configuration = self._saved_widget(profile_id, body)
+            query, slicer_lineage = self._compose_slicers(record, widget, _saved_widget_projection(configuration))
+            owner = self._postgres_structured_result_owner(
+                body, widget_id=body["widgetId"],
+                authority_digest=_saved_widget_result_authority(configuration, "aggregate", query, slicer_lineage),
+            )
+            return service.execute_widget_query(
+                profile_id, configuration["source"], query, result_owner=owner, slicer_lineage=slicer_lineage,
+            )
+
+        def _postgres_dashboard_widget_preview(self, profile_id, body):
+            record, widget, configuration = self._saved_widget(profile_id, body, require_query=False)
+            query, slicer_lineage = self._compose_slicers(record, widget, body["query"])
+            owner = self._postgres_structured_result_owner(
+                body, widget_id=body["widgetId"],
+                authority_digest=_dashboard_widget_preview_authority(configuration),
+            )
+            return service.execute_widget_query(
+                profile_id, configuration["source"], query, result_owner=owner, slicer_lineage=slicer_lineage,
+            )
 
         def _postgres_saved_widget_detail(self, profile_id, body):
-            guard, configuration = self._saved_widget(profile_id, body)
+            record, widget, configuration = self._saved_widget(profile_id, body)
+            saved_detail = configuration.get("detail")
+            if not isinstance(saved_detail, dict):
+                raise PostgresServiceError(409, "saved_widget_changed", "The saved widget detail projection is no longer available")
+            detail = {
+                "version": 1,
+                "columns": [
+                    {"id": f"detail_column_{index + 1}", "label": item["label"], "column": item["sourceColumn"], "numberFormat": item["numberFormat"], "searchable": item["searchable"]}
+                    for index, item in enumerate(saved_detail["columns"])
+                ],
+                "rowIdentifier": saved_detail["rowIdentifier"],
+            }
+            effective_query, slicer_lineage = self._compose_slicers(
+                record, widget, _saved_widget_projection(configuration),
+            )
+            owner = self._postgres_structured_result_owner(
+                body, widget_id=body["widgetId"],
+                authority_digest=_saved_widget_result_authority(configuration, "detail", effective_query, slicer_lineage),
+            )
+            return service.execute_relation_detail(
+                profile_id, configuration["source"], effective_query, body["selection"],
+                detail, body["offset"], body["limit"], body["sort"], body["searches"],
+                result_owner=owner, slicer_lineage=slicer_lineage,
+            )
+
+        @contextmanager
+        def _postgres_structured_result_guard(self, binding):
+            dashboard_id = binding.get("dashboardId")
+            if dashboard_id is None:
+                yield
+                return
+            expected_revision = binding.get("dashboardRevision")
+            widget_id = binding.get("widgetId")
+            if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+                raise PostgresServiceError(400, "validation_error", "Structured result dashboard binding is invalid")
             try:
-                saved_detail = configuration.get("detail")
-                if not isinstance(saved_detail, dict):
-                    raise PostgresServiceError(409, "saved_widget_changed", "The saved widget detail projection is no longer available")
-                detail = {
-                    "version": 1,
-                    "columns": [
-                        {"id": f"detail_column_{index + 1}", "label": item["label"], "column": item["sourceColumn"], "numberFormat": item["numberFormat"], "searchable": item["searchable"]}
-                        for index, item in enumerate(saved_detail["columns"])
-                    ],
-                    "rowIdentifier": saved_detail["rowIdentifier"],
-                }
-                return service.execute_relation_detail(
-                    profile_id, configuration["source"], _saved_widget_projection(configuration), body["selection"],
-                    detail, body["offset"], body["limit"], body["sort"], body["searches"],
-                )
-            finally:
-                guard.__exit__(None, None, None)
+                with dashboard_store.guard_revision(dashboard_id, expected_revision) as record:
+                    if widget_id is not None:
+                        widget = next((item for item in record["dashboard"]["widgets"] if item["id"] == widget_id), None)
+                        configuration = widget.get("configuration", {}) if widget else {}
+                        source = configuration.get("source", {})
+                        kind = binding.get("resultKind")
+                        expected_authorities = set()
+                        if widget and kind in {"aggregate", "detail"} and isinstance(configuration.get("source"), dict):
+                            if kind == "aggregate":
+                                expected_authorities.add(_dashboard_widget_preview_authority(configuration))
+                        if (
+                            widget and kind in {"aggregate", "detail"}
+                            and isinstance(configuration.get("query"), dict)
+                            and isinstance(configuration.get("source"), dict)
+                        ):
+                            effective_query, slicer_lineage = self._compose_slicers(
+                                record, widget, _saved_widget_projection(configuration),
+                            )
+                            expected_authorities.add(_saved_widget_result_authority(
+                                configuration, kind, effective_query, slicer_lineage,
+                            ))
+                        exact_source = all(source.get(key) == binding.get(key) for key in (
+                            "profileId", "database", "namespace", "relation",
+                        )) and source.get("kind") == binding.get("relationKind") and source.get("fingerprint") == binding.get("relationFingerprint")
+                        if not exact_source or binding.get("authorityDigest") not in expected_authorities:
+                            raise PostgresServiceError(
+                                409, "saved_widget_changed",
+                                "The saved widget source, query, or detail projection changed; run it again explicitly",
+                                {"automaticReplay": False},
+                            )
+            except DashboardStoreError as error:
+                detail = error.payload["error"]
+                raise PostgresServiceError(error.status, detail["code"], detail["message"]) from error
+            yield
 
         @contextmanager
         def _postgres_temporal_series_guard(self, body):
@@ -440,7 +559,13 @@ def make_handler(
                     }
                     if not widget or visualization.get("mode") != "line" or configuration.get("source") != body.get("source") or expected_query != body.get("query"):
                         raise PostgresServiceError(409, "temporal_series_changed", "The temporal series no longer matches the saved line widget")
-                    yield
+                    effective_query, slicer_lineage = self._compose_slicers(record, widget, expected_query)
+                    body["query"] = effective_query
+                    body["_slicerLineage"] = slicer_lineage
+                    try:
+                        yield
+                    finally:
+                        body.pop("_slicerLineage", None)
             except DashboardStoreError as error:
                 detail = error.payload["error"]
                 raise PostgresServiceError(error.status, detail["code"], detail["message"]) from error
@@ -486,17 +611,40 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/api/readiness":
-                status, report = readiness_report(ai_authority, ai_service, service, ai_maintenance)
-                return self.send_json(status, report)
+                status, report = readiness_report(
+                    ai_authority, ai_service, service, ai_maintenance, dashboard_store,
+                    access_policy,
+                )
+                return self.send_json(status, report, normalize_error=False)
             if self._handle_common_get(path):
                 return
             if path == "/api/dashboards":
                 if self._authorize_dashboard():
-                    self._dashboard_call(lambda: {"dashboards": dashboard_store.list()})
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    if set(query) - {"pageSize", "cursor"} or any(len(values) != 1 for values in query.values()):
+                        return self.send_json(400, {"error": {"code": "validation_error", "message": "Dashboard list query is invalid"}})
+                    def dashboards_page():
+                        if not query:
+                            return {"dashboards": dashboard_store.list()}
+                        page = dashboard_store.list_page(
+                            summaries=False, page_size=query.get("pageSize", [None])[0], cursor=query.get("cursor", [None])[0],
+                        )
+                        return {"dashboards": page["items"], "page": page["page"]}
+                    self._dashboard_call(dashboards_page)
                 return
             if path == "/api/dashboards/summary":
                 if self._authorize_dashboard():
-                    self._dashboard_call(lambda: {"summaries": dashboard_store.list_summaries()})
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    if set(query) - {"pageSize", "cursor"} or any(len(values) != 1 for values in query.values()):
+                        return self.send_json(400, {"error": {"code": "validation_error", "message": "Dashboard summary query is invalid"}})
+                    def summary_page():
+                        if not query:
+                            return {"summaries": dashboard_store.list_summaries()}
+                        page = dashboard_store.list_page(
+                            summaries=True, page_size=query.get("pageSize", [None])[0], cursor=query.get("cursor", [None])[0],
+                        )
+                        return {"summaries": page["items"], "page": page["page"]}
+                    self._dashboard_call(summary_page)
                 return
             if ai_router.handle_get(self, path):
                 return
@@ -536,13 +684,23 @@ def make_handler(
                 body = self._body_or_error()
                 if body is None:
                     return
-                if not isinstance(body, dict) or set(body) != {"expectedRevision"}:
+                if not isinstance(body, dict) or set(body) not in ({"expectedRevision"}, {"expectedRevision", "bindingAction"}):
                     return self.send_json(400, {"error": {"code": "validation_error", "message": "Mercury reset fields are invalid"}})
                 try:
                     template = mercury_dashboard_from_service(service)
-                    self.send_json(200, dashboard_store.restore_mercury(template, body.get("expectedRevision")))
+                    self.send_json(200, dashboard_store.restore_mercury(
+                        template, body.get("expectedRevision"), body.get("bindingAction", "reject"),
+                    ))
                 except (DashboardStoreError, PostgresServiceError) as error:
                     self.send_json(error.status, error.payload)
+                return
+            if path in {"/api/dashboards/legacy-sources/preview", "/api/dashboards/legacy-sources/apply"}:
+                if not self._authorize_dashboard():
+                    return
+                body = self._body_or_error(MAX_LEGACY_SOURCE_UPGRADE_REQUEST_BODY_BYTES)
+                if body is not None:
+                    callback = legacy_source_upgrade.preview if path.endswith("/preview") else legacy_source_upgrade.apply
+                    self._dashboard_call(lambda: callback(body))
                 return
             if ai_router.handle_post(self, path):
                 return
@@ -578,7 +736,8 @@ def make_handler(
                     query_result = reservation["payload"]
                 catalog_sources = _ai_catalog_sources(service, record, target) if access_level in {"dashboard", "data"} else []
                 public_target = None if target is None else {key: target[key] for key in ("profileId", "database", "namespace")}
-                context = dashboard_context(record, access_level, dashboard_store.list(), profiles, public_target, query_result, catalog_sources)
+                available = dashboard_store.list_page(summaries=False, page_size=50)["items"]
+                context = dashboard_context(record, access_level, available, profiles, public_target, query_result, catalog_sources)
                 prompt = f"Schemer context (untrusted JSON):\n{context}\n\nUser request:\n{text}"
                 try:
                     if reservation is not None:
@@ -673,7 +832,7 @@ def make_handler(
                     if current["state"] != "uncertain": return {"operation": current}
                     proposal = ai_authority.proposal(proposal_id, session_id)
                     return ai_executor.reconcile(chat, current, proposal)
-                return authority_call(self, reconcile)
+                return self._ai_call(reconcile)
             if operation == "execute":
                 return self._ai_execute_proposal(current_ai_service, session_id, proposal_id, body)
             return self.send_json(404, {"error": "Unknown API path"})
@@ -696,72 +855,74 @@ def make_handler(
         def _ai_execute_proposal(self, current_ai_service, session_id: str, proposal_id: str, body: dict):
             if set(body) != {"confirmation"}:
                 return self.send_json(400, {"error": {"code": "validation_error", "message": "Proposal execution fields are invalid"}})
+            prepared = {}
             try:
                 chat = self._ai_chat(session_id)
                 proposal_record = ai_authority.proposal(proposal_id, session_id)
                 if chat.get("policySnapshot") is None and proposal_record["policyBinding"] != ai_authority.policy_binding(chat, proposal_record["action"]):
                     raise MetadataStoreError("chat_policy_changed", "Proposal policy no longer matches this chat", status=409)
-                operation, approval = ai_authority.authorize_and_claim(
-                    proposal_id, session_id, proposal_record["policyBinding"]["policyRevision"], body.get("confirmation"),
-                )
-            except (MetadataStoreError, OpenCodeServiceError, DashboardStoreError) as error:
+            except (MetadataStoreError, OpenCodeServiceError, DashboardStoreError, PostgresServiceError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
                 return self.send_json(error.status, payload)
-            dashboard_id = chat["dashboardId"]
-            access = chat["accessLevel"]
-            record = dashboard_store.get(dashboard_id)
-            schema_concurrency = {"revision": record["revision"]}
-            authorization_target = dict(chat["target"])
-            profile = None
-            if access == "data":
-                profile = next((item for item in service.list_profiles() if item.get("id") == authorization_target.get("profileId")), None)
-                if profile is None or profile.get("dbname") != authorization_target.get("database"):
-                    return self.send_json(409, {"error": {"code": "database_changed", "message": "The PostgreSQL target changed"}})
-            execution_owner = operation.pop("executionOwner", False)
-            if not execution_owner:
-                return self.send_json(200, {"operation": operation, "approval": approval})
-            action = proposal_record["action"]
-            attempt_id = operation.pop("attemptId")
-            claim_token = operation.pop("claimToken")
-            if ai_maintenance is not None:
-                ai_maintenance.track(operation["id"], attempt_id, claim_token)
+            prepared["action"] = proposal_record["action"]
 
-            def finish_claim(state, *, result=None, error=None):
-                try:
-                    if ai_maintenance is not None:
-                        ai_maintenance.assert_owned(attempt_id)
-                    return ai_authority.finish_operation(attempt_id, claim_token, state, result=result, error=error), False
-                except OperationLeaseLost:
-                    return ai_authority.operation(operation["id"], session_id), True
-                except MetadataStoreError as failure:
-                    if failure.code not in {"invalid_claim", "operation_not_running", "operation_lease_expired"}:
-                        raise
-                    return ai_authority.operation(operation["id"], session_id), True
-                finally:
-                    if ai_maintenance is not None:
-                        ai_maintenance.release(attempt_id)
-                    if action.get("type") == "read_query":
-                        service.release_read_only_sql(operation["id"])
-            try:
+            def preflight():
+                dashboard_id = chat["dashboardId"]
+                access = chat["accessLevel"]
+                record = dashboard_store.get(dashboard_id)
+                schema_concurrency = {"revision": record["revision"]}
+                authorization_target = dict(chat["target"])
+                profile = None
+                if access == "data":
+                    profile = next((item for item in service.list_profiles() if item.get("id") == authorization_target.get("profileId")), None)
+                    if (
+                        profile is None
+                        or profile.get("dbname") != authorization_target.get("database")
+                        or service.profile_context_fingerprint(profile["id"]) != authorization_target.get("profileFingerprint")
+                    ):
+                        raise PostgresServiceError(409, "database_changed", "The PostgreSQL target changed")
                 if proposal_record["schemaConcurrency"] != schema_concurrency or proposal_record["authorizationTarget"] != authorization_target:
                     raise DashboardStoreError(409, "dashboard_changed", "Proposal authority binding changed; request a fresh proposal")
-                result = ai_executor.execute(
-                    action, operation["id"], chat=chat, record=record, profile=profile,
-                    schema_concurrency=schema_concurrency, authorization_target=authorization_target,
-                    policy_binding=proposal_record["policyBinding"],
+                return {
+                    "chat": chat, "proposal": proposal_record, "record": record, "profile": profile,
+                    "schemaConcurrency": schema_concurrency, "authorizationTarget": authorization_target,
+                }
+
+            def execute(operation_id, context):
+                return ai_executor.execute(
+                    context["proposal"]["action"], operation_id, chat=context["chat"],
+                    record=context["record"], profile=context["profile"],
+                    schema_concurrency=context["schemaConcurrency"],
+                    authorization_target=context["authorizationTarget"],
+                    policy_binding=context["proposal"]["policyBinding"],
                 )
-            except (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, MetadataStoreError) as error:
+
+            def classify(error):
+                return known_failure(
+                    error, (OpenCodeServiceError, DashboardStoreError, PostgresServiceError, MetadataStoreError),
+                    uncertain=lambda current, detail: (
+                        detail.get("code") == "execution_outcome_unknown"
+                        or isinstance(current, DashboardStoreError) and current.status >= 500
+                    ),
+                )
+
+            def release_cancellation(operation_id):
+                if prepared.get("action", {}).get("type") == "read_query":
+                    service.release_read_only_sql(operation_id)
+
+            try:
+                outcome = ai_execution.run(
+                    proposal_id=proposal_id, chat_id=session_id,
+                    policy_revision=proposal_record["policyBinding"]["policyRevision"],
+                    confirmation=body.get("confirmation"), preflight=preflight, execute=execute,
+                    classify_failure=classify, durable_result=ai_executor.durable_result,
+                    expose_execution_result=True, release_cancellation=release_cancellation,
+                    return_existing_before_preflight=True,
+                )
+            except (MetadataStoreError, OpenCodeServiceError, DashboardStoreError, PostgresServiceError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
-                uncertain = isinstance(error, DashboardStoreError) and error.status >= 500
-                finished, lost = finish_claim("uncertain" if uncertain else "failed", error=payload["error"])
-                return self.send_json(409 if lost else getattr(error, "status", 400), {"operation": finished, "approval": approval})
-            except Exception:
-                finished, lost = finish_claim("uncertain",
-                    error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"},
-                )
-                return self.send_json(409 if lost else 500, {"operation": finished, "approval": approval})
-            finished, lost = finish_claim("succeeded", result=result)
-            return self.send_json(409 if lost else 200, {"operation": finished, "approval": approval})
+                return self.send_json(error.status, payload)
+            return self.send_json(outcome.status, outcome.payload)
 
         def do_PUT(self):
             path = urlparse(self.path).path
@@ -773,7 +934,13 @@ def make_handler(
                     return
                 body = self._body_or_error()
                 if body is not None:
-                    self._dashboard_call(lambda: dashboard_store.save(dashboard_id, body))
+                    if not isinstance(body, dict):
+                        return self.send_json(400, {"error": {"code": "invalid_dashboard_binding", "message": "Dashboard save fields are invalid"}})
+                    if set(body) == {"record", "bindingAction"}:
+                        record, binding_action = body["record"], body["bindingAction"]
+                    else:
+                        record, binding_action = body, "reject"
+                    self._dashboard_call(lambda: dashboard_store.save(dashboard_id, record, binding_action))
                 return
             if not self._handle_postgres_put(path):
                 self.send_json(404, {"error": {"code": "not_found", "message": "Unknown API path"}})
@@ -800,9 +967,7 @@ def make_handler(
 def main() -> None:
     web_dir, config_dir, dashboard_dir = _paths()
     host = os.environ.get("SCHEMER_HOST", "127.0.0.1")
-    behind_loopback_proxy = parse_proxy_setting(
-        os.environ.get("SCHEMER_BEHIND_LOOPBACK_PROXY", "0"), "SCHEMER_BEHIND_LOOPBACK_PROXY",
-    )
+    access_policy = http_access_policy(os.environ, "SCHEMER")
     port = parse_port(os.environ.get("SCHEMER_PORT", "8081"), "SCHEMER_PORT")
     try:
         ai_timeout = float(os.environ.get("SCHEMER_OPENCODE_TIMEOUT", "120"))
@@ -826,9 +991,12 @@ def main() -> None:
     )
     dashboard_store = DashboardStore(dashboard_dir)
     try:
-        metadata_config = MetadataConfig.from_env()
+        metadata_config = MetadataConfig.from_runtime_env("schemer")
         metadata_store = MetadataStore(
             MetadataConnectionFactory(metadata_config), max_json_bytes=metadata_config.max_json_bytes,
+            expected_application=metadata_config.expected_application,
+            expected_role=metadata_config.expected_role, expected_owner=metadata_config.expected_owner,
+            expected_admin_owner=metadata_config.expected_admin_owner,
         )
         metadata_store.health()
     except (ValueError, MetadataStoreError) as error:
@@ -878,9 +1046,13 @@ def main() -> None:
             read_only=True,
         ),
         ai_service=ai_service,
-        behind_loopback_proxy=behind_loopback_proxy,
+        access_policy=access_policy,
     )
-    run_server(host, port, handler, "Schemer", server_factory=ThreadingHTTPServer, shutdown_callback=service.close, lifecycle_services=(ai_maintenance,))
+    def close_services():
+        dashboard_store.close()
+        service.close()
+
+    run_server(host, port, handler, "Schemer", server_factory=ThreadingHTTPServer, shutdown_callback=close_services, lifecycle_services=(ai_maintenance,))
 
 
 if __name__ == "__main__":

@@ -6,15 +6,13 @@ services:
       - schemer-dashboards:/data/dependency-dashboards:ro
 
   schemer:
-    build:
-      context: .
-      target: schemer-runtime
-    image: ${SCHEMER_IMAGE:-schemer:local}
+    image: ${SCHEMII_IMAGE:-schemii:local}
+    command: ["schemer"]
     depends_on:
       metadata-migrate:
         condition: service_completed_successfully
-    ports:
-      - "127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8081"
+      example-profile-init:
+        condition: service_completed_successfully
     environment:
       SCHEMER_HOST: 0.0.0.0
       SCHEMER_PORT: 8081
@@ -22,8 +20,9 @@ services:
       SCHEMER_DASHBOARD_DIR: /data/dashboards
       SCHEMII_SCHEMA_DIR: /data/schemas
       SCHEMER_BEHIND_LOOPBACK_PROXY: 1
+      SCHEMER_TRUSTED_LOCAL_PROXY: schemer-ingress
+      SCHEMER_PUBLIC_ORIGINS: ${SCHEMER_PUBLIC_ORIGINS:-}
       SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_schemer
-      SCHEMII_METADATA_APPLICATION_NAME: schemer
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_schemer_password
     secrets:
       - metadata_schemer_password
@@ -31,6 +30,9 @@ services:
       - schemii-config:/data/config
       - schemii-schemas:/data/schemas:ro
       - schemer-dashboards:/data/dashboards
+    networks:
+      - default
+      - schemer-ingress
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -52,5 +54,41 @@ services:
       start_period: 3s
     restart: on-failure
 
+  schemer-ingress:
+    image: nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
+    depends_on:
+      schemer:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8080"
+    volumes:
+      - ./docker/ingress/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ingress/schemer-upstream.conf:/etc/nginx/application-upstream.conf:ro
+    networks:
+      - schemer-ingress
+      - schemer-loopback
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:size=24m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--header", "Host: localhost", "http://127.0.0.1:8080/api/readiness"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    restart: unless-stopped
+
 volumes:
   schemer-dashboards:
+
+networks:
+  schemer-ingress:
+    internal: true
+  schemer-loopback:

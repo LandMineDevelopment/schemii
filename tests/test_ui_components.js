@@ -44,7 +44,20 @@ class Element {
   getBoundingClientRect() { return this.bounds || { left: 0, top: 0, width: 100, height: 100 }; }
 }
 
-const document = { body: new Element("body"), createElement: tag => new Element(tag) };
+const downloads = [];
+const objectUrls = [];
+const revokedUrls = [];
+class TestBlob {
+  constructor(parts, { type = "" } = {}) { this.parts = parts; this.type = type; }
+}
+const document = {
+  body: new Element("body"),
+  createElement: tag => {
+    const element = new Element(tag);
+    if (tag === "a") element.click = () => downloads.push({ href: element.href, filename: element.download });
+    return element;
+  }
+};
 const storage = new Map();
 const context = vm.createContext({
   window: { innerWidth: 1000, innerHeight: 800 }, document, HTMLElement: Element,
@@ -54,6 +67,11 @@ const context = vm.createContext({
     removeItem(key) { storage.delete(key); }
   },
   getComputedStyle: () => ({ textOverflow: "clip", webkitLineClamp: "none" }),
+  Blob: TestBlob,
+  URL: {
+    createObjectURL(blob) { objectUrls.push(blob); return `blob:test-${objectUrls.length}`; },
+    revokeObjectURL(url) { revokedUrls.push(url); },
+  },
   setTimeout, clearTimeout, requestAnimationFrame: callback => callback(), TypeError
 });
 vm.runInContext(fs.readFileSync("src/schemii/shared_web/ui-components.js", "utf8"), context);
@@ -83,6 +101,16 @@ shared.setControlStatus(status, "Failed", { state: "error", hideWhenEmpty: true 
 assert.equal(status.classList.contains("error"), true);
 assert.equal(status.hidden, false);
 assert.throws(() => shared.createIconButton({ icon: "missing", label: "Missing" }), TypeError);
+
+shared.downloadContent('{"ok":true}', "result.json", "application/json");
+assert.deepEqual(downloads[0], { href: "blob:test-1", filename: "result.json" });
+assert.equal(objectUrls[0].type, "application/json");
+assert.deepEqual(Array.from(objectUrls[0].parts), ['{"ok":true}']);
+assert.deepEqual(revokedUrls, ["blob:test-1"], "object URLs must be released after dispatch");
+const existingBlob = new TestBlob(["raw"], { type: "text/plain" });
+shared.downloadBlob(existingBlob, "result.txt");
+assert.equal(objectUrls[1], existingBlob, "Blob downloads must not rebuild app-owned payloads");
+assert.deepEqual(downloads[1], { href: "blob:test-2", filename: "result.txt" });
 
 const root = new Element();
 root.bounds = { left: 10, top: 20, width: 200, height: 100 };

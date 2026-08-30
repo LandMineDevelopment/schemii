@@ -40,6 +40,8 @@ class StandaloneRuntimeTests(unittest.TestCase):
         result = self.run_shell_launcher("--help")
         self.assertEqual(result.returncode, 0)
         self.assertIn("Complete UI, tutorial PostgreSQL, and AI stack", result.stdout)
+        self.assertIn("schemer-ai", result.stdout)
+        self.assertIn("instance-restore", result.stdout)
         self.assertIn("#install-docker", result.stdout)
 
     def test_powershell_launcher_help_when_powershell_is_available(self):
@@ -112,6 +114,9 @@ esac
             self.assertIn("schemii-opencode-data", source)
             self.assertIn("schemii-postgres", source)
             self.assertIn("schemer-dashboards", source)
+            self.assertIn("schemii-recovery", source)
+            self.assertIn("schemii-ingress", source)
+            self.assertIn("schemer-ingress", source)
             self.assertNotIn('"schemer:local"', source)
             self.assertNotIn("system prune", source)
             self.assertNotIn("volume prune", source)
@@ -138,6 +143,7 @@ esac
             log = root / "docker.log"
             credentials = root / "credential data"
             (credentials / "owned-app").mkdir(parents=True)
+            credentials.chmod(0o700)
             (credentials / "owned-app/instance").write_text("owned-app\n", encoding="utf-8")
             docker = binary / "docker"
             docker.write_text('''#!/bin/sh
@@ -153,13 +159,13 @@ case "$*" in
     orphaned_schemii-config orphaned_schemii-schemas \
     collision_schemii-config foreign_schemer-dashboards ;;
   inspect*"{{.Config.Image}}"*owned-app-container)
-    printf 'owned-app|%s|sha256:owned-app|schemii:owned-app\n' "$REPOSITORY" ;;
+    printf 'owned-app|schemii|%s|sha256:owned-app|schemii:owned-app\n' "$REPOSITORY" ;;
   inspect*"{{.Config.Image}}"*owned-schemer-container)
-    printf 'owned-schemer|%s|sha256:shared-schemer|schemer:local\n' "$REPOSITORY" ;;
+    printf 'owned-schemer|schemer|%s|sha256:shared-schemer|schemer:local\n' "$REPOSITORY" ;;
   inspect*"{{.Config.Image}}"*foreign-schemer-container)
-    printf 'foreign|/tmp/unrelated|sha256:foreign|schemer:local\n' ;;
+    printf 'foreign|schemer|/tmp/unrelated|sha256:foreign|schemer:local\n' ;;
   inspect*"{{.Config.Image}}"*spoof-container)
-    printf 'owned-app|/tmp/unrelated|sha256:spoof|schemii:owned-app\n' ;;
+    printf 'owned-app|schemer|/tmp/unrelated|sha256:spoof|schemii:owned-app\n' ;;
   "inspect --format "*owned-app-container)
     printf 'owned-app|schemii|%s\n' "$REPOSITORY" ;;
   "inspect --format "*owned-schemer-container)
@@ -179,9 +185,13 @@ case "$*" in
   "volume inspect --format "*)
     project=${last%%_*}; logical=${last#*_}
     printf '%s|%s\n' "$project" "$logical" ;;
-  "network ls -q --filter label=com.docker.compose.project=owned-app") printf 'owned-network\nspoof-network\n' ;;
+  "network ls -q --filter label=com.docker.compose.project=owned-app") printf 'owned-network\nschemii-ingress-network\nschemer-ingress-network\nschemii-loopback-network\nschemer-loopback-network\nspoof-network\n' ;;
   "network ls -q --filter label=com.docker.compose.project="*) exit 0 ;;
   "network inspect --format "*owned-network) printf 'owned-app|default|owned-app_default\n' ;;
+  "network inspect --format "*schemii-ingress-network) printf 'owned-app|schemii-ingress|owned-app_schemii-ingress\n' ;;
+  "network inspect --format "*schemer-ingress-network) printf 'owned-app|schemer-ingress|owned-app_schemer-ingress\n' ;;
+  "network inspect --format "*schemii-loopback-network) printf 'owned-app|schemii-loopback|owned-app_schemii-loopback\n' ;;
+  "network inspect --format "*schemer-loopback-network) printf 'owned-app|schemer-loopback|owned-app_schemer-loopback\n' ;;
   "network inspect --format "*spoof-network) printf 'someone-else|default|owned-app_default\n' ;;
   "image inspect --format "*"schemii:owned-app") printf 'sha256:owned-app\n' ;;
   *) exit 0 ;;
@@ -213,6 +223,10 @@ esac
             self.assertNotIn("rm -f foreign-schemer-container", calls)
             self.assertNotIn("rm -f spoof-container", calls)
             self.assertIn("network rm owned-network", calls)
+            self.assertIn("network rm schemii-ingress-network", calls)
+            self.assertIn("network rm schemer-ingress-network", calls)
+            self.assertIn("network rm schemii-loopback-network", calls)
+            self.assertIn("network rm schemer-loopback-network", calls)
             self.assertNotIn("network rm spoof-network", calls)
             self.assertIn("volume rm owned-app_schemii-config", calls)
             self.assertIn("volume rm owned-schemer_schemer-dashboards", calls)
@@ -223,6 +237,37 @@ esac
             self.assertNotIn("volume rm foreign_schemer-dashboards", calls)
             self.assertIn("image rm schemii:owned-app", calls)
             self.assertNotIn("image rm schemer:local", calls)
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell uninstaller is tested on POSIX runners")
+    def test_shell_uninstaller_handles_empty_docker_resource_lists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "schemii-empty"
+            (repository / "src/schemii").mkdir(parents=True)
+            shutil.copy2(ROOT / "uninstall.sh", repository / "uninstall.sh")
+            (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+            (repository / "start.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            binary = root / "bin"
+            binary.mkdir()
+            docker = binary / "docker"
+            docker.write_text(
+                '#!/bin/sh\ncase "$*" in info|"ps -aq"|"volume ls -q") exit 0 ;; *) exit 1 ;; esac\n',
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                ["/bin/bash", str(repository / "uninstall.sh"), "--yes"],
+                cwd=repository,
+                env={**os.environ, "PATH": f"{binary}:/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Detected Schemii instances: none", result.stdout)
+            self.assertFalse(repository.exists())
 
     def test_backend_has_no_outbound_clients_or_process_execution(self):
         forbidden_modules = {
@@ -240,7 +285,7 @@ esac
                 else:
                     continue
                 for name in names:
-                    if path.name == "opencode_service.py" and name == "urllib.request":
+                    if (path.name == "opencode_service.py" and name == "urllib.request") or (path.name == "http_access.py" and name == "socket"):
                         continue
                     if any(name == forbidden or name.startswith(f"{forbidden}.") for forbidden in forbidden_modules):
                         violations.append(f"{path.name}:{node.lineno}: {name}")
@@ -330,11 +375,39 @@ esac
             self.assertIn("SCHEMII_INSTANCE", source)
             self.assertIn("--project-name", source)
             self.assertIn("SCHEMII_HOST_PORT", source)
-            self.assertIn("SCHEMII_METADATA_HOST_PORT", source)
+            self.assertNotIn("SCHEMII_METADATA_HOST_PORT", source)
             self.assertIn("Legacy Schemii data volumes were found", source)
         self.assertIn("service_completed_successfully", postgres_compose)
         self.assertIn("/seed/001_bookstore.sql:ro", postgres_compose)
         self.assertIn("SCHEMII_EXAMPLES: all", postgres_compose)
+
+    def test_launchers_have_platform_parity_for_schemer_and_coordinated_recovery(self):
+        shell = (ROOT / "start.sh").read_text(encoding="utf-8")
+        powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
+        recovery = (ROOT / "compose.recovery.yaml").read_text(encoding="utf-8")
+
+        for source in (shell, powershell):
+            for value in ("schemer", "schemer-ai", "SCHEMER_HOST_PORT", "instance-backup", "instance-restore"):
+                self.assertIn(value, source)
+            self.assertIn("compose.schemer.yaml", source)
+            self.assertIn("compose.schemer.ai.yaml", source)
+            self.assertIn("compose.recovery.yaml", source)
+            self.assertIn("schemer-dashboards", source)
+            self.assertIn("schemii-metadata-postgres", source)
+            self.assertIn("RESTORE:", source)
+            self.assertNotIn("SCHEMER_IMAGE", source)
+        self.assertIn("health_services=(metadata-postgres schemii schemii-ingress)", shell)
+        self.assertIn("health_services+=(schemer schemer-ingress)", shell)
+        self.assertIn("Schemii companion:", shell)
+        self.assertIn('$healthServices.Add(@("schemii-ingress", "Schemii ingress"))', powershell)
+        self.assertIn('$healthServices.Add(@("schemer-ingress", "Schemer ingress"))', powershell)
+        self.assertIn("Schemii companion:", powershell)
+        self.assertIn("127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8080", (ROOT / "compose.schemer.yaml").read_text(encoding="utf-8"))
+        self.assertIn("application-recovery-verify", recovery)
+        self.assertIn("schemii-schemas:/data/schemas", recovery)
+        self.assertIn("./src/schemii/metadata/migrations:/opt/schemii-recovery/migrations:ro", recovery)
+        self.assertIn("FOWNER", recovery)
+        self.assertNotIn("/var/run/docker.sock", recovery)
 
     def test_metadata_postgres_is_dedicated_migrated_and_role_scoped(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
@@ -348,8 +421,9 @@ esac
         self.assertIn('["python", "-m", "schemii.metadata_migrate"]', compose)
         self.assertIn("service_completed_successfully", compose)
         self.assertNotRegex(compose, r'(?m)^    ports:.*\n(?:.*\n){0,3}.*metadata-postgres')
-        self.assertIn('127.0.0.1:${SCHEMII_METADATA_HOST_PORT:-5433}:5432', local)
-        self.assertIn("host=127.0.0.1 port=${SCHEMII_METADATA_HOST_PORT:-5433}", local)
+        self.assertIn("host-postgres-socket:/run/schemii-host-postgres:ro", local)
+        self.assertIn("network_mode: service:schemii", local)
+        self.assertNotIn("SCHEMII_METADATA_HOST_PORT", local)
         self.assertIn("schemii_metadata_schemii", compose)
         self.assertIn("schemii_metadata_schemer", schemer)
         self.assertIn("schemii_metadata_owner NOLOGIN", roles)
@@ -379,6 +453,9 @@ esac
         powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
         for source in (shell, powershell):
             self.assertIn(".credential-transaction", source)
+            self.assertIn(".credential-transaction-committed", source)
+            self.assertIn("committed-cleanup-required", source)
+            self.assertIn("finalize-commit", source)
             self.assertIn("Backup instance marker", source)
             self.assertIn("16-256 characters from [A-Za-z0-9_-]", source)
         self.assertIn("rollback_credential_transaction", shell)
@@ -389,69 +466,567 @@ esac
         self.assertIn("WriteAllBytes($Target", powershell)
         self.assertIn('write_secret "$temporary_dir/metadata_bootstrap_password"', shell)
         self.assertIn('$newValues["metadata_bootstrap_password"] = Read-CredentialValue', powershell)
+        self.assertIn('temporary="$(mktemp "$credential_dir/.credential.XXXXXX")" \\', shell)
+        self.assertIn('cp "$temporary" "$path" \\', shell)
+        self.assertIn('rm -f -- "$temporary" \\', shell)
+        self.assertIn("recovery refuses to infer that it is stopped", shell)
+        self.assertIn("recovery refuses to infer that it is stopped", powershell)
+        self.assertIn("recovery evidence was retained and commit was not attempted", shell)
+        self.assertIn("recovery evidence was retained and commit was not attempted", powershell)
+        self.assertIn('up --no-build -d --remove-orphans', shell)
+        self.assertIn('@("up", "--no-build", "-d", "--remove-orphans")', powershell)
+        self.assertIn('src/schemii/build_revision.txt', shell)
+        self.assertIn('default_application_image="schemii:${release_identity}"', shell)
+        self.assertIn('src/schemii/build_revision.txt', powershell)
+        self.assertIn('$defaultApplicationImage = "schemii:$releaseIdentity"', powershell)
 
-    def test_credential_lifecycle_is_cross_process_locked_and_waits_before_forward_update(self):
+    def test_credential_and_recovery_mutations_keep_the_instance_lock(self):
         shell = (ROOT / "start.sh").read_text(encoding="utf-8")
         powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
 
         self.assertIn('credential_lock="${credential_dir}.lock"', shell)
-        self.assertIn('mkdir "$credential_lock"', shell)
-        self.assertIn('kill -0 "$lock_pid"', shell)
-        self.assertIn("Timed out waiting for another launcher credential operation", shell)
-        self.assertLess(shell.index("release_credential_lock\nif [[ \"$project\""), shell.index('"${compose[@]}" up'))
+        self.assertIn('if [[ "$credential_action" != "instance-backup" && "$credential_action" != "instance-restore" ]]', shell)
+        self.assertGreater(
+            shell.index("release_credential_lock", shell.index('if [[ "$credential_action" == "instance-backup"')),
+            shell.index("cleanup_status=0", shell.index('if [[ "$credential_action" == "instance-backup"')),
+        )
         self.assertRegex(shell, re.compile(r'run_credential_transaction\(\).*?wait_for_metadata .*?update_metadata_passwords', re.S))
 
         self.assertIn("[System.IO.FileShare]::None", powershell)
-        self.assertIn("Exit-CredentialLock", powershell)
-        self.assertLess(powershell.index("finally {\n    Exit-CredentialLock\n}\nif ($project"), powershell.index("& docker @upArgs"))
+        self.assertIn('if ($Mode -notin @("instance-backup", "instance-restore")) { Exit-CredentialLock }', powershell)
+        recovery_finally = powershell.index("finally { Exit-CredentialLock }")
+        self.assertGreater(recovery_finally, powershell.index('if ($Mode -in @("instance-backup", "instance-restore"))'))
         self.assertRegex(powershell, re.compile(r'function Complete-CredentialTransaction.*?Wait-MetadataReady .*?Invoke-MetadataPasswordUpdate', re.S))
 
-    @unittest.skipIf(os.name == "nt", "POSIX stale lock recovery is tested on POSIX runners")
-    def test_shell_credential_lock_recovers_after_owner_crash(self):
+    @unittest.skipIf(os.name == "nt", "POSIX recovery failure propagation is tested on POSIX runners")
+    def test_shell_recovery_propagates_each_stage_failure_and_credential_mismatch(self):
+        credential_names = (
+            "metadata_bootstrap_password", "metadata_migration_password",
+            "metadata_schemii_password", "metadata_schemer_password", "opencode_password",
+        )
+
+        def write_credentials(directory, project, value):
+            directory.mkdir(parents=True, mode=0o700)
+            (directory / "instance").write_text(f"{project}\n", encoding="utf-8")
+            (directory / "instance").chmod(0o600)
+            for name in credential_names:
+                path = directory / name
+                path.write_text(value * 32 + "\n", encoding="utf-8")
+                path.chmod(0o600)
+
+        docker_source = r'''#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+for argument do last=$argument; done
+if [ "${SCHEMII_TEST_STOPPED_PS_FAILURE:-0}" = 1 ] \
+    && [ "$*" = "ps -aq --filter label=com.docker.compose.project=$SCHEMII_INSTANCE" ]; then
+  exit 71
+fi
+recovery_state_file=${SCHEMII_TEST_RECOVERY_STATE_FILE:-${DOCKER_LOG}.state}
+case "$*" in
+  *"metadata-recovery state")
+    if [ -f "$recovery_state_file" ]; then cat "$recovery_state_file"; else printf 'none\n'; fi
+    exit 0 ;;
+  *"metadata-recovery restore")
+    printf 'rollback-required\n' > "$recovery_state_file" ;;
+  *"metadata-recovery commit")
+    if [ "${SCHEMII_TEST_COMMIT_FAIL_BEFORE_PUBLISH:-0}" = 1 ] \
+        && [ -n "${SCHEMII_TEST_FAIL_MATCH:-}" ]; then
+      exit 71
+    fi
+    printf 'committed-cleanup-required\n' > "$recovery_state_file" ;;
+  *"metadata-recovery finalize-commit")
+    if [ "${SCHEMII_TEST_FAIL_MATCH:-}" = "metadata-recovery finalize-commit" ]; then exit 71; fi
+    rm -f -- "$recovery_state_file"
+    exit 0 ;;
+  *"metadata-recovery rollback")
+    rm -f -- "$recovery_state_file" ;;
+esac
+case "$*" in
+  *"$SCHEMII_TEST_FAIL_MATCH"*)
+    if [ -n "${SCHEMII_TEST_FAIL_MATCH:-}" ]; then exit 71; fi ;;
+esac
+case "$*" in
+  info|"compose version") exit 0 ;;
+  "volume inspect --format "*)
+    logical=${last#"${SCHEMII_INSTANCE}_"}
+    printf '%s|%s\n' "$SCHEMII_INSTANCE" "$logical"
+    exit 0 ;;
+  "volume inspect "*"_schemii-metadata-postgres") exit 0 ;;
+  "ps -aq "*"com.docker.compose.service=metadata-postgres"*)
+    [ "${SCHEMII_TEST_RETAINED_TRANSACTION:-0}" = 1 ] && printf 'metadata-container\n'
+    exit 0 ;;
+  "ps -aq --filter label=com.docker.compose.project=$SCHEMII_INSTANCE")
+    [ "${SCHEMII_TEST_STOPPED_CONTAINER:-0}" = 1 ] && printf 'stopped-container\n'
+    exit 0 ;;
+  "ps -q "*|"ps -aq "*) exit 0 ;;
+  "inspect --format {{.State.Running}} stopped-container") printf 'false\n'; exit 0 ;;
+  *compose*" ps -q metadata-postgres") printf 'metadata-container\n'; exit 0 ;;
+  "exec -u postgres metadata-container pg_isready"*) exit 0 ;;
+  "cp "*)
+    mkdir -p "$last"
+    : > "$last/complete"
+    if [ "${SCHEMII_TEST_MOVE_RACE:-0}" = 1 ]; then : > "$SCHEMII_TEST_FINAL_BACKUP"; fi
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+'''
+
+        cases = (
+            ("image inspect", "Selected immutable recovery images are not loaded"),
+            ("application-recovery-verify", "failed backup validation"),
+            ("metadata-recovery backup", "Coordinated backup failed"),
+            ("cp ", "Backup output could not be copied"),
+        )
+        for failed_command, expected_error in cases:
+            with self.subTest(failed_command=failed_command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / "bin"
+                binary.mkdir()
+                docker = binary / "docker"
+                docker.write_text(docker_source, encoding="utf-8")
+                docker.chmod(0o755)
+                project = "schemii-recovery-failure"
+                credentials = root / "credentials"
+                write_credentials(credentials, project, "a")
+                backup_parent = root / "backups"
+                result = subprocess.run(
+                    ["/bin/bash", str(ROOT / "start.sh"), "instance-backup", str(backup_parent)],
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "PATH": f"{binary}:/usr/bin:/bin",
+                        "DOCKER_LOG": str(root / "docker.log"),
+                        "SCHEMII_INSTANCE": project,
+                        "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                        "SCHEMII_TEST_FAIL_MATCH": failed_command,
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(result.returncode, 71, result.stdout + result.stderr)
+                self.assertIn(expected_error, result.stderr)
+                self.assertFalse((backup_parent / project).exists())
+
+        for stopped_failure in ("ps", "inspect"):
+            with self.subTest(stopped_failure=stopped_failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / "bin"
+                binary.mkdir()
+                docker = binary / "docker"
+                docker.write_text(docker_source, encoding="utf-8")
+                docker.chmod(0o755)
+                project = f"schemii-recovery-{stopped_failure}-failure"
+                credentials = root / "credentials"
+                write_credentials(credentials, project, "a")
+                result = subprocess.run(
+                    ["/bin/bash", str(ROOT / "start.sh"), "instance-backup", str(root / "backups")],
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "PATH": f"{binary}:/usr/bin:/bin",
+                        "DOCKER_LOG": str(root / "docker.log"),
+                        "SCHEMII_INSTANCE": project,
+                        "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                        "SCHEMII_TEST_FAIL_MATCH": "inspect --format {{.State.Running}} stopped-container" if stopped_failure == "inspect" else "never-match",
+                        "SCHEMII_TEST_STOPPED_CONTAINER": "1" if stopped_failure == "inspect" else "0",
+                        "SCHEMII_TEST_STOPPED_PS_FAILURE": "1" if stopped_failure == "ps" else "0",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("refuses to infer that it is stopped", result.stderr)
+                self.assertNotIn("metadata-recovery prepare", (root / "docker.log").read_text(encoding="utf-8"))
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binary = root / "bin"
             binary.mkdir()
             docker = binary / "docker"
-            docker.write_text(
-                '#!/bin/sh\ncase "$*" in info|"compose version") exit 0 ;; *) exit 1 ;; esac\n',
-                encoding="utf-8",
-            )
+            docker.write_text(docker_source, encoding="utf-8")
             docker.chmod(0o755)
-            project = "schemii-lock-test"
-            credentials = root / "credentials" / project
-            credentials.mkdir(parents=True, mode=0o700)
-            (credentials / "instance").write_text(f"{project}\n", encoding="utf-8")
-            for name in (
-                "metadata_bootstrap_password", "metadata_migration_password",
-                "metadata_schemii_password", "metadata_schemer_password", "opencode_password",
-            ):
-                path = credentials / name
-                path.write_text("a" * 32 + "\n", encoding="utf-8")
-                path.chmod(0o600)
-            lock = Path(f"{credentials}.lock")
-            lock.mkdir(mode=0o700)
-            (lock / "pid").write_text("99999999\n", encoding="utf-8")
-            (lock / "token").write_text("crashed-owner\n", encoding="utf-8")
-            backup = root / "backup"
-
+            project = "schemii-recovery-move"
+            credentials = root / "credentials"
+            write_credentials(credentials, project, "a")
+            backup_parent = root / "backups"
             result = subprocess.run(
-                ["/bin/bash", str(ROOT / "start.sh"), "credentials-backup", str(backup)],
+                ["/bin/bash", str(ROOT / "start.sh"), "instance-backup", str(backup_parent)],
                 cwd=ROOT,
                 env={
                     **os.environ,
                     "PATH": f"{binary}:/usr/bin:/bin",
+                    "DOCKER_LOG": str(root / "docker.log"),
                     "SCHEMII_INSTANCE": project,
                     "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                    "SCHEMII_TEST_FAIL_MATCH": "never-match",
+                    "SCHEMII_TEST_MOVE_RACE": "1",
+                    "SCHEMII_TEST_FINAL_BACKUP": str(backup_parent / project),
                 },
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=20,
             )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("could not be published", result.stderr)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(lock.exists())
-            self.assertTrue((backup / project / "metadata_migration_password").is_file())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "bin"
+            binary.mkdir()
+            docker = binary / "docker"
+            docker.write_text(docker_source, encoding="utf-8")
+            docker.chmod(0o755)
+            project = "schemii-recovery-immutable"
+            credentials = root / "credentials"
+            write_credentials(credentials, project, "a")
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "start.sh"), "instance-backup", str(root / "backups")],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                    "DOCKER_LOG": str(root / "docker.log"),
+                    "SCHEMII_INSTANCE": project,
+                    "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                    "SCHEMII_IMAGE": "schemii:immutable",
+                    "SCHEMII_METADATA_IMAGE": "schemii-metadata-postgres:immutable",
+                    "SCHEMII_TEST_FAIL_MATCH": "never-match",
+                },
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            log = (root / "docker.log").read_text(encoding="utf-8")
+            self.assertIn("image inspect schemii:immutable schemii-metadata-postgres:immutable", log)
+            self.assertNotIn("build metadata-postgres schemii", log)
+
+        for mismatch in (False, True):
+            with self.subTest(credential_stage_mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / "bin"
+                binary.mkdir()
+                docker = binary / "docker"
+                docker.write_text(docker_source, encoding="utf-8")
+                docker.chmod(0o755)
+                project = "schemii-recovery-restore"
+                credentials = root / "credentials"
+                source = root / "backup"
+                write_credentials(credentials, project, "a")
+                write_credentials(source / "credentials", project, "b")
+                (source / "instance").write_text(f"{project}\n", encoding="utf-8")
+                if mismatch:
+                    transaction = credentials / ".credential-transaction"
+                    write_credentials(transaction / "old", project, "a")
+                    write_credentials(transaction / "new", project, "c")
+                    (transaction / "instance").write_text(f"{project}\n", encoding="utf-8")
+                    (transaction / "operation").write_text("instance-restore\n", encoding="utf-8")
+                result = subprocess.run(
+                    ["/bin/bash", str(ROOT / "start.sh"), "instance-restore", str(source), f"RESTORE:{project}"],
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "PATH": f"{binary}:/usr/bin:/bin",
+                        "DOCKER_LOG": str(root / "docker.log"),
+                        "SCHEMII_INSTANCE": project,
+                        "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                        "SCHEMII_TEST_FAIL_MATCH": "metadata-recovery stage-verification" if not mismatch else "never-match",
+                        "SCHEMII_TEST_RETAINED_TRANSACTION": "1" if mismatch else "0",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                log = (root / "docker.log").read_text(encoding="utf-8")
+                self.assertNotIn("metadata-recovery restore", log)
+                if mismatch:
+                    self.assertIn("do not match the retained restore staging transaction", result.stderr)
+                    self.assertTrue((credentials / ".credential-transaction").is_dir())
+                else:
+                    self.assertIn("Backup manifest or archive verification failed", result.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "bin"
+            binary.mkdir()
+            docker = binary / "docker"
+            docker.write_text(docker_source, encoding="utf-8")
+            docker.chmod(0o755)
+            project = "schemii-recovery-stop-failure"
+            credentials = root / "credentials"
+            source = root / "backup"
+            write_credentials(credentials, project, "a")
+            write_credentials(source / "credentials", project, "b")
+            (source / "instance").write_text(f"{project}\n", encoding="utf-8")
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "start.sh"), "instance-restore", str(source), f"RESTORE:{project}"],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                    "DOCKER_LOG": str(root / "docker.log"),
+                    "SCHEMII_INSTANCE": project,
+                    "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                    "SCHEMII_TEST_FAIL_MATCH": "stop metadata-container",
+                },
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("recovery evidence was retained and commit was not attempted", result.stderr)
+            self.assertTrue((credentials / ".credential-transaction").is_dir())
+            calls = (root / "docker.log").read_text(encoding="utf-8")
+            self.assertNotIn("metadata-recovery commit", calls)
+            self.assertNotIn("Coordinated restore completed", result.stdout)
+
+        for commit_failure in ("before-publish", "after-publish", "finalize-after-publish"):
+            with self.subTest(commit_failure=commit_failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / "bin"
+                binary.mkdir()
+                docker = binary / "docker"
+                docker.write_text(docker_source, encoding="utf-8")
+                docker.chmod(0o755)
+                project = f"schemii-recovery-commit-{commit_failure}"
+                credentials = root / "credentials"
+                source = root / "backup"
+                write_credentials(credentials, project, "a")
+                write_credentials(source / "credentials", project, "b")
+                (source / "instance").write_text(f"{project}\n", encoding="utf-8")
+                base_env = {
+                    **os.environ,
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                    "DOCKER_LOG": str(root / "docker.log"),
+                    "SCHEMII_TEST_RECOVERY_STATE_FILE": str(root / "recovery.state"),
+                    "SCHEMII_INSTANCE": project,
+                    "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                }
+                failed = subprocess.run(
+                    ["/bin/bash", str(ROOT / "start.sh"), "instance-restore", str(source), f"RESTORE:{project}"],
+                    cwd=ROOT,
+                    env={
+                        **base_env,
+                        "SCHEMII_TEST_FAIL_MATCH": "metadata-recovery finalize-commit" if commit_failure == "finalize-after-publish" else "metadata-recovery commit",
+                        "SCHEMII_TEST_COMMIT_FAIL_BEFORE_PUBLISH": "1" if commit_failure == "before-publish" else "0",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(failed.returncode, 71, failed.stdout + failed.stderr)
+                first_calls = (root / "docker.log").read_text(encoding="utf-8")
+                if commit_failure == "before-publish":
+                    self.assertIn("failed before publication", failed.stderr)
+                    self.assertIn("metadata-recovery rollback", first_calls)
+                    self.assertFalse((credentials / ".credential-transaction").exists())
+                else:
+                    self.assertIn("forward cleanup", failed.stderr)
+                    self.assertNotIn("metadata-recovery rollback", first_calls)
+                    self.assertEqual(
+                        (credentials / ".credential-transaction").is_dir(),
+                        commit_failure == "after-publish",
+                    )
+
+                    restarted = subprocess.run(
+                        ["/bin/bash", str(ROOT / "start.sh"), "instance-restore", str(source), f"RESTORE:{project}"],
+                        cwd=ROOT,
+                        env={**base_env, "SCHEMII_TEST_FAIL_MATCH": "never-match"},
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                    )
+                    self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
+                    all_calls = (root / "docker.log").read_text(encoding="utf-8")
+                    self.assertEqual(all_calls.count("metadata-recovery restore\n"), 1)
+                    self.assertNotIn("metadata-recovery rollback", all_calls)
+                    self.assertIn("metadata-recovery finalize-commit", all_calls)
+                    self.assertFalse((credentials / ".credential-transaction").exists())
+                    self.assertFalse((credentials / ".credential-transaction-committed").exists())
+
+        real_mv = shutil.which("mv")
+        real_rm = shutil.which("rm")
+        self.assertIsNotNone(real_mv)
+        self.assertIsNotNone(real_rm)
+        for credential_cleanup_failure in ("move", "remove"):
+            with self.subTest(credential_cleanup_failure=credential_cleanup_failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / "bin"
+                binary.mkdir()
+                project = f"schemii-recovery-credential-cleanup-{credential_cleanup_failure}"
+                credentials = root / "credentials"
+                source = root / "backup"
+                write_credentials(credentials, project, "a")
+                write_credentials(source / "credentials", project, "b")
+                (source / "instance").write_text(f"{project}\n", encoding="utf-8")
+                docker = binary / "docker"
+                docker.write_text(docker_source, encoding="utf-8")
+                docker.chmod(0o755)
+                wrapper = f'''#!/bin/sh
+tool=${{0##*/}}
+case "$tool:${{SCHEMII_TEST_CREDENTIAL_CLEANUP_FAILURE:-}}:$*" in
+  mv:move:*".credential-transaction "*".credential-transaction-committed") exit 71 ;;
+  rm:remove:*".credential-transaction-committed") exit 71 ;;
+esac
+case "$tool" in
+  mv) exec {real_mv} "$@" ;;
+  rm) exec {real_rm} "$@" ;;
+esac
+exit 127
+'''
+                for name in ("mv", "rm"):
+                    path = binary / name
+                    path.write_text(wrapper, encoding="utf-8")
+                    path.chmod(0o755)
+                base_env = {
+                    **os.environ,
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                    "DOCKER_LOG": str(root / "docker.log"),
+                    "SCHEMII_TEST_RECOVERY_STATE_FILE": str(root / "recovery.state"),
+                    "SCHEMII_INSTANCE": project,
+                    "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                    "SCHEMII_TEST_FAIL_MATCH": "never-match",
+                }
+                failed = subprocess.run(
+                    ["/bin/bash", str(ROOT / "start.sh"), "instance-restore", str(source), f"RESTORE:{project}"],
+                    cwd=ROOT,
+                    env={**base_env, "SCHEMII_TEST_CREDENTIAL_CLEANUP_FAILURE": credential_cleanup_failure},
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+                self.assertNotIn("metadata-recovery rollback", (root / "docker.log").read_text(encoding="utf-8"))
+                self.assertTrue((root / "recovery.state").is_file())
+
+                restarted = subprocess.run(
+                    ["/bin/bash", str(ROOT / "start.sh"), "instance-restore", str(source), f"RESTORE:{project}"],
+                    cwd=ROOT,
+                    env=base_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
+                calls = (root / "docker.log").read_text(encoding="utf-8")
+                self.assertEqual(calls.count("metadata-recovery restore\n"), 1)
+                self.assertNotIn("metadata-recovery rollback", calls)
+                self.assertFalse((credentials / ".credential-transaction").exists())
+                self.assertFalse((credentials / ".credential-transaction-committed").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX credential mutation failures are tested on POSIX runners")
+    def test_shell_credential_mutation_commands_fail_explicitly(self):
+        credential_names = (
+            "metadata_bootstrap_password", "metadata_migration_password",
+            "metadata_schemii_password", "metadata_schemer_password", "opencode_password",
+        )
+        real_tools = {name: shutil.which(name) for name in ("mktemp", "cp", "chmod", "mv", "rm")}
+        self.assertTrue(all(real_tools.values()))
+
+        def write_credentials(directory, project, value):
+            directory.mkdir(parents=True, mode=0o700)
+            (directory / "instance").write_text(f"{project}\n", encoding="utf-8")
+            (directory / "instance").chmod(0o600)
+            for name in credential_names:
+                path = directory / name
+                path.write_text(value * 32 + "\n", encoding="utf-8")
+                path.chmod(0o600)
+
+        for failure in ("mktemp", "write", "copy", "chmod-temp", "chmod-target", "remove", "move"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / "bin"
+                binary.mkdir()
+                project = f"schemii-credential-{failure}"
+                credentials = root / "credentials"
+                source = root / "backup"
+                write_credentials(credentials, project, "a")
+                write_credentials(source / project, project, "b")
+                docker = binary / "docker"
+                docker.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$*\" in\n"
+                    "  info|\"compose version\") exit 0 ;;\n"
+                    "  \"volume inspect ${SCHEMII_INSTANCE}_schemii-metadata-postgres\")\n"
+                    "    [ \"${SCHEMII_TEST_MUTATION_FAILURE:-}\" = move ] && exit 0 || exit 1 ;;\n"
+                    "  \"ps -q \"*\"com.docker.compose.service=metadata-postgres\"*) printf 'metadata-container\\n'; exit 0 ;;\n"
+                    "  \"run --rm python:3.12-slim python -c \"*) printf '%064d\\n' 0; exit 0 ;;\n"
+                    "  ps*|inspect*|start*|restart*|exec*) exit 0 ;;\n"
+                    "esac\n"
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+                docker.chmod(0o755)
+                wrapper = r"""#!/bin/sh
+tool=${0##*/}
+last=
+for argument do last=$argument; done
+case "$tool:$SCHEMII_TEST_MUTATION_FAILURE:$*" in
+  mktemp:mktemp:*\/.credential.XXXXXX) exit 71 ;;
+  mktemp:write:*\/.credential.XXXXXX)
+    printf '%s\n' "$SCHEMII_CREDENTIAL_DIR/missing/.credential.test"
+    exit 0 ;;
+  cp:copy:*\/.credential.*)
+    exit 71 ;;
+  chmod:chmod-temp:*\/.credential.*)
+    exit 71 ;;
+  chmod:chmod-target:*)
+    if [ -f "$SCHEMII_TEST_COPY_COMPLETED" ] && [ "$last" = "$SCHEMII_CREDENTIAL_DIR/metadata_bootstrap_password" ]; then exit 71; fi ;;
+  rm:remove:*\/.credential.*)
+    exit 71 ;;
+  mv:move:*\.credential-transaction)
+    exit 71 ;;
+esac
+if [ "$tool" = cp ] && [ "$SCHEMII_TEST_MUTATION_FAILURE" = chmod-target ]; then
+  "$SCHEMII_TEST_REAL_CP" "$@" || exit $?
+  : > "$SCHEMII_TEST_COPY_COMPLETED"
+  exit 0
+fi
+case "$tool" in
+  mktemp) exec "$SCHEMII_TEST_REAL_MKTEMP" "$@" ;;
+  cp) exec "$SCHEMII_TEST_REAL_CP" "$@" ;;
+  chmod) exec "$SCHEMII_TEST_REAL_CHMOD" "$@" ;;
+  mv) exec "$SCHEMII_TEST_REAL_MV" "$@" ;;
+  rm) exec "$SCHEMII_TEST_REAL_RM" "$@" ;;
+esac
+exit 127
+"""
+                for name in real_tools:
+                    path = binary / name
+                    path.write_text(wrapper, encoding="utf-8")
+                    path.chmod(0o755)
+                command = ["/bin/bash", str(ROOT / "start.sh")]
+                if failure == "move":
+                    command.append("credentials-rotate")
+                else:
+                    command.extend(("credentials-restore", str(source)))
+                result = subprocess.run(
+                    command,
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "PATH": f"{binary}:/usr/bin:/bin",
+                        "SCHEMII_INSTANCE": project,
+                        "SCHEMII_CREDENTIAL_DIR": str(credentials),
+                        "SCHEMII_TEST_MUTATION_FAILURE": failure,
+                        "SCHEMII_TEST_COPY_COMPLETED": str(root / "copy-completed"),
+                        **{f"SCHEMII_TEST_REAL_{name.upper()}": path for name, path in real_tools.items()},
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                if failure in {"mktemp", "write", "copy", "chmod-temp", "move"}:
+                    self.assertEqual(
+                        (credentials / "metadata_bootstrap_password").read_text(encoding="utf-8"),
+                        "a" * 32 + "\n",
+                    )
+                if failure in {"copy", "chmod-target", "remove"}:
+                    self.assertTrue(any(path.name.startswith(".credential.") for path in credentials.iterdir()))
 
     def test_windows_credential_acls_are_recursive_verified_and_fail_closed(self):
         powershell = (ROOT / "start.ps1").read_text(encoding="utf-8")
@@ -463,7 +1038,12 @@ esac
         self.assertIn("Credential ACL verification failed closed", powershell)
         self.assertIn("Protect-CredentialTree $credentialDirectory", powershell)
         self.assertIn("Protect-CredentialTree $backupDirectory", powershell)
-        self.assertIn("if ($runningOnWindows) { Protect-CredentialTree $sourceDirectory }", powershell)
+        self.assertNotIn("Protect-CredentialTree $sourceDirectory", powershell)
+        self.assertIn("[System.IO.FileMode]::CreateNew", powershell)
+        self.assertEqual(powershell.count("[System.IO.FileMode]::OpenOrCreate"), 1)
+        self.assertIn("$credentialLockPath, [System.IO.FileMode]::OpenOrCreate", powershell)
+        self.assertIn("Copy-ProtectedRestoreSource $sourceDirectory", powershell)
+        self.assertIn(".restore-source.", powershell)
         self.assertIn("Protect-CredentialPath $staging $true", powershell)
         self.assertNotIn("icacls.exe", powershell)
 
@@ -482,7 +1062,7 @@ esac
     def test_compose_allows_a_clean_browser_shutdown_to_remain_stopped(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
-        schemii_service = compose.split("  schemii:\n", 1)[1].split("\nvolumes:", 1)[0]
+        schemii_service = compose.split("  schemii:\n", 1)[1].split("\n  schemii-ingress:", 1)[0]
         self.assertIn("restart: on-failure", schemii_service)
         self.assertNotIn("restart: unless-stopped", schemii_service)
 
@@ -491,12 +1071,16 @@ esac
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         package = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertIn("target: schemer-runtime", compose)
-        self.assertIn('127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8081', compose)
+        self.assertNotIn("target:", compose)
+        self.assertIn('127.0.0.1:${SCHEMER_HOST_PORT:-8081}:8080', compose)
+        schemer_service = compose.split("  schemer:\n", 1)[1].split("\n  schemer-ingress:", 1)[0]
+        self.assertNotIn("    ports:", schemer_service)
         self.assertIn("schemii-config:/data/config", compose)
         self.assertIn("schemer-dashboards:/data/dashboards", compose)
         self.assertIn("SCHEMER_DASHBOARD_DIR: /data/dashboards", compose)
-        self.assertIn("FROM runtime AS schemer-runtime", dockerfile)
+        self.assertNotIn("schemer-runtime", dockerfile)
+        self.assertIn('image: ${SCHEMII_IMAGE:-schemii:local}', compose)
+        self.assertIn('command: ["schemer"]', compose)
         self.assertIn("/data/config /data/schemas /data/dashboards", dockerfile)
         self.assertIn('schemer = "schemii.schemer_server:main"', package)
 

@@ -21,11 +21,11 @@ CAPABILITY_ALIASES = {
 LEGACY_SCHEMER_TIERS = {
     "metadata": ("dashboard_read",),
     "dashboard": ("dashboard_read", "dashboard_write"),
-    "data": ("dashboard_read", "dashboard_write", "structured_read"),
+    "data": ("dashboard_read", "dashboard_write", "structured_read", "raw_read"),
 }
 APPLICATION_CAPABILITIES = {
     "schemii": POSTGRES_CAPABILITIES,
-    "schemer": ("structured_read", "dashboard_read", "dashboard_write"),
+    "schemer": ("structured_read", "raw_read", "dashboard_read", "dashboard_write"),
 }
 SAFETY_FLOORS = {
     "schema": "every_action",
@@ -52,7 +52,7 @@ LEGACY_CAPABILITIES = {
         "rawread": "raw_read", "rawwrite": "raw_write",
     },
     "schemer": {
-        "metadata": "dashboard_read", "dashboard": "dashboard_write", "data": "structured_read",
+        "metadata": "dashboard_read", "dashboard": "dashboard_write", "data": "raw_read",
     },
 }
 
@@ -136,7 +136,11 @@ def effective_chat_snapshot(
     requested_names = set(requested or ())
     if any(name not in aliases for name in requested_names):
         raise MetadataStoreError("invalid_metadata", "Legacy AI capability selection is invalid", status=400)
-    requested_canonical = {aliases[name] for name in requested_names}
+    requested_canonical = (
+        {capability for name in requested_names for capability in legacy_schemer_capabilities(name)}
+        if application == "schemer"
+        else {aliases[name] for name in requested_names}
+    )
     narrowed_modes = requested_modes or {}
     capabilities = {}
     for name, authority in settings["capabilities"].items():

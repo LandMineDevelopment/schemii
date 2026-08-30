@@ -10,7 +10,13 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from schemii.opencode_service import CUSTOM_TOOLS, PROMPT_TOOLS, SAFE_SKILLS, TOOL_ACTION_TYPES
 from schemii.schemer_ai import SCHEMER_AI_SKILLS, SCHEMER_AI_TOOL_ACTION_TYPES
-from schemii.ai_tool_contracts import AI_TOOL_CONTRACTS, SCHEMII_TOOL_CONTRACTS, SCHEMER_TOOL_CONTRACTS
+from schemii.ai_tool_contracts import (
+    AI_TOOL_CONTRACTS,
+    SCHEMII_TOOL_CONTRACTS,
+    SCHEMER_TOOL_CONTRACTS,
+    action_authority,
+    effective_schemii_contract,
+)
 
 
 class AiPermissionContractTests(unittest.TestCase):
@@ -63,6 +69,53 @@ class AiPermissionContractTests(unittest.TestCase):
                     self.assertIsInstance(contract.executor_adapter, str)
                     self.assertTrue(contract.executor_adapter)
 
+    def test_schemer_sql_and_dashboard_creation_have_exact_authority_contracts(self):
+        self.assertEqual(SCHEMER_TOOL_CONTRACTS["schemer_read_query"].capability, "raw_read")
+        self.assertEqual(SCHEMER_TOOL_CONTRACTS["schemer_read_query"].approval_floor({}), "every_action")
+        self.assertEqual(SCHEMER_TOOL_CONTRACTS["schemer_dashboard_create"].capability, "dashboard_write")
+        self.assertEqual(SCHEMER_TOOL_CONTRACTS["schemer_dashboard_create"].approval_floor({}), "every_action")
+
+    def test_server_issued_schemii_actions_have_exact_authority_contracts(self):
+        child = {
+            "type": "add_table", "name": "events", "purpose": "Track events",
+            "columns": [{"name": "id", "type": "bigint"}], "requiresConfirmation": True,
+        }
+        batch = {"type": "schema_batch", "actions": [child, {**child, "name": "logs"}], "requiresConfirmation": True}
+        migration = {
+            "type": "migration_apply", "profileId": "local", "database": "demo", "namespace": "public",
+            "planId": "ai_plan_one", "destructive": True, "reviewDigest": "a" * 64,
+            "requiresConfirmation": True,
+        }
+        reviewed = {
+            "applyPlanId": "ai_plan_two", "planDigest": "b" * 64, "effectsDigest": "c" * 64,
+            "rowCount": 2,
+        }
+        write = {
+            "type": "postgres_write_apply", "writeKind": "insert_rows", "profileId": "local",
+            "database": "demo", "namespace": "public", "relation": "events", "planId": "ai_plan_two",
+            "reviewDigest": "b" * 64, "effectsDigest": "c" * 64, "rowCount": 2,
+            "reviewedPlan": reviewed, "requiresConfirmation": True,
+        }
+
+        self.assertEqual(effective_schemii_contract(batch), ("schema", None))
+        self.assertEqual(action_authority("schemii", batch, "schema", "automatic", origin="model"), ("schema", "automatic"))
+        self.assertEqual(action_authority("schemii", migration, "schema", "automatic", origin="server_apply"), ("schema", "every_action"))
+        self.assertEqual(action_authority("schemii", write, "structured_write", "every_action", origin="server_apply"), ("structured_write", "every_action"))
+
+        for tampered in (
+            {**batch, "unexpected": True},
+            {**migration, "reviewDigest": "not-a-digest"},
+            {**write, "rowCount": 3},
+        ):
+            with self.subTest(action=tampered["type"]), self.assertRaises(ValueError):
+                action_authority("schemii", tampered, "schema" if tampered["type"] != "postgres_write_apply" else "write", "every_action", origin="model" if tampered["type"] == "schema_batch" else "server_apply")
+        with self.assertRaises(ValueError):
+            action_authority("schemii", migration, "schema", "every_action", origin="model")
+        with self.assertRaises(ValueError):
+            action_authority("schemii", migration, "schema", "every_action")
+        with self.assertRaises(ValueError):
+            effective_schemii_contract({"type": "unknown_server_action"})
+
     def test_agent_guidance_exposes_table_proposals_without_write_bypasses(self):
         workspace = ROOT / "ai/workspace"
         instructions = (workspace / "AGENTS.md").read_text()
@@ -101,7 +154,8 @@ class AiPermissionContractTests(unittest.TestCase):
         local_override = (ROOT / "compose.ai.local-db.yaml").read_text()
         self.assertIn("./ai/workspace:/workspace:ro", ai_compose)
         self.assertNotRegex(ai_compose, r'ports:\s*\n\s*-\s*["\']?[^\n]*4096')
-        self.assertIn('"127.0.0.1:${SCHEMII_OPENCODE_HOST_PORT:-4096}:4096"', local_override)
+        self.assertIn("services: {}", local_override)
+        self.assertNotIn("ports:", local_override)
         self.assertNotIn('"0.0.0.0:', local_override)
         self.assertIn("OPENCODE_DISABLE_EXTERNAL_SKILLS: 1", ai_compose)
         self.assertIn("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: 1", ai_compose)
@@ -117,6 +171,10 @@ class AiPermissionContractTests(unittest.TestCase):
         skills = {path.parent.name for path in (root / ".opencode/skills").glob("*/SKILL.md")}
         self.assertEqual(tools, set(SCHEMER_AI_TOOL_ACTION_TYPES))
         self.assertEqual(skills, SCHEMER_AI_SKILLS)
+        self.assertIn("schemer-order-safety", skills)
+        self.assertNotIn("schemer-layout-safety", skills)
+        self.assertNotIn("schemer-layout-safety", (root / "opencode.json").read_text())
+        self.assertNotIn("schemer-layout-safety", (root / "AGENTS.md").read_text())
         self.assertEqual({name for name in tools if permission.get(name) == "allow"}, tools)
         self.assertEqual({name for name, value in permission["skill"].items() if value == "allow"}, skills)
         self.assertEqual(permission["*"], "deny")

@@ -28,7 +28,7 @@ read_secret() {
   printf '%s' "$value"
 }
 
-secret_dir=/tmp/schemii-metadata-secrets
+secret_dir="${SCHEMII_METADATA_SECRET_DIR:-/tmp/schemii-metadata-secrets}"
 migration_password="$(read_secret "$secret_dir/metadata_migration_password" metadata_migration_password)"
 schemii_password="$(read_secret "$secret_dir/metadata_schemii_password" metadata_schemii_password)"
 schemer_password="$(read_secret "$secret_dir/metadata_schemer_password" metadata_schemer_password)"
@@ -52,7 +52,7 @@ GRANT schemii_metadata_owner TO schemii_metadata_migration;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 ALTER SCHEMA public OWNER TO schemii_metadata_owner;
 GRANT USAGE ON SCHEMA public TO schemii_metadata_schemii, schemii_metadata_schemer;
-ALTER DEFAULT PRIVILEGES FOR ROLE schemii_metadata_owner IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE schemii_metadata_owner
   REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE schemii_metadata_owner IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO schemii_metadata_schemii, schemii_metadata_schemer;

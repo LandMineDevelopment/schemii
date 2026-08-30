@@ -56,6 +56,18 @@ class AgentSettingsRepositoryTests(unittest.TestCase):
         self.assertIn("q.state = 'ready'", sql)
         self.assertNotIn("metadata_operations SET", sql)
 
+    def test_legacy_schemer_policy_does_not_inherit_new_raw_read_authority(self):
+        row = revision_row("schemer")
+        row["policy"]["capabilities"].pop("raw_read")
+        legacy_capabilities = [item for item in capability_rows("schemer") if item["capability"] != "raw_read"]
+        connection = FakeConnection(rows=[{"exists": 1}, row, legacy_capabilities])
+
+        result = MetadataStore(lambda: connection).get_agent_settings("schemer", "default")
+
+        self.assertEqual(result["capabilities"]["raw_read"], {
+            "configuredMode": "disabled", "effectiveMode": "disabled", "safetyFloor": "every_action",
+        })
+
     def test_stale_update_reports_policy_changed(self):
         connection = FakeConnection(rows=[{"current_revision": 4}])
         with self.assertRaises(MetadataStoreError) as caught:

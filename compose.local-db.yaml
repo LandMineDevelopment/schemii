@@ -1,16 +1,48 @@
-# Linux-only override for PostgreSQL bound to host loopback.
+# Linux-only bridge for PostgreSQL bound to host loopback.
 services:
-  metadata-postgres:
-    ports:
-      - "127.0.0.1:${SCHEMII_METADATA_HOST_PORT:-5433}:5432"
-
   schemii:
+    volumes:
+      - host-postgres-socket:/run/schemii-host-postgres:ro
+
+  host-postgres-exporter:
+    image: nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8
     network_mode: host
-    ports: !reset []
-    environment:
-      SCHEMII_HOST: 127.0.0.1
-      SCHEMII_PORT: ${SCHEMII_HOST_PORT:-8080}
-      SCHEMII_BEHIND_LOOPBACK_PROXY: 0
-      SCHEMII_METADATA_DSN: host=127.0.0.1 port=${SCHEMII_METADATA_HOST_PORT:-5433} dbname=schemii_metadata user=schemii_metadata_schemii
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['SCHEMII_PORT'] + '/', timeout=2).read(1)"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "rm -f /run/schemii-host-postgres/.s.PGSQL.5432 && exec nginx -g 'daemon off;' -c /etc/nginx/nginx.conf"
+    volumes:
+      - host-postgres-socket:/run/schemii-host-postgres
+      - ./docker/ingress/host-postgres-exporter.conf:/etc/nginx/nginx.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  local-postgres-relay:
+    image: nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8
+    network_mode: service:schemii
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
+    depends_on:
+      host-postgres-exporter:
+        condition: service_started
+      schemii:
+        condition: service_started
+    volumes:
+      - host-postgres-socket:/run/schemii-host-postgres:ro
+      - ./docker/ingress/local-postgres-relay.conf:/etc/nginx/nginx.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  host-postgres-socket:

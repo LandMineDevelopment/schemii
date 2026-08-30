@@ -68,7 +68,7 @@ TARGET = {
 class MetadataRepositoryMigrationTests(unittest.TestCase):
     def test_0002_is_additive_and_adds_repository_evidence(self):
         migrations = packaged_migrations()
-        self.assertEqual([migration.version for migration in migrations], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        self.assertEqual([migration.version for migration in migrations], list(range(1, 14)))
         sql = resources.files("schemii.metadata.migrations").joinpath("0002_authority_repository.sql").read_text()
         self.assertIn("ADD COLUMN binding jsonb", sql)
         self.assertIn("lease_expires_at", sql)
@@ -108,6 +108,17 @@ class MetadataRepositoryMigrationTests(unittest.TestCase):
         self.assertIn("ADD COLUMN conversation_title", chat_titles)
         self.assertIn("octet_length(conversation_title) <= 80", chat_titles)
         self.assertNotIn("DROP TABLE", chat_titles)
+        outcome_scrub = resources.files("schemii.metadata.migrations").joinpath("0011_scrub_schemer_query_outcomes.sql").read_text()
+        self.assertIn("outcome.result - 'display'", outcome_scrub)
+        self.assertIn("proposal.action ->> 'type' = 'read_query'", outcome_scrub)
+        self.assertNotIn("DROP TABLE", outcome_scrub)
+        cleanup_ownership = resources.files("schemii.metadata.migrations").joinpath(
+            "0013_chat_cleanup_ownership.sql"
+        ).read_text()
+        self.assertIn("metadata_ai_operation_usage_operation_id_fkey", cleanup_ownership)
+        self.assertIn("ON DELETE CASCADE", cleanup_ownership)
+        self.assertIn("VALIDATE CONSTRAINT", cleanup_ownership)
+        self.assertIn("Aggregate IDs intentionally have no foreign key", cleanup_ownership)
 
 
 class MetadataRepositoryContractTests(unittest.TestCase):

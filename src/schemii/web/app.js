@@ -278,6 +278,10 @@ const elements = {
   inspectorDemoCursor: document.querySelector(".tour-inspector-demo .tour-demo-cursor"),
   inspectorDemoStatus: document.querySelector("#tour-demo-status"),
   inspectorDemoToggle: document.querySelector("#tour-demo-toggle"),
+  workspaceDemo: document.querySelector(".tour-workspace-demo"),
+  workspaceDemoCursor: document.querySelector(".tour-workspace-demo .tour-demo-cursor"),
+  workspaceDemoStatus: document.querySelector("#workspace-demo-status"),
+  workspaceDemoToggle: document.querySelector("#workspace-demo-toggle"),
   assistantDemo: document.querySelector(".tour-assistant-demo"),
   assistantDemoCursor: document.querySelector(".tour-assistant-cursor"),
   assistantDemoStatus: document.querySelector("#assistant-demo-status"),
@@ -287,6 +291,10 @@ const elements = {
   postgresDemoCursor: document.querySelector(".tour-postgres-cursor"),
   postgresDemoStatus: document.querySelector("#postgres-demo-status"),
   postgresDemoToggle: document.querySelector("#postgres-demo-toggle"),
+  recoveryDemo: document.querySelector(".tour-recovery-demo"),
+  recoveryDemoCursor: document.querySelector(".tour-recovery-demo .tour-demo-cursor"),
+  recoveryDemoStatus: document.querySelector("#recovery-demo-status"),
+  recoveryDemoToggle: document.querySelector("#recovery-demo-toggle"),
   shutdownDialog: document.querySelector("#shutdown-dialog"),
   shutdownConfirmPanel: document.querySelector("#shutdown-confirm-panel"),
   shutdownComplete: document.querySelector("#shutdown-complete"),
@@ -473,6 +481,8 @@ let aiState = {
   oauth: null
 };
 let schemaSaveQuarantine = null;
+let schemaActivationGeneration = 0;
+let schemaConflictRecoveryInProgress = false;
 
 const TABLE_CREATION_DEMO_STATES = ["dialog", "named", "created", "email", "email-named", "timestamp", "complete"];
 const tableCreationDemo = window.SchemiiShared.createOnboardingDemo({
@@ -499,6 +509,62 @@ const tableCreationDemo = window.SchemiiShared.createOnboardingDemo({
   completeText: "Table configured. Replaying without changing the saved schema...",
   staticState: "complete",
   stepDelay: 800,
+});
+
+function tutorialStateRenderer(root, states) {
+  return state => {
+    const activeIndex = state ? states.indexOf(state) : -1;
+    states.forEach((name, index) => root.classList.toggle(`demo-${name}`, index <= activeIndex));
+  };
+}
+
+const WORKSPACE_DEMO_STATES = ["views", "catalog", "lineage", "definition", "sql", "queries", "query-menu", "running", "retained"];
+const workspaceDemo = window.SchemiiShared.createOnboardingDemo({
+  root: elements.workspaceDemo,
+  cursor: elements.workspaceDemoCursor,
+  status: elements.workspaceDemoStatus,
+  toggle: elements.workspaceDemoToggle,
+  steps: [
+    { target: "views", caption: "Switch from Tables to the peer Views workspace.", state: "views" },
+    { target: "browse-views", caption: "Browse the searchable live view catalog in the right drawer.", state: "catalog" },
+    { target: "root-query", caption: "Follow verified sources through the outer-SELECT root to the final view.", state: "lineage" },
+    { target: "definition", caption: "Expand the separate PostgreSQL definition pane.", state: "definition" },
+    { target: "preview-view", caption: "Preview reviewed DDL from the definition pane before applying it.", state: "definition" },
+    { target: "sql", caption: "Open standalone SQL while retaining the exact profile, database, and namespace.", state: "sql" },
+    { target: "sql-queries", caption: "Open saved queries and recent history in the right drawer.", state: "queries" },
+    { target: "query-menu", caption: "Choose, rename, or add a browser-local query from the attached menu.", state: "query-menu" },
+    { target: "run-sql", caption: "Run the current statement in the read-only default mode.", state: "running" },
+    { caption: "The completed response expands Results and removes the running-only Stop action.", state: "retained", delay: 650 },
+    { target: "retained-result", caption: "Load more, export JSON, or close this retained result without replaying SQL.", state: "retained" },
+  ],
+  renderState: tutorialStateRenderer(elements.workspaceDemo, WORKSPACE_DEMO_STATES),
+  isActive: () => onboardingController?.page === 3 && elements.onboardingDialog.open,
+  idleText: "Watch the peer workspaces move from design to retained results.",
+  staticText: "Views lineage and a retained read-only SQL result are shown.",
+  completeText: "Workflow complete. Replaying without querying PostgreSQL...",
+  staticState: "retained",
+  stepDelay: 850,
+});
+
+const RECOVERY_DEMO_STATES = ["library", "transfer", "drift", "conflict"];
+const recoveryDemo = window.SchemiiShared.createOnboardingDemo({
+  root: elements.recoveryDemo,
+  cursor: elements.recoveryDemoCursor,
+  status: elements.recoveryDemoStatus,
+  toggle: elements.recoveryDemoToggle,
+  steps: [
+    { target: "library", caption: "Open the saved design library.", state: "library" },
+    { target: "transfer", caption: "Upload SQL into a new design or download a one-way JSON or SQL copy.", state: "transfer" },
+    { target: "drift", caption: "Refresh semantic drift while preserving established layout.", state: "drift" },
+    { target: "conflict", caption: "Export local edits before refreshing the saved design.", state: "conflict" },
+  ],
+  renderState: tutorialStateRenderer(elements.recoveryDemo, RECOVERY_DEMO_STATES),
+  isActive: () => onboardingController?.page === 6 && elements.onboardingDialog.open,
+  idleText: "Watch a design move through save, transfer, drift, and conflict recovery.",
+  staticText: "Frozen autosave offers Export local edits and Refresh saved design.",
+  completeText: "Recovery tour complete. Replaying without changing saved designs...",
+  staticState: "conflict",
+  stepDelay: 900,
 });
 
 function clone(value) {
@@ -1704,20 +1770,53 @@ function previewViewDefinition(definition, allowDestructive = false) {
   return previewViewOperation("upsert", definition, allowDestructive);
 }
 
-async function reloadActiveSchemaRecord() {
-  const record = await sharedSessionClient.json(`/api/schemas/${encodeURIComponent(activeSchemaId)}`, {}, {
-    allowPath: window.SchemiiShared.createApiPathPredicate("/api/schemas"),
+async function fetchSchemaRecord(schemaId) {
+  const path = `/api/schemas/${encodeURIComponent(schemaId)}`;
+  const record = await sharedSessionClient.json(path, {}, {
+    allowPath: candidate => candidate === path,
     defaultMessage: "The saved schema could not be refreshed",
     validate: window.SchemiiShared.validateSchemaRecord
   });
+  if (record.id !== schemaId) {
+    const error = new Error("The schema server returned a different saved design");
+    error.code = "invalid_api_response";
+    throw error;
+  }
+  return record;
+}
+
+function activateSchemaRecord(record, { fit = false, closeLibrary = false, message = null } = {}) {
+  const nextSchema = migrateSchema(clone(record.schema));
+  const nextTableView = clone(nextSchema.layout.layers.tables.viewport);
+  const nextViewsLayer = nextSchema.layout.layers.views;
+  const nextViewsView = clone(nextViewsLayer?.viewport && typeof nextViewsLayer.viewport === "object" ? nextViewsLayer.viewport : { x: 45, y: 35, zoom: 1 });
+  const nextViewsObjects = clone(nextViewsLayer?.objects && typeof nextViewsLayer.objects === "object" ? nextViewsLayer.objects : {});
   const library = readSchemaLibrary();
-  library.schemas = library.schemas.map(item => item.id === record.id ? record : item);
-  library.activeId = activeSchemaId;
+  const index = library.schemas.findIndex(item => item.id === record.id);
+  if (index >= 0) library.schemas[index] = record;
+  else library.schemas.push(record);
+  library.activeId = record.id;
+
+  activeSchemaId = record.id;
+  schema = nextSchema;
+  view = nextTableView;
+  viewsView = nextViewsView;
+  viewsObjects = nextViewsObjects;
   writeSchemaLibrary(library);
-  schema = migrateSchema(clone(record.schema));
-  view = clone(schema.layout.layers.tables.viewport);
-  restoreViewsRuntimeLayout(schema);
+  resetSchemaSession();
+  if (closeLibrary && elements.schemaDialog.open) elements.schemaDialog.close();
   render();
+  if (fit) requestAnimationFrame(fitDiagram);
+  if (message) showToast(message);
+  return true;
+}
+
+async function reloadActiveSchemaRecord() {
+  const schemaId = activeSchemaId;
+  const generation = ++schemaActivationGeneration;
+  const record = await fetchSchemaRecord(schemaId);
+  if (generation !== schemaActivationGeneration || activeSchemaId !== schemaId) return false;
+  return activateSchemaRecord(record);
 }
 
 function standaloneSqlTarget() {
@@ -2131,20 +2230,9 @@ function consoleResultTabContent(tab) {
   return `<table class="standalone-sql-table"><thead><tr>${statement.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${statement.rows.map(row => `<tr>${row.map(value => `<td>${consoleSqlCell(value)}</td>`).join("")}</tr>`).join("")}</tbody><caption>${state} · ${transactionState}</caption></table>${actions}`;
 }
 
-function consoleResultUrl(tab, includeCursor = false) {
-  const statement = tab.statement;
-  const query = new URLSearchParams({
-    consoleId: tab.consoleId, database: tab.target.database, namespace: tab.target.namespace,
-    statementIndex: String(statement.statementIndex), resultIndex: String(statement.resultIndex),
-  });
-  if (includeCursor) query.set("cursor", statement.nextCursor);
-  return `/api/postgres/profiles/${encodeURIComponent(tab.target.profileId)}/console/executions/${encodeURIComponent(statement.executionId)}/results/${encodeURIComponent(statement.resultId)}?${query}`;
-}
-
-async function closeConsoleResultResource(tab) {
+async function closeConsoleResultResource(tab, options = {}) {
   if (tab?.kind !== "result" || !tab.statement?.hasMore) return;
-  await postgresRequest(consoleResultUrl(tab), { method: "DELETE" });
-  Object.assign(tab.statement, { hasMore: false, nextCursor: null, resourceState: "closed", closureEvents: ["closed"] });
+  await window.SchemiiShared.releaseConsoleResultResource(tab, postgresRequest, options);
 }
 
 async function closeConsoleResultResources(tabs) {
@@ -2153,25 +2241,17 @@ async function closeConsoleResultResources(tabs) {
 
 async function loadConsoleResultPage(tab) {
   if (tab?.kind !== "result" || !tab.statement?.hasMore || !tab.statement.nextCursor) return;
-  const rows = tab.statement.rows;
-  const page = await postgresRequest(consoleResultUrl(tab, true));
-  rows.push(...page.rows);
-  Object.assign(tab.statement, page, { rows });
-  tab.meta = `${tab.statement.command} · ${rows.length}${page.hasMore ? "+" : ""} rows · ${tab.committed ? "committed" : "rolled back"}`;
+  const statement = await window.SchemiiShared.pageConsoleResultResource(tab, postgresRequest);
+  tab.meta = `${statement.command} · ${statement.rows.length}${statement.hasMore ? "+" : ""} rows · ${tab.committed ? "committed" : "rolled back"}`;
 }
 
 async function exportConsoleResult(tab) {
-  while (tab?.statement?.hasMore) await loadConsoleResultPage(tab);
   if (!tab?.statement) return;
-  const blob = new Blob([JSON.stringify({
-    columns: tab.statement.columns, rows: tab.statement.rows,
-    truncationEvents: tab.statement.truncationEvents || [],
-  }, null, 2)], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = `console-${tab.statement.executionId}-statement-${tab.statement.statementIndex + 1}.json`;
-  link.click();
-  URL.revokeObjectURL(link.href);
+  const statement = await window.SchemiiShared.drainConsoleResultResource(tab, postgresRequest);
+  window.SchemiiShared.downloadContent(JSON.stringify({
+    columns: statement.columns, rows: statement.rows,
+    truncationEvents: statement.truncationEvents || [],
+  }, null, 2), `console-${statement.executionId}-statement-${statement.statementIndex + 1}.json`, "application/json");
 }
 
 function uniqueStandaloneSqlTabLabel(viewState, requested, excludedId = null, reserved = []) {
@@ -2537,7 +2617,7 @@ function queueAssistantDemo(callback, delay) {
 }
 
 function typeAssistantDemoPrompt(index = 0) {
-  if (assistantDemoPaused || onboardingController?.page !== 4 || !elements.onboardingDialog.open) return;
+  if (assistantDemoPaused || onboardingController?.page !== 5 || !elements.onboardingDialog.open) return;
   elements.assistantDemoPrompt.textContent = ASSISTANT_DEMO_PROMPT.slice(0, index);
   if (index <= ASSISTANT_DEMO_PROMPT.length) return queueAssistantDemo(() => typeAssistantDemoPrompt(index + 1), 42);
   elements.assistantDemoStatus.textContent = "Message ready to send.";
@@ -2546,7 +2626,7 @@ function typeAssistantDemoPrompt(index = 0) {
 }
 
 function runAssistantDemoStep() {
-  if (assistantDemoPaused || onboardingController?.page !== 4 || !elements.onboardingDialog.open) return;
+  if (assistantDemoPaused || onboardingController?.page !== 5 || !elements.onboardingDialog.open) return;
   if (assistantDemoStep >= ASSISTANT_DEMO_STEPS.length) {
     elements.assistantDemoStatus.textContent = "Conversation complete. Replaying...";
     return queueAssistantDemo(() => {
@@ -2636,7 +2716,7 @@ function queuePostgresDemo(callback, delay) {
 }
 
 function runPostgresDemoStep() {
-  if (postgresDemoPaused || onboardingController?.page !== 3 || !elements.onboardingDialog.open) return;
+  if (postgresDemoPaused || onboardingController?.page !== 4 || !elements.onboardingDialog.open) return;
   if (postgresDemoStep >= POSTGRES_DEMO_STEPS.length) {
     elements.postgresDemoStatus.textContent = "Preview complete. Replaying without applying changes...";
     return queuePostgresDemo(() => {
@@ -2818,8 +2898,10 @@ function createSchemiiOnboardingController() {
       tableCreationDemo,
       { start: startRelationshipDemo, stop: stopRelationshipDemo },
       { start: startInspectorDemo, stop: stopInspectorDemo },
+      workspaceDemo,
       { start: startPostgresDemo, stop: stopPostgresDemo },
       { start: startAssistantDemo, stop: stopAssistantDemo },
+      recoveryDemo,
     ],
   });
 }
@@ -3606,7 +3688,12 @@ function saveSchema(delay = SAVE_DELAY_MS) {
 function reportSaveError(error) {
   const conflict = error?.code === "schema_conflict" || error?.code === "layout_conflict";
   if (conflict && !schemaSaveQuarantine) {
-    schemaSaveQuarantine = { schemaId: activeSchemaId, schema: clone(schema), capturedAt: new Date().toISOString(), code: error.code };
+    schemaSaveQuarantine = {
+      schemaId: activeSchemaId,
+      schema: schemaForStorage(schema, view, { views: { viewport: viewsView, objects: viewsObjects } }),
+      capturedAt: new Date().toISOString(),
+      code: error.code,
+    };
     clearTimeout(saveTimer);
     saveTimer = null;
     document.querySelector("#schema-conflict-banner").hidden = false;
@@ -3843,29 +3930,24 @@ async function openSchema(schemaId, { fit = false } = {}) {
     if (elements.schemaDialog.open) elements.schemaDialog.close();
     return true;
   }
+  const sourceSchemaId = activeSchemaId;
+  const generation = ++schemaActivationGeneration;
   try {
     await flushPendingSave();
   } catch {
     return false;
   }
-  const library = readSchemaLibrary();
-  const record = library.schemas.find(item => item.id === schemaId);
-  if (!record) {
-    showToast("That schema could not be found");
+  if (generation !== schemaActivationGeneration || activeSchemaId !== sourceSchemaId) return false;
+  let record;
+  try {
+    record = await fetchSchemaRecord(schemaId);
+  } catch (error) {
+    showToast(error.message || "That schema could not be loaded");
     return false;
   }
-  activeSchemaId = record.id;
-  schema = migrateSchema(clone(record.schema));
-  library.activeId = activeSchemaId;
-  writeSchemaLibrary(library);
-  view = clone(schema.layout.layers.tables.viewport);
-  restoreViewsRuntimeLayout(schema);
-  resetSchemaSession();
-  if (elements.schemaDialog.open) elements.schemaDialog.close();
-  render();
-  if (fit) requestAnimationFrame(fitDiagram);
-  showToast(`${schema.projectName || "Untitled schema"} opened`);
-  return true;
+  if (generation !== schemaActivationGeneration || activeSchemaId !== sourceSchemaId) return false;
+  const projectName = record.schema?.projectName || "Untitled schema";
+  return activateSchemaRecord(record, { fit, closeLibrary: true, message: `${projectName} opened` });
 }
 
 async function deleteSavedSchema(schemaId) {
@@ -3893,25 +3975,32 @@ async function deleteSavedSchema(schemaId) {
 document.querySelector("#export-conflicted-schema").addEventListener("click", () => {
   if (!schemaSaveQuarantine) return;
   const name = (schemaSaveQuarantine.schema.projectName || "schema-local-edits").replace(/[^A-Za-z0-9_-]+/g, "-");
-  exportFile(`${name}-conflict.json`, JSON.stringify({ id: schemaSaveQuarantine.schemaId, capturedAt: schemaSaveQuarantine.capturedAt, schema: schemaForStorage(schemaSaveQuarantine.schema, view, { views: { viewport: viewsView, objects: viewsObjects } }) }, null, 2), "application/json");
+  exportFile(`${name}-conflict.json`, JSON.stringify({ id: schemaSaveQuarantine.schemaId, capturedAt: schemaSaveQuarantine.capturedAt, schema: clone(schemaSaveQuarantine.schema) }, null, 2), "application/json");
 });
 
 document.querySelector("#refresh-conflicted-schema").addEventListener("click", async () => {
-  if (!schemaSaveQuarantine || !confirm("Discard the quarantined local edits and load the current saved design? Export them first if needed.")) return;
-  const schemaId = schemaSaveQuarantine.schemaId;
-  const path = `/api/schemas/${encodeURIComponent(schemaId)}`;
+  if (!schemaSaveQuarantine || schemaConflictRecoveryInProgress || !confirm("Discard the quarantined local edits and load the current saved design? Export them first if needed.")) return;
+  const quarantine = schemaSaveQuarantine;
+  const schemaId = quarantine.schemaId;
+  const control = document.querySelector("#refresh-conflicted-schema");
+  schemaConflictRecoveryInProgress = true;
+  control.disabled = true;
+  const generation = ++schemaActivationGeneration;
   try {
-    const record = await sharedSessionClient.json(path, {}, { allowPath: candidate => candidate === path, validate: window.SchemiiShared.validateSchemaRecord });
-    const library = readSchemaLibrary();
-    const index = library.schemas.findIndex(item => item.id === schemaId);
-    if (index >= 0) library.schemas[index] = record;
-    else library.schemas.push(record);
-    writeSchemaLibrary(library);
+    await saveQueue.catch(() => {});
+    if (schemaSaveQuarantine !== quarantine || activeSchemaId !== schemaId || generation !== schemaActivationGeneration) return;
+    const record = await fetchSchemaRecord(schemaId);
+    if (schemaSaveQuarantine !== quarantine || activeSchemaId !== schemaId || generation !== schemaActivationGeneration) return;
+    activateSchemaRecord(record);
     schemaSaveQuarantine = null;
     document.querySelector("#schema-conflict-banner").hidden = true;
-    openSavedSchema(schemaId, false);
+    elements.saveStatus.textContent = "Saved to file";
+    showToast("Current saved design loaded");
   } catch (error) {
     showToast(error.message || "Could not refresh the saved design");
+  } finally {
+    schemaConflictRecoveryInProgress = false;
+    control.disabled = false;
   }
 });
 
@@ -5936,13 +6025,7 @@ async function importSqlFile(file) {
 }
 
 function exportFile(filename, content, type) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  window.SchemiiShared.downloadContent(content, filename, type);
 }
 
 function generateSql() {
@@ -8701,13 +8784,13 @@ window.addEventListener("beforeunload", () => {
   }
   for (const tab of sqlConsoleState.resultTabs || []) {
     if (tab.kind === "result" && tab.statement?.hasMore) {
-      void postgresRequest(consoleResultUrl(tab), { method: "DELETE", keepalive: true }).catch(() => {});
+      void closeConsoleResultResource(tab, { keepalive: true }).catch(() => {});
     }
   }
   for (const viewState of standaloneSqlState.views) {
     for (const tab of viewState.resultTabs || []) {
       if (tab.kind === "result" && tab.statement?.hasMore) {
-        void postgresRequest(consoleResultUrl(tab), { method: "DELETE", keepalive: true }).catch(() => {});
+        void closeConsoleResultResource(tab, { keepalive: true }).catch(() => {});
       }
     }
   }

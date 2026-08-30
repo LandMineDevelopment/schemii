@@ -30,14 +30,14 @@ class AiPolicyTests(unittest.TestCase):
         })
         self.assertEqual(canonical_capability("rawwrite"), "raw_write")
         self.assertEqual(legacy_schemer_capabilities("data"), (
-            "dashboard_read", "dashboard_write", "structured_read",
+            "dashboard_read", "dashboard_write", "structured_read", "raw_read",
         ))
 
     def test_defaults_are_disabled_and_application_resources_stay_separate(self):
         schemii = default_policy("schemii")
         schemer = default_policy("schemer")
         self.assertTrue(all(mode == "disabled" for mode in schemii["capabilities"].values()))
-        self.assertEqual(set(schemer["capabilities"]), {"structured_read", "dashboard_read", "dashboard_write"})
+        self.assertEqual(set(schemer["capabilities"]), {"structured_read", "raw_read", "dashboard_read", "dashboard_write"})
         self.assertNotIn("structured_write", schemer["capabilities"])
         with self.assertRaises(MetadataStoreError):
             validate_policy("schemer", default_policy("schemii"))
@@ -93,14 +93,14 @@ class AiPolicyTests(unittest.TestCase):
 
     def test_target_capability_is_disabled_without_exact_verified_target(self):
         policy = default_policy("schemer")
-        policy["capabilities"]["structured_read"] = "automatic"
+        policy["capabilities"]["raw_read"] = "automatic"
         settings = {
             "application": "schemer", "agentId": "default", "revision": 2,
             "schemaVersion": 1, "policyRevisionId": "revision-id", "policyDigest": policy_digest(policy),
             "capabilities": effective_capabilities("schemer", policy), "effectiveBounds": effective_bounds(policy),
         }
         snapshot = effective_chat_snapshot(settings, ["data"], target_verified=False, disclosure_class="data")
-        self.assertEqual(snapshot["capabilities"]["structured_read"]["effectiveMode"], "disabled")
+        self.assertEqual(snapshot["capabilities"]["raw_read"]["effectiveMode"], "disabled")
 
 
 if __name__ == "__main__":

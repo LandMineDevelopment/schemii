@@ -11,6 +11,8 @@
     delete: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 3h4l1 3H7l1-3ZM6 6l1 11h6l1-11M9 9v5M11 9v5"/></svg>',
     add: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>',
     refresh: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 7A6 6 0 1 0 16 12"/><path d="M15.5 3.5V7H12"/></svg>',
+    calendar: '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.5" width="14" height="12.5" rx="2"/><path d="M6 3v3M14 3v3M3 8h14M7 11h.01M10 11h.01M13 11h.01M7 14h.01M10 14h.01"/></svg>',
+    schemas: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 3 7 3.5-7 3.5-7-3.5L10 3Z"/><path d="m3 10 7 3.5 7-3.5M3 13.5 10 17l7-3.5"/></svg>',
     search: '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5"/><path d="m12.2 12.2 4.3 4.3"/></svg>',
     more: '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1"/><circle cx="10" cy="10" r="1"/><circle cx="15" cy="10" r="1"/></svg>',
     assistant: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5h12v10H9l-3 3v-13Z"/><path d="M9 9h6M9 12h4"/></svg>',
@@ -18,6 +20,13 @@
     settings: '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4"/></svg>',
     newChat: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>',
   });
+
+  function createIconElement(icon) {
+    if (!ICONS[icon]) throw new TypeError("A known icon is required");
+    const template = document.createElement("template");
+    template.innerHTML = ICONS[icon];
+    return template.content.firstElementChild;
+  }
 
   function decorateIconControl(control, { icon, label, tooltip = label, placement = "top", id = "", className = "", dataset = {}, attributes = {} }) {
     if (!ICONS[icon] || typeof label !== "string" || !label) throw new TypeError("A known icon and accessible label are required");
@@ -189,6 +198,22 @@
     element.dataset.state = state;
     element.classList.toggle("error", state === "error");
     if (hideWhenEmpty) element.hidden = !message;
+  }
+
+  function downloadBlob(blob, filename) {
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = filename;
+    try {
+      link.click();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function downloadContent(content, filename, type = "application/octet-stream") {
+    downloadBlob(new Blob([content], { type }), filename);
   }
 
   const loadingStates = new WeakMap();
@@ -427,9 +452,9 @@
 
   window.SchemiiShared = Object.freeze({
     ...(window.SchemiiShared || {}),
-    ICONS, decorateIconControl, createIconButton, createTooltipController,
+    ICONS, createIconElement, decorateIconControl, createIconButton, createTooltipController,
     elementHasTruncatedText, automaticTooltipText, findTooltipTarget, installTooltipDelegation,
-    setControlStatus, setControlLoading, withLoadingControl, installDetailsMenu,
+    setControlStatus, downloadBlob, downloadContent, setControlLoading, withLoadingControl, installDetailsMenu,
     positionOnboardingCursor, createOnboardingDemo, createOnboardingController,
   });
 })();

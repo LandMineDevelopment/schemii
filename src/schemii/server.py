@@ -9,8 +9,9 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .ai_execution import AiExecutionRunner, known_failure
 from .ai_metadata_authority import SchemiiMetadataAuthority, retire_legacy_schemii_authority
-from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMaintenanceConfig, OperationLeaseLost
+from .ai_operation_maintenance import AiOperationMaintenance, AiOperationMaintenanceConfig
 from .schemii_ai_actions import normalize_schemii_action
 from .ai_tool_contracts import effective_schemii_contract
 from .ai_schema_mutations import apply_schema_actions, destructive_impact
@@ -19,7 +20,8 @@ from .metadata import MetadataConfig, MetadataConnectionFactory, MetadataStore, 
 from .secret_file import read_secret_file
 from .migration_execution import DurableMigrationCoordinator
 from .examples import ExampleInstaller, installer_from_environment
-from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, is_local_request as _is_local_request, make_local_app_handler, metadata_profile_dependencies
+from .http_access import HttpAccessPolicy, http_access_policy, is_local_request as _is_local_request
+from .http_common import CONTENT_SECURITY_POLICY, MAX_BODY_SIZE, make_local_app_handler, metadata_profile_dependencies
 from .dashboard_store import DashboardStore
 from .opencode_service import OpenCodeService, OpenCodeServiceError
 from .postgres_http import (
@@ -38,7 +40,7 @@ from .postgres_service import PostgresService, PostgresServiceError
 from .postgres_console import ConsolePolicy
 from .schema_store import SchemaStore, SchemaStoreError
 from .schemii_ai_executor import SchemiiAiExecutor
-from .server_runtime import begin_http_shutdown, parse_port, parse_proxy_setting, postgres_runtime_config, run_server, validate_static_directory
+from .server_runtime import begin_http_shutdown, parse_port, postgres_runtime_config, run_server, validate_static_directory
 from .postgres_concurrency import PostgresExecutionController
 from .readiness import readiness_report
 
@@ -326,12 +328,12 @@ def make_handler(
     example_installer: ExampleInstaller | None = None,
     dependency_dashboard_store: DashboardStore | None = None,
     behind_loopback_proxy: bool = False,
+    access_policy: HttpAccessPolicy | None = None,
     ai_maintenance: AiOperationMaintenance | None = None,
 ):
     migration_coordinator = migration_coordinator or getattr(service, "_migration_coordinator", None)
-    base_handler = make_local_app_handler(
-        web_dir, service, session_token, server_id=server_id, behind_loopback_proxy=behind_loopback_proxy,
-    )
+    access_policy = access_policy or HttpAccessPolicy(behind_loopback_proxy=behind_loopback_proxy)
+    base_handler = make_local_app_handler(web_dir, service, session_token, server_id=server_id, access_policy=access_policy)
     ai_router = AiHttpRouter(
         ai_service,
         lambda handler, current_service, session_id, body: handler._ai_message(current_service, session_id, body),
@@ -367,6 +369,7 @@ def make_handler(
         service, store, ai_authority, mutation_types=AI_SCHEMA_MUTATION_TYPES,
         has_access=_has_ai_access, policy_binding=bound_ai_policy,
     )
+    ai_execution = AiExecutionRunner(ai_authority, ai_maintenance)
 
     class SchemiiHandler(PostgresHttpMixin, base_handler):
         postgres_route_policy = PostgresRoutePolicy(
@@ -545,8 +548,11 @@ def make_handler(
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/api/readiness":
-                status, report = readiness_report(ai_authority, ai_service, service, ai_maintenance)
-                return self.send_json(status, report)
+                status, report = readiness_report(
+                    ai_authority, ai_service, service, ai_maintenance,
+                    access_policy=access_policy,
+                )
+                return self.send_json(status, report, normalize_error=False)
             if self._handle_common_get(path) or self._handle_postgres_get(parsed):
                 return
             plan_status = MIGRATION_PLAN_STATUS_PATH.fullmatch(path)
@@ -922,20 +928,19 @@ def make_handler(
         def _run_ai_proposal(self, session_id, proposal_id, chat, policy_revision, confirmation):
             schema_id = chat["schemaId"]
             access = _ai_access(chat["capabilities"])
-            try:
+            prepared = {}
+
+            def preflight():
                 record = store.get(schema_id)
-            except SchemaStoreError as error:
-                return error.status, error.payload
-            schema_concurrency = {"revision": record["revision"], "layoutToken": record["layoutToken"]}
-            authorization_target = dict(chat["target"])
-            profile = None
-            if authorization_target:
-                profile = next((item for item in service.list_profiles() if item.get("id") == authorization_target["profileId"]), None)
-                if profile is None:
-                    return 404, {"error": {"code": "not_found", "message": "Profile was not found"}}
-                if profile.get("dbname") != authorization_target["database"] or service.profile_context_fingerprint(profile["id"]) != authorization_target["profileFingerprint"]:
-                    return 409, {"error": {"code": "session_context_changed", "message": "The saved connection changed; create a new AI chat"}}
-            try:
+                schema_concurrency = {"revision": record["revision"], "layoutToken": record["layoutToken"]}
+                authorization_target = dict(chat["target"])
+                profile = None
+                if authorization_target:
+                    profile = next((item for item in service.list_profiles() if item.get("id") == authorization_target["profileId"]), None)
+                    if profile is None:
+                        raise PostgresServiceError(404, "not_found", "Profile was not found")
+                    if profile.get("dbname") != authorization_target["database"] or service.profile_context_fingerprint(profile["id"]) != authorization_target["profileFingerprint"]:
+                        raise PostgresServiceError(409, "session_context_changed", "The saved connection changed; create a new AI chat")
                 proposal_record = ai_authority.proposal(proposal_id, session_id)
                 policy = proposal_record["policyBinding"]
                 if chat.get("policySnapshot") is not None and (
@@ -946,42 +951,20 @@ def make_handler(
                 expected_policy = bound_ai_policy(chat, proposal_record["action"], origin=policy.get("origin", "model"))
                 if chat.get("policySnapshot") is None and policy != expected_policy:
                     raise MetadataStoreError("chat_policy_changed", "Proposal approval policy no longer matches this chat", status=409)
-                operation, approval = ai_authority.authorize_and_claim(
-                    proposal_id, session_id, policy_revision, confirmation,
-                )
-            except MetadataStoreError as error:
-                return error.status, error.to_dict()
-            execution_owner = operation.pop("executionOwner", False)
-            if not execution_owner:
-                return 200, {"operation": operation, "approval": approval}
-            action = proposal_record["action"]
-            attempt_id = operation.pop("attemptId")
-            claim_token = operation.pop("claimToken")
-            if ai_maintenance is not None:
-                ai_maintenance.track(operation["id"], attempt_id, claim_token)
+                prepared["action"] = proposal_record["action"]
+                return {
+                    "record": record, "schemaConcurrency": schema_concurrency,
+                    "authorizationTarget": authorization_target, "profile": profile,
+                    "policy": policy, "action": proposal_record["action"],
+                }
 
-            def finish_claim(state, *, result=None, error=None):
-                try:
-                    if ai_maintenance is not None:
-                        ai_maintenance.assert_owned(attempt_id)
-                    return ai_authority.finish_operation(attempt_id, claim_token, state, result=result, error=error), False
-                except OperationLeaseLost:
-                    return ai_authority.operation(operation["id"], session_id), True
-                except MetadataStoreError as failure:
-                    if failure.code not in {"invalid_claim", "operation_not_running", "operation_lease_expired"}:
-                        raise
-                    return ai_authority.operation(operation["id"], session_id), True
-                finally:
-                    if ai_maintenance is not None:
-                        ai_maintenance.release(attempt_id)
-                    if action.get("type") == "schema_read_query":
-                        service.release_read_only_sql(operation["id"])
-            try:
+            def execute(operation_id, context):
                 result = self._execute_schemii_action(
-                    action, session_id, schema_id, record, profile, authorization_target,
-                    schema_concurrency, operation["id"], access, policy,
+                    context["action"], session_id, schema_id, context["record"], context["profile"],
+                    context["authorizationTarget"], context["schemaConcurrency"], operation_id, access,
+                    context["policy"],
                 )
-                if action.get("type") in {"migration_apply", "postgres_write_apply"} and isinstance(result, dict):
+                if context["action"].get("type") in {"migration_apply", "postgres_write_apply"} and isinstance(result, dict):
                     durable_state = result.get("state")
                     if durable_state == "failed":
                         raise PostgresServiceError(409, "apply_not_committed", "PostgreSQL execution did not commit; create a fresh preview")
@@ -991,18 +974,31 @@ def make_handler(
                             503, "execution_outcome_unknown", "PostgreSQL execution requires reconciliation without replay",
                             {"executionId": execution.get("executionId"), "reconcileRequired": True},
                         )
+                return result
+
+            def classify(error):
+                return known_failure(
+                    error, (OpenCodeServiceError, SchemaStoreError, PostgresServiceError, MetadataStoreError),
+                    uncertain=lambda current, detail: (
+                        detail.get("code") == "execution_outcome_unknown"
+                        or isinstance(current, SchemaStoreError) and current.status >= 500
+                    ),
+                )
+
+            def release_cancellation(operation_id):
+                if prepared.get("action", {}).get("type") == "schema_read_query":
+                    service.release_read_only_sql(operation_id)
+
+            try:
+                outcome = ai_execution.run(
+                    proposal_id=proposal_id, chat_id=session_id, policy_revision=policy_revision,
+                    confirmation=confirmation, preflight=preflight, execute=execute,
+                    classify_failure=classify, release_cancellation=release_cancellation,
+                )
             except (OpenCodeServiceError, SchemaStoreError, PostgresServiceError, MetadataStoreError) as error:
                 payload = error.payload if hasattr(error, "payload") else error.to_dict()
-                action_type = action.get("type")
-                uncertain = payload["error"].get("code") == "execution_outcome_unknown"
-                finished, lost = finish_claim("uncertain" if uncertain else "failed", error=payload["error"])
-                return (409 if lost else getattr(error, "status", 400)), {"operation": finished, "approval": approval}
-            except Exception:
-                finished, lost = finish_claim("uncertain",
-                    error={"code": "execution_outcome_unknown", "message": "Operation outcome is uncertain; reload authoritative state"})
-                return (409 if lost else 500), {"operation": finished, "approval": approval}
-            finished, lost = finish_claim("succeeded", result=result)
-            return (409 if lost else 200), {"operation": finished, "approval": approval}
+                return error.status, payload
+            return outcome.status, outcome.payload
 
         def _ai_proposal_envelope(self, proposal, session_id, chat):
             envelope = {
@@ -1069,9 +1065,7 @@ def make_handler(
 def main() -> None:
     web_dir, config_dir, schema_dir = _paths()
     host = os.environ.get("SCHEMII_HOST", "127.0.0.1")
-    behind_loopback_proxy = parse_proxy_setting(
-        os.environ.get("SCHEMII_BEHIND_LOOPBACK_PROXY", "0"), "SCHEMII_BEHIND_LOOPBACK_PROXY",
-    )
+    access_policy = http_access_policy(os.environ, "SCHEMII")
     port = parse_port(os.environ.get("SCHEMII_PORT", "8080"), "SCHEMII_PORT")
     try:
         ai_timeout = float(os.environ.get("SCHEMII_OPENCODE_TIMEOUT", "300"))
@@ -1095,9 +1089,12 @@ def main() -> None:
     )
     store = SchemaStore(schema_dir)
     try:
-        metadata_config = MetadataConfig.from_env()
+        metadata_config = MetadataConfig.from_runtime_env("schemii")
         metadata_store = MetadataStore(
             MetadataConnectionFactory(metadata_config), max_json_bytes=metadata_config.max_json_bytes,
+            expected_application=metadata_config.expected_application,
+            expected_role=metadata_config.expected_role, expected_owner=metadata_config.expected_owner,
+            expected_admin_owner=metadata_config.expected_admin_owner,
         )
         metadata_store.health()
     except (ValueError, MetadataStoreError) as error:
@@ -1146,7 +1143,7 @@ def main() -> None:
         migration_coordinator=migration_coordinator,
         ai_service=ai_service,
         example_installer=example_installer,
-        behind_loopback_proxy=behind_loopback_proxy,
+        access_policy=access_policy,
     )
     run_server(host, port, handler, "Schemii", server_factory=ThreadingHTTPServer, shutdown_callback=service.close, lifecycle_services=(ai_maintenance,))
 

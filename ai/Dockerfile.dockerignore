@@ -1,0 +1,6 @@
+**
+!secret-entrypoint.sh
+!workspace/
+!workspace/.opencode/
+!workspace/.opencode/package.json
+!workspace/.opencode/package-lock.json

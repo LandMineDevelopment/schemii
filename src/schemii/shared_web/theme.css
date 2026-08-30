@@ -55,6 +55,18 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 
 body { background: var(--bg); color: var(--text); }
 
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 button, input, select { font: inherit; }
 button { color: inherit; }
 
@@ -99,10 +111,6 @@ button { color: inherit; }
 .button-danger { color: #ffd9dc; border-color: #7b363e; background: #5a252c; }
 .button-danger:hover { border-color: #a94b56; background: #732f38; }
 .button-ghost { background: transparent; }
-.top-action-icon { display: grid; place-items: center; width: 31px; min-width: 31px; height: 31px; min-height: 31px; padding: 0; color: #aab4c1; border-color: transparent; }
-.top-action-icon:hover { color: var(--text); border-color: var(--line-strong); }
-.top-action-icon svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-
 .shared-icon-button, .icon-button { display: grid; width: 27px; min-width: 27px; height: 27px; min-height: 27px; padding: 0; border: 1px solid var(--line); border-radius: 5px; place-items: center; color: #747f8e; background: transparent; cursor: pointer; }
 .shared-icon-button:hover, .shared-icon-button:focus-visible, .icon-button:hover, .icon-button:focus-visible { color: var(--accent); border-color: #675426; outline: 0; background: var(--surface-accent-hover); }
 .shared-icon-button.active, .icon-button.active { color: var(--accent); border-color: #675426; background: var(--surface-accent-hover); }
@@ -110,6 +118,9 @@ button { color: inherit; }
 .shared-icon-button:disabled, .icon-button:disabled { opacity: .35; cursor: not-allowed; }
 .shared-icon-button:disabled:hover, .icon-button:disabled:hover { color: #747f8e; border-color: var(--line); background: transparent; }
 .shared-icon-button svg, .icon-button svg { width: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.top-action-icon { display: grid; width: 31px; min-width: 31px; height: 31px; min-height: 31px; padding: 0; place-items: center; border: 1px solid transparent; border-radius: 6px; color: #aab4c1; background: transparent; cursor: pointer; }
+.top-action-icon:hover, .top-action-icon:focus-visible { color: var(--text); border-color: var(--line-strong); outline: 0; background: var(--panel-2); }
+.top-action-icon svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 .app-tooltip { position: fixed; z-index: var(--z-tooltip); width: max-content; max-width: min(260px, calc(100vw - 16px)); padding: 5px 8px; pointer-events: none; opacity: 0; border: 1px solid var(--line); border-radius: 4px; color: #cdd5df; background: #171c24; box-shadow: 0 5px 16px rgba(0, 0, 0, .28); font-size: 10px; line-height: 1.35; white-space: normal; transition: opacity .15s, transform .15s; }
 .app-tooltip[data-placement="right"] { transform: translateX(-4px); }

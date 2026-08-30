@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ContextManager, FrozenSet
 from urllib.parse import parse_qs, urlparse
 
-from .postgres_common import ValidationError
+from .postgres_common import PostgresServiceError, ValidationError
 from .postgres_console import ConsolePolicy
 
 
@@ -32,6 +32,10 @@ RELATION_TEMPORAL_SERIES_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9
 RELATION_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/relation/detail$")
 SAVED_WIDGET_QUERY_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/saved-widgets/aggregate$")
 SAVED_WIDGET_DETAIL_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/saved-widgets/detail$")
+DASHBOARD_WIDGET_PREVIEW_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/dashboard-widgets/preview$")
+STRUCTURED_RESULT_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/structured-results/([A-Za-z0-9_-]{16,128})$")
+STRUCTURED_RESULT_EXPORT_PATH = re.compile(r"^/api/postgres/profiles/([A-Za-z0-9][A-Za-z0-9_-]{0,63})/structured-results/([A-Za-z0-9_-]{16,128})/export$")
+STRUCTURED_RESULT_BINDING_HEADER = "X-Schemer-Result-Binding"
 POSTGRES_PROFILE_CAPABILITY = "profiles"
 POSTGRES_CATALOG_CAPABILITY = "catalog"
 POSTGRES_SCHEMA_CAPABILITY = "schema"
@@ -73,6 +77,8 @@ class PostgresRoutePolicy:
     relation_detail_guard: RouteGuard | None = None
     saved_widget_query: SavedWidgetHandler | None = None
     saved_widget_detail: SavedWidgetHandler | None = None
+    dashboard_widget_preview: SavedWidgetHandler | None = None
+    structured_result_guard: RouteGuard | None = None
 
 
 DEFAULT_POSTGRES_ROUTE_POLICY = PostgresRoutePolicy(
@@ -126,22 +132,46 @@ class PostgresHttpMixin:
         return {("page_size" if key == "pageSize" else key): values[0] for key, values in query.items()}
 
     def _postgres_service_call(self, callback, status: int = 200):
-        path = getattr(self, "path", "").split("?", 1)[0]
-        if "/console/" in path:
-            return self._service_call(callback, status)
-        execution_class = "read" if any(part in path for part in (
-            "/data", "/sql", "/relation/preview", "/relation/query", "/relation/detail",
-            "/relation/temporal-series", "/saved-widgets/",
-        )) else "catalog"
+        return self._service_call(callback, status)
 
-        def admitted():
-            execution = getattr(self.service, "execution", None)
-            if execution is None:
-                return callback()
-            with execution(execution_class):
-                return callback()
+    def _postgres_binary_service_call(self, callback) -> None:
+        try:
+            content_type, _filename, content, headers = callback()
+            self.send_bytes(200, content, content_type, headers)
+        except PostgresServiceError as error:
+            self.send_json(error.status, error.to_dict())
 
-        return self._service_call(admitted, status)
+    def _postgres_structured_result_owner(
+        self, body: dict[str, Any], *, widget_id: str | None = None,
+        authority_digest: str | None = None,
+    ) -> dict[str, Any]:
+        dashboard_id = body.get("dashboardId")
+        dashboard_revision = body.get("expectedRevision")
+        if dashboard_id is None:
+            dashboard_revision = None
+            widget_id = None
+        return {
+            "applicationId": self.postgres_route_policy.application,
+            "sessionBinding": self.postgres_session_binding,
+            "serverId": self.postgres_server_id,
+            "dashboardId": dashboard_id,
+            "dashboardRevision": dashboard_revision,
+            "widgetId": widget_id,
+            "authorityDigest": authority_digest,
+        }
+
+    def _postgres_result_guard(self, binding: dict[str, Any]):
+        guard = self.postgres_route_policy.structured_result_guard
+        return guard(self, binding) if guard is not None else None
+
+    def _structured_result_binding(self) -> str:
+        values = self.headers.get_all(STRUCTURED_RESULT_BINDING_HEADER, [])
+        if (
+            len(values) != 1 or not isinstance(values[0], str) or not values[0]
+            or len(values[0]) > 256 or any(ord(char) < 33 or ord(char) == 127 for char in values[0])
+        ):
+            raise ValidationError(f"{STRUCTURED_RESULT_BINDING_HEADER} header is required")
+        return values[0]
 
     def _postgres_profile_dependency_impact(self, profile_id: str) -> dict[str, list[dict]]:
         return {"schemas": [], "dashboards": [], "activeChats": [], "plans": [], "operations": []}
@@ -162,6 +192,8 @@ class PostgresHttpMixin:
         get_capability = None
         if path == CONSOLE_SETTINGS_PATH or any(pattern.fullmatch(path) for pattern in (CONSOLE_RESULT_PATH, CONSOLE_EXECUTION_PATH, CONSOLE_TRANSACTION_PATH)):
             get_capability = (POSTGRES_CONSOLE_CAPABILITY, "PostgreSQL Console")
+        elif STRUCTURED_RESULT_PATH.fullmatch(path) or STRUCTURED_RESULT_EXPORT_PATH.fullmatch(path):
+            get_capability = (POSTGRES_RELATION_QUERY_CAPABILITY, "structured query results")
         elif path == "/api/postgres/profiles":
             get_capability = (POSTGRES_PROFILE_CAPABILITY, "PostgreSQL profiles")
         elif DATA_PATH.fullmatch(path):
@@ -179,6 +211,59 @@ class PostgresHttpMixin:
         if path == CONSOLE_SETTINGS_PATH and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
             if self._authorize_postgres():
                 self._postgres_service_call(self.service.console_settings)
+            return True
+        structured_match = STRUCTURED_RESULT_PATH.fullmatch(path)
+        structured_export_match = STRUCTURED_RESULT_EXPORT_PATH.fullmatch(path)
+        if (structured_match or structured_export_match) and self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+            if not self._authorize_postgres():
+                return True
+            try:
+                allowed = {"format"} if structured_export_match else {"cursor"}
+                required = allowed
+                query = self._catalog_query(parsed, allowed, required)
+                binding_token = self._structured_result_binding()
+            except ValidationError as error:
+                self.send_json(400, error.to_dict())
+                return True
+            match = structured_export_match or structured_match
+            profile_id, result_id = match.group(1), match.group(2)
+
+            def authorize_result():
+                binding = self.service.structured_result_binding(
+                    profile_id, result_id, binding_token,
+                    self.postgres_session_binding, self.postgres_server_id,
+                )
+                guard = self._postgres_result_guard(binding)
+                return binding, guard
+
+            if structured_export_match:
+                def export_result():
+                    _binding, guard = authorize_result()
+                    if guard is None:
+                        return self.service.export_structured_result(
+                            profile_id, result_id, binding_token, query["format"],
+                            self.postgres_session_binding, self.postgres_server_id,
+                        )
+                    with guard:
+                        return self.service.export_structured_result(
+                            profile_id, result_id, binding_token, query["format"],
+                            self.postgres_session_binding, self.postgres_server_id,
+                        )
+                self._postgres_binary_service_call(export_result)
+            else:
+                def result_page():
+                    _binding, guard = authorize_result()
+                    if guard is None:
+                        return self.service.structured_result_page(
+                            profile_id, result_id, binding_token, query["cursor"],
+                            self.postgres_session_binding, self.postgres_server_id,
+                        )
+                    with guard:
+                        return self.service.structured_result_page(
+                            profile_id, result_id, binding_token, query["cursor"],
+                            self.postgres_session_binding, self.postgres_server_id,
+                        )
+                self._postgres_service_call(result_page)
             return True
         result_match = CONSOLE_RESULT_PATH.fullmatch(path)
         if result_match and self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
@@ -300,6 +385,7 @@ class PostgresHttpMixin:
         relation_detail_match = RELATION_DETAIL_PATH.fullmatch(path)
         saved_widget_query_match = SAVED_WIDGET_QUERY_PATH.fullmatch(path)
         saved_widget_detail_match = SAVED_WIDGET_DETAIL_PATH.fullmatch(path)
+        dashboard_widget_preview_match = DASHBOARD_WIDGET_PREVIEW_PATH.fullmatch(path)
         profile_match = PROFILE_PATH.fullmatch(path)
         if sql_match and not self._has_postgres_capability(POSTGRES_READ_SQL_CAPABILITY):
             return self._postgres_capability_unavailable(POSTGRES_READ_SQL_CAPABILITY, "read-only SQL")
@@ -307,20 +393,27 @@ class PostgresHttpMixin:
             return self._postgres_capability_unavailable(POSTGRES_CONSOLE_CAPABILITY, "PostgreSQL Console")
         if write_grants_match and not self._has_postgres_capability(POSTGRES_CONSOLE_WRITE_CAPABILITY):
             return self._postgres_capability_unavailable(POSTGRES_CONSOLE_WRITE_CAPABILITY, "Console writes")
-        if any((relation_preview_match, relation_verify_match, relation_verify_batch_match, relation_query_match, relation_temporal_series_match, relation_detail_match, saved_widget_query_match, saved_widget_detail_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+        if any((relation_preview_match, relation_verify_match, relation_verify_batch_match, relation_query_match, relation_temporal_series_match, relation_detail_match, saved_widget_query_match, saved_widget_detail_match, dashboard_widget_preview_match)) and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
             return self._postgres_capability_unavailable(POSTGRES_RELATION_QUERY_CAPABILITY, "structured relation queries")
         if profile_match and profile_match.group(2) == "test" and not self._has_postgres_capability(POSTGRES_PROFILE_CAPABILITY):
             return self._postgres_capability_unavailable(POSTGRES_PROFILE_CAPABILITY, "profile connection test")
         if profile_match and profile_match.group(2) == "introspect" and not self._has_postgres_capability(POSTGRES_SCHEMA_CAPABILITY):
             return self._postgres_capability_unavailable(POSTGRES_SCHEMA_CAPABILITY, "schema introspection")
-        if not sql_match and not console_match and not transactions_match and not transaction_executions_match and not transaction_finish_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_verify_batch_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not saved_widget_query_match and not saved_widget_detail_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
+        if not sql_match and not console_match and not transactions_match and not transaction_executions_match and not transaction_finish_match and not write_grants_match and not relation_preview_match and not relation_verify_match and not relation_verify_batch_match and not relation_query_match and not relation_temporal_series_match and not relation_detail_match and not saved_widget_query_match and not saved_widget_detail_match and not dashboard_widget_preview_match and not (profile_match and profile_match.group(2) in {"test", "introspect"}):
             return False
         if not self._authorize_postgres():
             return True
         body = self._body_or_error()
         if body is None:
             return True
-        if saved_widget_query_match:
+        if dashboard_widget_preview_match:
+            fields = {"dashboardId", "expectedRevision", "widgetId", "query"}
+            adapter = self.postgres_route_policy.dashboard_widget_preview
+            if set(body) != fields or adapter is None:
+                self.send_json(400, {"error": {"code": "validation_error", "message": "Dashboard widget preview fields are invalid"}})
+            else:
+                self._postgres_service_call(lambda: adapter(self, dashboard_widget_preview_match.group(1), body))
+        elif saved_widget_query_match:
             adapter = self.postgres_route_policy.saved_widget_query
             if set(body) != {"dashboardId", "expectedRevision", "widgetId"} or adapter is None:
                 self.send_json(400, {"error": {"code": "validation_error", "message": "Saved widget aggregate fields are invalid"}})
@@ -381,11 +474,13 @@ class PostgresHttpMixin:
                         return self.service.execute_relation_detail(
                             relation_detail_match.group(1), body["source"], body["query"], body["selection"],
                             body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
+                            result_owner=self._postgres_structured_result_owner(body),
                         )
                     with guard(self, body):
                         return self.service.execute_relation_detail(
                             relation_detail_match.group(1), body["source"], body["query"], body["selection"],
                             body["detail"], body["offset"], body["limit"], body["sort"], body["searches"],
+                            result_owner=self._postgres_structured_result_owner(body),
                         )
                 self._postgres_service_call(execute_detail)
         elif relation_temporal_series_match:
@@ -401,7 +496,7 @@ class PostgresHttpMixin:
                 def execute_temporal_series():
                     call = lambda: self.service.execute_temporal_series(
                         relation_temporal_series_match.group(1), body["source"], body["query"], body["action"], body["refreshGeneration"],
-                        body.get("series"), body.get("windowStart"),
+                        body.get("series"), body.get("windowStart"), slicer_lineage=body.get("_slicerLineage"),
                     )
                     guard = self.postgres_route_policy.temporal_series_guard
                     if guard is None:
@@ -418,9 +513,15 @@ class PostgresHttpMixin:
                 def execute_query():
                     guard = self.postgres_route_policy.relation_query_guard
                     if guard is None or set(body) == base_fields:
-                        return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
+                        return self.service.execute_widget_query(
+                            relation_query_match.group(1), body["source"], body["query"],
+                            result_owner=self._postgres_structured_result_owner(body),
+                        )
                     with guard(self, body):
-                        return self.service.execute_widget_query(relation_query_match.group(1), body["source"], body["query"])
+                        return self.service.execute_widget_query(
+                            relation_query_match.group(1), body["source"], body["query"],
+                            result_owner=self._postgres_structured_result_owner(body),
+                        )
                 self._postgres_service_call(execute_query)
         elif relation_verify_batch_match:
             if not isinstance(body, dict) or set(body) != {"sources"}:
@@ -506,6 +607,22 @@ class PostgresHttpMixin:
         return True
 
     def _handle_postgres_delete(self, path: str) -> bool:
+        structured_match = STRUCTURED_RESULT_PATH.fullmatch(path)
+        if structured_match and not self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+            return self._postgres_capability_unavailable(POSTGRES_RELATION_QUERY_CAPABILITY, "structured query results")
+        if structured_match and self._has_postgres_capability(POSTGRES_RELATION_QUERY_CAPABILITY):
+            if self._authorize_postgres():
+                try:
+                    self._catalog_query(urlparse(getattr(self, "path", path)), set(), set())
+                    binding_token = self._structured_result_binding()
+                except ValidationError as error:
+                    self.send_json(400, error.to_dict())
+                    return True
+                self._postgres_service_call(lambda: self.service.close_structured_result(
+                    structured_match.group(1), structured_match.group(2), binding_token,
+                    self.postgres_session_binding, self.postgres_server_id,
+                ))
+            return True
         recognized_console = CONSOLE_RESULT_PATH.fullmatch(path) or CONSOLE_EXECUTION_PATH.fullmatch(path)
         if recognized_console and not self._has_postgres_capability(POSTGRES_CONSOLE_CAPABILITY):
             return self._postgres_capability_unavailable(POSTGRES_CONSOLE_CAPABILITY, "PostgreSQL Console")

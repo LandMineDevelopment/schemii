@@ -5,6 +5,7 @@ import unittest
 import uuid
 from importlib import resources
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,16 +62,85 @@ class MetadataConfigTests(unittest.TestCase):
             "SCHEMII_METADATA_APPLICATION_NAME": "schemer-metadata",
             "SCHEMII_METADATA_CONNECT_TIMEOUT": "9",
             "SCHEMII_METADATA_MAX_JSON_BYTES": "4096",
+            "SCHEMII_METADATA_EXPECTED_ROLE": "schemii_metadata_schemer",
+            "SCHEMII_METADATA_EXPECTED_OWNER": "schemii_metadata_owner",
         })
         self.assertEqual(config.application_name, "schemer-metadata")
         self.assertEqual(config.connect_timeout, 9)
         self.assertEqual(config.max_json_bytes, 4096)
+        self.assertEqual(config.expected_role, "schemii_metadata_schemer")
+        self.assertEqual(config.expected_owner, "schemii_metadata_owner")
         with self.assertRaises(ValueError):
             MetadataConfig.from_env({})
         with self.assertRaises(ValueError):
             MetadataConfig("sqlite:///metadata.db")
         with self.assertRaises(ValueError):
             MetadataConfig("postgresql://metadata@db/schemii_metadata", max_json_bytes=1024 * 1024 + 1)
+
+    def test_runtime_configuration_cannot_disable_or_replace_native_identity_checks(self):
+        config = MetadataConfig.from_runtime_env("schemer", {
+            "SCHEMII_METADATA_DSN": "postgresql://wrong-role@db/schemii_metadata",
+            "SCHEMII_METADATA_APPLICATION_NAME": "operator-override",
+            "SCHEMII_METADATA_EXPECTED_APPLICATION": "schemii",
+            "SCHEMII_METADATA_EXPECTED_ROLE": "schemii_metadata_schemii",
+            "SCHEMII_METADATA_EXPECTED_OWNER": "postgres",
+            "SCHEMII_METADATA_EXPECTED_ADMIN_OWNER": "postgres",
+        })
+        self.assertEqual(config.application_name, "schemer")
+        self.assertEqual(config.expected_application, "schemer")
+        self.assertEqual(config.expected_role, "schemii_metadata_schemer")
+        self.assertEqual(config.expected_owner, "schemii_metadata_owner")
+        self.assertEqual(config.expected_admin_owner, "schemii_metadata_bootstrap")
+
+        missing_overrides = MetadataConfig.from_runtime_env("schemii", {
+            "SCHEMII_METADATA_DSN": "host=db dbname=schemii_metadata user=runtime",
+        })
+        self.assertEqual(missing_overrides.expected_role, "schemii_metadata_schemii")
+        self.assertEqual(missing_overrides.expected_owner, "schemii_metadata_owner")
+
+    def test_native_server_startup_fails_closed_on_missing_or_wrong_runtime_role(self):
+        from schemii import schemer_server, server
+
+        applied = [
+            {"version": item.version, "name": item.name, "checksum": item.checksum}
+            for item in packaged_migrations()
+        ]
+        for module, application, store_name in (
+            (server, "schemii", "SchemaStore"),
+            (schemer_server, "schemer", "DashboardStore"),
+        ):
+            expected_role = f"schemii_metadata_{application}"
+            wrong_role = "schemii_metadata_schemer" if application == "schemii" else "schemii_metadata_schemii"
+            wrong_identity = {
+                **MetadataStoreTests.healthy_identity(),
+                "application_id": application,
+                "current_user": wrong_role,
+                "session_user": wrong_role,
+            }
+            config = MetadataConfig(
+                "postgresql://runtime@db/schemii_metadata",
+                application_name=application,
+                expected_application=application,
+                expected_role=expected_role,
+                expected_owner="schemii_metadata_owner",
+                expected_admin_owner="schemii_metadata_bootstrap",
+            )
+            for identity in (None, wrong_identity):
+                with self.subTest(application=application, identity="missing" if identity is None else "wrong"):
+                    connection = FakeConnection(rows=[applied, identity])
+                    with (
+                        patch.object(module, "_paths", return_value=(Path("web"), Path("config"), Path("data"))),
+                        patch.object(module, "validate_static_directory"),
+                        patch.object(module, "PostgresService"),
+                        patch.object(module, store_name),
+                        patch.object(module.MetadataConfig, "from_runtime_env", return_value=config) as runtime_config,
+                        patch.object(module, "MetadataConnectionFactory", return_value=lambda: connection),
+                        patch.object(module, "run_server") as run_server,
+                    ):
+                        with self.assertRaisesRegex(SystemExit, "metadata readiness failed"):
+                            module.main()
+                    runtime_config.assert_called_once_with(application)
+                    run_server.assert_not_called()
 
     def test_connection_factory_passes_only_validated_connection_settings(self):
         calls = []
@@ -86,7 +156,7 @@ class MetadataConfigTests(unittest.TestCase):
     def test_connection_factory_reads_password_file_without_changing_dsn(self):
         with tempfile.TemporaryDirectory() as directory:
             password_file = Path(directory) / "password"
-            password_file.write_text("file-only-secret\n", encoding="utf-8")
+            password_file.write_bytes(b"file-only-secret\n")
             calls = []
             factory = MetadataConnectionFactory(
                 MetadataConfig("host=db dbname=schemii_metadata user=runtime", password_file=str(password_file)),
@@ -107,7 +177,7 @@ class MetadataConfigTests(unittest.TestCase):
         ):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
                 password_file = Path(directory) / "password"
-                password_file.write_text(value, encoding="utf-8")
+                password_file.write_bytes(value.encode("utf-8"))
                 factory = MetadataConnectionFactory(
                     MetadataConfig(
                         "host=db dbname=schemii_metadata user=runtime",
@@ -210,8 +280,55 @@ class MetadataSqlContractTests(unittest.TestCase):
         self.assertIn("ALTER TABLE metadata_chats ENABLE ROW LEVEL SECURITY", self.sql)
         self.assertIn("metadata_migration_plans_isolation", self.sql)
 
+    def test_current_migration_forces_rls_without_blocking_owner_maintenance(self):
+        sql = resources.files("schemii.metadata.migrations").joinpath(
+            "0012_force_rls_and_catalog_guards.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CREATE POLICY metadata_owner_maintenance", sql)
+        self.assertIn("TO schemii_metadata_owner", sql)
+        self.assertIn("FORCE ROW LEVEL SECURITY", sql)
+
+    def test_chat_cleanup_ownership_preserves_audit_and_shared_policy_evidence(self):
+        sql = resources.files("schemii.metadata.migrations").joinpath(
+            "0013_chat_cleanup_ownership.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("REFERENCES metadata_operations(operation_id)", sql)
+        self.assertIn("ON DELETE CASCADE", sql)
+        self.assertIn("metadata_authority_transitions", sql)
+        self.assertNotIn("DELETE FROM metadata_authority_transitions", sql)
+        self.assertNotIn("DELETE FROM metadata_agent_policy_revisions", sql)
+
 
 class MetadataStoreTests(unittest.TestCase):
+    @staticmethod
+    def healthy_identity():
+        owner = "schemii_metadata_owner"
+        role_defaults = {
+            "inherit": True, "superuser": False, "createRole": False,
+            "createDatabase": False, "replication": False, "bypassRls": False,
+        }
+        return {
+            "current_user": "schemii_metadata_schemer", "session_user": "schemii_metadata_schemer",
+            "database_owner": owner, "schema_owner": owner,
+            "application_id": "schemer", "admin_schema_owner": "schemii_metadata_bootstrap",
+            "object_owners": [
+                {"name": "metadata_applications", "kind": "r", "owner": owner},
+                {"name": "metadata_schema_migrations", "kind": "r", "owner": owner},
+                {"name": "metadata_operation_events_event_id_seq", "kind": "S", "owner": owner},
+            ],
+            "function_owners": [{"name": "metadata_current_application", "owner": owner}],
+            "rls_tables": [{"name": "metadata_applications", "enabled": True, "forced": True}],
+            "metadata_roles": [
+                {"name": "schemii_metadata_bootstrap", "login": False, "memberOfOwner": False,
+                 "inherit": True, "superuser": True, "createRole": True,
+                 "createDatabase": True, "replication": True, "bypassRls": True},
+                {"name": owner, "login": False, "memberOfOwner": False, **role_defaults},
+                {"name": "schemii_metadata_migration", "login": True, "memberOfOwner": True, **role_defaults},
+                {"name": "schemii_metadata_schemii", "login": True, "memberOfOwner": False, **role_defaults},
+                {"name": "schemii_metadata_schemer", "login": True, "memberOfOwner": False, **role_defaults},
+            ],
+        }
+
     def test_health_requires_exact_packaged_version(self):
         migrations = packaged_migrations()
         connection = FakeConnection(rows=[[
@@ -219,10 +336,74 @@ class MetadataStoreTests(unittest.TestCase):
             for migration in migrations
         ]])
         store = MetadataStore(lambda: connection)
-        self.assertEqual(store.health(), {"ok": True, "version": 10, "expectedVersion": 10})
+        expected_version = len(migrations)
+        self.assertEqual(store.health(), {"ok": True, "version": expected_version, "expectedVersion": expected_version})
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
         self.assertTrue(connection.closed)
+
+    def test_health_validates_runtime_role_and_metadata_owners(self):
+        migrations = packaged_migrations()
+        applied = [{"version": item.version, "name": item.name, "checksum": item.checksum} for item in migrations]
+        identity = self.healthy_identity()
+        store = MetadataStore(
+            lambda: FakeConnection(rows=[applied, identity]),
+            expected_application="schemer", expected_role="schemii_metadata_schemer",
+            expected_owner="schemii_metadata_owner", expected_admin_owner="schemii_metadata_bootstrap",
+        )
+        self.assertEqual(store.health()["role"], "schemii_metadata_schemer")
+
+        mismatched = MetadataStore(
+            lambda: FakeConnection(rows=[applied, {**identity, "current_user": "schemii_metadata_schemii", "session_user": "schemii_metadata_schemii"}]),
+            expected_application="schemer", expected_role="schemii_metadata_schemer",
+            expected_owner="schemii_metadata_owner", expected_admin_owner="schemii_metadata_bootstrap",
+        )
+        with self.assertRaises(MetadataStoreError) as caught:
+            mismatched.health()
+        self.assertEqual(caught.exception.code, "metadata_identity_mismatch")
+
+    def test_health_rejects_catalog_ownership_rls_and_role_drift(self):
+        migrations = packaged_migrations()
+        applied = [{"version": item.version, "name": item.name, "checksum": item.checksum} for item in migrations]
+        cases = (
+            ("object_owners", [{"name": "metadata_applications", "kind": "r", "owner": "postgres"}], "ownershipDrift"),
+            ("rls_tables", [{"name": "metadata_applications", "enabled": True, "forced": False}], "rowSecurityDrift"),
+            ("metadata_roles", [], "roleDrift"),
+        )
+        for field, value, detail in cases:
+            with self.subTest(field=field):
+                identity = {**self.healthy_identity(), field: value}
+                store = MetadataStore(
+                    lambda: FakeConnection(rows=[applied, identity]),
+                    expected_application="schemer", expected_role="schemii_metadata_schemer",
+                    expected_owner="schemii_metadata_owner", expected_admin_owner="schemii_metadata_bootstrap",
+                )
+                with self.assertRaises(MetadataStoreError) as caught:
+                    store.health()
+                self.assertEqual(caught.exception.code, "metadata_catalog_mismatch")
+                self.assertTrue(caught.exception.details[detail])
+
+    def test_health_fails_closed_when_identity_or_catalog_rows_are_unavailable(self):
+        migrations = packaged_migrations()
+        applied = [{"version": item.version, "name": item.name, "checksum": item.checksum} for item in migrations]
+        missing_identity = MetadataStore(
+            lambda: FakeConnection(rows=[applied, None]),
+            expected_application="schemer", expected_role="schemii_metadata_schemer",
+            expected_owner="schemii_metadata_owner", expected_admin_owner="schemii_metadata_bootstrap",
+        )
+        with self.assertRaises(MetadataStoreError) as caught:
+            missing_identity.health()
+        self.assertEqual(caught.exception.code, "metadata_identity_mismatch")
+
+        malformed = {**self.healthy_identity(), "object_owners": "not-json"}
+        malformed_catalog = MetadataStore(
+            lambda: FakeConnection(rows=[applied, malformed]),
+            expected_application="schemer", expected_role="schemii_metadata_schemer",
+            expected_owner="schemii_metadata_owner", expected_admin_owner="schemii_metadata_bootstrap",
+        )
+        with self.assertRaises(MetadataStoreError) as caught:
+            malformed_catalog.health()
+        self.assertEqual(caught.exception.code, "metadata_catalog_mismatch")
 
     def test_chat_conversation_title_initialization_and_rename_are_durable(self):
         chat_id = str(uuid.uuid4())

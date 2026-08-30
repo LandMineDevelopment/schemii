@@ -1,16 +1,25 @@
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS builder
+
+ARG SCHEMII_VERSION=development
+ARG SCHEMII_REVISION=development
 
 ENV VIRTUAL_ENV=/opt/venv
 RUN python -m venv "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 WORKDIR /build
-COPY pyproject.toml ./
-COPY README.md LICENSE ./
-COPY src ./src
-RUN python -m pip install --no-cache-dir .
+COPY dist ./dist
+RUN set -- /build/dist/*.whl; test "$#" -eq 1; python -m pip install --no-cache-dir "$1"
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
+
+ARG SCHEMII_VERSION=development
+ARG SCHEMII_REVISION=development
+ARG SCHEMII_SOURCE=https://github.com/LandMineDevelopment/schemii
+LABEL org.opencontainers.image.title="Schemii" \
+      org.opencontainers.image.version="$SCHEMII_VERSION" \
+      org.opencontainers.image.revision="$SCHEMII_REVISION" \
+      org.opencontainers.image.source="$SCHEMII_SOURCE"
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -19,7 +28,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     SCHEMII_PORT=8080 \
     SCHEMII_CONFIG_DIR=/data/config \
     SCHEMII_SCHEMA_DIR=/data/schemas \
-    SCHEMII_BEHIND_LOOPBACK_PROXY=1
+    SCHEMII_BEHIND_LOOPBACK_PROXY=0
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --chmod=0555 docker/runtime-secret-entrypoint.sh /usr/local/bin/schemii-runtime
@@ -32,14 +41,5 @@ USER root
 ENTRYPOINT ["/usr/local/bin/schemii-runtime"]
 EXPOSE 8080
 
-FROM runtime AS schemer-runtime
-ENV SCHEMER_HOST=0.0.0.0 \
-    SCHEMER_PORT=8081 \
-    SCHEMER_CONFIG_DIR=/data/config \
-    SCHEMER_DASHBOARD_DIR=/data/dashboards \
-    SCHEMER_BEHIND_LOOPBACK_PROXY=1
 EXPOSE 8081
-CMD ["schemer"]
-
-FROM runtime AS schemii-runtime
 CMD ["schemii"]

@@ -30,6 +30,7 @@ assert.match(source, /function validateSchemerAiAction[\s\S]*exactFields[\s\S]*e
 assert.match(source, /action\.dashboardId !== capture\.dashboardId \|\| action\.expectedRevision !== capture\.revision/, "local dashboard revisions must invalidate stale proposal cards");
 assert.doesNotMatch(source, /applyAction: applySchemerAiAction/, "Schemer proposals must not execute browser-owned dashboard mutations");
 assert.match(shared, /proposalRequest\(proposal, "execute", body\)[\s\S]*proposalRequest\(proposal, "reconcile", context\)/, "Schemer must use idempotent server execute and reconcile operations");
+assert.match(shared, /if \(prepareProposalExecution\) await prepareProposalExecution\(\{ proposal, capture \}\)[\s\S]*proposalRequest\(proposal, "execute", body\)/, "application-owned save guards must complete before proposal execution");
 assert.match(source, /buildProposalExecutionPayload: \(\{ confirmation \}\) => \(\{ confirmation \}\)/, "Schemer proposal execution may send only explicit confirmation");
 const messageAdapter = source.slice(source.indexOf("buildMessagePayload:"), source.indexOf("buildHistoryQuery:"));
 assert.doesNotMatch(messageAdapter, /password|connectionString|host|\buser\b|profileFingerprint/i, "Schemer AI messages must not expose connection credentials or local identity fingerprints");
@@ -42,6 +43,8 @@ assert.match(shared, /normalized\.action\?\.type === "read_query"[\s\S]*onCancel
 assert.match(styles, /\.ai-action-progress\.cancelled[\s\S]*\.ai-action-cancel/, "Schemer query cancellation needs a distinct terminal state and Stop control");
 assert.match(source, /function schemerAiTargetLabel[\s\S]*toolbarTargetExplicit \? "selected" : "suggested"/, "Schemer AI must name whether its exact toolbar target was selected or merely suggested");
 assert.match(source, /result\?\.kind === "sql_result"[\s\S]*persistedAfter[\s\S]*appendQueryResult\(result\.display\)[\s\S]*resultRef: result\.resultRef/, "approved result references must retain local dashboard safety checks before follow-up delivery");
+assert.match(source, /async function prepareSchemerAiExecution[\s\S]*await flushPendingSave\(\)[\s\S]*persisted\.revision !== capture\.revision[\s\S]*prepareProposalExecution: prepareSchemerAiExecution/, "Schemer must flush or block dirty dashboards and prove the proposal revision before execution");
+assert.match(source, /result\?\.kind === "dashboard_saved"[\s\S]*await flushPendingSave\(\)[\s\S]*await loadDashboards/, "AI dashboard reloads must never discard edits made after execution began");
 assert.doesNotMatch(source, /queryResult: boundedSchemerAiQueryResult\(result\)/, "browser-owned rows must not be submitted as AI query provenance");
 assert.match(source, /canViewSession: \(binding, currentKey\) => binding\.accessLevel !== "data" \|\| binding\.key === currentKey/, "data history must remain hidden outside its exact target context");
 assert.match(messageAdapter, /text, model,[\s\S]*resultRef/, "ordinary messages may carry only text, model, and an optional result reference");

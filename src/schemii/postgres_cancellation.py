@@ -4,6 +4,23 @@ import threading
 from typing import Any
 
 
+class ReadOnlyQueryReservation:
+    def __init__(self, registry: "ReadOnlyQueryCancellationRegistry", operation_id: str | None):
+        self.registry = registry
+        self.operation_id = operation_id
+        self.cancel_requested = registry.reserve(operation_id) if operation_id is not None else False
+
+    def attach(self, connection: Any) -> bool:
+        return self.operation_id is not None and self.registry.attach(self.operation_id, connection)
+
+    def requested(self) -> bool:
+        return self.operation_id is not None and self.registry.requested(self.operation_id)
+
+    def release(self) -> None:
+        if self.operation_id is not None:
+            self.registry.release(self.operation_id)
+
+
 class ReadOnlyQueryCancellationRegistry:
     """Coordinates cancellation requests with a query's process-local connection."""
 
@@ -20,6 +37,9 @@ class ReadOnlyQueryCancellationRegistry:
                 raise RuntimeError("Read-only query operation is already active")
             entry["reserved"] = True
             return bool(entry["cancelRequested"])
+
+    def reservation(self, operation_id: str | None) -> ReadOnlyQueryReservation:
+        return ReadOnlyQueryReservation(self, operation_id)
 
     def attach(self, operation_id: str, connection: Any) -> bool:
         with self._lock:

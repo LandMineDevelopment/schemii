@@ -10,7 +10,7 @@ This checklist is the durable execution source for aligning Schemii and Schemer 
 - [x] Users explicitly control versioned AI capabilities, approval modes, and optional agent-specific bounds.
 - [x] The AI cannot broaden its own policy; structured errors name the missing capability and local settings action.
 - [x] Exact-target, stale-revision, destructive-review, layout/dashboard preservation, and uncertain-write recovery remain enforced.
-- [ ] Application transport/resource bounds use continuation or explicit truncation throughout. Catalogs and snapshot-safe Console reads page; Console browser JSON export drains retained pageable/spooled resources within TTL and caps, while terminal spool truncation and several older bounded result routes remain non-recoverable.
+- [ ] Application transport/resource bounds use continuation or explicit truncation throughout. Catalogs, snapshot-safe Console reads, and Schemer aggregate/detail results page; Console and Schemer browser exports drain retained resources within TTL and caps, while terminal Console spool truncation and several older bounded result routes remain non-recoverable.
 - [x] Application limitations are labeled explicitly and direct users to Console/raw PostgreSQL where safe. A finite `rowsWritten` policy necessarily blocks arbitrary AI raw writes.
 
 ## 1. PostgreSQL Policy Ownership
@@ -53,7 +53,7 @@ Residual: table reorder and materialized-view recreation use separate conservati
 - [x] Derive and fingerprint structured type capabilities from PostgreSQL type/operator/aggregate catalogs; legacy v1 snapshots require explicit reselection.
 - [ ] Add continuation/pagination/export paths for bounded result responses.
 
-Residual: Console managed-read and explicit cursors are snapshot-safe and browser JSON export drains retained resources, but committed spools remain finite and terminally truncated rows cannot be recovered. Universal continuation/export for all bounded APIs is not implemented.
+Residual: Console managed-read and explicit cursors are snapshot-safe, and Schemer aggregate/detail results have process-local continuation plus JSON/CSV export without query replay. Console committed spools remain finite and terminally truncated rows cannot be recovered. Universal continuation/export for all bounded APIs is not implemented.
 
 ## 5. Shared PostgreSQL Console
 
@@ -66,7 +66,7 @@ Residual: Console managed-read and explicit cursors are snapshot-safe and browse
 - [x] Replace recurring pseudo-permission expiry with durable application-scoped human write intent and exact settings/target revalidation.
 - [ ] Make statement/script/result limits user-configurable or pageable where they affect capability rather than transport safety.
 
-Residual: statement count and row page size are user settings; hard SQL length, column, cell/row, response, spool, active-result, snapshot, and process limits remain operator/process safety ceilings. Export is absent.
+Residual: statement count and row page size are user settings; hard SQL length, column, cell/row, response, spool, active-result, snapshot, and process limits remain operator/process safety ceilings. Console export remains browser JSON, while Schemer retained aggregate/detail resources export JSON or CSV.
 
 ## 6. User-Controlled AI Policy
 
@@ -101,9 +101,11 @@ Residual: statement count and row page size are user settings; hard SQL length, 
 - [x] Keep destructive structured migration preview and final reviewed apply.
 - [x] Standardize bounded PostgreSQL diagnostics across catalog, query, Console, migration, and AI routes.
 - [x] Return explicit capability-unavailable and application-limitation errors with structured guidance.
+- [x] Normalize Schemer dashboard version-1 and version-2 records deterministically in memory to version 3 with stable mobile order, vertical-only viewport, no persisted geometry, and no write-on-read.
+- [x] Persist strict date-range slicers with explicit widget/source-column bindings, start-inclusive/end-exclusive ranges, temporal type and source-time-zone validation, DNF-preserving query composition, effective-query lineage, revision-guarded binding removal, and a complete browser editor. Every responsive breakpoint uses the same widget array order and uniform card size.
 - [ ] Preserve responsive desktop/mobile behavior and accessible controls.
 
-Evidence covers responsive CSS, keyboard/focus, ARIA/inert, accessible chart tables, and reduced motion in browser contract tests. Manual screen-reader/assistive-technology validation is not reported, so this remains open.
+Evidence covers 1440x900 and 390x844 Chromium execution, responsive CSS, keyboard geometry and calendar navigation, focus trapping, ARIA/inert state, accessible chart tables, and reduced motion. Manual screen-reader/assistive-technology validation is not reported, so this remains open.
 
 ## 9. Operability And Recovery
 
@@ -117,9 +119,9 @@ Evidence covers responsive CSS, keyboard/focus, ARIA/inert, accessible chart tab
 ## 10. Verification And Delivery
 
 - [x] Focused Python and browser contract tests cover the changed implementation boundaries.
-- [x] Full Python suite passes: 455 tests, 8 environment-gated skips.
+- [x] Full Python suite passes: 539 tests, 8 environment-gated skips.
 - [x] Python compilation passes.
-- [x] JavaScript syntax and all 27 browser contract suites pass.
+- [x] JavaScript syntax and all 31 browser contract suites pass.
 - [x] Disposable PostgreSQL 17 matrix covers timeout inheritance/narrowing, column grants, RLS, triggers, partitions, enum/domain/composite types, generated/identity diagnostics, managed rollback, explicit transactions/savepoints, autocommit partial success, maintenance mode, and no execution-ID replay. Cleanup left zero test schemas or roles.
 - [x] Rebuilt Schemii and Schemer containers are healthy; `/`, `/api/readiness`, session bootstrap, profiles, AI settings, Console settings, paged namespaces, and relation inspection pass in both applications.
 - [x] No model-provider prompt was sent; verification used only local application/PostgreSQL routes.

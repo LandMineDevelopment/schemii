@@ -1,0 +1,60 @@
+services:
+  metadata-recovery:
+    image: ${SCHEMII_METADATA_IMAGE:-schemii-metadata-postgres:local}
+    entrypoint: ["/bin/sh", "/opt/schemii-recovery/recovery.sh"]
+    environment:
+      SCHEMII_INSTANCE: ${SCHEMII_INSTANCE:?Set SCHEMII_INSTANCE to the exact launcher instance}
+      SCHEMII_RECOVERY_OUTPUT_DIR: /transaction/output
+    secrets:
+      - metadata_bootstrap_password
+      - metadata_migration_password
+      - metadata_schemii_password
+      - metadata_schemer_password
+      - opencode_password
+    volumes:
+      - schemii-config:/data/config
+      - schemii-schemas:/data/schemas
+      - schemer-dashboards:/data/dashboards
+      - schemii-recovery:/transaction
+      - ./docker/recovery.sh:/opt/schemii-recovery/recovery.sh:ro
+      - ./docker/metadata/verify_security.sql:/opt/schemii-recovery/verify_security.sql:ro
+      - ./src/schemii/metadata/migrations:/opt/schemii-recovery/migrations:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  application-recovery-verify:
+    image: ${SCHEMII_IMAGE:-schemii:local}
+    entrypoint: ["python", "-m", "schemii.recovery_verify"]
+    user: "10001:10001"
+    environment:
+      SCHEMII_CONFIG_DIR: /data/config
+      SCHEMII_SCHEMA_DIR: /data/schemas
+      SCHEMER_DASHBOARD_DIR: /data/dashboards
+      SCHEMII_INSTANCE: ${SCHEMII_INSTANCE:?Set SCHEMII_INSTANCE to the exact launcher instance}
+    volumes:
+      - schemii-config:/data/config:ro
+      - schemii-schemas:/data/schemas:ro
+      - schemer-dashboards:/data/dashboards:ro
+      - schemii-recovery:/transaction:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+volumes:
+  schemer-dashboards:
+  schemii-recovery:

@@ -17,6 +17,9 @@ from .view_provenance import (
 
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_RELATION_DEFINITION_BYTES = 64 * 1024
+MAX_RELATION_COLUMNS = 1600
+MAX_RELATION_OPERATOR_ROWS = MAX_RELATION_COLUMNS * 7
+MAX_RELATION_AGGREGATE_ROWS = MAX_RELATION_COLUMNS * 5
 RELATION_KINDS = {"table": "r", "partitioned_table": "p", "view": "v", "materialized_view": "m", "foreign_table": "f"}
 
 
@@ -296,7 +299,7 @@ class PostgresCatalogMixin:
                 LEFT JOIN pg_catalog.pg_range rng ON rng.rngtypid = base.oid
                  WHERE a.attrelid = %s AND a.attnum > 0 AND NOT a.attisdropped
                    ORDER BY a.attnum
-        """, (relation_row["live_oid"], relation_row["live_oid"]))
+        """, (relation_row["live_oid"], relation_row["live_oid"]), max_rows=MAX_RELATION_COLUMNS)
         operator_rows = self._execute_rows(connection, """
                 /* structured_query_operators */
                 WITH RECURSIVE type_chain AS (
@@ -406,7 +409,7 @@ class PostgresCatalogMixin:
                         COALESCE(selected.support_versions, '') || ':' || selected.cast_identity) AS catalog_version
                 FROM selected JOIN pg_catalog.pg_namespace namespace ON namespace.oid = selected.oprnamespace
                 ORDER BY selected.attnum, selected.logical_name
-        """, (relation_row["live_oid"],))
+        """, (relation_row["live_oid"],), max_rows=MAX_RELATION_OPERATOR_ROWS)
         aggregate_rows = self._execute_rows(connection, """
                 /* structured_query_aggregates */
                 WITH RECURSIVE type_chain AS (
@@ -481,7 +484,7 @@ class PostgresCatalogMixin:
                 JOIN pg_catalog.pg_type result_type ON result_type.oid = selected.prorettype
                 JOIN pg_catalog.pg_type input_type ON input_type.oid = selected.input_type_oid
                 ORDER BY selected.attnum, selected.logical_name
-        """, (relation_row["live_oid"],))
+        """, (relation_row["live_oid"],), max_rows=MAX_RELATION_AGGREGATE_ROWS)
         operators_by_ordinal: dict[int, list[dict[str, Any]]] = {}
         aggregates_by_ordinal: dict[int, list[dict[str, Any]]] = {}
         for row in operator_rows:
@@ -536,6 +539,18 @@ class PostgresCatalogMixin:
             descriptor["snapshotVersion"] = 2
         descriptor["fingerprint"] = canonical_fingerprint({
             **descriptor, "columns": fingerprint_columns,
+            "catalogKind": relation_row["catalog_kind"],
+            "viewDefinition": relation_row.get("view_definition"),
+        })
+        legacy_columns = [
+            {key: column[key] for key in ("name", "type", "nullable", "ordinal")}
+            for column in fingerprint_columns
+        ]
+        legacy_kind = "table" if descriptor["kind"] == "partitioned_table" else descriptor["kind"]
+        descriptor["legacyFingerprint"] = canonical_fingerprint({
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation")},
+            "kind": legacy_kind,
+            "columns": legacy_columns,
             "catalogKind": relation_row["catalog_kind"],
             "viewDefinition": relation_row.get("view_definition"),
         })

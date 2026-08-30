@@ -23,3 +23,22 @@ migration_history.json
 
 # Saved schemas are runtime data unless intentionally added as examples.
 schemas/
+
+# Database exports, local clusters, release staging, and application state.
+*.dump
+*.backup
+*.bak
+*.sqlite
+*.sqlite3
+*.db
+*.tar
+*.tgz
+*.gz
+*.zip
+pgdata/
+postgres-data/
+dashboards/
+credentials/
+backups/
+release/
+.dev-test/

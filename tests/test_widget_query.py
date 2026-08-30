@@ -1,6 +1,8 @@
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,12 +71,18 @@ class WidgetQueryTests(unittest.TestCase):
         value["measures"] = [value["measures"][1]]
         value["sort"] = [{"targetKind": "measure", "targetId": "measure_revenue", "direction": "desc", "nulls": "last"}]
         series = normalize_temporal_series(value, columns)
-        manifest = compile_temporal_series_manifest({"namespace": "bookstore", "relation": "orders"}, series, quote_identifier, columns)
+        manifest = compile_temporal_series_manifest(
+            {"namespace": "bookstore", "relation": "orders"}, series, quote_identifier, columns,
+            source_time_zone="America/New_York",
+        )
         self.assertIn('"pg_catalog"."min"(("ordered_at"::"pg_catalog"."timestamp"))', manifest["sql"])
         self.assertIn('OPERATOR("pg_catalog".=) %s::"pg_catalog"."text" OR', manifest["sql"])
+        self.assertNotIn("America/New_York", manifest["sql"])
+        self.assertEqual(manifest["parameters"].count("America/New_York"), 3)
         window = compile_temporal_series_window(
             {"namespace": "bookstore", "relation": "orders"}, series, quote_identifier,
             86400, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 32, columns,
+            source_time_zone="America/New_York",
         )
         self.assertIn("extract(epoch FROM", window["sql"])
         self.assertIn("GROUP BY\n    1", window["sql"])
@@ -82,11 +90,23 @@ class WidgetQueryTests(unittest.TestCase):
         self.assertIn(">= %s", window["sql"])
         self.assertIn("< %s", window["sql"])
         self.assertNotIn("__schemer_m0\" DESC", window["sql"])
-        self.assertEqual(window["parameters"], [86400, 86400, "paperback", "hardcover", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 33])
+        self.assertEqual(window["parameters"], [
+            "America/New_York", 86400, 86400, "paperback", "hardcover",
+            "America/New_York", "2026-01-01T00:00:00Z",
+            "America/New_York", "2026-02-01T00:00:00Z", 33,
+        ])
 
         value["dimensions"] = [{"id": "dimension_publisher", "label": "Publisher", "column": "publisher"}]
         with self.assertRaisesRegex(QueryValidationError, "date or timestamp"):
             normalize_temporal_series(value, columns)
+
+    def test_iana_source_zone_preserves_dst_offsets_before_utc_bucketing(self):
+        source_zone = ZoneInfo("America/New_York")
+        winter = datetime(2026, 1, 15, 12, tzinfo=source_zone)
+        summer = datetime(2026, 7, 15, 12, tzinfo=source_zone)
+
+        self.assertEqual(winter.utcoffset().total_seconds(), -5 * 3600)
+        self.assertEqual(summer.utcoffset().total_seconds(), -4 * 3600)
 
     def test_normalizes_and_compiles_deterministically(self):
         normalized = normalize_query(query(), COLUMNS)

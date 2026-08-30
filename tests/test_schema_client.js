@@ -8,8 +8,14 @@ const source = fs.readFileSync(path.join(root, "src/schemii/web/app.js"), "utf8"
 assert.doesNotMatch(source, /fetch\([^\n]*\/api\/schemas|fetch\(`\/api\/schemas/, "schema requests must not bypass the authenticated client");
 
 const reload = source.slice(source.indexOf("async function reloadActiveSchemaRecord"), source.indexOf("function standaloneSqlTarget"));
-assert.match(reload, /sharedSessionClient\.json\(`\/api\/schemas\/\$\{encodeURIComponent\(activeSchemaId\)\}`/, "active schema refresh must use the exact-resource session client route");
-assert.match(reload, /createApiPathPredicate\("\/api\/schemas"\)/, "active schema refresh must allow only schema resource paths");
+const fetchRecord = source.slice(source.indexOf("async function fetchSchemaRecord"), source.indexOf("function activateSchemaRecord"));
+assert.match(fetchRecord, /const path = `\/api\/schemas\/\$\{encodeURIComponent\(schemaId\)\}`[\s\S]*sharedSessionClient\.json\(path/, "schema refresh must use an encoded exact-resource session route");
+assert.match(fetchRecord, /allowPath: candidate => candidate === path/, "schema refresh must allow only its exact resource path");
+assert.match(fetchRecord, /record\.id !== schemaId[\s\S]*invalid_api_response/, "schema refresh must reject a response for a different saved design");
+assert.match(reload, /const schemaId = activeSchemaId[\s\S]*fetchSchemaRecord\(schemaId\)[\s\S]*activeSchemaId !== schemaId[\s\S]*activateSchemaRecord\(record\)/, "active schema refresh must abandon stale responses before authoritative activation");
+
+const activation = source.slice(source.indexOf("function activateSchemaRecord"), source.indexOf("async function reloadActiveSchemaRecord"));
+assert.match(activation, /const nextSchema = migrateSchema\(clone\(record\.schema\)\)[\s\S]*activeSchemaId = record\.id[\s\S]*schema = nextSchema[\s\S]*resetSchemaSession\(\)[\s\S]*render\(\)/, "authoritative records must be validated and migrated before replacing active schema state");
 
 const save = source.slice(source.indexOf("async function putRecordFile"), source.indexOf("function saveRecordFile"));
 assert.match(save, /sharedSessionClient\.json\(path/, "schema saves must use the session client");
@@ -26,10 +32,11 @@ assert.match(deletion, /sharedSessionClient\.json\(path, \{ method: "DELETE", bo
 assert.match(deletion, /allowPath: candidate => candidate === path/, "schema deletion must allow only its exact encoded path");
 
 const quarantine = source.slice(source.indexOf("function reportSaveError"), source.indexOf("function captureHistoryState"));
-assert.match(quarantine, /schemaSaveQuarantine = \{ schemaId: activeSchemaId, schema: clone\(schema\)/, "a schema conflict must preserve an immutable local recovery snapshot");
+assert.match(quarantine, /schemaSaveQuarantine = \{[\s\S]*schemaId: activeSchemaId,[\s\S]*schema: schemaForStorage\(schema, view, \{ views: \{ viewport: viewsView, objects: viewsObjects \} \}\)/, "a schema conflict must preserve one complete local semantic and layout projection");
 assert.match(quarantine, /clearTimeout\(saveTimer\)[\s\S]*schema-conflict-banner/, "a schema conflict must freeze scheduled autosave and expose recovery");
 assert.match(quarantine, /schemaSaveQuarantine\?\.schemaId === schemaId[\s\S]*schema_save_quarantined/, "queued saves must not replay a stale schema after quarantine");
-assert.match(source, /export-conflicted-schema[\s\S]*schemaForStorage\(schemaSaveQuarantine\.schema[\s\S]*refresh-conflicted-schema[\s\S]*validateSchemaRecord/, "quarantined local edits must remain exportable until explicit authoritative refresh");
+assert.match(source, /export-conflicted-schema[\s\S]*clone\(schemaSaveQuarantine\.schema\)[\s\S]*refresh-conflicted-schema[\s\S]*await saveQueue\.catch[\s\S]*fetchSchemaRecord\(schemaId\)[\s\S]*activateSchemaRecord\(record\)[\s\S]*schemaSaveQuarantine = null/, "quarantined local edits must remain immutable and exportable until authoritative activation succeeds");
+assert.doesNotMatch(source, /openSavedSchema/, "conflict recovery must not call a nonexistent legacy schema opener");
 
 const clientDeclaration = source.indexOf("const sharedSessionClient =");
 assert.ok(clientDeclaration > source.indexOf("async function putRecordFile"), "schema functions may be declared before the session client");

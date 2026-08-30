@@ -39,7 +39,32 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("Do not assume port 8080", setup)
         self.assertIn("schemii-metadata-postgres", readme)
         self.assertIn("metadata-migrate", setup)
-        self.assertIn("SCHEMII_METADATA_HOST_PORT", setup)
+        self.assertIn("metadata PostgreSQL remains private", setup)
+        self.assertIn("bash ./start.sh schemer", setup)
+        self.assertIn("instance-restore", readme)
+        self.assertIn("legacy-volume-adopt ADOPT:schemii", readme)
+        self.assertIn("legacy-volume-adoptions.v1", readme)
+        self.assertIn("must never be copied, edited, or automatically replaced", setup)
+        self.assertIn("docs/RELEASE_CHECKLIST.md", readme)
+        self.assertIn("application-linux-amd64.tar.gz", readme)
+        self.assertIn("gh attestation verify", readme)
+        self.assertIn("Full Disaster Recovery Order", readme)
+        self.assertIn("target-postgres.dump", readme)
+        self.assertIn('docker exec -i "$postgres_id" pg_restore --list < disaster-recovery/target-postgres.dump', readme)
+        self.assertIn("schemii-opencode-state.tar.gz", readme)
+        self.assertIn('SCHEMII_CREDENTIAL_DIR="$SCHEMII_CREDENTIAL_DIR"', readme)
+        self.assertIn('SCHEMII_METADATA_IMAGE="$SCHEMII_METADATA_IMAGE"', readme)
+        self.assertIn('SCHEMII_OPENCODE_IMAGE="$SCHEMII_OPENCODE_IMAGE"', readme)
+        self.assertIn("up --no-build -d postgres", readme)
+        self.assertIn("rm -f disaster-recovery/SHA256SUMS", readme)
+        self.assertIn("export SCHEMII_INSTANCE='<exact-instance>'", readme)
+        self.assertIn("git fetch --no-tags origin", readme)
+        self.assertIn("starts the complete private Compose stack with `--no-build`", readme)
+        self.assertIn("SCHEMII_PUBLIC_ORIGINS", readme)
+        self.assertIn("SCHEMER_PUBLIC_ORIGINS", readme)
+        self.assertNotIn("git pull --ff-only", readme)
+        self.assertNotIn("For a ZIP installation", readme)
+        self.assertIn("protected GitHub `production-release` environment", (ROOT / "docs/RELEASE_CHECKLIST.md").read_text(encoding="utf-8"))
         self.assertIn("no model request is made until the user sends", assistant)
         for stale in (
             "The default trial starts only Schemii",
@@ -60,6 +85,34 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("no-argument launcher uses `ai-docker-db`", help_skill)
         self.assertIn("For a local-only design", layout)
         self.assertIn("Skip migration preview for a confirmed local-only design", layout)
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        setup = (ROOT / "docs/AI_AGENT_SETUP.md").read_text(encoding="utf-8")
+        guide = (ROOT / "agent_guide.md").read_text(encoding="utf-8")
+        for required in (
+            "machine-local reverse proxy", "SCHEMII_PUBLIC_ORIGINS", "SCHEMER_PUBLIC_ORIGINS",
+            "X-Forwarded-Host", "X-Forwarded-Proto", "not application user authorization",
+        ):
+            self.assertIn(required, readme)
+        self.assertIn("machine-local reverse proxy", setup)
+        self.assertIn("publish applications only on loopback", guide)
+
+    def test_schemer_docs_use_order_only_v3_and_precise_source_consistency_terms(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        assistant = (ROOT / "docs/AI_ASSISTANT.md").read_text(encoding="utf-8")
+        audit = (ROOT / "docs/SHARED_RESOURCES_AUDIT.md").read_text(encoding="utf-8")
+
+        self.assertIn("the cross-system linearization boundary", readme)
+        self.assertIn("authoritative at the guarded repeatable-read snapshot", readme)
+        self.assertIn("no response claims the catalog remains frozen", readme)
+        self.assertIn("Preview's `deferredWidgetIds` is the sole continuation list", readme)
+        self.assertIn("order safety", assistant)
+        self.assertIn("uniform responsive version-3 cards", assistant.lower())
+        self.assertIn("uniform responsive version-3 cards", audit)
+        self.assertNotIn("layout safety", assistant)
+        self.assertNotIn("desktop/mobile layout", assistant)
+        self.assertNotIn("freeform widget", audit)
+        self.assertNotIn("dashboard layout metadata", audit)
 
 
 if __name__ == "__main__":

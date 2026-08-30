@@ -9,6 +9,7 @@ from typing import Any
 
 from .metadata import MetadataStore, MetadataStoreError
 from .ai_policy import DEFAULT_AGENT_ID, LEGACY_CAPABILITIES, capability_unavailable, effective_chat_snapshot
+from .ai_tool_contracts import action_authority
 
 
 CAPABILITIES = ("schema", "structured", "write", "rawread", "rawwrite")
@@ -24,7 +25,9 @@ class SchemiiMetadataAuthority:
 
     application_id = "schemii"
     resource_kind = "schema"
+    resource_id_field = "schemaId"
     query_action_type = "schema_read_query"
+    retry_metadata_commit_uncertain = False
 
     def __init__(self, store: MetadataStore, *, worker_id: str, lease_seconds: int = 90):
         self.store = store
@@ -35,20 +38,25 @@ class SchemiiMetadataAuthority:
         return self.store.health()
 
     def get_settings(self) -> dict[str, Any]:
-        return self.store.get_agent_settings("schemii", DEFAULT_AGENT_ID)
+        return self.store.get_agent_settings(self.application_id, DEFAULT_AGENT_ID)
 
     def update_settings(self, body: Any) -> dict[str, Any]:
         if not isinstance(body, dict) or set(body) != {"expectedRevision", "policy"}:
             raise MetadataStoreError("invalid_metadata", "AI settings request fields are invalid", status=400)
         return self.store.update_agent_settings(
-            "schemii", DEFAULT_AGENT_ID, body["expectedRevision"], body["policy"],
+            self.application_id, DEFAULT_AGENT_ID, body["expectedRevision"], body["policy"],
         )
 
-    def provision_chat(self, schema_id: str) -> dict[str, Any]:
-        return self.store.provision_chat("schemii", "schema", schema_id)
+    def provision_chat(self, resource_id: str) -> dict[str, Any]:
+        return self.store.provision_chat(self.application_id, self.resource_kind, resource_id)
 
     def bind_external_session(self, chat_id: str, external_session_id: str, title: str) -> dict[str, Any]:
-        return self.store.bind_chat_external_session(chat_id, external_session_id, title)
+        try:
+            return self.store.bind_chat_external_session(chat_id, external_session_id, title)
+        except MetadataStoreError as error:
+            if not self.retry_metadata_commit_uncertain or error.code != "metadata_commit_uncertain":
+                raise
+            return self.store.bind_chat_external_session(chat_id, external_session_id, title)
 
     def activate_chat(
         self,
@@ -84,10 +92,7 @@ class SchemiiMetadataAuthority:
         return self.store.fail_chat(chat_id, reason)
 
     def get_chat(self, chat_id: str) -> dict[str, Any]:
-        chat = self.store.get_chat(chat_id)
-        if chat["state"] != "active":
-            raise MetadataStoreError("chat_inactive", "AI chat is not active", status=409)
-        current = self.store.get_current_policy(chat_id)
+        chat, current = self._active_chat_records(chat_id)
         policy = current["policy"]
         grants = {
             item["capability"]: {"policyRevision": item["policyRevision"]}
@@ -101,24 +106,10 @@ class SchemiiMetadataAuthority:
         else:
             enabled = [item for item in CAPABILITIES if item in policy["capabilities"]]
             approvals = dict(policy["approvals"])
-        return {
-            "id": chat["chatId"],
-            "schemaId": chat["resourceId"],
-            "externalSessionId": chat["externalSessionId"],
-            "title": chat.get("conversationTitle") or chat["displayTitle"],
-            "contextTitle": chat["displayTitle"],
-            "conversationTitle": chat.get("conversationTitle"),
-            "target": {} if target is None else {
-                "profileId": target["profileId"],
-                "database": target["databaseName"],
-                "namespace": target["namespaceName"],
-                "profileFingerprint": target["profileFingerprint"],
-            },
+        return self._chat_envelope(chat, current) | {
             "capabilities": enabled,
             "approvals": approvals,
-            "policyRevision": current["revision"],
             "policySnapshot": copy.deepcopy(policy) if policy.get("version") == 2 else None,
-            "agentPolicyRevisionId": current.get("agentPolicyRevisionId"),
             "grants": grants,
         }
 
@@ -129,6 +120,33 @@ class SchemiiMetadataAuthority:
     def rename_conversation(self, chat_id: str, title: str) -> dict[str, Any]:
         self.store.set_chat_conversation_title(chat_id, title, overwrite=True)
         return self.get_chat(chat_id)
+
+    def _active_chat_records(self, chat_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        chat = self.store.get_chat(chat_id)
+        if chat["state"] != "active":
+            raise MetadataStoreError("chat_inactive", "AI chat is not active", status=409)
+        return chat, self.store.get_current_policy(chat_id)
+
+    def _chat_envelope(
+        self, chat: dict[str, Any], current: dict[str, Any],
+    ) -> dict[str, Any]:
+        target = chat["target"]
+        return {
+            "id": chat["chatId"],
+            self.resource_id_field: chat["resourceId"],
+            "externalSessionId": chat["externalSessionId"],
+            "title": chat.get("conversationTitle") or chat["displayTitle"],
+            "contextTitle": chat["displayTitle"],
+            "conversationTitle": chat.get("conversationTitle"),
+            "target": {} if target is None else {
+                "profileId": target["profileId"],
+                "database": target["databaseName"],
+                "namespace": target["namespaceName"],
+                "profileFingerprint": target["profileFingerprint"],
+            },
+            "policyRevision": current["revision"],
+            "agentPolicyRevisionId": current.get("agentPolicyRevisionId"),
+        }
 
     def list_chats(self, schema_id: str, target: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         records = self.store.list_chats(resource_kind="schema", resource_id=schema_id, states=["active"])
@@ -252,7 +270,16 @@ class SchemiiMetadataAuthority:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         proposal = self.proposal(proposal_id, chat_id)
         policy = proposal["policyBinding"]
-        mode = policy["effectiveMode"]
+        try:
+            _, mode = action_authority(
+                self.application_id, proposal["action"],
+                policy.get("canonicalCapability", policy.get("capability")), policy.get("effectiveMode"),
+                origin=policy.get("origin"),
+            )
+        except (KeyError, ValueError) as exc:
+            raise MetadataStoreError(
+                "authority_binding_mismatch", "Proposal action authority does not match the server contract", status=409,
+            ) from exc
         approved = False
         if mode != "automatic":
             expected_mode = "once_per_chat" if mode == "once_per_chat" else "every_action"
@@ -265,6 +292,7 @@ class SchemiiMetadataAuthority:
             proposal_id,
             expected_policy_revision=policy_revision,
             approved=approved,
+            required_effective_mode=mode,
             worker_id=self.worker_id,
             lease_seconds=self.lease_seconds,
         )

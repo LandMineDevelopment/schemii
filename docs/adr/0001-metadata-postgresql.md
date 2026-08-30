@@ -16,7 +16,7 @@ Use a dedicated private PostgreSQL service and volume for server metadata.
 - Default database: `schemii_metadata`.
 - Distinct no-login owner, migration role, Schemii runtime role, and Schemer runtime role.
 - No host publication in bridge modes.
-- Loopback-only publication in host-network modes.
+- No metadata host publication; Linux host-PostgreSQL modes use a separate private Unix-socket relay.
 - Packaged checksummed SQL migrations guarded by a PostgreSQL advisory lock.
 - Application readiness requires metadata connectivity and current schema version.
 - Authority-dependent workflows fail closed with `metadata_unavailable`; no JSON or in-memory fallback.
@@ -36,7 +36,7 @@ Costs:
 
 - One additional PostgreSQL service and volume in local deployments.
 - Migration, credentials, readiness, backup, retention, and outage behavior become explicit operational responsibilities.
-- Host-network launch modes need an instance-specific loopback metadata port.
+- Linux host-PostgreSQL modes require a private Unix-socket relay, but metadata PostgreSQL remains on the private dependency network and needs no host port.
 
 ## Rejected alternatives
 

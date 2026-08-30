@@ -5,6 +5,8 @@ services:
         condition: service_healthy
       example-seed:
         condition: service_completed_successfully
+      example-profile-init:
+        condition: service_completed_successfully
     environment:
       SCHEMII_EXAMPLES: all
       SCHEMII_EXAMPLE_POSTGRES_HOST: postgres
@@ -12,9 +14,10 @@ services:
       SCHEMII_EXAMPLE_POSTGRES_DB: ${SCHEMII_POSTGRES_DB:-schemii}
       SCHEMII_EXAMPLE_POSTGRES_USER: ${SCHEMII_POSTGRES_USER:-schemii}
       SCHEMII_EXAMPLE_POSTGRES_PASSWORD: ${SCHEMII_POSTGRES_PASSWORD:-schemii-local}
+      SCHEMII_EXAMPLE_PROFILE_OWNER: initializer
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     environment:
       POSTGRES_DB: ${SCHEMII_POSTGRES_DB:-schemii}
       POSTGRES_USER: ${SCHEMII_POSTGRES_USER:-schemii}
@@ -29,7 +32,7 @@ services:
     restart: unless-stopped
 
   example-seed:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,6 +51,36 @@ services:
       - /tmp:size=8m,mode=1777
     cap_drop:
       - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  example-profile-init:
+    image: ${SCHEMII_IMAGE:-schemii:local}
+    command: ["python", "-m", "schemii.example_profile_init"]
+    depends_on:
+      example-seed:
+        condition: service_completed_successfully
+    environment:
+      SCHEMII_CONFIG_DIR: /data/config
+      SCHEMII_EXAMPLE_POSTGRES_HOST: postgres
+      SCHEMII_EXAMPLE_POSTGRES_PORT: 5432
+      SCHEMII_EXAMPLE_POSTGRES_DB: ${SCHEMII_POSTGRES_DB:-schemii}
+      SCHEMII_EXAMPLE_POSTGRES_USER: ${SCHEMII_POSTGRES_USER:-schemii}
+      SCHEMII_EXAMPLE_POSTGRES_PASSWORD: ${SCHEMII_POSTGRES_PASSWORD:-schemii-local}
+    volumes:
+      - schemii-config:/data/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETPCAP
+      - SETUID
     security_opt:
       - no-new-privileges:true
     restart: "no"

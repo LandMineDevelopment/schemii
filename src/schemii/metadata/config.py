@@ -8,6 +8,15 @@ from typing import Mapping
 
 
 _APPLICATION_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_ROLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")
+_APPLICATION_ID = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+
+METADATA_OWNER_ROLE = "schemii_metadata_owner"
+METADATA_ADMIN_OWNER_ROLE = "schemii_metadata_bootstrap"
+METADATA_RUNTIME_ROLES = {
+    "schemii": "schemii_metadata_schemii",
+    "schemer": "schemii_metadata_schemer",
+}
 
 
 @dataclass(frozen=True)
@@ -17,6 +26,10 @@ class MetadataConfig:
     connect_timeout: int = 5
     max_json_bytes: int = 1024 * 1024
     password_file: str = ""
+    expected_application: str = ""
+    expected_role: str = ""
+    expected_owner: str = ""
+    expected_admin_owner: str = ""
 
     def __post_init__(self) -> None:
         dsn = self.dsn.strip() if isinstance(self.dsn, str) else ""
@@ -33,6 +46,14 @@ class MetadataConfig:
         object.__setattr__(self, "dsn", dsn)
         if self.password_file and not Path(self.password_file).is_absolute():
             raise ValueError("metadata password_file must be absolute")
+        if self.expected_application and not _APPLICATION_ID.fullmatch(self.expected_application):
+            raise ValueError("metadata expected_application is invalid")
+        if self.expected_role and not _ROLE_NAME.fullmatch(self.expected_role):
+            raise ValueError("metadata expected_role is invalid")
+        if self.expected_owner and not _ROLE_NAME.fullmatch(self.expected_owner):
+            raise ValueError("metadata expected_owner is invalid")
+        if self.expected_admin_owner and not _ROLE_NAME.fullmatch(self.expected_admin_owner):
+            raise ValueError("metadata expected_admin_owner is invalid")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "MetadataConfig":
@@ -49,4 +70,28 @@ class MetadataConfig:
             application_name=values.get("SCHEMII_METADATA_APPLICATION_NAME", "schemii-metadata"),
             connect_timeout=timeout,
             max_json_bytes=max_json,
+            expected_application=values.get("SCHEMII_METADATA_EXPECTED_APPLICATION", ""),
+            expected_role=values.get("SCHEMII_METADATA_EXPECTED_ROLE", ""),
+            expected_owner=values.get("SCHEMII_METADATA_EXPECTED_OWNER", ""),
+            expected_admin_owner=values.get("SCHEMII_METADATA_EXPECTED_ADMIN_OWNER", ""),
+        )
+
+    @classmethod
+    def from_runtime_env(
+        cls, application: str, env: Mapping[str, str] | None = None,
+    ) -> "MetadataConfig":
+        role = METADATA_RUNTIME_ROLES.get(application)
+        if role is None:
+            raise ValueError("metadata runtime application is invalid")
+        configured = cls.from_env(env)
+        return cls(
+            dsn=configured.dsn,
+            application_name=application,
+            connect_timeout=configured.connect_timeout,
+            max_json_bytes=configured.max_json_bytes,
+            password_file=configured.password_file,
+            expected_application=application,
+            expected_role=role,
+            expected_owner=METADATA_OWNER_ROLE,
+            expected_admin_owner=METADATA_ADMIN_OWNER_ROLE,
         )

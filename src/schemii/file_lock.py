@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import errno
 import os
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import Any, BinaryIO, Callable, Hashable, Iterator
 
 if os.name == "nt":  # pragma: no cover - imported on Windows.
     import msvcrt
@@ -60,3 +61,63 @@ def exclusive_file_lock(path: str | os.PathLike[str], *, mode: int = 0o600) -> I
             yield
         finally:
             _unlock(handle)
+
+
+class RefCountedKeyedFileGuard:
+    """Keyed reentrant thread guards with one outer cross-process file lock."""
+
+    def __init__(self, lock_path: Callable[[Hashable], str | os.PathLike[str]]):
+        self._lock_path = lock_path
+        self._registry_lock = threading.Lock()
+        self._entries: dict[Hashable, dict[str, Any]] = {}
+        self._local = threading.local()
+
+    @contextmanager
+    def thread(self, key: Hashable) -> Iterator[None]:
+        lock = self._retain(key)
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            self._release(key, lock)
+
+    @contextmanager
+    def exclusive(self, key: Hashable) -> Iterator[None]:
+        lock = self._retain(key)
+        lock.acquire()
+        depths = getattr(self._local, "depths", {})
+        depth = depths.get(key, 0)
+        depths[key] = depth + 1
+        self._local.depths = depths
+        try:
+            if depth:
+                yield
+            else:
+                with exclusive_file_lock(self._lock_path(key)):
+                    yield
+        finally:
+            if depth:
+                depths[key] = depth
+            else:
+                depths.pop(key, None)
+            lock.release()
+            self._release(key, lock)
+
+    def _retain(self, key: Hashable) -> threading.RLock:
+        with self._registry_lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = {"lock": threading.RLock(), "references": 0}
+                self._entries[key] = entry
+            entry["references"] += 1
+            return entry["lock"]
+
+    def _release(self, key: Hashable, lock: threading.RLock) -> None:
+        with self._registry_lock:
+            entry = self._entries.get(key)
+            if entry is None or entry["lock"] is not lock:
+                return
+            entry["references"] -= 1
+            if entry["references"] == 0:
+                del self._entries[key]

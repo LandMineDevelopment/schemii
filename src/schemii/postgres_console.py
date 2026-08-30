@@ -5,12 +5,12 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from .postgres_common import NotFoundError, PostgresServiceError, ValidationError, narrow_statement_timeout, postgres_error_details, quote_identifier
 from .result_limits import ResultLimitError, ResultLimiter, ResultLimits, json_utf8_size
+from .retained_resources import RetainedResourceRegistry, utc_expiry
 
 
 MAX_STATEMENTS = 100
@@ -32,10 +32,8 @@ MAX_SPOOL_BYTES = 8 * 1024 * 1024
 RESULT_TTL_SECONDS = 300
 MAX_RESULT_TOMBSTONES = 256
 MAX_TRANSACTION_TOMBSTONES = 256
-
-
-def _utc_expiry(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+MAX_PENDING_CANCELLATIONS = 256
+PENDING_CANCELLATION_TTL_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -184,23 +182,43 @@ def _canonical_uuid(value: Any, label: str) -> str:
 
 
 class ConsoleExecutionRegistry:
-    def __init__(self, maximum_active: int = MAX_ACTIVE_EXECUTIONS):
+    def __init__(self, maximum_active: int = MAX_ACTIVE_EXECUTIONS, *,
+                 maximum_pending_cancellations: int = MAX_PENDING_CANCELLATIONS,
+                 clock: Any = time.monotonic):
         self._maximum_active = maximum_active
+        self._maximum_pending_cancellations = maximum_pending_cancellations
+        self._clock = clock
         self._lock = threading.RLock()
         self._entries: dict[str, dict[str, Any]] = {}
+        self._pending_cancellations: dict[str, dict[str, Any]] = {}
 
-    def reserve(self, execution_id: str, console_id: str, profile_id: str, binding: str, server_id: str) -> None:
+    def _expire_pending_locked(self) -> None:
+        now = self._clock()
+        for execution_id in [
+            key for key, entry in self._pending_cancellations.items() if entry["expiresAt"] <= now
+        ]:
+            self._pending_cancellations.pop(execution_id, None)
+
+    def reserve(self, execution_id: str, console_id: str, profile_id: str, binding: str, server_id: str) -> bool:
         with self._lock:
+            self._expire_pending_locked()
             if execution_id in self._entries:
                 raise PostgresServiceError(409, "execution_conflict", "The execution ID is already active")
+            pending = self._pending_cancellations.get(execution_id)
+            owner = (profile_id, binding, server_id)
+            if pending is not None and pending["owner"] != owner:
+                raise PostgresServiceError(409, "execution_conflict", "The execution ID has a cancellation reservation for another owner")
             if len(self._entries) >= self._maximum_active or any(
                 entry["consoleId"] == console_id for entry in self._entries.values()
             ):
                 raise PostgresServiceError(429, "execution_busy", "Console execution capacity is busy")
+            cancel_requested = pending is not None
+            self._pending_cancellations.pop(execution_id, None)
             self._entries[execution_id] = {
                 "consoleId": console_id, "profileId": profile_id, "binding": binding,
-                "serverId": server_id, "connection": None, "cancelRequested": False,
+                "serverId": server_id, "connection": None, "cancelRequested": cancel_requested,
             }
+            return cancel_requested
 
     def attach(self, execution_id: str, connection: Any) -> bool:
         with self._lock:
@@ -211,10 +229,29 @@ class ConsoleExecutionRegistry:
             connection.cancel()
         return requested
 
-    def cancel(self, execution_id: str, profile_id: str, binding: str, server_id: str) -> dict[str, bool]:
+    def cancel(self, execution_id: str, profile_id: str, binding: str, server_id: str,
+               *, reserve_missing: bool = True) -> dict[str, bool]:
         with self._lock:
+            self._expire_pending_locked()
             entry = self._entries.get(execution_id)
-            if entry is None or (entry["profileId"], entry["binding"], entry["serverId"]) != (profile_id, binding, server_id):
+            owner = (profile_id, binding, server_id)
+            if entry is None and not reserve_missing:
+                raise PostgresServiceError(404, "execution_not_found", "Console execution was not found")
+            if entry is None:
+                pending = self._pending_cancellations.get(execution_id)
+                if pending is not None and pending["owner"] != owner:
+                    raise PostgresServiceError(404, "execution_not_found", "Console execution was not found")
+                if pending is None and len(self._pending_cancellations) >= self._maximum_pending_cancellations:
+                    raise PostgresServiceError(
+                        429, "console_cancellation_capacity_exhausted",
+                        "Console pre-admission cancellation capacity is exhausted",
+                        {"limitSource": "application", "maximumPendingCancellations": self._maximum_pending_cancellations},
+                    )
+                self._pending_cancellations[execution_id] = {
+                    "owner": owner, "expiresAt": self._clock() + PENDING_CANCELLATION_TTL_SECONDS,
+                }
+                return {"requested": True, "reserved": True}
+            if (entry["profileId"], entry["binding"], entry["serverId"]) != owner:
                 raise PostgresServiceError(404, "execution_not_found", "Console execution was not found")
             entry["cancelRequested"] = True
             connection = entry["connection"]
@@ -237,6 +274,7 @@ class ConsoleExecutionRegistry:
     def close(self) -> None:
         with self._lock:
             entries = list(self._entries.values())
+            self._pending_cancellations.clear()
             for entry in entries:
                 entry["cancelRequested"] = True
         for entry in entries:
@@ -295,7 +333,7 @@ class ExplicitTransactionRegistry:
     def _tombstone(self, transaction_id: str, entry: dict[str, Any], state: str) -> None:
         self._tombstones[transaction_id] = {
             "owner": {key: entry[key] for key in ("application", "binding", "serverId", "profileId", "profileFingerprint")},
-            "state": state, "closedAt": _utc_expiry(self.service._clock()),
+            "state": state, "closedAt": utc_expiry(self.service._clock()),
         }
         while len(self._tombstones) > MAX_TRANSACTION_TOMBSTONES:
             self._tombstones.pop(next(iter(self._tombstones)))
@@ -378,71 +416,21 @@ class ExplicitTransactionRegistry:
             self._sweeper.join(timeout=1)
 
 
-class ConsoleResultRegistry:
+class ConsoleResultRegistry(RetainedResourceRegistry):
     """Owns transient Console rows without ever retaining or replaying SQL."""
 
     def __init__(self, console: Any, maximum_active: int = MAX_ACTIVE_RESULTS,
                  ttl_seconds: int = RESULT_TTL_SECONDS, clock: Any = time.time):
         self.console = console
-        self.maximum_active = maximum_active
-        self.ttl_seconds = ttl_seconds
-        self.clock = clock
-        self._lock = threading.RLock()
-        self._entries: dict[str, dict[str, Any]] = {}
-        self._tombstones: dict[str, dict[str, Any]] = {}
-        self._stopping = threading.Event()
-        self._sweeper = threading.Thread(target=self._sweep_loop, name="console-result-expiry", daemon=True)
-        self._sweeper.start()
-
-    @staticmethod
-    def _matches(entry: dict[str, Any], owner: dict[str, Any]) -> bool:
-        return all(entry["owner"].get(key) == value for key, value in owner.items())
-
-    def _sweep_loop(self) -> None:
-        while not self._stopping.wait(min(30, max(1, self.ttl_seconds))):
-            self.expire()
-
-    def _tombstone(self, entry: dict[str, Any], event: str) -> None:
-        self._tombstones[entry["resultId"]] = {
-            "owner": entry["owner"], "state": event,
-            "closedAt": _utc_expiry(self.clock()),
-        }
-        while len(self._tombstones) > MAX_RESULT_TOMBSTONES:
-            self._tombstones.pop(next(iter(self._tombstones)))
-
-    @staticmethod
-    def _close_entry(entry: dict[str, Any]) -> None:
-        close = getattr(entry.get("cursor"), "close", None)
-        if close:
-            try:
-                close()
-            except Exception:
-                pass
-        cleanup = entry.get("cleanup")
-        if cleanup:
-            cleanup()
-
-    def _remove(self, result_id: str, event: str) -> dict[str, Any] | None:
-        with self._lock:
-            entry = self._entries.pop(result_id, None)
-            if entry is not None:
-                self._tombstone(entry, event)
-        if entry is not None:
-            self._close_entry(entry)
-        return entry
-
-    def expire(self) -> None:
-        now = self.clock()
-        with self._lock:
-            expired = [entry for entry in self._entries.values() if entry["expiresAtEpoch"] <= now]
-        for entry in expired:
-            lock = entry["operationLock"]
-            if not lock.acquire(blocking=False):
-                continue
-            try:
-                self._remove(entry["resultId"], "expired")
-            finally:
-                lock.release()
+        super().__init__(
+            label="Console result", maximum_active=maximum_active, ttl_seconds=ttl_seconds,
+            clock=clock, maximum_tombstones=MAX_RESULT_TOMBSTONES,
+            capacity_code="console_result_capacity_exhausted",
+            capacity_message="Console result retention capacity is exhausted; close or exhaust another result",
+            stopping_code="console_shutting_down",
+            stopping_message="Console result retention is shutting down",
+            sweeper_name="console-result-expiry",
+        )
 
     def add(self, *, owner: dict[str, Any], columns: list[dict[str, str]], page_size: int,
             retention: str, cursor: Any = None, rows: list[list[Any]] | None = None,
@@ -451,14 +439,6 @@ class ConsoleResultRegistry:
             response_byte_limit: int = MAX_RESPONSE_BYTES) -> dict[str, Any]:
         self.expire()
         with self._lock:
-            if self._stopping.is_set():
-                raise PostgresServiceError(503, "console_shutting_down", "Console result retention is shutting down")
-            if len(self._entries) >= self.maximum_active:
-                raise PostgresServiceError(
-                    429, "console_result_capacity_exhausted",
-                    "Console result retention capacity is exhausted; close or exhaust another result",
-                    {"limitSource": "application", "maximumActiveResults": self.maximum_active},
-                )
             if cursor is not None:
                 retained = {
                     (item["owner"].get("transactionId") or item["owner"]["executionId"])
@@ -471,32 +451,18 @@ class ConsoleResultRegistry:
                         "Console retained-snapshot capacity is exhausted; close or exhaust another result",
                         {"limitSource": "application", "maximumRetainedSnapshots": MAX_RETAINED_SNAPSHOTS},
                     )
-            result_id = secrets.token_urlsafe(24)
-            expires = self.clock() + self.ttl_seconds
             entry = {
-                "resultId": result_id, "owner": dict(owner), "columns": columns,
+                "owner": dict(owner), "columns": columns,
                 "pageSize": page_size, "retention": retention, "cursor": cursor,
                 "rows": rows, "offset": 0, "pending": list(pending or []),
                 "cleanup": cleanup, "operationLock": operation_lock or threading.Lock(),
-                "cursorToken": None, "expiresAtEpoch": expires,
-                "expiresAt": _utc_expiry(expires), "truncationEvents": list(truncation_events or []),
+                "cursorToken": None, "truncationEvents": list(truncation_events or []),
                 "responseByteLimit": response_byte_limit,
             }
-            self._entries[result_id] = entry
-            return entry
+        return self._add_entry(entry)
 
     def _require(self, result_id: str, owner: dict[str, Any], cursor_token: str | None) -> dict[str, Any]:
-        self.expire()
-        with self._lock:
-            entry = self._entries.get(result_id)
-            tombstone = self._tombstones.get(result_id)
-        if entry is None:
-            if tombstone is not None and self._matches(tombstone, owner):
-                state = tombstone["state"]
-                raise PostgresServiceError(410, f"result_{state}", f"Console result is {state}", {"resultId": result_id})
-            raise PostgresServiceError(404, "result_not_found", "Console result was not found")
-        if not self._matches(entry, owner):
-            raise PostgresServiceError(404, "result_not_found", "Console result was not found")
+        entry = self._require_entry(result_id, owner)
         if cursor_token is not None and not secrets.compare_digest(cursor_token, entry.get("cursorToken") or ""):
             raise PostgresServiceError(409, "result_cursor_stale", "Console result cursor is stale or belongs to another page")
         return entry
@@ -629,21 +595,7 @@ class ConsoleResultRegistry:
         return closed
 
     def close(self) -> None:
-        self._stopping.set()
-        with self._lock:
-            entries = list(self._entries.values())
-        for entry in entries:
-            lock = entry["operationLock"]
-            lock.acquire()
-            try:
-                with self._lock:
-                    current = self._entries.get(entry["resultId"])
-                if current is entry:
-                    self._remove(entry["resultId"], "shutdown")
-            finally:
-                lock.release()
-        if self._sweeper is not threading.current_thread():
-            self._sweeper.join(timeout=1)
+        super().close()
 
 
 class PostgresConsole:
@@ -992,7 +944,8 @@ class PostgresConsole:
         completed: list[int] = []
         target_dispatch_started = False
         try:
-            self.registry.reserve(execution_id, console_id, profile_id, binding, server_id)
+            if self.registry.reserve(execution_id, console_id, profile_id, binding, server_id):
+                raise PostgresServiceError(409, "execution_cancelled", "Console execution was cancelled before PostgreSQL dispatch")
             self._mark_running(context)
             connection = self.service._connect_profile(profile)
             target_dispatch_started = True
@@ -1398,9 +1351,11 @@ class PostgresConsole:
             self._receipt(context, "failed", "not_started", [], error)
             raise error
         try:
-            self.registry.reserve(execution_id, entry["consoleId"], profile_id, binding, server_id)
+            if self.registry.reserve(execution_id, entry["consoleId"], profile_id, binding, server_id):
+                raise PostgresServiceError(409, "execution_cancelled", "Console execution was cancelled before PostgreSQL dispatch")
             self._mark_running(context)
         except Exception as exc:
+            self.registry.release(execution_id)
             entry["lock"].release()
             error = exc if isinstance(exc, PostgresServiceError) else PostgresServiceError(
                 503, "execution_reservation_failed", "Console execution admission failed",
@@ -1408,7 +1363,9 @@ class PostgresConsole:
             )
             if isinstance(error, PostgresServiceError):
                 error.details = {**(error.details or {}), "reconciliationEvidence": {"postgresDispatchStarted": False}}
-                self._receipt(context, "failed", "not_started", [], error)
+                cancelled = error.code == "execution_cancelled"
+                self._receipt(context, "cancelled" if cancelled else "failed",
+                              "transaction_open" if cancelled else "not_started", [], error)
             raise
         cursor = None
         notice_handler = None
@@ -1488,16 +1445,20 @@ class PostgresConsole:
             self._receipt(context, "failed", "not_started", [], error)
             raise error
         try:
-            self.registry.reserve(execution_id, entry["consoleId"], profile_id, binding, server_id)
+            if self.registry.reserve(execution_id, entry["consoleId"], profile_id, binding, server_id):
+                raise PostgresServiceError(409, "execution_cancelled", "Console transaction completion was cancelled before PostgreSQL dispatch")
             self._mark_running(context)
         except Exception as exc:
+            self.registry.release(execution_id)
             entry["lock"].release()
             error = exc if isinstance(exc, PostgresServiceError) else PostgresServiceError(
                 503, "execution_reservation_failed", "Console execution admission failed",
             )
             if isinstance(error, PostgresServiceError):
                 error.details = {**(error.details or {}), "reconciliationEvidence": {"postgresDispatchStarted": False}}
-                self._receipt(context, "failed", "not_started", [], error)
+                cancelled = error.code == "execution_cancelled"
+                self._receipt(context, "cancelled" if cancelled else "failed",
+                              "transaction_open" if cancelled else "not_started", [], error)
             raise
         connection = entry["connection"]
         attempted = False
@@ -1553,7 +1514,9 @@ class PostgresConsole:
         profile_id = self.service._validate_profile_id(profile_id)
         execution_id = _canonical_uuid(execution_id, "executionId")
         try:
-            return self.registry.cancel(execution_id, profile_id, binding, server_id)
+            return self.registry.cancel(
+                execution_id, profile_id, binding, server_id, reserve_missing=False,
+            )
         except PostgresServiceError as exc:
             if exc.code != "execution_not_found":
                 raise
@@ -1561,9 +1524,9 @@ class PostgresConsole:
                 "applicationId": self.service._application_name, "sessionBinding": binding,
                 "serverId": server_id, "profileId": profile_id, "executionId": execution_id,
             }, "cancelled")
-            if not closed:
-                raise
-            return {"requested": False, "closedResults": closed}
+            if closed:
+                return {"requested": False, "closedResults": closed}
+            return self.registry.cancel(execution_id, profile_id, binding, server_id)
 
     def create_write_grant(self, profile_id: str, payload: Any, binding: str, server_id: str) -> dict[str, Any]:
         raise PostgresServiceError(410, "console_write_grants_retired", "Console write grants are retired; use durable Console settings")

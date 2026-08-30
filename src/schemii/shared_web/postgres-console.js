@@ -13,27 +13,72 @@
     return String(value).replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
   }
 
+  function consoleResultResourceParts(resource) {
+    const statement = resource?.statement ?? resource;
+    const target = resource?.target;
+    const consoleId = resource?.consoleId;
+    if (!statement?.executionId || !statement?.resultId || !target?.profileId || !target?.database || !target?.namespace || !consoleId) {
+      throw new Error("The retained Console result identity is incomplete");
+    }
+    return { statement, target, consoleId };
+  }
+
+  function consoleResultResourceUrl(resource, { cursor = null } = {}) {
+    const { statement, target, consoleId } = consoleResultResourceParts(resource);
+    const query = new URLSearchParams({
+      consoleId, database: target.database, namespace: target.namespace,
+      statementIndex: String(statement.statementIndex), resultIndex: String(statement.resultIndex),
+    });
+    if (cursor) query.set("cursor", cursor);
+    return `/api/postgres/profiles/${encodeURIComponent(target.profileId)}/console/executions/${encodeURIComponent(statement.executionId)}/results/${encodeURIComponent(statement.resultId)}?${query}`;
+  }
+
+  async function pageConsoleResultResource(resource, request) {
+    const { statement } = consoleResultResourceParts(resource);
+    if (!statement.hasMore || !statement.nextCursor) return statement;
+    const rows = statement.rows;
+    const page = await request(consoleResultResourceUrl(resource, { cursor: statement.nextCursor }));
+    rows.push(...page.rows);
+    Object.assign(statement, page, { rows });
+    return statement;
+  }
+
+  async function drainConsoleResultResource(resource, request) {
+    let { statement } = consoleResultResourceParts(resource);
+    while (statement.hasMore) statement = await pageConsoleResultResource(resource, request);
+    return statement;
+  }
+
+  async function releaseConsoleResultResource(resource, request, { keepalive = false } = {}) {
+    const { statement } = consoleResultResourceParts(resource);
+    if (!statement.hasMore) return statement;
+    await request(consoleResultResourceUrl(resource), { method: "DELETE", ...(keepalive ? { keepalive: true } : {}) });
+    Object.assign(statement, { hasMore: false, nextCursor: null, resourceState: "closed", closureEvents: ["closed"] });
+    return statement;
+  }
+
   function createPostgresConsole({ button, postgresClient, getTarget, targetControls = [], onCommittedWrite = () => {} }) {
     if (!button || !postgresClient || typeof getTarget !== "function") throw new Error("PostgreSQL Console adapter is incomplete");
     const dialog = document.createElement("dialog");
     dialog.className = "shared-postgres-console";
     dialog.id = `postgres-console-${crypto.randomUUID()}`;
-    dialog.setAttribute("aria-labelledby", "shared-console-title");
+    const titleId = `${dialog.id}-title`;
+    dialog.setAttribute("aria-labelledby", titleId);
     button.setAttribute("aria-controls", dialog.id);
     button.setAttribute("aria-haspopup", "dialog");
     button.setAttribute("aria-expanded", "false");
     dialog.innerHTML = `<div class="shared-console-shell">
-      <header><div><span>Live PostgreSQL</span><h2 id="shared-console-title">Console</h2></div><button type="button" data-console-close aria-label="Close Console">x</button></header>
+      <header><div><span>Live PostgreSQL</span><h2 id="${titleId}">Console</h2></div><button type="button" data-console-close aria-label="Close Console">x</button></header>
       <dl class="shared-console-target" aria-label="Exact PostgreSQL target"><div><dt>Profile</dt><dd data-console-profile>Not selected</dd></div><div><dt>Database</dt><dd data-console-database>Not selected</dd></div><div><dt>Namespace</dt><dd data-console-namespace>Not selected</dd></div></dl>
       <section class="shared-console-settings"><label>Mode<select data-console-mode>${Object.entries(modes).map(([value, item]) => `<option value="${value}">${item[0]}</option>`).join("")}</select></label><p data-console-consequence></p><div class="shared-console-limits"><label>Statements<input type="number" min="1" max="100" data-console-statement-limit></label><label>Rows / result<input type="number" min="1" max="500" data-console-row-page-size></label></div><label class="shared-console-intent"><input type="checkbox" data-console-intent> Enable durable human write intent for this application</label><button type="button" data-console-save-settings>Save Console settings</button><span data-console-settings-status role="status"></span></section>
       <section class="shared-console-transaction" data-console-transaction hidden><strong>Explicit transaction: <span data-console-transaction-state>closed</span></strong><div><button type="button" data-console-commit>Commit</button><button type="button" data-console-rollback>Roll back</button></div></section>
       <textarea data-console-sql aria-label="PostgreSQL SQL" spellcheck="false" placeholder="SELECT current_database();"></textarea>
-      <footer><span data-console-status role="status" aria-live="polite">Ready</span><button type="button" data-console-run>Run</button></footer>
+      <footer><span data-console-status role="status" aria-live="polite">Ready</span><div><button type="button" data-console-stop hidden>Stop</button><button type="button" data-console-run>Run</button></div></footer>
       <section class="shared-console-results" data-console-results aria-label="Console results"></section>
     </div>`;
     document.body.append(dialog);
     const element = name => dialog.querySelector(`[data-console-${name}]`);
-    const state = { settings: null, targetKey: null, transactionId: null, transactionState: "closed", running: false, consoleId: crypto.randomUUID(), results: new Map() };
+    const state = { settings: null, targetKey: null, transactionId: null, transactionState: "closed", running: false, busyPhase: "idle", activeExecution: null, consoleId: crypto.randomUUID(), results: new Map(), closingResults: new Set() };
 
     function target() {
       const value = getTarget();
@@ -49,11 +94,22 @@
     }
 
     function guardTargetChange(event) {
-      if (!activeTransaction()) return true;
+      if (!activeTransaction() && !state.running) return true;
       event?.preventDefault();
       event?.stopImmediatePropagation();
-      element("status").textContent = "Commit or roll back the active transaction before changing the target.";
+      element("status").textContent = state.running ? "Stop or wait for the active execution before changing the target." : "Commit or roll back the active transaction before changing the target.";
       return false;
+    }
+
+    function setRunning(running, phase = running ? "preparing" : "idle") {
+      state.running = running;
+      state.busyPhase = phase;
+      element("run").disabled = running;
+      element("stop").hidden = phase !== "dispatched" || !state.activeExecution;
+      element("stop").disabled = phase !== "dispatched" || !state.activeExecution || state.activeExecution.cancelRequested;
+      element("sql").readOnly = running;
+      for (const name of ["mode", "intent", "statement-limit", "row-page-size", "save-settings", "commit", "rollback"]) element(name).disabled = running;
+      element("close").disabled = running;
     }
 
     function renderTarget() {
@@ -112,15 +168,6 @@
       };
     }
 
-    function resultUrl(resource, includeCursor = false) {
-      const query = new URLSearchParams({
-        consoleId: state.consoleId, database: resource.target.database, namespace: resource.target.namespace,
-        statementIndex: String(resource.statementIndex), resultIndex: String(resource.resultIndex),
-      });
-      if (includeCursor) query.set("cursor", resource.nextCursor);
-      return `/api/postgres/profiles/${encodeURIComponent(resource.target.profileId)}/console/executions/${encodeURIComponent(resource.executionId)}/results/${encodeURIComponent(resource.resultId)}?${query}`;
-    }
-
     function resultCell(value) {
       if (value === null) return "NULL";
       if (typeof value === "object") return JSON.stringify(value);
@@ -135,13 +182,11 @@
       element("results").innerHTML = [...state.results.values()].map(resource => {
         const headings = resource.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("");
         const rows = resource.rows.map(row => `<tr>${row.map(value => `<td>${escapeHtml(resultCell(value))}</td>`).join("")}</tr>`).join("");
-        const warning = resource.truncationEvents.length
-          ? `<p class="shared-console-result-warning">Display/export is truncated by an application transport limit.</p>`
-          : resource.hasMore ? `<p class="shared-console-result-pending">More rows remain in the retained ${escapeHtml(resource.snapshotRetention.replaceAll("_", " "))}.</p>` : "";
+        const warning = `${resource.truncationEvents.length ? '<p class="shared-console-result-warning">Transport limits truncated this result. The shown row count is not the complete PostgreSQL result.</p>' : ""}${resource.hasMore ? `<p class="shared-console-result-pending">More rows remain in the retained ${escapeHtml(resource.snapshotRetention.replaceAll("_", " "))}; Load more and export continue without replaying SQL.</p>` : ""}`;
         return `<article class="shared-console-result ${resource.truncationEvents.length ? "truncated" : resource.hasMore ? "incomplete" : "complete"}" data-console-result="${escapeHtml(resource.resultId)}">
           <header><strong>Statement ${resource.statementIndex + 1}</strong><span>${resource.rows.length} loaded${resource.hasMore ? ", incomplete" : ""}</span></header>
           ${warning}<div class="shared-console-table"><table><thead><tr>${headings}</tr></thead><tbody>${rows}</tbody></table></div>
-          <footer>${resource.hasMore ? `<button type="button" data-console-load-more="${escapeHtml(resource.resultId)}">Load more</button><button type="button" data-console-export="${escapeHtml(resource.resultId)}">Export JSON</button><button type="button" data-console-close-result="${escapeHtml(resource.resultId)}">Close result</button>` : '<span>Result exhausted</span>'}</footer>
+          <footer>${resource.hasMore ? `<button type="button" data-console-load-more="${escapeHtml(resource.resultId)}">Load more</button>` : '<span>Result exhausted</span>'}<button type="button" data-console-export="${escapeHtml(resource.resultId)}">Export JSON</button>${resource.hasMore ? `<button type="button" data-console-close-result="${escapeHtml(resource.resultId)}">Close result</button>` : ""}</footer>
         </article>`;
       }).join("");
     }
@@ -151,7 +196,7 @@
       for (const statement of result.statements || []) {
         if (!statement.resultId || !statement.columns?.length) continue;
         state.results.set(statement.resultId, {
-          ...statement, target: value, rows: [...statement.rows],
+          ...statement, target: value, consoleId: state.consoleId, rows: [...statement.rows],
           truncationEvents: [...(statement.truncationEvents || statement.limitEvents || [])],
         });
       }
@@ -161,41 +206,43 @@
     async function loadMore(resultId, render = true) {
       const resource = state.results.get(resultId);
       if (!resource?.hasMore || !resource.nextCursor) return resource;
-      const page = await postgresClient.request(resultUrl(resource, true));
-      resource.rows.push(...page.rows);
-      Object.assign(resource, page, { rows: resource.rows, target: resource.target });
-      resource.truncationEvents = [...(page.truncationEvents || [])];
+      await pageConsoleResultResource(resource, postgresClient.request);
       if (render) renderResults();
       return resource;
     }
 
     async function closeResult(resultId, { remove = false } = {}) {
       const resource = state.results.get(resultId);
-      if (!resource) return;
-      if (resource.hasMore) await postgresClient.request(resultUrl(resource), { method: "DELETE" });
+      if (!resource || state.closingResults.has(resultId)) return;
+      state.closingResults.add(resultId);
+      try {
+        if (resource.hasMore) await releaseConsoleResultResource(resource, postgresClient.request);
+      } finally {
+        state.closingResults.delete(resultId);
+      }
       if (remove) state.results.delete(resultId);
-      else Object.assign(resource, { hasMore: false, nextCursor: null, resourceState: "closed", closureEvents: ["closed"] });
       renderResults();
     }
 
     async function closeAllResults() {
-      const open = [...state.results.values()].filter(resource => resource.hasMore);
-      await Promise.allSettled(open.map(resource => postgresClient.request(resultUrl(resource), { method: "DELETE" })));
+      const open = [...state.results.values()].filter(resource => resource.hasMore && !state.closingResults.has(resource.resultId));
+      open.forEach(resource => state.closingResults.add(resource.resultId));
+      await Promise.allSettled(open.map(resource => releaseConsoleResultResource(resource, postgresClient.request)));
+      open.forEach(resource => state.closingResults.delete(resource.resultId));
       state.results.clear();
       renderResults();
     }
 
     async function exportResult(resultId) {
-      let resource = state.results.get(resultId);
-      while (resource?.hasMore) resource = await loadMore(resultId, false);
+      const resource = state.results.get(resultId);
       if (!resource) return;
+      await drainConsoleResultResource(resource, postgresClient.request);
       renderResults();
-      const blob = new Blob([JSON.stringify({ columns: resource.columns, rows: resource.rows, truncationEvents: resource.truncationEvents }, null, 2)], { type: "application/json" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = `console-${resource.executionId}-statement-${resource.statementIndex + 1}.json`;
-      link.click();
-      URL.revokeObjectURL(link.href);
+      shared.downloadContent(
+        JSON.stringify({ columns: resource.columns, rows: resource.rows, truncationEvents: resource.truncationEvents }, null, 2),
+        `console-${resource.executionId}-statement-${resource.statementIndex + 1}.json`,
+        "application/json",
+      );
     }
 
     async function recoverUnknown(value, executionId) {
@@ -214,15 +261,23 @@
     async function run() {
       const value = target();
       const mode = element("mode").value;
-      if (!value || !state.settings || !element("sql").value.trim() || state.running) return;
+      if (state.running) return;
+      const sql = element("sql").value.trim();
+      if (!value) return void (element("status").textContent = "Select an exact profile, database, and namespace before running SQL.");
+      if (!state.settings) return void (element("status").textContent = "Console settings are not loaded.");
+      if (!Object.hasOwn(modes, mode)) return void (element("status").textContent = "Select a supported transaction mode.");
+      if (!sql) return void (element("status").textContent = "Enter at least one SQL statement.");
+      if (sql.includes("\0")) return void (element("status").textContent = "SQL must not contain null bytes.");
+      if (sql.length > 100000) return void (element("status").textContent = "SQL exceeds the 100000-character Console limit.");
       if (state.targetKey && state.targetKey !== targetKey(value)) return guardTargetChange();
       if (mode !== "managed_read" && state.settings.writeIntent !== "enabled") {
         element("status").textContent = "Enable and save human write intent before starting a write-capable operation.";
         return;
       }
-      state.running = true;
-      element("run").disabled = true;
       const executionId = crypto.randomUUID();
+      state.activeExecution = null;
+      setRunning(true, "preparing");
+      element("status").textContent = "Preparing the Console target and releasing prior results...";
       try {
         await closeAllResults();
         let result;
@@ -237,26 +292,50 @@
             });
             state.transactionState = created.state;
           }
-          result = await postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(value.profileId)}/console/transactions/${encodeURIComponent(state.transactionId)}/executions`, {
+          const pending = postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(value.profileId)}/console/transactions/${encodeURIComponent(state.transactionId)}/executions`, {
             method: "POST", body: JSON.stringify({ executionId, sql: element("sql").value }),
           });
+          state.activeExecution = { executionId, profileId: value.profileId, mode, cancelRequested: false };
+          setRunning(true, "dispatched");
+          element("status").textContent = `Running ${modes[mode][0].toLowerCase()} execution...`;
+          result = await pending;
           state.transactionState = result.transactionState;
         } else {
-          result = await postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(value.profileId)}/console/executions`, {
+          const pending = postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(value.profileId)}/console/executions`, {
             method: "POST", body: JSON.stringify(requestBody(value, mode, executionId)),
           });
+          state.activeExecution = { executionId, profileId: value.profileId, mode, cancelRequested: false };
+          setRunning(true, "dispatched");
+          element("status").textContent = `Running ${modes[mode][0].toLowerCase()} execution...`;
+          result = await pending;
           if (["managed", "autocommit"].includes(mode) && result.committed) await onCommittedWrite(value, result);
         }
-        element("status").textContent = mode === "explicit" ? `Transaction ${state.transactionState}` : `Outcome ${result.outcome}`;
+        element("status").textContent = mode === "explicit" ? `Transaction ${state.transactionState}` : result.outcome === "cancelled" ? "Execution cancelled by PostgreSQL." : `Outcome ${result.outcome}`;
         rememberResults(result, value);
       } catch (error) {
         const writeCapable = mode !== "managed_read";
-        if (writeCapable && (!error.code || error.code === "execution_outcome_unknown" || error.code === "execution_receipt_unavailable")) await recoverUnknown(value, executionId);
+        if (error.code === "execution_cancelled") element("status").textContent = "Execution cancelled by PostgreSQL.";
+        else if (writeCapable && (!error.code || error.code === "execution_outcome_unknown" || error.code === "execution_receipt_unavailable")) await recoverUnknown(value, executionId);
         else element("status").textContent = error.message;
       } finally {
-        state.running = false;
-        element("run").disabled = false;
+        state.activeExecution = null;
+        setRunning(false);
         renderMode();
+      }
+    }
+
+    async function stop() {
+      const execution = state.activeExecution;
+      if (!execution || execution.cancelRequested) return;
+      execution.cancelRequested = true;
+      element("stop").disabled = true;
+      element("status").textContent = "Cancellation requested. Waiting for PostgreSQL to confirm the terminal outcome...";
+      try {
+        await postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(execution.profileId)}/console/executions/${encodeURIComponent(execution.executionId)}`, { method: "DELETE" });
+      } catch (error) {
+        execution.cancelRequested = false;
+        element("stop").disabled = false;
+        element("status").textContent = `Cancellation request failed: ${error.message}. The execution may still be running.`;
       }
     }
 
@@ -264,7 +343,7 @@
       const value = target();
       if (!value || !state.transactionId || state.running) return;
       const executionId = crypto.randomUUID();
-      state.running = true;
+      setRunning(true);
       try {
         const result = await postgresClient.request(`/api/postgres/profiles/${encodeURIComponent(value.profileId)}/console/transactions/${encodeURIComponent(state.transactionId)}/${action}`, {
           method: "POST", body: JSON.stringify({ executionId }),
@@ -284,7 +363,7 @@
           renderResults();
         } else element("status").textContent = error.message;
       } finally {
-        state.running = false;
+        setRunning(false);
         renderMode();
       }
     }
@@ -295,15 +374,17 @@
       renderTarget();
       dialog.showModal();
       button.setAttribute("aria-expanded", "true");
+      button.classList.add("active");
       try { await loadSettings(); } catch (error) { element("status").textContent = error.message; }
     }, true);
-    element("close").addEventListener("click", async () => { if (!activeTransaction()) { await closeAllResults(); dialog.close(); } else guardTargetChange(); });
+    element("close").addEventListener("click", async () => { if (!activeTransaction() && !state.running) { await closeAllResults(); dialog.close(); } else guardTargetChange(); });
     dialog.addEventListener("close", () => {
       button.setAttribute("aria-expanded", "false");
+      button.classList.remove("active");
       if (!activeTransaction() && state.results.size) void closeAllResults();
     });
     dialog.addEventListener("cancel", async event => {
-      if (activeTransaction()) return guardTargetChange(event);
+      if (activeTransaction() || state.running) return guardTargetChange(event);
       event.preventDefault();
       await closeAllResults();
       dialog.close();
@@ -317,6 +398,7 @@
     });
     element("save-settings").addEventListener("click", saveSettings);
     element("run").addEventListener("click", run);
+    element("stop").addEventListener("click", stop);
     element("commit").addEventListener("click", () => finish("commit"));
     element("rollback").addEventListener("click", () => finish("rollback"));
     element("results").addEventListener("click", async event => {
@@ -336,12 +418,15 @@
     });
     global.addEventListener("beforeunload", event => {
       for (const resource of state.results.values()) {
-        if (resource.hasMore) void postgresClient.request(resultUrl(resource), { method: "DELETE", keepalive: true }).catch(() => {});
+        if (resource.hasMore && !state.closingResults.has(resource.resultId)) void releaseConsoleResultResource(resource, postgresClient.request, { keepalive: true }).catch(() => {});
       }
       if (activeTransaction()) { event.preventDefault(); event.returnValue = ""; }
     });
     return { hasActiveTransaction: activeTransaction, guardTargetChange, refreshTarget: renderTarget, dialog };
   }
 
-  global.SchemiiShared = Object.freeze({ ...shared, createPostgresConsole });
+  global.SchemiiShared = Object.freeze({
+    ...shared, consoleResultResourceUrl, pageConsoleResultResource, drainConsoleResultResource,
+    releaseConsoleResultResource, createPostgresConsole,
+  });
 })(window);

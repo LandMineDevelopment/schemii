@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0d1117" />
     <title>Schemii</title>
+    <link rel="icon" href="/shared/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="/shared/ai-assistant.css" />
     <link rel="stylesheet" href="/shared/postgres-console.css" />
@@ -232,7 +233,7 @@
             <section class="standalone-sql-editor-panel">
               <header class="standalone-sql-head">
                 <button class="standalone-sql-heading-toggle" id="show-standalone-sql-editor" type="button" aria-expanded="true"><span class="eyebrow">Live PostgreSQL · server-owned transaction</span><span><strong>SQL Console</strong><span class="prototype-badge">Script</span></span></button>
-                <div class="standalone-sql-view-control"><span>View</span><details id="standalone-sql-view-menu"><summary id="standalone-sql-view" aria-label="Choose SQL Console query"><span>Query 1</span><i aria-hidden="true"></i></summary><div class="standalone-sql-view-menu" id="standalone-sql-view-list" role="menu"></div></details></div>
+                <div class="standalone-sql-view-control"><span>View</span><details class="shared-menu" id="standalone-sql-view-menu"><summary id="standalone-sql-view" aria-label="Choose SQL Console query"><span>Query 1</span><i aria-hidden="true"></i></summary><div class="standalone-sql-view-menu shared-menu-surface" id="standalone-sql-view-list" role="menu"></div></details></div>
                 <dl class="standalone-sql-target" aria-label="SQL target identity">
                   <div><dt>Connection</dt><dd id="standalone-sql-profile">No linked profile</dd></div>
                   <div><dt>Database</dt><dd id="standalone-sql-database">Not selected</dd></div>
@@ -325,11 +326,11 @@
             <span class="eyebrow">Quick start</span>
             <h2 id="onboarding-title">Welcome to Schemii</h2>
           </div>
-          <span id="onboarding-step-label" aria-live="polite">1 of 5</span>
+          <span id="onboarding-step-label" aria-live="polite">1 of 7</span>
         </header>
         <div class="onboarding-pages">
           <section class="onboarding-page" data-onboarding-page="0">
-            <div class="tour-demo-playback"><span class="tour-demo-status" id="table-creation-demo-status">Watch a table and its columns take shape.</span><button class="tour-demo-toggle" id="table-creation-demo-toggle" type="button">Pause demo</button></div>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="table-creation-demo-status" role="status" aria-live="polite">Watch a table and its columns take shape.</span><button class="tour-demo-toggle" id="table-creation-demo-toggle" type="button">Pause demo</button></div>
             <div class="onboarding-screenshot canvas-tour-shot tour-table-creation-demo" aria-hidden="true">
               <div class="tour-shot-bar"><i></i><span>product_workspace</span><b>Saved</b></div>
               <div class="tour-shot-rail"><i></i><span class="tour-add-table-tool" data-onboarding-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M9 10v9M15 10v9"/></svg></span><i></i><i></i></div>
@@ -347,11 +348,11 @@
             </div>
             <div class="onboarding-copy">
               <span class="onboarding-number">01</span>
-              <div><h3>Create tables and columns</h3><p>Choose <strong>Add table</strong> from the left tool rail, enter a unique table name, and create it. Schemii opens the new table's inspector with an <strong>id</strong> primary key. Use <strong>+ Add column</strong> for each additional field, then edit its name, PostgreSQL type, nullability, uniqueness, default, or primary-key setting.</p></div>
+              <div><h3>Create tables and columns</h3><p>Choose <strong>Add table</strong>, enter a unique name, and create it. The inspector opens with an <strong>id</strong> primary key; add fields and set their PostgreSQL types, nullability, uniqueness, defaults, and key roles. Saved designs also keep checks, indexes, triggers, views, and PostgreSQL functions.</p></div>
             </div>
           </section>
           <section class="onboarding-page" data-onboarding-page="1" hidden>
-            <div class="tour-demo-playback"><span class="tour-demo-status" id="relationship-demo-status">Watch how a foreign-key connection is created.</span><button class="tour-demo-toggle" id="relationship-demo-toggle" type="button">Pause demo</button></div>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="relationship-demo-status" role="status" aria-live="polite">Watch how a foreign-key connection is created.</span><button class="tour-demo-toggle" id="relationship-demo-toggle" type="button">Pause demo</button></div>
             <div class="onboarding-screenshot canvas-tour-shot tour-relationship-demo" aria-hidden="true">
               <div class="tour-shot-bar"><i></i><span>product_workspace</span><b>Saved</b></div>
               <div class="tour-shot-rail"><i></i><i></i><span class="tour-relationship-tool" data-relationship-demo-target="tool" aria-label="Add relationship tool"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="M8.5 7h3a3 3 0 0 1 3 3v4a3 3 0 0 0 3 3"/></svg></span><i></i></div>
@@ -377,11 +378,11 @@
             </div>
             <div class="onboarding-copy">
               <span class="onboarding-number">02</span>
-              <div><h3>Design on the canvas</h3><p>Tables are cards, columns are rows, and connecting lines are foreign keys. To create one, choose the highlighted linked-circle <strong>Add relationship</strong> tool, click the foreign-key column first, then click the referenced primary or unique key. Drag tables to arrange them, use the mouse wheel to zoom, use the arrow keys to pan (hold Shift to move faster), and select a card to edit it.</p></div>
+              <div><h3>Design on the canvas</h3><p>Create a relationship by choosing <strong>Add relationship</strong>, then click the foreign-key column first, then click the referenced primary or unique key; ordered pairs support composite keys. Drag or marquee-select cards, move multi-selections, undo or redo edits, fit or zoom, and use the arrow keys to pan (hold Shift to move faster). Positions, colors, and each layer's viewport are saved as your layout.</p></div>
             </div>
           </section>
           <section class="onboarding-page" data-onboarding-page="2" hidden>
-            <div class="tour-demo-playback"><span class="tour-demo-status" id="tour-demo-status">Watch the table, headers, and pane controls.</span><button class="tour-demo-toggle" id="tour-demo-toggle" type="button">Pause demo</button></div>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="tour-demo-status" role="status" aria-live="polite">Watch the table, headers, and pane controls.</span><button class="tour-demo-toggle" id="tour-demo-toggle" type="button">Pause demo</button></div>
             <div class="onboarding-screenshot inspector-tour-shot tour-inspector-demo" aria-hidden="true">
               <div class="tour-table tour-focused" data-demo-target="table"><strong>orders</strong><span><i class="tour-key-badge primary"><svg viewBox="0 0 16 16" aria-label="Primary key"><circle cx="5" cy="7" r="3"/><path d="m7.5 8.5 5 4M10 10.5l1.5-1.5"/></svg></i>id <em>uuid</em></span><span><i class="tour-key-badge">·</i>status <em>text</em></span><span><i class="tour-key-badge">·</i>created_at <em>timestamp</em></span></div>
               <div class="tour-data-tools">
@@ -419,59 +420,116 @@
             </div>
             <div class="onboarding-copy">
               <span class="onboarding-number">03</span>
-              <div><h3>Inspect tables and live data</h3><p><strong>Click any table to open its inspector on the right.</strong> Edit columns, keys, checks, indexes, and triggers there. For a table imported from PostgreSQL, click the data-tools icon in the inspector header to open <strong>Table data</strong> and the read-only <strong>SQL console</strong> beside it. Click either pane header to switch views, use maximize to temporarily cover the inspector, use minimize to close data tools, or close the inspector to close all three panes.</p></div>
+              <div><h3>Inspect tables and live data</h3><p><strong>Click any table to open its inspector on the right.</strong> Edit columns, primary and unique keys, checks, indexes, and triggers there. For an imported table, click the data-tools icon in the inspector header to open bounded <strong>Table data</strong> and the permanently read-only, table-scoped <strong>SQL console</strong>. Switch pane headers, use maximize to temporarily cover the inspector, use minimize to close data tools, or close the inspector and all attached panes.</p></div>
             </div>
           </section>
           <section class="onboarding-page" data-onboarding-page="3" hidden>
-            <div class="tour-demo-playback"><span class="tour-demo-status" id="postgres-demo-status">Watch the safe PostgreSQL import and preview workflow.</span><button class="tour-demo-toggle" id="postgres-demo-toggle" type="button">Pause demo</button></div>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="workspace-demo-status" role="status" aria-live="polite">Watch the peer workspaces move from design to retained results.</span><button class="tour-demo-toggle" id="workspace-demo-toggle" type="button">Pause demo</button></div>
+            <div class="onboarding-screenshot tour-workspace-demo" aria-hidden="true">
+              <header class="tour-peer-switch">
+                <strong>Schemii</strong>
+                <nav><button class="tour-peer-tables-selector active" type="button" tabindex="-1" aria-label="Tables"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="4" width="13" height="12" rx="1.5"/><path d="M3.5 8h13M8 8v8M12.5 8v8"/></svg></button><button data-onboarding-target="views" type="button" tabindex="-1" aria-label="Views"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/></svg></button><button data-onboarding-target="sql" type="button" tabindex="-1" aria-label="Open SQL Console"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4.5" width="14" height="11" rx="1.5"/><path d="m6 8 2 2-2 2M10.5 12h3.5"/></svg></button></nav>
+                <span>Mercury Books · schemii · bookstore</span>
+              </header>
+              <section class="tour-peer-tables"><div><strong>customers</strong><span>id · bigint</span><span>email · varchar</span></div><div><strong>orders</strong><span>id · bigint</span><span>customer_id · bigint</span></div></section>
+              <section class="tour-peer-views" data-tour-workspace="views">
+                <aside class="tour-peer-rail tour-peer-views-rail"><button data-onboarding-target="browse-views" type="button" tabindex="-1"><b>⌕</b><span>Browse</span></button><button type="button" tabindex="-1"><b>＋</b><span>Create</span></button><button type="button" tabindex="-1"><b>↻</b><span>Refresh</span></button><button class="danger" type="button" tabindex="-1"><b>×</b><span>Delete</span></button></aside>
+                <div class="tour-peer-views-body">
+                  <section class="tour-peer-lineage-panel" data-tour-view-pane="lineage">
+                    <header><span><small>VERIFIED POSTGRESQL LINEAGE</small><strong>View lineage</strong></span><i>VIEW · bookstore.book_catalog</i></header>
+                    <div class="tour-peer-lineage-canvas">
+                      <div class="tour-peer-lineage-node sources"><small>SOURCES · 5</small><strong>books · publishers</strong><span>inventory · book_authors · authors</span></div><i>→</i>
+                      <div class="tour-peer-lineage-node root-query" data-onboarding-target="root-query" data-tour-view-role="root-query-block"><small>ROOT QUERY BLOCK</small><strong>Outer SELECT</strong><span>5 inputs · 4 joins</span></div><i>→</i>
+                      <div class="tour-peer-lineage-node final-view" data-tour-view-role="final-view"><small>FINAL VIEW · VIEW</small><strong>book_catalog</strong><span>8 verified columns</span></div>
+                    </div>
+                    <footer><span>1 query-local stage, including root SELECT · available</span><b>Fit&nbsp;&nbsp;−&nbsp;&nbsp;100%&nbsp;&nbsp;+</b></footer>
+                  </section>
+                  <section class="tour-peer-definition-panel" data-tour-view-pane="definition">
+                    <header data-onboarding-target="definition"><span><small>REVIEWED POSTGRESQL DEFINITION</small><strong>PostgreSQL definition</strong></span><i>VIEW</i></header>
+                    <div><code>CREATE OR REPLACE VIEW "bookstore"."book_catalog" AS<br />SELECT b.id, b.isbn, b.title, p.name AS publisher,<br />&nbsp;&nbsp;b.price, b.format, i.on_hand, string_agg(a.name, ', ') AS authors<br />FROM bookstore.books b<br />&nbsp;&nbsp;JOIN bookstore.publishers p ON p.id = b.publisher_id<br />&nbsp;&nbsp;JOIN bookstore.inventory i ON i.book_id = b.id<br />GROUP BY b.id, p.name, i.on_hand;</code><footer><span>Live definition; PostgreSQL authorizes apply</span><button data-onboarding-target="preview-view" type="button" tabindex="-1">Preview changes</button></footer></div>
+                  </section>
+                  <aside class="tour-peer-catalog" data-tour-view-pane="catalog"><header><span><small>LIVE RELATION BROWSER</small><strong>Views</strong></span><b>×</b></header><label>Search views…</label><nav><b>All</b><span>Views</span><span>Materialized</span></nav><button type="button" tabindex="-1"><strong>book_catalog</strong><span>VIEW · 8 outputs</span></button><button type="button" tabindex="-1"><strong>customer_order_totals</strong><span>VIEW · loading contract…</span></button><button type="button" tabindex="-1"><strong>low_stock_books</strong><span>VIEW · loading contract…</span></button><button type="button" tabindex="-1"><strong>monthly_sales</strong><span>MATERIALIZED · loading contract…</span></button><button type="button" tabindex="-1"><strong>order_summary</strong><span>VIEW · loading contract…</span></button></aside>
+                </div>
+              </section>
+              <section class="tour-peer-sql" data-tour-workspace="sql">
+                <aside class="tour-peer-rail tour-peer-sql-rail"><button type="button" tabindex="-1"><b>＋</b><span>New</span></button><button data-onboarding-target="sql-queries" type="button" tabindex="-1"><b>▤</b><span>Queries</span></button><button type="button" tabindex="-1"><b>◇</b><span>Save</span></button><button type="button" tabindex="-1"><b>R</b><span>Read</span></button><button data-onboarding-target="run-sql" type="button" tabindex="-1"><b>▶</b><span>Run</span></button><button type="button" tabindex="-1"><b>▶▶</b><span>Run all</span></button><button type="button" tabindex="-1"><b>▣</b><span>Console</span></button><button class="tour-peer-stop" type="button" tabindex="-1"><b>■</b><span>Stop</span></button></aside>
+                <div class="tour-peer-sql-shell">
+                  <section class="tour-peer-sql-editor" data-tour-sql-pane="editor">
+                    <header><span class="tour-peer-sql-title"><small>LIVE POSTGRESQL · SERVER-OWNED TRANSACTION</small><strong>SQL Console <i>SCRIPT</i></strong></span><div class="tour-peer-query-control"><small>VIEW</small><button data-onboarding-target="query-menu" data-tour-sql-role="query-menu" type="button" tabindex="-1"><strong>Query 1</strong><i>⌄</i></button><div class="tour-peer-query-menu"><span><strong>Query 1</strong><small>Empty query</small><i>RENAME&nbsp;&nbsp;×</i></span><b>＋ Add new query</b></div></div><dl data-tour-sql-role="exact-target"><div><dt>CONNECTION</dt><dd>Mercury Books: Included PostgreSQL</dd></div><div><dt>DATABASE</dt><dd>schemii</dd></div><div><dt>NAMESPACE</dt><dd>bookstore</dd></div></dl></header>
+                    <div class="tour-peer-sql-editor-body"><code>SELECT id, title, publisher, on_hand<br />FROM bookstore.book_catalog<br />ORDER BY title<br />LIMIT 5;</code></div>
+                    <footer><span>Run with Ctrl + Enter</span><b>Copy&nbsp;&nbsp;&nbsp;Clear</b></footer>
+                  </section>
+                  <aside class="tour-peer-sql-drawer"><header><span><small>SQL WORKSPACE</small><strong>Queries</strong></span><i>Local only</i><b>×</b></header><label>Saved queries <i>＋</i></label><button type="button" tabindex="-1"><small>SAVED</small><strong>Daily order totals</strong></button><button type="button" tabindex="-1"><small>SAVED</small><strong>Unfulfilled orders</strong></button><label>Recent history <i>3 entries</i></label><span><small>READ</small><strong>Recent orders</strong><i>12 rows · read only</i></span><span><small>WRITE</small><strong>Archive stale carts</strong><i>4 rows · rolled back</i></span><span><small>ERROR</small><strong>Missing relation</strong><i>42P01 · just now</i></span></aside>
+                  <section class="tour-peer-sql-results" data-tour-sql-pane="results"><header><span><small>POSTGRESQL TRANSACTION RESPONSE</small><strong>Results</strong></span><b class="tour-peer-awaiting">AWAITING QUERY</b><b class="tour-peer-running">RUNNING · STOP AVAILABLE</b><b class="tour-peer-complete">UNKNOWN · 5 ROWS · ROLLED BACK</b></header><div class="tour-peer-running-body"><i></i><span>Running the current statement against the exact target…</span></div><div class="tour-peer-result-body"><nav><b>Result 1</b><span>ROWS</span></nav><p><b>id</b><b>title</b><b>publisher</b><b>on_hand</b><span>3</span><span>A Short History of Maps</span><span>Harbor House</span><span>12</span><span>15</span><span>Brave Algorithms 15</span><span>Juniper Editions</span><span>30</span><span>35</span><span>Brave Archives 35</span><span>Juniper Editions</span><span>70</span><span>25</span><span>Brave Coastlines 25</span><span>Juniper Editions</span><span>50</span><span>65</span><span>Brave Journeys 65</span><span>Juniper Editions</span><span>45</span></p><footer data-onboarding-target="retained-result"><span>Retained result actions do not replay SQL</span><b>Load more</b><b>Export JSON</b><b>Close result</b></footer></div></section>
+                </div>
+              </section>
+              <div class="tour-demo-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
+            </div>
+            <div class="onboarding-copy"><span class="onboarding-number">04</span><div><h3>Tables, Views, and SQL workspaces</h3><p>Use the shared selector and left tool rail without changing the saved target. <strong>Views</strong> opens on verified lineage; Browse opens the searchable ordinary/materialized-view catalog on the right. Sources feed query-local SQL stages, including the required outer-SELECT root, before the final view and any downstream relation consumers. Edit the separate PostgreSQL definition pane and use <strong>Preview changes</strong> before create, replace, recreate, or delete.</p><ul class="onboarding-points"><li>Standalone SQL keeps browser-local query views in the Query menu. Its header shows the exact profile, database, and namespace; distinct rail actions run the current statement or full script. Read-only is the default, write mode is query-local, and <strong>Stop</strong> appears only while PostgreSQL is running.</li><li>Editor and Results exchange vertical space. Diagnostics stay in their error result; <strong>Load more</strong>, <strong>Export JSON</strong>, and <strong>Close result</strong> act on an incomplete retained result without replay. The separate shared Console offers Managed read, all-or-nothing, explicit transaction, and autocommit/maintenance modes; PostgreSQL role permissions remain authoritative.</li></ul></div></div>
+          </section>
+          <section class="onboarding-page" data-onboarding-page="4" hidden>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="postgres-demo-status" role="status" aria-live="polite">Watch the PostgreSQL target, import, and preview workflow.</span><button class="tour-demo-toggle" id="postgres-demo-toggle" type="button">Pause demo</button></div>
             <div class="onboarding-screenshot postgres-tour-shot tour-postgres-demo" aria-hidden="true">
               <div class="tour-postgres-rail"><i></i><i></i><span class="tour-postgres-tool" data-postgres-demo-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></span></div>
               <div class="tour-db-card">
                 <header><span><small>LIVE DATABASE</small><strong>PostgreSQL</strong></span><b>×</b></header>
-                <button class="tour-postgres-profile" data-postgres-demo-target="profile" type="button" tabindex="-1"><span><strong>Development</strong><small>schemii@db:5432 / app</small></span><i>SELECTED</i></button>
-                <label>PostgreSQL namespace <em>public</em></label>
-                <p>app.public · 3 tables · 2 relationships · 4 indexes</p>
-                <footer><button data-postgres-demo-target="import" type="button" tabindex="-1">Import</button><button data-postgres-demo-target="preview" type="button" tabindex="-1">Preview migration</button></footer>
+                <button class="tour-postgres-profile" data-postgres-demo-target="profile" type="button" tabindex="-1"><span><strong>Development</strong><small>Save &amp; test · app database</small></span><i>VERIFIED</i></button>
+                <label>Exact database · namespace <em>app · public</em></label>
+                <p>Verified target · user namespaces · system namespaces optional</p>
+                <footer><button data-postgres-demo-target="import" type="button" tabindex="-1">Import / Refresh design</button><button data-postgres-demo-target="preview" type="button" tabindex="-1">Preview changes</button></footer>
               </div>
               <section class="tour-migration-preview">
                 <header><span><small>REVIEWED DATABASE CHANGE</small><strong>Migration preview</strong><i>Development · app.public</i></span><b>×</b></header>
-                <div><span>3 steps</span><span>0 destructive</span><span>Transaction ready</span></div>
+                <div><span>3 steps</span><span>0 destructive by default</span><span>Warnings 0</span><span>Locks reviewed</span><span>Blockers 0</span></div>
                 <pre>CREATE TABLE "public"."authors" ( ... );
 CREATE TABLE "public"."books" ( ... );
 ALTER TABLE "public"."books"
   ADD CONSTRAINT "books_author_id_fkey" ...;</pre>
-                <p><b>Review before apply</b> Inspect SQL, warnings, locks, and destructive steps.</p>
-                <footer><label>□ Include destructive changes</label><button type="button" tabindex="-1">Apply migration</button></footer>
+                <p><b>Review before apply</b> Inspect SQL, warnings, locks, blockers, and destructive steps.</p>
+                <footer><label>□ Opt in to destructive changes</label><button type="button" tabindex="-1">Apply reviewed plan</button></footer>
               </section>
               <div class="tour-demo-cursor tour-postgres-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
-              <span class="onboarding-number">04</span>
-              <div><h3>PostgreSQL stays authoritative</h3><p>Connect to an exact database and namespace, import its live structure, then preview differences. Schemii never applies a migration until you review the SQL and confirm it.</p></div>
+              <span class="onboarding-number">05</span>
+              <div><h3>PostgreSQL stays authoritative</h3><p>Save and test the shared profile, then verify the exact database and namespace; system namespaces are an explicit option. <strong>Import / Refresh</strong> updates the design from live PostgreSQL, while <strong>Preview / Apply</strong> reviews SQL, warnings, locks, blockers, and destructive opt-ins in the other direction.</p><ul class="onboarding-points"><li>Re-preview after the design, profile, or live catalog changes. If an outcome is unknown, reconcile it instead of blindly replaying.</li><li>PostgreSQL may commit before local saved-design synchronization reports success; the result reports those outcomes separately.</li></ul></div>
             </div>
           </section>
-          <section class="onboarding-page" data-onboarding-page="4" hidden>
-            <div class="tour-demo-playback"><span class="tour-demo-status" id="assistant-demo-status">Watch a quick conversation with the schema assistant.</span><button class="tour-demo-toggle" id="assistant-demo-toggle" type="button">Pause demo</button></div>
+          <section class="onboarding-page" data-onboarding-page="5" hidden>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="assistant-demo-status" role="status" aria-live="polite">Watch a quick conversation with the schema assistant.</span><button class="tour-demo-toggle" id="assistant-demo-toggle" type="button">Pause demo</button></div>
             <div class="onboarding-screenshot assistant-tour-shot tour-assistant-demo" aria-hidden="true">
               <div class="tour-assistant-rail"><i></i><i></i><i></i><span class="tour-assistant-tool" data-assistant-demo-target="tool"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5h12v10H9l-3 3v-13Z"/><path d="M9 9h6M9 12h4"/></svg><b></b></span></div>
               <div class="tour-assistant-canvas"><span>authors</span><span>books</span><span>loans</span></div>
               <section class="tour-assistant-panel">
                 <header><div><small>SCHEMII COPILOT</small><strong>Schema assistant</strong></div><i>Ready</i><b>×</b></header>
-                <div class="tour-assistant-context"><span>Model <b>Connected</b></span><span>Access <b>Schema</b></span></div>
+                <div class="tour-assistant-context"><span>Provider / model <b>Connected</b></span><span>Disclosure <b>Schema</b></span><span>Capabilities <b>Bounded</b></span><span>History <b>Schemii</b></span></div>
                 <div class="tour-assistant-messages">
                   <div class="tour-assistant-user"><small>YOU</small><p>Create a small library schema.</p></div>
                   <div class="tour-assistant-working"><i></i><span>Reviewing the active design</span><b>•••</b></div>
                   <div class="tour-assistant-response"><small>ASSISTANT</small><p>I can add authors, books, and loans with keys and relationships.</p></div>
-                  <div class="tour-assistant-proposal"><i>PROPOSAL</i><span><b>Populate the active schema</b>3 tables · 2 relationships</span><button type="button" tabindex="-1">Review &amp; confirm</button></div>
+                  <div class="tour-assistant-proposal"><i>PROPOSAL</i><span><b>Populate the exact active schema</b>3 tables · 2 relationships · structured review</span><button type="button" tabindex="-1">Review &amp; confirm</button></div>
                 </div>
                 <div class="tour-assistant-composer"><span data-assistant-demo-target="composer"></span><button data-assistant-demo-target="send" type="button" tabindex="-1">Send</button></div>
               </section>
               <div class="tour-demo-cursor tour-assistant-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
             </div>
             <div class="onboarding-copy">
-              <span class="onboarding-number">05</span>
-              <div><h3>Ask, review, stay in control</h3><p>The optional assistant can explain or propose schema changes, but every action waits for your confirmation. Use the <strong>?</strong> menu anytime to reopen this guide or shut down the app.</p></div>
+              <span class="onboarding-number">06</span>
+              <div><h3>Ask, review, stay in control</h3><p>Connect a provider and model, then use Schemii's separate chat history against the displayed exact target. Disclosure mode, capabilities, and limits bound what context and actions are available; structured proposals show the intended change before execution.</p><ul class="onboarding-points"><li>Schema, write, and raw operations have confirmation floors. Migration, structured-insert, and view-creation plans separate preview from apply; confirmed raw SQL remains proposal-bound.</li><li><strong>Stop</strong> requests cancellation and keeps waiting for the terminal result.</li></ul></div>
             </div>
+          </section>
+          <section class="onboarding-page" data-onboarding-page="6" hidden>
+            <div class="tour-demo-playback"><span class="tour-demo-status" id="recovery-demo-status" role="status" aria-live="polite">Watch a design move through save, transfer, drift, and conflict recovery.</span><button class="tour-demo-toggle" id="recovery-demo-toggle" type="button">Pause demo</button></div>
+            <div class="onboarding-screenshot tour-recovery-demo" aria-hidden="true">
+              <header><strong>product_workspace</strong><span class="tour-recovery-save">Saved to file</span></header>
+              <nav><button data-onboarding-target="library" type="button" tabindex="-1">Saved designs</button><button data-onboarding-target="transfer" type="button" tabindex="-1">Upload / Download</button><button data-onboarding-target="drift" type="button" tabindex="-1">Drift</button><button data-onboarding-target="conflict" type="button" tabindex="-1">Conflict</button></nav>
+              <section class="tour-recovery-library"><aside><small>DESIGN LIBRARY</small><button type="button" tabindex="-1"><strong>Product workspace</strong><span>CURRENT · Saved to file</span></button><button type="button" tabindex="-1"><strong>Mercury Books</strong><span>PostgreSQL · bookstore</span></button><footer>New design · Open design</footer></aside><main><strong>Saved design lifecycle</strong><p>Tables · relationships · functions · views · schema objects</p><span>Positions, colors, and layer viewports travel with the design.</span></main></section>
+              <section class="tour-recovery-transfer"><strong>Move a reviewed design</strong><div><span>Upload SQL → new saved design</span><span>Download JSON → local copy</span><span>Download SQL → local copy</span><span>Help → Restore examples</span></div><p>Only SQL can be uploaded. JSON and SQL downloads are one-way copies; restoring examples is a separate Help action.</p></section>
+              <section class="tour-recovery-drift"><strong>PostgreSQL changed</strong><p>Refresh semantic objects from the exact linked target or dismiss this fingerprint.</p><div><button type="button" tabindex="-1">Dismiss</button><button type="button" tabindex="-1">Refresh design</button></div><small>Established positions, colors, and layer viewports are preserved.</small></section>
+              <section class="tour-recovery-conflict"><small>STALE SAVED STATE</small><strong>Autosave is frozen</strong><p>Your local edits are preserved while the saved schema or layout is newer.</p><div><button type="button" tabindex="-1">Export local edits</button><button type="button" tabindex="-1">Refresh saved design</button></div></section>
+              <div class="tour-demo-cursor" aria-hidden="true"><svg viewBox="0 0 24 28"><path d="M3 2v20l5-5 4 9 4-2-4-8h7Z"/></svg><span>Left click</span></div>
+            </div>
+            <div class="onboarding-copy"><span class="onboarding-number">07</span><div><h3>Save, move, and recover safely</h3><p>The graphical New, Open, Save, Upload SQL, and Download design controls manage saved files. SQL upload creates a new saved design; JSON and SQL downloads are one-way local copies. <strong>Restore examples</strong> lives under Help. Autosave reports <strong>Saved to file</strong> for tables, relationships, functions, views, schema objects, and layout.</p><ul class="onboarding-points"><li>Database drift can be refreshed or dismissed. A semantic PostgreSQL refresh preserves established positions, colors, and per-layer viewports.</li><li>A stale schema or layout conflict freezes autosave: <strong>Export local edits</strong>, then explicitly <strong>Refresh saved design</strong>. Open <strong>Help</strong> to replay this guide.</li></ul></div></div>
           </section>
         </div>
         <footer class="onboarding-footer">

@@ -427,7 +427,7 @@ def _temporal_value(value: str, temporal: str) -> str:
         return f"({value}::timestamp AT TIME ZONE 'UTC')"
     if temporal == "timestamp_tz":
         return value
-    return f"({value} AT TIME ZONE 'UTC')"
+    return f"({value} AT TIME ZONE %s)"
 
 
 def _temporal_expression(column: dict[str, Any], quote: Callable[[str], str]) -> str:
@@ -453,7 +453,10 @@ def normalize_temporal_series(query: Any, source_columns: list[dict[str, Any]]) 
     return {**normalized, "temporalSourceType": source_type, "temporalKind": _capability(source_column)["temporal"]}
 
 
-def compile_temporal_series_manifest(source: dict[str, Any], series: dict[str, Any], quote: Callable[[str], str], source_columns: list[dict[str, Any]]) -> dict[str, Any]:
+def compile_temporal_series_manifest(
+    source: dict[str, Any], series: dict[str, Any], quote: Callable[[str], str],
+    source_columns: list[dict[str, Any]], *, source_time_zone: str = "UTC",
+) -> dict[str, Any]:
     dimension = series["dimensions"][0]
     columns = {column["name"]: column for column in source_columns}
     source_column = columns[dimension["column"]]
@@ -477,13 +480,15 @@ def compile_temporal_series_manifest(source: dict[str, Any], series: dict[str, A
         f'    {count}(DISTINCT {typed_source}) AS "__schemer_points"\nFROM {relation}\nWHERE\n    '
         + "\n    AND ".join(predicates)
     )
+    if series["temporalKind"] == "timestamp":
+        parameters = [source_time_zone, source_time_zone, *parameters, source_time_zone]
     return {"sql": sql, "parameters": parameters, "dimension": dimension}
 
 
 def compile_temporal_series_window(
     source: dict[str, Any], series: dict[str, Any], quote: Callable[[str], str],
     bucket_seconds: int, window_start: Any, window_end: Any, maximum_rows: int,
-    source_columns: list[dict[str, Any]],
+    source_columns: list[dict[str, Any]], *, source_time_zone: str = "UTC",
 ) -> dict[str, Any]:
     dimension = series["dimensions"][0]
     columns = {column["name"]: column for column in source_columns}
@@ -513,6 +518,11 @@ def compile_temporal_series_window(
         + '\nGROUP BY\n    1\nORDER BY\n    "__schemer_t0" ASC NULLS LAST\nLIMIT %s'
     )
     parameters = [bucket_seconds, bucket_seconds, *filter_parameters, window_start, window_end, maximum_rows + 1]
+    if series["temporalKind"] == "timestamp":
+        parameters = [
+            source_time_zone, bucket_seconds, bucket_seconds, *filter_parameters,
+            source_time_zone, window_start, source_time_zone, window_end, maximum_rows + 1,
+        ]
     return {"sql": sql, "parameters": parameters, "columns": output, "aliases": aliases}
 
 
@@ -555,6 +565,7 @@ def compile_query(source: dict[str, Any], query: dict[str, Any], quote: Callable
 def compile_detail_query(
     source: dict[str, Any], query: dict[str, Any], request: dict[str, Any],
     source_columns: list[dict[str, Any]], quote: Callable[[str], str],
+    retained_limit: int | None = None,
 ) -> dict[str, Any]:
     detail_columns = request["detail"]["columns"]
     source_by_name = {column["name"]: column for column in source_columns}
@@ -620,6 +631,6 @@ def compile_detail_query(
     select_sql += "\nLIMIT %s OFFSET %s"
     return {
         "countSql": count_sql, "countParameters": list(parameters),
-        "sql": select_sql, "parameters": [*parameters, request["limit"], request["offset"]],
+        "sql": select_sql, "parameters": [*parameters, retained_limit or request["limit"], request["offset"]],
         "columns": output_columns, "aliases": [aliases[item["id"]] for item in detail_columns],
     }

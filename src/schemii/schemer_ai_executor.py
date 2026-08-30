@@ -24,11 +24,24 @@ class SchemerAiExecutor:
     def reconcile(self, chat: dict[str, Any], current: dict[str, Any], proposal: dict[str, Any]) -> dict[str, Any]:
         if proposal["action"].get("type") not in self.MUTATIONS:
             return {"operation": current}
-        receipt = self.dashboard_store.operation_receipt(chat["dashboardId"], current["id"])
-        if receipt is None:
-            operation = self.authority.resolve_operation(current["id"], chat["id"], "failed", error={"code": "operation_not_applied", "message": "No dashboard mutation receipt exists; request a fresh proposal"})
-        else:
+        evidence = self.dashboard_store.operation_receipt_evidence(chat["dashboardId"], current["id"])
+        receipt = evidence["receipt"]
+        if receipt is None and evidence["archiveComplete"]:
+            operation = self.authority.resolve_operation(current["id"], chat["id"], "failed", error={
+                "code": "operation_not_applied",
+                "message": "The complete dashboard receipt history proves that the mutation was not applied; request a fresh proposal",
+                "receiptEvidence": {"archiveComplete": evidence["archiveComplete"]},
+            })
+        elif receipt is not None:
             operation = self.authority.resolve_operation(current["id"], chat["id"], "succeeded", result=receipt)
+        else:
+            return {
+                "operation": current,
+                "reconciliation": {
+                    "status": "insufficient_evidence",
+                    "message": "Legacy dashboard receipt history is incomplete; the operation remains uncertain and will not be replayed",
+                },
+            }
         return {"operation": operation}
 
     def execute(self, action, operation_id, *, chat, record, profile, schema_concurrency, authorization_target, policy_binding=None):
@@ -67,6 +80,25 @@ class SchemerAiExecutor:
                 if identity not in {tuple(item.get(key) for key in fields) for item in allowed}:
                     raise PostgresServiceError(409, "action_target_changed", "Widget source is outside the bounded catalog context issued for this proposal")
                 with self.dashboard_store.guard_revision(chat["dashboardId"], schema_concurrency["revision"]) as guarded:
-                    prepared = self.configured_widget(self.service, action, operation_id, len(guarded["dashboard"]["widgets"]))
+                    widget_count = len(guarded["dashboard"]["widgets"])
+                prepared = self.configured_widget(
+                    self.service, action, operation_id, widget_count,
+                    operation_timeout_ms=bounds.get("operationTimeoutMs"),
+                )
             return self.dashboard_store.apply_ai_mutation(chat["dashboardId"], operation_id, schema_concurrency["revision"], action, prepared)
         raise OpenCodeServiceError(409, "action_temporarily_unavailable", "This action is unavailable until its server execution adapter is installed")
+
+    @staticmethod
+    def durable_result(result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("kind") != "sql_result":
+            return result
+        display = result.get("display") if isinstance(result.get("display"), dict) else {}
+        return {
+            key: value for key, value in result.items() if key != "display"
+        } | {
+            "evidence": {
+                "rowCount": display.get("rowCount", len(display.get("rows", []))),
+                "columnCount": len(display.get("columns", [])),
+                "truncated": bool(display.get("truncated")),
+            },
+        }

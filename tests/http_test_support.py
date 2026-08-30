@@ -1,6 +1,7 @@
 import json
 import hashlib
 import threading
+from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -61,6 +62,7 @@ class FakePostgresService:
         self.view_expectation = {"kind": "view", "fingerprint": "a" * 64}
         self.view_saved_id = "view_summary"
         self.ai_write_results = {}
+        self.structured_results = {}
         self.console_settings_value = {
             "application": "test", "revision": 1, "writeIntent": "disabled", "defaultMode": "managed_read",
             "statementLimit": 100, "rowPageSize": 100, "inheritance": "none",
@@ -85,6 +87,15 @@ class FakePostgresService:
                 for name, capacity in {"catalog": 8, "read": 8, "console": 4, "write": 1}.items()
             },
             "targets": {},
+        }
+
+    def structured_result_metrics(self):
+        return {
+            "status": "available", "processLocal": True, "active": 0, "capacity": 108,
+            "ttlSeconds": 300, "activeSnapshots": 0, "snapshotCapacity": 4,
+            "retainedBytes": 0, "memoryCapacityBytes": 128 * 1024 * 1024,
+            "aggregateResults": {"active": 0, "capacity": 100, "retainedBytes": 0, "memoryCapacityBytes": 64 * 1024 * 1024},
+            "detailResults": {"active": 0, "capacity": 8, "retainedBytes": 0, "memoryCapacityBytes": 64 * 1024 * 1024},
         }
 
     def profile_context_fingerprint(self, profile_id):
@@ -220,6 +231,24 @@ class FakePostgresService:
             "definition": {"status": "unavailable", "reason": "not_supported"},
         }
 
+    @contextmanager
+    def verified_relation_catalog_snapshots(self, targets):
+        fields = ("profileId", "database", "namespace", "relation")
+        if not isinstance(targets, list) or any(not isinstance(target, dict) or set(target) != set(fields) for target in targets):
+            raise AssertionError("fake received invalid verified relation targets")
+        ordered = [dict(zip(fields, identity)) for identity in sorted({tuple(target[field] for field in fields) for target in targets})]
+        self.calls.append(("verified_relation_catalog_snapshots", ordered))
+        snapshots = []
+        for target in ordered:
+            snapshots.append({
+                **target,
+                "profileFingerprint": self.profile_context_fingerprint(target["profileId"]),
+                "descriptor": self.inspect_relation(
+                    target["profileId"], target["database"], target["namespace"], target["relation"],
+                ),
+            })
+        yield snapshots
+
     def list_relation_lineage(self, profile_id, database, namespace, relation, direction, **options):
         self.calls.append(("list_relation_lineage", profile_id, database, namespace, relation, direction, options))
         return {
@@ -240,17 +269,79 @@ class FakePostgresService:
         self.calls.append(("verify_relation_source", profile_id, source))
         return {"status": "verified", "matches": True, **source, "missingColumns": [], "addedColumns": [], "changedColumns": []}
 
-    def execute_widget_query(self, profile_id, source, query):
-        self.calls.append(("execute_widget_query", profile_id, source, query))
-        return {"columns": [{"label": "Rows"}], "rows": [[1]], "sql": "SELECT count(*)", "parameters": []}
+    def verify_relation_sources(self, profile_id, sources):
+        self.calls.append(("verify_relation_sources", profile_id, sources))
+        return {"snapshot": "repeatable_read", "results": [
+            {"status": "verified", "matches": True, **source, "missingColumns": [], "addedColumns": [], "changedColumns": []}
+            for source in sources
+        ]}
 
-    def execute_temporal_series(self, profile_id, source, query, action, refresh_generation, series=None, window_start=None):
-        self.calls.append(("execute_temporal_series", profile_id, source, query, action, refresh_generation, series, window_start))
-        return {"seriesVersion": 1, "action": action, "refreshGeneration": refresh_generation}
+    def execute_widget_query(self, profile_id, source, query, **policy):
+        recorded_policy = {key: value for key, value in policy.items() if key not in {"result_owner", "slicer_lineage"}}
+        self.calls.append(("execute_widget_query", profile_id, source, query, recorded_policy) if recorded_policy else ("execute_widget_query", profile_id, source, query))
+        result = {"source": source, "effectiveQuery": query, "slicerLineage": policy.get("slicer_lineage") or [], "columns": [{"id": "rows", "label": "Rows"}], "rows": [[1]], "rowCount": 1, "limit": 1, "truncated": False, "limitEvents": [], "sql": "SELECT count(*)", "parameters": []}
+        if policy.get("result_owner"):
+            result["resultResource"] = self._structured_resource(profile_id, source, "aggregate", policy["result_owner"], result)
+        return result
 
-    def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, searches):
-        self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, searches))
-        return {"columns": [], "rows": [], "matchingRowCount": 0, "offset": offset, "limit": limit, "hasMore": False}
+    def execute_temporal_series(self, profile_id, source, query, action, refresh_generation, series=None, window_start=None, *, slicer_lineage=None):
+        call = ("execute_temporal_series", profile_id, source, query, action, refresh_generation, series, window_start)
+        self.calls.append((*call, {"slicer_lineage": slicer_lineage}) if slicer_lineage else call)
+        return {"seriesVersion": 1, "action": action, "refreshGeneration": refresh_generation, "effectiveQuery": query, "slicerLineage": slicer_lineage or []}
+
+    def execute_relation_detail(self, profile_id, source, query, selection, detail, offset, limit, sort, searches, **policy):
+        recorded_policy = {key: value for key, value in policy.items() if key not in {"result_owner", "slicer_lineage"}}
+        self.calls.append(("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, searches, recorded_policy) if recorded_policy else ("execute_relation_detail", profile_id, source, query, selection, detail, offset, limit, sort, searches))
+        result = {"source": source, "effectiveQuery": query, "slicerLineage": policy.get("slicer_lineage") or [], "columns": [], "rows": [], "matchingRowCount": 0, "offset": offset, "nextOffset": offset, "limit": limit, "hasMore": False, "truncated": False, "limitEvents": [], "sql": "SELECT detail", "parameters": []}
+        if policy.get("result_owner"):
+            result["resultResource"] = self._structured_resource(profile_id, source, "detail", policy["result_owner"], result)
+        return result
+
+    def _structured_resource(self, profile_id, source, kind, owner, response):
+        result_id = f"fake_result_{len(self.structured_results) + 1:04d}"
+        token = f"fake_binding_{len(self.structured_results) + 1:04d}"
+        binding = {
+            **owner, "resultKind": kind, "profileId": profile_id,
+            "profileFingerprint": self.profile_context_fingerprint(profile_id),
+            "database": source["database"], "namespace": source["namespace"],
+            "relation": source["relation"], "relationKind": source["kind"],
+            "relationFingerprint": source["fingerprint"], "queryDigest": "c" * 64,
+        }
+        envelope = {
+            "version": 1, "id": result_id, "kind": kind, "binding": token,
+            "state": "retained", "processLocal": True, "retention": "bounded_memory",
+            "snapshotState": "released", "expiresAt": "2099-01-01T00:00:00Z", "availableRows": len(response["rows"]),
+            "page": {"offset": 0, "pageSize": max(1, response.get("limit", 1)), "returnedRows": len(response["rows"]), "hasNext": False, "hasPrevious": False, "nextCursor": None, "previousCursor": None},
+            "export": {"formats": ["json", "csv"], "persistentUntilExpiry": True},
+            "limits": {"maximumRows": 10000, "maximumBytes": 16777216, "terminalTruncation": False, "terminalReason": None},
+        }
+        self.structured_results[result_id] = {"bindingToken": token, "binding": binding, "response": response, "envelope": envelope, "state": "retained"}
+        return envelope
+
+    def structured_result_binding(self, profile_id, result_id, binding_token, binding, server_id):
+        item = self.structured_results.get(result_id)
+        if item is None or item["bindingToken"] != binding_token or item["binding"]["profileId"] != profile_id:
+            from schemii.postgres_common import PostgresServiceError
+            raise PostgresServiceError(404, "result_not_found", "Structured result was not found")
+        if item["state"] != "retained":
+            from schemii.postgres_common import PostgresServiceError
+            raise PostgresServiceError(410, f"result_{item['state']}", f"Structured result is {item['state']}")
+        return dict(item["binding"])
+
+    def structured_result_page(self, profile_id, result_id, binding_token, cursor, binding, server_id):
+        self.structured_result_binding(profile_id, result_id, binding_token, binding, server_id)
+        item = self.structured_results[result_id]
+        return {**item["response"], "resultResource": item["envelope"]}
+
+    def export_structured_result(self, profile_id, result_id, binding_token, format_name, binding, server_id):
+        self.structured_result_binding(profile_id, result_id, binding_token, binding, server_id)
+        content = json.dumps(self.structured_results[result_id]["response"]).encode()
+        return "application/json; charset=utf-8", "result.json", content, {"Content-Disposition": 'attachment; filename="result.json"'}
+
+    def close_structured_result(self, profile_id, result_id, binding_token, binding, server_id):
+        self.structured_result_binding(profile_id, result_id, binding_token, binding, server_id)
+        self.structured_results[result_id]["state"] = "cancelled"
+        return {"resultId": result_id, "state": "cancelled", "closed": True}
 
     def catalog_status(self, profile_id, namespace):
         self.calls.append(("catalog_status", profile_id, namespace))

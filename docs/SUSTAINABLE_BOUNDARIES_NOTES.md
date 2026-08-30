@@ -32,7 +32,7 @@ Decision after architecture research:
 
 - Add a dedicated private `metadata-postgres` service and volume in every launcher mode. Do not store metadata in the optional user-target `postgres` service.
 - Use database `schemii_metadata` with separate narrowly scoped Schemii and Schemer runtime roles, a no-login owner, and a migration role.
-- Normal bridge modes use the private service name. Host-network modes publish metadata PostgreSQL to an instance-specific loopback-only port.
+- Every mode uses the private metadata service name. Linux host-PostgreSQL modes keep the application in bridge mode and use a private Unix-socket relay, so metadata PostgreSQL is never published.
 - Both application readiness checks require metadata connectivity and current migrations. Static UI and domain-document access may degrade, but authority-dependent actions fail with structured `503 metadata_unavailable`; there is no JSON fallback.
 - Use packaged, checksummed SQL migrations serialized by a PostgreSQL advisory lock. No ORM or migration dependency is required.
 - Treat metadata backups separately from user target backups. Metadata contains sensitive transient query-result payloads and authority history.

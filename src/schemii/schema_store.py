@@ -13,7 +13,7 @@ from typing import Any
 from .migration_contract import has_full_schema_completeness_proof
 
 from .atomic_json import write_json
-from .file_lock import exclusive_file_lock
+from .file_lock import RefCountedKeyedFileGuard
 
 
 SCHEMA_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -91,38 +91,19 @@ class SchemaStore:
         self.schema_dir = Path(schema_dir).expanduser()
         self.read_only = read_only
         self._lock = threading.RLock()
-        self._schema_locks: dict[str, threading.RLock] = {}
-        self._lock_state = threading.local()
         self.lock_dir = self.schema_dir / ".locks"
+        self._guards = RefCountedKeyedFileGuard(lambda schema_id: self.lock_dir / f"{schema_id}.lock")
         if not read_only:
             self.schema_dir.mkdir(parents=True, exist_ok=True)
             self.lock_dir.mkdir(mode=0o700, exist_ok=True)
-
-    def _schema_lock(self, schema_id: str) -> threading.RLock:
-        with self._lock:
-            return self._schema_locks.setdefault(schema_id, threading.RLock())
 
     @contextmanager
     def _schema_guard(self, schema_id: str):
         """Serialize schema writes across threads and server processes."""
         if self.read_only:
             raise SchemaStoreError(403, "schema_store_read_only", "This schema store is read-only")
-        with self._schema_lock(schema_id):
-            depths = getattr(self._lock_state, "depths", {})
-            depth = depths.get(schema_id, 0)
-            depths[schema_id] = depth + 1
-            self._lock_state.depths = depths
-            try:
-                if depth:
-                    yield
-                else:
-                    with exclusive_file_lock(self.lock_dir / f"{schema_id}.lock"):
-                        yield
-            finally:
-                if depth:
-                    depths[schema_id] = depth
-                else:
-                    depths.pop(schema_id, None)
+        with self._guards.exclusive(schema_id):
+            yield
 
     @contextmanager
     def _schema_read_guard(self, schema_id: str):
@@ -130,7 +111,7 @@ class SchemaStore:
             with self._schema_guard(schema_id):
                 yield
             return
-        with self._schema_lock(schema_id):
+        with self._guards.thread(schema_id):
             yield
 
     @staticmethod

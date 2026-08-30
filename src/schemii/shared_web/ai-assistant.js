@@ -81,7 +81,7 @@
     const {
       sessionClient, root, trigger, settingsDialog, historyDialog, storageKey, getContext,
       buildMessagePayload, buildSessionPayload, contextKey = () => null, parseSession = session => ({ title: session.title || "Untitled chat", key: null }),
-      buildProposalClaimPayload, buildProposalExecutionPayload, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
+      buildProposalClaimPayload, buildProposalExecutionPayload, prepareProposalExecution, buildHistoryQuery, renderAction, validateAction, handleOperationResult, toolLabels = {}, skillLabels = {}, labels = {},
       onOpenChange = () => {}, onAccessChange = () => {}, onNewChat = () => {}, onPolicyChange = () => {}, state: suppliedState,
       canViewSession = () => true, extraBusyControls = [], panelModal = true,
     } = options;
@@ -785,6 +785,10 @@
     async function executeProposal(proposal, capture) {
       if (!proposalContextIsCurrent(capture)) {
         throw new Error("The application context changed. Start a new conversation before confirming this action.");
+      }
+      if (prepareProposalExecution) await prepareProposalExecution({ proposal, capture });
+      if (!proposalContextIsCurrent(capture)) {
+        throw new Error("The application context changed while pending edits were saved. Request a fresh proposal.");
       }
       const context = buildProposalClaimPayload ? buildProposalClaimPayload(capture, elements.access.value) : {};
       const policy = proposal.policyBinding ?? {};

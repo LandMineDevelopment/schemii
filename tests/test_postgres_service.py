@@ -23,8 +23,11 @@ from schemii.postgres_service import (
     ValidationError,
     canonical_fingerprint,
     quote_identifier,
+    _series_key,
 )
 from schemii.postgres_safety import namespace_lock_keys
+from schemii.postgres_profiles import validate_profile_document
+from schemii.result_limits import ResultLimiter, ResultLimits
 from tests.capability_test_support import capabilities_for_formatted_type
 
 
@@ -51,6 +54,10 @@ class Cursor:
         self.offset = 0
         if self.connection.fail_on and self.connection.fail_on in sql:
             raise self.connection.failure or RuntimeError("database detail that must not escape")
+        if sql.strip() == "SHOW lock_timeout" and "SHOW lock_timeout" not in self.connection.responses:
+            self.rows = [{"lock_timeout": "0"}]
+            self.description = [Column("lock_timeout")]
+            return
         if "AS namespace_exists" in sql and not any(marker in sql for marker in self.connection.responses):
             self.rows = [{"namespace_exists": True}]
             self.description = [Column("namespace_exists")]
@@ -213,6 +220,21 @@ class PostgresServiceTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.service.save_profile("local", {**PROFILE, field: value})
                 self.assertNotEqual(self.service.profile_context_fingerprint("local"), original)
+
+    def test_pure_profile_document_validator_is_the_store_contract(self):
+        document = {"profiles": {"local": PROFILE}}
+        validated = validate_profile_document(document)
+        self.assertEqual(validated, document["profiles"])
+        self.assertIsNot(validated["local"], PROFILE)
+        with self.assertRaises(ValidationError):
+            validate_profile_document({"profiles": {"../bad": PROFILE}})
+        with self.assertRaises(ValidationError):
+            validate_profile_document({"profiles": {"local": PROFILE}, "version": 1})
+
+        store = Path(self.temporary_directory.name) / "postgres_profiles.json"
+        store.write_text(json.dumps({"profiles": {"local": PROFILE}, "version": 1}), encoding="utf-8")
+        with self.assertRaisesRegex(PostgresServiceError, "Profile store is invalid"):
+            self.service.list_profiles()
 
     def test_profile_validation_identifier_quoting_and_plan_invalidation(self):
         for change in ({"port": 0}, {"timeout": True}, {"sslmode": "maybe"}, {"host": "bad host"}):
@@ -501,6 +523,338 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertNotEqual(first, namespace_lock_keys("demo", "other"))
         self.assertTrue(all(-(2 ** 31) <= item < 2 ** 31 for item in first))
 
+    def test_verified_relation_snapshots_deduplicate_and_lock_targets_deterministically(self):
+        self.service.save_profile("alpha", {**PROFILE, "user": "alpha"})
+        self.service.save_profile("zeta", {**PROFILE, "user": "zeta"})
+        events = []
+        connections = []
+
+        class OrderedCursor(Cursor):
+            def execute(cursor_self, sql, params=()):
+                events.append((cursor_self.connection.profile_user, sql, params))
+                return super().execute(sql, params)
+
+        class OrderedConnection(Connection):
+            def __init__(connection_self, profile_user):
+                super().__init__({"SELECT current_database() AS database": [{"database": "demo"}]})
+                connection_self.profile_user = profile_user
+
+            def cursor(connection_self):
+                return OrderedCursor(connection_self)
+
+        def connect(**kwargs):
+            connection = OrderedConnection(kwargs["user"])
+            connections.append(connection)
+            return connection
+
+        inspections = []
+        service = PostgresService(self.temporary_directory.name, connect_factory=connect)
+
+        def inspect(connection, profile_id, database, namespace, relation, expected_kind, expected_fingerprint):
+            inspections.append((profile_id, database, namespace, relation, connection.profile_user))
+            return {
+                "profileId": profile_id, "database": database, "namespace": namespace,
+                "relation": relation, "kind": "table", "columns": [], "fingerprint": "a" * 64,
+            }
+
+        service._inspect_relation_connection = inspect
+        targets = [
+            {"profileId": "zeta", "database": "demo", "namespace": "sales", "relation": "z_orders"},
+            {"profileId": "alpha", "database": "demo", "namespace": "sales", "relation": "orders"},
+            {"profileId": "alpha", "database": "demo", "namespace": "archive", "relation": "orders"},
+            {"profileId": "alpha", "database": "demo", "namespace": "sales", "relation": "orders"},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "caller failed"):
+            with service.verified_relation_catalog_snapshots(targets) as snapshots:
+                self.assertEqual([
+                    tuple(snapshot[field] for field in ("profileId", "database", "namespace", "relation"))
+                    for snapshot in snapshots
+                ], [
+                    ("alpha", "demo", "archive", "orders"),
+                    ("alpha", "demo", "sales", "orders"),
+                    ("zeta", "demo", "sales", "z_orders"),
+                ])
+                self.assertTrue(all(connection.rollbacks == 0 and not connection.closed for connection in connections))
+                raise RuntimeError("caller failed")
+
+        lock_sql = [sql for _, sql, _ in events if sql.startswith("PREPARE")]
+        self.assertEqual(lock_sql, [
+            'PREPARE "schemii_relation_guard_0" AS SELECT NULL FROM "archive"."orders" WHERE FALSE',
+            'PREPARE "schemii_relation_guard_1" AS SELECT NULL FROM "sales"."orders" WHERE FALSE',
+            'PREPARE "schemii_relation_guard_2" AS SELECT NULL FROM "sales"."z_orders" WHERE FALSE',
+        ])
+        first_snapshot_select = next(index for index, (_, sql, _) in enumerate(events) if sql == "SELECT current_database() AS database")
+        self.assertTrue(all(index < first_snapshot_select for index, (_, sql, _) in enumerate(events) if sql.startswith("PREPARE")))
+        self.assertEqual(inspections, [
+            ("alpha", "demo", "archive", "orders", "alpha"),
+            ("alpha", "demo", "sales", "orders", "alpha"),
+            ("zeta", "demo", "sales", "z_orders", "zeta"),
+        ])
+        self.assertEqual([connection.profile_user for connection in connections], ["alpha", "zeta", "alpha", "zeta"])
+        self.assertTrue(all(connection.rollbacks == 1 and connection.closed for connection in connections))
+        self.assertTrue(all(
+            connection.executed[0][0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY"
+            for connection in connections[:2]
+        ))
+        self.assertTrue(all(("SHOW lock_timeout", ()) in connection.executed for connection in connections[:2]))
+        self.assertTrue(all(("SET LOCAL lock_timeout = '5000ms'", ()) in connection.executed for connection in connections[:2]))
+        self.assertTrue(all(not any("lock_timeout" in sql for sql, _ in connection.executed) for connection in connections[2:]))
+
+    def test_verified_relation_snapshot_retains_stricter_postgres_lock_timeout(self):
+        guard = Connection({
+            "SHOW lock_timeout": [{"lock_timeout": "250ms"}],
+            "SELECT current_database() AS database": [{"database": "demo"}],
+        })
+        snapshot = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+        connections = [guard, snapshot]
+        service = PostgresService(
+            self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0),
+            lock_timeout_ms=3000,
+        )
+        service._inspect_relation_connection = lambda _connection, profile_id, database, namespace, relation, *_: {
+            "profileId": profile_id, "database": database, "namespace": namespace,
+            "relation": relation, "kind": "table", "columns": [], "fingerprint": "a" * 64,
+        }
+
+        with service.verified_relation_catalog_snapshots([{
+            "profileId": "local", "database": "demo", "namespace": "public", "relation": "orders",
+        }]):
+            pass
+
+        self.assertIn(("SHOW lock_timeout", ()), guard.executed)
+        self.assertFalse(any(sql.startswith("SET LOCAL lock_timeout") for sql, _ in guard.executed))
+        self.assertTrue(all(connection.rollbacks == 1 and connection.closed for connection in (guard, snapshot)))
+
+    def test_verified_relation_snapshot_caps_unique_fanout_before_connecting_and_retains_100_target_limit(self):
+        targets = []
+        for index in range(100):
+            profile_id = f"profile_{index:03}"
+            self.service.save_profile(profile_id, {**PROFILE, "user": profile_id})
+            targets.append({
+                "profileId": profile_id, "database": "demo", "namespace": "public",
+                "relation": f"relation_{index:03}",
+            })
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: connections.append(kwargs),
+        )
+
+        with self.assertRaises(PostgresServiceError) as caught:
+            with service.verified_relation_catalog_snapshots(targets):
+                self.fail("excessive profile/database fanout must not connect")
+
+        self.assertEqual(caught.exception.code, "verified_relation_fanout_too_large")
+        self.assertEqual(caught.exception.details, {
+            "actualUniqueProfileDatabases": 100,
+            "maximumUniqueProfileDatabases": 4,
+            "maximumTargetsPerRequest": 100,
+            "chunkable": True,
+        })
+        self.assertEqual(connections, [])
+        with self.assertRaises(ValidationError):
+            with service.verified_relation_catalog_snapshots(targets + [{**targets[0], "relation": "relation_100"}]):
+                self.fail("more than 100 exact targets must remain invalid")
+
+    def test_verified_relation_snapshot_supports_100_targets_with_eight_bounded_connections_and_cleanup(self):
+        connections = []
+        targets = []
+        for index in range(4):
+            profile_id = f"bounded_{index}"
+            self.service.save_profile(profile_id, {**PROFILE, "user": profile_id})
+        for index in range(100):
+            targets.append({
+                "profileId": f"bounded_{index % 4}", "database": "demo", "namespace": "public",
+                "relation": f"relation_{index:03}",
+            })
+
+        def connect(**kwargs):
+            connection = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+            connection.profile_user = kwargs["user"]
+            connections.append(connection)
+            return connection
+
+        service = PostgresService(self.temporary_directory.name, connect_factory=connect)
+        service._inspect_relation_connection = lambda _connection, profile_id, database, namespace, relation, *_: {
+            "profileId": profile_id, "database": database, "namespace": namespace,
+            "relation": relation, "kind": "table", "columns": [], "fingerprint": "a" * 64,
+        }
+
+        with service.verified_relation_catalog_snapshots(targets) as snapshots:
+            self.assertEqual(len(snapshots), 100)
+            self.assertEqual(len(connections), 8)
+            self.assertTrue(all(connection.rollbacks == 0 and not connection.closed for connection in connections))
+
+        self.assertEqual(
+            [connection.profile_user for connection in connections],
+            [f"bounded_{index}" for index in range(4)] * 2,
+        )
+        self.assertEqual(sum(
+            sql.startswith("PREPARE") for connection in connections[:4] for sql, _ in connection.executed
+        ), 100)
+        self.assertEqual(sum(
+            sql.startswith("SELECT NULL FROM") for connection in connections[4:] for sql, _ in connection.executed
+        ), 100)
+        self.assertTrue(all(connection.rollbacks == 1 and connection.closed for connection in connections))
+
+    def test_verified_relation_snapshot_rejects_wrong_database_after_locking_before_inspection(self):
+        guard = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+        snapshot = Connection({"SELECT current_database() AS database": [{"database": "other"}]})
+        connections = [guard, snapshot]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+        inspected = []
+        service._inspect_relation_connection = lambda *args: inspected.append(args)
+        target = {"profileId": "local", "database": "demo", "namespace": "public", "relation": "orders"}
+
+        with self.assertRaises(PostgresServiceError) as caught:
+            with service.verified_relation_catalog_snapshots([target]):
+                self.fail("wrong database must not yield a snapshot")
+
+        self.assertEqual(caught.exception.code, "database_changed")
+        self.assertEqual(inspected, [])
+        self.assertIn(('PREPARE "schemii_relation_guard_0" AS SELECT NULL FROM "public"."orders" WHERE FALSE', ()), guard.executed)
+        self.assertFalse(any(sql.startswith("SELECT NULL FROM") for sql, _ in snapshot.executed))
+        self.assertEqual((guard.rollbacks, snapshot.rollbacks), (1, 1))
+        self.assertTrue(guard.closed and snapshot.closed)
+
+    def test_verified_relation_snapshot_checks_profile_database_before_connecting(self):
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: connections.append(kwargs),
+        )
+        target = {"profileId": "local", "database": "other", "namespace": "public", "relation": "orders"}
+
+        with self.assertRaises(PostgresServiceError) as caught:
+            with service.verified_relation_catalog_snapshots([target]):
+                self.fail("profile database mismatch must not connect")
+
+        self.assertEqual(caught.exception.code, "database_changed")
+        self.assertEqual(connections, [])
+
+    def test_verified_relation_snapshot_rejects_a_descriptor_for_another_target(self):
+        guard = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+        snapshot = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+        connections = [guard, snapshot]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+        service._inspect_relation_connection = lambda _connection, profile_id, database, namespace, relation, *_: {
+            "profileId": profile_id, "database": database, "namespace": namespace,
+            "relation": "other_orders", "kind": "table", "columns": [], "fingerprint": "a" * 64,
+        }
+        target = {"profileId": "local", "database": "demo", "namespace": "public", "relation": "orders"}
+
+        with self.assertRaises(PostgresServiceError) as caught:
+            with service.verified_relation_catalog_snapshots([target]):
+                self.fail("wrong relation descriptor must not yield a snapshot")
+
+        self.assertEqual(caught.exception.code, "relation_changed")
+        self.assertIn(('PREPARE "schemii_relation_guard_0" AS SELECT NULL FROM "public"."orders" WHERE FALSE', ()), guard.executed)
+        self.assertIn(('SELECT NULL FROM "public"."orders" WHERE FALSE', ()), snapshot.executed)
+        self.assertFalse(any('"other_orders"' in sql for connection in (guard, snapshot) for sql, _ in connection.executed))
+        self.assertTrue(all(connection.rollbacks == 1 and connection.closed for connection in (guard, snapshot)))
+
+    def test_verified_relation_snapshot_uses_no_scan_guards_for_every_supported_kind(self):
+        kinds = ("table", "partitioned_table", "view", "materialized_view", "foreign_table")
+        guard = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+        snapshot = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+        connections = [guard, snapshot]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+        service._inspect_relation_connection = lambda _connection, profile_id, database, namespace, relation, *_: {
+            "profileId": profile_id, "database": database, "namespace": namespace,
+            "relation": relation, "kind": kinds[int(relation.rsplit("_", 1)[1])],
+            "columns": [], "fingerprint": "a" * 64,
+        }
+        targets = [
+            {"profileId": "local", "database": "demo", "namespace": 'odd"schema', "relation": f"relation_{index}"}
+            for index in range(len(kinds))
+        ]
+
+        with service.verified_relation_catalog_snapshots(targets) as snapshots:
+            self.assertEqual([item["descriptor"]["kind"] for item in snapshots], list(kinds))
+
+        prepare_sql = [sql for sql, _ in guard.executed if sql.startswith("PREPARE")]
+        permission_sql = [sql for sql, _ in snapshot.executed if sql.startswith("SELECT NULL FROM")]
+        self.assertEqual(len(prepare_sql), len(kinds))
+        self.assertEqual(len(permission_sql), len(kinds))
+        self.assertTrue(all('FROM "odd""schema"."relation_' in sql and sql.endswith(" WHERE FALSE") for sql in prepare_sql + permission_sql))
+        self.assertFalse(any("LIMIT 0" in sql or "LOCK TABLE" in sql for sql in prepare_sql + permission_sql))
+
+    def test_verified_relation_snapshot_blocks_catalog_and_profile_mutation_until_exit(self):
+        catalog_lock = threading.Lock()
+
+        class LockingCursor(Cursor):
+            def execute(cursor_self, sql, params=()):
+                if sql.startswith("PREPARE"):
+                    catalog_lock.acquire()
+                    cursor_self.connection.catalog_lock_held = True
+                return super().execute(sql, params)
+
+        class LockingConnection(Connection):
+            def __init__(connection_self):
+                super().__init__({"SELECT current_database() AS database": [{"database": "demo"}]})
+                connection_self.catalog_lock_held = False
+
+            def cursor(connection_self):
+                return LockingCursor(connection_self)
+
+            def rollback(connection_self):
+                super().rollback()
+                if connection_self.catalog_lock_held:
+                    connection_self.catalog_lock_held = False
+                    catalog_lock.release()
+
+        guard = LockingConnection()
+        snapshot = Connection({"SELECT current_database() AS database": [{"database": "demo"}]})
+        connections = [guard, snapshot]
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connections.pop(0))
+        other_service = PostgresService(self.temporary_directory.name)
+        service._inspect_relation_connection = lambda _connection, profile_id, database, namespace, relation, *_: {
+            "profileId": profile_id, "database": database, "namespace": namespace,
+            "relation": relation, "kind": "table", "columns": [], "fingerprint": "a" * 64,
+        }
+        target = {"profileId": "local", "database": "demo", "namespace": "public", "relation": "orders"}
+        ddl_started = threading.Event()
+        ddl_finished = threading.Event()
+        local_save_started = threading.Event()
+        local_save_finished = threading.Event()
+        external_save_started = threading.Event()
+        external_save_finished = threading.Event()
+
+        def mutate_catalog():
+            ddl_started.set()
+            with catalog_lock:
+                ddl_finished.set()
+
+        def save_profile(current_service, name, started, finished):
+            started.set()
+            current_service.save_profile("local", {**PROFILE, "name": name})
+            finished.set()
+
+        with service.verified_relation_catalog_snapshots([target]):
+            threads = [
+                threading.Thread(target=mutate_catalog),
+                threading.Thread(target=save_profile, args=(service, "Local thread", local_save_started, local_save_finished)),
+                threading.Thread(target=save_profile, args=(other_service, "Other instance", external_save_started, external_save_finished)),
+            ]
+            for thread in threads:
+                thread.start()
+            self.assertTrue(ddl_started.wait(1))
+            self.assertTrue(local_save_started.wait(1))
+            self.assertTrue(external_save_started.wait(1))
+            self.assertFalse(ddl_finished.wait(0.05), "catalog mutation interleaved with guarded descriptor use")
+            self.assertFalse(local_save_finished.wait(0.05), "same-service profile mutation interleaved with guarded descriptor use")
+            self.assertFalse(external_save_finished.wait(0.05), "cross-instance profile mutation interleaved with guarded descriptor use")
+
+        for thread in threads:
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+        self.assertTrue(ddl_finished.is_set())
+        self.assertTrue(local_save_finished.is_set())
+        self.assertTrue(external_save_finished.is_set())
+        self.assertEqual((guard.rollbacks, snapshot.rollbacks), (1, 1))
+        self.assertTrue(guard.closed and snapshot.closed)
+
     def test_relation_inspection_returns_ordered_columns_and_stable_fingerprint(self):
         responses = {
             "SELECT current_database() AS database": [{"database": "demo"}],
@@ -521,6 +875,15 @@ class PostgresServiceTests(unittest.TestCase):
         ])
         self.assertEqual(len(first["fingerprint"]), 64)
         self.assertEqual(first["fingerprint"], second["fingerprint"])
+        self.assertEqual(first["legacyFingerprint"], canonical_fingerprint({
+            "profileId": "local", "database": "demo", "namespace": "reporting",
+            "relation": "order_summary", "kind": "view",
+            "columns": [
+                {"name": "id", "type": "bigint", "nullable": False, "ordinal": 1},
+                {"name": "total", "type": "numeric(12,2)", "nullable": True, "ordinal": 2},
+            ],
+            "catalogKind": "v", "viewDefinition": "SELECT id, total FROM orders",
+        }))
         self.assertEqual(first["definition"], {
             "status": "available", "format": "query", "sql": "SELECT id, total FROM orders",
         })
@@ -536,6 +899,25 @@ class PostgresServiceTests(unittest.TestCase):
         }]}
         definition_service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=changed_definition))
         self.assertNotEqual(first["fingerprint"], definition_service.inspect_relation("local", "demo", "reporting", "order_summary")["fingerprint"])
+
+    def test_partitioned_relation_legacy_fingerprint_uses_historical_table_kind(self):
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "p", "relation_kind": "partitioned_table", "view_definition": None}],
+            "a.attname AS column_name": [
+                {"column_name": "id", "data_type": "bigint", "nullable": False, "ordinal": 1, "type_category": "N", "type_name": "int8"},
+            ],
+        }
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: Connection(responses=responses))
+
+        result = service.inspect_relation("local", "demo", "public", "orders")
+
+        self.assertEqual(result["kind"], "partitioned_table")
+        self.assertEqual(result["legacyFingerprint"], canonical_fingerprint({
+            "profileId": "local", "database": "demo", "namespace": "public", "relation": "orders",
+            "kind": "table", "columns": [{"name": "id", "type": "bigint", "nullable": False, "ordinal": 1}],
+            "catalogKind": "p", "viewDefinition": None,
+        }))
 
     def test_relation_inspection_derives_verified_output_column_provenance(self):
         responses = {
@@ -1052,10 +1434,15 @@ class PostgresServiceTests(unittest.TestCase):
             "sort": [{"targetKind": "measure", "targetId": "measure_revenue", "direction": "desc", "nulls": "last"}],
             "limit": 2,
         }
-        result = service.execute_widget_query("local", source, query)
+        result = service.execute_widget_query(
+            "local", source, query, operation_timeout_ms=2500, operation_id="widget-query",
+            slicer_lineage=[{"slicerId": "slicer_status"}],
+        )
         self.assertEqual(result["rows"], [["paid", "30.50"], ["pending", "12"]])
         self.assertTrue(result["truncated"])
         self.assertEqual(result["queryVersion"], 2)
+        self.assertEqual(result["effectiveQuery"], query)
+        self.assertEqual(result["slicerLineage"], [{"slicerId": "slicer_status"}])
         self.assertEqual(result["parameters"], ["cancelled", 3])
         self.assertIsInstance(result["queryDurationMs"], int)
         self.assertTrue(result["queriedAt"].endswith("Z"))
@@ -1066,6 +1453,8 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(result["provenance"]["relation"]["definition"]["reason"], "not_supported")
         query_connection = connections[-1]
         self.assertEqual(query_connection.executed[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        timeout = next(item for item in query_connection.executed if "set_config('statement_timeout'" in item[0])
+        self.assertEqual(timeout[1], (2500, 2500, True))
         self.assertIn(('LOCK TABLE "public"."orders" IN ACCESS SHARE MODE', ()), query_connection.executed)
         sql, parameters = next(item for item in query_connection.executed if '"status" AS "__schemer_d0"' in item[0])
         self.assertEqual(sql, result["sql"])
@@ -1074,6 +1463,11 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertNotIn("JOIN", sql.upper())
         self.assertEqual(query_connection.rollbacks, 1)
         self.assertTrue(query_connection.closed)
+
+        service.cancel_read_only_sql("widget-query-cancelled")
+        with self.assertRaises(PostgresServiceError) as cancelled:
+            service.execute_widget_query("local", source, query, operation_id="widget-query-cancelled")
+        self.assertEqual(cancelled.exception.code, "execution_cancelled")
 
         changed_source = {**source, "fingerprint": "0" * 64}
         with self.assertRaises(PostgresServiceError) as error:
@@ -1105,6 +1499,20 @@ class PostgresServiceTests(unittest.TestCase):
             service.execute_widget_query("local", source, query)
         self.assertEqual(error.exception.code, "relation_changed")
         self.assertFalse(any('AS "__schemer_m0"' in sql for sql, _ in changed.executed))
+
+    def test_temporal_series_signature_includes_exact_source_time_zone(self):
+        profile = {"host": "localhost", "port": 5432, "dbname": "demo", "user": "reader", "sslmode": "prefer"}
+        source = {"database": "demo", "namespace": "public", "relation": "events", "fingerprint": "a" * 64}
+        query = {"dimensions": [{"id": "time", "column": "occurred_at"}], "temporalKind": "timestamp"}
+        descriptor = {"dimensionId": "time", "sourceTimeZone": "America/New_York", "bucketSeconds": 3600}
+
+        new_york = _series_key(b"secret", "local", profile, source, query, "refresh", descriptor)
+        los_angeles = _series_key(
+            b"secret", "local", profile, source, query, "refresh",
+            {**descriptor, "sourceTimeZone": "America/Los_Angeles"},
+        )
+
+        self.assertNotEqual(new_york, los_angeles)
 
     def test_temporal_series_manifest_and_windows_use_one_proportional_utc_domain(self):
         responses = {
@@ -1143,7 +1551,10 @@ class PostgresServiceTests(unittest.TestCase):
             "measures": [{"id": "measure_revenue", "label": "Revenue", "column": "amount", "aggregation": "sum", "distinct": False, "nullBehavior": "zero", "numberFormat": {"style": "currency", "currency": "USD", "fractionDigits": 2}}],
             "filters": [], "sort": [], "limit": 10,
         }
-        manifest = service.execute_temporal_series("local", source, query, "manifest", "refresh-one")
+        slicer_lineage = [{"slicerId": "slicer_dates"}]
+        manifest = service.execute_temporal_series(
+            "local", source, query, "manifest", "refresh-one", slicer_lineage=slicer_lineage,
+        )
         self.assertFalse(manifest["empty"])
         self.assertEqual(manifest["domain"], {"min": "2026-01-01T00:00:00.000Z", "max": "2026-01-10T00:00:00.000Z"})
         self.assertEqual(manifest["series"]["bucketSeconds"], 86400)
@@ -1151,16 +1562,21 @@ class PostgresServiceTests(unittest.TestCase):
         self.assertEqual(manifest["series"]["alignedEndExclusive"], "2026-01-11T00:00:00.000Z")
         self.assertEqual(manifest["series"]["refreshGeneration"], "refresh-one")
         self.assertEqual(manifest["series"]["expiresAtEpoch"], 1018)
+        self.assertEqual(manifest["effectiveQuery"], query)
+        self.assertEqual(manifest["slicerLineage"], slicer_lineage)
         self.assertEqual(len(manifest["series"]["key"]), 64)
         manifest_connection = connections[-1]
         self.assertIn(("SET LOCAL TIME ZONE 'UTC'", ()), manifest_connection.executed)
         self.assertEqual(manifest_connection.rollbacks, 1)
 
         window = service.execute_temporal_series(
-            "local", source, query, "window", "refresh-one", manifest["series"], manifest["series"]["alignedStart"]
+            "local", source, query, "window", "refresh-one", manifest["series"], manifest["series"]["alignedStart"],
+            slicer_lineage=slicer_lineage,
         )
         self.assertEqual(window["rows"], [["2026-01-01T00:00:00.000Z", "30.50"], ["2026-01-03T00:00:00.000Z", "12.00"]])
         self.assertEqual(window["range"], {"start": "2026-01-01T00:00:00.000Z", "endExclusive": "2026-01-11T00:00:00.000Z"})
+        self.assertEqual(window["effectiveQuery"], query)
+        self.assertEqual(window["slicerLineage"], slicer_lineage)
         window_connection = connections[-1]
         sql, parameters = next(item for item in window_connection.executed if "pg_catalog.to_timestamp" in item[0])
         self.assertIn(">= %s", sql)
@@ -1229,10 +1645,14 @@ class PostgresServiceTests(unittest.TestCase):
             "local", source, query, selection, detail, 0, 2,
             {"targetId": "detail_amount", "direction": "desc", "nulls": "last"},
             [{"targetId": "detail_status", "value": "acme"}],
+            slicer_lineage=[{"slicerId": "slicer_status"}],
         )
         self.assertEqual(result["rows"], [["paid", "30.50"], ["paid", "12"]])
         self.assertEqual(result["matchingRowCount"], 3)
         self.assertTrue(result["hasMore"])
+        self.assertEqual(result["nextOffset"], 2)
+        self.assertEqual(result["effectiveQuery"], query)
+        self.assertEqual(result["slicerLineage"], [{"slicerId": "slicer_status"}])
         self.assertEqual(result["parameters"], ["cancelled", "paid", "%acme%", 2, 0])
         self.assertEqual(result["countParameters"], ["cancelled", "paid", "%acme%"])
         self.assertIsInstance(result["queryDurationMs"], int)
@@ -1252,6 +1672,70 @@ class PostgresServiceTests(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             service.execute_relation_detail("local", source, query, selection, detail, 0, 101, None, [])
+
+    def test_relation_detail_byte_truncation_advances_only_returned_rows(self):
+        source_rows = [
+            {"column_name": "status", "data_type": "text", "nullable": False, "ordinal": 1, "type_category": "S", "type_name": "text"},
+        ]
+        responses = {
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": source_rows,
+            'count(*) AS "__schemer_count"': [{"__schemer_count": 3}],
+            '"status" AS "__schemer_c0"': {
+                "columns": ["__schemer_c0"],
+                "rows": [("a" * 20,), ("b" * 20,), ("c" * 20,)],
+            },
+        }
+        connections = []
+        service = PostgresService(
+            self.temporary_directory.name,
+            connect_factory=lambda **kwargs: (connections.append(Connection(responses=responses)) or connections[-1]),
+        )
+        descriptor = service.inspect_relation("local", "demo", "public", "orders")
+        source = {
+            **{key: descriptor[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+            "snapshotVersion": 2,
+            "columns": [{key: column[key] for key in ("name", "type", "nullable", "ordinal", "capabilities")} for column in descriptor["columns"]],
+        }
+        query = {
+            "version": 2, "dimensions": [],
+            "measures": [{"id": "measure_rows", "label": "Rows", "column": None, "aggregation": "count_rows", "distinct": False, "nullBehavior": "preserve", "numberFormat": {"style": "integer"}}],
+            "filters": [], "sort": [], "limit": 100,
+        }
+        detail = {
+            "version": 1,
+            "columns": [{"id": "detail_status", "label": "Status", "column": "status", "numberFormat": {"style": "auto"}, "searchable": False}],
+            "rowIdentifier": None,
+        }
+        service._result_limiter = ResultLimiter(ResultLimits(max_cell_bytes=100, max_row_bytes=100, max_result_bytes=30))
+
+        first = service.execute_relation_detail("local", source, query, {"dimensions": []}, detail, 0, 3, None, [])
+        self.assertEqual((len(first["rows"]), first["nextOffset"], first["hasMore"]), (1, 1, True))
+        service.execute_relation_detail("local", source, query, {"dimensions": []}, detail, first["nextOffset"], 3, None, [])
+        page_parameters = next(
+            parameters for sql, parameters in connections[-1].executed if '"status" AS "__schemer_c0"' in sql
+        )
+        self.assertEqual(page_parameters[-1], 1)
+
+    def test_1600_column_relation_capability_inspection_uses_validated_query_bounds(self):
+        rows = [
+            {"column_name": f"column_{index}", "data_type": "bigint", "nullable": True, "ordinal": index + 1, "type_category": "N", "type_name": "int8"}
+            for index in range(1600)
+        ]
+        connection = Connection(responses={
+            "SELECT current_database() AS database": [{"database": "demo"}],
+            "c.relkind AS catalog_kind": [{"catalog_kind": "r", "relation_kind": "table", "view_definition": None}],
+            "a.attname AS column_name": rows,
+        })
+        service = PostgresService(self.temporary_directory.name, connect_factory=lambda **kwargs: connection)
+
+        descriptor = service.inspect_relation("local", "demo", "public", "wide_relation")
+
+        self.assertEqual(len(descriptor["columns"]), 1600)
+        self.assertTrue(all("capabilities" in column for column in descriptor["columns"]))
+        with self.assertRaises(ValueError):
+            service._execute_rows(connection, "SELECT 1", max_rows=20_001)
 
     def test_relation_inspection_rejects_stale_kind_and_fingerprint(self):
         responses = {

@@ -12,6 +12,9 @@
 .onboarding-number { color: #4f5966; font: 9px ui-monospace, monospace; letter-spacing: .1em; }
 .onboarding-copy h3 { margin: 0; color: #e9edf2; font-size: 16px; }
 .onboarding-copy p { max-width: 620px; margin: 7px 0 0; color: #84909f; font-size: 11px; line-height: 1.65; }
+.onboarding-points { display: grid; max-width: 640px; gap: 4px; margin: 7px 0 0; padding: 0; color: #84909f; font-size: 10px; line-height: 1.55; list-style: none; }
+.onboarding-points li { position: relative; padding-left: 12px; }
+.onboarding-points li::before { position: absolute; top: .62em; left: 1px; width: 4px; height: 4px; border-radius: 50%; background: #80682e; content: ""; }
 .tour-demo-playback { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding: 6px 8px; border: 1px solid #303947; border-radius: 5px; background: #0f141a; }
 .tour-demo-status { min-width: 0; overflow: hidden; color: #aab5c2; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .tour-demo-toggle { flex: none; min-height: 28px; padding: 0 9px; border: 1px solid #4d4329; border-radius: 5px; color: #d9c58e; background: #211b0f; font-size: 9px; cursor: pointer; }
@@ -45,12 +48,13 @@
   .onboarding-head { padding: 15px 16px 12px; }
   .onboarding-page { padding: 13px 14px 15px; }
   .onboarding-screenshot { height: 210px; }
-  .tour-demo-playback { margin-bottom: 6px; padding: 4px 5px; }
-  .tour-demo-status { font-size: 8px; }
+  .tour-demo-playback { align-items: flex-start; margin-bottom: 6px; padding: 4px 5px; }
+  .tour-demo-status { overflow: visible; font-size: 8px; line-height: 1.35; text-overflow: clip; white-space: normal; }
   .tour-demo-toggle { min-height: 25px; padding: 0 7px; font-size: 8px; }
   .tour-demo-cursor { transform: scale(.82); transform-origin: top left; }
   .onboarding-copy { grid-template-columns: 30px minmax(0, 1fr); gap: 8px; margin-top: 13px; }
   .onboarding-copy p { line-height: 1.5; }
+  .onboarding-points { gap: 3px; font-size: 9px; line-height: 1.45; }
   .onboarding-footer { grid-template-columns: 1fr auto; gap: 10px; padding: 11px 13px; }
   .onboarding-opt-out { grid-column: 1 / -1; }
   .onboarding-progress { justify-self: start; }

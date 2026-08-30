@@ -16,17 +16,22 @@ const preserveStart = source.indexOf("function preserveTableLayout(importedSchem
 const preserveEnd = source.indexOf("async function importPostgresSchema()", preserveStart);
 const initializationStart = source.indexOf("async function initializeSchemaLibrary()");
 const initializationEnd = source.indexOf("function uid(prefix)", initializationStart);
+const activationStart = source.indexOf("function activateSchemaRecord(");
+const activationEnd = source.indexOf("async function reloadActiveSchemaRecord(", activationStart);
 const openSchemaStart = source.indexOf("async function openSchema(");
 const openSchemaEnd = source.indexOf("async function deleteSavedSchema(", openSchemaStart);
-for (const [name, marker] of Object.entries({ storageStart, storageEnd, migrationStart, migrationEnd, preserveStart, preserveEnd, initializationStart, initializationEnd, openSchemaStart, openSchemaEnd })) {
+for (const [name, marker] of Object.entries({ storageStart, storageEnd, migrationStart, migrationEnd, preserveStart, preserveEnd, initializationStart, initializationEnd, activationStart, activationEnd, openSchemaStart, openSchemaEnd })) {
   assert.notEqual(marker, -1, `${name} marker is missing`);
 }
 assert.doesNotMatch(source.slice(initializationStart, initializationEnd), /fitDiagram\s*\(/, "startup must preserve the saved viewport");
 const openSchemaSource = source.slice(openSchemaStart, openSchemaEnd);
+const activationSource = source.slice(activationStart, activationEnd);
 assert.match(openSchemaSource, /\{ fit = false \}/, "opening a saved schema must preserve its viewport by default");
-assert.match(openSchemaSource, /view = clone\(schema\.layout\.layers\.tables\.viewport\)/, "opening a saved schema must restore its viewport");
-assert.match(openSchemaSource, /restoreViewsRuntimeLayout\(schema\)/, "opening a saved schema must restore the Views viewport and objects");
-assert.doesNotMatch(openSchemaSource, /fitViewsCanvas\s*\(/, "opening a saved schema must not fit the Views canvas");
+assert.match(activationSource, /nextTableView = clone\(nextSchema\.layout\.layers\.tables\.viewport\)/, "activating a saved schema must capture its table viewport");
+assert.match(activationSource, /view = nextTableView/, "activating a saved schema must restore its table viewport");
+assert.match(activationSource, /viewsView = nextViewsView/, "activating a saved schema must restore its Views viewport");
+assert.match(activationSource, /viewsObjects = nextViewsObjects/, "activating a saved schema must restore its Views objects");
+assert.doesNotMatch(activationSource, /fitViewsCanvas\s*\(/, "activating a saved schema must not fit the Views canvas");
 assert.match(source.slice(initializationStart, initializationEnd), /restoreViewsRuntimeLayout\(schema\)/, "startup must restore the Views layout without fitting it");
 assert.match(source, /function persistSchemaRecord[\s\S]*schemaForStorage\([\s\S]*\{ views: \{ viewport: viewsView, objects: viewsObjects \} \}/, "the revision/layout-token queue must persist the active Views runtime overlay");
 

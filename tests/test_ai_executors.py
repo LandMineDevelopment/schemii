@@ -1,5 +1,6 @@
 import sys
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -103,6 +104,41 @@ class ExecutorContractTests(unittest.TestCase):
             record=dashboard, profile=None, schema_concurrency={"revision": 4}, authorization_target={},
         )
         self.assertEqual(result["command"], {"type": "open_dashboard", "dashboardId": "dashboard_one", "revision": 4})
+
+    def test_schemer_complete_widget_validation_receives_operation_timeout_and_identity(self):
+        source = {
+            "profileId": "local", "database": "demo", "namespace": "public", "relation": "orders",
+            "kind": "table", "fingerprint": "a" * 64,
+        }
+        dashboard = {"id": "dashboard_one", "revision": 4, "dashboard": {"widgets": []}}
+
+        class Store(StoreDouble):
+            @contextmanager
+            def guard_revision(self, dashboard_id, revision):
+                yield self.record
+
+            def apply_ai_mutation(self, dashboard_id, operation_id, revision, action, prepared):
+                return prepared
+
+        calls = []
+        executor = SchemerAiExecutor(
+            object(), Store(dashboard), object(), catalog_sources=lambda *_: [source],
+            configured_widget=lambda *args, **kwargs: calls.append((args, kwargs)) or {"kind": "aggregate_report"},
+        )
+        action = {
+            "type": "widget_create", "dashboardId": "dashboard_one", "expectedRevision": 4,
+            "title": "Orders", "source": source, "query": {"version": 2}, "visualizationMode": "table",
+        }
+        result = executor.execute(
+            action, "operation-widget", chat={"id": "chat", "dashboardId": "dashboard_one", "accessLevel": "data"},
+            record=dashboard, profile=None, schema_concurrency={"revision": 4},
+            authorization_target={"profileId": "local", "database": "demo", "namespace": "public"},
+            policy_binding={"snapshot": {"version": 2, "bounds": {"operationTimeoutMs": 4200}}},
+        )
+
+        self.assertEqual(result, {"kind": "aggregate_report"})
+        self.assertEqual(calls[0][0][2:4], ("operation-widget", 0))
+        self.assertEqual(calls[0][1], {"operation_timeout_ms": 4200})
 
     def test_finite_rows_written_bound_rejects_arbitrary_raw_write_before_service_call(self):
         class Service:

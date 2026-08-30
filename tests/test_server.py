@@ -202,6 +202,13 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(readiness["components"]["postgresExecution"]["global"], {"active": 0, "capacity": 12})
         self.assertEqual(readiness["components"]["postgresExecution"]["targetCapacity"], 4)
         self.assertEqual(readiness["components"]["postgresExecution"]["target"]["active"], 0)
+        self.assertEqual(readiness["components"]["httpAccess"], {
+            "required": True,
+            "status": "available",
+            "mode": "loopback-only",
+            "behindLoopbackProxy": False,
+            "publicOrigins": [],
+        })
 
         status, body, _ = self.request("/api/schemas/summary", authorized=True)
         self.assertEqual(status, 200)
@@ -312,7 +319,7 @@ class ServerTests(unittest.TestCase):
 
     def test_loopback_proxy_mode_still_requires_a_local_host_and_origin(self):
         self.assertFalse(_is_local_request("172.17.0.1", "localhost:8080", None, False))
-        self.assertTrue(_is_local_request("172.17.0.1", "localhost:8080", None, True))
+        self.assertFalse(_is_local_request("172.17.0.1", "localhost:8080", None, True))
         self.assertFalse(_is_local_request("172.17.0.1", "example.com", None, True))
         self.assertFalse(_is_local_request("172.17.0.1", "localhost:8080", "https://example.com", True))
 

@@ -11,6 +11,7 @@ from .result_limits import ResultLimitError
 
 
 MAX_CATALOG_ROWS = 5000
+MAX_QUERY_SPECIFIC_CATALOG_ROWS = 20_000
 CATALOG_FETCH_BATCH_SIZE = 500
 
 
@@ -65,16 +66,27 @@ class PostgresConnectionMixin:
             close()
 
     @staticmethod
-    def _execute_rows(connection: Any, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    def _execute_rows(
+        connection: Any,
+        query: str,
+        params: tuple[Any, ...] = (),
+        *,
+        max_rows: int = MAX_CATALOG_ROWS,
+    ) -> list[dict[str, Any]]:
+        if (
+            isinstance(max_rows, bool) or not isinstance(max_rows, int)
+            or not 1 <= max_rows <= MAX_QUERY_SPECIFIC_CATALOG_ROWS
+        ):
+            raise ValueError("catalog row bound must be an integer from 1 to 20000")
         cursor = connection.cursor()
         try:
             cursor.execute(query, params)
             fetchmany = getattr(cursor, "fetchmany", None)
-            rows = fetchmany(MAX_CATALOG_ROWS + 1) if fetchmany else cursor.fetchall()
-            if len(rows) > MAX_CATALOG_ROWS:
+            rows = fetchmany(max_rows + 1) if fetchmany else cursor.fetchall()
+            if len(rows) > max_rows:
                 raise PostgresServiceError(
                     422, "catalog_result_too_large", "PostgreSQL catalog result exceeds the item limit",
-                    {"policy": "reject", "path": "$", "limit": MAX_CATALOG_ROWS, "actual": len(rows)},
+                    {"policy": "reject", "path": "$", "limit": max_rows, "actual": len(rows)},
                 )
             if not rows:
                 return []

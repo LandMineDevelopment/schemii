@@ -1,9 +1,4 @@
-# Combine after compose.local-db.yaml and compose.ai.yaml on Linux.
-services:
-  schemii:
-    environment:
-      SCHEMII_OPENCODE_URL: http://127.0.0.1:${SCHEMII_OPENCODE_HOST_PORT:-4096}
-
-  opencode:
-    ports:
-      - "127.0.0.1:${SCHEMII_OPENCODE_HOST_PORT:-4096}:4096"
+# Combine after compose.local-db.yaml and compose.ai.yaml on Linux. Schemii
+# remains on the default bridge network, so the private OpenCode service needs
+# no host publication or endpoint override.
+services: {}

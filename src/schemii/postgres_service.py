@@ -20,12 +20,14 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .atomic_json import write_json
 from .file_lock import exclusive_file_lock
 from .postgres_common import (
     ConflictError,
+    MAX_VERIFIED_RELATION_PROFILE_DATABASES,
     NotFoundError,
     PostgresServiceError,
     ValidationError,
@@ -41,9 +43,16 @@ from .postgres_console import ConsolePolicy, PostgresConsole, single_sql_stateme
 from .postgres_cancellation import ReadOnlyQueryCancellationRegistry
 from .postgres_concurrency import PostgresExecutionController, postgres_execution
 from .postgres_migrations import PostgresMigrationFacade
+from .postgres_profiles import PROFILE_ID_RE, validate_profile, validate_profile_document, validate_profile_id
 from .relation_source import RelationSourceValidationError, normalize_relation_source
 from .query_type_capabilities import snapshot_column
-from .result_limits import ResultLimitError, ResultLimiter, ResultLimits
+from .result_limits import ResultLimitError, ResultLimiter, ResultLimits, json_utf8_size
+from .structured_results import (
+    MAX_DETAIL_RETAINED_ROWS,
+    MAX_STRUCTURED_PAGE_BYTES,
+    MAX_STRUCTURED_RESULT_BYTES,
+    StructuredResultRegistry,
+)
 from .widget_query import (
     QueryValidationError,
     compile_detail_query,
@@ -63,13 +72,25 @@ def _profile_context_fingerprint(profile_id: str, profile: dict[str, Any]) -> st
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
-PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+VERIFIED_RELATION_TARGET_FIELDS = ("profileId", "database", "namespace", "relation")
+MAX_VERIFIED_RELATION_TARGETS = 100
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
 SQL_IDENTIFIER_RE = r'(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
 SQL_QUALIFIED_RE = rf'{SQL_IDENTIFIER_RE}(?:\s*\.\s*{SQL_IDENTIFIER_RE})?'
-SSL_MODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 COLORS = ("#f4b942", "#65a9ff", "#9b82f4", "#59c894", "#ef7c8e", "#e58d4c")
+
+
+def _postgres_timeout_ms(value: Any) -> float:
+    if not isinstance(value, str):
+        raise ValueError("PostgreSQL timeout setting is invalid")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)?", value.strip().lower())
+    if not match:
+        raise ValueError("PostgreSQL timeout setting is invalid")
+    multipliers = {None: 1, "us": 0.001, "ms": 1, "s": 1000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
+    return float(match.group(1)) * multipliers[match.group(2)]
+
+
 def _quote_literal(value: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValidationError("SQL literal must be a non-empty string")
@@ -121,6 +142,27 @@ def _series_key(secret: bytes, profile_id: str, profile: dict[str, Any], source:
     ]
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return hmac.new(secret, encoded.encode(), hashlib.sha256).hexdigest()
+
+
+def _series_source_time_zone(query: dict[str, Any], slicer_lineage: list[dict[str, Any]] | None) -> str | None:
+    if query.get("temporalKind") != "timestamp":
+        return None
+    source_column = query["dimensions"][0]["column"]
+    matching = [
+        item for item in slicer_lineage or []
+        if isinstance(item, dict) and item.get("sourceColumn") == source_column
+    ]
+    if not matching:
+        return "UTC"
+    zones = {item.get("sourceTimeZone") for item in matching}
+    if len(zones) != 1 or not isinstance(next(iter(zones)), str):
+        raise ValidationError("timestamp temporal series source time zone is invalid")
+    source_time_zone = next(iter(zones))
+    try:
+        ZoneInfo(source_time_zone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValidationError("timestamp temporal series source time zone is unavailable") from exc
+    return source_time_zone
 
 
 _top_level_semicolons = top_level_semicolons
@@ -317,6 +359,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             transaction_idle_seconds=console_transaction_idle_seconds,
             transaction_lifetime_seconds=console_transaction_lifetime_seconds,
         )
+        self._structured_results = StructuredResultRegistry(clock=clock)
         self._read_query_cancellations = ReadOnlyQueryCancellationRegistry()
         self._ensure_config_dir()
 
@@ -339,6 +382,173 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     def profile_context_fingerprint(self, profile_id: str) -> str:
         return _profile_context_fingerprint(profile_id, self._profile(profile_id))
+
+    def _verified_relation_targets(self, targets: Any) -> list[dict[str, str]]:
+        if not isinstance(targets, list) or not 1 <= len(targets) <= MAX_VERIFIED_RELATION_TARGETS:
+            raise ValidationError("verified relation targets must contain from 1 to 100 exact targets")
+        identities = set()
+        for target in targets:
+            if not isinstance(target, dict) or set(target) != set(VERIFIED_RELATION_TARGET_FIELDS):
+                raise ValidationError("verified relation target fields are invalid")
+            identities.add((
+                self._validate_profile_id(target["profileId"]),
+                self._validate_database(target["database"]),
+                self._validate_namespace(target["namespace"]),
+                self._validate_relation_name(target["relation"]),
+            ))
+        return [dict(zip(VERIFIED_RELATION_TARGET_FIELDS, identity)) for identity in sorted(identities)]
+
+    @contextmanager
+    def verified_relation_catalog_snapshots(self, targets: Any) -> Iterator[list[dict[str, Any]]]:
+        """Yield ordered descriptors while exact profile and PostgreSQL relation locks remain held."""
+        ordered_targets = self._verified_relation_targets(targets)
+        connection_targets = sorted({
+            (target["profileId"], target["database"])
+            for target in ordered_targets
+        })
+        if len(connection_targets) > MAX_VERIFIED_RELATION_PROFILE_DATABASES:
+            raise PostgresServiceError(
+                422, "verified_relation_fanout_too_large",
+                "Verified relation targets span too many PostgreSQL profile/database pairs; retry in smaller batches",
+                {
+                    "actualUniqueProfileDatabases": len(connection_targets),
+                    "maximumUniqueProfileDatabases": MAX_VERIFIED_RELATION_PROFILE_DATABASES,
+                    "maximumTargetsPerRequest": MAX_VERIFIED_RELATION_TARGETS,
+                    "chunkable": True,
+                },
+            )
+        guard_connections: dict[tuple[str, str], Any] = {}
+        snapshot_connections: dict[tuple[str, str], Any] = {}
+        opened_connections: list[Any] = []
+        ready = False
+        with self.execution("catalog"):
+            # Match save/delete lock order. The file lock extends this profile snapshot across processes.
+            with self._lock:
+                with self._profile_store_lock():
+                    profiles = self._read_profiles()
+                    profile_fingerprints: dict[str, str] = {}
+                    try:
+                        for profile_id, database in connection_targets:
+                            profile = profiles.get(profile_id)
+                            if profile is None:
+                                raise NotFoundError("Profile was not found")
+                            if profile["dbname"] != database:
+                                raise PostgresServiceError(
+                                    409, "database_changed",
+                                    "The saved PostgreSQL profile database does not match the requested database",
+                                )
+                            connection = self._connect_profile(profile)
+                            opened_connections.append(connection)
+                            guard_connections[(profile_id, database)] = connection
+                            self._execute_statement(
+                                connection, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY",
+                            )
+                            timeout_rows = self._execute_rows(connection, "SHOW lock_timeout", max_rows=1)
+                            if len(timeout_rows) != 1 or "lock_timeout" not in timeout_rows[0]:
+                                raise RuntimeError("PostgreSQL did not return lock_timeout")
+                            current_lock_timeout_ms = _postgres_timeout_ms(timeout_rows[0]["lock_timeout"])
+                            if current_lock_timeout_ms == 0 or current_lock_timeout_ms > self._lock_timeout_ms:
+                                self._execute_statement(
+                                    connection, f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'",
+                                )
+                            profile_fingerprints[profile_id] = _profile_context_fingerprint(profile_id, profile)
+
+                        # PREPARE parses and rewrites the false query, acquiring AccessShare locks
+                        # without planning a foreign scan or opening an unpopulated materialized view.
+                        # These lock-only transactions are never used as catalog snapshots.
+                        for index, target in enumerate(ordered_targets):
+                            qualified = (
+                                f"{quote_identifier(target['namespace'])}."
+                                f"{quote_identifier(target['relation'])}"
+                            )
+                            self._execute_statement(
+                                guard_connections[(target["profileId"], target["database"])],
+                                f"PREPARE {quote_identifier(f'schemii_relation_guard_{index}')} "
+                                f"AS SELECT NULL FROM {qualified} WHERE FALSE",
+                            )
+
+                        for profile_id, database in connection_targets:
+                            rows = self._execute_rows(
+                                guard_connections[(profile_id, database)],
+                                "SELECT current_database() AS database",
+                            )
+                            if len(rows) != 1 or rows[0].get("database") != database:
+                                raise PostgresServiceError(
+                                    409, "database_changed",
+                                    "The connected PostgreSQL database does not match the requested database",
+                                )
+
+                        # PREPARE establishes a transaction snapshot under REPEATABLE READ on
+                        # PostgreSQL 17. Separate READ COMMITTED guards avoid that DDL race; the
+                        # bounded fanout above limits this proven two-connection design to eight.
+                        for profile_id, database in connection_targets:
+                            connection = self._connect_profile(profiles[profile_id])
+                            opened_connections.append(connection)
+                            snapshot_connections[(profile_id, database)] = connection
+                            self._execute_statement(
+                                connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+                            )
+                            rows = self._execute_rows(connection, "SELECT current_database() AS database")
+                            if len(rows) != 1 or rows[0].get("database") != database:
+                                raise PostgresServiceError(
+                                    409, "database_changed",
+                                    "The connected PostgreSQL database does not match the requested database",
+                                )
+
+                        # PostgreSQL remains authoritative for relation SELECT permission. The
+                        # constant-false predicate executes no user rows and initializes no FDW scan.
+                        for target in ordered_targets:
+                            qualified = (
+                                f"{quote_identifier(target['namespace'])}."
+                                f"{quote_identifier(target['relation'])}"
+                            )
+                            self._execute_statement(
+                                snapshot_connections[(target["profileId"], target["database"])],
+                                f"SELECT NULL FROM {qualified} WHERE FALSE",
+                            )
+
+                        snapshots = []
+                        for target in ordered_targets:
+                            descriptor = self._inspect_relation_connection(
+                                snapshot_connections[(target["profileId"], target["database"])],
+                                target["profileId"], target["database"], target["namespace"],
+                                target["relation"], None, None,
+                            )
+                            if any(descriptor.get(field) != target[field] for field in VERIFIED_RELATION_TARGET_FIELDS):
+                                raise PostgresServiceError(
+                                    409, "relation_changed",
+                                    "PostgreSQL returned a different relation than the verified target",
+                                )
+                            snapshots.append({
+                                **target,
+                                "profileFingerprint": profile_fingerprints[target["profileId"]],
+                                "descriptor": descriptor,
+                            })
+                        ready = True
+                        yield snapshots
+                    except PostgresServiceError:
+                        raise
+                    except Exception as exc:
+                        if ready:
+                            raise
+                        raise PostgresServiceError(
+                            502, "introspection_failed",
+                            "PostgreSQL relation snapshots could not be verified",
+                            postgres_error_details(
+                                exc, phase="catalog", operation="verified_relation_snapshots",
+                                rollback={"attempted": True},
+                            ),
+                        ) from exc
+                    finally:
+                        for connection in reversed(opened_connections):
+                            try:
+                                connection.rollback()
+                            except Exception:
+                                pass
+                            try:
+                                self._close(connection)
+                            except Exception:
+                                pass
 
     def admission_target(self, profile_id: str) -> str:
         return _profile_context_fingerprint(profile_id, self._profile(profile_id))
@@ -403,6 +613,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     def close(self) -> None:
         self._read_query_cancellations.close()
+        self._structured_results.close()
         self._console.close()
         self._execution_controller.close()
 
@@ -411,6 +622,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     def execution_metrics(self) -> dict[str, Any]:
         return self._execution_controller.snapshot()
+
+    def structured_result_metrics(self) -> dict[str, Any]:
+        return self._structured_results.metrics()
 
     def _record_target_connection(self, profile: dict[str, Any], healthy: bool) -> None:
         profile_id = profile.get("id")
@@ -456,6 +670,154 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except ResultLimitError as exc:
             raise self._limit_error(exc) from exc
 
+    def _structured_result_owner(
+        self,
+        profile_id: str,
+        source: dict[str, Any],
+        kind: str,
+        digest_payload: Any,
+        result_owner: dict[str, Any],
+    ) -> dict[str, Any]:
+        required = {
+            "applicationId", "sessionBinding", "serverId", "dashboardId",
+            "dashboardRevision", "widgetId", "authorityDigest",
+        }
+        if not isinstance(result_owner, dict) or set(result_owner) != required:
+            raise ValueError("structured result owner fields are invalid")
+        if result_owner["applicationId"] != self._application_name:
+            raise ValueError("structured result application owner is invalid")
+        for field in ("sessionBinding", "serverId"):
+            if not isinstance(result_owner[field], str) or not 1 <= len(result_owner[field]) <= 256:
+                raise ValueError(f"structured result {field} is invalid")
+        dashboard_id = result_owner["dashboardId"]
+        dashboard_revision = result_owner["dashboardRevision"]
+        widget_id = result_owner["widgetId"]
+        if dashboard_id is None:
+            if dashboard_revision is not None or widget_id is not None:
+                raise ValueError("contextless structured results cannot claim dashboard or widget ownership")
+        elif (
+            not isinstance(dashboard_id, str) or not dashboard_id
+            or isinstance(dashboard_revision, bool) or not isinstance(dashboard_revision, int) or dashboard_revision < 1
+            or widget_id is not None and (not isinstance(widget_id, str) or not widget_id)
+        ):
+            raise ValueError("structured result dashboard owner is invalid")
+        authority_digest = result_owner["authorityDigest"]
+        if authority_digest is not None and (
+            not isinstance(authority_digest, str) or not FINGERPRINT_RE.fullmatch(authority_digest)
+            or widget_id is None
+        ):
+            raise ValueError("structured result authority digest is invalid")
+        profile = self._profile(profile_id)
+        return {
+            **result_owner,
+            "resultKind": kind,
+            "profileId": profile_id,
+            "profileFingerprint": _profile_context_fingerprint(profile_id, profile),
+            "database": source["database"],
+            "namespace": source["namespace"],
+            "relation": source["relation"],
+            "relationKind": source["kind"],
+            "relationFingerprint": source["fingerprint"],
+            "queryDigest": canonical_fingerprint({"kind": kind, "request": digest_payload}),
+            "sourceSnapshot": copy.deepcopy(source),
+        }
+
+    def _structured_request_owner(self, profile_id: str, binding: str, server_id: str) -> dict[str, Any]:
+        return {
+            "applicationId": self._application_name,
+            "sessionBinding": binding,
+            "serverId": server_id,
+            "profileId": self._validate_profile_id(profile_id),
+        }
+
+    def structured_result_binding(
+        self, profile_id: str, result_id: Any, binding_token: Any, binding: str, server_id: str,
+    ) -> dict[str, Any]:
+        entry = self._structured_results.require(
+            result_id, self._structured_request_owner(profile_id, binding, server_id), binding_token,
+        )
+        return self._structured_results.public_binding(entry)
+
+    def _structured_result_entry(
+        self, profile_id: str, result_id: Any, binding_token: Any, binding: str, server_id: str,
+        *, validate_source: bool,
+    ) -> dict[str, Any]:
+        entry = self._structured_results.require(
+            result_id, self._structured_request_owner(profile_id, binding, server_id), binding_token,
+        )
+        owner = entry["owner"]
+        profile = self._profile(profile_id)
+        if (
+            profile.get("dbname") != owner["database"]
+            or _profile_context_fingerprint(profile_id, profile) != owner["profileFingerprint"]
+        ):
+            raise PostgresServiceError(
+                409, "result_target_changed",
+                "The structured result PostgreSQL profile changed; run the query again explicitly",
+                {"automaticReplay": False},
+            )
+        if validate_source:
+            verification = self.verify_relation_source(profile_id, owner["sourceSnapshot"])
+            if not verification.get("matches"):
+                raise PostgresServiceError(
+                    409, "result_source_changed",
+                    "The structured result source changed; run the query again explicitly",
+                    {"automaticReplay": False, "verification": verification},
+                )
+        return entry
+
+    @postgres_execution("read")
+    def structured_result_page(
+        self, profile_id: str, result_id: Any, binding_token: Any, cursor: Any,
+        binding: str, server_id: str,
+    ) -> dict[str, Any]:
+        entry = self._structured_result_entry(
+            profile_id, result_id, binding_token, binding, server_id, validate_source=True,
+        )
+        return self._structured_results.page(entry, cursor)
+
+    @postgres_execution("read")
+    def export_structured_result(
+        self, profile_id: str, result_id: Any, binding_token: Any, format_name: Any,
+        binding: str, server_id: str,
+    ) -> tuple[str, str, bytes, dict[str, str]]:
+        entry = self._structured_result_entry(
+            profile_id, result_id, binding_token, binding, server_id, validate_source=True,
+        )
+        return self._structured_results.export(entry, format_name)
+
+    def close_structured_result(
+        self, profile_id: str, result_id: Any, binding_token: Any, binding: str, server_id: str,
+    ) -> dict[str, Any]:
+        entry = self._structured_result_entry(
+            profile_id, result_id, binding_token, binding, server_id, validate_source=False,
+        )
+        return self._structured_results.cancel(entry)
+
+    def _normalize_structured_rows(
+        self, rows: list[Any], aliases: list[str], *, maximum_rows: int,
+    ) -> tuple[list[list[Any]], list[dict[str, Any]], int]:
+        normalized = []
+        events: list[dict[str, Any]] = []
+        retained_bytes = 0
+        for index, raw in enumerate(rows[:maximum_rows]):
+            values = [raw.get(alias) for alias in aliases] if isinstance(raw, dict) else list(raw)
+            try:
+                row, row_events = self._result_limiter.row(values, row_index=index)
+            except ResultLimitError as exc:
+                raise self._limit_error(exc) from exc
+            row_bytes = json_utf8_size(row)
+            if retained_bytes + row_bytes > MAX_STRUCTURED_RESULT_BYTES:
+                raise PostgresServiceError(
+                    422, "structured_result_retention_too_large",
+                    "The structured query result exceeds the bounded retained-result byte limit",
+                    {"limitSource": "application", "maximumBytes": MAX_STRUCTURED_RESULT_BYTES},
+                )
+            normalized.append(row)
+            retained_bytes += row_bytes
+            events.extend(row_events)
+        return normalized, events, retained_bytes
+
     # ---- profiles -------------------------------------------------------
 
     def _ensure_config_dir(self) -> None:
@@ -485,9 +847,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 data = json.loads(self.profile_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise PostgresServiceError(500, "profile_store_error", "Profile store could not be read") from exc
-            if not isinstance(data, dict) or not isinstance(data.get("profiles", {}), dict):
-                raise PostgresServiceError(500, "profile_store_error", "Profile store is invalid")
-            return data.get("profiles", {})
+            try:
+                return validate_profile_document(data)
+            except ValidationError as exc:
+                raise PostgresServiceError(500, "profile_store_error", "Profile store is invalid") from exc
 
     @contextmanager
     def _profile_store_lock(self):
@@ -503,55 +866,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
     @staticmethod
     def _validate_profile_id(profile_id: Any) -> str:
-        if not isinstance(profile_id, str) or not PROFILE_ID_RE.fullmatch(profile_id):
-            raise ValidationError("Profile ID must be 1-64 letters, numbers, underscores, or hyphens")
-        return profile_id
-
-    @staticmethod
-    def _text(payload: dict[str, Any], key: str, maximum: int, *, host: bool = False) -> str:
-        value = payload.get(key)
-        if not isinstance(value, str) or value != value.strip() or not value or len(value) > maximum:
-            raise ValidationError(f"{key} must be a non-empty trimmed string up to {maximum} characters")
-        if "\x00" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
-            raise ValidationError(f"{key} contains invalid characters")
-        if host and any(char.isspace() for char in value):
-            raise ValidationError("host must not contain whitespace")
-        return value
+        return validate_profile_id(profile_id)
 
     def _validated_profile(self, payload: Any, existing: dict[str, Any] | None = None) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise ValidationError("Profile payload must be an object")
-        allowed = {"name", "host", "port", "dbname", "user", "password", "sslmode", "timeout"}
-        unknown = set(payload) - allowed
-        if unknown:
-            raise ValidationError(f"Unknown profile field: {sorted(unknown)[0]}")
-        merged = dict(existing or {})
-        merged.update(payload)
-        result = {
-            "name": self._text(merged, "name", 128),
-            "host": self._text(merged, "host", 255, host=True),
-            "dbname": self._text(merged, "dbname", 128),
-            "user": self._text(merged, "user", 128),
-        }
-        port = merged.get("port", 5432)
-        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-            raise ValidationError("port must be an integer from 1 to 65535")
-        result["port"] = port
-        sslmode = merged.get("sslmode", "prefer")
-        if not isinstance(sslmode, str) or sslmode not in SSL_MODES:
-            raise ValidationError("sslmode is invalid")
-        result["sslmode"] = sslmode
-        timeout = merged.get("timeout", 10)
-        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 120:
-            raise ValidationError("timeout must be an integer from 1 to 120 seconds")
-        result["timeout"] = timeout
-        password = merged.get("password", "")
-        if not isinstance(password, str) or len(password) > 4096 or "\x00" in password:
-            raise ValidationError("password is invalid")
-        if existing is not None and payload.get("password") == "":
-            password = existing.get("password", "")
-        result["password"] = password
-        return result
+        return validate_profile(payload, existing)
 
     @staticmethod
     def _redact(profile_id: str, profile: dict[str, Any]) -> dict[str, Any]:
@@ -667,7 +985,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         database, namespace, relation, kind, fingerprint, expected_columns = self._validate_relation_source(profile_id, source)
         connection = self._connect(profile_id)
         try:
-            self._execute_statement(connection, "SET TRANSACTION READ ONLY")
+            self._execute_statement(
+                connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+            )
             try:
                 descriptor = self._inspect_relation_connection(
                     connection, profile_id, database, namespace, relation, None, None
@@ -813,7 +1133,11 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             self._close(connection)
 
     @postgres_execution("read")
-    def execute_widget_query(self, profile_id: str, source: Any, query: Any) -> dict[str, Any]:
+    def execute_widget_query(
+        self, profile_id: str, source: Any, query: Any, *,
+        operation_timeout_ms: int | None = None, operation_id: str | None = None,
+        result_owner: dict[str, Any] | None = None, slicer_lineage: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
         if source_columns is None:
             raise ValidationError("widget query requires a current source column snapshot")
@@ -824,10 +1148,25 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         profile = self._profile(profile_id)
         if profile["dbname"] != database:
             raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the widget source")
-        connection = self._connect_profile(profile)
+        if operation_timeout_ms is not None and (isinstance(operation_timeout_ms, bool) or not isinstance(operation_timeout_ms, int) or operation_timeout_ms < 1):
+            raise ValueError("operation_timeout_ms must be a positive integer or None")
+        if operation_id is not None and (not isinstance(operation_id, str) or not operation_id or len(operation_id) > 128):
+            raise ValueError("operation_id must be a non-empty bounded string or None")
+        connection = None
         started = time.perf_counter()
+        cancellation = self._read_query_cancellations.reservation(operation_id)
         try:
+            if cancellation.cancel_requested:
+                raise PostgresServiceError(409, "execution_cancelled", "AI widget query was cancelled before PostgreSQL execution started")
+            connection = self._connect_profile(profile)
+            if cancellation.attach(connection):
+                raise PostgresServiceError(409, "execution_cancelled", "AI widget query was cancelled before PostgreSQL execution started")
             self._execute_statement(connection, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            timeout_cursor = connection.cursor()
+            try:
+                narrow_statement_timeout(timeout_cursor, operation_timeout_ms)
+            finally:
+                timeout_cursor.close()
             relation_sql = f"{quote_identifier(namespace)}.{quote_identifier(relation)}"
             self._execute_statement(connection, f"LOCK TABLE {relation_sql} IN ACCESS SHARE MODE")
             current_database = self._execute_rows(connection, "SELECT current_database() AS database")[0]["database"]
@@ -844,19 +1183,32 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
             limit = normalized_query["limit"]
             truncated = len(rows) > limit
-            page = rows[:limit]
-            limited = self._limited_rows(rows, compiled["aliases"], max_rows=limit)
-            result_rows = limited["rows"]
-            connection.rollback()
-            return {
+            if result_owner is None:
+                limited = self._limited_rows(rows, compiled["aliases"], max_rows=limit)
+                result_rows = limited["rows"]
+                limit_events = limited["limitEvents"]
+            else:
+                result_rows, limit_events, retained_bytes = self._normalize_structured_rows(
+                    rows, compiled["aliases"], maximum_rows=limit,
+                )
+                if truncated:
+                    limit_events.append({
+                        "code": "result_row_count_truncated", "policy": "semantic_limit", "path": "$",
+                        "limit": limit, "actual": len(rows),
+                    })
+            if cancellation.requested():
+                raise PostgresServiceError(409, "execution_cancelled", "AI widget query was cancelled")
+            result = {
                 "source": {key: source[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
                 "queryVersion": 2,
+                "effectiveQuery": {key: normalized_query[key] for key in ("version", "dimensions", "measures", "filters", "sort", "limit")},
+                "slicerLineage": json.loads(json.dumps(slicer_lineage or [])),
                 "columns": compiled["columns"],
                 "rows": result_rows,
                 "rowCount": len(result_rows),
                 "limit": limit,
-                "truncated": truncated or limited["truncated"],
-                "limitEvents": limited["limitEvents"],
+                "truncated": truncated or len(result_rows) < min(limit, len(rows)),
+                "limitEvents": limit_events,
                 "sql": compiled["sql"],
                 "parameters": [self._json_cell(value) for value in compiled["parameters"]],
                 "queryDurationMs": max(0, round((time.perf_counter() - started) * 1000)),
@@ -871,6 +1223,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                     } for group in normalized_query["filters"]],
                 },
             }
+            if result_owner is not None and (truncated or json_utf8_size(result) > MAX_STRUCTURED_PAGE_BYTES):
+                owner = self._structured_result_owner(
+                    profile_id, source, "aggregate", normalized_query, result_owner,
+                )
+                template = {**result, "rows": [], "rowCount": 0, "semanticTruncated": truncated}
+                resource = self._structured_results.add(
+                    owner=owner, kind="aggregate", columns=compiled["columns"], page_size=limit,
+                    template=template, rows=result_rows, retained_bytes=retained_bytes,
+                )
+                result = self._structured_results.first_page(resource)
+            connection.rollback()
+            return result
         except PostgresServiceError:
             try:
                 connection.rollback()
@@ -882,16 +1246,20 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 connection.rollback()
             except Exception:
                 pass
-            raise PostgresServiceError(422, "aggregate_query_failed", "Aggregate query failed", postgres_error_details(
-                exc, phase="execute", operation="structured_aggregate", rollback={"attempted": True},
-            )) from exc
+            details = postgres_error_details(exc, phase="execute", operation="structured_aggregate", rollback={"attempted": True})
+            if cancellation.requested():
+                raise PostgresServiceError(409, "execution_cancelled", "AI widget query was cancelled", details) from exc
+            message = "PostgreSQL canceled the widget query under its configured timeout policy" if details["postgres"].get("sqlstate") == "57014" else "Aggregate query failed"
+            raise PostgresServiceError(422, "aggregate_query_failed", message, details) from exc
         finally:
-            self._close(connection)
+            if connection is not None:
+                self._close(connection)
+            cancellation.release()
 
     @postgres_execution("read")
     def execute_temporal_series(
         self, profile_id: str, source: Any, query: Any, action: Any, refresh_generation: Any,
-        series: Any = None, window_start: Any = None,
+        series: Any = None, window_start: Any = None, *, slicer_lineage: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
         if source_columns is None:
@@ -905,6 +1273,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         except QueryValidationError as exc:
             raise ValidationError(str(exc)) from exc
         profile = self._profile(profile_id)
+        source_time_zone = _series_source_time_zone(normalized_query, slicer_lineage)
         if profile["dbname"] != database:
             raise PostgresServiceError(409, "database_changed", "The saved profile database does not match the widget source")
         connection = self._connect_profile(profile)
@@ -928,7 +1297,10 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             if action == "manifest":
                 if series is not None or window_start is not None:
                     raise ValidationError("temporal series manifest fields are invalid")
-                compiled = compile_temporal_series_manifest(source, normalized_query, quote_identifier, descriptor["columns"])
+                compiled = compile_temporal_series_manifest(
+                    source, normalized_query, quote_identifier, descriptor["columns"],
+                    source_time_zone=source_time_zone or "UTC",
+                )
                 rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
                 bounds = rows[0] if rows else {"__schemer_min": None, "__schemer_max": None}
                 minimum_raw = bounds.get("__schemer_min")
@@ -939,6 +1311,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                         "dimensionId": normalized_query["dimensions"][0]["id"],
                         "sourceType": normalized_query["temporalSourceType"],
                         "interpretation": "utc",
+                        "sourceTimeZone": source_time_zone,
                         "bucketSeconds": SERIES_BUCKET_SECONDS[0],
                         "windowBucketCount": min(SERIES_WINDOW_BUCKETS, normalized_query["limit"]),
                         "pointLimit": normalized_query["limit"],
@@ -953,6 +1326,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                         source, normalized_query, quote_identifier, SERIES_BUCKET_SECONDS[0],
                         datetime.now(timezone.utc), datetime.now(timezone.utc) + timedelta(seconds=SERIES_BUCKET_SECONDS[0]),
                         SERIES_WINDOW_BUCKETS, descriptor["columns"],
+                        source_time_zone=source_time_zone or "UTC",
                     )["columns"]
                     empty = True
                     domain = {"min": None, "max": None}
@@ -980,6 +1354,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                         "dimensionId": normalized_query["dimensions"][0]["id"],
                         "sourceType": normalized_query["temporalSourceType"],
                         "interpretation": "utc",
+                        "sourceTimeZone": source_time_zone,
                         "bucketSeconds": bucket_seconds,
                         "windowBucketCount": min(SERIES_WINDOW_BUCKETS, normalized_query["limit"]),
                         "pointLimit": normalized_query["limit"],
@@ -994,6 +1369,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                         source, normalized_query, quote_identifier, bucket_seconds, aligned_start,
                         min(aligned_end, aligned_start + timedelta(seconds=bucket_seconds * temporal["windowBucketCount"])),
                         temporal["windowBucketCount"], descriptor["columns"],
+                        source_time_zone=source_time_zone or "UTC",
                     )["columns"]
                     empty = False
                     domain = {"min": _series_iso(minimum), "max": _series_iso(maximum)}
@@ -1001,6 +1377,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 return {
                     "seriesVersion": 1,
                     "series": series_identity,
+                    "effectiveQuery": {key: normalized_query[key] for key in ("version", "dimensions", "measures", "filters", "sort", "limit")},
+                    "slicerLineage": json.loads(json.dumps(slicer_lineage or [])),
                     "domain": domain,
                     "empty": empty,
                     "columns": result_columns,
@@ -1022,11 +1400,16 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
             required_series_fields = {
                 "key", "dimensionId", "sourceType", "interpretation", "bucketSeconds",
-                "windowBucketCount", "pointLimit", "refreshGeneration", "expiresAtEpoch", "alignedStart", "alignedEndExclusive",
+                "sourceTimeZone", "windowBucketCount", "pointLimit", "refreshGeneration", "expiresAtEpoch", "alignedStart", "alignedEndExclusive",
             }
             if not isinstance(series, dict) or set(series) != required_series_fields:
                 raise ValidationError("temporal series window descriptor is invalid")
-            if series.get("dimensionId") != normalized_query["dimensions"][0]["id"] or series.get("sourceType") != normalized_query["temporalSourceType"] or series.get("interpretation") != "utc":
+            if (
+                series.get("dimensionId") != normalized_query["dimensions"][0]["id"]
+                or series.get("sourceType") != normalized_query["temporalSourceType"]
+                or series.get("interpretation") != "utc"
+                or series.get("sourceTimeZone") != source_time_zone
+            ):
                 raise ValidationError("temporal series window descriptor does not match the query")
             bucket_seconds = series.get("bucketSeconds")
             window_bucket_count = series.get("windowBucketCount")
@@ -1061,6 +1444,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             compiled = compile_temporal_series_window(
                 source, normalized_query, quote_identifier, bucket_seconds, requested_start, requested_end, maximum_rows,
                 descriptor["columns"],
+                source_time_zone=source_time_zone or "UTC",
             )
             rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
             if len(rows) > maximum_rows:
@@ -1072,6 +1456,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             return {
                 "seriesVersion": 1,
                 "seriesKey": series["key"],
+                "effectiveQuery": {key: normalized_query[key] for key in ("version", "dimensions", "measures", "filters", "sort", "limit")},
+                "slicerLineage": json.loads(json.dumps(slicer_lineage or [])),
                 "range": {"start": _series_iso(requested_start), "endExclusive": _series_iso(requested_end)},
                 "columns": compiled["columns"],
                 "rows": result_rows,
@@ -1122,6 +1508,9 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
         limit: Any,
         sort: Any,
         searches: Any,
+        *,
+        result_owner: dict[str, Any] | None = None,
+        slicer_lineage: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         database, namespace, relation, kind, fingerprint, source_columns = self._validate_relation_source(profile_id, source)
         if source_columns is None:
@@ -1157,26 +1546,90 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 )
             except QueryValidationError as exc:
                 raise ValidationError(str(exc)) from exc
-            compiled = compile_detail_query(source, normalized_query, normalized_request, descriptor["columns"], quote_identifier)
+            compiled = compile_detail_query(
+                source, normalized_query, normalized_request, descriptor["columns"], quote_identifier,
+                MAX_DETAIL_RETAINED_ROWS + 1 if result_owner is not None else None,
+            )
             count_rows = self._execute_rows(connection, compiled["countSql"], tuple(compiled["countParameters"]))
             matching_row_count = int(count_rows[0]["__schemer_count"]) if count_rows else 0
-            rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
-            limited = self._limited_rows(rows, compiled["aliases"], max_rows=normalized_request["limit"])
-            result_rows = limited["rows"]
-            connection.rollback()
+            if result_owner is None:
+                rows = self._execute_rows(connection, compiled["sql"], tuple(compiled["parameters"]))
+                limited = self._limited_rows(rows, compiled["aliases"], max_rows=normalized_request["limit"])
+                result_rows = limited["rows"]
+                next_offset = normalized_request["offset"] + len(result_rows)
+                connection.rollback()
+                duration_ms = max(0, round((time.perf_counter() - started) * 1000))
+                return {
+                    "source": {key: source[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
+                    "queryVersion": 2,
+                    "effectiveQuery": {key: normalized_query[key] for key in ("version", "dimensions", "measures", "filters", "sort", "limit")},
+                    "slicerLineage": json.loads(json.dumps(slicer_lineage or [])),
+                    "detailVersion": 1,
+                    "columns": compiled["columns"],
+                    "rows": result_rows,
+                    "matchingRowCount": matching_row_count,
+                    "offset": normalized_request["offset"],
+                    "nextOffset": next_offset,
+                    "limit": normalized_request["limit"],
+                    "hasMore": next_offset < matching_row_count,
+                    "truncated": limited["truncated"],
+                    "limitEvents": limited["limitEvents"],
+                    "sql": compiled["sql"],
+                    "parameters": [self._json_cell(value) for value in compiled["parameters"]],
+                    "countSql": compiled["countSql"],
+                    "countParameters": [self._json_cell(value) for value in compiled["countParameters"]],
+                    "queryDurationMs": duration_ms,
+                    "queriedAt": _utc_now(),
+                    "provenance": self._query_provenance(profile_id, profile, descriptor),
+                }
+
+            try:
+                detail_cursor = connection.cursor(name=f"schemer_detail_{secrets.token_hex(8)}")
+            except TypeError:
+                detail_cursor = connection.cursor()
+            if hasattr(detail_cursor, "itersize"):
+                detail_cursor.itersize = min(256, normalized_request["limit"] + 1)
+            detail_cursor.execute(compiled["sql"], tuple(compiled["parameters"]))
+            snapshot_connection = connection
+            cleanup_lock = threading.Lock()
+            cleaned = False
+
+            def cleanup_snapshot() -> None:
+                nonlocal cleaned
+                with cleanup_lock:
+                    if cleaned:
+                        return
+                    cleaned = True
+                try:
+                    snapshot_connection.rollback()
+                except Exception:
+                    pass
+                self._close(snapshot_connection)
+
+            def normalize_retained_row(raw: Any, index: int) -> tuple[list[Any], list[dict[str, Any]]]:
+                values = [raw.get(alias) for alias in compiled["aliases"]] if isinstance(raw, dict) else list(raw)
+                try:
+                    return self._result_limiter.row(values, row_index=index)
+                except ResultLimitError as exc:
+                    raise self._limit_error(exc) from exc
+
             duration_ms = max(0, round((time.perf_counter() - started) * 1000))
-            return {
+            template = {
                 "source": {key: source[key] for key in ("profileId", "database", "namespace", "relation", "kind", "fingerprint")},
                 "queryVersion": 2,
+                "effectiveQuery": {key: normalized_query[key] for key in ("version", "dimensions", "measures", "filters", "sort", "limit")},
+                "slicerLineage": json.loads(json.dumps(slicer_lineage or [])),
                 "detailVersion": 1,
                 "columns": compiled["columns"],
-                "rows": result_rows,
+                "rows": [],
                 "matchingRowCount": matching_row_count,
+                "initialOffset": normalized_request["offset"],
                 "offset": normalized_request["offset"],
+                "nextOffset": normalized_request["offset"],
                 "limit": normalized_request["limit"],
-                "hasMore": normalized_request["offset"] + len(result_rows) < matching_row_count,
-                "truncated": limited["truncated"],
-                "limitEvents": limited["limitEvents"],
+                "hasMore": False,
+                "truncated": False,
+                "limitEvents": [],
                 "sql": compiled["sql"],
                 "parameters": [self._json_cell(value) for value in compiled["parameters"]],
                 "countSql": compiled["countSql"],
@@ -1185,6 +1638,18 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 "queriedAt": _utc_now(),
                 "provenance": self._query_provenance(profile_id, profile, descriptor),
             }
+            owner = self._structured_result_owner(
+                profile_id, source, "detail",
+                {"query": normalized_query, "detailRequest": normalized_request}, result_owner,
+            )
+            resource = self._structured_results.add(
+                owner=owner, kind="detail", columns=compiled["columns"],
+                page_size=normalized_request["limit"], template=template,
+                cursor=detail_cursor, cleanup=cleanup_snapshot,
+                normalize_row=normalize_retained_row, maximum_rows=MAX_DETAIL_RETAINED_ROWS,
+            )
+            connection = None
+            return self._structured_results.first_page(resource)
         except PostgresServiceError:
             try:
                 connection.rollback()
@@ -1200,7 +1665,8 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                 exc, phase="execute", operation="structured_detail", rollback={"attempted": True},
             )) from exc
         finally:
-            self._close(connection)
+            if connection is not None:
+                self._close(connection)
 
     @postgres_execution("read")
     def preview_table_data(
@@ -1328,11 +1794,12 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
 
         connection = None
         cursor = None
+        cancellation = self._read_query_cancellations.reservation(operation_id)
         try:
-            if operation_id is not None and self._read_query_cancellations.reserve(operation_id):
+            if cancellation.cancel_requested:
                 raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled before PostgreSQL execution started")
             connection = self._connect_profile(profile)
-            if operation_id is not None and self._read_query_cancellations.attach(operation_id, connection):
+            if cancellation.attach(connection):
                 raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled before PostgreSQL execution started")
             cursor = connection.cursor()
             cursor.execute("SET TRANSACTION READ ONLY")
@@ -1393,14 +1860,14 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
             base["limitEvents"] = limited["limitEvents"]
             if len(json.dumps(base, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")) > max_result_bytes:
                 raise PostgresServiceError(422, "sql_result_too_large", "SQL result metadata exceeds the byte limit")
-            if operation_id is not None and self._read_query_cancellations.requested(operation_id):
+            if cancellation.requested():
                 raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled")
             return base
         except PostgresServiceError:
             raise
         except Exception as exc:
             details = postgres_error_details(exc, phase="execute", operation="read_sql", rollback={"attempted": True})
-            if operation_id is not None and self._read_query_cancellations.requested(operation_id):
+            if cancellation.requested():
                 raise PostgresServiceError(409, "execution_cancelled", "AI query was cancelled", details) from exc
             message = "Read-only SQL query failed"
             if details["postgres"].get("sqlstate") == "57014":
@@ -1422,8 +1889,7 @@ class PostgresService(PostgresConnectionMixin, PostgresCatalogMixin):
                         if connection is not None:
                             self._close(connection)
                     finally:
-                        if operation_id is not None:
-                            self._read_query_cancellations.release(operation_id)
+                        cancellation.release()
 
     # ---- introspection --------------------------------------------------
 

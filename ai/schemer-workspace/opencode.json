@@ -36,7 +36,7 @@
       "*": "deny",
       "schemer-help": "allow",
       "schemer-dashboard-safety": "allow",
-      "schemer-layout-safety": "allow",
+      "schemer-order-safety": "allow",
       "schemer-query-safety": "allow"
     },
     "schemer_dashboard_open": "allow",

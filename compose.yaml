@@ -2,8 +2,6 @@ name: ${SCHEMII_INSTANCE:-schemii}
 
 services:
   metadata-postgres:
-    build:
-      context: ./docker/metadata
     image: ${SCHEMII_METADATA_IMAGE:-schemii-metadata-postgres:local}
     environment:
       POSTGRES_DB: schemii_metadata
@@ -27,9 +25,6 @@ services:
     restart: unless-stopped
 
   metadata-migrate:
-    build:
-      context: .
-      target: schemii-runtime
     image: ${SCHEMII_IMAGE:-schemii:local}
     command: ["python", "-m", "schemii.metadata_migrate"]
     environment:
@@ -57,11 +52,8 @@ services:
     restart: "no"
 
   schemii:
-    build:
-      context: .
     image: ${SCHEMII_IMAGE:-schemii:local}
-    ports:
-      - "127.0.0.1:${SCHEMII_HOST_PORT:-8080}:8080"
+    command: ["schemii"]
     environment:
       SCHEMII_HOST: 0.0.0.0
       SCHEMII_PORT: 8080
@@ -69,9 +61,10 @@ services:
       SCHEMII_SCHEMA_DIR: /data/schemas
       SCHEMER_DASHBOARD_DIR: /tmp/schemer-dashboards
       SCHEMII_BEHIND_LOOPBACK_PROXY: 1
+      SCHEMII_TRUSTED_LOCAL_PROXY: schemii-ingress
+      SCHEMII_PUBLIC_ORIGINS: ${SCHEMII_PUBLIC_ORIGINS:-}
       SCHEMII_EXAMPLES: local
       SCHEMII_METADATA_DSN: host=metadata-postgres port=5432 dbname=schemii_metadata user=schemii_metadata_schemii
-      SCHEMII_METADATA_APPLICATION_NAME: schemii
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_schemii_password
     secrets:
       - metadata_schemii_password
@@ -81,6 +74,9 @@ services:
     volumes:
       - schemii-config:/data/config
       - schemii-schemas:/data/schemas
+    networks:
+      - default
+      - schemii-ingress
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -102,10 +98,46 @@ services:
       start_period: 3s
     restart: on-failure
 
+  schemii-ingress:
+    image: nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
+    depends_on:
+      schemii:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SCHEMII_HOST_PORT:-8080}:8080"
+    volumes:
+      - ./docker/ingress/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ingress/schemii-upstream.conf:/etc/nginx/application-upstream.conf:ro
+    networks:
+      - schemii-ingress
+      - schemii-loopback
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:size=24m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--header", "Host: localhost", "http://127.0.0.1:8080/api/readiness"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    restart: unless-stopped
+
 volumes:
   schemii-metadata-postgres:
   schemii-config:
   schemii-schemas:
+
+networks:
+  schemii-ingress:
+    internal: true
+  schemii-loopback:
 
 secrets:
   metadata_bootstrap_password:

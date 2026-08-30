@@ -1,15 +1,28 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from schemii.result_limits import ResultLimitError, ResultLimiter, ResultLimits, json_utf8_size, truncate_utf8
+from schemii.result_limits import ResultLimitError, ResultLimiter, ResultLimits, fit_serialized_envelope, json_utf8_size, truncate_utf8
 
 
 class ResultLimitTests(unittest.TestCase):
+    def test_envelope_fitting_counts_exact_serialized_metadata_and_rows(self):
+        rows = [["x" * 20], ["y" * 20], ["z" * 20]]
+        envelope = lambda values: {"metadata": "m" * 20, "rows": values, "count": len(values)}
+        maximum = json_utf8_size(envelope(rows[:2]))
+        fitted, document = fit_serialized_envelope(rows, envelope, maximum)
+        self.assertEqual(fitted, rows[:2])
+        self.assertEqual(json_utf8_size(document), maximum)
+
+        with self.assertRaises(ResultLimitError) as caught:
+            fit_serialized_envelope([], lambda values: {"metadata": "too large", "rows": values}, 10)
+        self.assertEqual(caught.exception.code, "result_metadata_too_large")
+
     def test_utf8_truncation_never_splits_a_code_point(self):
         self.assertEqual(truncate_utf8("a🙂b", 5), "a🙂")
         limiter = ResultLimiter(ResultLimits(max_cell_bytes=8, max_row_bytes=32, max_result_bytes=64))
@@ -70,6 +83,30 @@ class ResultLimitTests(unittest.TestCase):
         self.assertEqual(result["rows"], [{"payload": [1, 2]}])
         self.assertTrue(result["limitEvents"])
         self.assertEqual(result["limitEvents"][0]["code"], "result_collection_truncated")
+
+    def test_incremental_accounting_never_serializes_the_accumulated_row_list(self):
+        import schemii.result_limits as limits_module
+
+        measured = limits_module.json_utf8_size
+
+        def assert_incremental(value):
+            if isinstance(value, list) and len(value) > 1 and all(isinstance(item, list) for item in value):
+                raise AssertionError("accumulated rows were copied and serialized")
+            return measured(value)
+
+        limiter = ResultLimiter(ResultLimits(max_result_bytes=1024))
+        with patch("schemii.result_limits.json_utf8_size", side_effect=assert_incremental):
+            result = limiter.rows([(index,) for index in range(20)], ["value"], max_rows=20)
+        self.assertEqual(len(result["rows"]), 20)
+        self.assertLessEqual(json_utf8_size(result["rows"]), limiter.limits.max_result_bytes)
+
+    def test_record_byte_accounting_includes_field_names(self):
+        alias = "field_name_that_is_larger_than_the_value"
+        limiter = ResultLimiter(ResultLimits(max_cell_bytes=100, max_row_bytes=100, max_result_bytes=40))
+        result = limiter.records([(1,), (2,)], [alias], max_rows=2)
+        self.assertEqual(result["rows"], [])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["limitEvents"][-1]["code"], "result_total_bytes_truncated")
 
 
 if __name__ == "__main__":

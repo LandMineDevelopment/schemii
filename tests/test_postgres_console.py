@@ -467,6 +467,50 @@ class PostgresConsoleTests(unittest.TestCase):
         self.assertEqual(self.connection.commits, 0)
         self.assertEqual(self.connection.rollbacks, 1)
 
+    def test_pre_admission_cancellation_prevents_all_write_capable_dispatch(self):
+        for mode in ("managed", "autocommit"):
+            with self.subTest(mode=mode):
+                request = self.request(f"UPDATE blocked_{mode}", mode=mode)
+                cancellation = self.service.cancel_console(
+                    "local", request["executionId"], "binding", "server",
+                )
+                self.assertEqual(cancellation, {"requested": True, "reserved": True})
+                with self.assertRaises(PostgresServiceError) as caught:
+                    self.service.execute_console(
+                        "local", request, "binding", "server", self.human_policy,
+                    )
+                self.assertEqual(caught.exception.code, "execution_cancelled")
+                self.assertEqual(caught.exception.details, {
+                    "completedStatementIndexes": [], "outcome": "not_started",
+                    "reconciliationEvidence": {"postgresDispatchStarted": False},
+                })
+                receipt = self.authority.receipts[request["executionId"]]
+                self.assertEqual((receipt["state"], receipt["outcome"]), ("cancelled", "not_started"))
+                self.assertFalse(any(sql == f"UPDATE blocked_{mode}" for sql, _ in self.connection.executed))
+
+        transaction_id = str(uuid4())
+        self.service.create_console_transaction("local", {
+            "transactionId": transaction_id, "consoleId": str(uuid4()), "database": "demo",
+            "namespace": "public", "settingsRevision": self.settings_revision,
+            "profileFingerprint": self.fingerprint,
+        }, "binding", "server", self.human_policy)
+        execution_id = str(uuid4())
+        self.assertEqual(
+            self.service.cancel_console("local", execution_id, "binding", "server"),
+            {"requested": True, "reserved": True},
+        )
+        with self.assertRaises(PostgresServiceError) as explicit:
+            self.service.execute_console_transaction(
+                "local", transaction_id, {"executionId": execution_id, "sql": "UPDATE blocked_explicit"},
+                "binding", "server",
+            )
+        self.assertEqual(explicit.exception.code, "execution_cancelled")
+        self.assertFalse(any(sql == "UPDATE blocked_explicit" for sql, _ in self.connection.executed))
+        self.assertEqual(
+            (self.authority.receipts[execution_id]["state"], self.authority.receipts[execution_id]["outcome"]),
+            ("cancelled", "transaction_open"),
+        )
+
     def test_explicit_transaction_failed_state_savepoint_recovery_and_shutdown_rollback(self):
         console_id = str(uuid4())
         transaction_id = str(uuid4())
@@ -654,6 +698,24 @@ class PostgresConsoleTests(unittest.TestCase):
         connection = Connection()
         self.assertTrue(pending.attach(pending_id, connection))
         self.assertTrue(connection.cancelled)
+
+        now = [10.0]
+        pre_admission = ConsoleExecutionRegistry(maximum_pending_cancellations=1, clock=lambda: now[0])
+        reserved_id = str(uuid4())
+        self.assertEqual(
+            pre_admission.cancel(reserved_id, "one", "binding", "server"),
+            {"requested": True, "reserved": True},
+        )
+        with self.assertRaises(PostgresServiceError) as bounded:
+            pre_admission.cancel(str(uuid4()), "one", "binding", "server")
+        self.assertEqual(bounded.exception.code, "console_cancellation_capacity_exhausted")
+        self.assertTrue(pre_admission.reserve(reserved_id, "console", "one", "binding", "server"))
+        pre_admission.release(reserved_id)
+        now[0] += 31
+        self.assertEqual(
+            pre_admission.cancel(str(uuid4()), "one", "binding", "server"),
+            {"requested": True, "reserved": True},
+        )
 
     def test_cancel_during_statement_is_distinguished_from_timeout(self):
         self.connection.block_on = "SELECT slow"

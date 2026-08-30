@@ -10,6 +10,7 @@ TRANSIENT_KEYS = {
     "x", "y", "color", "fingerprint", "importedAt", "importTime", "updatedAt",
     "profileId", "sourceProfileId", "liveOid", "layout", "timeZone",
 }
+MAX_VERIFIED_RELATION_PROFILE_DATABASES = 4
 
 
 class PostgresServiceError(Exception):

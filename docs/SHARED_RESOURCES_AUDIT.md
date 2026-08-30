@@ -73,7 +73,7 @@ The original audit recommended splitting the PostgreSQL facade, extracting atomi
 - Schemii and Schemer route assembly, application state, user workflows, and safety confirmations.
 - A universal top bar, universal grid, shared global state container, or single combined server process.
 
-Schemer intentionally does not support freeform widget resizing. User-owned widget order, dashboard layout metadata, and viewport state remain part of Schemer's own persistence contract.
+Schemer persists one user-owned widget array order and vertical viewport state. Its uniform responsive version-3 cards have no saved geometry or breakpoint-specific order; those order-only dashboard semantics remain application-specific.
 
 ## Maintenance Rules
 

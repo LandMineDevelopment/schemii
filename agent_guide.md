@@ -6,6 +6,8 @@ This repository contains Schemii, a PostgreSQL schema design and migration appli
 
 For installation, launch modes, Docker networking, persistent-volume safety, and setup verification, follow `docs/AI_AGENT_SETUP.md`.
 
+Production launch modes publish applications only on loopback. A machine-local reverse proxy may be configured externally with exact HTTPS origins supplied through `SCHEMII_PUBLIC_ORIGINS` or `SCHEMER_PUBLIC_ORIGINS`; the repository must not own its identity, hostname, listener, routes, TLS, or access policy. Forwarded Host/Proto trust is request admission from the configured Docker ingress peer, not application user authorization or per-user privacy.
+
 ## Sources Of Truth
 
 Use this order when behavior differs:
@@ -63,12 +65,12 @@ Treat `layout_conflict` as a hard-refresh requirement. Never bypass the layout t
 
 ## Schemer Dashboard Safety
 
-- Dashboard records, widget order, layout metadata, viewport state, source/query configuration, and unrelated custom widgets are user-owned data.
+- Dashboard records, widget array order, viewport state, source/query configuration, and unrelated custom widgets are user-owned data. Version-3 cards have no persisted geometry.
 - Treat `dashboard_conflict`, `dashboard_changed`, and stale temporal-series errors as refresh requirements. Never bypass dashboard revision guards.
 - Never rewrite a stale relation fingerprint or semantic column snapshot automatically. Require explicit source reselection after catalog changes.
 - For Schemer dashboard work, send aggregate and detail execution with the exact dashboard ID/revision and complete verified profile, database, namespace, relation kind, fingerprint, source-column, and structured-query request. Draft queries may execute before they are saved. The base aggregate/detail API also accepts requests without dashboard context, so do not describe its revision guard as universal. Temporal execution additionally requires the exact saved widget ID and server-reconstructed line projection; never imply that stronger anti-tamper boundary exists on standard aggregate or detail requests.
 - Keep persisted widgets single-relation and caller-SQL-free. Separately confirmed data-mode analytic SQL may join relations but must remain profile/database/namespace/revision-bound and must not mutate widget configuration.
-- Mercury restoration may replace reserved default definitions only. Preserve established layout, viewport, and unrelated widgets.
+- Mercury restoration may replace reserved default definitions only. Preserve established widget order, viewport, and unrelated widgets.
 - Temporal line windows are separate read-only PostgreSQL snapshots. Cache them only within one refresh generation and never claim cross-window point-in-time consistency.
 
 ## Safe Migrations

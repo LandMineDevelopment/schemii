@@ -19,16 +19,39 @@ _TERMINAL_MIGRATION_STATES = {"succeeded", "failed", "uncertain"}
 _HEX_DIGEST = frozenset("0123456789abcdef")
 
 
+def _catalog_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise MetadataStoreError(
+                "metadata_catalog_mismatch", "Server metadata PostgreSQL catalog is malformed", status=503,
+            ) from exc
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise MetadataStoreError(
+            "metadata_catalog_mismatch", "Server metadata PostgreSQL catalog is malformed", status=503,
+        )
+    return value
+
+
 class MetadataStore:
     """Transactional repository for shared server authority metadata."""
 
-    def __init__(self, connection_factory: Callable[[], Any], *, max_json_bytes: int = 1024 * 1024):
+    def __init__(
+        self, connection_factory: Callable[[], Any], *, max_json_bytes: int = 1024 * 1024,
+        expected_application: str = "", expected_role: str = "", expected_owner: str = "",
+        expected_admin_owner: str = "",
+    ):
         if not callable(connection_factory):
             raise ValueError("connection_factory must be callable")
         if isinstance(max_json_bytes, bool) or not 1024 <= max_json_bytes <= 1024 * 1024:
             raise ValueError("max_json_bytes must be between 1024 and 1048576")
         self.connection_factory = connection_factory
         self.max_json_bytes = max_json_bytes
+        self.expected_application = identity(expected_application, "expected_application") if expected_application else ""
+        self.expected_role = identity(expected_role, "expected_role") if expected_role else ""
+        self.expected_owner = identity(expected_owner, "expected_owner") if expected_owner else ""
+        self.expected_admin_owner = identity(expected_admin_owner, "expected_admin_owner") if expected_admin_owner else ""
 
     def migrate(self) -> int:
         return MetadataMigrator(self.connection_factory).migrate()
@@ -41,6 +64,75 @@ class MetadataStore:
                 cursor.execute("SELECT version, name, checksum FROM metadata_schema_migrations ORDER BY version")
                 applied = validate_applied_migrations(cursor.fetchall(), migrator.migrations)
                 version = len(applied)
+                identity_row = None
+                if self.expected_application or self.expected_role or self.expected_owner or self.expected_admin_owner:
+                    cursor.execute(
+                        """SELECT current_user AS current_user, session_user AS session_user,
+                                  pg_catalog.pg_get_userbyid(database.datdba) AS database_owner,
+                                  pg_catalog.pg_get_userbyid(namespace.nspowner) AS schema_owner,
+                                  public.metadata_current_application() AS application_id,
+                                  (
+                                      SELECT pg_catalog.pg_get_userbyid(admin_namespace.nspowner)
+                                      FROM pg_catalog.pg_namespace AS admin_namespace
+                                      WHERE admin_namespace.nspname = 'schemii_admin'
+                                  ) AS admin_schema_owner,
+                                  COALESCE((
+                                      SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                                          'name', object_catalog.relname, 'kind', object_catalog.relkind,
+                                          'owner', pg_catalog.pg_get_userbyid(object_catalog.relowner)
+                                      ) ORDER BY object_catalog.relname)
+                                      FROM pg_catalog.pg_class AS object_catalog
+                                      WHERE object_catalog.relnamespace = namespace.oid
+                                        AND object_catalog.relkind IN ('r', 'p', 'S')
+                                        AND object_catalog.relname LIKE 'metadata\\_%' ESCAPE '\\'
+                                  ), '[]'::jsonb) AS object_owners,
+                                  COALESCE((
+                                      SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                                          'name', function_catalog.proname, 'owner', pg_catalog.pg_get_userbyid(function_catalog.proowner)
+                                      ) ORDER BY function_catalog.proname, function_catalog.oid)
+                                      FROM pg_catalog.pg_proc AS function_catalog
+                                      WHERE function_catalog.pronamespace = namespace.oid
+                                        AND function_catalog.proname LIKE 'metadata\\_%' ESCAPE '\\'
+                                  ), '[]'::jsonb) AS function_owners,
+                                  COALESCE((
+                                      SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                                          'name', object_catalog.relname, 'enabled', object_catalog.relrowsecurity,
+                                          'forced', object_catalog.relforcerowsecurity
+                                      ) ORDER BY object_catalog.relname)
+                                      FROM pg_catalog.pg_class AS object_catalog
+                                      WHERE object_catalog.relnamespace = namespace.oid
+                                        AND object_catalog.relkind IN ('r', 'p')
+                                        AND object_catalog.relname LIKE 'metadata\\_%' ESCAPE '\\'
+                                        AND object_catalog.relname <> 'metadata_schema_migrations'
+                                  ), '[]'::jsonb) AS rls_tables,
+                                  COALESCE((
+                                      SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+                                          'name', role_catalog.rolname, 'login', role_catalog.rolcanlogin,
+                                           'inherit', role_catalog.rolinherit, 'superuser', role_catalog.rolsuper,
+                                           'createRole', role_catalog.rolcreaterole, 'createDatabase', role_catalog.rolcreatedb,
+                                           'replication', role_catalog.rolreplication, 'bypassRls', role_catalog.rolbypassrls,
+                                          'memberOfOwner', CASE
+                                              WHEN role_catalog.rolname = 'schemii_metadata_owner' THEN false
+                                              ELSE EXISTS (
+                                                  SELECT 1
+                                                  FROM pg_catalog.pg_auth_members AS membership
+                                                  JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid = membership.roleid
+                                                  WHERE membership.member = role_catalog.oid
+                                                    AND owner_role.rolname = 'schemii_metadata_owner'
+                                              )
+                                          END
+                                      ) ORDER BY role_catalog.rolname)
+                                       FROM pg_catalog.pg_roles AS role_catalog
+                                       WHERE role_catalog.rolname IN (
+                                           'schemii_metadata_bootstrap', 'schemii_metadata_owner', 'schemii_metadata_migration',
+                                           'schemii_metadata_schemii', 'schemii_metadata_schemer'
+                                      )
+                                  ), '[]'::jsonb) AS metadata_roles
+                           FROM pg_catalog.pg_database AS database
+                           JOIN pg_catalog.pg_namespace AS namespace ON namespace.nspname = 'public'
+                           WHERE database.datname = current_database()"""
+                    )
+                    identity_row = cursor.fetchone()
         except MetadataStoreError:
             raise
         except Exception as exc:
@@ -52,8 +144,103 @@ class MetadataStore:
                 status=503,
                 details={"currentVersion": version, "expectedVersion": expected},
             )
-        return {"ok": True, "version": version, "expectedVersion": expected}
-
+        if (self.expected_application or self.expected_role or self.expected_owner or self.expected_admin_owner) and identity_row is None:
+            raise MetadataStoreError(
+                "metadata_identity_mismatch",
+                "Server metadata PostgreSQL role or ownership identity is unavailable",
+                status=503,
+            )
+        if identity_row is not None:
+            actual_role = _row_value(identity_row, "current_user", 0)
+            session_role = _row_value(identity_row, "session_user", 1)
+            database_owner = _row_value(identity_row, "database_owner", 2)
+            schema_owner = _row_value(identity_row, "schema_owner", 3)
+            application_id = _row_value(identity_row, "application_id", 4)
+            admin_schema_owner = _row_value(identity_row, "admin_schema_owner", 5)
+            application_matches = not self.expected_application or application_id == self.expected_application
+            role_matches = not self.expected_role or actual_role == self.expected_role == session_role
+            owner_matches = not self.expected_owner or database_owner == self.expected_owner == schema_owner
+            admin_owner_matches = not self.expected_admin_owner or admin_schema_owner == self.expected_admin_owner
+            if not application_matches or not role_matches or not owner_matches or not admin_owner_matches:
+                raise MetadataStoreError(
+                    "metadata_identity_mismatch",
+                    "Server metadata PostgreSQL role or ownership identity is not the configured identity",
+                    status=503,
+                    details={
+                        "expectedApplication": self.expected_application or None,
+                        "currentApplication": application_id,
+                        "expectedRole": self.expected_role or None, "currentUser": actual_role,
+                        "sessionUser": session_role, "expectedOwner": self.expected_owner or None,
+                        "databaseOwner": database_owner, "schemaOwner": schema_owner,
+                        "expectedAdminOwner": self.expected_admin_owner or None,
+                        "adminSchemaOwner": admin_schema_owner,
+                    },
+                )
+            object_owners = _catalog_list(_row_value(identity_row, "object_owners", 6))
+            function_owners = _catalog_list(_row_value(identity_row, "function_owners", 7))
+            rls_tables = _catalog_list(_row_value(identity_row, "rls_tables", 8))
+            roles = _catalog_list(_row_value(identity_row, "metadata_roles", 9))
+            ownership_drift = [
+                {"kind": "relation", **item} for item in object_owners
+                if self.expected_owner and item.get("owner") != self.expected_owner
+            ] + [
+                {"kind": "function", **item} for item in function_owners
+                if self.expected_owner and item.get("owner") != self.expected_owner
+            ]
+            if not any(item.get("name") == "metadata_schema_migrations" for item in object_owners):
+                ownership_drift.append({"kind": "relation", "name": "metadata_schema_migrations", "owner": None})
+            if not any(item.get("name") == "metadata_current_application" for item in function_owners):
+                ownership_drift.append({"kind": "function", "name": "metadata_current_application", "owner": None})
+            expected_rls_tables = {
+                item.get("name") for item in object_owners
+                if item.get("kind") in {"r", "p"} and item.get("name") != "metadata_schema_migrations"
+            }
+            rls_by_name = {item.get("name"): item for item in rls_tables}
+            rls_drift = [
+                table_name for table_name in sorted(expected_rls_tables)
+                if table_name not in rls_by_name
+                or rls_by_name[table_name].get("enabled") is not True
+                or rls_by_name[table_name].get("forced") is not True
+            ]
+            expected_roles = {
+                "schemii_metadata_bootstrap": {
+                    "login": False, "memberOfOwner": False, "superuser": True,
+                    "createRole": True, "createDatabase": True, "replication": True, "bypassRls": True,
+                },
+                "schemii_metadata_owner": {"login": False, "memberOfOwner": False},
+                "schemii_metadata_migration": {"login": True, "memberOfOwner": True},
+                "schemii_metadata_schemii": {"login": True, "memberOfOwner": False},
+                "schemii_metadata_schemer": {"login": True, "memberOfOwner": False},
+            }
+            roles_by_name = {item.get("name"): item for item in roles}
+            role_drift = []
+            for role_name, expected_role in expected_roles.items():
+                role = roles_by_name.get(role_name)
+                if (
+                    role is None or role.get("login") is not expected_role["login"]
+                    or role.get("memberOfOwner") is not expected_role["memberOfOwner"]
+                    or role.get("inherit") is not True or any(
+                        role.get(field) is not expected_role.get(field, False)
+                        for field in ("superuser", "createRole", "createDatabase", "replication", "bypassRls")
+                    )
+                ):
+                    role_drift.append(role_name)
+            if ownership_drift or rls_drift or role_drift:
+                raise MetadataStoreError(
+                    "metadata_catalog_mismatch",
+                    "Server metadata PostgreSQL catalog does not match its ownership and isolation contract",
+                    status=503,
+                    details={
+                        "ownershipDrift": ownership_drift,
+                        "rowSecurityDrift": rls_drift,
+                        "roleDrift": role_drift,
+                    },
+                )
+        return {
+            "ok": True, "version": version, "expectedVersion": expected,
+            **({"application": self.expected_application} if self.expected_application else {}),
+            **({"role": self.expected_role} if self.expected_role else {}),
+        }
     def create_agent_settings(self, application_id: str, agent_id: str, policy: Any) -> dict[str, Any]:
         from ..ai_policy import effective_capabilities, policy_digest, validate_policy
 
@@ -238,7 +425,13 @@ class MetadataStore:
             }
             for item in cursor.fetchall()
         }
-        from ..ai_policy import effective_bounds
+        from ..ai_policy import APPLICATION_CAPABILITIES, SAFETY_FLOORS, effective_bounds
+        # New capabilities never inherit authority from an older immutable policy revision.
+        for capability in APPLICATION_CAPABILITIES[application]:
+            capabilities.setdefault(capability, {
+                "configuredMode": "disabled", "effectiveMode": "disabled",
+                "safetyFloor": SAFETY_FLOORS[capability],
+            })
         policy = _json_value(_row_value(row, "policy", 3))
         return {
             "application": application, "agentId": agent,
@@ -856,6 +1049,7 @@ class MetadataStore:
         *,
         expected_policy_revision: int,
         approved: bool = False,
+        required_effective_mode: str | None = None,
         worker_id: str | None = None,
         lease_seconds: int = 60,
     ) -> dict[str, Any]:
@@ -864,6 +1058,8 @@ class MetadataStore:
             raise MetadataStoreError("invalid_metadata", "expected_policy_revision is invalid", status=400)
         if type(approved) is not bool:
             raise MetadataStoreError("invalid_metadata", "approved must be a boolean", status=400)
+        if required_effective_mode is not None and required_effective_mode not in {"every_action", "once_per_chat", "automatic"}:
+            raise MetadataStoreError("invalid_metadata", "required_effective_mode is invalid", status=400)
         worker = None if worker_id is None else identity(worker_id, "worker_id")
         lease = _seconds(lease_seconds, "lease_seconds", maximum=3600)
         claim_token = secrets.token_urlsafe(32) if worker is not None else None
@@ -945,6 +1141,8 @@ class MetadataStore:
             effective = binding.get("policyBinding", {}).get("effectiveMode") if isinstance(binding, dict) else None
             if effective not in {"every_action", "once_per_chat", "automatic"}:
                 raise MetadataStoreError("policy_changed", "Proposal approval policy binding is invalid", status=409)
+            if required_effective_mode is not None:
+                effective = required_effective_mode
             compatible = (
                 effective == "every_action" or
                 (effective == "once_per_chat" and mode == "once_per_chat") or
@@ -1794,6 +1992,8 @@ class MetadataStore:
                 (cutoff, count),
             )
             deleted["planPayloadsRedacted"] = max(0, int(cursor.rowcount))
+            # Chat-owned authority and result rows cascade atomically. Application-scoped
+            # authority transitions deliberately have no aggregate FK and remain as audit evidence.
             for name, sql in (
                 ("results", "DELETE FROM metadata_query_result_references WHERE result_ref_id IN (SELECT result_ref_id FROM metadata_query_result_references WHERE state IN ('consumed', 'uncertain', 'expired', 'revoked') AND expires_at < %s ORDER BY expires_at LIMIT %s FOR UPDATE SKIP LOCKED)"),
                 ("plans", "DELETE FROM metadata_migration_plans WHERE plan_id IN (SELECT p.plan_id FROM metadata_migration_plans p LEFT JOIN metadata_migration_executions e USING (plan_id) WHERE e.execution_id IS NULL AND p.expires_at < %s ORDER BY p.expires_at LIMIT %s FOR UPDATE OF p SKIP LOCKED)"),
