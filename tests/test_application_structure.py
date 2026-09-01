@@ -51,7 +51,7 @@ def test_openapi_exposes_typed_planned_routes_without_marking_them_implemented()
     ]
 
     assert len(operations) == 68
-    assert len(planned) == 54
+    assert len(planned) == 49
     assert all("501" in operation["responses"] for operation in planned)
     assert schema["paths"]["/api/v1/schemii/ai/chats"]["get"]["tags"] == [
         "schemii",
@@ -59,7 +59,7 @@ def test_openapi_exposes_typed_planned_routes_without_marking_them_implemented()
     ]
     assert schema["paths"]["/api/v1/schemii/workspaces/{workspace_id}/design"][
         "get"
-    ]["tags"] == ["schemii", "schemii-schema-design-planned"]
+    ]["tags"] == ["schemii", "schemii-schema-design"]
     assert schema["paths"][
         "/api/v1/schemii/workspaces/{workspace_id}/relations"
     ]["get"]["tags"] == ["schemii", "schemii-database-browser-planned"]

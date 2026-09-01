@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from schemii.common.api.models import ApiModel
 
@@ -58,7 +58,7 @@ class DesignTable(ApiModel):
 
     id: DesignObjectId
     name: DesignIdentifier
-    columns: list[DesignColumn] = Field(max_length=1600)
+    columns: list[DesignColumn] = Field(min_length=1, max_length=1600)
     keys: list[DesignKeyConstraint] = Field(default_factory=list, max_length=1600)
     checks: list[DesignCheckConstraint] = Field(default_factory=list, max_length=1600)
     indexes: list[DesignIndex] = Field(default_factory=list, max_length=1600)
@@ -122,7 +122,6 @@ class SchemiiDesign(ApiModel):
 class SchemiiDesignReplace(ApiModel):
     """Optimistic complete replacement of user-authored desired state."""
 
-    expected_workspace_revision: Annotated[int, Field(strict=True, ge=1)]
     expected_design_revision: DesignRevision
     content: SchemiiDesignContent
 
@@ -136,20 +135,17 @@ class DesignObjectPosition(ApiModel):
     y: Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)]
 
 
-class DesignViewport(ApiModel):
-    """Independent saved camera for one visual design layer."""
-
-    x: Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)] = 0
-    y: Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)] = 0
-    zoom: Annotated[float, Field(strict=True, ge=0.05, le=8)] = 1
-
-
 class SchemiiDesignLayoutContent(ApiModel):
-    """Target-independent object placement and per-layer cameras."""
+    """Target-independent placement; cameras remain browser-owned."""
 
     objects: list[DesignObjectPosition] = Field(default_factory=list, max_length=20_000)
-    tables_viewport: DesignViewport = Field(default_factory=DesignViewport)
-    views_viewport: DesignViewport = Field(default_factory=DesignViewport)
+
+    @model_validator(mode="after")
+    def unique_objects(self) -> "SchemiiDesignLayoutContent":
+        object_ids = [position.object_id for position in self.objects]
+        if len(object_ids) != len(set(object_ids)):
+            raise ValueError("design layout object IDs must be unique")
+        return self
 
 
 class SchemiiDesignLayout(ApiModel):

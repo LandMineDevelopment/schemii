@@ -130,6 +130,20 @@ class PostgresWorkspaceRepository:
                             request.namespace,
                         ),
                     )
+                cursor.execute(
+                    """
+                    INSERT INTO schemii.workspace_designs (workspace_id, owner_id)
+                    VALUES (%s, %s)
+                    """,
+                    (workspace_id, owner_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO schemii.workspace_design_layouts (workspace_id, owner_id)
+                    VALUES (%s, %s)
+                    """,
+                    (workspace_id, owner_id),
+                )
                 row.update(
                     connection_id=request.connection_id,
                     database_name=request.database,

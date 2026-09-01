@@ -16,6 +16,7 @@ from schemii.common.postgres import inspection as database_inspection
 from schemii.common import system_inspection
 from schemii.common.system_inspection import build_developer_system_document
 from schemii.main import ApplicationServices, create_app
+from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
 
@@ -162,6 +163,7 @@ def test_system_inspection_derives_runtime_protocol_bindings_without_values() ->
         connections=ConnectionService(connections, (workspaces,)),
         postgres=PsycopgPostgresGateway(),
         workspaces=workspaces,
+        designs=InMemoryDesignRepository(),
     )
 
     document = build_developer_system_document(create_app(services))

@@ -1,14 +1,17 @@
-"""Planned database-independent schema design routes."""
+"""Database-independent desired-schema routes."""
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 
+from schemii.common.api.errors import ApiProblem
 from schemii.common.api.planned import (
     PLANNED_OPENAPI,
     PLANNED_RESPONSES,
     planned_capability,
 )
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
 
+from .export import export_design
 from .models import (
     SchemiiDesign,
     SchemiiDesignExport,
@@ -18,86 +21,133 @@ from .models import (
     SchemiiDesignLayoutReplace,
     SchemiiDesignReplace,
 )
+from .store import (
+    DesignConflictError,
+    DesignLayoutConflictError,
+    DesignRepository,
+    DesignValidationError,
+    DesignWorkspaceNotFoundError,
+)
 
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}",
-    tags=["schemii-schema-design-planned"],
+    tags=["schemii-schema-design"],
 )
 
 
-@router.get(
-    "/design",
-    response_model=SchemiiDesign,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
+def _designs(request: Request) -> DesignRepository:
+    return request.app.state.services.designs
+
+
+def _workspaces(request: Request) -> WorkspaceRepository:
+    return request.app.state.services.workspaces
+
+
+def _require_workspace(request: Request, owner_id: str, workspace_id: str) -> None:
+    try:
+        _workspaces(request).get(owner_id, workspace_id)
+    except WorkspaceNotFoundError as error:
+        raise ApiProblem(404, "workspace_not_found", str(error)) from error
+
+
+def _design_not_found(error: DesignWorkspaceNotFoundError) -> ApiProblem:
+    return ApiProblem(404, "workspace_not_found", str(error))
+
+
+def _design_conflict(error: DesignConflictError) -> ApiProblem:
+    return ApiProblem(
+        409,
+        "design_conflict",
+        str(error),
+        details={"currentRevision": error.current_revision},
+    )
+
+
+def _layout_conflict(error: DesignLayoutConflictError) -> ApiProblem:
+    return ApiProblem(
+        409,
+        "design_layout_conflict",
+        str(error),
+        details={
+            "currentLayoutRevision": error.current_layout_revision,
+            "currentDesignRevision": error.current_design_revision,
+        },
+    )
+
+
+def _invalid_design(error: DesignValidationError) -> ApiProblem:
+    return ApiProblem(422, "invalid_design", str(error), details=error.details)
+
+
+@router.get("/design", response_model=SchemiiDesign)
 def get_workspace_design(
     workspace_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiDesign:
-    """Return user-authored desired state whether or not PostgreSQL is attached."""
+    """Return saved desired state without contacting an optional target database."""
 
-    # TODO(schemii-design-store): Read the owner/workspace design aggregate
-    # from metadata storage without contacting the optional target database.
-    del workspace_id, principal
-    planned_capability("schemii.design.read")
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        return _designs(request).get(principal.user_id, workspace_id)
+    except DesignWorkspaceNotFoundError as error:
+        raise _design_not_found(error) from error
 
 
-@router.put(
-    "/design",
-    response_model=SchemiiDesign,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
+@router.put("/design", response_model=SchemiiDesign)
 def replace_workspace_design(
     workspace_id: str,
     body: SchemiiDesignReplace,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiDesign:
-    """Validate stable object references and replace one desired-design revision."""
+    """Validate references and atomically replace one desired-design revision."""
 
-    # TODO(schemii-design-store): Validate unique names, relationship endpoints,
-    # and function/view bounds before one optimistic metadata transaction.
-    del workspace_id, body, principal
-    planned_capability("schemii.design.replace")
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        return _designs(request).replace(principal.user_id, workspace_id, body)
+    except DesignWorkspaceNotFoundError as error:
+        raise _design_not_found(error) from error
+    except DesignConflictError as error:
+        raise _design_conflict(error) from error
+    except DesignValidationError as error:
+        raise _invalid_design(error) from error
 
 
-@router.get(
-    "/design/layout",
-    response_model=SchemiiDesignLayout,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
+@router.get("/design/layout", response_model=SchemiiDesignLayout)
 def get_workspace_design_layout(
     workspace_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiDesignLayout:
-    """Return target-independent positions and cameras for stable design objects."""
+    """Return stable desired-object positions; browser camera state stays local."""
 
-    # TODO(schemii-design-layout): Read layout separately from semantic design so
-    # frequent drag saves do not create false desired-state revision conflicts.
-    del workspace_id, principal
-    planned_capability("schemii.design.layout.read")
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        return _designs(request).get_layout(principal.user_id, workspace_id)
+    except DesignWorkspaceNotFoundError as error:
+        raise _design_not_found(error) from error
 
 
-@router.put(
-    "/design/layout",
-    response_model=SchemiiDesignLayout,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
+@router.put("/design/layout", response_model=SchemiiDesignLayout)
 def replace_workspace_design_layout(
     workspace_id: str,
     body: SchemiiDesignLayoutReplace,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiDesignLayout:
-    """Save visual state after validating every object against the design revision."""
+    """Save positions against exact semantic and layout revisions."""
 
-    # TODO(schemii-design-layout): Reject unknown/duplicate object IDs and commit
-    # one optimistic layout revision without modifying semantic desired state.
-    del workspace_id, body, principal
-    planned_capability("schemii.design.layout.replace")
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        return _designs(request).replace_layout(principal.user_id, workspace_id, body)
+    except DesignWorkspaceNotFoundError as error:
+        raise _design_not_found(error) from error
+    except DesignLayoutConflictError as error:
+        raise _layout_conflict(error) from error
+    except DesignValidationError as error:
+        raise _invalid_design(error) from error
 
 
 @router.post(
@@ -120,21 +170,20 @@ def import_attached_catalog(
     planned_capability("schemii.design.import")
 
 
-@router.post(
-    "/design/exports",
-    response_model=SchemiiDesignExport,
-    status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
+@router.post("/design/exports", response_model=SchemiiDesignExport)
 def export_workspace_design(
     workspace_id: str,
     body: SchemiiDesignExportRequest,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiDesignExport:
-    """Render deterministic SQL or JSON from saved design state with no database call."""
+    """Render deterministic SQL or JSON from saved state without target I/O."""
 
-    # TODO(schemii-design-export): Compile names and dependencies in a stable
-    # order, quote PostgreSQL identifiers, and hash the exact returned bytes.
-    del workspace_id, body, principal
-    planned_capability("schemii.design.export")
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        design = _designs(request).get(principal.user_id, workspace_id)
+    except DesignWorkspaceNotFoundError as error:
+        raise _design_not_found(error) from error
+    if design.revision != body.expected_design_revision:
+        raise _design_conflict(DesignConflictError(design.revision))
+    return export_design(design, body)

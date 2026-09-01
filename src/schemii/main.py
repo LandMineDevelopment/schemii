@@ -20,6 +20,8 @@ from schemii.common.postgres import PostgresGateway, PsycopgPostgresGateway
 from schemii.common.postgres.inspection import install_developer_database_inspection
 from schemii.common.system_inspection import install_developer_system_inspection
 from schemii.schemer.routes import router as schemer_router
+from schemii.schemii.designs.postgres_store import PostgresDesignRepository
+from schemii.schemii.designs.store import DesignRepository, InMemoryDesignRepository
 from schemii.schemii.frontend import install_schemii_frontend
 from schemii.schemii.routes import router as schemii_router
 from schemii.schemii.workspaces.store import (
@@ -36,6 +38,7 @@ class ApplicationServices:
     connections: ConnectionService
     postgres: PostgresGateway
     workspaces: WorkspaceRepository
+    designs: DesignRepository
 
 
 def create_services() -> ApplicationServices:
@@ -45,12 +48,18 @@ def create_services() -> ApplicationServices:
         if metadata.connection_factory is not None
         else InMemoryWorkspaceRepository()
     )
+    designs: DesignRepository = (
+        PostgresDesignRepository(metadata.connection_factory)
+        if metadata.connection_factory is not None
+        else InMemoryDesignRepository()
+    )
     connections = ConnectionService(metadata.connections, (workspaces,))
     return ApplicationServices(
         metadata=metadata,
         connections=connections,
         postgres=PsycopgPostgresGateway(),
         workspaces=workspaces,
+        designs=designs,
     )
 
 

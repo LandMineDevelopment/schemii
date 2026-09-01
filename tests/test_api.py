@@ -12,6 +12,7 @@ from schemii.common.postgres.models import (
     build_postgres_catalog,
 )
 from schemii.main import ApplicationServices, create_app
+from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
 
@@ -72,6 +73,7 @@ def client() -> tuple[TestClient, FakePostgresGateway]:
         connections=ConnectionService(connections, (workspaces,)),
         postgres=postgres,
         workspaces=workspaces,
+        designs=InMemoryDesignRepository(),
     )
     return TestClient(create_app(services), base_url="http://localhost"), postgres
 
@@ -139,6 +141,7 @@ def test_unexpected_errors_keep_safe_runtime_headers() -> None:
         connections=ConnectionService(connections, (workspaces,)),
         postgres=FakePostgresGateway(),
         workspaces=workspaces,
+        designs=InMemoryDesignRepository(),
     )
     application = create_app(services)
 
@@ -325,14 +328,103 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     assert catalog.status_code == 409
     assert catalog.json()["error"]["code"] == "workspace_target_required"
 
-    planned_design = api.get(
+    empty_design = api.get(
         f"/api/v1/schemii/workspaces/{workspace['id']}/design"
     )
-    assert planned_design.status_code == 501
-    assert planned_design.json()["error"]["details"] == {
-        "capability": "schemii.design.read",
-        "status": "planned",
+    assert empty_design.status_code == 200
+    assert empty_design.json()["revision"] == 0
+    assert empty_design.json()["content"] == {
+        "tables": [],
+        "relationships": [],
+        "functions": [],
+        "views": [],
     }
+
+    table_id = "table_" + "a" * 32
+    id_column = "column_" + "b" * 32
+    name_column = "column_" + "c" * 32
+    key_id = "key_" + "d" * 32
+    saved = api.put(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design",
+        json={
+            "expectedDesignRevision": 0,
+            "content": {
+                "tables": [
+                    {
+                        "id": table_id,
+                        "name": "inventory item",
+                        "columns": [
+                            {
+                                "id": id_column,
+                                "name": "id",
+                                "dataType": "bigint",
+                                "nullable": False,
+                                "identity": "by_default",
+                            },
+                            {
+                                "id": name_column,
+                                "name": "display name",
+                                "dataType": "text",
+                                "nullable": False,
+                            },
+                        ],
+                        "keys": [
+                            {
+                                "id": key_id,
+                                "name": "inventory item_pkey",
+                                "kind": "primary",
+                                "columnIds": [id_column],
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["revision"] == 1
+    assert len(saved.json()["fingerprint"]) == 64
+
+    stale = api.put(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design",
+        json={"expectedDesignRevision": 0, "content": saved.json()["content"]},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["details"] == {"currentRevision": 1}
+
+    layout = api.get(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/layout"
+    )
+    assert layout.status_code == 200
+    assert layout.json()["revision"] == 1
+    positioned = api.put(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/layout",
+        json={
+            "expectedLayoutRevision": 1,
+            "expectedDesignRevision": 1,
+            "content": {
+                "objects": [
+                    {
+                        "objectId": table_id,
+                        "layer": "tables",
+                        "x": 120.0,
+                        "y": 80.0,
+                    }
+                ]
+            },
+        },
+    )
+    assert positioned.status_code == 200
+    assert positioned.json()["revision"] == 2
+
+    exported = api.post(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/exports",
+        json={"expectedDesignRevision": 1, "format": "postgresql_sql"},
+    )
+    assert exported.status_code == 200
+    assert 'CREATE TABLE "inventory item"' in exported.json()["content"]
+    assert '"display name" text NOT NULL' in exported.json()["content"]
+    assert postgres.connections == []
 
 
 def test_workspace_rejects_an_incomplete_optional_target() -> None:
