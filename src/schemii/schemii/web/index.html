@@ -66,6 +66,7 @@
         <aside class="tool-rail" aria-label="Workspace tools">
           <button id="create-table-button" type="button" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
           <button id="create-relationship-button" type="button" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" aria-pressed="false" disabled></button>
+          <button id="create-key-button" type="button" data-ui-icon="key" title="Create key" aria-label="Create primary or unique key" aria-pressed="false" disabled></button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button type="button" data-ui-icon="undo" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo"></button>
           <button type="button" data-ui-icon="redo" data-unavailable="semantic-redo" title="Semantic redo" aria-label="Semantic redo"></button>
@@ -92,6 +93,7 @@
             <div class="relationship-authoring-banner" id="relationship-authoring-banner" role="status" aria-live="polite" hidden>
               <span id="relationship-authoring-step">1</span>
               <strong id="relationship-authoring-instruction">Select the foreign key column</strong>
+              <button id="review-key-authoring" type="button" hidden>Review key</button>
               <button id="cancel-relationship-authoring" type="button">Cancel</button>
             </div>
             <div class="canvas-stage" id="canvas-stage">
@@ -237,6 +239,23 @@
         </div>
         <div class="form-status" id="design-table-status" aria-live="polite"></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-table-button" type="submit">Create table</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="ui-dialog editor-dialog design-key-dialog" id="design-key-dialog" aria-labelledby="design-key-title">
+      <form class="ui-dialog__shell" id="design-key-form">
+        <header class="ui-dialog__head"><div><small>Selected columns</small><h2 id="design-key-title">Confirm key</h2><p>Column order is preserved for composite keys. Primary-key columns become required automatically.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close key editor"></button></header>
+        <div class="design-key-body">
+          <label class="design-field"><span>Table</span><output id="design-key-table"></output></label>
+          <label class="design-field"><span>Key type</span><select id="design-key-kind"><option value="unique">Unique key</option><option value="primary">Primary key</option></select></label>
+          <label class="design-field span-all"><span>Constraint name</span><input id="design-key-name" required maxlength="63" autocomplete="off" /></label>
+          <section class="design-key-columns span-all" aria-labelledby="design-key-columns-title">
+            <header><strong id="design-key-columns-title">Ordered columns</strong><small>Use the arrows to change composite-key order</small></header>
+            <div id="design-key-columns"></div>
+          </section>
+        </div>
+        <div class="form-status" id="design-key-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-key-button" type="submit">Create key</button></footer>
       </form>
     </dialog>
 

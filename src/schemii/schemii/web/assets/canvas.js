@@ -13,9 +13,21 @@ function clamp(value, minimum, maximum) {
 }
 
 function columnBadges(table, foreignColumns, columnName) {
-  const badges = element("span", { className: "column-badges", attrs: { "aria-hidden": "true" } });
-  if (table.primaryKey?.columns?.includes(columnName)) badges.append(element("span", { className: "pk", text: "PK" }));
-  if (foreignColumns.has(`${table.name}\u0000${columnName}`)) badges.append(element("span", { className: "fk", text: "FK" }));
+  const labels = [];
+  const primary = table.primaryKey?.columns?.includes(columnName);
+  const unique = table.uniqueConstraints?.some(key => key.columns.includes(columnName));
+  const foreign = foreignColumns.has(`${table.name}\u0000${columnName}`);
+  if (primary) labels.push("Primary key");
+  if (unique) labels.push("Unique key");
+  if (foreign) labels.push("Foreign key");
+  const badges = element("span", {
+    className: "column-badges",
+    attrs: { "aria-label": labels.join(", ") || "No key constraints" },
+    dataset: labels.length ? { uiTooltip: labels.join(" · "), uiTooltipTouch: "" } : {},
+  });
+  if (primary) badges.append(element("span", { className: "pk", text: "PK" }));
+  if (unique) badges.append(element("span", { className: "uq", text: "UQ" }));
+  if (foreign) badges.append(element("span", { className: "fk", text: "FK" }));
   if (!badges.childElementCount) badges.append(element("span", { text: "·" }));
   return badges;
 }
@@ -50,6 +62,7 @@ export class CatalogCanvas {
     zoomOutput,
     onSelect,
     onRelationshipColumnSelect = () => {},
+    onKeyColumnSelect = () => {},
     onPositionsChanged,
     onRelationshipVisibilityChanged,
     getViewportInsets = () => ({}),
@@ -63,6 +76,7 @@ export class CatalogCanvas {
     this.zoomOutput = zoomOutput;
     this.onSelect = onSelect;
     this.onRelationshipColumnSelect = onRelationshipColumnSelect;
+    this.onKeyColumnSelect = onKeyColumnSelect;
     this.onPositionsChanged = onPositionsChanged;
     this.onRelationshipVisibilityChanged = onRelationshipVisibilityChanged;
     this.getViewportInsets = getViewportInsets;
@@ -78,6 +92,7 @@ export class CatalogCanvas {
     this.measuredCardWidth = CARD_WIDTH;
     this.selectedName = null;
     this.relationshipMode = { enabled: false, source: null };
+    this.keyMode = { enabled: false, tableName: null, columnNames: [] };
     this.interactive = true;
     this.viewport = new GraphViewport({
       host: canvas,
@@ -121,7 +136,7 @@ export class CatalogCanvas {
     this.selectedName = null;
     replace(this.layer);
     replace(this.lines);
-    this.applyRelationshipMode();
+    this.applyColumnAuthoringMode();
   }
 
   setCatalog(catalog, serverPositions = []) {
@@ -183,16 +198,18 @@ export class CatalogCanvas {
           element("code", { text: column.dataType }),
         );
         row.addEventListener("click", event => {
-          if (!this.relationshipMode.enabled) return;
+          if (!this.relationshipMode.enabled && !this.keyMode.enabled) return;
           event.preventDefault();
           event.stopPropagation();
-          this.selectRelationshipColumn(table.name, column.name);
+          if (this.relationshipMode.enabled) this.selectRelationshipColumn(table.name, column.name);
+          else this.selectKeyColumn(table.name, column.name);
         });
         row.addEventListener("keydown", event => {
-          if (!this.relationshipMode.enabled || !["Enter", " "].includes(event.key)) return;
+          if ((!this.relationshipMode.enabled && !this.keyMode.enabled) || !["Enter", " "].includes(event.key)) return;
           event.preventDefault();
           event.stopPropagation();
-          this.selectRelationshipColumn(table.name, column.name);
+          if (this.relationshipMode.enabled) this.selectRelationshipColumn(table.name, column.name);
+          else this.selectKeyColumn(table.name, column.name);
         });
         this.columnRows.set(`${table.name}\u0000${column.name}`, { row, table, column });
         card.append(row);
@@ -214,38 +231,56 @@ export class CatalogCanvas {
     }
     this.measureCardWidth();
     this.drawRelationships();
-    this.applyRelationshipMode();
+    this.applyColumnAuthoringMode();
   }
 
   setRelationshipMode({ enabled, source = null }) {
     this.relationshipMode = { enabled: Boolean(enabled), source: enabled ? source : null };
-    this.applyRelationshipMode();
+    if (enabled) this.keyMode = { enabled: false, tableName: null, columnNames: [] };
+    this.applyColumnAuthoringMode();
   }
 
-  applyRelationshipMode() {
+  setKeyMode({ enabled, tableName = null, columnNames = [] }) {
+    this.keyMode = { enabled: Boolean(enabled), tableName: enabled ? tableName : null, columnNames: enabled ? [...columnNames] : [] };
+    if (enabled) this.relationshipMode = { enabled: false, source: null };
+    this.applyColumnAuthoringMode();
+  }
+
+  applyColumnAuthoringMode() {
     const { enabled, source } = this.relationshipMode;
+    const keyEnabled = this.keyMode.enabled;
+    const keyColumns = new Set(this.keyMode.columnNames);
     this.canvas.classList.toggle("relationship-mode", enabled);
+    this.canvas.classList.toggle("key-mode", keyEnabled);
     for (const { row, table, column } of this.columnRows.values()) {
       const selected = Boolean(source && source.tableName === table.name && source.columnName === column.name);
-      const keyColumns = new Set([
+      const targetColumns = new Set([
         ...(table.primaryKey?.columns || []),
         ...(table.uniqueConstraints || []).flatMap(key => key.columns),
       ]);
-      const target = Boolean(source && keyColumns.has(column.name) && !selected);
+      const target = Boolean(source && targetColumns.has(column.name) && !selected);
+      const keySelected = Boolean(keyEnabled && this.keyMode.tableName === table.name && keyColumns.has(column.name));
+      const keyInvalid = Boolean(keyEnabled && this.keyMode.tableName && this.keyMode.tableName !== table.name);
       row.classList.toggle("relationship-source", selected);
       row.classList.toggle("relationship-target", target);
       row.classList.toggle("relationship-invalid", Boolean(enabled && source && !target && !selected));
-      if (enabled) {
+      row.classList.toggle("key-selected", keySelected);
+      row.classList.toggle("key-invalid", keyInvalid);
+      if (enabled || keyEnabled) {
         row.setAttribute("role", "button");
         row.setAttribute("tabindex", "0");
-        row.setAttribute("aria-pressed", selected ? "true" : "false");
-        row.setAttribute("aria-label", source
-          ? `Reference ${table.name}.${column.name}`
-          : `Use ${table.name}.${column.name} as the foreign key column`);
+        row.setAttribute("aria-pressed", selected || keySelected ? "true" : "false");
+        row.setAttribute("aria-disabled", keyInvalid ? "true" : "false");
+        row.setAttribute("aria-label", keyEnabled
+          ? `${keySelected ? "Remove" : "Use"} ${table.name}.${column.name} ${keySelected ? "from" : "in"} the key`
+          : source
+            ? `Reference ${table.name}.${column.name}`
+            : `Use ${table.name}.${column.name} as the foreign key column`);
       } else {
         row.removeAttribute("role");
         row.removeAttribute("tabindex");
         row.removeAttribute("aria-pressed");
+        row.removeAttribute("aria-disabled");
         row.removeAttribute("aria-label");
       }
     }
@@ -257,6 +292,16 @@ export class CatalogCanvas {
     const column = table?.columns.find(item => item.name === columnName);
     if (!table || !column) return false;
     this.onRelationshipColumnSelect(table, column);
+    return true;
+  }
+
+  selectKeyColumn(tableName, columnName) {
+    if (!this.interactive || !this.keyMode.enabled) return false;
+    if (this.keyMode.tableName && this.keyMode.tableName !== tableName) return false;
+    const table = this.tableByName.get(tableName);
+    const column = table?.columns.find(item => item.name === columnName);
+    if (!table || !column) return false;
+    this.onKeyColumnSelect(table, column);
     return true;
   }
 
@@ -505,7 +550,7 @@ export class CatalogCanvas {
     this.interactive = interactive;
     this.canvas.classList.toggle("is-loading", !interactive);
     for (const card of this.cards.values()) card.setAttribute("aria-disabled", interactive ? "false" : "true");
-    this.applyRelationshipMode();
+    this.applyColumnAuthoringMode();
   }
 
   startPan(event) {

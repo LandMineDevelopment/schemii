@@ -28,6 +28,7 @@ const ICON_PATHS = Object.freeze({
   tables: '<rect x="3.5" y="4" width="13" height="12" rx="1.5"/><path d="M3.5 8h13M8 8v8M12.5 8v8"/>',
   views: '<path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/>',
   relationship: '<circle cx="5.5" cy="6" r="2"/><circle cx="14.5" cy="14" r="2"/><path d="M7.5 6h2.2a3 3 0 0 1 3 3v2a3 3 0 0 0 1.8 3"/>',
+  key: '<circle cx="6.5" cy="8" r="3"/><path d="m9 10 6 6M12 13l1.8-1.8M14 15l1.8-1.8"/>',
   undo: '<path d="m8 5-4 4 4 4M4 9h6a5 5 0 0 1 5 5"/>',
   redo: '<path d="m12 5 4 4-4 4M16 9h-6a5 5 0 0 0-5 5"/>',
   fit: '<path d="M7 3H3v4M13 3h4v4M7 17H3v-4M13 17h4v-4"/>',

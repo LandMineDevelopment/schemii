@@ -95,6 +95,9 @@ export function renderInspector({
   table,
   catalog,
   onEditTable = null,
+  onAddKey = null,
+  onEditKey = null,
+  onDeleteKey = null,
   onAddRelationship = null,
   onDeleteRelationship = null,
 }) {
@@ -159,13 +162,24 @@ export function renderInspector({
     ...table.notNullConstraints.map(item => ({ ...item, displayKind: "Not null" })),
     ...table.exclusionConstraints.map(item => ({ ...item, displayKind: "Exclusion" })),
   ];
-  const constraints = section("Constraints", constraintValues.length);
-  boundedInspectorList(constraints, constraintValues, constraint => itemCard(constraint.name, constraint.displayKind, [
-    ["Columns", constraint.columns],
-    ["Validated", constraint.validated],
-    ["Deferrable", constraint.deferrable],
-    ["Initially deferred", constraint.initiallyDeferred],
-  ], constraint.definition), "constraints", desired);
+  const constraints = section(
+    "Constraints",
+    constraintValues.length,
+    desired && onAddKey ? actionButton("Add key", onAddKey) : null,
+  );
+  boundedInspectorList(constraints, constraintValues, constraint => {
+    const editableKey = desired && constraint.designId
+      && (constraint.displayKind === "Primary key" || constraint.displayKind === "Unique");
+    return itemCard(constraint.name, constraint.displayKind, [
+      ["Columns", constraint.columns],
+      ["Validated", constraint.validated],
+      ["Deferrable", constraint.deferrable],
+      ["Initially deferred", constraint.initiallyDeferred],
+    ], constraint.definition, editableKey ? [
+      ...(onEditKey ? [actionButton("Edit", () => onEditKey(constraint))] : []),
+      ...(onDeleteKey ? [actionButton("Delete", () => onDeleteKey(constraint), { danger: true })] : []),
+    ] : []);
+  }, "constraints", desired);
   content.append(constraints);
 
   const indexes = section("Indexes", table.indexes.length);

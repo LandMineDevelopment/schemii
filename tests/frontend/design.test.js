@@ -5,10 +5,13 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignKey,
   designLayoutContent,
   designPositions,
   designToCatalog,
   relationshipDraftFromColumns,
+  saveDesignKey,
+  suggestDesignKeyName,
   updateDesignTable,
 } from "../../src/schemii/schemii/web/assets/design.js";
 
@@ -54,6 +57,7 @@ test("desired designs use the existing catalog canvas without losing stable layo
   const catalog = designToCatalog({ name: "Customer model" }, design);
   assert.equal(catalog.source, "design");
   assert.equal(catalog.tables[0].primaryKey.columns[0], "id");
+  assert.equal(catalog.tables[0].primaryKey.designId, table.keys[0].id);
   assert.deepEqual(designPositions(design, layout), [{ name: "customers", x: 90, y: 120 }]);
   assert.deepEqual(
     designLayoutContent(design, [{ name: "customers", x: 140, y: 160 }]),
@@ -235,4 +239,83 @@ test("graphical target selection rejects columns that are not keys", () => {
     targetTableId: target.id,
     targetColumnId: target.columns[1].id,
   }), /primary or unique key/);
+});
+
+test("graphical key authoring creates ordered composite keys and primary keys enforce not null", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("memberships", [
+    { name: "tenant_id", dataType: "uuid", nullable: true, primary: false },
+    { name: "email", dataType: "text", nullable: true, primary: false },
+  ], nextUuid);
+  const content = { tables: [table], relationships: [], functions: [], views: [] };
+  const uniqueName = suggestDesignKeyName(content, {
+    tableId: table.id,
+    kind: "unique",
+    columnIds: [table.columns[0].id, table.columns[1].id],
+  });
+
+  const unique = saveDesignKey(content, {
+    tableId: table.id,
+    name: uniqueName,
+    kind: "unique",
+    columnIds: [table.columns[0].id, table.columns[1].id],
+  }, nextUuid);
+  assert.equal(uniqueName, "memberships_tenant_id_email_key");
+  assert.deepEqual(unique.key.columnIds, [table.columns[0].id, table.columns[1].id]);
+  assert.equal(unique.content.tables[0].columns[0].nullable, true);
+
+  const primary = saveDesignKey(unique.content, {
+    tableId: table.id,
+    name: "memberships_pkey",
+    kind: "primary",
+    columnIds: [table.columns[0].id],
+  }, nextUuid);
+  assert.equal(primary.content.tables[0].columns[0].nullable, false);
+  assert.equal(content.tables[0].keys.length, 0);
+});
+
+test("key editing and deletion preserve referenced target keys", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const parent = createDesignTable("parents", [
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+    { name: "code", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const child = createDesignTable("children", [
+    { name: "parent_id", dataType: "bigint", nullable: false, primary: false },
+  ], nextUuid);
+  const base = { tables: [parent, child], relationships: [], functions: [], views: [] };
+  const relationship = createDesignRelationship(base, {
+    name: "children_parents_fkey",
+    sourceTableId: child.id,
+    sourceColumnIds: [child.columns[0].id],
+    targetTableId: parent.id,
+    targetKeyId: parent.keys[0].id,
+    onUpdate: "NO ACTION",
+    onDelete: "NO ACTION",
+    deferrable: false,
+    initiallyDeferred: false,
+  }, nextUuid);
+  const content = { ...base, relationships: [relationship] };
+
+  const renamed = saveDesignKey(content, {
+    tableId: parent.id,
+    keyId: parent.keys[0].id,
+    name: "parents_identity_pkey",
+    kind: "primary",
+    columnIds: [parent.columns[0].id],
+  }, nextUuid);
+  assert.equal(renamed.key.name, "parents_identity_pkey");
+  assert.throws(() => saveDesignKey(content, {
+    tableId: parent.id,
+    keyId: parent.keys[0].id,
+    name: "parents_pkey",
+    kind: "primary",
+    columnIds: [parent.columns[1].id],
+  }, nextUuid), /targets this key/);
+  assert.throws(() => deleteDesignKey(content, parent.id, parent.keys[0].id), /targets this key/);
+
+  const withoutRelationship = { ...content, relationships: [] };
+  assert.equal(deleteDesignKey(withoutRelationship, parent.id, parent.keys[0].id).content.tables[0].keys.length, 0);
 });

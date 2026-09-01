@@ -4,10 +4,13 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignKey,
   designLayoutContent,
   designPositions,
   designToCatalog,
   relationshipDraftFromColumns,
+  saveDesignKey,
+  suggestDesignKeyName,
   updateDesignTable,
 } from "./design.js";
 import {
@@ -60,9 +63,11 @@ const elements = {
   relationshipAuthoringStep: byId("relationship-authoring-step"),
   relationshipAuthoringInstruction: byId("relationship-authoring-instruction"),
   cancelRelationshipAuthoring: byId("cancel-relationship-authoring"),
+  reviewKeyAuthoring: byId("review-key-authoring"),
   fitButton: byId("fit-button"),
   createTableButton: byId("create-table-button"),
   createRelationshipButton: byId("create-relationship-button"),
+  createKeyButton: byId("create-key-button"),
   zoomInButton: byId("zoom-in-button"),
   zoomOutButton: byId("zoom-out-button"),
   inspector: byId("inspector"),
@@ -131,6 +136,15 @@ const elements = {
   addDesignColumnButton: byId("add-design-column-button"),
   designTableStatus: byId("design-table-status"),
   saveDesignTableButton: byId("save-design-table-button"),
+  designKeyDialog: byId("design-key-dialog"),
+  designKeyForm: byId("design-key-form"),
+  designKeyTitle: byId("design-key-title"),
+  designKeyTable: byId("design-key-table"),
+  designKeyKind: byId("design-key-kind"),
+  designKeyName: byId("design-key-name"),
+  designKeyColumns: byId("design-key-columns"),
+  designKeyStatus: byId("design-key-status"),
+  saveDesignKeyButton: byId("save-design-key-button"),
   designRelationshipDialog: byId("design-relationship-dialog"),
   designRelationshipForm: byId("design-relationship-form"),
   designRelationshipName: byId("design-relationship-name"),
@@ -210,6 +224,12 @@ const state = {
   relationshipAuthoring: false,
   relationshipSource: null,
   designRelationshipAnchor: null,
+  keyAuthoring: false,
+  keySelection: null,
+  designKeyEditorId: null,
+  designKeyTableId: null,
+  designKeyColumnIds: [],
+  designKeyAutoName: null,
   catalog: null,
   catalogLoading: false,
   catalogError: null,
@@ -256,6 +276,7 @@ const canvas = new CatalogCanvas({
   }),
   onSelect: selectTable,
   onRelationshipColumnSelect: handleRelationshipColumnSelection,
+  onKeyColumnSelect: handleKeyColumnSelection,
   onPositionsChanged: positionsChanged,
   onRelationshipVisibilityChanged: (shown, available) => {
     elements.relationshipOutput.hidden = shown === available;
@@ -321,6 +342,10 @@ function updateDesignControls() {
   elements.createRelationshipButton.classList.toggle("active", state.relationshipAuthoring);
   elements.createRelationshipButton.setAttribute("aria-pressed", state.relationshipAuthoring ? "true" : "false");
   elements.createRelationshipButton.title = state.relationshipAuthoring ? "Cancel relationship selection" : "Create relationship";
+  elements.createKeyButton.disabled = !detached || busy || !state.design?.content.tables.length;
+  elements.createKeyButton.classList.toggle("active", state.keyAuthoring);
+  elements.createKeyButton.setAttribute("aria-pressed", state.keyAuthoring ? "true" : "false");
+  elements.createKeyButton.title = state.keyAuthoring ? "Cancel key selection" : "Create primary or unique key";
   elements.editTableButton.disabled = !selected || busy;
   elements.deleteTableButton.disabled = !selected || busy;
 }
@@ -1034,7 +1059,7 @@ function clearActiveWorkspace({ historyMode = "replace" } = {}) {
   state.layoutConflict = false;
   state.layoutConflictKind = null;
   if (state.preservedLayout?.workspaceId === workspaceId) state.preservedLayout = null;
-  setRelationshipAuthoring(false);
+  cancelColumnAuthoring();
   canvas.clear();
   renderConflict();
   renderCatalogSurfaces();
@@ -1076,7 +1101,7 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
   state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
-  setRelationshipAuthoring(false);
+  cancelColumnAuthoring();
   canvas.clear();
   renderConflict();
   renderCatalogSurfaces();
@@ -1098,7 +1123,7 @@ async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
-  setRelationshipAuthoring(false);
+  cancelColumnAuthoring();
   canvas.clear();
   renderConflict();
   renderCatalogSurfaces();
@@ -1258,6 +1283,9 @@ function renderActiveInspector(table) {
     table,
     catalog: state.catalog,
     onEditTable: desired && table ? () => openDesignTableEditor(table.designId) : null,
+    onAddKey: desired && table ? () => startKeyAuthoring({ tableId: table.designId }) : null,
+    onEditKey: desired ? editDesignKey : null,
+    onDeleteKey: desired ? confirmDeleteDesignKey : null,
     onAddRelationship: desired && table ? startRelationshipAuthoring : null,
     onDeleteRelationship: desired ? confirmDeleteDesignRelationship : null,
   });
@@ -1524,6 +1552,7 @@ function appendDesignColumn({ id = null, name = "", dataType = "text", nullable 
 
 function openDesignTableEditor(tableId = null) {
   if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  cancelColumnAuthoring();
   const table = tableId ? state.design.content.tables.find(item => item.id === tableId) : null;
   if (tableId && !table) {
     showToast("The selected table is no longer in this design.", { error: true });
@@ -1677,6 +1706,270 @@ function designTableById(tableId) {
   return state.design?.content.tables.find(table => table.id === tableId) || null;
 }
 
+function designKeyById(tableId, keyId) {
+  return designTableById(tableId)?.keys.find(key => key.id === keyId) || null;
+}
+
+function updateKeyAuthoringPresentation() {
+  const selection = state.keySelection;
+  const table = designTableById(selection?.tableId);
+  const columnNames = new Map((table?.columns || []).map(column => [column.id, column.name]));
+  const selectedNames = (selection?.columnIds || []).map(columnId => columnNames.get(columnId)).filter(Boolean);
+  elements.relationshipAuthoringStep.textContent = String(Math.max(1, selectedNames.length));
+  elements.relationshipAuthoringInstruction.textContent = table
+    ? selectedNames.length
+      ? `${table.name}: ${selectedNames.join(" → ")}`
+      : `Select key columns on ${table.name}`
+    : "Select the first key column";
+  elements.reviewKeyAuthoring.hidden = !selectedNames.length;
+  elements.reviewKeyAuthoring.textContent = `Review key (${selectedNames.length})`;
+  canvas.setKeyMode({
+    enabled: state.keyAuthoring,
+    tableName: table?.name || null,
+    columnNames: selectedNames,
+  });
+}
+
+function setKeyAuthoring(enabled, { tableId = null, keyId = null, columnIds = null } = {}) {
+  const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
+  if (active && state.relationshipAuthoring) setRelationshipAuthoring(false);
+  state.keyAuthoring = active;
+  if (active) {
+    const table = tableId ? designTableById(tableId) : null;
+    const key = table && keyId ? designKeyById(table.id, keyId) : null;
+    state.keySelection = {
+      tableId: table?.id || null,
+      keyId: key?.id || null,
+      columnIds: [...(columnIds || key?.columnIds || [])],
+    };
+  } else {
+    state.keySelection = null;
+  }
+  elements.relationshipAuthoringBanner.hidden = !active;
+  if (active) updateKeyAuthoringPresentation();
+  else {
+    elements.reviewKeyAuthoring.hidden = true;
+    canvas.setKeyMode({ enabled: false });
+  }
+  updateDesignControls();
+}
+
+function cancelColumnAuthoring() {
+  setRelationshipAuthoring(false);
+  setKeyAuthoring(false);
+}
+
+function startKeyAuthoring({ tableId = null, keyId = null } = {}) {
+  if (state.keyAuthoring) return;
+  if (!state.design?.content.tables.length) {
+    showToast("Add a table before creating a key.");
+    return;
+  }
+  if (keyId && !designKeyById(tableId, keyId)) {
+    showToast("The selected key is no longer in this design.", { error: true });
+    return;
+  }
+  setKeyAuthoring(true, { tableId, keyId });
+}
+
+function toggleKeyAuthoring() {
+  if (state.keyAuthoring) setKeyAuthoring(false);
+  else startKeyAuthoring();
+}
+
+function handleKeyColumnSelection(table, column) {
+  if (!state.keyAuthoring || !table.designId || !column.designId) return;
+  const selection = state.keySelection || { tableId: null, keyId: null, columnIds: [] };
+  if (selection.tableId && selection.tableId !== table.designId) {
+    showToast("All key columns must come from the same table.");
+    return;
+  }
+  const columnIds = [...selection.columnIds];
+  const existingIndex = columnIds.indexOf(column.designId);
+  if (existingIndex >= 0) columnIds.splice(existingIndex, 1);
+  else columnIds.push(column.designId);
+  state.keySelection = {
+    tableId: selection.tableId || table.designId,
+    keyId: selection.keyId,
+    columnIds,
+  };
+  updateKeyAuthoringPresentation();
+}
+
+function reviewKeyAuthoring() {
+  if (!state.keyAuthoring || !state.keySelection?.columnIds.length) return;
+  const draft = {
+    tableId: state.keySelection.tableId,
+    keyId: state.keySelection.keyId,
+    columnIds: [...state.keySelection.columnIds],
+  };
+  setKeyAuthoring(false);
+  openDesignKeyEditor(draft);
+}
+
+function updateGeneratedKeyName() {
+  const current = elements.designKeyName.value;
+  const generated = suggestDesignKeyName(state.design.content, {
+    tableId: state.designKeyTableId,
+    keyId: state.designKeyEditorId,
+    kind: elements.designKeyKind.value,
+    columnIds: state.designKeyColumnIds,
+  });
+  if (!current || current === state.designKeyAutoName) elements.designKeyName.value = generated;
+  state.designKeyAutoName = generated;
+}
+
+function moveDesignKeyColumn(index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= state.designKeyColumnIds.length) return;
+  const columnIds = [...state.designKeyColumnIds];
+  const [moved] = columnIds.splice(index, 1);
+  columnIds.splice(target, 0, moved);
+  state.designKeyColumnIds = columnIds;
+  renderDesignKeyColumns();
+  updateGeneratedKeyName();
+}
+
+function renderDesignKeyColumns() {
+  const table = designTableById(state.designKeyTableId);
+  const columns = new Map((table?.columns || []).map(column => [column.id, column]));
+  replace(elements.designKeyColumns);
+  state.designKeyColumnIds.forEach((columnId, index) => {
+    const column = columns.get(columnId);
+    if (!column) return;
+    const up = element("button", {
+      className: "ui-button compact",
+      type: "button",
+      text: "↑",
+      attrs: { "aria-label": `Move ${column.name} earlier` },
+    });
+    const down = element("button", {
+      className: "ui-button compact",
+      type: "button",
+      text: "↓",
+      attrs: { "aria-label": `Move ${column.name} later` },
+    });
+    up.disabled = index === 0;
+    down.disabled = index === state.designKeyColumnIds.length - 1;
+    up.addEventListener("click", () => moveDesignKeyColumn(index, -1));
+    down.addEventListener("click", () => moveDesignKeyColumn(index, 1));
+    elements.designKeyColumns.append(element("div", { className: "design-key-column" }, [
+      element("span", { text: String(index + 1).padStart(2, "0") }),
+      element("span", {}, [element("strong", { text: column.name }), element("code", { text: column.dataType })]),
+      element("span", { className: "design-key-column-actions" }, [up, down]),
+    ]));
+  });
+}
+
+function openDesignKeyEditor({ tableId, keyId = null, columnIds }) {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  const table = designTableById(tableId);
+  const key = keyId ? designKeyById(tableId, keyId) : null;
+  if (!table || (keyId && !key)) {
+    showToast("The selected key is no longer in this design.", { error: true });
+    return;
+  }
+  elements.designKeyForm.reset();
+  replace(elements.designKeyStatus);
+  state.designKeyEditorId = key?.id || null;
+  state.designKeyTableId = table.id;
+  state.designKeyColumnIds = [...columnIds];
+  state.designKeyAutoName = null;
+  elements.designKeyTitle.textContent = key ? `Edit ${key.name}` : "Confirm key";
+  elements.saveDesignKeyButton.textContent = key ? "Save key" : "Create key";
+  elements.designKeyTable.textContent = table.name;
+  const primaryOption = elements.designKeyKind.querySelector('option[value="primary"]');
+  primaryOption.disabled = table.keys.some(item => item.kind === "primary" && item.id !== key?.id);
+  elements.designKeyKind.value = key?.kind || (primaryOption.disabled ? "unique" : "primary");
+  elements.designKeyName.value = key?.name || "";
+  renderDesignKeyColumns();
+  updateGeneratedKeyName();
+  openDialog(elements.designKeyDialog);
+  elements.designKeyName.focus();
+}
+
+async function submitDesignKey(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  let result;
+  try {
+    result = saveDesignKey(state.design.content, {
+      tableId: state.designKeyTableId,
+      keyId: state.designKeyEditorId,
+      name: elements.designKeyName.value,
+      kind: elements.designKeyKind.value,
+      columnIds: state.designKeyColumnIds,
+    });
+  } catch (error) {
+    replace(elements.designKeyStatus, errorPanel(error));
+    return;
+  }
+  if (!await flushLayoutBeforeTransition()) return;
+  state.designSubmitting = true;
+  elements.saveDesignKeyButton.disabled = true;
+  updateDesignControls();
+  replace(elements.designKeyStatus, element("span", { text: "Validating and saving the key…" }));
+  try {
+    const table = designTableById(state.designKeyTableId);
+    const editing = Boolean(state.designKeyEditorId);
+    const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+    if (!design) return;
+    elements.designKeyDialog.close();
+    canvas.select(table.name, { notify: true });
+    showToast(`${editing ? "Updated" : "Created"} ${result.key.name} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designKeyStatus, conflictPanel(error));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignKeyButton.disabled = false;
+    updateHeader();
+  }
+}
+
+function editDesignKey(constraint) {
+  const table = selectedDesignTable();
+  if (!table || !constraint?.designId) return;
+  startKeyAuthoring({ tableId: table.id, keyId: constraint.designId });
+}
+
+function confirmDeleteDesignKey(constraint) {
+  const table = selectedDesignTable();
+  if (!table || !constraint?.designId || state.designSubmitting) return;
+  try {
+    deleteDesignKey(state.design.content, table.id, constraint.designId);
+  } catch (error) {
+    showToast(error.message, { error: true });
+    return;
+  }
+  askConfirmation({
+    title: "Delete key",
+    message: `Delete ${constraint.displayKind.toLocaleLowerCase()} “${constraint.name}” from ${table.name}? The columns remain in the design.`,
+    label: "Delete key",
+    callback: async () => {
+      let result;
+      try {
+        result = deleteDesignKey(state.design.content, table.id, constraint.designId);
+      } catch (error) {
+        errorToast(error);
+        return;
+      }
+      if (!await flushLayoutBeforeTransition()) return;
+      state.designSubmitting = true;
+      updateDesignControls();
+      try {
+        const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+        if (!design) return;
+        showToast(`Deleted ${result.key.name} in design revision ${design.revision}.`);
+      } catch (error) {
+        errorToast(error);
+      } finally {
+        state.designSubmitting = false;
+        updateHeader();
+      }
+    },
+  });
+}
+
 function keyLabel(table, key) {
   const columns = new Map(table.columns.map(column => [column.id, column.name]));
   const kind = key.kind === "primary" ? "Primary key" : `Unique · ${key.name}`;
@@ -1821,11 +2114,13 @@ function openDesignRelationshipEditor(draft) {
 
 function setRelationshipAuthoring(enabled) {
   const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
+  if (active && state.keyAuthoring) setKeyAuthoring(false);
   state.relationshipAuthoring = active;
   state.relationshipSource = null;
   elements.relationshipAuthoringBanner.hidden = !active;
   elements.relationshipAuthoringStep.textContent = "1";
   elements.relationshipAuthoringInstruction.textContent = "Select the foreign key column";
+  elements.reviewKeyAuthoring.hidden = true;
   canvas.setRelationshipMode({ enabled: active });
   updateDesignControls();
 }
@@ -1967,7 +2262,7 @@ function confirmDeleteDesignRelationship(relationship) {
 }
 
 function setLayer(layer, { historyMode = "push" } = {}) {
-  if (layer !== "tables" && state.relationshipAuthoring) setRelationshipAuthoring(false);
+  if (layer !== "tables" && (state.relationshipAuthoring || state.keyAuthoring)) cancelColumnAuthoring();
   state.activeLayer = layer;
   for (const button of document.querySelectorAll("[data-layer]")) {
     const active = button.dataset.layer === layer;
@@ -2033,7 +2328,7 @@ function bindEvents() {
     if (close) close.closest("dialog")?.close();
   });
   document.addEventListener("keydown", event => {
-    if (event.key === "Escape" && state.relationshipAuthoring) setRelationshipAuthoring(false);
+    if (event.key === "Escape" && (state.relationshipAuthoring || state.keyAuthoring)) cancelColumnAuthoring();
   });
   document.querySelectorAll("[data-confirm-cancel]").forEach(button => button.addEventListener("click", () => {
     state.confirmCallback = null;
@@ -2065,7 +2360,9 @@ function bindEvents() {
   elements.exportDesignSqlButton.addEventListener("click", exportDesignSql);
   elements.createTableButton.addEventListener("click", () => openDesignTableEditor());
   elements.createRelationshipButton.addEventListener("click", toggleRelationshipAuthoring);
-  elements.cancelRelationshipAuthoring.addEventListener("click", () => setRelationshipAuthoring(false));
+  elements.createKeyButton.addEventListener("click", toggleKeyAuthoring);
+  elements.cancelRelationshipAuthoring.addEventListener("click", cancelColumnAuthoring);
+  elements.reviewKeyAuthoring.addEventListener("click", reviewKeyAuthoring);
   elements.editTableButton.addEventListener("click", () => {
     const table = selectedDesignTable();
     if (table) openDesignTableEditor(table.id);
@@ -2118,6 +2415,14 @@ function bindEvents() {
   elements.designTableForm.addEventListener("submit", submitDesignTable);
   elements.designTableDialog.addEventListener("close", () => {
     state.designTableEditorId = null;
+  });
+  elements.designKeyForm.addEventListener("submit", submitDesignKey);
+  elements.designKeyKind.addEventListener("change", updateGeneratedKeyName);
+  elements.designKeyDialog.addEventListener("close", () => {
+    state.designKeyEditorId = null;
+    state.designKeyTableId = null;
+    state.designKeyColumnIds = [];
+    state.designKeyAutoName = null;
   });
   elements.designRelationshipForm.addEventListener("submit", submitDesignRelationship);
   elements.designRelationshipKey.addEventListener("change", remapRelationshipForSelectedKey);

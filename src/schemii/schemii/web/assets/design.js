@@ -15,6 +15,7 @@ function keyDefinition(key, columns) {
 
 function tableCatalogEntry(table, columns) {
   const keys = table.keys.map(key => ({
+    designId: key.id,
     name: key.name,
     columns: key.columnIds.map(id => columns.get(id)?.name || id),
     definition: keyDefinition(key, columns),
@@ -157,6 +158,10 @@ function truncateBytes(value, maximum) {
   return output;
 }
 
+function nameWithSuffix(value, suffix) {
+  return `${truncateBytes(value, 63 - byteLength(suffix))}${suffix}`;
+}
+
 export function createDesignTable(name, columnValues, randomUUID = () => crypto.randomUUID()) {
   return designTableFromValues(null, name, columnValues, randomUUID);
 }
@@ -252,17 +257,102 @@ export function updateDesignTable(content, tableId, name, columnValues, randomUU
   const reference = referencedRemovedColumn(content, table, retainedColumnIds);
   if (reference) throw new Error(`Remove or update ${reference} before removing its column.`);
   const updated = designTableFromValues(table, name, columnValues, randomUUID);
-  const targetKeys = new Set(updated.keys
-    .filter(key => key.kind === "primary" || key.kind === "unique")
-    .map(key => key.columnIds.join("\u0000")));
-  const invalidRelationship = content.relationships.find(relationship => (
-    relationship.targetTableId === tableId
-    && !targetKeys.has(relationship.targetColumnIds.join("\u0000"))
-  ));
+  const invalidRelationship = relationshipWithoutTargetKey(content, tableId, updated.keys);
   if (invalidRelationship) {
     throw new Error(`Relationship “${invalidRelationship.name}” targets this key. Delete the relationship before changing the key.`);
   }
   return updated;
+}
+
+function relationshipWithoutTargetKey(content, tableId, keys) {
+  const targetKeys = new Set(keys
+    .filter(key => key.kind === "primary" || key.kind === "unique")
+    .map(key => key.columnIds.join("\u0000")));
+  return content.relationships.find(relationship => (
+    relationship.targetTableId === tableId
+    && !targetKeys.has(relationship.targetColumnIds.join("\u0000"))
+  ));
+}
+
+export function suggestDesignKeyName(content, { tableId, kind, columnIds, keyId = null }) {
+  const table = content.tables.find(item => item.id === tableId);
+  if (!table) return "";
+  const columns = new Map(table.columns.map(column => [column.id, column.name]));
+  const base = kind === "primary"
+    ? nameWithSuffix(table.name, "_pkey")
+    : nameWithSuffix(`${table.name}_${columnIds.map(columnId => columns.get(columnId)).filter(Boolean).join("_")}`, "_key");
+  const used = new Set([
+    ...table.keys.filter(key => key.id !== keyId).map(key => key.name),
+    ...table.checks.map(check => check.name),
+  ]);
+  if (!used.has(base)) return base;
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = nameWithSuffix(base, `_${index}`);
+    if (!used.has(candidate)) return candidate;
+  }
+  return base;
+}
+
+export function saveDesignKey(content, values, randomUUID = () => crypto.randomUUID()) {
+  const table = content.tables.find(item => item.id === values.tableId);
+  if (!table) throw new Error("The selected table is no longer in this design.");
+  const existing = values.keyId ? table.keys.find(key => key.id === values.keyId) : null;
+  if (values.keyId && !existing) throw new Error("The selected key is no longer in this design.");
+  if (!["primary", "unique"].includes(values.kind)) throw new Error("Choose a primary or unique key.");
+  const name = validatedName(values.name, "key name");
+  const columnIds = Array.isArray(values.columnIds) ? [...values.columnIds] : [];
+  const ownedColumnIds = new Set(table.columns.map(column => column.id));
+  if (!columnIds.length || columnIds.some(columnId => !ownedColumnIds.has(columnId))) {
+    throw new Error("Select at least one column from this table.");
+  }
+  if (new Set(columnIds).size !== columnIds.length) throw new Error("Each column can appear only once in a key.");
+  const duplicateName = [...table.keys, ...table.checks].some(item => item.id !== values.keyId && item.name === name);
+  if (duplicateName) throw new Error("A constraint with this name already exists on the table.");
+  if (values.kind === "primary" && table.keys.some(key => key.id !== values.keyId && key.kind === "primary")) {
+    throw new Error("This table already has a primary key.");
+  }
+  const duplicateShape = table.keys.some(key => (
+    key.id !== values.keyId
+    && key.kind === values.kind
+    && key.columnIds.join("\u0000") === columnIds.join("\u0000")
+  ));
+  if (duplicateShape) throw new Error(`This table already has the same ${values.kind} key.`);
+
+  const key = {
+    id: existing?.id || id("key", randomUUID),
+    name,
+    kind: values.kind,
+    columnIds,
+  };
+  const revised = structuredClone(content);
+  const revisedTable = revised.tables.find(item => item.id === table.id);
+  if (existing) revisedTable.keys = revisedTable.keys.map(item => item.id === existing.id ? key : item);
+  else revisedTable.keys.push(key);
+  if (key.kind === "primary") {
+    const primaryIds = new Set(key.columnIds);
+    for (const column of revisedTable.columns) {
+      if (primaryIds.has(column.id)) column.nullable = false;
+    }
+  }
+  const invalidRelationship = relationshipWithoutTargetKey(revised, table.id, revisedTable.keys);
+  if (invalidRelationship) {
+    throw new Error(`Relationship “${invalidRelationship.name}” targets this key. Delete the relationship before changing the key columns.`);
+  }
+  return { content: revised, key };
+}
+
+export function deleteDesignKey(content, tableId, keyId) {
+  const table = content.tables.find(item => item.id === tableId);
+  const key = table?.keys.find(item => item.id === keyId);
+  if (!table || !key) throw new Error("The selected key is no longer in this design.");
+  const revised = structuredClone(content);
+  const revisedTable = revised.tables.find(item => item.id === table.id);
+  revisedTable.keys = revisedTable.keys.filter(item => item.id !== key.id);
+  const invalidRelationship = relationshipWithoutTargetKey(revised, table.id, revisedTable.keys);
+  if (invalidRelationship) {
+    throw new Error(`Relationship “${invalidRelationship.name}” targets this key. Delete the relationship before deleting it.`);
+  }
+  return { content: revised, key };
 }
 
 export function createDesignRelationship(content, values, randomUUID = () => crypto.randomUUID()) {

@@ -124,6 +124,7 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
   let savedPositionCount = 0;
   let selectionCount = 0;
   const relationshipColumnSelections = [];
+  const keyColumnSelections = [];
   const canvas = new CatalogCanvas({
     canvas: host,
     stage,
@@ -133,6 +134,9 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
     onSelect() { selectionCount += 1; },
     onRelationshipColumnSelect(table, column) {
       relationshipColumnSelections.push([table.name, column.name]);
+    },
+    onKeyColumnSelect(table, column) {
+      keyColumnSelections.push([table.name, column.name]);
     },
     onPositionsChanged() {
       savedPositionCount += 1;
@@ -156,6 +160,7 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
     savedPositionCount: () => savedPositionCount,
     selectionCount: () => selectionCount,
     relationshipColumnSelections,
+    keyColumnSelections,
   };
 }
 
@@ -441,4 +446,45 @@ test("relationship mode exposes graphical source and eligible target columns", (
   canvas.setRelationshipMode({ enabled: false });
   assert.equal(canvas.canvas.classList.contains("relationship-mode"), false);
   assert.equal(targetRow.attributes.has("role"), false);
+});
+
+test("key mode preserves ordered same-table graphical column selection", () => {
+  const { canvas, keyColumnSelections } = fixture();
+  const orders = {
+    name: "orders",
+    columns: [{ name: "tenant_id" }, { name: "order_number" }],
+    primaryKey: null,
+    uniqueConstraints: [],
+  };
+  const customers = {
+    name: "customers",
+    columns: [{ name: "id" }],
+    primaryKey: { columns: ["id"] },
+    uniqueConstraints: [],
+  };
+  const tenantRow = new PointerTarget();
+  const orderRow = new PointerTarget();
+  const otherTableRow = new PointerTarget();
+  canvas.catalog.tables = [orders, customers];
+  canvas.tableByName = new Map([[orders.name, orders], [customers.name, customers]]);
+  canvas.columnRows.set("orders\u0000tenant_id", { row: tenantRow, table: orders, column: orders.columns[0] });
+  canvas.columnRows.set("orders\u0000order_number", { row: orderRow, table: orders, column: orders.columns[1] });
+  canvas.columnRows.set("customers\u0000id", { row: otherTableRow, table: customers, column: customers.columns[0] });
+
+  canvas.setKeyMode({ enabled: true, tableName: "orders", columnNames: ["tenant_id"] });
+
+  assert.equal(canvas.canvas.classList.contains("key-mode"), true);
+  assert.equal(tenantRow.classList.contains("key-selected"), true);
+  assert.equal(tenantRow.attributes.get("aria-pressed"), "true");
+  assert.equal(orderRow.attributes.get("aria-pressed"), "false");
+  assert.equal(otherTableRow.classList.contains("key-invalid"), true);
+  assert.equal(otherTableRow.attributes.get("aria-disabled"), "true");
+  assert.equal(canvas.selectKeyColumn("customers", "id"), false);
+  assert.equal(canvas.selectKeyColumn("orders", "order_number"), true);
+  assert.deepEqual(keyColumnSelections, [["orders", "order_number"]]);
+
+  canvas.setKeyMode({ enabled: false });
+  assert.equal(canvas.canvas.classList.contains("key-mode"), false);
+  assert.equal(tenantRow.attributes.has("role"), false);
+  assert.equal(otherTableRow.classList.contains("key-invalid"), false);
 });
