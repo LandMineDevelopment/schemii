@@ -13,13 +13,20 @@ def install_schemii_frontend(application: FastAPI) -> None:
     index_file = web_directory / "index.html"
     system_map_file = web_directory / "system-map.html"
     assets_directory = web_directory / "assets"
+    common_assets_directory = Path(__file__).resolve().parents[1] / "common" / "web" / "assets"
     if (
         not index_file.is_file()
         or not system_map_file.is_file()
         or not assets_directory.is_dir()
+        or not common_assets_directory.is_dir()
     ):
         raise RuntimeError("Packaged Schemii frontend assets are unavailable")
 
+    application.mount(
+        "/assets/common",
+        StaticFiles(directory=common_assets_directory),
+        name="common-assets",
+    )
     application.mount(
         "/assets",
         StaticFiles(directory=assets_directory),

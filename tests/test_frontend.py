@@ -144,11 +144,20 @@ def test_api_documentation_receives_general_browser_safety_headers() -> None:
 def test_every_packaged_frontend_asset_is_available_and_revalidated() -> None:
     api = TestClient(create_app(), base_url="http://localhost")
     assets = files("schemii.schemii").joinpath("web", "assets")
+    common_assets = files("schemii.common").joinpath("web", "assets")
 
     for asset in assets.iterdir():
         if not asset.is_file():
             continue
         response = api.get(f"/assets/{asset.name}")
+        assert response.status_code == 200, asset.name
+        assert response.headers["cache-control"] == "public, max-age=0, must-revalidate"
+        assert response.headers["x-content-type-options"] == "nosniff"
+
+    for asset in common_assets.iterdir():
+        if not asset.is_file():
+            continue
+        response = api.get(f"/assets/common/{asset.name}")
         assert response.status_code == 200, asset.name
         assert response.headers["cache-control"] == "public, max-age=0, must-revalidate"
         assert response.headers["x-content-type-options"] == "nosniff"

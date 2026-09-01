@@ -31,6 +31,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "schemii.schemii" = ["web/*.html", "web/assets/*"]
+"schemii.common" = ["web/assets/*"]
 "schemii.common.metadata" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]

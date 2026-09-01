@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { installSortableList, reorderedValues } from "../../src/schemii/schemii/web/assets/sortable.js";
+import { installSortableList, reorderedValues } from "../../src/schemii/common/web/assets/sortable.js";
 
 class ClassList {
   values = new Set();
@@ -26,6 +26,7 @@ class SortNode {
     this.capturedPointers = new Set();
     this.focused = false;
     this.animationCalls = [];
+    this.style = { transform: "" };
   }
 
   get nextElementSibling() {
@@ -82,7 +83,8 @@ class SortNode {
     const dynamicTop = this.classList.contains("item") && this.parentElement
       ? this.parentElement.children.indexOf(this) * 50
       : this.top;
-    return { top: dynamicTop, height: this.height };
+    const translateY = Number(/translate3d\(0,\s*(-?[\d.]+)px/.exec(this.style.transform)?.[1] || 0);
+    return { top: dynamicTop + translateY, height: this.height };
   }
   getAnimations() { return this.animationCalls.filter(animation => !animation.cancelled); }
   animate(keyframes, options) {
@@ -155,7 +157,7 @@ test("sortable values ignore unavailable and no-op destinations", () => {
   assert.throws(() => reorderedValues("not-an-array", 0, 1), /array/);
 });
 
-test("pointer dragging captures on the stable list while rows move", () => {
+test("pointer dragging keeps the grabbed row attached while neighboring rows move", () => {
   const { container, rows, handles } = sortableFixture();
   const reorders = [];
   installSortableList(container, {
@@ -163,7 +165,7 @@ test("pointer dragging captures on the stable list while rows move", () => {
     onReorder: (fromIndex, toIndex, details) => reorders.push([fromIndex, toIndex, details]),
   });
 
-  container.dispatch("pointerdown", { target: handles[0], pointerId: 9 });
+  container.dispatch("pointerdown", { target: handles[0], pointerId: 9, clientY: 15 });
   assert.equal(container.hasPointerCapture(9), true);
   assert.equal(handles[0].hasPointerCapture(9), false);
   container.dispatch("pointermove", { target: container, pointerId: 9, clientY: 500 });
@@ -171,6 +173,9 @@ test("pointer dragging captures on the stable list while rows move", () => {
   assert.equal(container.hasPointerCapture(9), true);
   assert.equal(rows[2].classList.contains("sort-drop-after"), true);
   assert.equal(rows[0].dataset.sortPosition, "Position 3 of 3");
+  assert.equal(rows[0].style.transform, "translate3d(0, 385px, 0)");
+  assert.equal(rows[0].getBoundingClientRect().top, 500 - 15);
+  assert.equal(rows[0].animationCalls.length, 0);
   assert.deepEqual(rows[1].animationCalls[0].keyframes, [
     { transform: "translate3d(0, 50px, 0)" },
     { transform: "translate3d(0, 0, 0)" },
@@ -186,6 +191,45 @@ test("pointer dragging captures on the stable list while rows move", () => {
   assert.equal(rows[0].classList.contains("is-sorting"), false);
   assert.equal(rows[0].dataset.sortPosition, undefined);
   assert.equal(rows[2].classList.contains("sort-drop-after"), false);
+  assert.equal(rows[0].style.transform, "");
+  assert.deepEqual(rows[0].animationCalls[0].keyframes, [
+    { transform: "translate3d(0, 385px, 0)" },
+    { transform: "translate3d(0, 0, 0)" },
+  ]);
+  assert.deepEqual(rows[0].animationCalls[0].options, {
+    duration: 160,
+    easing: "cubic-bezier(.22, 1, .36, 1)",
+  });
+});
+
+test("touch dragging follows the finger before crossing a reorder boundary", () => {
+  const { container, rows, handles } = sortableFixture();
+  const reorders = [];
+  installSortableList(container, {
+    itemSelector: ".item",
+    onReorder: (...change) => reorders.push(change),
+  });
+
+  container.dispatch("pointerdown", {
+    target: handles[0],
+    pointerId: 6,
+    pointerType: "touch",
+    clientY: 15,
+  });
+  container.dispatch("pointermove", {
+    target: container,
+    pointerId: 6,
+    pointerType: "touch",
+    clientY: 42,
+  });
+
+  assert.deepEqual(container.children.map(row => row.dataset.sortKey), ["a", "b", "c"]);
+  assert.equal(rows[0].style.transform, "translate3d(0, 27px, 0)");
+  assert.equal(rows[0].getBoundingClientRect().top + 15, 42);
+
+  container.dispatch("pointerup", { target: container, pointerId: 6, pointerType: "touch" });
+  assert.equal(rows[0].style.transform, "");
+  assert.deepEqual(reorders, []);
 });
 
 test("cancelled pointer dragging restores the original order", () => {
@@ -196,11 +240,16 @@ test("cancelled pointer dragging restores the original order", () => {
     onReorder: (...change) => reorders.push(change),
   });
 
-  container.dispatch("pointerdown", { target: handles[0], pointerId: 4 });
+  container.dispatch("pointerdown", { target: handles[0], pointerId: 4, clientY: 10 });
   container.dispatch("pointermove", { target: container, pointerId: 4, clientY: 500 });
   container.dispatch("pointercancel", { target: container, pointerId: 4 });
 
   assert.deepEqual(container.children.map(row => row.dataset.sortKey), ["a", "b", "c"]);
   assert.deepEqual(reorders, []);
   assert.equal(container.hasPointerCapture(4), false);
+  assert.equal(handles[0].parentElement.style.transform, "");
+  assert.deepEqual(handles[0].parentElement.animationCalls.at(-1).keyframes, [
+    { transform: "translate3d(0, 490px, 0)" },
+    { transform: "translate3d(0, 0, 0)" },
+  ]);
 });

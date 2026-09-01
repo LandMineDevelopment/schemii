@@ -32,7 +32,7 @@ import {
   renderViewsList,
 } from "./catalog.js";
 import { element, emptyPanel, errorPanel, formatTimestamp, replace } from "./dom.js";
-import { installSortableList, reorderedValues } from "./sortable.js";
+import { installSortableList, reorderedValues } from "/assets/common/sortable.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
 import { closeDetailsMenus, createIconButton, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
 import {

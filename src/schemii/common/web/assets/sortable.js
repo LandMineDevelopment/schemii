@@ -53,10 +53,17 @@ export function installSortableList(container, {
     return positions;
   }
 
+  function prefersReducedMotion() {
+    return container.ownerDocument?.defaultView
+      ?.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+  }
+
   function animateFromPositions(positions) {
-    const view = container.ownerDocument?.defaultView;
-    if (view?.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    if (prefersReducedMotion()) return;
     for (const item of items()) {
+      // The lifted row owns its transform while it follows the pointer. Animating
+      // that same property here would detach it from the user's grab point.
+      if (item === active?.item) continue;
       const previousTop = positions.get(item);
       if (previousTop === undefined || typeof item.animate !== "function") continue;
       const deltaY = previousTop - item.getBoundingClientRect().top;
@@ -69,6 +76,34 @@ export function installSortableList(container, {
         { duration: 190, easing: "cubic-bezier(.22, 1, .36, 1)" },
       );
     }
+  }
+
+  function followPointer(clientY) {
+    if (!active || !Number.isFinite(clientY)) return;
+    // getBoundingClientRect includes the transform currently following the
+    // pointer. Subtract it to recover the row's new layout position after a
+    // reorder, then translate back to the exact point where it was grabbed.
+    const currentTop = active.item.getBoundingClientRect().top;
+    const layoutTop = currentTop - active.translateY;
+    active.translateY = clientY - active.grabOffsetY - layoutTop;
+    active.item.style.transform = `translate3d(0, ${active.translateY}px, 0)`;
+  }
+
+  function settleDraggedItem(drag) {
+    const translateY = drag.translateY;
+    drag.item.style.transform = "";
+    if (
+      Math.abs(translateY) < 1
+      || prefersReducedMotion()
+      || typeof drag.item.animate !== "function"
+    ) return;
+    drag.item.animate(
+      [
+        { transform: `translate3d(0, ${translateY}px, 0)` },
+        { transform: "translate3d(0, 0, 0)" },
+      ],
+      { duration: 160, easing: "cubic-bezier(.22, 1, .36, 1)" },
+    );
   }
 
   function updateActivePosition() {
@@ -91,7 +126,13 @@ export function installSortableList(container, {
   function restoreActiveItem() {
     if (!active) return;
     const positions = captureVisualPositions();
+    const visualTop = positions.get(active.item);
     moveItem(container, active.item, items(), active.startIndex);
+    if (visualTop !== undefined) {
+      const layoutTop = active.item.getBoundingClientRect().top - active.translateY;
+      active.translateY = visualTop - layoutTop;
+      active.item.style.transform = `translate3d(0, ${active.translateY}px, 0)`;
+    }
     animateFromPositions(positions);
   }
 
@@ -99,6 +140,7 @@ export function installSortableList(container, {
     if (!active) return;
     const drag = active;
     if (cancelled) restoreActiveItem();
+    settleDraggedItem(drag);
     drag.item.classList.remove("is-sorting");
     delete drag.item.dataset.sortPosition;
     container.classList.remove("is-sorting");
@@ -123,6 +165,8 @@ export function installSortableList(container, {
       pointerId: event.pointerId,
       startIndex: current.indexOf(item),
       sortKey: item.dataset.sortKey || "",
+      grabOffsetY: event.clientY - item.getBoundingClientRect().top,
+      translateY: 0,
     };
     item.classList.add("is-sorting");
     container.classList.add("is-sorting");
@@ -139,11 +183,15 @@ export function installSortableList(container, {
     const candidates = items().filter(item => item !== active.item);
     const before = candidates.find(item => event.clientY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2);
     markDropPosition(before, candidates);
-    if (before === active.item.nextElementSibling || (!before && active.item === container.lastElementChild)) return;
-    const positions = captureVisualPositions();
-    container.insertBefore(active.item, before || null);
-    updateActivePosition();
-    animateFromPositions(positions);
+    const alreadyInSlot = before === active.item.nextElementSibling
+      || (!before && active.item === container.lastElementChild);
+    if (!alreadyInSlot) {
+      const positions = captureVisualPositions();
+      container.insertBefore(active.item, before || null);
+      updateActivePosition();
+      animateFromPositions(positions);
+    }
+    followPointer(event.clientY);
   }
 
   function onPointerUp(event) {
