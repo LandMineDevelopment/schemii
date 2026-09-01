@@ -6,6 +6,7 @@ import {
   createDesignRelationship,
   createDesignTable,
   deleteDesignCheck,
+  deleteDesignIndex,
   deleteDesignKey,
   designLayoutContent,
   designPositions,
@@ -14,8 +15,10 @@ import {
   relationshipDraftFromColumns,
   relationshipDraftFromExisting,
   saveDesignCheck,
+  saveDesignIndex,
   saveDesignKey,
   suggestDesignCheckName,
+  suggestDesignIndexName,
   suggestDesignKeyName,
   updateDesignRelationship,
   updateDesignTable,
@@ -227,6 +230,95 @@ test("table editing blocks removal of generated and check dependency columns", (
   assert.throws(() => updateDesignTable(checked.content, checkedTable.id, checkedTable.name, [{
     ...checkedTable.columns[1], primary: false,
   }]), /check constraint/);
+});
+
+test("index authoring supports ordered, expression, partial, unique, edit, and catalog workflows", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("accounts", [
+    { name: "tenant_id", dataType: "uuid", nullable: false },
+    { name: "email", dataType: "text", nullable: false },
+    { name: "active", dataType: "boolean", nullable: false },
+  ], nextUuid);
+  const base = { tables: [table], relationships: [], functions: [], views: [] };
+  const suggested = suggestDesignIndexName(base, {
+    tableId: table.id,
+    columnIds: [table.columns[0].id, table.columns[1].id],
+  });
+  assert.equal(suggested, "accounts_tenant_id_email_idx");
+  const created = saveDesignIndex(base, {
+    tableId: table.id,
+    name: suggested,
+    method: "btree",
+    columnIds: [table.columns[0].id],
+    expression: "lower(email)",
+    predicate: "active",
+    unique: true,
+  }, nextUuid);
+
+  assert.deepEqual(created.index.columnIds, [table.columns[0].id]);
+  assert.deepEqual(created.index.expressionSourceColumnIds, [table.columns[1].id]);
+  assert.deepEqual(created.index.predicateColumnIds, [table.columns[2].id]);
+  assert.equal(created.index.unique, true);
+  const edited = saveDesignIndex(created.content, {
+    tableId: table.id,
+    indexId: created.index.id,
+    name: created.index.name,
+    method: "hash",
+    columnIds: [],
+    expression: "lower(email)",
+    predicate: "active",
+    unique: false,
+  }, nextUuid);
+  assert.equal(edited.index.id, created.index.id);
+  assert.equal(edited.index.method, "hash");
+  assert.deepEqual(edited.index.columnIds, []);
+
+  const design = { revision: 1, fingerprint: "a".repeat(64), content: edited.content };
+  const catalogIndex = designToCatalog({ name: "Accounts" }, design).tables[0].indexes[0];
+  assert.equal(catalogIndex.designId, created.index.id);
+  assert.deepEqual(catalogIndex.columns, []);
+  assert.equal(catalogIndex.expression, "lower(email)");
+  assert.equal(deleteDesignIndex(edited.content, table.id, created.index.id).content.tables[0].indexes.length, 0);
+  assert.throws(() => saveDesignIndex(base, {
+    tableId: table.id,
+    name: "empty_idx",
+    method: "btree",
+    columnIds: [],
+    expression: "",
+    predicate: "active",
+    unique: false,
+  }, nextUuid), /Select a column or enter an index expression/);
+});
+
+test("index dependencies follow column renames and block unsafe removal", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("accounts", [
+    { name: "email", dataType: "text", nullable: false },
+    { name: "active", dataType: "boolean", nullable: false },
+  ], nextUuid);
+  const base = { tables: [table], relationships: [], functions: [], views: [] };
+  const indexed = saveDesignIndex(base, {
+    tableId: table.id,
+    name: "accounts_email_idx",
+    method: "btree",
+    columnIds: [],
+    expression: "lower(email)",
+    predicate: "active AND 'email' <> ''",
+    unique: false,
+  }, nextUuid);
+  const updated = updateDesignTable(indexed.content, table.id, table.name, [
+    { ...table.columns[0], name: "address", primary: false },
+    { ...table.columns[1], name: "enabled", primary: false },
+  ], nextUuid);
+  assert.equal(updated.indexes[0].expression, "lower(address)");
+  assert.equal(updated.indexes[0].predicate, "enabled AND 'email' <> ''");
+  assert.deepEqual(updated.indexes[0].expressionSourceColumnIds, [table.columns[0].id]);
+  assert.deepEqual(updated.indexes[0].predicateColumnIds, [table.columns[1].id]);
+  assert.throws(() => updateDesignTable(indexed.content, table.id, table.name, [{
+    ...table.columns[1], primary: false,
+  }]), /index “accounts_email_idx”/);
 });
 
 test("table editing blocks removal of columns used by relationships", () => {

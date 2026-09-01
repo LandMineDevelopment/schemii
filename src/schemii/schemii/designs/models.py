@@ -55,7 +55,15 @@ class DesignIndex(ApiModel):
     method: DesignIdentifier = "btree"
     column_ids: list[DesignObjectId] = Field(default_factory=list, max_length=1600)
     expression: DesignExpression | None = None
+    expression_source_column_ids: list[DesignObjectId] = Field(
+        default_factory=list,
+        max_length=1600,
+    )
     predicate: DesignExpression | None = None
+    predicate_column_ids: list[DesignObjectId] = Field(
+        default_factory=list,
+        max_length=1600,
+    )
     unique: bool = False
 
 

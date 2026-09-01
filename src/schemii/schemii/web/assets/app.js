@@ -5,6 +5,7 @@ import {
   createDesignRelationship,
   createDesignTable,
   deleteDesignCheck,
+  deleteDesignIndex,
   deleteDesignKey,
   designLayoutContent,
   designPositions,
@@ -13,8 +14,10 @@ import {
   relationshipDraftFromExisting,
   expressionColumnIds,
   saveDesignCheck,
+  saveDesignIndex,
   saveDesignKey,
   suggestDesignCheckName,
+  suggestDesignIndexName,
   suggestDesignKeyName,
   updateDesignRelationship,
   updateDesignTable,
@@ -74,6 +77,7 @@ const elements = {
   createTableButton: byId("create-table-button"),
   createRelationshipButton: byId("create-relationship-button"),
   createKeyButton: byId("create-key-button"),
+  createIndexButton: byId("create-index-button"),
   zoomInButton: byId("zoom-in-button"),
   zoomOutButton: byId("zoom-out-button"),
   inspector: byId("inspector"),
@@ -160,6 +164,20 @@ const elements = {
   designCheckDependencies: byId("design-check-dependencies"),
   designCheckStatus: byId("design-check-status"),
   saveDesignCheckButton: byId("save-design-check-button"),
+  designIndexDialog: byId("design-index-dialog"),
+  designIndexForm: byId("design-index-form"),
+  designIndexTitle: byId("design-index-title"),
+  designIndexTable: byId("design-index-table"),
+  designIndexName: byId("design-index-name"),
+  designIndexMethod: byId("design-index-method"),
+  designIndexUnique: byId("design-index-unique"),
+  designIndexColumns: byId("design-index-columns"),
+  designIndexExpression: byId("design-index-expression"),
+  designIndexExpressionDependencies: byId("design-index-expression-dependencies"),
+  designIndexPredicate: byId("design-index-predicate"),
+  designIndexPredicateDependencies: byId("design-index-predicate-dependencies"),
+  designIndexStatus: byId("design-index-status"),
+  saveDesignIndexButton: byId("save-design-index-button"),
   designRelationshipDialog: byId("design-relationship-dialog"),
   designRelationshipForm: byId("design-relationship-form"),
   designRelationshipTitle: byId("design-relationship-title"),
@@ -254,6 +272,12 @@ const state = {
   designCheckEditorId: null,
   designCheckTableId: null,
   designCheckAutoName: null,
+  indexAuthoring: false,
+  indexSelection: null,
+  designIndexEditorId: null,
+  designIndexTableId: null,
+  designIndexColumnIds: [],
+  designIndexAutoName: null,
   catalog: null,
   catalogLoading: false,
   catalogError: null,
@@ -301,6 +325,7 @@ const canvas = new CatalogCanvas({
   onSelect: selectTable,
   onRelationshipColumnSelect: handleRelationshipColumnSelection,
   onKeyColumnSelect: handleKeyColumnSelection,
+  onIndexColumnSelect: handleIndexColumnSelection,
   onPositionsChanged: positionsChanged,
   onRelationshipVisibilityChanged: (shown, available) => {
     elements.relationshipOutput.hidden = shown === available;
@@ -370,6 +395,10 @@ function updateDesignControls() {
   elements.createKeyButton.classList.toggle("active", state.keyAuthoring);
   elements.createKeyButton.setAttribute("aria-pressed", state.keyAuthoring ? "true" : "false");
   elements.createKeyButton.title = state.keyAuthoring ? "Cancel key selection" : "Create primary or unique key";
+  elements.createIndexButton.disabled = !detached || busy || !selected;
+  elements.createIndexButton.classList.toggle("active", state.indexAuthoring);
+  elements.createIndexButton.setAttribute("aria-pressed", state.indexAuthoring ? "true" : "false");
+  elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index on selected table";
   elements.editTableButton.disabled = !selected || busy;
   elements.deleteTableButton.disabled = !selected || busy;
 }
@@ -1313,6 +1342,9 @@ function renderActiveInspector(table) {
     onAddCheck: desired && table ? () => openDesignCheckEditor({ tableId: table.designId }) : null,
     onEditCheck: desired ? editDesignCheck : null,
     onDeleteCheck: desired ? confirmDeleteDesignCheck : null,
+    onAddIndex: desired && table ? () => startIndexAuthoring({ tableId: table.designId }) : null,
+    onEditIndex: desired ? editDesignIndex : null,
+    onDeleteIndex: desired ? confirmDeleteDesignIndex : null,
     onAddRelationship: desired && table ? () => startRelationshipAuthoring() : null,
     onEditRelationship: desired ? editDesignRelationship : null,
     onDeleteRelationship: desired ? confirmDeleteDesignRelationship : null,
@@ -1796,6 +1828,10 @@ function designCheckById(tableId, checkId) {
   return designTableById(tableId)?.checks.find(check => check.id === checkId) || null;
 }
 
+function designIndexById(tableId, indexId) {
+  return designTableById(tableId)?.indexes.find(index => index.id === indexId) || null;
+}
+
 function designRelationshipById(relationshipId) {
   return state.design?.content.relationships.find(relationship => relationship.id === relationshipId) || null;
 }
@@ -1823,6 +1859,7 @@ function updateKeyAuthoringPresentation() {
 function setKeyAuthoring(enabled, { tableId = null, keyId = null, columnIds = null } = {}) {
   const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
   if (active && state.relationshipAuthoring) setRelationshipAuthoring(false);
+  if (active && state.indexAuthoring) setIndexAuthoring(false);
   state.keyAuthoring = active;
   if (active) {
     const table = tableId ? designTableById(tableId) : null;
@@ -1847,6 +1884,7 @@ function setKeyAuthoring(enabled, { tableId = null, keyId = null, columnIds = nu
 function cancelColumnAuthoring() {
   setRelationshipAuthoring(false);
   setKeyAuthoring(false);
+  setIndexAuthoring(false);
 }
 
 function startKeyAuthoring({ tableId = null, keyId = null } = {}) {
@@ -1897,6 +1935,101 @@ function reviewKeyAuthoring() {
   openDesignKeyEditor(draft);
 }
 
+function updateIndexAuthoringPresentation() {
+  const selection = state.indexSelection;
+  const table = designTableById(selection?.tableId);
+  const columnNames = new Map((table?.columns || []).map(column => [column.id, column.name]));
+  const selectedNames = (selection?.columnIds || []).map(columnId => columnNames.get(columnId)).filter(Boolean);
+  elements.relationshipAuthoringStep.textContent = String(Math.max(1, selectedNames.length));
+  elements.relationshipAuthoringInstruction.textContent = selectedNames.length
+    ? `${table.name}: ${selectedNames.join(" → ")}`
+    : `Select ordered columns on ${table.name}, or configure an expression index`;
+  elements.reviewKeyAuthoring.hidden = false;
+  elements.reviewKeyAuthoring.textContent = selectedNames.length
+    ? `Configure index (${selectedNames.length})`
+    : "Configure expression index";
+  canvas.setIndexMode({
+    enabled: state.indexAuthoring,
+    tableName: table?.name || null,
+    columnNames: selectedNames,
+  });
+}
+
+function setIndexAuthoring(enabled, { tableId = null, indexId = null, columnIds = null } = {}) {
+  const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
+  if (active && state.relationshipAuthoring) setRelationshipAuthoring(false);
+  if (active && state.keyAuthoring) setKeyAuthoring(false);
+  state.indexAuthoring = active;
+  if (active) {
+    const table = designTableById(tableId);
+    const index = table && indexId ? designIndexById(table.id, indexId) : null;
+    state.indexSelection = {
+      tableId: table?.id || null,
+      indexId: index?.id || null,
+      columnIds: [...(columnIds || index?.columnIds || [])],
+    };
+  } else {
+    state.indexSelection = null;
+  }
+  elements.relationshipAuthoringBanner.hidden = !active;
+  if (active) updateIndexAuthoringPresentation();
+  else {
+    elements.reviewKeyAuthoring.hidden = true;
+    canvas.setIndexMode({ enabled: false });
+  }
+  updateDesignControls();
+}
+
+function startIndexAuthoring({ tableId = selectedDesignTable()?.id || null, indexId = null } = {}) {
+  if (state.indexAuthoring) return;
+  const table = designTableById(tableId);
+  if (!table) {
+    showToast("Select a designed table before creating an index.");
+    return;
+  }
+  if (indexId && !designIndexById(table.id, indexId)) {
+    showToast("The selected index is no longer in this design.", { error: true });
+    return;
+  }
+  setIndexAuthoring(true, { tableId: table.id, indexId });
+}
+
+function toggleIndexAuthoring() {
+  if (state.indexAuthoring) setIndexAuthoring(false);
+  else startIndexAuthoring();
+}
+
+function handleIndexColumnSelection(table, column) {
+  if (!state.indexAuthoring || !table.designId || !column.designId) return;
+  const selection = state.indexSelection;
+  if (!selection || selection.tableId !== table.designId) {
+    showToast("All index columns must come from the selected table.");
+    return;
+  }
+  const columnIds = [...selection.columnIds];
+  const existingIndex = columnIds.indexOf(column.designId);
+  if (existingIndex >= 0) columnIds.splice(existingIndex, 1);
+  else columnIds.push(column.designId);
+  state.indexSelection = { ...selection, columnIds };
+  updateIndexAuthoringPresentation();
+}
+
+function reviewIndexAuthoring() {
+  if (!state.indexAuthoring || !state.indexSelection?.tableId) return;
+  const draft = {
+    tableId: state.indexSelection.tableId,
+    indexId: state.indexSelection.indexId,
+    columnIds: [...state.indexSelection.columnIds],
+  };
+  setIndexAuthoring(false);
+  openDesignIndexEditor(draft);
+}
+
+function reviewColumnAuthoring() {
+  if (state.indexAuthoring) reviewIndexAuthoring();
+  else reviewKeyAuthoring();
+}
+
 function updateGeneratedKeyName() {
   const current = elements.designKeyName.value;
   const generated = suggestDesignKeyName(state.design.content, {
@@ -1920,11 +2053,14 @@ function moveDesignKeyColumn(index, offset) {
   updateGeneratedKeyName();
 }
 
-function renderDesignKeyColumns() {
-  const table = designTableById(state.designKeyTableId);
+function renderOrderedDesignColumns(container, table, columnIds, onMove, emptyCopy = null) {
   const columns = new Map((table?.columns || []).map(column => [column.id, column]));
-  replace(elements.designKeyColumns);
-  state.designKeyColumnIds.forEach((columnId, index) => {
+  replace(container);
+  if (!columnIds.length && emptyCopy) {
+    container.append(element("p", { className: "none-reported", text: emptyCopy }));
+    return;
+  }
+  columnIds.forEach((columnId, index) => {
     const column = columns.get(columnId);
     if (!column) return;
     const up = element("button", {
@@ -1940,15 +2076,24 @@ function renderDesignKeyColumns() {
       attrs: { "aria-label": `Move ${column.name} later` },
     });
     up.disabled = index === 0;
-    down.disabled = index === state.designKeyColumnIds.length - 1;
-    up.addEventListener("click", () => moveDesignKeyColumn(index, -1));
-    down.addEventListener("click", () => moveDesignKeyColumn(index, 1));
-    elements.designKeyColumns.append(element("div", { className: "design-key-column" }, [
+    down.disabled = index === columnIds.length - 1;
+    up.addEventListener("click", () => onMove(index, -1));
+    down.addEventListener("click", () => onMove(index, 1));
+    container.append(element("div", { className: "design-key-column" }, [
       element("span", { text: String(index + 1).padStart(2, "0") }),
       element("span", {}, [element("strong", { text: column.name }), element("code", { text: column.dataType })]),
       element("span", { className: "design-key-column-actions" }, [up, down]),
     ]));
   });
+}
+
+function renderDesignKeyColumns() {
+  renderOrderedDesignColumns(
+    elements.designKeyColumns,
+    designTableById(state.designKeyTableId),
+    state.designKeyColumnIds,
+    moveDesignKeyColumn,
+  );
 }
 
 function openDesignKeyEditor({ tableId, keyId = null, columnIds }) {
@@ -2197,6 +2342,181 @@ function confirmDeleteDesignCheck(constraint) {
   });
 }
 
+function updateGeneratedIndexName() {
+  if (!state.design || !state.designIndexTableId) return;
+  const current = elements.designIndexName.value;
+  const generated = suggestDesignIndexName(state.design.content, {
+    tableId: state.designIndexTableId,
+    indexId: state.designIndexEditorId,
+    columnIds: state.designIndexColumnIds,
+    expression: elements.designIndexExpression.value,
+  });
+  if (!current || current === state.designIndexAutoName) elements.designIndexName.value = generated;
+  state.designIndexAutoName = generated;
+}
+
+function renderDesignIndexDependency(container, label, expression) {
+  const table = designTableById(state.designIndexTableId);
+  replace(container);
+  if (!table || !expression.trim()) {
+    container.append(element("span", { text: `${label}: none` }));
+    return;
+  }
+  const columnIds = new Set(expressionColumnIds(expression, table.columns));
+  const dependencies = table.columns.filter(column => columnIds.has(column.id));
+  container.append(element("strong", { text: `${label}:` }));
+  if (!dependencies.length) {
+    container.append(element("span", { text: "No table columns recognized" }));
+    return;
+  }
+  for (const column of dependencies) {
+    container.append(element("span", { className: "design-dependency-chip", text: column.name }));
+  }
+}
+
+function updateDesignIndexDraft() {
+  renderDesignIndexDependency(
+    elements.designIndexExpressionDependencies,
+    "Expression uses",
+    elements.designIndexExpression.value,
+  );
+  renderDesignIndexDependency(
+    elements.designIndexPredicateDependencies,
+    "Predicate uses",
+    elements.designIndexPredicate.value,
+  );
+  updateGeneratedIndexName();
+}
+
+function moveDesignIndexColumn(index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= state.designIndexColumnIds.length) return;
+  const columnIds = [...state.designIndexColumnIds];
+  const [moved] = columnIds.splice(index, 1);
+  columnIds.splice(target, 0, moved);
+  state.designIndexColumnIds = columnIds;
+  renderDesignIndexColumns();
+  updateGeneratedIndexName();
+}
+
+function renderDesignIndexColumns() {
+  renderOrderedDesignColumns(
+    elements.designIndexColumns,
+    designTableById(state.designIndexTableId),
+    state.designIndexColumnIds,
+    moveDesignIndexColumn,
+    "No plain columns selected. Enter an expression below to create an expression-only index.",
+  );
+}
+
+function openDesignIndexEditor({ tableId, indexId = null, columnIds = [] }) {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  const table = designTableById(tableId);
+  const index = indexId ? designIndexById(tableId, indexId) : null;
+  if (!table || (indexId && !index)) {
+    showToast("The selected index is no longer in this design.", { error: true });
+    return;
+  }
+  elements.designIndexForm.reset();
+  replace(elements.designIndexStatus);
+  state.designIndexEditorId = index?.id || null;
+  state.designIndexTableId = table.id;
+  state.designIndexColumnIds = [...columnIds];
+  state.designIndexAutoName = null;
+  elements.designIndexTitle.textContent = index ? `Edit ${index.name}` : "Create index";
+  elements.saveDesignIndexButton.textContent = index ? "Save index" : "Create index";
+  elements.designIndexTable.textContent = table.name;
+  elements.designIndexName.value = index?.name || "";
+  elements.designIndexMethod.value = index?.method || "btree";
+  elements.designIndexUnique.checked = index?.unique || false;
+  elements.designIndexExpression.value = index?.expression || "";
+  elements.designIndexPredicate.value = index?.predicate || "";
+  renderDesignIndexColumns();
+  updateDesignIndexDraft();
+  if (index) state.designIndexAutoName = null;
+  openDialog(elements.designIndexDialog);
+  (index ? elements.designIndexExpression : elements.designIndexName).focus();
+}
+
+async function submitDesignIndex(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  let result;
+  try {
+    result = saveDesignIndex(state.design.content, {
+      tableId: state.designIndexTableId,
+      indexId: state.designIndexEditorId,
+      name: elements.designIndexName.value,
+      method: elements.designIndexMethod.value,
+      columnIds: state.designIndexColumnIds,
+      expression: elements.designIndexExpression.value,
+      predicate: elements.designIndexPredicate.value,
+      unique: elements.designIndexUnique.checked,
+    });
+  } catch (error) {
+    replace(elements.designIndexStatus, errorPanel(error));
+    return;
+  }
+  if (!await flushLayoutBeforeTransition()) return;
+  state.designSubmitting = true;
+  elements.saveDesignIndexButton.disabled = true;
+  updateDesignControls();
+  replace(elements.designIndexStatus, element("span", { text: "Validating and saving the index…" }));
+  try {
+    const table = designTableById(state.designIndexTableId);
+    const editing = Boolean(state.designIndexEditorId);
+    const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+    if (!design) return;
+    elements.designIndexDialog.close();
+    canvas.select(table.name, { notify: true });
+    showToast(`${editing ? "Updated" : "Created"} ${result.index.name} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designIndexStatus, conflictPanel(error));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignIndexButton.disabled = false;
+    updateHeader();
+  }
+}
+
+function editDesignIndex(index) {
+  const table = selectedDesignTable();
+  if (!table || !index?.designId) return;
+  startIndexAuthoring({ tableId: table.id, indexId: index.designId });
+}
+
+function confirmDeleteDesignIndex(index) {
+  const table = selectedDesignTable();
+  if (!table || !index?.designId || state.designSubmitting) return;
+  askConfirmation({
+    title: "Delete index",
+    message: `Delete index “${index.name}” from ${table.name}? Its columns remain in the design.`,
+    label: "Delete index",
+    callback: async () => {
+      let result;
+      try {
+        result = deleteDesignIndex(state.design.content, table.id, index.designId);
+      } catch (error) {
+        errorToast(error);
+        return;
+      }
+      if (!await flushLayoutBeforeTransition()) return;
+      state.designSubmitting = true;
+      updateDesignControls();
+      try {
+        const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+        if (!design) return;
+        showToast(`Deleted ${result.index.name} in design revision ${design.revision}.`);
+      } catch (error) {
+        errorToast(error);
+      } finally {
+        state.designSubmitting = false;
+        updateHeader();
+      }
+    },
+  });
+}
+
 function keyLabel(table, key) {
   const columns = new Map(table.columns.map(column => [column.id, column.name]));
   const kind = key.kind === "primary" ? "Primary key" : `Unique · ${key.name}`;
@@ -2384,6 +2704,7 @@ function editDesignRelationship(relationship) {
 function setRelationshipAuthoring(enabled, { relationshipId = null, defaults = null } = {}) {
   const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
   if (active && state.keyAuthoring) setKeyAuthoring(false);
+  if (active && state.indexAuthoring) setIndexAuthoring(false);
   state.relationshipAuthoring = active;
   state.relationshipSource = null;
   state.relationshipAuthoringEditId = active ? relationshipId : null;
@@ -2590,7 +2911,7 @@ function confirmDeleteDesignRelationship(relationship) {
 }
 
 function setLayer(layer, { historyMode = "push" } = {}) {
-  if (layer !== "tables" && (state.relationshipAuthoring || state.keyAuthoring)) cancelColumnAuthoring();
+  if (layer !== "tables" && (state.relationshipAuthoring || state.keyAuthoring || state.indexAuthoring)) cancelColumnAuthoring();
   state.activeLayer = layer;
   for (const button of document.querySelectorAll("[data-layer]")) {
     const active = button.dataset.layer === layer;
@@ -2656,7 +2977,7 @@ function bindEvents() {
     if (close) close.closest("dialog")?.close();
   });
   document.addEventListener("keydown", event => {
-    if (event.key === "Escape" && (state.relationshipAuthoring || state.keyAuthoring)) cancelColumnAuthoring();
+    if (event.key === "Escape" && (state.relationshipAuthoring || state.keyAuthoring || state.indexAuthoring)) cancelColumnAuthoring();
   });
   document.querySelectorAll("[data-confirm-cancel]").forEach(button => button.addEventListener("click", () => {
     state.confirmCallback = null;
@@ -2689,8 +3010,9 @@ function bindEvents() {
   elements.createTableButton.addEventListener("click", () => openDesignTableEditor());
   elements.createRelationshipButton.addEventListener("click", toggleRelationshipAuthoring);
   elements.createKeyButton.addEventListener("click", toggleKeyAuthoring);
+  elements.createIndexButton.addEventListener("click", toggleIndexAuthoring);
   elements.cancelRelationshipAuthoring.addEventListener("click", cancelColumnAuthoring);
-  elements.reviewKeyAuthoring.addEventListener("click", reviewKeyAuthoring);
+  elements.reviewKeyAuthoring.addEventListener("click", reviewColumnAuthoring);
   elements.editTableButton.addEventListener("click", () => {
     const table = selectedDesignTable();
     if (table) openDesignTableEditor(table.id);
@@ -2758,6 +3080,15 @@ function bindEvents() {
     state.designCheckEditorId = null;
     state.designCheckTableId = null;
     state.designCheckAutoName = null;
+  });
+  elements.designIndexForm.addEventListener("submit", submitDesignIndex);
+  elements.designIndexExpression.addEventListener("input", updateDesignIndexDraft);
+  elements.designIndexPredicate.addEventListener("input", updateDesignIndexDraft);
+  elements.designIndexDialog.addEventListener("close", () => {
+    state.designIndexEditorId = null;
+    state.designIndexTableId = null;
+    state.designIndexColumnIds = [];
+    state.designIndexAutoName = null;
   });
   elements.designRelationshipForm.addEventListener("submit", submitDesignRelationship);
   elements.reselectDesignRelationship.addEventListener("click", reselectDesignRelationship);

@@ -101,6 +101,9 @@ export function renderInspector({
   onAddCheck = null,
   onEditCheck = null,
   onDeleteCheck = null,
+  onAddIndex = null,
+  onEditIndex = null,
+  onDeleteIndex = null,
   onAddRelationship = null,
   onEditRelationship = null,
   onDeleteRelationship = null,
@@ -193,12 +196,21 @@ export function renderInspector({
   }, "constraints", desired);
   content.append(constraints);
 
-  const indexes = section("Indexes", table.indexes.length);
+  const indexes = section(
+    "Indexes",
+    table.indexes.length,
+    desired && onAddIndex ? actionButton("Add index", onAddIndex) : null,
+  );
   boundedInspectorList(indexes, table.indexes, index => itemCard(index.name, index.method, [
+    ["Columns", index.columns || []],
+    ["Expression", index.expression],
     ["Unique", index.unique],
     ["Valid", index.valid],
     ["Predicate", index.predicate],
-  ], index.definition), "indexes", desired);
+  ], index.definition, desired && index.designId ? [
+    ...(onEditIndex ? [actionButton("Edit", () => onEditIndex(index))] : []),
+    ...(onDeleteIndex ? [actionButton("Delete", () => onDeleteIndex(index), { danger: true })] : []),
+  ] : []), "indexes", desired);
   content.append(indexes);
 
   const triggers = section("Triggers", table.triggers.length);

@@ -125,6 +125,7 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
   let selectionCount = 0;
   const relationshipColumnSelections = [];
   const keyColumnSelections = [];
+  const indexColumnSelections = [];
   const canvas = new CatalogCanvas({
     canvas: host,
     stage,
@@ -137,6 +138,9 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
     },
     onKeyColumnSelect(table, column) {
       keyColumnSelections.push([table.name, column.name]);
+    },
+    onIndexColumnSelect(table, column) {
+      indexColumnSelections.push([table.name, column.name]);
     },
     onPositionsChanged() {
       savedPositionCount += 1;
@@ -161,6 +165,7 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
     selectionCount: () => selectionCount,
     relationshipColumnSelections,
     keyColumnSelections,
+    indexColumnSelections,
   };
 }
 
@@ -487,6 +492,43 @@ test("key mode preserves ordered same-table graphical column selection", () => {
   assert.equal(canvas.canvas.classList.contains("key-mode"), false);
   assert.equal(tenantRow.attributes.has("role"), false);
   assert.equal(otherTableRow.classList.contains("key-invalid"), false);
+});
+
+test("index mode exposes ordered same-table graphical column selection", () => {
+  const { canvas, indexColumnSelections } = fixture();
+  const orders = {
+    name: "orders",
+    columns: [{ name: "created_at" }, { name: "status" }],
+    primaryKey: null,
+    uniqueConstraints: [],
+  };
+  const customers = {
+    name: "customers",
+    columns: [{ name: "id" }],
+    primaryKey: { columns: ["id"] },
+    uniqueConstraints: [],
+  };
+  const createdRow = new PointerTarget();
+  const statusRow = new PointerTarget();
+  const otherRow = new PointerTarget();
+  canvas.catalog.tables = [orders, customers];
+  canvas.tableByName = new Map([[orders.name, orders], [customers.name, customers]]);
+  canvas.columnRows.set("orders\u0000created_at", { row: createdRow, table: orders, column: orders.columns[0] });
+  canvas.columnRows.set("orders\u0000status", { row: statusRow, table: orders, column: orders.columns[1] });
+  canvas.columnRows.set("customers\u0000id", { row: otherRow, table: customers, column: customers.columns[0] });
+
+  canvas.setIndexMode({ enabled: true, tableName: "orders", columnNames: ["created_at"] });
+
+  assert.equal(canvas.canvas.classList.contains("index-mode"), true);
+  assert.equal(createdRow.classList.contains("index-selected"), true);
+  assert.equal(otherRow.classList.contains("index-invalid"), true);
+  assert.equal(canvas.selectIndexColumn("customers", "id"), false);
+  assert.equal(canvas.selectIndexColumn("orders", "status"), true);
+  assert.deepEqual(indexColumnSelections, [["orders", "status"]]);
+
+  canvas.setIndexMode({ enabled: false });
+  assert.equal(canvas.canvas.classList.contains("index-mode"), false);
+  assert.equal(createdRow.attributes.has("role"), false);
 });
 
 test("column symbols distinguish primary, unique, composite, and foreign roles", () => {

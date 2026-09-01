@@ -152,6 +152,7 @@ export class CatalogCanvas {
     onSelect,
     onRelationshipColumnSelect = () => {},
     onKeyColumnSelect = () => {},
+    onIndexColumnSelect = () => {},
     onPositionsChanged,
     onRelationshipVisibilityChanged,
     getViewportInsets = () => ({}),
@@ -166,6 +167,7 @@ export class CatalogCanvas {
     this.onSelect = onSelect;
     this.onRelationshipColumnSelect = onRelationshipColumnSelect;
     this.onKeyColumnSelect = onKeyColumnSelect;
+    this.onIndexColumnSelect = onIndexColumnSelect;
     this.onPositionsChanged = onPositionsChanged;
     this.onRelationshipVisibilityChanged = onRelationshipVisibilityChanged;
     this.getViewportInsets = getViewportInsets;
@@ -182,6 +184,7 @@ export class CatalogCanvas {
     this.selectedName = null;
     this.relationshipMode = { enabled: false, source: null };
     this.keyMode = { enabled: false, tableName: null, columnNames: [] };
+    this.indexMode = { enabled: false, tableName: null, columnNames: [] };
     this.interactive = true;
     this.viewport = new GraphViewport({
       host: canvas,
@@ -286,18 +289,20 @@ export class CatalogCanvas {
           element("code", { text: column.dataType }),
         );
         row.addEventListener("click", event => {
-          if (!this.relationshipMode.enabled && !this.keyMode.enabled) return;
+          if (!this.relationshipMode.enabled && !this.keyMode.enabled && !this.indexMode.enabled) return;
           event.preventDefault();
           event.stopPropagation();
           if (this.relationshipMode.enabled) this.selectRelationshipColumn(table.name, column.name);
-          else this.selectKeyColumn(table.name, column.name);
+          else if (this.keyMode.enabled) this.selectKeyColumn(table.name, column.name);
+          else this.selectIndexColumn(table.name, column.name);
         });
         row.addEventListener("keydown", event => {
-          if ((!this.relationshipMode.enabled && !this.keyMode.enabled) || !["Enter", " "].includes(event.key)) return;
+          if ((!this.relationshipMode.enabled && !this.keyMode.enabled && !this.indexMode.enabled) || !["Enter", " "].includes(event.key)) return;
           event.preventDefault();
           event.stopPropagation();
           if (this.relationshipMode.enabled) this.selectRelationshipColumn(table.name, column.name);
-          else this.selectKeyColumn(table.name, column.name);
+          else if (this.keyMode.enabled) this.selectKeyColumn(table.name, column.name);
+          else this.selectIndexColumn(table.name, column.name);
         });
         this.columnRows.set(`${table.name}\u0000${column.name}`, { row, table, column });
         card.append(row);
@@ -325,12 +330,21 @@ export class CatalogCanvas {
   setRelationshipMode({ enabled, source = null }) {
     this.relationshipMode = { enabled: Boolean(enabled), source: enabled ? source : null };
     if (enabled) this.keyMode = { enabled: false, tableName: null, columnNames: [] };
+    if (enabled) this.indexMode = { enabled: false, tableName: null, columnNames: [] };
     this.applyColumnAuthoringMode();
   }
 
   setKeyMode({ enabled, tableName = null, columnNames = [] }) {
     this.keyMode = { enabled: Boolean(enabled), tableName: enabled ? tableName : null, columnNames: enabled ? [...columnNames] : [] };
     if (enabled) this.relationshipMode = { enabled: false, source: null };
+    if (enabled) this.indexMode = { enabled: false, tableName: null, columnNames: [] };
+    this.applyColumnAuthoringMode();
+  }
+
+  setIndexMode({ enabled, tableName = null, columnNames = [] }) {
+    this.indexMode = { enabled: Boolean(enabled), tableName: enabled ? tableName : null, columnNames: enabled ? [...columnNames] : [] };
+    if (enabled) this.relationshipMode = { enabled: false, source: null };
+    if (enabled) this.keyMode = { enabled: false, tableName: null, columnNames: [] };
     this.applyColumnAuthoringMode();
   }
 
@@ -338,8 +352,11 @@ export class CatalogCanvas {
     const { enabled, source } = this.relationshipMode;
     const keyEnabled = this.keyMode.enabled;
     const keyColumns = new Set(this.keyMode.columnNames);
+    const indexEnabled = this.indexMode.enabled;
+    const indexColumns = new Set(this.indexMode.columnNames);
     this.canvas.classList.toggle("relationship-mode", enabled);
     this.canvas.classList.toggle("key-mode", keyEnabled);
+    this.canvas.classList.toggle("index-mode", indexEnabled);
     for (const { row, table, column } of this.columnRows.values()) {
       const selected = Boolean(source && source.tableName === table.name && source.columnName === column.name);
       const targetColumns = new Set([
@@ -349,18 +366,24 @@ export class CatalogCanvas {
       const target = Boolean(source && targetColumns.has(column.name) && !selected);
       const keySelected = Boolean(keyEnabled && this.keyMode.tableName === table.name && keyColumns.has(column.name));
       const keyInvalid = Boolean(keyEnabled && this.keyMode.tableName && this.keyMode.tableName !== table.name);
+      const indexSelected = Boolean(indexEnabled && this.indexMode.tableName === table.name && indexColumns.has(column.name));
+      const indexInvalid = Boolean(indexEnabled && this.indexMode.tableName && this.indexMode.tableName !== table.name);
       row.classList.toggle("relationship-source", selected);
       row.classList.toggle("relationship-target", target);
       row.classList.toggle("relationship-invalid", Boolean(enabled && source && !target && !selected));
       row.classList.toggle("key-selected", keySelected);
       row.classList.toggle("key-invalid", keyInvalid);
-      if (enabled || keyEnabled) {
+      row.classList.toggle("index-selected", indexSelected);
+      row.classList.toggle("index-invalid", indexInvalid);
+      if (enabled || keyEnabled || indexEnabled) {
         row.setAttribute("role", "button");
         row.setAttribute("tabindex", "0");
-        row.setAttribute("aria-pressed", selected || keySelected ? "true" : "false");
-        row.setAttribute("aria-disabled", keyInvalid ? "true" : "false");
+        row.setAttribute("aria-pressed", selected || keySelected || indexSelected ? "true" : "false");
+        row.setAttribute("aria-disabled", keyInvalid || indexInvalid ? "true" : "false");
         row.setAttribute("aria-label", keyEnabled
           ? `${keySelected ? "Remove" : "Use"} ${table.name}.${column.name} ${keySelected ? "from" : "in"} the key`
+          : indexEnabled
+            ? `${indexSelected ? "Remove" : "Use"} ${table.name}.${column.name} ${indexSelected ? "from" : "in"} the index`
           : source
             ? `Reference ${table.name}.${column.name}`
             : `Use ${table.name}.${column.name} as the foreign key column`);
@@ -390,6 +413,16 @@ export class CatalogCanvas {
     const column = table?.columns.find(item => item.name === columnName);
     if (!table || !column) return false;
     this.onKeyColumnSelect(table, column);
+    return true;
+  }
+
+  selectIndexColumn(tableName, columnName) {
+    if (!this.interactive || !this.indexMode.enabled) return false;
+    if (this.indexMode.tableName && this.indexMode.tableName !== tableName) return false;
+    const table = this.tableByName.get(tableName);
+    const column = table?.columns.find(item => item.name === columnName);
+    if (!table || !column) return false;
+    this.onIndexColumnSelect(table, column);
     return true;
   }
 

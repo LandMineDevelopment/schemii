@@ -67,6 +67,7 @@
           <button id="create-table-button" type="button" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
           <button id="create-relationship-button" type="button" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" aria-pressed="false" disabled></button>
           <button id="create-key-button" type="button" data-ui-icon="key" title="Create key" aria-label="Create primary or unique key" aria-pressed="false" disabled></button>
+          <button id="create-index-button" type="button" data-ui-icon="index" title="Create index" aria-label="Create index" aria-pressed="false" disabled></button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button type="button" data-ui-icon="undo" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo"></button>
           <button type="button" data-ui-icon="redo" data-unavailable="semantic-redo" title="Semantic redo" aria-label="Semantic redo"></button>
@@ -273,6 +274,29 @@
         </div>
         <div class="form-status" id="design-check-status" aria-live="polite"></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-check-button" type="submit">Create check</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="ui-dialog editor-dialog design-index-dialog" id="design-index-dialog" aria-labelledby="design-index-title">
+      <form class="ui-dialog__shell" id="design-index-form">
+        <header class="ui-dialog__head"><div><small>Query access path</small><h2 id="design-index-title">Create index</h2><p>Keep the selected columns in order, then optionally add one PostgreSQL expression or a partial-index predicate.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close index editor"></button></header>
+        <div class="design-index-body">
+          <label class="design-field"><span>Table</span><output id="design-index-table"></output></label>
+          <label class="design-field"><span>Index name</span><input id="design-index-name" required maxlength="63" autocomplete="off" /></label>
+          <label class="design-field"><span>Access method</span><input id="design-index-method" required maxlength="63" list="postgres-index-methods" value="btree" autocomplete="off" /></label>
+          <label class="check-row"><input id="design-index-unique" type="checkbox" /><span>Unique index</span></label>
+          <datalist id="postgres-index-methods"><option value="btree"></option><option value="hash"></option><option value="gist"></option><option value="spgist"></option><option value="gin"></option><option value="brin"></option></datalist>
+          <section class="design-key-columns span-all" aria-labelledby="design-index-columns-title">
+            <header><strong id="design-index-columns-title">Ordered columns</strong><small>Optional when an expression is supplied</small></header>
+            <div class="design-ordered-columns" id="design-index-columns"></div>
+          </section>
+          <label class="design-field span-all"><span>Index expression · optional</span><textarea id="design-index-expression" spellcheck="false" placeholder="lower(email)"></textarea></label>
+          <div class="design-index-dependencies span-all" id="design-index-expression-dependencies" aria-live="polite"></div>
+          <label class="design-field span-all"><span>Partial predicate · optional</span><textarea id="design-index-predicate" spellcheck="false" placeholder="deleted_at IS NULL"></textarea></label>
+          <div class="design-index-dependencies span-all" id="design-index-predicate-dependencies" aria-live="polite"></div>
+        </div>
+        <div class="form-status" id="design-index-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-index-button" type="submit">Create index</button></footer>
       </form>
     </dialog>
 

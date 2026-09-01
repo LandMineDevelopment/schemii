@@ -56,12 +56,18 @@ function tableCatalogEntry(table, columns) {
     notNullConstraints: [],
     exclusionConstraints: [],
     indexes: table.indexes.map(index => ({
+      designId: index.id,
       name: index.name,
       method: index.method,
+      columns: index.columnIds.map(id => columns.get(id)?.name || id),
       unique: index.unique,
       valid: true,
       predicate: index.predicate,
-      definition: index.expression || index.columnIds.map(id => columns.get(id)?.name || id).join(", "),
+      expression: index.expression,
+      definition: [
+        ...index.columnIds.map(id => columns.get(id)?.name || id),
+        ...(index.expression ? [index.expression] : []),
+      ].join(", "),
     })),
     triggers: [],
   };
@@ -384,13 +390,44 @@ function designTableFromValues(existingTable, name, columnValues, randomUUID) {
       columnIds: expressionColumnIds(expression, designColumns),
     };
   });
+  const indexes = (existingTable?.indexes || []).map(index => {
+    const expressionReferences = new Set(
+      index.expressionSourceColumnIds?.length
+        ? index.expressionSourceColumnIds
+        : expressionColumnIds(index.expression || "", existingTable.columns),
+    );
+    const predicateReferences = new Set(
+      index.predicateColumnIds?.length
+        ? index.predicateColumnIds
+        : expressionColumnIds(index.predicate || "", existingTable.columns),
+    );
+    const expression = rewriteColumnReferences(
+      index.expression,
+      existingTable.columns,
+      designColumns,
+      expressionReferences,
+    );
+    const predicate = rewriteColumnReferences(
+      index.predicate,
+      existingTable.columns,
+      designColumns,
+      predicateReferences,
+    );
+    return {
+      ...index,
+      expression,
+      expressionSourceColumnIds: expressionColumnIds(expression || "", designColumns),
+      predicate,
+      predicateColumnIds: expressionColumnIds(predicate || "", designColumns),
+    };
+  });
   return {
     id: existingTable?.id || id("table", randomUUID),
     name: tableName,
     columns: designColumns,
     keys,
     checks,
-    indexes: existingTable?.indexes || [],
+    indexes,
   };
 }
 
@@ -399,7 +436,17 @@ function referencedRemovedColumn(content, table, retainedColumnIds) {
   if (!removed.size) return null;
   const key = table.keys.find(item => item.kind !== "primary" && item.columnIds.some(columnId => removed.has(columnId)));
   if (key) return `unique key “${key.name}”`;
-  const index = table.indexes.find(item => item.columnIds.some(columnId => removed.has(columnId)));
+  const index = table.indexes.find(item => (
+    item.columnIds.some(columnId => removed.has(columnId))
+    || (item.expressionSourceColumnIds?.length
+      ? item.expressionSourceColumnIds
+      : expressionColumnIds(item.expression || "", table.columns)
+    ).some(columnId => removed.has(columnId))
+    || (item.predicateColumnIds?.length
+      ? item.predicateColumnIds
+      : expressionColumnIds(item.predicate || "", table.columns)
+    ).some(columnId => removed.has(columnId))
+  ));
   if (index) return `index “${index.name}”`;
   const generated = table.columns.find(item => (
     (item.generatedSourceColumnIds?.length
@@ -582,6 +629,89 @@ export function deleteDesignCheck(content, tableId, checkId) {
   const revisedTable = revised.tables.find(item => item.id === table.id);
   revisedTable.checks = revisedTable.checks.filter(item => item.id !== check.id);
   return { content: revised, check };
+}
+
+export function suggestDesignIndexName(content, {
+  tableId,
+  columnIds = [],
+  expression = "",
+  indexId = null,
+}) {
+  const table = content.tables.find(item => item.id === tableId);
+  if (!table) return "";
+  const names = new Map(table.columns.map(column => [column.id, column.name]));
+  const expressionIds = expressionColumnIds(expression, table.columns);
+  const parts = [...columnIds, ...expressionIds]
+    .filter((columnId, index, values) => values.indexOf(columnId) === index)
+    .map(columnId => names.get(columnId))
+    .filter(Boolean);
+  const stem = parts.length ? `${table.name}_${parts.join("_")}` : table.name;
+  const base = nameWithSuffix(stem, "_idx");
+  const used = new Set(table.indexes.filter(index => index.id !== indexId).map(index => index.name));
+  if (!used.has(base)) return base;
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = nameWithSuffix(stem, `_idx_${index}`);
+    if (!used.has(candidate)) return candidate;
+  }
+  return base;
+}
+
+export function saveDesignIndex(content, values, randomUUID = () => crypto.randomUUID()) {
+  const table = content.tables.find(item => item.id === values.tableId);
+  if (!table) throw new Error("The selected table is no longer in this design.");
+  const existing = values.indexId ? table.indexes.find(index => index.id === values.indexId) : null;
+  if (values.indexId && !existing) throw new Error("The selected index is no longer in this design.");
+  const name = validatedName(values.name, "index name");
+  const method = validatedName(values.method || "btree", "index method");
+  const columnIds = Array.isArray(values.columnIds) ? [...values.columnIds] : [];
+  const ownedColumnIds = new Set(table.columns.map(column => column.id));
+  if (columnIds.some(columnId => !ownedColumnIds.has(columnId))) {
+    throw new Error("Index columns must come from their own table.");
+  }
+  if (new Set(columnIds).size !== columnIds.length) throw new Error("Each column can appear only once in an index.");
+  const expression = optionalExpression(values.expression);
+  const predicate = optionalExpression(values.predicate);
+  if (!columnIds.length && !expression) throw new Error("Select a column or enter an index expression.");
+  if (expression) validateExpression(expression, `expression for index “${name}”`);
+  if (predicate) validateExpression(predicate, `predicate for index “${name}”`);
+  if (table.indexes.some(index => index.id !== values.indexId && index.name === name)) {
+    throw new Error("An index with this name already exists on the table.");
+  }
+  const duplicateShape = table.indexes.some(index => (
+    index.id !== values.indexId
+    && index.method === method
+    && index.unique === Boolean(values.unique)
+    && index.columnIds.join("\u0000") === columnIds.join("\u0000")
+    && (index.expression || "") === (expression || "")
+    && (index.predicate || "") === (predicate || "")
+  ));
+  if (duplicateShape) throw new Error("This table already has the same index definition.");
+  const index = {
+    id: existing?.id || id("index", randomUUID),
+    name,
+    method,
+    columnIds,
+    expression,
+    expressionSourceColumnIds: expressionColumnIds(expression || "", table.columns),
+    predicate,
+    predicateColumnIds: expressionColumnIds(predicate || "", table.columns),
+    unique: Boolean(values.unique),
+  };
+  const revised = structuredClone(content);
+  const revisedTable = revised.tables.find(item => item.id === table.id);
+  if (existing) revisedTable.indexes = revisedTable.indexes.map(item => item.id === existing.id ? index : item);
+  else revisedTable.indexes.push(index);
+  return { content: revised, index };
+}
+
+export function deleteDesignIndex(content, tableId, indexId) {
+  const table = content.tables.find(item => item.id === tableId);
+  const index = table?.indexes.find(item => item.id === indexId);
+  if (!table || !index) throw new Error("The selected index is no longer in this design.");
+  const revised = structuredClone(content);
+  const revisedTable = revised.tables.find(item => item.id === table.id);
+  revisedTable.indexes = revisedTable.indexes.filter(item => item.id !== index.id);
+  return { content: revised, index };
 }
 
 function designRelationshipFromValues(content, values, relationshipId, randomUUID) {

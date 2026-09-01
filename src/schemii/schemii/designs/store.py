@@ -230,9 +230,47 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                     details={"table": table.name, "index": index.name},
                 )
             if index.expression is not None:
+                if not index.expression.strip():
+                    raise DesignValidationError(
+                        "Index expressions cannot be empty",
+                        details={"table": table.name, "index": index.name},
+                    )
                 _safe_fragment(index.expression, category=f"index expression {index.name}")
+                if (
+                    len(index.expression_source_column_ids)
+                    != len(set(index.expression_source_column_ids))
+                    or not set(index.expression_source_column_ids) <= column_ids
+                ):
+                    raise DesignValidationError(
+                        "Index expressions may reference unique columns on their own table only",
+                        details={"table": table.name, "index": index.name},
+                    )
+            elif index.expression_source_column_ids:
+                raise DesignValidationError(
+                    "Index expression dependencies require an index expression",
+                    details={"table": table.name, "index": index.name},
+                )
             if index.predicate is not None:
+                if not index.predicate.strip():
+                    raise DesignValidationError(
+                        "Index predicates cannot be empty",
+                        details={"table": table.name, "index": index.name},
+                    )
                 _safe_fragment(index.predicate, category=f"index predicate {index.name}")
+                if (
+                    len(index.predicate_column_ids)
+                    != len(set(index.predicate_column_ids))
+                    or not set(index.predicate_column_ids) <= column_ids
+                ):
+                    raise DesignValidationError(
+                        "Index predicates may reference unique columns on their own table only",
+                        details={"table": table.name, "index": index.name},
+                    )
+            elif index.predicate_column_ids:
+                raise DesignValidationError(
+                    "Index predicate dependencies require an index predicate",
+                    details={"table": table.name, "index": index.name},
+                )
             all_ids.append(index.id)
 
     _unique([relationship.name for relationship in content.relationships], category="relationship names")
