@@ -12,6 +12,7 @@ SCHEMII_TEST_POSTGRES_PASSWORD="${SCHEMII_TEST_POSTGRES_PASSWORD-schemii-local-t
 SCHEMII_STARTUP_TIMEOUT="${SCHEMII_STARTUP_TIMEOUT-120}"
 SCHEMII_TLS_DIRECTORY="${SCHEMII_TLS_DIRECTORY-${ROOT_DIR}/.schemii/tls}"
 SCHEMII_TLS_CERTIFICATE_DAYS="${SCHEMII_TLS_CERTIFICATE_DAYS-365}"
+SCHEMII_SECRET_DIRECTORY="${SCHEMII_SECRET_DIRECTORY-${ROOT_DIR}/.schemii/secrets}"
 
 fail() {
   printf 'Schemii startup error: %s\n' "$1" >&2
@@ -30,6 +31,7 @@ fi
 [[ -n "$SCHEMII_TEST_POSTGRES_DB" ]] || fail "SCHEMII_TEST_POSTGRES_DB must not be empty"
 [[ -n "$SCHEMII_TEST_POSTGRES_USER" ]] || fail "SCHEMII_TEST_POSTGRES_USER must not be empty"
 [[ -n "$SCHEMII_TEST_POSTGRES_PASSWORD" ]] || fail "SCHEMII_TEST_POSTGRES_PASSWORD must not be empty"
+[[ -n "$SCHEMII_SECRET_DIRECTORY" ]] || fail "SCHEMII_SECRET_DIRECTORY must not be empty"
 [[ -f "$COMPOSE_FILE" ]] || fail "Compose definition is missing at ${COMPOSE_FILE}"
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed or is not on PATH"
 docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is unavailable"
@@ -37,6 +39,8 @@ command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required to create the lo
 
 SCHEMII_TEST_TLS_CERTIFICATE="${SCHEMII_TLS_DIRECTORY}/localhost.crt"
 SCHEMII_TEST_TLS_PRIVATE_KEY="${SCHEMII_TLS_DIRECTORY}/localhost.key"
+SCHEMII_METADATA_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_password"
+SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_encryption_key"
 
 certificate_is_current() {
   local certificate_text certificate_modulus key_modulus
@@ -93,6 +97,54 @@ if ! certificate_is_current; then
 fi
 SCHEMII_TLS_READER_GID="$(stat -c '%g' "$SCHEMII_TEST_TLS_PRIVATE_KEY")"
 
+write_metadata_password() {
+  mkdir -p -- "$SCHEMII_SECRET_DIRECTORY"
+  chmod 750 "$SCHEMII_SECRET_DIRECTORY"
+  local temporary_file
+  temporary_file="$(mktemp "${SCHEMII_SECRET_DIRECTORY}/.metadata-password.XXXXXX")"
+  trap 'rm -f -- "$temporary_file"' RETURN
+  printf '%s\n' "$SCHEMII_TEST_POSTGRES_PASSWORD" > "$temporary_file"
+  chmod 640 "$temporary_file"
+  mv -- "$temporary_file" "$SCHEMII_METADATA_PASSWORD_SECRET_FILE"
+  trap - RETURN
+}
+
+metadata_encryption_key_is_valid() {
+  [[ -f "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" ]] || return 1
+  local decoded_file decoded_size
+  decoded_file="$(mktemp "${SCHEMII_SECRET_DIRECTORY}/.decoded-key.XXXXXX")"
+  if ! openssl base64 -d -A \
+      -in "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" \
+      -out "$decoded_file" 2>/dev/null; then
+    rm -f -- "$decoded_file"
+    return 1
+  fi
+  decoded_size="$(stat -c '%s' "$decoded_file")"
+  rm -f -- "$decoded_file"
+  [[ "$decoded_size" == "32" ]]
+}
+
+create_metadata_encryption_key() {
+  local temporary_file
+  temporary_file="$(mktemp "${SCHEMII_SECRET_DIRECTORY}/.metadata-key.XXXXXX")"
+  trap 'rm -f -- "$temporary_file"' RETURN
+  openssl rand -base64 32 | tr -d '\n' > "$temporary_file"
+  printf '\n' >> "$temporary_file"
+  chmod 640 "$temporary_file"
+  mv -- "$temporary_file" "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE"
+  trap - RETURN
+}
+
+write_metadata_password
+if ! metadata_encryption_key_is_valid; then
+  if [[ -e "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" ]]; then
+    fail "the existing metadata encryption key is invalid; restore the original 256-bit base64 key"
+  fi
+  printf 'Creating a persistent metadata credential encryption key...\n'
+  create_metadata_encryption_key
+fi
+SCHEMII_SECRET_READER_GID="$(stat -c '%g' "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE")"
+
 export SCHEMII_TEST_APP_PORT
 export SCHEMII_TEST_POSTGRES_DB
 export SCHEMII_TEST_POSTGRES_USER
@@ -100,6 +152,9 @@ export SCHEMII_TEST_POSTGRES_PASSWORD
 export SCHEMII_TEST_TLS_CERTIFICATE
 export SCHEMII_TEST_TLS_PRIVATE_KEY
 export SCHEMII_TLS_READER_GID
+export SCHEMII_METADATA_PASSWORD_SECRET_FILE
+export SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE
+export SCHEMII_SECRET_READER_GID
 
 compose_args=(
   compose
@@ -107,8 +162,9 @@ compose_args=(
   --file "$COMPOSE_FILE"
 )
 
-# Nginx loads its file-mounted configuration and certificate only at process start.
-docker "${compose_args[@]}" rm --stop --force ingress
+# The launcher is also the restart boundary: replace both stateless HTTP
+# processes even when their image digest and mounted files are unchanged.
+docker "${compose_args[@]}" rm --stop --force ingress schemii
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
 docker "${compose_args[@]}" up --build --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"

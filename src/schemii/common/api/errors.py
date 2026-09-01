@@ -9,6 +9,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHttpException
 
+from schemii.common.connections.store import (
+    ConnectionCredentialUnreadableError,
+    ConnectionStorageUnavailableError,
+)
+
 
 class ApiProblem(RuntimeError):
     def __init__(
@@ -108,6 +113,35 @@ def install_api_error_handlers(application: FastAPI) -> None:
             request,
             ApiProblem(error.status_code, code, message),
             headers=safe_headers,
+        )
+
+    @application.exception_handler(ConnectionStorageUnavailableError)
+    async def handle_connection_storage_error(
+        request: Request,
+        error: ConnectionStorageUnavailableError,
+    ) -> JSONResponse:
+        return _response(
+            request,
+            ApiProblem(
+                503,
+                "connection_storage_unavailable",
+                str(error),
+                retryable=True,
+            ),
+        )
+
+    @application.exception_handler(ConnectionCredentialUnreadableError)
+    async def handle_connection_credential_error(
+        request: Request,
+        error: ConnectionCredentialUnreadableError,
+    ) -> JSONResponse:
+        return _response(
+            request,
+            ApiProblem(
+                500,
+                "connection_credential_unreadable",
+                str(error),
+            ),
         )
 
     @application.exception_handler(Exception)

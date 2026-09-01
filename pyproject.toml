@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
+    "cryptography>=46,<51",
     "fastapi>=0.141,<1",
     "psycopg[binary]>=3.3,<4",
     "pydantic>=2.11,<3",
@@ -30,6 +31,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "schemii.schemii" = ["web/*.html", "web/assets/*"]
+"schemii.common.metadata" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

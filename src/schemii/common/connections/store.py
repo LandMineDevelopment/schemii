@@ -44,6 +44,14 @@ class ConnectionLimitError(ConnectionRepositoryError):
         super().__init__("The PostgreSQL connection limit has been reached")
 
 
+class ConnectionStorageUnavailableError(ConnectionRepositoryError):
+    """Durable connection metadata cannot currently be read or changed."""
+
+
+class ConnectionCredentialUnreadableError(ConnectionRepositoryError):
+    """A stored credential failed authenticated decryption."""
+
+
 @runtime_checkable
 class ConnectionRepository(Protocol):
     def list(self, owner_id: str) -> list[PostgresConnectionProfile]: ...

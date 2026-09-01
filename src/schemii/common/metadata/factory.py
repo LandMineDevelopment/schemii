@@ -1,25 +1,41 @@
 """Metadata repository composition boundary."""
 
 from dataclasses import dataclass
+from typing import Mapping
 
 from schemii.common.connections.store import (
     ConnectionRepository,
     InMemoryConnectionRepository,
 )
 
+from .config import MetadataConfig
+from .crypto import CredentialCipher
+from .database import MetadataConnectionFactory, MetadataMigrator
+from .secrets import read_encryption_key
+
 
 @dataclass(frozen=True)
 class MetadataRepositories:
     connections: ConnectionRepository
+    storage: str = "memory"
+    durable: bool = False
 
 
-def create_metadata_repositories() -> MetadataRepositories:
-    """Return valid ephemeral repositories for the current prototype.
+def create_metadata_repositories(
+    env: Mapping[str, str] | None = None,
+) -> MetadataRepositories:
+    """Use durable PostgreSQL when configured, otherwise isolate tests in memory."""
 
-    TODO(metadata-postgres): replace this factory with PostgreSQL-backed users,
-    sessions, wrapped per-user encryption keys, encrypted connection
-    credentials, owner-scoped product resources, and migration of the local
-    prototype user. Keep the repository contracts and route ownership checks
-    stable when making that replacement.
-    """
-    return MetadataRepositories(connections=InMemoryConnectionRepository())
+    config = MetadataConfig.from_env(env)
+    if config is None:
+        return MetadataRepositories(connections=InMemoryConnectionRepository())
+    from schemii.common.connections.postgres_store import PostgresConnectionRepository
+
+    connection_factory = MetadataConnectionFactory(config)
+    MetadataMigrator(connection_factory).migrate()
+    cipher = CredentialCipher(read_encryption_key(config.encryption_key_file))
+    return MetadataRepositories(
+        connections=PostgresConnectionRepository(connection_factory, cipher),
+        storage="postgresql",
+        durable=True,
+    )

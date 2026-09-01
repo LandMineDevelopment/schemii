@@ -38,6 +38,12 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     assert "  app-ingress:\n    internal: true" in networks
     assert "postgres:17-alpine@sha256:" in compose
     assert 'SCHEMII_DEVELOPER_INSPECTION: "1"' in schemii
+    assert "SCHEMII_METADATA_DSN:" in schemii
+    assert "SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_password" in schemii
+    assert "SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key" in schemii
+    assert "/run/secrets/metadata_password:ro" in schemii
+    assert "/run/secrets/metadata_encryption_key:ro" in schemii
+    assert '"${SCHEMII_SECRET_READER_GID:-10001}"' in schemii
     assert compose.count("ports:") == 1
     assert "condition: service_completed_successfully" in compose
     assert "condition: service_healthy\n        restart: true" in ingress

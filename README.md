@@ -34,19 +34,19 @@ src/schemii/
 
 `main.py` constructs the FastAPI application, shared services, common routes, and three product routers. Each product package owns its product-specific API routes and Pydantic contracts. The same application serves the Schemii frontend at `/`, so browser requests use the active same-origin API without a separate frontend process or build step.
 
-## Prototype API
+## Current API
 
-The current API is deliberately single-user and ephemeral while product workflows are prototyped:
+The current API deliberately uses one local application user while product workflows are prototyped:
 
 - `GET /api/v1/session` returns the valid local prototype principal.
-- `/api/v1/connections` manages owner-scoped in-memory PostgreSQL connections.
+- `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
 - `/api/v1/schemii/workspaces` manages database-independent design workspaces, optional Schemii target bindings, and table positions.
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
 - Interactive OpenAPI documentation is available at `/docs`.
 
-This phase has no remote authentication and must remain bound to loopback. Authentication and persistent, encrypted per-user credentials belong to the metadata PostgreSQL replacement.
+This phase has no application authentication and the Compose ingress remains bound to loopback. Remote ingress is a deployment concern. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures.
 
-Connections, credentials, and workspace positions are held only in backend memory and reset when the process restarts. Passwords are accepted only by write models, represented as `SecretStr`, omitted from profiles and errors, and resolved internally only while opening PostgreSQL.
+Connection profiles survive application rebuilds and restarts in the deployment's private PostgreSQL volume. Passwords are accepted only by write models, represented as `SecretStr`, authenticated-encrypted before entering metadata PostgreSQL, omitted from profiles and errors, and decrypted only while opening the selected target. The persistent encryption key lives outside PostgreSQL under `.schemii/secrets`; losing that key makes stored passwords unrecoverable. Workspaces remain in memory during this implementation stage.
 
 Each profile targets exactly one PostgreSQL host. TLS certificate and hostname verification (`verify-full`) is the default; weaker libpq SSL modes must be selected explicitly for environments that require them.
 
@@ -62,7 +62,7 @@ Promote a frontend implementation into the shared UI layer when multiple real pa
 
 The current catalog experience is read-only. Schema mutation, SQL execution, migration, and AI workflows remain planned contracts rather than implemented capabilities. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
-The metadata PostgreSQL replacement is intentionally deferred at the active code boundaries in `common/metadata/factory.py` and `common/metadata/models.py`. Repository operations already require an owner ID so persistent users, sessions, encrypted credentials, product ownership, and Tailscale identities can replace the prototype adapters without changing product route contracts.
+`common/metadata/factory.py` selects the durable PostgreSQL repositories when metadata deployment settings are present and retains in-memory adapters for isolated unit tests. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
 
 Start the local application stack with the repository launcher:
 
@@ -72,7 +72,7 @@ Start the local application stack with the repository launcher:
 
 Then open <https://localhost:8001/>. [`start.sh`](start.sh) is the single Docker Compose startup boundary and runs Docker directly without `sudo`. If Docker group membership was added after the current shell started, the launcher refreshes only its own process through `newgrp docker`; otherwise it uses the current session unchanged. The application containers never receive the Docker socket. The script builds the current source, waits for all services to become healthy, and reports the resulting service state.
 
-The launcher creates a persistent self-signed server certificate for `localhost` and `127.0.0.1` under ignored local state at `.schemii/tls`. The private key is excluded from both Git and the Docker build context. HTTPS protects transport but does not add application authentication.
+The launcher creates a persistent self-signed server certificate for `localhost` and `127.0.0.1` under ignored local state at `.schemii/tls`, plus a persistent credential-encryption key under `.schemii/secrets`. Both private keys are excluded from Git and the Docker build context. Back up the metadata database and `.schemii/secrets/metadata_encryption_key` together. HTTPS protects transport but does not add application authentication.
 
 Chromium-family browsers on Linux can trust only this exact certificate, without granting it certificate-authority privileges, through the user's NSS database:
 
@@ -83,7 +83,7 @@ certutil -A -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"
 
 Restart the browser or T3Code after changing trust. Remove the exception with `certutil -D -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"`. Other clients can either trust `.schemii/tls/localhost.crt` through their own certificate store or retain their normal self-signed-certificate warning.
 
-Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, and `SCHEMII_TLS_CERTIFICATE_DAYS`. The default deployment remains loopback-only because this prototype intentionally has no remote authentication.
+Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
 
 ## Seeded Docker test deployment
 

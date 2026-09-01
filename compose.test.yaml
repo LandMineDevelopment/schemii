@@ -7,6 +7,9 @@ services:
       dockerfile: Dockerfile
     environment:
       SCHEMII_DEVELOPER_INSPECTION: "1"
+      SCHEMII_METADATA_DSN: "host=postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_TEST_POSTGRES_USER:-schemii}"
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_password
+      SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key
     depends_on:
       postgres:
         condition: service_healthy
@@ -16,6 +19,11 @@ services:
     networks:
       - database
       - app-ingress
+    volumes:
+      - "${SCHEMII_METADATA_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_password}:/run/secrets/metadata_password:ro"
+      - "${SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE:-./.schemii/secrets/metadata_encryption_key}:/run/secrets/metadata_encryption_key:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-10001}"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777

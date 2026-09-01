@@ -179,7 +179,7 @@
 
     <dialog class="ui-dialog manager-dialog" id="connections-dialog" aria-labelledby="connections-title">
       <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small>PostgreSQL</small><h2 id="connections-title">Connections</h2><p>Connection metadata and credentials are held by the active server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connections"></button></header>
+        <header class="ui-dialog__head"><div><small>PostgreSQL</small><h2 id="connections-title">Connections</h2><p>Connection profiles are saved by this server. Passwords are encrypted and never returned to the browser.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connections"></button></header>
         <div class="dialog-toolbar"><span id="connections-count">Loading connections</span><button class="ui-button compact" id="reload-connections-button" type="button">Reload</button><button class="ui-button compact primary" id="add-connection-button" type="button">New connection</button></div>
         <div class="manager-list" id="connections-list" aria-live="polite"></div>
       </div>
@@ -187,7 +187,7 @@
 
     <dialog class="ui-dialog editor-dialog" id="connection-editor-dialog" aria-labelledby="connection-editor-title">
       <form class="ui-dialog__shell" id="connection-form">
-        <header class="ui-dialog__head"><div><small>PostgreSQL target</small><h2 id="connection-editor-title">Connection</h2><p id="connection-editor-copy">Enter connection metadata for the active server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connection editor"></button></header>
+        <header class="ui-dialog__head"><div><small>PostgreSQL target</small><h2 id="connection-editor-title">Connection</h2><p id="connection-editor-copy">Save a reusable PostgreSQL target on this server.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connection editor"></button></header>
         <div class="form-grid">
           <label class="span-2"><span>Connection name</span><input id="connection-name" name="name" required maxlength="128" autocomplete="off" /></label>
           <label class="span-2"><span>Host</span><input id="connection-host" name="host" required maxlength="255" autocomplete="off" /></label>

@@ -120,6 +120,15 @@ def test_connection_targets_are_exact_and_single_host() -> None:
             username="reader",
         )
 
+    with pytest.raises(ValidationError, match="4096 UTF-8 bytes"):
+        PostgresConnectionCreate(
+            name="Reporting",
+            host="localhost",
+            database="analytics",
+            username="reader",
+            password="\N{SNOWMAN}" * 4096,
+        )
+
     with pytest.raises(ValidationError):
         PostgresConnectionCreate(
             name="Reporting",

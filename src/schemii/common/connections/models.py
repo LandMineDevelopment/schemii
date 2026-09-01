@@ -42,7 +42,19 @@ ConnectTimeout = Annotated[
     int,
     Field(strict=True, ge=1, le=MAX_CONNECT_TIMEOUT_SECONDS),
 ]
-Password = Annotated[SecretStr, Field(min_length=1, max_length=4096)]
+
+
+def _bounded_password(value: SecretStr) -> SecretStr:
+    if len(value.get_secret_value().encode("utf-8")) > 4096:
+        raise ValueError("password must not exceed 4096 UTF-8 bytes")
+    return value
+
+
+Password = Annotated[
+    SecretStr,
+    Field(min_length=1, max_length=4096),
+    AfterValidator(_bounded_password),
+]
 
 
 class PostgresSslMode(str, Enum):

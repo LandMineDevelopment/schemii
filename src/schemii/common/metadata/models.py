@@ -16,12 +16,10 @@ class Principal(BaseModel):
 
 
 def get_current_principal() -> Principal:
-    """Return the valid single-user identity used during API prototyping.
+    """Return the single local owner until deployment-neutral auth is added.
 
-    TODO(metadata-postgres): resolve an authenticated, owner-scoped principal
-    from a server-side session. The future implementation must support users,
-    authentication identities, Tailscale identity mapping, session expiry, and
-    password reset/recovery without changing product route signatures.
+    A future identity adapter can resolve an authenticated owner without
+    changing product route or repository signatures.
     """
     return Principal(
         user_id=LOCAL_PROTOTYPE_USER_ID,
