@@ -77,11 +77,12 @@ export function designToCatalog(workspace, design) {
   const columns = columnMap(design);
   const tables = tableMap(design);
   const views = design.content.views.map(view => ({
+    designId: view.id,
     namespace: "desired",
     name: view.name,
     columns: [],
     queryDefinition: view.definition,
-    populated: view.populated,
+    populateOnCreate: view.populateOnCreate,
   }));
   return {
     source: "design",
@@ -875,4 +876,39 @@ export function alignRelationshipColumnTypes(content, relationship) {
   const revisedColumns = new Map(revisedSource.columns.map(column => [column.id, column]));
   for (const change of changes) revisedColumns.get(change.sourceColumnId).dataType = change.to;
   return { content: revised, changes };
+}
+
+export function saveDesignView(content, values, randomUUID = crypto.randomUUID.bind(crypto)) {
+  const name = validatedName(values.name, "view name");
+  const definition = String(values.definition || "").trim().replace(/;+\s*$/, "");
+  const kind = values.kind === "materialized_view" ? "materialized_view" : "view";
+  if (!definition) throw new Error("Enter the SELECT query that defines this view.");
+  if (/^create\s+/i.test(definition)) {
+    throw new Error("Enter only the SELECT query body. Schemii generates CREATE VIEW and the view name.");
+  }
+  const existing = values.viewId
+    ? content.views.find(view => view.id === values.viewId)
+    : null;
+  if (values.viewId && !existing) throw new Error("The view changed while this editor was open. Reload the design and try again.");
+  const duplicateTable = content.tables.some(table => table.name === name);
+  const duplicateView = content.views.some(view => view.id !== existing?.id && view.name === name);
+  if (duplicateTable || duplicateView) throw new Error(`A table or view named “${name}” already exists in the design.`);
+  const view = {
+    id: existing?.id || id("view", randomUUID),
+    name,
+    kind,
+    definition,
+    populateOnCreate: kind === "materialized_view" ? values.populateOnCreate !== false : null,
+  };
+  const revised = structuredClone(content);
+  if (existing) revised.views = revised.views.map(item => item.id === existing.id ? view : item);
+  else revised.views.push(view);
+  return { content: revised, view };
+}
+
+export function deleteDesignView(content, viewId) {
+  if (!content.views.some(view => view.id === viewId)) throw new Error("The selected view is no longer in this design.");
+  const revised = structuredClone(content);
+  revised.views = revised.views.filter(view => view.id !== viewId);
+  return { content: revised };
 }

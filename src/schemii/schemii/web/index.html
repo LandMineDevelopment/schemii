@@ -135,7 +135,7 @@
 
         <section class="views-workspace layer-panel" id="views-workspace" data-layer-panel="views" aria-label="Views browser" hidden>
           <aside class="views-sidebar">
-            <header><span><small>Live relation browser</small><strong>Views</strong></span><button class="ui-button compact" id="refresh-views-button" type="button">Refresh</button></header>
+            <header><span><small id="views-source-label">Relation browser</small><strong>Views</strong></span><span class="views-header-actions"><button class="ui-icon-button compact" id="refresh-views-button" type="button" data-ui-icon="refresh" title="Refresh views" aria-label="Refresh views"></button><button class="ui-button compact primary" id="create-view-button" type="button" disabled>Create</button></span></header>
             <label class="search-field"><span>Search views</span><input id="views-search" type="search" autocomplete="off" /></label>
             <div class="view-filters" role="group" aria-label="View type filter">
               <button class="active" type="button" data-view-filter="all" aria-pressed="true">All</button>
@@ -147,12 +147,6 @@
           <article class="view-detail" id="view-detail">
             <div class="empty-panel ui-state surface"><span class="ui-state__mark" aria-hidden="true">VIEW</span><strong>No view selected</strong><p>Open a workspace, then select an ordinary or materialized view from its live catalog.</p></div>
           </article>
-          <nav class="view-actions ui-action-group" aria-label="View actions">
-            <button class="ui-button compact" type="button" data-unavailable="view-create">Create view</button>
-            <button class="ui-button compact" type="button" data-unavailable="view-replace">Replace definition</button>
-            <button class="ui-button compact" type="button" data-unavailable="view-delete">Delete view</button>
-            <button class="ui-button compact" type="button" data-unavailable="view-lineage">View lineage</button>
-          </nav>
         </section>
 
         <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" aria-label="SQL workspace" hidden>
@@ -240,6 +234,28 @@
         </div>
         <div class="form-status" id="design-table-status" aria-live="polite"></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-table-button" type="submit">Create table</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="ui-dialog editor-dialog design-view-dialog" id="design-view-dialog" aria-labelledby="design-view-title">
+      <form class="ui-dialog__shell" id="design-view-form">
+        <header class="ui-dialog__head"><div><small>Source-derived view</small><h2 id="design-view-title">Create view</h2><p id="design-view-copy">Write one SELECT query. Schemii derives the inputs, transformations, outputs, and consumers without contacting PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close view editor"></button></header>
+        <div class="design-view-body">
+          <section class="design-view-fields" aria-label="View definition">
+            <div class="design-view-identity">
+              <label class="design-field"><span>View name</span><input id="design-view-name" required maxlength="63" autocomplete="off" placeholder="customer_totals" /></label>
+              <label class="design-field"><span>Storage</span><select id="design-view-kind"><option value="view">Ordinary view</option><option value="materialized_view">Materialized view</option></select></label>
+            </div>
+            <label class="check-row design-view-population" id="design-view-population-row" hidden><input id="design-view-populate" type="checkbox" checked /><span>Populate stored results when created</span></label>
+            <label class="design-field design-view-query"><span>SELECT query body</span><textarea id="design-view-definition" required spellcheck="false" placeholder="SELECT&#10;    customer_id,&#10;    sum(total) AS lifetime_value&#10;FROM orders&#10;GROUP BY customer_id"></textarea><small>Do not enter CREATE VIEW; the design owns the name and storage choice above.</small></label>
+          </section>
+          <section class="design-view-preview" aria-labelledby="design-view-preview-title">
+            <header><span><small>Derived at request time</small><strong id="design-view-preview-title">Query story preview</strong></span></header>
+            <div id="design-view-preview"></div>
+          </section>
+        </div>
+        <div class="form-status" id="design-view-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-view-button" type="submit">Create view</button></footer>
       </form>
     </dialog>
 

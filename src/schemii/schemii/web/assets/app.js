@@ -4,6 +4,7 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
   deleteDesignKey,
@@ -16,6 +17,7 @@ import {
   saveDesignCheck,
   saveDesignIndex,
   saveDesignKey,
+  saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
   suggestDesignKeyName,
@@ -41,6 +43,7 @@ import {
   updateWorkspacePreferences,
   workspaceNavigationHref,
 } from "./workspace-navigation.js";
+import { renderDesignViewStory } from "./view-story.js";
 
 const byId = id => document.getElementById(id);
 const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
@@ -97,6 +100,8 @@ const elements = {
   viewsSearch: byId("views-search"),
   viewDetail: byId("view-detail"),
   refreshViewsButton: byId("refresh-views-button"),
+  createViewButton: byId("create-view-button"),
+  viewsSourceLabel: byId("views-source-label"),
   sqlDraft: byId("sql-draft"),
   newSqlDraftButton: byId("new-sql-draft-button"),
   sqlTargetConnection: byId("sql-target-connection"),
@@ -147,6 +152,18 @@ const elements = {
   addDesignColumnButton: byId("add-design-column-button"),
   designTableStatus: byId("design-table-status"),
   saveDesignTableButton: byId("save-design-table-button"),
+  designViewDialog: byId("design-view-dialog"),
+  designViewForm: byId("design-view-form"),
+  designViewTitle: byId("design-view-title"),
+  designViewCopy: byId("design-view-copy"),
+  designViewName: byId("design-view-name"),
+  designViewKind: byId("design-view-kind"),
+  designViewPopulationRow: byId("design-view-population-row"),
+  designViewPopulate: byId("design-view-populate"),
+  designViewDefinition: byId("design-view-definition"),
+  designViewPreview: byId("design-view-preview"),
+  designViewStatus: byId("design-view-status"),
+  saveDesignViewButton: byId("save-design-view-button"),
   generatedExpressionHelpDialog: byId("generated-expression-help-dialog"),
   designKeyDialog: byId("design-key-dialog"),
   designKeyForm: byId("design-key-form"),
@@ -289,6 +306,19 @@ const state = {
   selectedTableName: null,
   selectedViewName: null,
   selectedViewKind: null,
+  selectedViewOutputOrdinal: null,
+  viewAnalysisCache: new Map(),
+  viewAnalysisLoadingKey: null,
+  viewAnalysisError: null,
+  viewAnalysisErrorKey: null,
+  viewAnalysisGeneration: 0,
+  designViewEditorId: null,
+  designViewPreviewAnalysis: null,
+  designViewPreviewError: null,
+  designViewPreviewLoading: false,
+  designViewPreviewOutputOrdinal: null,
+  designViewPreviewTimer: null,
+  designViewPreviewGeneration: 0,
   activeLayer: "tables",
   viewFilter: "all",
   connectionEditorId: null,
@@ -405,6 +435,7 @@ function updateDesignControls() {
   elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index on selected table";
   elements.editTableButton.disabled = !selected || busy;
   elements.deleteTableButton.disabled = !selected || busy;
+  elements.createViewButton.disabled = !detached || busy;
 }
 
 function workspaceStorage() {
@@ -551,6 +582,7 @@ function updateHeader() {
   elements.refreshCatalogButton.title = detached ? "Refresh saved design" : "Refresh live catalog";
   elements.refreshCatalogButton.setAttribute("aria-label", elements.refreshCatalogButton.title);
   elements.refreshViewsButton.disabled = state.catalogLoading;
+  elements.createViewButton.disabled = !detached || state.catalogLoading || state.designSubmitting || state.layoutConflict;
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
@@ -1529,11 +1561,54 @@ function renderCatalogSurfaces() {
 function selectView(view, { historyMode = "push" } = {}) {
   state.selectedViewName = view?.name || null;
   state.selectedViewKind = view?.catalogKind || null;
+  state.selectedViewOutputOrdinal = null;
+  state.viewAnalysisError = null;
+  state.viewAnalysisErrorKey = null;
   renderViews();
   syncWorkspaceNavigation(historyMode);
 }
 
+function viewAnalysisKey(view) {
+  return `${state.activeWorkspace?.id || "none"}:${view.designId || view.name}:${view.queryDefinition}`;
+}
+
+async function analyzeSelectedDesignView(view, { force = false } = {}) {
+  if (!isDetachedWorkspace() || !state.design || !view?.designId) return;
+  const key = viewAnalysisKey(view);
+  if (!force && (state.viewAnalysisCache.has(key) || state.viewAnalysisLoadingKey === key)) return;
+  const generation = ++state.viewAnalysisGeneration;
+  const workspaceId = state.activeWorkspace.id;
+  state.viewAnalysisLoadingKey = key;
+  state.viewAnalysisError = null;
+  state.viewAnalysisErrorKey = null;
+  renderViews();
+  try {
+    const analysis = await api.analyzeDesignView(workspaceId, {
+      viewId: view.designId,
+      name: view.name,
+      definition: view.queryDefinition,
+    });
+    if (generation !== state.viewAnalysisGeneration || state.activeWorkspace?.id !== workspaceId) return;
+    state.viewAnalysisCache.set(key, analysis);
+    if (!state.selectedViewOutputOrdinal && analysis.outputs.length) {
+      state.selectedViewOutputOrdinal = analysis.outputs[0].ordinal;
+    }
+  } catch (error) {
+    if (generation !== state.viewAnalysisGeneration) return;
+    state.viewAnalysisError = error;
+    state.viewAnalysisErrorKey = key;
+  } finally {
+    if (generation === state.viewAnalysisGeneration) {
+      state.viewAnalysisLoadingKey = null;
+      renderViews();
+    }
+  }
+}
+
 function renderViews() {
+  const desired = state.catalog?.source === "design";
+  elements.viewsSourceLabel.textContent = desired ? "Desired schema" : "Live PostgreSQL";
+  elements.createViewButton.hidden = !desired;
   renderViewsList(elements.viewsList, {
     catalog: state.catalog,
     query: elements.viewsSearch.value,
@@ -1542,7 +1617,231 @@ function renderViews() {
     onSelect: selectView,
   });
   const view = allViews(state.catalog).find(item => item.name === state.selectedViewName && item.catalogKind === state.selectedViewKind) || null;
-  renderViewDetail(elements.viewDetail, view);
+  if (!desired) {
+    renderViewDetail(elements.viewDetail, view);
+    return;
+  }
+  if (!view) {
+    renderDesignViewStory(elements.viewDetail, { view: null });
+    return;
+  }
+  const key = viewAnalysisKey(view);
+  const analysis = state.viewAnalysisCache.get(key) || null;
+  renderDesignViewStory(elements.viewDetail, {
+    view,
+    analysis,
+    loading: state.viewAnalysisLoadingKey === key,
+    error: state.viewAnalysisErrorKey === key ? state.viewAnalysisError : null,
+    selectedOutputOrdinal: state.selectedViewOutputOrdinal,
+    onSelectOutput: output => {
+      state.selectedViewOutputOrdinal = output.ordinal;
+      renderViews();
+    },
+    onEdit: () => openDesignViewEditor(view.designId),
+    onDelete: () => confirmDeleteDesignView(view.designId),
+    onRetry: () => analyzeSelectedDesignView(view, { force: true }),
+  });
+  if (!analysis && state.viewAnalysisLoadingKey !== key && state.viewAnalysisErrorKey !== key) {
+    void analyzeSelectedDesignView(view);
+  }
+}
+
+function selectedDesignView() {
+  if (!isDetachedWorkspace() || !state.design || !state.selectedViewName) return null;
+  return state.design.content.views.find(view => (
+    view.name === state.selectedViewName && view.kind === state.selectedViewKind
+  )) || null;
+}
+
+function quotedSqlIdentifier(value) {
+  return `"${String(value).replaceAll('"', '""')}"`;
+}
+
+function designViewDraft() {
+  return {
+    designId: state.designViewEditorId,
+    namespace: "desired",
+    name: elements.designViewName.value.trim() || "new_view",
+    catalogKind: elements.designViewKind.value,
+    queryDefinition: elements.designViewDefinition.value,
+    populateOnCreate: elements.designViewKind.value === "materialized_view"
+      ? elements.designViewPopulate.checked
+      : null,
+  };
+}
+
+function renderDesignViewPreview() {
+  renderDesignViewStory(elements.designViewPreview, {
+    view: designViewDraft(),
+    analysis: state.designViewPreviewAnalysis,
+    loading: state.designViewPreviewLoading,
+    error: state.designViewPreviewError,
+    selectedOutputOrdinal: state.designViewPreviewOutputOrdinal,
+    onSelectOutput: output => {
+      state.designViewPreviewOutputOrdinal = output.ordinal;
+      renderDesignViewPreview();
+    },
+    compact: true,
+  });
+}
+
+async function analyzeDesignViewDraft() {
+  window.clearTimeout(state.designViewPreviewTimer);
+  const definition = elements.designViewDefinition.value.trim();
+  if (!elements.designViewDialog.open || !definition) {
+    state.designViewPreviewLoading = false;
+    state.designViewPreviewAnalysis = null;
+    state.designViewPreviewError = null;
+    renderDesignViewPreview();
+    return;
+  }
+  const generation = ++state.designViewPreviewGeneration;
+  const workspaceId = state.activeWorkspace.id;
+  state.designViewPreviewLoading = true;
+  state.designViewPreviewError = null;
+  renderDesignViewPreview();
+  try {
+    const analysis = await api.analyzeDesignView(workspaceId, {
+      viewId: state.designViewEditorId,
+      name: elements.designViewName.value.trim() || "new_view",
+      definition,
+    });
+    if (generation !== state.designViewPreviewGeneration || !elements.designViewDialog.open) return;
+    state.designViewPreviewAnalysis = analysis;
+    state.designViewPreviewOutputOrdinal = analysis.outputs[0]?.ordinal || null;
+  } catch (error) {
+    if (generation !== state.designViewPreviewGeneration || !elements.designViewDialog.open) return;
+    state.designViewPreviewAnalysis = null;
+    state.designViewPreviewError = error;
+  } finally {
+    if (generation === state.designViewPreviewGeneration) {
+      state.designViewPreviewLoading = false;
+      renderDesignViewPreview();
+    }
+  }
+}
+
+function scheduleDesignViewPreview(delay = 280) {
+  window.clearTimeout(state.designViewPreviewTimer);
+  state.designViewPreviewTimer = window.setTimeout(analyzeDesignViewDraft, delay);
+}
+
+function updateDesignViewPopulation() {
+  elements.designViewPopulationRow.hidden = elements.designViewKind.value !== "materialized_view";
+  renderDesignViewPreview();
+}
+
+function openDesignViewEditor(viewId = null) {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  const view = viewId ? state.design.content.views.find(item => item.id === viewId) : null;
+  if (viewId && !view) {
+    showToast("The selected view is no longer in this design.", { error: true });
+    return;
+  }
+  state.designViewEditorId = view?.id || null;
+  state.designViewPreviewGeneration += 1;
+  state.designViewPreviewAnalysis = null;
+  state.designViewPreviewError = null;
+  state.designViewPreviewLoading = false;
+  state.designViewPreviewOutputOrdinal = null;
+  elements.designViewForm.reset();
+  replace(elements.designViewStatus);
+  elements.designViewTitle.textContent = view ? `Edit ${view.name}` : "Create view";
+  elements.designViewCopy.textContent = view
+    ? "Change the query and Schemii will re-derive its complete data story before anything is saved."
+    : "Write one SELECT query. Schemii derives the inputs, transformations, outputs, and consumers without contacting PostgreSQL.";
+  elements.saveDesignViewButton.textContent = view ? "Save view" : "Create view";
+  elements.designViewName.value = view?.name || "";
+  elements.designViewKind.value = view?.kind || "view";
+  elements.designViewPopulate.checked = view?.populateOnCreate !== false;
+  const firstTable = state.design.content.tables[0];
+  elements.designViewDefinition.value = view?.definition || (firstTable
+    ? `SELECT\n    *\nFROM ${quotedSqlIdentifier(firstTable.name)}`
+    : "SELECT\n    1 AS example");
+  updateDesignViewPopulation();
+  openDialog(elements.designViewDialog);
+  renderDesignViewPreview();
+  scheduleDesignViewPreview(0);
+  elements.designViewName.focus();
+}
+
+async function submitDesignView(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  const editing = Boolean(state.designViewEditorId);
+  let result;
+  try {
+    result = saveDesignView(state.design.content, {
+      viewId: state.designViewEditorId,
+      name: elements.designViewName.value,
+      kind: elements.designViewKind.value,
+      populateOnCreate: elements.designViewPopulate.checked,
+      definition: elements.designViewDefinition.value,
+    });
+  } catch (error) {
+    replace(elements.designViewStatus, errorPanel(error));
+    return;
+  }
+  if (!await flushLayoutBeforeTransition()) return;
+  state.designSubmitting = true;
+  elements.saveDesignViewButton.disabled = true;
+  updateDesignControls();
+  replace(elements.designViewStatus, element("span", { text: "Validating the query and saving the desired view…" }));
+  try {
+    state.viewAnalysisCache.clear();
+    const design = await replaceActiveDesign(result.content, {
+      selectedViewName: result.view.name,
+      selectedViewKind: result.view.kind,
+    });
+    if (!design) return;
+    elements.designViewDialog.close();
+    state.selectedViewOutputOrdinal = null;
+    syncWorkspaceNavigation("replace");
+    showToast(`${editing ? "Updated" : "Created"} ${result.view.name} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designViewStatus, conflictPanel(error));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignViewButton.disabled = false;
+    updateHeader();
+  }
+}
+
+function confirmDeleteDesignView(viewId) {
+  const view = state.design?.content.views.find(item => item.id === viewId);
+  if (!view || state.designSubmitting) return;
+  const catalogView = allViews(state.catalog).find(item => item.designId === view.id);
+  const analysis = catalogView ? state.viewAnalysisCache.get(viewAnalysisKey(catalogView)) : null;
+  const consumerCopy = analysis?.consumers.length
+    ? ` ${analysis.consumers.length} other designed view${analysis.consumers.length === 1 ? "" : "s"} currently reference it and will become unresolved.`
+    : "";
+  askConfirmation({
+    title: "Delete designed view",
+    message: `Delete “${view.name}” from the desired schema?${consumerCopy}`,
+    label: "Delete view",
+    callback: async () => {
+      if (!await flushLayoutBeforeTransition()) return;
+      state.designSubmitting = true;
+      updateDesignControls();
+      try {
+        const result = deleteDesignView(state.design.content, view.id);
+        state.viewAnalysisCache.clear();
+        const design = await replaceActiveDesign(result.content, {
+          selectedViewName: null,
+          selectedViewKind: null,
+        });
+        if (!design) return;
+        state.selectedViewOutputOrdinal = null;
+        syncWorkspaceNavigation("replace");
+        showToast(`Deleted ${view.name} from design revision ${design.revision}.`);
+      } catch (error) {
+        errorToast(error);
+      } finally {
+        state.designSubmitting = false;
+        updateHeader();
+      }
+    },
+  });
 }
 
 function renderFunctionsBrowser() {
@@ -1747,7 +2046,11 @@ function conflictPanel(error) {
   });
 }
 
-async function replaceActiveDesign(content, { selectedTableName = state.selectedTableName } = {}) {
+async function replaceActiveDesign(content, {
+  selectedTableName = state.selectedTableName,
+  selectedViewName = state.selectedViewName,
+  selectedViewKind = state.selectedViewKind,
+} = {}) {
   const workspaceId = state.activeWorkspace.id;
   const design = await api.replaceDesign(workspaceId, {
     expectedDesignRevision: state.design.revision,
@@ -1759,6 +2062,8 @@ async function replaceActiveDesign(content, { selectedTableName = state.selected
   state.designLayout = layout;
   state.catalog = designToCatalog(state.activeWorkspace, design);
   state.selectedTableName = selectedTableName;
+  state.selectedViewName = selectedViewName;
+  state.selectedViewKind = selectedViewKind;
   state.catalogError = null;
   state.layoutError = null;
   canvas.setCatalog(state.catalog, designPositions(design, layout));
@@ -3110,6 +3415,18 @@ function bindEvents() {
   elements.designTableForm.addEventListener("submit", submitDesignTable);
   elements.designTableDialog.addEventListener("close", () => {
     state.designTableEditorId = null;
+  });
+  elements.createViewButton.addEventListener("click", () => openDesignViewEditor());
+  elements.designViewForm.addEventListener("submit", submitDesignView);
+  elements.designViewName.addEventListener("input", () => scheduleDesignViewPreview());
+  elements.designViewDefinition.addEventListener("input", () => scheduleDesignViewPreview());
+  elements.designViewKind.addEventListener("change", updateDesignViewPopulation);
+  elements.designViewPopulate.addEventListener("change", renderDesignViewPreview);
+  elements.designViewDialog.addEventListener("close", () => {
+    window.clearTimeout(state.designViewPreviewTimer);
+    state.designViewPreviewGeneration += 1;
+    state.designViewEditorId = null;
+    state.designViewPreviewLoading = false;
   });
   elements.designKeyForm.addEventListener("submit", submitDesignKey);
   elements.designKeyKind.addEventListener("change", updateGeneratedKeyName);

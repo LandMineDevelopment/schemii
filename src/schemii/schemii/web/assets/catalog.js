@@ -255,13 +255,14 @@ export function allViews(catalog) {
 export function renderViewsList(container, { catalog, query = "", filter = "all", selectedName, onSelect }) {
   replace(container);
   if (!catalog) {
-    container.append(emptyPanel("VIEW", "No catalog loaded", "Open a workspace to browse its live views."));
+    container.append(emptyPanel("VIEW", "No workspace loaded", "Open a workspace to browse its views."));
     return [];
   }
+  const desired = catalog.source === "design";
   const needle = normalizedSearch(query);
   const views = allViews(catalog).filter(view => (filter === "all" || view.catalogKind === filter) && (!needle || `${view.namespace}.${view.name}`.toLocaleLowerCase().includes(needle)));
   if (!views.length) {
-    container.append(emptyPanel("0", "No matching views", query || filter !== "all" ? "No live catalog views match this filter." : "The live catalog reported no ordinary or materialized views."));
+    container.append(emptyPanel("0", "No matching views", query || filter !== "all" ? "No views match this filter." : desired ? "This design has no ordinary or materialized views yet." : "The live catalog reported no ordinary or materialized views."));
     return views;
   }
   for (const view of views.slice(0, MAX_BROWSER_ITEMS)) {
@@ -270,11 +271,14 @@ export function renderViewsList(container, { catalog, query = "", filter = "all"
       type: "button",
       attrs: { "aria-pressed": view.name === selectedName ? "true" : "false" },
     });
-    button.append(element("strong", { text: view.name }), element("span", { text: `${view.catalogKind === "view" ? "Ordinary view" : "Materialized view"} · ${view.columns.length} ${view.columns.length === 1 ? "column" : "columns"}` }));
+    const detail = desired
+      ? `${view.catalogKind === "view" ? "Ordinary view" : "Materialized view"} · designed query`
+      : `${view.catalogKind === "view" ? "Ordinary view" : "Materialized view"} · ${view.columns.length} ${view.columns.length === 1 ? "column" : "columns"}`;
+    button.append(element("strong", { text: view.name, title: view.name }), element("span", { text: detail }));
     button.addEventListener("click", () => onSelect(view));
     container.append(button);
   }
-  if (views.length > MAX_BROWSER_ITEMS) container.append(element("p", { className: "none-reported", text: `Showing the first ${MAX_BROWSER_ITEMS} of ${views.length} matching live views. Refine the search to narrow the list.` }));
+  if (views.length > MAX_BROWSER_ITEMS) container.append(element("p", { className: "none-reported", text: `Showing the first ${MAX_BROWSER_ITEMS} of ${views.length} matching views. Refine the search to narrow the list.` }));
   return views;
 }
 

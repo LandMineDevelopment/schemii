@@ -5,6 +5,7 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
   deleteDesignKey,
@@ -17,6 +18,7 @@ import {
   saveDesignCheck,
   saveDesignIndex,
   saveDesignKey,
+  saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
   suggestDesignKeyName,
@@ -72,6 +74,46 @@ test("desired designs use the existing catalog canvas without losing stable layo
     designLayoutContent(design, [{ name: "customers", x: 140, y: 160 }]),
     { objects: [{ objectId: table.id, layer: "tables", x: 140, y: 160 }] },
   );
+});
+
+test("view authoring stores only durable source inputs and retains stable identity on edit", () => {
+  const base = { tables: [], relationships: [], functions: [], views: [] };
+  const created = saveDesignView(base, {
+    name: "account_totals",
+    kind: "materialized_view",
+    populateOnCreate: false,
+    definition: "SELECT account_id, sum(total) AS total FROM orders GROUP BY account_id;",
+  }, () => uuids[0]);
+
+  assert.equal(created.view.id, `view_${"1".repeat(32)}`);
+  assert.equal(created.view.populateOnCreate, false);
+  assert.equal(created.view.definition.endsWith(";"), false);
+  assert.deepEqual(Object.keys(created.view), ["id", "name", "kind", "definition", "populateOnCreate"]);
+
+  const edited = saveDesignView(created.content, {
+    viewId: created.view.id,
+    name: "account_totals",
+    kind: "view",
+    definition: "SELECT account_id, total FROM orders",
+  }, () => uuids[1]);
+  assert.equal(edited.view.id, created.view.id);
+  assert.equal(edited.view.populateOnCreate, null);
+  assert.equal(deleteDesignView(edited.content, edited.view.id).content.views.length, 0);
+});
+
+test("view authoring rejects generated CREATE wrappers and relation-name collisions", () => {
+  const table = createDesignTable("accounts", [{ name: "id", dataType: "uuid", nullable: false }], () => uuids[0]);
+  const content = { tables: [table], relationships: [], functions: [], views: [] };
+  assert.throws(() => saveDesignView(content, {
+    name: "accounts",
+    kind: "view",
+    definition: "SELECT 1",
+  }, () => uuids[1]), /already exists/);
+  assert.throws(() => saveDesignView(content, {
+    name: "account_view",
+    kind: "view",
+    definition: "CREATE VIEW account_view AS SELECT 1",
+  }, () => uuids[1]), /SELECT query body/);
 });
 
 test("table authoring rejects duplicate columns before making a request", () => {
