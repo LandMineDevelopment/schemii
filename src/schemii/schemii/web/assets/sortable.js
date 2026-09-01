@@ -77,14 +77,16 @@ export function installSortableList(container, {
     const current = items();
     active = {
       item,
-      handle,
       pointerId: event.pointerId,
       startIndex: current.indexOf(item),
       sortKey: item.dataset.sortKey || "",
     };
     item.classList.add("is-sorting");
     container.classList.add("is-sorting");
-    handle.setPointerCapture?.(event.pointerId);
+    // Capture on the stable container. Capturing on the handle is unreliable because
+    // the handle moves with its row; mobile browsers may drop capture when that row
+    // is reinserted to preview a new position.
+    container.setPointerCapture?.(event.pointerId);
   }
 
   function onPointerMove(event) {
@@ -92,21 +94,20 @@ export function installSortableList(container, {
     event.preventDefault();
     const candidates = items().filter(item => item !== active.item);
     const before = candidates.find(item => event.clientY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2);
+    if (before === active.item.nextElementSibling || (!before && active.item === container.lastElementChild)) return;
     container.insertBefore(active.item, before || null);
   }
 
   function onPointerUp(event) {
     if (!active || event.pointerId !== active.pointerId) return;
-    const handle = active.handle;
     finish();
-    if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    if (container.hasPointerCapture?.(event.pointerId)) container.releasePointerCapture(event.pointerId);
   }
 
   function onPointerCancel(event) {
     if (!active || event.pointerId !== active.pointerId) return;
-    const handle = active.handle;
     finish({ cancelled: true });
-    if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    if (container.hasPointerCapture?.(event.pointerId)) container.releasePointerCapture(event.pointerId);
   }
 
   function onLostPointerCapture(event) {

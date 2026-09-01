@@ -309,6 +309,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-column-row { display: grid; min-width: 0; grid-template-columns: 32px minmax(120px, 1fr) minmax(150px, 1.25fr) auto auto auto; align-items: end; gap: 8px; padding: 9px; border: 1px solid #29333f; border-radius: 7px; background: #141a21; }
 .design-column-row > label { display: grid; min-width: 0; gap: 5px; color: #778493; font-size: 7px; }
 .design-sort-handle { align-self: end; color: #657383; cursor: grab; touch-action: none; }
+.ui-icon-button.design-sort-handle svg { width: 16px; }
 .design-sort-handle:active { cursor: grabbing; }
 .design-columns.is-sorting, .design-ordered-columns.is-sorting, #design-key-columns.is-sorting { user-select: none; }
 .design-column-row.is-sorting, .design-key-column.is-sorting { z-index: 2; opacity: .78; border-color: #679ed0; background: #172331; box-shadow: 0 10px 24px rgba(0, 0, 0, .34); }
@@ -522,6 +523,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .design-key-column { grid-template-columns: 40px 20px minmax(0, 1fr) auto; gap: 6px; padding: 7px; }
   .design-key-column-actions { display: none; }
   .design-key-column > .design-sort-handle { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
+  .ui-icon-button.design-sort-handle svg { width: 18px; }
   .design-relationship-body { grid-template-columns: 1fr; }
   .design-relationship-body > .span-all { grid-column: 1; }
   .relationship-mapping > header { flex-wrap: wrap; }

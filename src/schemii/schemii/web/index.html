@@ -235,7 +235,7 @@
         <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="design-table-title">Create table</h2><p id="design-table-copy">Add a table and its initial columns. Saving replaces one exact design revision and never contacts PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close table editor"></button></header>
         <div class="design-table-body">
           <label class="design-table-name"><span>Table name</span><input id="design-table-name" required maxlength="63" autocomplete="off" placeholder="customers" /></label>
-          <div class="design-columns-head"><span>Columns · drag to set physical order</span><button class="ui-button compact" id="add-design-column-button" type="button">Add column</button></div>
+          <div class="design-columns-head"><span>Columns · drag the six-dot handle to order</span><button class="ui-button compact" id="add-design-column-button" type="button">Add column</button></div>
           <div class="design-columns" id="design-columns"></div>
         </div>
         <div class="form-status" id="design-table-status" aria-live="polite"></div>
@@ -267,7 +267,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
           <label class="design-field"><span>Key type</span><select id="design-key-kind"><option value="unique">Unique key</option><option value="primary">Primary key</option></select></label>
           <label class="design-field span-all"><span>Constraint name</span><input id="design-key-name" required maxlength="63" autocomplete="off" /></label>
           <section class="design-key-columns span-all" aria-labelledby="design-key-columns-title">
-            <header><strong id="design-key-columns-title">Ordered columns</strong><small>Drag or use arrow keys</small></header>
+            <header><strong id="design-key-columns-title">Ordered columns</strong><small>Drag the six-dot handle or use arrow keys</small></header>
             <div id="design-key-columns"></div>
           </section>
         </div>
@@ -303,7 +303,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
           <label class="check-row"><input id="design-index-unique" type="checkbox" /><span>Unique index</span></label>
           <datalist id="postgres-index-methods"><option value="btree"></option><option value="hash"></option><option value="gist"></option><option value="spgist"></option><option value="gin"></option><option value="brin"></option></datalist>
           <section class="design-key-columns span-all" aria-labelledby="design-index-columns-title">
-            <header><strong id="design-index-columns-title">Ordered columns</strong><small>Drag to order · optional with an expression</small></header>
+            <header><strong id="design-index-columns-title">Ordered columns</strong><small>Drag the six-dot handle · optional with an expression</small></header>
             <div class="design-ordered-columns" id="design-index-columns"></div>
           </section>
           <label class="design-field span-all"><span>Index expression · optional</span><textarea id="design-index-expression" spellcheck="false" placeholder="lower(email)"></textarea></label>
