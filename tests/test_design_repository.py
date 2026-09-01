@@ -211,6 +211,26 @@ def test_design_validation_rejects_conflicting_generators_and_cross_table_depend
             ),
         )
 
+    generated_dependency = content().model_dump(mode="json", by_alias=True)
+    generated_dependency["tables"][0]["columns"].append(
+        {
+            "id": "column_" + "6" * 32,
+            "name": "double_email_length",
+            "dataType": "integer",
+            "nullable": False,
+            "generatedExpression": "email_length * 2",
+            "generatedSourceColumnIds": [NAME_LENGTH_COLUMN],
+        }
+    )
+    with pytest.raises(DesignValidationError, match="other generated columns"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace.model_validate(
+                {"expectedDesignRevision": 0, "content": generated_dependency}
+            ),
+        )
+
 
 def test_new_dependency_fields_are_backward_compatible_with_saved_design_json() -> None:
     legacy = content().model_dump(mode="json", by_alias=True)

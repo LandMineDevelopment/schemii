@@ -25,6 +25,8 @@ const ICON_PATHS = Object.freeze({
   upload: '<path d="M10 12V3M6.5 6.5 10 3l3.5 3.5M4 14v2h12v-2"/>',
   download: '<path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14v2h12v-2"/>',
   help: '<circle cx="10" cy="10" r="7"/><path d="M7.8 7.6A2.4 2.4 0 0 1 10 6.2c1.4 0 2.4.8 2.4 2 0 1.7-2.4 1.8-2.4 3.5M10 14.5h.01"/>',
+  info: '<circle cx="10" cy="10" r="7"/><path d="M10 9v5M10 6h.01"/>',
+  drag: '<circle cx="7" cy="5" r=".8" fill="currentColor" stroke="none"/><circle cx="13" cy="5" r=".8" fill="currentColor" stroke="none"/><circle cx="7" cy="10" r=".8" fill="currentColor" stroke="none"/><circle cx="13" cy="10" r=".8" fill="currentColor" stroke="none"/><circle cx="7" cy="15" r=".8" fill="currentColor" stroke="none"/><circle cx="13" cy="15" r=".8" fill="currentColor" stroke="none"/>',
   tables: '<rect x="3.5" y="4" width="13" height="12" rx="1.5"/><path d="M3.5 8h13M8 8v8M12.5 8v8"/>',
   views: '<path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/>',
   relationship: '<circle cx="5.5" cy="6" r="2"/><circle cx="14.5" cy="14" r="2"/><path d="M7.5 6h2.2a3 3 0 0 1 3 3v2a3 3 0 0 0 1.8 3"/>',

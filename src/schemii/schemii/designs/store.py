@@ -124,6 +124,9 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
         all_ids.append(table.id)
         _unique([column.name for column in table.columns], category=f"columns in {table.name}")
         column_ids = {column.id for column in table.columns}
+        generated_column_ids = {
+            column.id for column in table.columns if column.generated_expression is not None
+        }
         for column in table.columns:
             _valid_identifier(column.name, category="column name")
             _safe_fragment(column.data_type, category=f"data type for {table.name}.{column.name}")
@@ -173,6 +176,11 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                 ):
                     raise DesignValidationError(
                         "Generated columns may reference unique sibling columns only",
+                        details={"table": table.name, "column": column.name},
+                    )
+                if set(column.generated_source_column_ids) & generated_column_ids:
+                    raise DesignValidationError(
+                        "Generated columns cannot reference other generated columns",
                         details={"table": table.name, "column": column.name},
                     )
             elif column.generated_source_column_ids:

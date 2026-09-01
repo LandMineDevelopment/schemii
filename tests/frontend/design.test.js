@@ -141,6 +141,39 @@ test("column value behaviors and generated dependencies are authored from one ta
   }], nextUuid), /one value behavior/);
 });
 
+test("table column reordering preserves physical order without silently changing composite key order", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("memberships", [
+    { name: "tenant_id", dataType: "uuid", nullable: false, primary: true },
+    { name: "member_id", dataType: "uuid", nullable: false, primary: true },
+    { name: "label", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const originalPrimaryOrder = [...table.keys[0].columnIds];
+
+  const reordered = updateDesignTable(
+    { tables: [table], relationships: [], functions: [], views: [] },
+    table.id,
+    table.name,
+    [...table.columns].reverse().map(column => ({ ...column, primary: originalPrimaryOrder.includes(column.id) })),
+    nextUuid,
+  );
+
+  assert.deepEqual(reordered.columns.map(column => column.name), ["label", "member_id", "tenant_id"]);
+  assert.deepEqual(reordered.keys[0].columnIds, originalPrimaryOrder);
+});
+
+test("generated columns reject dependencies on other generated columns before saving", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+
+  assert.throws(() => createDesignTable("totals", [
+    { name: "quantity", dataType: "integer", nullable: false },
+    { name: "subtotal", dataType: "numeric", nullable: false, generatedExpression: "quantity * 10" },
+    { name: "display_total", dataType: "text", nullable: false, generatedExpression: "subtotal::text" },
+  ], nextUuid), /cannot reference another generated column/);
+});
+
 test("check constraints derive stable dependencies and column renames rewrite SQL identifiers only", () => {
   let value = 1;
   const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;

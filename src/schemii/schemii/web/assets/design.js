@@ -360,8 +360,24 @@ function designTableFromValues(existingTable, name, columnValues, randomUUID) {
       throw new Error(`Generated column “${column.name}” cannot reference itself.`);
     }
   }
-  const primaryColumnIds = designColumns.filter((_, index) => columns[index].primary).map(column => column.id);
+  const generatedColumnIds = new Set(
+    designColumns.filter(column => column.generatedExpression).map(column => column.id),
+  );
+  for (const column of designColumns) {
+    if (!column.generatedExpression) continue;
+    if (column.generatedSourceColumnIds.some(columnId => generatedColumnIds.has(columnId))) {
+      throw new Error(`Generated column “${column.name}” cannot reference another generated column.`);
+    }
+  }
   const existingPrimary = existingTable?.keys.find(key => key.kind === "primary") || null;
+  const selectedPrimaryColumnIds = designColumns.filter((_, index) => columns[index].primary).map(column => column.id);
+  const selectedPrimarySet = new Set(selectedPrimaryColumnIds);
+  const primaryColumnIds = existingPrimary
+    ? [
+        ...existingPrimary.columnIds.filter(columnId => selectedPrimarySet.has(columnId)),
+        ...selectedPrimaryColumnIds.filter(columnId => !existingPrimary.columnIds.includes(columnId)),
+      ]
+    : selectedPrimaryColumnIds;
   const otherKeys = (existingTable?.keys || []).filter(key => key.kind !== "primary");
   const keys = [...otherKeys];
   if (primaryColumnIds.length) {

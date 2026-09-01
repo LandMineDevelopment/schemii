@@ -32,8 +32,9 @@ import {
   renderViewsList,
 } from "./catalog.js";
 import { element, emptyPanel, errorPanel, formatTimestamp, replace } from "./dom.js";
+import { installSortableList, reorderedValues } from "./sortable.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
-import { closeDetailsMenus, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
+import { closeDetailsMenus, createIconButton, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
 import {
   readWorkspaceNavigation,
   readWorkspacePreferences,
@@ -146,6 +147,7 @@ const elements = {
   addDesignColumnButton: byId("add-design-column-button"),
   designTableStatus: byId("design-table-status"),
   saveDesignTableButton: byId("save-design-table-button"),
+  generatedExpressionHelpDialog: byId("generated-expression-help-dialog"),
   designKeyDialog: byId("design-key-dialog"),
   designKeyForm: byId("design-key-form"),
   designKeyTitle: byId("design-key-title"),
@@ -217,6 +219,8 @@ const elements = {
   confirmAction: byId("confirm-action"),
   toast: byId("toast"),
 };
+
+let designColumnDraftSequence = 0;
 
 initializeUi();
 
@@ -1590,7 +1594,21 @@ function appendDesignColumn({
   identity = null,
   generatedExpression = null,
 } = {}) {
-  const row = element("div", { className: "design-column-row", dataset: { designColumnId: id || "" } });
+  designColumnDraftSequence += 1;
+  const row = element("div", {
+    className: "design-column-row",
+    dataset: {
+      designColumnId: id || "",
+      sortKey: id || `draft-column-${designColumnDraftSequence}`,
+    },
+  });
+  const sortHandle = createIconButton({
+    icon: "drag",
+    label: `Reorder ${name || "new column"}`,
+    tooltip: `Drag to reorder ${name || "new column"}`,
+    className: "compact design-sort-handle",
+  });
+  sortHandle.dataset.sortHandle = "";
   const nameInput = element("input", { attrs: { required: "", maxlength: "63", autocomplete: "off", value: name, placeholder: "column_name" }, dataset: { designColumnName: "" } });
   const typeInput = element("input", { attrs: { required: "", maxlength: "512", autocomplete: "off", value: dataType, placeholder: "text" }, dataset: { designColumnType: "" } });
   const nullableInput = element("input", { type: "checkbox", dataset: { designColumnNullable: "" } });
@@ -1619,20 +1637,32 @@ function appendDesignColumn({
     attrs: { maxlength: "262144", autocomplete: "off", value: generatedExpression || defaultExpression || "" },
     dataset: { designColumnExpression: "" },
   });
-  const expressionLabel = element("label", {}, [element("span"), expressionInput]);
+  const expressionTitle = element("span");
+  const expressionHelp = createIconButton({
+    icon: "info",
+    label: "Allowed calculated-column expression syntax",
+    tooltip: "Allowed calculated-column expression syntax",
+    className: "compact",
+  });
+  expressionHelp.addEventListener("click", () => openDialog(elements.generatedExpressionHelpDialog));
+  const expressionHeading = element("span", { className: "design-expression-heading" }, [expressionTitle, expressionHelp]);
+  const expressionField = element("div", { className: "design-expression-field" }, [expressionHeading, expressionInput]);
   const syncBehavior = () => {
     const generated = behaviorSelect.value === "generated";
     const defaulted = behaviorSelect.value === "default";
     const identityBehavior = behaviorSelect.value.startsWith("identity_");
-    expressionLabel.hidden = !generated && !defaulted;
-    expressionLabel.querySelector("span").textContent = generated ? "Generation expression" : "Default expression";
+    expressionField.hidden = !generated && !defaulted;
+    expressionTitle.textContent = generated ? "Generation expression" : "Default expression";
+    expressionHelp.hidden = !generated;
     expressionInput.placeholder = generated ? "quantity * unit_price" : "now()";
+    expressionInput.setAttribute("aria-label", generated ? "Generation expression" : "Default expression");
     expressionInput.required = generated || defaulted;
     nullableInput.disabled = primaryInput.checked || identityBehavior;
     if (nullableInput.disabled) nullableInput.checked = false;
   };
   primaryInput.addEventListener("change", syncBehavior);
   behaviorSelect.addEventListener("change", syncBehavior);
+  nameInput.addEventListener("input", () => designTableColumnSorter.refresh());
   const remove = element("button", { className: "ui-button compact danger-text design-column-remove", type: "button", text: "Remove", attrs: { "aria-label": "Remove column" } });
   remove.addEventListener("click", () => {
     if (elements.designColumns.childElementCount === 1) {
@@ -1640,20 +1670,23 @@ function appendDesignColumn({
       return;
     }
     row.remove();
+    designTableColumnSorter.refresh();
   });
   row.append(
-    element("label", {}, [element("span", { text: "Name" }), nameInput]),
-    element("label", {}, [element("span", { text: "PostgreSQL type" }), typeInput]),
-    element("label", { className: "design-column-check" }, [nullableInput, element("span", { text: "Nullable" })]),
-    element("label", { className: "design-column-check" }, [primaryInput, element("span", { text: "Primary" })]),
+    sortHandle,
+    element("label", { className: "design-column-name" }, [element("span", { text: "Name" }), nameInput]),
+    element("label", { className: "design-column-type" }, [element("span", { text: "PostgreSQL type" }), typeInput]),
+    element("label", { className: "design-column-check design-column-nullable" }, [nullableInput, element("span", { text: "Nullable" })]),
+    element("label", { className: "design-column-check design-column-primary" }, [primaryInput, element("span", { text: "Primary" })]),
     remove,
     element("div", { className: "design-column-value" }, [
       element("label", {}, [element("span", { text: "Value behavior" }), behaviorSelect]),
-      expressionLabel,
+      expressionField,
     ]),
   );
   syncBehavior();
   elements.designColumns.append(row);
+  designTableColumnSorter.refresh();
   return row;
 }
 
@@ -2045,10 +2078,11 @@ function updateGeneratedKeyName() {
 function moveDesignKeyColumn(index, offset) {
   const target = index + offset;
   if (target < 0 || target >= state.designKeyColumnIds.length) return;
-  const columnIds = [...state.designKeyColumnIds];
-  const [moved] = columnIds.splice(index, 1);
-  columnIds.splice(target, 0, moved);
-  state.designKeyColumnIds = columnIds;
+  reorderDesignKeyColumns(index, target);
+}
+
+function reorderDesignKeyColumns(fromIndex, toIndex) {
+  state.designKeyColumnIds = reorderedValues(state.designKeyColumnIds, fromIndex, toIndex);
   renderDesignKeyColumns();
   updateGeneratedKeyName();
 }
@@ -2063,6 +2097,13 @@ function renderOrderedDesignColumns(container, table, columnIds, onMove, emptyCo
   columnIds.forEach((columnId, index) => {
     const column = columns.get(columnId);
     if (!column) return;
+    const sortHandle = createIconButton({
+      icon: "drag",
+      label: `Reorder ${column.name}`,
+      tooltip: `Drag to reorder ${column.name}`,
+      className: "compact design-sort-handle",
+    });
+    sortHandle.dataset.sortHandle = "";
     const up = element("button", {
       className: "ui-button compact",
       type: "button",
@@ -2079,12 +2120,15 @@ function renderOrderedDesignColumns(container, table, columnIds, onMove, emptyCo
     down.disabled = index === columnIds.length - 1;
     up.addEventListener("click", () => onMove(index, -1));
     down.addEventListener("click", () => onMove(index, 1));
-    container.append(element("div", { className: "design-key-column" }, [
-      element("span", { text: String(index + 1).padStart(2, "0") }),
-      element("span", {}, [element("strong", { text: column.name }), element("code", { text: column.dataType })]),
+    container.append(element("div", { className: "design-key-column", dataset: { sortKey: column.id } }, [
+      sortHandle,
+      element("span", { className: "design-key-column-order", text: String(index + 1).padStart(2, "0") }),
+      element("span", { className: "design-key-column-copy" }, [element("strong", { text: column.name }), element("code", { text: column.dataType })]),
       element("span", { className: "design-key-column-actions" }, [up, down]),
     ]));
   });
+  if (container === elements.designKeyColumns) designKeyColumnSorter.refresh();
+  else if (container === elements.designIndexColumns) designIndexColumnSorter.refresh();
 }
 
 function renderDesignKeyColumns() {
@@ -2391,10 +2435,11 @@ function updateDesignIndexDraft() {
 function moveDesignIndexColumn(index, offset) {
   const target = index + offset;
   if (target < 0 || target >= state.designIndexColumnIds.length) return;
-  const columnIds = [...state.designIndexColumnIds];
-  const [moved] = columnIds.splice(index, 1);
-  columnIds.splice(target, 0, moved);
-  state.designIndexColumnIds = columnIds;
+  reorderDesignIndexColumns(index, target);
+}
+
+function reorderDesignIndexColumns(fromIndex, toIndex) {
+  state.designIndexColumnIds = reorderedValues(state.designIndexColumnIds, fromIndex, toIndex);
   renderDesignIndexColumns();
   updateGeneratedIndexName();
 }
@@ -3147,6 +3192,22 @@ function bindEvents() {
     restoreWorkspaceNavigation(readWorkspaceNavigation(window.location.href)).catch(errorToast);
   });
 }
+
+const designTableColumnSorter = installSortableList(elements.designColumns, {
+  itemSelector: ".design-column-row",
+  itemLabel: item => item.querySelector("[data-design-column-name]")?.value || "new column",
+  onReorder: () => designTableColumnSorter.refresh(),
+});
+const designKeyColumnSorter = installSortableList(elements.designKeyColumns, {
+  itemSelector: ".design-key-column",
+  itemLabel: item => item.querySelector("strong")?.textContent || "key column",
+  onReorder: reorderDesignKeyColumns,
+});
+const designIndexColumnSorter = installSortableList(elements.designIndexColumns, {
+  itemSelector: ".design-key-column",
+  itemLabel: item => item.querySelector("strong")?.textContent || "index column",
+  onReorder: reorderDesignIndexColumns,
+});
 
 bindEvents();
 renderCatalogSurfaces();
