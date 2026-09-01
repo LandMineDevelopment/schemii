@@ -37,6 +37,45 @@ export function installSortableList(container, {
   const items = () => directItems(container, itemSelector);
   const handleFor = item => item.querySelector(handleSelector);
 
+  function clearDropMarkers() {
+    for (const item of items()) item.classList.remove("sort-drop-before", "sort-drop-after");
+  }
+
+  function markDropPosition(before, candidates) {
+    clearDropMarkers();
+    const marker = before || candidates.at(-1);
+    if (marker) marker.classList.add(before ? "sort-drop-before" : "sort-drop-after");
+  }
+
+  function captureVisualPositions() {
+    const positions = new Map(items().map(item => [item, item.getBoundingClientRect().top]));
+    for (const item of items()) item.getAnimations?.().forEach(animation => animation.cancel());
+    return positions;
+  }
+
+  function animateFromPositions(positions) {
+    const view = container.ownerDocument?.defaultView;
+    if (view?.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    for (const item of items()) {
+      const previousTop = positions.get(item);
+      if (previousTop === undefined || typeof item.animate !== "function") continue;
+      const deltaY = previousTop - item.getBoundingClientRect().top;
+      if (Math.abs(deltaY) < 1) continue;
+      item.animate(
+        [
+          { transform: `translate3d(0, ${deltaY}px, 0)` },
+          { transform: "translate3d(0, 0, 0)" },
+        ],
+        { duration: 190, easing: "cubic-bezier(.22, 1, .36, 1)" },
+      );
+    }
+  }
+
+  function updateActivePosition() {
+    if (!active) return;
+    active.item.dataset.sortPosition = `Position ${items().indexOf(active.item) + 1} of ${items().length}`;
+  }
+
   function refresh() {
     const current = items();
     current.forEach((item, index) => {
@@ -51,7 +90,9 @@ export function installSortableList(container, {
 
   function restoreActiveItem() {
     if (!active) return;
+    const positions = captureVisualPositions();
     moveItem(container, active.item, items(), active.startIndex);
+    animateFromPositions(positions);
   }
 
   function finish({ cancelled = false } = {}) {
@@ -59,7 +100,9 @@ export function installSortableList(container, {
     const drag = active;
     if (cancelled) restoreActiveItem();
     drag.item.classList.remove("is-sorting");
+    delete drag.item.dataset.sortPosition;
     container.classList.remove("is-sorting");
+    clearDropMarkers();
     active = null;
     const finalIndex = items().indexOf(drag.item);
     refresh();
@@ -83,6 +126,7 @@ export function installSortableList(container, {
     };
     item.classList.add("is-sorting");
     container.classList.add("is-sorting");
+    updateActivePosition();
     // Capture on the stable container. Capturing on the handle is unreliable because
     // the handle moves with its row; mobile browsers may drop capture when that row
     // is reinserted to preview a new position.
@@ -94,8 +138,12 @@ export function installSortableList(container, {
     event.preventDefault();
     const candidates = items().filter(item => item !== active.item);
     const before = candidates.find(item => event.clientY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2);
+    markDropPosition(before, candidates);
     if (before === active.item.nextElementSibling || (!before && active.item === container.lastElementChild)) return;
+    const positions = captureVisualPositions();
     container.insertBefore(active.item, before || null);
+    updateActivePosition();
+    animateFromPositions(positions);
   }
 
   function onPointerUp(event) {

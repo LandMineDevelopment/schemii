@@ -6,8 +6,8 @@ import { installSortableList, reorderedValues } from "../../src/schemii/schemii/
 class ClassList {
   values = new Set();
 
-  add(value) { this.values.add(value); }
-  remove(value) { this.values.delete(value); }
+  add(...values) { values.forEach(value => this.values.add(value)); }
+  remove(...values) { values.forEach(value => this.values.delete(value)); }
   contains(value) { return this.values.has(value); }
 }
 
@@ -25,6 +25,7 @@ class SortNode {
     this.attributes = new Map();
     this.capturedPointers = new Set();
     this.focused = false;
+    this.animationCalls = [];
   }
 
   get nextElementSibling() {
@@ -77,7 +78,23 @@ class SortNode {
   }
 
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-  getBoundingClientRect() { return { top: this.top, height: this.height }; }
+  getBoundingClientRect() {
+    const dynamicTop = this.classList.contains("item") && this.parentElement
+      ? this.parentElement.children.indexOf(this) * 50
+      : this.top;
+    return { top: dynamicTop, height: this.height };
+  }
+  getAnimations() { return this.animationCalls.filter(animation => !animation.cancelled); }
+  animate(keyframes, options) {
+    const animation = {
+      keyframes,
+      options,
+      cancelled: false,
+      cancel() { this.cancelled = true; },
+    };
+    this.animationCalls.push(animation);
+    return animation;
+  }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   focus() { this.focused = true; }
 
@@ -152,11 +169,23 @@ test("pointer dragging captures on the stable list while rows move", () => {
   container.dispatch("pointermove", { target: container, pointerId: 9, clientY: 500 });
   assert.deepEqual(container.children.map(row => row.dataset.sortKey), ["b", "c", "a"]);
   assert.equal(container.hasPointerCapture(9), true);
+  assert.equal(rows[2].classList.contains("sort-drop-after"), true);
+  assert.equal(rows[0].dataset.sortPosition, "Position 3 of 3");
+  assert.deepEqual(rows[1].animationCalls[0].keyframes, [
+    { transform: "translate3d(0, 50px, 0)" },
+    { transform: "translate3d(0, 0, 0)" },
+  ]);
+  assert.deepEqual(rows[1].animationCalls[0].options, {
+    duration: 190,
+    easing: "cubic-bezier(.22, 1, .36, 1)",
+  });
   container.dispatch("pointerup", { target: container, pointerId: 9 });
 
   assert.equal(container.hasPointerCapture(9), false);
   assert.deepEqual(reorders, [[0, 2, { input: "pointer", sortKey: "a" }]]);
   assert.equal(rows[0].classList.contains("is-sorting"), false);
+  assert.equal(rows[0].dataset.sortPosition, undefined);
+  assert.equal(rows[2].classList.contains("sort-drop-after"), false);
 });
 
 test("cancelled pointer dragging restores the original order", () => {
