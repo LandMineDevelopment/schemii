@@ -12,8 +12,15 @@ import {
 import { element, emptyPanel, errorPanel, formatTimestamp, replace } from "./dom.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
 import { closeDetailsMenus, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
+import {
+  readWorkspaceNavigation,
+  readWorkspacePreferences,
+  updateWorkspacePreferences,
+  workspaceNavigationHref,
+} from "./workspace-navigation.js";
 
 const byId = id => document.getElementById(id);
+const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
 
 const elements = {
   runtimeDot: byId("runtime-dot"),
@@ -115,6 +122,7 @@ const elements = {
 
 initializeUi();
 
+let inspectorPreferenceReady = false;
 const inspectorPane = new DockPane({
   container: elements.mainLayout,
   pane: elements.inspector,
@@ -125,6 +133,7 @@ const inspectorPane = new DockPane({
   expandedLabel: "Minimize table inspector",
   minimizedLabel: "Expand table inspector",
   getRestoreFocusTarget: () => document.querySelector(`.table-card[data-table-name="${CSS.escape(state.selectedTableName || "")}"]`) || elements.canvas,
+  onStateChange: persistInspectorState,
 });
 inspectorPane.setAvailable(false);
 
@@ -174,7 +183,11 @@ const state = {
   confirmBusy: false,
   toastTimer: null,
   canvasResizeFrame: null,
+  preferenceTimer: null,
+  navigationGeneration: 0,
+  restoringNavigation: false,
 };
+inspectorPreferenceReady = true;
 
 const canvas = new CatalogCanvas({
   canvas: elements.canvas,
@@ -228,6 +241,125 @@ function workspaceLabel(workspace) {
 function workspaceTargetLabel(workspace) {
   if (!workspace.connectionId) return "Detached design";
   return connectionById(workspace.connectionId)?.name || workspace.connectionId;
+}
+
+function workspaceStorage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function currentWorkspaceNavigation() {
+  return {
+    workspaceId: state.activeWorkspace?.id || null,
+    layer: state.activeLayer,
+    table: state.activeLayer === "tables" ? state.selectedTableName : null,
+    view: state.activeLayer === "views" ? state.selectedViewName : null,
+    viewKind: state.activeLayer === "views" ? state.selectedViewKind : null,
+  };
+}
+
+function syncWorkspaceNavigation(historyMode = "replace") {
+  if (!historyMode || state.restoringNavigation) return;
+  const next = workspaceNavigationHref(window.location.href, currentWorkspaceNavigation());
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next === current) return;
+  const method = historyMode === "push" ? "pushState" : "replaceState";
+  window.history[method](null, "", next);
+}
+
+function persistCanvasView() {
+  window.clearTimeout(state.preferenceTimer);
+  state.preferenceTimer = null;
+  if (!state.activeWorkspace) return;
+  updateWorkspacePreferences(workspaceStorage(), state.activeWorkspace.id, {
+    camera: { ...canvas.view },
+  });
+}
+
+function scheduleCanvasViewPersistence() {
+  if (!state.activeWorkspace || state.restoringNavigation) return;
+  window.clearTimeout(state.preferenceTimer);
+  state.preferenceTimer = window.setTimeout(persistCanvasView, 120);
+}
+
+function persistInspectorState(paneState) {
+  if (!inspectorPreferenceReady || state.restoringNavigation || !state.activeWorkspace) return;
+  if (!["expanded", "minimized", "dismissed"].includes(paneState)) return;
+  updateWorkspacePreferences(workspaceStorage(), state.activeWorkspace.id, {
+    inspector: paneState,
+  });
+}
+
+function restoreCanvasView(workspaceId) {
+  const preferences = readWorkspacePreferences(workspaceStorage(), workspaceId);
+  canvas.view = preferences.camera || DEFAULT_CANVAS_VIEW;
+  return preferences;
+}
+
+function applyWorkspaceNavigation(navigation) {
+  const wasRestoring = state.restoringNavigation;
+  state.restoringNavigation = true;
+  try {
+    setLayer(navigation.layer, { historyMode: null });
+    if (navigation.layer === "tables") {
+      const table = state.catalog?.tables.find(item => item.name === navigation.table) || null;
+      if (table) canvas.select(table.name, { notify: true });
+      else {
+        canvas.clearSelection();
+        selectTable(null, { historyMode: null });
+      }
+      if (table) {
+        const preferences = readWorkspacePreferences(workspaceStorage(), state.activeWorkspace?.id);
+        if (preferences.inspector) inspectorPane.setState(preferences.inspector);
+      }
+    } else if (navigation.layer === "views") {
+      const view = allViews(state.catalog).find(item => (
+        item.name === navigation.view && item.catalogKind === navigation.viewKind
+      )) || null;
+      selectView(view, { historyMode: null });
+    }
+  } finally {
+    state.restoringNavigation = wasRestoring;
+  }
+}
+
+async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } = {}) {
+  const generation = ++state.navigationGeneration;
+  const wasRestoring = state.restoringNavigation;
+  state.restoringNavigation = true;
+  let restored = false;
+  try {
+    if (!navigation.workspaceId) {
+      if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
+      clearActiveWorkspace({ historyMode: null });
+      setLayer("tables", { historyMode: null });
+      restored = true;
+      return true;
+    }
+    if (!state.workspacesLoaded) return false;
+    const workspace = state.workspaces.find(item => item.id === navigation.workspaceId);
+    if (!workspace) {
+      if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
+      clearActiveWorkspace({ historyMode: null });
+      setLayer("tables", { historyMode: null });
+      if (notifyMissing) showToast("The workspace saved in this browser URL no longer exists.", { error: true });
+      restored = true;
+      return true;
+    }
+    if (state.activeWorkspace?.id !== workspace.id || !state.catalog) {
+      if (!await openWorkspace(workspace, { historyMode: null })) return false;
+    }
+    if (generation !== state.navigationGeneration || !state.catalog) return false;
+    applyWorkspaceNavigation(navigation);
+    restored = true;
+    return true;
+  } finally {
+    state.restoringNavigation = wasRestoring;
+    if (restored && generation === state.navigationGeneration) syncWorkspaceNavigation("replace");
+  }
 }
 
 function updateHeader() {
@@ -349,6 +481,7 @@ async function loadRuntime() {
 }
 
 async function bootstrap() {
+  const requestedNavigation = readWorkspaceNavigation(window.location.href);
   state.startupComplete = false;
   state.connectionsLoading = true;
   state.workspacesLoading = true;
@@ -357,6 +490,7 @@ async function bootstrap() {
   renderWorkspaces();
   await Promise.all([loadRuntime(), loadConnections(), loadWorkspaces()]);
   state.startupComplete = true;
+  await restoreWorkspaceNavigation(requestedNavigation, { notifyMissing: true });
   renderCatalogState();
   updateHeader();
 }
@@ -766,8 +900,9 @@ function confirmDeleteWorkspace(workspace) {
   });
 }
 
-function clearActiveWorkspace() {
+function clearActiveWorkspace({ historyMode = "replace" } = {}) {
   const workspaceId = state.activeWorkspace?.id;
+  persistCanvasView();
   state.catalogGeneration += 1;
   resetLayoutSaveState();
   state.activeWorkspace = null;
@@ -776,6 +911,7 @@ function clearActiveWorkspace() {
   state.catalogLoading = false;
   state.selectedTableName = null;
   state.selectedViewName = null;
+  state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
   if (state.preservedLayout?.workspaceId === workspaceId) state.preservedLayout = null;
@@ -784,6 +920,7 @@ function clearActiveWorkspace() {
   renderCatalogSurfaces();
   renderCatalogState();
   updateHeader();
+  syncWorkspaceNavigation(historyMode);
 }
 
 function resetLayoutSaveState() {
@@ -824,8 +961,9 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
   updateHeader();
 }
 
-async function openWorkspace(workspace) {
+async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   if (!await flushLayoutBeforeTransition()) return false;
+  persistCanvasView();
   resetLayoutSaveState();
   state.activeWorkspace = workspace;
   state.catalog = null;
@@ -839,7 +977,9 @@ async function openWorkspace(workspace) {
   renderConflict();
   renderCatalogSurfaces();
   updateHeader();
+  syncWorkspaceNavigation(historyMode);
   await loadActiveCatalog({ clearConflictOnSuccess: true });
+  if (state.catalog && state.activeWorkspace?.id === workspace.id) restoreCanvasView(workspace.id);
   return true;
 }
 
@@ -891,6 +1031,11 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
     renderConflict();
     renderWorkspaces();
     renderCatalogSurfaces();
+    const navigation = readWorkspaceNavigation(window.location.href);
+    if (navigation.workspaceId === workspaceId) {
+      applyWorkspaceNavigation(navigation);
+      syncWorkspaceNavigation("replace");
+    }
   } catch (error) {
     if (generation !== state.catalogGeneration) return;
     state.catalogError = error;
@@ -926,7 +1071,7 @@ function reloadConflict() {
   loadActiveCatalog({ clearConflictOnSuccess: true });
 }
 
-function selectTable(name) {
+function selectTable(name, { historyMode = "push" } = {}) {
   state.selectedTableName = name;
   const table = state.catalog?.tables.find(item => item.name === name) || null;
   renderInspector({
@@ -939,6 +1084,7 @@ function selectTable(name) {
   });
   if (table) inspectorPane.reveal();
   else inspectorPane.setAvailable(false, { reset: true });
+  syncWorkspaceNavigation(historyMode);
 }
 
 function positionsChanged() {
@@ -1078,17 +1224,20 @@ function renderCatalogSurfaces() {
   renderSqlTarget();
 }
 
+function selectView(view, { historyMode = "push" } = {}) {
+  state.selectedViewName = view?.name || null;
+  state.selectedViewKind = view?.catalogKind || null;
+  renderViews();
+  syncWorkspaceNavigation(historyMode);
+}
+
 function renderViews() {
   renderViewsList(elements.viewsList, {
     catalog: state.catalog,
     query: elements.viewsSearch.value,
     filter: state.viewFilter,
     selectedName: state.selectedViewName,
-    onSelect: view => {
-      state.selectedViewName = view.name;
-      state.selectedViewKind = view.catalogKind;
-      renderViews();
-    },
+    onSelect: selectView,
   });
   const view = allViews(state.catalog).find(item => item.name === state.selectedViewName && item.catalogKind === state.selectedViewKind) || null;
   renderViewDetail(elements.viewDetail, view);
@@ -1103,14 +1252,12 @@ function renderObjectsBrowser() {
   const result = renderObjects(elements.objectsList, state.catalog, elements.objectsSearch.value, object => {
     if (object.target === "table") {
       elements.objectsDialog.close();
-      setLayer("tables");
+      setLayer("tables", { historyMode: null });
       canvas.focusTable(object.table);
     } else if (object.target === "view") {
       elements.objectsDialog.close();
-      state.selectedViewName = object.view.name;
-      state.selectedViewKind = object.view.catalogKind;
-      setLayer("views");
-      renderViews();
+      setLayer("views", { historyMode: null });
+      selectView(object.view);
     } else {
       elements.objectsDialog.close();
       renderFunctionsBrowser();
@@ -1128,7 +1275,7 @@ function renderSqlTarget() {
   elements.sqlTargetNamespace.textContent = workspace?.namespace || "No workspace open";
 }
 
-function setLayer(layer) {
+function setLayer(layer, { historyMode = "push" } = {}) {
   state.activeLayer = layer;
   for (const button of document.querySelectorAll("[data-layer]")) {
     const active = button.dataset.layer === layer;
@@ -1138,6 +1285,7 @@ function setLayer(layer) {
   for (const panel of document.querySelectorAll("[data-layer-panel]")) panel.hidden = panel.dataset.layerPanel !== layer;
   if (layer === "views") renderViews();
   if (layer === "tables") window.requestAnimationFrame(() => canvas.refreshGeometry());
+  syncWorkspaceNavigation(historyMode);
 }
 
 function downloadCatalog() {
@@ -1197,9 +1345,15 @@ function bindEvents() {
   });
   elements.fitButton.addEventListener("click", () => {
     if (!canvas.fit()) showToast("No live tables are available to fit.");
+    else scheduleCanvasViewPersistence();
   });
   elements.zoomInButton.addEventListener("click", () => canvas.zoomBy(0.1));
   elements.zoomOutButton.addEventListener("click", () => canvas.zoomBy(-0.1));
+  elements.zoomInButton.addEventListener("click", scheduleCanvasViewPersistence);
+  elements.zoomOutButton.addEventListener("click", scheduleCanvasViewPersistence);
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture", "wheel"]) {
+    elements.canvas.addEventListener(type, scheduleCanvasViewPersistence);
+  }
   elements.applyConnectionLayoutButton.addEventListener("click", applyLayoutToCurrentConnection);
   elements.reloadConflictButton.addEventListener("click", reloadConflict);
   document.querySelectorAll("[data-layer]").forEach(button => button.addEventListener("click", () => setLayer(button.dataset.layer)));
@@ -1264,6 +1418,10 @@ function bindEvents() {
       state.canvasResizeFrame = null;
       canvas.refreshGeometry();
     });
+  });
+  window.addEventListener("pagehide", persistCanvasView);
+  window.addEventListener("popstate", () => {
+    restoreWorkspaceNavigation(readWorkspaceNavigation(window.location.href)).catch(errorToast);
   });
 }
 

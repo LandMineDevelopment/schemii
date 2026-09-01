@@ -219,6 +219,21 @@ export class CatalogCanvas {
     this.onSelect(name);
   }
 
+  clearSelection({ notify = false } = {}) {
+    if (!this.selectedName) return false;
+    const previousName = this.selectedName;
+    this.selectedName = null;
+    const previous = this.cards.get(previousName);
+    previous?.classList.toggle("selected", false);
+    previous?.setAttribute("aria-pressed", "false");
+    if (this.catalog?.relationships.length > MAX_DIAGRAM_RELATIONSHIPS) {
+      this.updateDiagramRelationships();
+      this.drawRelationships();
+    }
+    if (notify) this.onSelect(null);
+    return true;
+  }
+
   updateDiagramRelationships() {
     if (!this.catalog) {
       this.diagramRelationships = [];

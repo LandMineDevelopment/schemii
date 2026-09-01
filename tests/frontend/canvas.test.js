@@ -185,6 +185,20 @@ test("lost pointer capture also closes an active table drag", () => {
   assert.deepEqual(canvas.positions.get("orders"), { x: 115, y: 215 });
 });
 
+test("clearing a table selection updates the card and notifies navigation", () => {
+  const { canvas, card, selectionCount } = fixture();
+  canvas.selectedName = "orders";
+  card.classList.add("selected");
+
+  assert.equal(canvas.clearSelection({ notify: true }), true);
+  assert.equal(canvas.selectedName, null);
+  assert.equal(card.classList.contains("selected"), false);
+  assert.equal(card.attributes.get("aria-pressed"), "false");
+  assert.equal(selectionCount(), 1);
+  assert.equal(canvas.clearSelection({ notify: true }), false);
+  assert.equal(selectionCount(), 1);
+});
+
 test("many pointer events produce one frame and mutate only incident relationships", () => {
   const { canvas, card, frames, handle, savedPositionCount } = fixture();
   const connected = {
