@@ -1,4 +1,5 @@
 import { element, emptyPanel, errorPanel, replace } from "./dom.js";
+import { installOverflowDisclosure } from "./ui.js";
 
 const TRANSFORMATION_LABELS = Object.freeze({
   stages: "Named query stages",
@@ -185,19 +186,42 @@ function selectProjectionLine(mapping, step, dataType = null) {
     className: `view-step-column-select-line${dataType ? "" : " no-type"}`,
     title: `${mapping.expression} → ${mapping.alias}`,
   });
-  if (dataType) line.append(sourceType(dataType));
+  const type = dataType ? sourceType(dataType) : null;
+  const expression = coloredExpression(mapping.expression, step);
+  const outputName = element("strong", { text: mapping.alias });
+  if (type) line.append(type);
   line.append(
-    coloredExpression(mapping.expression, step),
+    expression,
     element("span", {
       className: "view-step-column-select-arrow",
       text: "→",
       attrs: { "aria-hidden": "true" },
     }),
-    element("div", {}, [
-      element("strong", { text: mapping.alias }),
+    element("span", { className: "view-step-column-select-output" }, [
+      outputName,
       element("small", { text: mapping.derivation }),
     ]),
   );
+  installOverflowDisclosure(line, {
+    targets: [type, expression, outputName],
+    label: `column mapping to ${mapping.alias}`,
+  });
+  return line;
+}
+
+function sourceColumnLine(participant, column, step) {
+  const identity = `${participant.reference}.${column.name}`;
+  const line = element("div", {
+    className: "view-step-column-source-line",
+    title: `${identity} · ${column.dataType || "type unresolved"}`,
+  });
+  const type = sourceType(column.dataType);
+  const expression = coloredExpression(identity, step);
+  line.append(type, expression);
+  installOverflowDisclosure(line, {
+    targets: [type, expression],
+    label: `source column ${identity}`,
+  });
   return line;
 }
 
@@ -234,12 +258,7 @@ function participantRow(participant, index, selectedKeys, step) {
     if (projections.length) {
       projections.forEach(mapping => select.append(selectProjectionLine(mapping, step, column.dataType)));
     } else {
-      const source = element("div", { className: "view-step-column-source-line" });
-      source.append(
-        sourceType(column.dataType),
-        coloredExpression(`${participant.reference}.${column.name}`, step),
-      );
-      select.append(source);
+      select.append(sourceColumnLine(participant, column, step));
     }
     card.append(select);
 

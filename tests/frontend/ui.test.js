@@ -7,6 +7,7 @@ import {
   DockPane,
   ICONS,
   installDetailsMenu,
+  installOverflowDisclosure,
   installVisualViewportSizing,
   isOverflowingText,
   renderStatePanel,
@@ -111,6 +112,47 @@ test("overflow detection covers clipped inline and wrapped text", () => {
   assert.equal(isOverflowingText({ clientWidth: 100, scrollWidth: 100, clientHeight: 20, scrollHeight: 21 }), true);
   assert.equal(isOverflowingText({ clientWidth: 100, scrollWidth: 100, clientHeight: 20, scrollHeight: 20 }), false);
   assert.equal(isOverflowingText(null), false);
+});
+
+test("overflow disclosures activate only for clipped content and toggle full details", async () => {
+  const documentRef = { activeElement: null };
+  documentRef.defaultView = { requestAnimationFrame: callback => callback() };
+  const control = new Target(documentRef);
+  const clipped = { clientWidth: 80, scrollWidth: 120, clientHeight: 20, scrollHeight: 20 };
+  const visible = { clientWidth: 80, scrollWidth: 80, clientHeight: 20, scrollHeight: 20 };
+  const disclosure = installOverflowDisclosure(control, {
+    targets: [visible, clipped],
+    label: "column mapping source to result",
+  });
+  await Promise.resolve();
+
+  assert.equal(control.classList.contains("ui-overflow-disclosure"), true);
+  assert.equal(control.getAttribute("aria-expanded"), "false");
+  assert.equal(control.getAttribute("role"), "button");
+  assert.equal(control.getAttribute("aria-label"), "Expand column mapping source to result");
+  assert.equal(control.tabIndex, 0);
+
+  let keyboardDefaultPrevented = false;
+  for (const callback of control.listeners.get("keydown")) {
+    callback({ key: "Enter", preventDefault() { keyboardDefaultPrevented = true; } });
+  }
+  assert.equal(keyboardDefaultPrevented, true);
+  assert.equal(disclosure.expanded, true);
+  assert.equal(control.classList.contains("ui-overflow-disclosure-expanded"), true);
+  assert.equal(control.getAttribute("aria-expanded"), "true");
+  assert.equal(control.getAttribute("aria-label"), "Collapse column mapping source to result");
+
+  for (const callback of control.listeners.get("keydown")) {
+    callback({ key: " ", preventDefault() {} });
+  }
+  clipped.scrollWidth = 80;
+  disclosure.measure();
+  assert.equal(control.classList.contains("ui-overflow-disclosure"), false);
+  assert.equal(control.getAttribute("aria-expanded"), null);
+  assert.equal(control.getAttribute("aria-label"), null);
+  assert.equal(control.getAttribute("tabindex"), null);
+  assert.equal(control.getAttribute("role"), null);
+  disclosure.destroy();
 });
 
 test("dialog viewport sizing follows the actually visible mobile viewport", () => {

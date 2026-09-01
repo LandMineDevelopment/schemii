@@ -301,6 +301,86 @@ export function isOverflowingText(target) {
   return target.scrollWidth > target.clientWidth || target.scrollHeight > target.clientHeight;
 }
 
+export function installOverflowDisclosure(control, {
+  targets = [],
+  label = "details",
+} = {}) {
+  if (!control) throw new TypeError("An overflow disclosure control is required");
+  const measuredTargets = [...targets].filter(Boolean);
+  const windowRef = control.ownerDocument?.defaultView;
+  const originalRole = control.getAttribute("role");
+  const originalTabIndex = control.getAttribute("tabindex");
+  let clipped = false;
+  let destroyed = false;
+  let expanded = false;
+  let measureScheduled = false;
+
+  const sync = () => {
+    const available = clipped || expanded;
+    control.classList.toggle("ui-overflow-disclosure", available);
+    control.classList.toggle("ui-overflow-disclosure-expanded", expanded);
+    if (available) {
+      control.setAttribute("role", "button");
+      control.tabIndex = 0;
+      control.setAttribute("aria-expanded", String(expanded));
+      control.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} ${label}`);
+    } else {
+      if (originalRole === null) control.removeAttribute("role");
+      else control.setAttribute("role", originalRole);
+      if (originalTabIndex === null) control.removeAttribute("tabindex");
+      else control.setAttribute("tabindex", originalTabIndex);
+      control.removeAttribute("aria-expanded");
+      control.removeAttribute("aria-label");
+    }
+  };
+
+  const measure = () => {
+    measureScheduled = false;
+    if (destroyed || expanded) return clipped;
+    clipped = measuredTargets.some(isOverflowingText);
+    sync();
+    return clipped;
+  };
+
+  const scheduleMeasure = () => {
+    if (destroyed || measureScheduled) return;
+    measureScheduled = true;
+    (windowRef?.queueMicrotask || queueMicrotask)(measure);
+  };
+
+  const toggle = () => {
+    if (!clipped && !expanded) return;
+    expanded = !expanded;
+    sync();
+    if (!expanded) scheduleMeasure();
+  };
+  control.addEventListener("click", toggle);
+  const onKeydown = event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (!clipped && !expanded) return;
+    event.preventDefault();
+    toggle();
+  };
+  control.addEventListener("keydown", onKeydown);
+
+  const ResizeObserverClass = windowRef?.ResizeObserver;
+  const resizeObserver = ResizeObserverClass ? new ResizeObserverClass(scheduleMeasure) : null;
+  resizeObserver?.observe(control);
+  scheduleMeasure();
+
+  return Object.freeze({
+    get expanded() { return expanded; },
+    measure,
+    toggle,
+    destroy() {
+      destroyed = true;
+      resizeObserver?.disconnect();
+      control.removeEventListener("click", toggle);
+      control.removeEventListener("keydown", onKeydown);
+    },
+  });
+}
+
 export function installVisualViewportSizing(documentRef = document) {
   const windowRef = documentRef.defaultView;
   const style = documentRef.documentElement?.style;
