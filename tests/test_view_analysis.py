@@ -151,6 +151,45 @@ def test_analysis_reports_each_set_operation_once_and_preserves_all() -> None:
     }
 
 
+def test_analysis_keeps_cte_grain_and_aggregate_filters_in_their_query_scope() -> None:
+    analysis = analyze_view_definition(
+        """
+        WITH paid_orders AS (
+          SELECT o.customer_id,
+                 SUM(o.total) FILTER (WHERE o.state = 'paid') AS paid_total
+          FROM orders o
+          WHERE o.total > 0
+          GROUP BY o.customer_id
+        )
+        SELECT p.customer_id, SUM(p.paid_total) AS lifetime_value
+        FROM paid_orders p
+        GROUP BY p.customer_id
+        HAVING SUM(p.paid_total) > 100
+        """,
+        relations(),
+    )
+
+    assert analysis["row_filters"] == [
+        {
+            "expression": "o.total > 0",
+            "inputs": [{"source": "orders", "column": "total", "resolved": True}],
+            "scope": "paid_orders",
+        }
+    ]
+    assert analysis["aggregate_filters"] == [
+        {
+            "expression": "o.state = 'paid'",
+            "inputs": [{"source": "orders", "column": "state", "resolved": True}],
+            "scope": "paid_orders",
+        }
+    ]
+    assert [(item["expression"], item["scope"]) for item in analysis["grouping"]] == [
+        ("p.customer_id", None),
+        ("o.customer_id", "paid_orders"),
+    ]
+    assert analysis["filter_count"] == 1
+
+
 def test_design_analysis_derives_downstream_consumers_without_persisting_lineage() -> None:
     content = SchemiiDesignContent.model_validate(
         {

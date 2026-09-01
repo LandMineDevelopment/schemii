@@ -458,6 +458,7 @@ def analyze_view_definition(
     where_terms = [
         term
         for where in statement.find_all(exp.Where)
+        if isinstance(where.parent, exp.Select)
         for term in _and_terms(where.this)
     ][:MAX_ANALYSIS_ITEMS]
     row_filters = [
@@ -472,6 +473,18 @@ def analyze_view_definition(
             "items": [_sql(term) for term in where_terms if _sql(term)],
             "sql": None,
         })
+
+    aggregate_filter_terms = [
+        term
+        for aggregate_filter in statement.find_all(exp.Filter)
+        if isinstance(aggregate_filter.expression, exp.Where)
+        for term in _and_terms(aggregate_filter.expression.this)
+    ][:MAX_ANALYSIS_ITEMS]
+    aggregate_filters = [
+        detail
+        for term in aggregate_filter_terms
+        if (detail := expression_detail(term, role="aggregate_filter")) is not None
+    ]
 
     grouping = [
         item
@@ -603,6 +616,7 @@ def analyze_view_definition(
         "stages": [cte.alias_or_name for cte in ctes],
         "joins": join_details,
         "row_filters": row_filters,
+        "aggregate_filters": aggregate_filters,
         "grouping": grouping_details,
         "group_filters": group_filters,
         "ordering": ordering,

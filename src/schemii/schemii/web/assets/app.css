@@ -279,9 +279,22 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .view-source-uses { display: flex; min-width: 0; grid-column: 1 / -1; flex-wrap: wrap; gap: 3px; }
 .view-source-uses i { padding: 2px 4px; border: 1px solid #34404d; border-radius: 999px; color: #8695a4; background: #111820; font: normal 6px ui-monospace, monospace; text-transform: uppercase; }
 .view-rules-list { display: grid; min-width: 0; gap: 6px; padding: 8px; }
+.view-rule-scope { min-width: 0; overflow: hidden; border: 1px solid #303a46; border-radius: 7px; background: #0b1016; }
+.view-rule-scope + .view-rule-scope { position: relative; margin-top: 9px; }
+.view-rule-scope + .view-rule-scope::before { position: absolute; top: -13px; left: 16px; color: #6f638f; content: "↓"; font: 10px ui-monospace, monospace; }
+.view-rule-scope.final { border-color: #51477d; background: #100f19; }
+.view-rule-scope-head { display: grid; min-width: 0; min-height: 45px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 7px; border-bottom: 1px solid #28323d; background: #151c23; }
+.view-rule-scope.final > .view-rule-scope-head { background: #1b192a; }
+.view-rule-scope-head > span { padding: 4px 5px; border: 1px solid #4a416e; border-radius: 4px; color: #ad9ce9; background: #1c192b; font: 750 6px ui-monospace, monospace; }
+.view-rule-scope-head > div { display: grid; min-width: 0; gap: 2px; }
+.view-rule-scope-head strong { overflow: hidden; color: #d5dbe3; font: 750 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.view-rule-scope-head small { color: #6e7a89; font-size: 6px; text-transform: uppercase; letter-spacing: .08em; }
+.view-rule-scope-head > code { color: #777f91; font: 6px ui-monospace, monospace; white-space: nowrap; }
+.view-rule-scope-body { display: grid; min-width: 0; gap: 6px; padding: 6px; }
 .view-rule { display: grid; min-width: 0; gap: 6px; padding: 8px; border: 1px solid #313c48; border-left: 3px solid #68798b; border-radius: 6px; background: #0e141a; }
 .view-rule-join { border-left-color: #61a6df; }
 .view-rule-where { border-left-color: #63c4bd; }
+.view-rule-aggregate-filter { border-left-color: #d7b258; }
 .view-rule-group { border-left-color: #a37ae4; background: #151326; }
 .view-rule-having { border-left-color: #d184ae; }
 .view-rule-order, .view-rule-limit { border-left-color: #d2a84a; }

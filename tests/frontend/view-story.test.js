@@ -32,3 +32,16 @@ test("view story keeps grouping expressions compact at a glance", () => {
   };
   assert.equal(resultGrain(analysis), "One row per region + year + month + 1 more");
 });
+
+test("view story derives final grain without flattening CTE grouping", () => {
+  const analysis = {
+    sources: [{ name: "orders" }],
+    outputs: [{ name: "customer_id" }, { name: "lifetime_value", derivation: "aggregate" }],
+    grouping: [
+      { expression: "customer_id", scope: "paid_orders" },
+      { expression: "region", scope: null },
+    ],
+  };
+  assert.equal(resultGrain(analysis), "One row per region");
+  assert.equal(viewStorySummary(analysis), "One row per region, producing 2 columns from 1 source relation.");
+});

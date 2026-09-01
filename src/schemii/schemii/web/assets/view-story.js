@@ -28,9 +28,14 @@ const USE_LABELS = Object.freeze({
   output: "result",
   join: "join",
   filter: "filter",
+  aggregate_filter: "aggregate filter",
   group: "grain",
   having: "having",
   sort: "sort",
+});
+
+const RULE_LABELS = Object.freeze({
+  "aggregate-filter": "AGG FILTER",
 });
 
 function plural(value, singular, pluralForm = `${singular}s`) {
@@ -47,7 +52,7 @@ export function transformationLabel(kind) {
 }
 
 export function resultGrain(analysis) {
-  const grouping = analysis?.grouping || [];
+  const grouping = (analysis?.grouping || []).filter(item => !item.scope);
   if (grouping.length) {
     return `One row per ${compactList(grouping.map(item => item.expression))}`;
   }
@@ -238,7 +243,7 @@ function ruleCard(kind, title, expression, { scope = null, detail = null, inputs
   const card = element("article", { className: `view-rule view-rule-${kind}` });
   const head = element("header");
   head.append(
-    element("span", { text: kind.toUpperCase() }),
+    element("span", { text: RULE_LABELS[kind] || kind.toUpperCase() }),
     element("strong", { text: title, title }),
   );
   if (scope) head.append(element("small", { text: `in ${scope}`, title: `Inside CTE ${scope}` }));
@@ -249,49 +254,100 @@ function ruleCard(kind, title, expression, { scope = null, detail = null, inputs
   return card;
 }
 
+function scopeItems(items, scope) {
+  return (items || []).filter(item => (item.scope || null) === scope);
+}
+
+function groupingRule(analysis, scope) {
+  const grouping = scopeItems(analysis.grouping, scope);
+  if (!grouping.length) return null;
+  const title = scope
+    ? `One ${scope} row per ${compactList(grouping.map(item => item.expression))}`
+    : resultGrain(analysis);
+  return ruleCard("group", title, compactList(grouping.map(item => item.expression), 5), {
+    detail: scope
+      ? `These columns define the row grain produced by ${scope}.`
+      : "These columns define the final result row grain.",
+    inputs: grouping.flatMap(item => item.inputs || []),
+  });
+}
+
+function scopeRuleCount(analysis, scope, isFinal) {
+  return scopeItems(analysis.joins, scope).length
+    + scopeItems(analysis.rowFilters, scope).length
+    + scopeItems(analysis.aggregateFilters, scope).length
+    + scopeItems(analysis.groupFilters, scope).length
+    + scopeItems(analysis.ordering, scope).length
+    + (scopeItems(analysis.grouping, scope).length ? 1 : 0)
+    + (isFinal && analysis.distinct ? 1 : 0)
+    + (isFinal && analysis.limit ? 1 : 0)
+    + (isFinal ? analysis.setOperations?.length || 0 : 0);
+}
+
+function queryScope(analysis, scope, ordinal, isFinal) {
+  const count = scopeRuleCount(analysis, scope, isFinal);
+  const block = element("section", { className: `view-rule-scope${isFinal ? " final" : ""}` });
+  const heading = element("header", { className: "view-rule-scope-head" });
+  heading.append(
+    element("span", { text: isFinal ? "FINAL" : `CTE ${String(ordinal).padStart(2, "0")}` }),
+    element("div", {}, [
+      element("strong", { text: isFinal ? "Produce the view result" : scope, title: scope || "Final result" }),
+      element("small", { text: isFinal ? "Final SELECT" : "Intermediate relation" }),
+    ]),
+    element("code", { text: count ? plural(count, "rule") : "Direct projection" }),
+  );
+  block.append(heading);
+
+  const rules = element("div", { className: "view-rule-scope-body" });
+  for (const join of scopeItems(analysis.joins, scope)) {
+    const target = join.alias && join.alias !== join.target ? `${join.target} as ${join.alias}` : join.target;
+    rules.append(ruleCard("join", `${join.joinType} join ${target}`, join.expression || "No join predicate", {
+      inputs: join.inputs,
+    }));
+  }
+  for (const filter of scopeItems(analysis.rowFilters, scope)) {
+    rules.append(ruleCard("where", "Keep source rows where", filter.expression, { inputs: filter.inputs }));
+  }
+  for (const filter of scopeItems(analysis.aggregateFilters, scope)) {
+    rules.append(ruleCard("aggregate-filter", "Include aggregate values where", filter.expression, { inputs: filter.inputs }));
+  }
+  const group = groupingRule(analysis, scope);
+  if (group) rules.append(group);
+  for (const filter of scopeItems(analysis.groupFilters, scope)) {
+    rules.append(ruleCard("having", "Keep grouped rows where", filter.expression, { inputs: filter.inputs }));
+  }
+  if (isFinal && analysis.distinct) rules.append(ruleCard("distinct", "Return unique result rows", "DISTINCT"));
+  if (isFinal) {
+    for (const operation of analysis.setOperations || []) {
+      rules.append(ruleCard("set", `Combine another result with ${operation}`, operation));
+    }
+  }
+  for (const order of scopeItems(analysis.ordering, scope)) {
+    rules.append(ruleCard("order", "Present results ordered by", order.expression, { inputs: order.inputs }));
+  }
+  if (isFinal && analysis.limit) rules.append(ruleCard("limit", `Return at most ${analysis.limit} rows`, `LIMIT ${analysis.limit}`));
+  if (!count) {
+    rules.append(element("p", { className: "view-meaning-empty", text: "Selected columns pass directly into this relation." }));
+  }
+  block.append(rules);
+  return block;
+}
+
 function rulesPanel(analysis) {
   const section = element("section", { className: "view-query-rules" });
   const ruleCount = (analysis.joins?.length || 0)
     + (analysis.rowFilters?.length || 0)
+    + (analysis.aggregateFilters?.length || 0)
     + (analysis.groupFilters?.length || 0)
     + (analysis.ordering?.length || 0)
-    + (analysis.grouping?.length ? 1 : 0)
+    + new Set((analysis.grouping || []).map(item => item.scope || "__final__")).size
     + (analysis.distinct ? 1 : 0)
     + (analysis.limit ? 1 : 0)
     + (analysis.setOperations?.length || 0);
   section.append(sectionHeading("Relational meaning", "Relationships & rules", ruleCount ? plural(ruleCount, "rule") : "Direct projection"));
   const rules = element("div", { className: "view-rules-list" });
-
-  for (const join of analysis.joins || []) {
-    const target = join.alias && join.alias !== join.target ? `${join.target} as ${join.alias}` : join.target;
-    rules.append(ruleCard("join", `${join.joinType} join ${target}`, join.expression || "No join predicate", {
-      scope: join.scope,
-      inputs: join.inputs,
-    }));
-  }
-  for (const filter of analysis.rowFilters || []) {
-    rules.append(ruleCard("where", "Keep source rows where", filter.expression, filter));
-  }
-  if (analysis.grouping?.length) {
-    rules.append(ruleCard("group", resultGrain(analysis), compactList(analysis.grouping.map(item => item.expression), 5), {
-      detail: "These columns define the result row grain.",
-      inputs: analysis.grouping.flatMap(item => item.inputs || []),
-    }));
-  }
-  for (const filter of analysis.groupFilters || []) {
-    rules.append(ruleCard("having", "Keep grouped rows where", filter.expression, filter));
-  }
-  if (analysis.distinct) rules.append(ruleCard("distinct", "Return unique result rows", "DISTINCT"));
-  for (const operation of analysis.setOperations || []) {
-    rules.append(ruleCard("set", `Combine another result with ${operation}`, operation));
-  }
-  for (const order of analysis.ordering || []) {
-    rules.append(ruleCard("order", "Present results ordered by", order.expression, order));
-  }
-  if (analysis.limit) rules.append(ruleCard("limit", `Return at most ${analysis.limit} rows`, `LIMIT ${analysis.limit}`));
-  if (!ruleCount) {
-    rules.append(element("p", { className: "view-meaning-empty", text: "Selected columns pass directly into the result." }));
-  }
+  (analysis.stages || []).forEach((scope, index) => rules.append(queryScope(analysis, scope, index + 1, false)));
+  rules.append(queryScope(analysis, null, (analysis.stages || []).length + 1, true));
   section.append(rules);
   return section;
 }

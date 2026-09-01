@@ -224,6 +224,7 @@ class DesignViewAnalysis(ApiModel):
     stages: list[str] = Field(default_factory=list)
     joins: list[ViewAnalysisJoin] = Field(default_factory=list)
     row_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
+    aggregate_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
     grouping: list[ViewAnalysisExpression] = Field(default_factory=list)
     group_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
     ordering: list[ViewAnalysisExpression] = Field(default_factory=list)
