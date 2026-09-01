@@ -190,6 +190,81 @@ def test_analysis_keeps_cte_grain_and_aggregate_filters_in_their_query_scope() -
     assert analysis["filter_count"] == 1
 
 
+def test_analysis_builds_dependency_ordered_query_steps_and_column_roles() -> None:
+    analysis = analyze_view_definition(
+        """
+        WITH order_totals AS (
+          SELECT o.customer_id, SUM(o.total) AS revenue
+          FROM orders o
+          INNER JOIN customers buyer ON buyer.id = o.customer_id
+          WHERE o.state = 'paid' AND buyer.name IS NOT NULL
+          GROUP BY o.customer_id
+          ORDER BY revenue DESC
+        )
+        SELECT c.name, totals.revenue
+        FROM order_totals totals
+        LEFT JOIN customers c ON c.id = totals.customer_id
+        WHERE c.name <> 'Anonymous'
+        ORDER BY totals.revenue DESC
+        """,
+        relations(),
+    )
+
+    steps = analysis["query_steps"]
+    assert [(step["kind"], step["result_name"]) for step in steps] == [
+        ("cte", "order_totals"),
+        ("final", "view result"),
+    ]
+    cte = steps[0]
+    assert [(item["name"], item["reference"]) for item in cte["participants"]] == [
+        ("orders", "o"),
+        ("customers", "buyer"),
+    ]
+    buyer_name = next(
+        column
+        for participant in cte["participants"]
+        if participant["reference"] == "buyer"
+        for column in participant["columns"]
+        if column["name"] == "name"
+    )
+    assert buyer_name == {
+        "name": "name",
+        "data_type": "text",
+        "roles": ["filter"],
+        "filter_only": True,
+    }
+    assert cte["joins"][0]["join_type"] == "INNER"
+    assert [output["name"] for output in cte["outputs"]] == [
+        "customer_id",
+        "revenue",
+    ]
+    final = steps[1]
+    assert [(item["name"], item["kind"]) for item in final["participants"]] == [
+        ("order_totals", "intermediate"),
+        ("customers", "table"),
+    ]
+    assert final["joins"][0]["join_type"] == "LEFT"
+    assert [output["name"] for output in final["outputs"]] == ["name", "revenue"]
+
+
+def test_analysis_places_derived_subquery_before_its_outer_query() -> None:
+    analysis = analyze_view_definition(
+        """
+        SELECT summary.customer_id, c.name
+        FROM (
+          SELECT customer_id FROM orders WHERE state = 'paid'
+        ) summary
+        JOIN customers c ON c.id = summary.customer_id
+        """,
+        relations(),
+    )
+
+    assert [(step["kind"], step["result_name"]) for step in analysis["query_steps"]] == [
+        ("derived_table", "summary"),
+        ("final", "view result"),
+    ]
+
+
 def test_design_analysis_derives_downstream_consumers_without_persisting_lineage() -> None:
     content = SchemiiDesignContent.model_validate(
         {

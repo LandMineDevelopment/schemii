@@ -183,6 +183,45 @@ class ViewAnalysisOutput(ApiModel):
     inputs: list[ViewAnalysisInput] = Field(default_factory=list)
 
 
+class ViewAnalysisQueryParticipantColumn(ApiModel):
+    name: str
+    data_type: str | None = None
+    roles: list[str] = Field(default_factory=list)
+    filter_only: bool = False
+
+
+class ViewAnalysisQueryParticipant(ApiModel):
+    reference: str
+    namespace: str | None = None
+    name: str
+    kind: str
+    resolved: bool
+    columns: list[ViewAnalysisQueryParticipantColumn] = Field(default_factory=list)
+
+
+class ViewAnalysisQueryStep(ApiModel):
+    ordinal: int
+    kind: Literal[
+        "cte",
+        "derived_table",
+        "subquery",
+        "set_branch",
+        "table_function",
+        "final",
+    ]
+    result_name: str
+    participants: list[ViewAnalysisQueryParticipant] = Field(default_factory=list)
+    joins: list[ViewAnalysisJoin] = Field(default_factory=list)
+    row_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
+    aggregate_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
+    grouping: list[ViewAnalysisExpression] = Field(default_factory=list)
+    group_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
+    ordering: list[ViewAnalysisExpression] = Field(default_factory=list)
+    distinct: bool = False
+    limit: str | None = None
+    outputs: list[ViewAnalysisOutput] = Field(default_factory=list)
+
+
 class ViewAnalysisTransformation(ApiModel):
     kind: Literal[
         "stages",
@@ -231,6 +270,7 @@ class DesignViewAnalysis(ApiModel):
     distinct: bool = False
     limit: str | None = None
     set_operations: list[str] = Field(default_factory=list)
+    query_steps: list[ViewAnalysisQueryStep] = Field(default_factory=list)
     stage_count: int = 0
     join_count: int = 0
     filter_count: int = 0

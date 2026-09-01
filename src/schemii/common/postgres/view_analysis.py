@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlglot import exp, parse
 from sqlglot.errors import SqlglotError
+from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
 
 
 MAX_VIEW_DEFINITION_BYTES = 256 * 1024
@@ -132,6 +133,40 @@ def _derivation(expression: exp.Expression) -> str:
     return "expression"
 
 
+def _query_owner(expression: exp.Expression) -> exp.Expression | None:
+    """Return the nearest SELECT or set operation that owns an AST node."""
+
+    parent: exp.Expression | None = expression
+    while parent is not None:
+        if isinstance(parent, (exp.Select, exp.SetOperation)):
+            return parent
+        parent = parent.parent
+    return None
+
+
+def _scope_kind(scope: Scope) -> str:
+    return {
+        ScopeType.ROOT: "final",
+        ScopeType.CTE: "cte",
+        ScopeType.DERIVED_TABLE: "derived_table",
+        ScopeType.SUBQUERY: "subquery",
+        ScopeType.UNION: "set_branch",
+        ScopeType.UDTF: "table_function",
+    }[scope.scope_type]
+
+
+def _scope_result_name(scope: Scope, counters: dict[str, int]) -> str:
+    parent = scope.expression.parent
+    if scope.scope_type in {ScopeType.CTE, ScopeType.DERIVED_TABLE}:
+        if parent is not None and parent.alias_or_name:
+            return parent.alias_or_name
+    if scope.scope_type is ScopeType.ROOT:
+        return "view result"
+    kind = _scope_kind(scope)
+    counters[kind] = counters.get(kind, 0) + 1
+    return f"{kind.replace('_', ' ')} {counters[kind]}"
+
+
 def _relation_index(relations: Iterable[dict[str, Any]]) -> tuple[
     dict[tuple[str, str], dict[str, Any]],
     dict[str, list[dict[str, Any]]],
@@ -182,6 +217,316 @@ def referenced_relations(
         if len(references) >= MAX_ANALYSIS_ITEMS:
             break
     return references
+
+
+def _query_steps(
+    statement: exp.Expression,
+    *,
+    current_namespace: str,
+    exact: dict[tuple[str, str], dict[str, Any]],
+    by_name: dict[str, list[dict[str, Any]]],
+    warnings: set[str],
+) -> list[dict[str, Any]]:
+    """Build dependency-ordered query scopes for the chronological view story."""
+
+    steps: list[dict[str, Any]] = []
+    steps_by_scope: dict[int, dict[str, Any]] = {}
+    counters: dict[str, int] = {}
+
+    for scope in traverse_scope(statement):
+        query = scope.expression
+        kind = _scope_kind(scope)
+        result_name = _scope_result_name(scope, counters)
+        selected_sources = scope.selected_sources
+
+        source_order: list[str] = []
+        if isinstance(query, exp.Select):
+            from_clause = query.args.get("from_")
+            if from_clause is not None and from_clause.this is not None:
+                source_order.append(from_clause.this.alias_or_name)
+            source_order.extend(
+                join.this.alias_or_name
+                for join in query.args.get("joins") or []
+                if join.this is not None
+            )
+        source_order.extend(alias for alias in selected_sources if alias not in source_order)
+
+        participants: list[dict[str, Any]] = []
+        participant_by_reference: dict[str, dict[str, Any]] = {}
+        known_columns: dict[str, dict[str, str | None]] = {}
+        known_column_order: dict[str, list[str]] = {}
+
+        for reference in source_order:
+            selected = selected_sources.get(reference)
+            if selected is None:
+                continue
+            node, source = selected
+            namespace: str | None = None
+            name = reference
+            participant_kind = "relation"
+            resolved = False
+            columns: list[dict[str, Any]] = []
+            column_types: dict[str, str | None] = {}
+            column_order: list[str] = []
+
+            if isinstance(source, exp.Table):
+                namespace = source.db or current_namespace
+                name = source.name
+                relation = _resolved_relation(
+                    source.db or None,
+                    source.name,
+                    current_namespace=current_namespace,
+                    exact=exact,
+                    by_name=by_name,
+                )
+                resolved = relation is not None
+                participant_kind = str((relation or {}).get("kind") or "relation")
+                for column in (relation or {}).get("columns", []):
+                    column_name = str(column["name"])
+                    column_order.append(column_name)
+                    column_types[column_name] = str(column.get("data_type") or "") or None
+            elif isinstance(source, Scope):
+                producer = steps_by_scope.get(id(source))
+                if producer is not None:
+                    name = producer["result_name"]
+                    participant_kind = "intermediate"
+                    resolved = True
+                    for output in producer["outputs"]:
+                        if not output["name"]:
+                            continue
+                        column_order.append(output["name"])
+                        column_types[output["name"]] = output["data_type"]
+
+            participant = {
+                "reference": reference,
+                "namespace": namespace,
+                "name": name,
+                "kind": participant_kind,
+                "resolved": resolved,
+                "columns": columns,
+            }
+            participants.append(participant)
+            participant_by_reference[reference] = participant
+            participant_by_reference.setdefault(name, participant)
+            known_columns[reference] = column_types
+            known_column_order[reference] = column_order
+
+        scope_column_ids = {id(column) for column in scope.columns}
+        output_names: set[str] = set()
+
+        def aggregate_filter_predicate(column: exp.Column, projection: exp.Expression) -> bool:
+            parent = column.parent
+            while parent is not None and parent is not projection:
+                if isinstance(parent, exp.Where) and isinstance(parent.parent, exp.Filter):
+                    return True
+                parent = parent.parent
+            return False
+
+        def participant_for(column: exp.Column) -> dict[str, Any] | None:
+            if column.table:
+                return participant_by_reference.get(column.table)
+            matching = [
+                participant
+                for participant in participants
+                if column.name in known_columns.get(participant["reference"], {})
+            ]
+            if len(matching) == 1:
+                return matching[0]
+            return participants[0] if len(participants) == 1 else None
+
+        def record_input(
+            column: exp.Column,
+            role: str,
+            *,
+            warn: bool = True,
+        ) -> dict[str, Any]:
+            participant = participant_for(column)
+            if participant is None:
+                if warn:
+                    warnings.add("unresolved_column_source")
+                return {
+                    "source": column.table or None,
+                    "column": column.name,
+                    "resolved": False,
+                }
+            reference = participant["reference"]
+            existing = next(
+                (item for item in participant["columns"] if item["name"] == column.name),
+                None,
+            )
+            if existing is None:
+                existing = {
+                    "name": column.name,
+                    "data_type": known_columns.get(reference, {}).get(column.name),
+                    "roles": [],
+                    "filter_only": False,
+                }
+                participant["columns"].append(existing)
+            if role not in existing["roles"]:
+                existing["roles"].append(role)
+            return {
+                "source": reference,
+                "column": column.name,
+                "resolved": participant["resolved"],
+            }
+
+        def detail(expression: exp.Expression, role: str) -> dict[str, Any] | None:
+            value = _sql(expression)
+            if not value:
+                return None
+            inputs: list[dict[str, Any]] = []
+            for column in expression.find_all(exp.Column):
+                if id(column) not in scope_column_ids or column.is_star:
+                    continue
+                if role == "sort" and not column.table and column.name in output_names:
+                    continue
+                item = record_input(column, role)
+                if item not in inputs:
+                    inputs.append(item)
+            return {"expression": value, "inputs": inputs, "scope": result_name}
+
+        projections = list(getattr(query, "selects", []) or [])
+        outputs: list[dict[str, Any]] = []
+        for projection in projections[:MAX_ANALYSIS_ITEMS]:
+            value = projection.this if isinstance(projection, exp.Alias) else projection
+            wildcard_participant: dict[str, Any] | None = None
+            if isinstance(value, exp.Star) and len(participants) == 1:
+                wildcard_participant = participants[0]
+            elif isinstance(value, exp.Column) and value.is_star:
+                wildcard_participant = participant_by_reference.get(value.table)
+            if wildcard_participant is not None:
+                reference = wildcard_participant["reference"]
+                for column_name in known_column_order.get(reference, []):
+                    synthetic = exp.column(column_name, table=reference)
+                    item = record_input(synthetic, "output")
+                    output = {
+                        "ordinal": len(outputs) + 1,
+                        "name": column_name,
+                        "data_type": known_columns[reference].get(column_name),
+                        "derivation": "direct",
+                        "expression": f"{reference}.{column_name}",
+                        "inputs": [item],
+                    }
+                    outputs.append(output)
+                    output_names.add(column_name)
+                continue
+
+            inputs: list[dict[str, Any]] = []
+            for column in value.find_all(exp.Column):
+                if (
+                    id(column) not in scope_column_ids
+                    or column.is_star
+                    or aggregate_filter_predicate(column, value)
+                ):
+                    continue
+                item = record_input(column, "output")
+                if item not in inputs:
+                    inputs.append(item)
+            output_name = projection.alias or (
+                value.name
+                if isinstance(value, exp.Column) and not value.is_star
+                else None
+            )
+            if output_name:
+                output_names.add(output_name)
+            data_type = None
+            if isinstance(value, exp.Column) and len(inputs) == 1:
+                participant = participant_for(value)
+                if participant is not None:
+                    data_type = known_columns.get(participant["reference"], {}).get(value.name)
+            outputs.append({
+                "ordinal": len(outputs) + 1,
+                "name": output_name,
+                "data_type": data_type,
+                "derivation": _derivation(projection),
+                "expression": _sql(value),
+                "inputs": inputs,
+            })
+
+        joins: list[dict[str, Any]] = []
+        for join in (
+            query.args.get("joins") or []
+            if isinstance(query, exp.Select)
+            else []
+        ):
+            target_reference = join.this.alias_or_name
+            target_participant = participant_by_reference.get(target_reference)
+            condition = join.args.get("on")
+            condition_detail = detail(condition, "join") if condition is not None else None
+            condition_sql = condition_detail["expression"] if condition_detail else None
+            inputs = condition_detail["inputs"] if condition_detail else []
+            if condition_sql is None and join.args.get("using"):
+                condition_sql = "USING (" + ", ".join(
+                    item.name for item in join.args["using"]
+                ) + ")"
+            joins.append({
+                "join_type": _join_type(join),
+                "target": target_participant["name"] if target_participant else target_reference,
+                "alias": target_reference if target_participant and target_reference != target_participant["name"] else None,
+                "expression": condition_sql,
+                "inputs": inputs,
+                "scope": result_name,
+            })
+
+        where = query.args.get("where") if isinstance(query, exp.Select) else None
+        row_filters = [
+            item
+            for term in (_and_terms(where.this) if where is not None else [])
+            if (item := detail(term, "filter")) is not None
+        ]
+        aggregate_filters = [
+            item
+            for aggregate_filter in query.find_all(exp.Filter)
+            if _query_owner(aggregate_filter) is query
+            and isinstance(aggregate_filter.expression, exp.Where)
+            for term in _and_terms(aggregate_filter.expression.this)
+            if (item := detail(term, "aggregate_filter")) is not None
+        ]
+        group = query.args.get("group") if isinstance(query, exp.Select) else None
+        grouping = [
+            item
+            for expression in (group.expressions if group is not None else [])
+            if (item := detail(expression, "group")) is not None
+        ]
+        having = query.args.get("having") if isinstance(query, exp.Select) else None
+        group_filters = [
+            item
+            for term in (_and_terms(having.this) if having is not None else [])
+            if (item := detail(term, "having")) is not None
+        ]
+        order = query.args.get("order")
+        ordering = [
+            item
+            for expression in (order.expressions if order is not None else [])
+            if (item := detail(expression, "sort")) is not None
+        ]
+        limit_expression = query.args.get("limit")
+        limit = _sql(limit_expression.expression) if limit_expression is not None else None
+
+        filter_roles = {"filter", "aggregate_filter"}
+        for participant in participants:
+            for column in participant["columns"]:
+                column["filter_only"] = bool(column["roles"]) and set(column["roles"]) <= filter_roles
+
+        step = {
+            "ordinal": len(steps) + 1,
+            "kind": kind,
+            "result_name": result_name,
+            "participants": participants,
+            "joins": joins,
+            "row_filters": row_filters,
+            "aggregate_filters": aggregate_filters,
+            "grouping": grouping,
+            "group_filters": group_filters,
+            "ordering": ordering,
+            "distinct": bool(query.args.get("distinct")),
+            "limit": limit,
+            "outputs": outputs,
+        }
+        steps.append(step)
+        steps_by_scope[id(scope)] = step
+
+    return steps
 
 
 def analyze_view_definition(
@@ -603,6 +948,14 @@ def analyze_view_definition(
             "sql": None,
         })
 
+    query_steps = _query_steps(
+        statement,
+        current_namespace=current_namespace,
+        exact=exact,
+        by_name=by_name,
+        warnings=warnings,
+    )
+
     return {
         "status": "partial" if warnings else "available",
         "sources": sources,
@@ -623,6 +976,7 @@ def analyze_view_definition(
         "distinct": bool(distinct_count),
         "limit": limit,
         "set_operations": [_set_operation_label(item) for item in set_operations],
+        "query_steps": query_steps,
         "stage_count": len(ctes),
         "join_count": len(joins),
         "filter_count": len(where_terms),

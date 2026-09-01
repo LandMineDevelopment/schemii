@@ -34,10 +34,6 @@ const USE_LABELS = Object.freeze({
   sort: "sort",
 });
 
-const RULE_LABELS = Object.freeze({
-  "aggregate-filter": "AGG FILTER",
-});
-
 function plural(value, singular, pluralForm = `${singular}s`) {
   return `${value} ${value === 1 ? singular : pluralForm}`;
 }
@@ -72,6 +68,13 @@ export function viewStorySummary(analysis) {
   return `${resultGrain(analysis)}, producing ${columns} from ${relations}.`;
 }
 
+export function queryStoryPhases(analysis) {
+  return (analysis?.querySteps || []).flatMap(step => [
+    { kind: "operation", step },
+    { kind: "result", step },
+  ]);
+}
+
 function inputIdentity(input) {
   return input.source ? `${input.source}.${input.column}` : input.column;
 }
@@ -80,275 +83,237 @@ function outputIdentity(output) {
   return output.name || `expression ${output.ordinal}`;
 }
 
-function sourceIdentity(source) {
-  return source.namespace ? `${source.namespace}.${source.name}` : source.name;
-}
-
 function selectedInputKeys(output) {
   return new Set((output?.inputs || []).map(input => inputIdentity(input)));
 }
 
-function sectionHeading(eyebrow, title, count = null) {
-  const heading = element("header", { className: "view-meaning-section-head" });
-  heading.append(element("div", {}, [
-    element("small", { text: eyebrow }),
-    element("strong", { text: title }),
-  ]));
-  if (count) heading.append(element("span", { text: count }));
-  return heading;
+function stepGrain(step) {
+  if (step.grouping?.length) {
+    return `One row per ${compactList(step.grouping.map(item => item.expression))}`;
+  }
+  if (step.outputs?.some(output => output.derivation === "aggregate")) return "One aggregate row";
+  if (step.distinct) return "Distinct rows";
+  if (!step.participants?.length) return "One constructed row";
+  return "One row per match";
 }
 
-function sourceCard(source, selectedKeys) {
-  const identity = sourceIdentity(source);
-  const aliases = (source.aliases || []).filter(alias => alias !== source.name);
-  const relevantColumns = (source.columns || []).filter(column => column.uses?.length);
-  const selected = relevantColumns.some(column => selectedKeys.has(`${source.name}.${column.name}`));
-  const card = element("article", {
-    className: `view-source-card${source.resolved ? "" : " unresolved"}${selected ? " lineage-active" : ""}`,
+function participantIndex(step) {
+  const index = new Map();
+  (step.participants || []).forEach((participant, position) => {
+    index.set(participant.reference, position % 6);
+    index.set(participant.name, position % 6);
   });
-  const header = element("header");
-  header.append(element("div", {}, [
-    element("small", { text: source.kind.replaceAll("_", " ") }),
-    element("strong", { text: source.name, title: identity }),
-  ]));
-  if (aliases.length) header.append(element("code", { text: `as ${aliases.join(", ")}`, title: aliases.join(", ") }));
-  card.append(header);
-
-  const columns = element("div", { className: "view-source-columns" });
-  if (!source.resolved) {
-    columns.append(element("p", { text: "Relation shape is not available in this design." }));
-  } else if (!relevantColumns.length) {
-    columns.append(element("p", { text: `${plural(source.columnCount, "known column")} · no named column reference` }));
-  } else {
-    for (const column of relevantColumns) {
-      const key = `${source.name}.${column.name}`;
-      const row = element("div", {
-        className: `view-source-column${selectedKeys.has(key) ? " lineage-active" : ""}`,
-        title: `${identity}.${column.name} · ${column.dataType || "type unresolved"}`,
-      });
-      const uses = (column.uses || []).filter(use => use !== "read");
-      row.append(
-        element("strong", { text: column.name }),
-        element("code", { text: column.dataType || "unresolved" }),
-      );
-      if (uses.length) {
-        const roles = element("span", { className: "view-source-uses" });
-        for (const use of uses) {
-          roles.append(element("i", {
-            text: USE_LABELS[use] || use,
-            title: `Used by query ${USE_LABELS[use] || use}`,
-          }));
-        }
-        row.append(roles);
-      }
-      columns.append(row);
-    }
-  }
-  card.append(columns);
-  return card;
+  return index;
 }
 
-function inputChips(inputs, emptyText = "No source column") {
-  const chips = element("div", { className: "view-input-chips" });
-  if (!inputs?.length) {
-    chips.append(element("span", { text: emptyText }));
-    return chips;
-  }
-  for (const input of inputs) {
-    const identity = inputIdentity(input);
-    chips.append(element("span", {
-      className: input.resolved ? "" : "unresolved",
-      text: identity,
-      title: identity,
+function coloredExpression(expression, step) {
+  const value = expression || "Not reported";
+  const code = element("code", { className: "view-colored-expression", title: value });
+  const accents = participantIndex(step);
+  const pattern = /([A-Za-z_][A-Za-z0-9_$]*\.[A-Za-z_][A-Za-z0-9_$]*)/g;
+  let cursor = 0;
+  for (const match of value.matchAll(pattern)) {
+    if (match.index > cursor) code.append(document.createTextNode(value.slice(cursor, match.index)));
+    const reference = match[0].split(".", 1)[0];
+    const accent = accents.get(reference);
+    code.append(element("span", {
+      className: accent === undefined ? "" : `view-accent-text-${accent}`,
+      text: match[0],
     }));
+    cursor = match.index + match[0].length;
   }
-  return chips;
+  if (cursor < value.length) code.append(document.createTextNode(value.slice(cursor)));
+  return code;
 }
 
-function resultRow(output, selected, onSelect) {
-  const name = outputIdentity(output);
-  const row = element("article", { className: `view-result-row${selected ? " selected" : ""}` });
-  const button = element("button", {
-    type: "button",
-    title: `${name} ← ${output.expression || "expression not reported"}`,
-    attrs: { "aria-expanded": selected ? "true" : "false" },
+function participantRow(participant, index, selectedKeys) {
+  const row = element("article", {
+    className: `view-step-participant view-accent-${index}${participant.resolved ? "" : " unresolved"}`,
   });
-  button.append(
-    element("span", { className: "view-result-ordinal", text: String(output.ordinal).padStart(2, "0") }),
-    element("div", {}, [
-      element("strong", { text: name }),
-      element("code", { text: output.expression || "Expression not reported", title: output.expression || name }),
-    ]),
-    element("span", { className: `view-derivation view-derivation-${output.derivation}`, text: output.derivation }),
-    element("small", { text: output.dataType || "type at apply" }),
+  const identity = participant.namespace ? `${participant.namespace}.${participant.name}` : participant.name;
+  const label = element("header");
+  label.append(
+    element("small", { text: participant.kind.replaceAll("_", " ") }),
+    element("strong", { text: participant.name, title: identity }),
   );
-  button.addEventListener("click", () => onSelect(output));
-  row.append(button);
-  if (selected) {
-    const emptyInputText = output.derivation === "aggregate" && /count\s*\(\s*\*\s*\)/i.test(output.expression || "")
-      ? "Counts matching source rows"
-      : output.derivation === "constant"
-        ? "No source data"
-        : "No resolved source column";
-    const detail = element("div", { className: "view-result-detail" });
-    detail.append(
-      element("span", { text: "Reads" }),
-      inputChips(output.inputs, emptyInputText),
-      element("span", { text: "Expression" }),
-      element("pre", { text: output.expression || "Not reported" }),
-    );
-    row.append(detail);
+  if (participant.reference !== participant.name) {
+    label.append(element("code", { text: `as ${participant.reference}`, title: `Query alias ${participant.reference}` }));
   }
+  row.append(label);
+
+  const columns = element("div", { className: "view-step-columns" });
+  if (!participant.columns?.length) {
+    columns.append(element("p", { text: "No named column reference" }));
+  }
+  for (const column of participant.columns || []) {
+    const identityKey = `${participant.reference}.${column.name}`;
+    const card = element("div", {
+      className: `view-step-column${column.filterOnly ? " filter-only" : ""}${selectedKeys.has(identityKey) ? " lineage-active" : ""}`,
+      title: `${identityKey} · ${column.dataType || "type unresolved"} · ${(column.roles || []).map(role => USE_LABELS[role] || role).join(", ")}`,
+    });
+    card.append(element("strong", { text: column.name }));
+    if (column.dataType) card.append(element("code", { text: column.dataType }));
+    const roles = element("span");
+    if (column.filterOnly) {
+      roles.append(element("i", { className: "filter-only", text: "FILTER ONLY" }));
+    } else {
+      for (const role of column.roles || []) {
+        roles.append(element("i", { text: USE_LABELS[role] || role }));
+      }
+    }
+    card.append(roles);
+    columns.append(card);
+  }
+  row.append(columns);
   return row;
 }
 
-function resultContract(analysis, selected, onSelectOutput) {
-  const section = element("section", { className: "view-result-contract" });
-  section.append(sectionHeading("Result contract", resultGrain(analysis), plural(analysis.outputs.length, "column")));
-  const rows = element("div", { className: "view-result-rows" });
-  if (!analysis.outputs.length) {
-    rows.append(element("p", { className: "view-meaning-empty", text: "No stable result columns were derived." }));
-  } else {
-    for (const output of analysis.outputs) {
-      rows.append(resultRow(output, output.ordinal === selected?.ordinal, onSelectOutput));
-    }
-  }
-  section.append(rows);
-  return section;
-}
-
-function sourcesPanel(analysis, selected) {
-  const section = element("section", { className: "view-source-universe" });
-  section.append(sectionHeading("Relations read", "Source relations", plural(analysis.sources.length, "relation")));
-  if (analysis.stages?.length) {
-    const stages = element("div", { className: "view-stage-strip" });
-    stages.append(element("small", { text: "Named query stages" }));
-    for (const stage of analysis.stages) {
-      stages.append(element("span", { text: `CTE ${stage}`, title: `Named query stage ${stage}` }));
-    }
-    section.append(stages);
-  }
-  const cards = element("div", { className: "view-source-grid" });
-  const keys = selectedInputKeys(selected);
-  if (!analysis.sources.length) {
-    cards.append(element("p", { className: "view-meaning-empty", text: "This query does not read a relation." }));
-  } else {
-    for (const source of analysis.sources) cards.append(sourceCard(source, keys));
-  }
-  section.append(cards);
-  return section;
-}
-
-function ruleCard(kind, title, expression, { scope = null, detail = null, inputs = [] } = {}) {
-  const card = element("article", { className: `view-rule view-rule-${kind}` });
+function logicCard(kind, label, title, expressions, step) {
+  const card = element("article", { className: `view-step-logic view-step-logic-${kind}` });
   const head = element("header");
   head.append(
-    element("span", { text: RULE_LABELS[kind] || kind.toUpperCase() }),
+    element("span", { text: label }),
     element("strong", { text: title, title }),
+    element("small", { text: plural(expressions.length, "condition") }),
   );
-  if (scope) head.append(element("small", { text: `in ${scope}`, title: `Inside CTE ${scope}` }));
   card.append(head);
-  if (expression) card.append(element("code", { text: expression, title: expression }));
-  if (detail) card.append(element("p", { text: detail }));
-  if (inputs.length) card.append(inputChips(inputs));
+  const body = element("div");
+  for (const expression of expressions) body.append(coloredExpression(expression, step));
+  card.append(body);
   return card;
 }
 
-function scopeItems(items, scope) {
-  return (items || []).filter(item => (item.scope || null) === scope);
+function stepLogic(step) {
+  const logic = element("div", { className: "view-step-logic-grid" });
+  for (const join of step.joins || []) {
+    const target = join.alias ? `${join.target} as ${join.alias}` : join.target;
+    logic.append(logicCard("join", "JOIN", `${join.joinType} JOIN · ${target}`, [join.expression || "No join predicate"], step));
+  }
+  if (step.rowFilters?.length) {
+    logic.append(logicCard("filter", "FILTER", "WHERE", step.rowFilters.map(item => item.expression), step));
+  }
+  if (step.aggregateFilters?.length) {
+    logic.append(logicCard("aggregate-filter", "AGG FILTER", "Aggregate input filter", step.aggregateFilters.map(item => item.expression), step));
+  }
+  if (step.grouping?.length) {
+    logic.append(logicCard("group", "GROUP", "GROUP BY", step.grouping.map(item => item.expression), step));
+  }
+  if (step.groupFilters?.length) {
+    logic.append(logicCard("having", "HAVING", "Grouped-row filter", step.groupFilters.map(item => item.expression), step));
+  }
+  if (step.distinct) logic.append(logicCard("distinct", "DISTINCT", "Remove duplicate rows", ["DISTINCT"], step));
+  if (step.ordering?.length) {
+    logic.append(logicCard("order", "ORDER", "ORDER BY", step.ordering.map(item => item.expression), step));
+  }
+  if (step.limit) logic.append(logicCard("limit", "LIMIT", "Maximum result rows", [`LIMIT ${step.limit}`], step));
+  if (!logic.childNodes.length) {
+    logic.append(element("p", { className: "view-step-direct", text: "Direct projection · no join, filter, grouping, or ordering rule" }));
+  }
+  return logic;
 }
 
-function groupingRule(analysis, scope) {
-  const grouping = scopeItems(analysis.grouping, scope);
-  if (!grouping.length) return null;
-  const title = scope
-    ? `One ${scope} row per ${compactList(grouping.map(item => item.expression))}`
-    : resultGrain(analysis);
-  return ruleCard("group", title, compactList(grouping.map(item => item.expression), 5), {
-    detail: scope
-      ? `These columns define the row grain produced by ${scope}.`
-      : "These columns define the final result row grain.",
-    inputs: grouping.flatMap(item => item.inputs || []),
-  });
-}
-
-function scopeRuleCount(analysis, scope, isFinal) {
-  return scopeItems(analysis.joins, scope).length
-    + scopeItems(analysis.rowFilters, scope).length
-    + scopeItems(analysis.aggregateFilters, scope).length
-    + scopeItems(analysis.groupFilters, scope).length
-    + scopeItems(analysis.ordering, scope).length
-    + (scopeItems(analysis.grouping, scope).length ? 1 : 0)
-    + (isFinal && analysis.distinct ? 1 : 0)
-    + (isFinal && analysis.limit ? 1 : 0)
-    + (isFinal ? analysis.setOperations?.length || 0 : 0);
-}
-
-function queryScope(analysis, scope, ordinal, isFinal) {
-  const count = scopeRuleCount(analysis, scope, isFinal);
-  const block = element("section", { className: `view-rule-scope${isFinal ? " final" : ""}` });
-  const heading = element("header", { className: "view-rule-scope-head" });
+function operationCard(step, view, selected) {
+  const isFinal = step.kind === "final";
+  const card = element("article", { className: `view-query-operation${isFinal ? " final" : ""}` });
+  const heading = element("header", { className: "view-query-card-head" });
+  const title = isFinal ? `Build ${view.name}` : `Build ${step.resultName}`;
   heading.append(
-    element("span", { text: isFinal ? "FINAL" : `CTE ${String(ordinal).padStart(2, "0")}` }),
+    element("span", { text: String(step.ordinal).padStart(2, "0") }),
     element("div", {}, [
-      element("strong", { text: isFinal ? "Produce the view result" : scope, title: scope || "Final result" }),
-      element("small", { text: isFinal ? "Final SELECT" : "Intermediate relation" }),
+      element("small", { text: isFinal ? "OUTER QUERY" : step.kind.replaceAll("_", " ") }),
+      element("strong", { text: title, title }),
     ]),
-    element("code", { text: count ? plural(count, "rule") : "Direct projection" }),
+    element("code", { text: `${plural(step.participants.length, "input")} · ${plural(step.outputs.length, "output")}` }),
   );
-  block.append(heading);
+  card.append(heading);
 
-  const rules = element("div", { className: "view-rule-scope-body" });
-  for (const join of scopeItems(analysis.joins, scope)) {
-    const target = join.alias && join.alias !== join.target ? `${join.target} as ${join.alias}` : join.target;
-    rules.append(ruleCard("join", `${join.joinType} join ${target}`, join.expression || "No join predicate", {
-      inputs: join.inputs,
-    }));
+  const participants = element("section", { className: "view-step-participants" });
+  participants.append(element("header", {}, [
+    element("strong", { text: "Participating columns" }),
+    element("small", { text: "Grouped and colored by relation" }),
+  ]));
+  const stepSelected = isFinal
+    ? step.outputs.find(output => output.ordinal === selected?.ordinal) || selected
+    : null;
+  const selectedKeys = selectedInputKeys(stepSelected);
+  if (!step.participants.length) {
+    participants.append(element("p", { className: "view-meaning-empty", text: "This step does not read a relation." }));
+  } else {
+    step.participants.forEach((participant, index) => participants.append(participantRow(participant, index, selectedKeys)));
   }
-  for (const filter of scopeItems(analysis.rowFilters, scope)) {
-    rules.append(ruleCard("where", "Keep source rows where", filter.expression, { inputs: filter.inputs }));
-  }
-  for (const filter of scopeItems(analysis.aggregateFilters, scope)) {
-    rules.append(ruleCard("aggregate-filter", "Include aggregate values where", filter.expression, { inputs: filter.inputs }));
-  }
-  const group = groupingRule(analysis, scope);
-  if (group) rules.append(group);
-  for (const filter of scopeItems(analysis.groupFilters, scope)) {
-    rules.append(ruleCard("having", "Keep grouped rows where", filter.expression, { inputs: filter.inputs }));
-  }
-  if (isFinal && analysis.distinct) rules.append(ruleCard("distinct", "Return unique result rows", "DISTINCT"));
-  if (isFinal) {
-    for (const operation of analysis.setOperations || []) {
-      rules.append(ruleCard("set", `Combine another result with ${operation}`, operation));
+  card.append(participants, stepLogic(step));
+  return card;
+}
+
+function outputAccent(output, step) {
+  const accents = participantIndex(step);
+  const values = new Set((output.inputs || []).map(input => accents.get(input.source)).filter(value => value !== undefined));
+  return values.size === 1 ? ` view-accent-${[...values][0]}` : values.size > 1 ? " view-accent-multi" : "";
+}
+
+function resultColumn(output, step, selected, onSelect) {
+  const isFinal = step.kind === "final";
+  const tag = isFinal ? "button" : "article";
+  const card = element(tag, {
+    className: `view-step-output${outputAccent(output, step)}${selected ? " selected" : ""}`,
+    type: isFinal ? "button" : null,
+    title: `${outputIdentity(output)} ← ${output.expression || "expression not reported"}`,
+    attrs: isFinal ? { "aria-pressed": selected ? "true" : "false" } : {},
+  });
+  card.append(
+    element("span", { text: String(output.ordinal).padStart(2, "0") }),
+    element("div", {}, [
+      element("strong", { text: outputIdentity(output) }),
+      coloredExpression(output.expression, step),
+    ]),
+    element("small", { text: output.derivation }),
+  );
+  if (isFinal) card.addEventListener("click", () => onSelect(output));
+  return card;
+}
+
+function resultCard(step, view, selected, onSelectOutput) {
+  const isFinal = step.kind === "final";
+  const card = element("article", { className: `view-query-result${isFinal ? " final" : ""}` });
+  const name = isFinal ? view.name : step.resultName;
+  const heading = element("header", { className: "view-query-result-head" });
+  heading.append(
+    element("span", { text: "↓", attrs: { "aria-hidden": "true" } }),
+    element("div", {}, [
+      element("small", { text: isFinal ? "VIEW RESULT" : "INTERMEDIATE TABLE" }),
+      element("strong", { text: name, title: name }),
+    ]),
+    element("code", { text: stepGrain(step), title: stepGrain(step) }),
+  );
+  card.append(heading);
+  const outputs = element("div", { className: "view-step-outputs" });
+  if (!step.outputs.length) {
+    outputs.append(element("p", { className: "view-meaning-empty", text: "No stable output columns were derived." }));
+  } else {
+    for (const output of step.outputs) {
+      outputs.append(resultColumn(output, step, isFinal && output.ordinal === selected?.ordinal, onSelectOutput));
     }
   }
-  for (const order of scopeItems(analysis.ordering, scope)) {
-    rules.append(ruleCard("order", "Present results ordered by", order.expression, { inputs: order.inputs }));
-  }
-  if (isFinal && analysis.limit) rules.append(ruleCard("limit", `Return at most ${analysis.limit} rows`, `LIMIT ${analysis.limit}`));
-  if (!count) {
-    rules.append(element("p", { className: "view-meaning-empty", text: "Selected columns pass directly into this relation." }));
-  }
-  block.append(rules);
-  return block;
+  card.append(outputs);
+  return card;
 }
 
-function rulesPanel(analysis) {
-  const section = element("section", { className: "view-query-rules" });
-  const ruleCount = (analysis.joins?.length || 0)
-    + (analysis.rowFilters?.length || 0)
-    + (analysis.aggregateFilters?.length || 0)
-    + (analysis.groupFilters?.length || 0)
-    + (analysis.ordering?.length || 0)
-    + new Set((analysis.grouping || []).map(item => item.scope || "__final__")).size
-    + (analysis.distinct ? 1 : 0)
-    + (analysis.limit ? 1 : 0)
-    + (analysis.setOperations?.length || 0);
-  section.append(sectionHeading("Relational meaning", "Relationships & rules", ruleCount ? plural(ruleCount, "rule") : "Direct projection"));
-  const rules = element("div", { className: "view-rules-list" });
-  (analysis.stages || []).forEach((scope, index) => rules.append(queryScope(analysis, scope, index + 1, false)));
-  rules.append(queryScope(analysis, null, (analysis.stages || []).length + 1, true));
-  section.append(rules);
+function chronologicalStory(analysis, view, selected, onSelectOutput) {
+  const section = element("section", { className: "view-query-timeline" });
+  const heading = element("header", { className: "view-query-timeline-head" });
+  heading.append(element("div", {}, [
+    element("small", { text: "CHRONOLOGICAL QUERY STORY" }),
+    element("strong", { text: "Read each operation, then the relation it produces" }),
+  ]));
+  heading.append(element("span", { text: plural(analysis.querySteps.length, "query step") }));
+  section.append(heading);
+  const flow = element("div", { className: "view-query-flow" });
+  for (const phase of queryStoryPhases(analysis)) {
+    flow.append(phase.kind === "operation"
+      ? operationCard(phase.step, view, selected)
+      : resultCard(phase.step, view, selected, onSelectOutput));
+  }
+  section.append(flow);
   return section;
 }
 
@@ -466,13 +431,11 @@ export function renderDesignViewStory(container, {
   const selected = analysis.outputs.find(output => output.ordinal === selectedOutputOrdinal)
     || analysis.outputs[0]
     || null;
-  const canvas = element("div", { className: "view-meaning-canvas", attrs: { "aria-label": "Relational meaning map" } });
-  canvas.append(
-    resultContract(analysis, selected, onSelectOutput),
-    sourcesPanel(analysis, selected),
-    rulesPanel(analysis),
-  );
-  story.append(canvas);
+  if (analysis.querySteps?.length) {
+    story.append(chronologicalStory(analysis, view, selected, onSelectOutput));
+  } else {
+    story.append(emptyPanel("SQL", "No query steps", "The query parsed, but no executable SELECT scope was derived."));
+  }
   if (!compact) story.append(sqlPanel(analysis, view, selected));
   if (analysis.warnings.length) {
     const warnings = element("details", { className: "view-story-warnings" });
