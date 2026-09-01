@@ -43,6 +43,147 @@ def relations() -> list[dict[str, object]]:
     ]
 
 
+def commerce_relations() -> list[dict[str, object]]:
+    return [
+        {
+            "namespace": "desired",
+            "name": "orders",
+            "kind": "table",
+            "columns": [
+                {"name": "id", "data_type": "uuid"},
+                {"name": "customer_id", "data_type": "uuid"},
+                {"name": "ordered_at", "data_type": "timestamp with time zone"},
+                {"name": "status", "data_type": "text"},
+                {"name": "total", "data_type": "numeric(12,2)"},
+            ],
+        },
+        {
+            "namespace": "desired",
+            "name": "customers",
+            "kind": "table",
+            "columns": [
+                {"name": "id", "data_type": "uuid"},
+                {"name": "name", "data_type": "text"},
+                {"name": "region", "data_type": "text"},
+                {"name": "status", "data_type": "text"},
+            ],
+        },
+        {
+            "namespace": "desired",
+            "name": "order_items",
+            "kind": "table",
+            "columns": [
+                {"name": "order_id", "data_type": "uuid"},
+                {"name": "product_id", "data_type": "uuid"},
+                {"name": "quantity", "data_type": "integer"},
+                {"name": "unit_price", "data_type": "numeric(12,2)"},
+                {"name": "discount_amount", "data_type": "numeric(12,2)"},
+            ],
+        },
+        {
+            "namespace": "desired",
+            "name": "products",
+            "kind": "table",
+            "columns": [
+                {"name": "id", "data_type": "uuid"},
+                {"name": "category", "data_type": "text"},
+                {"name": "active", "data_type": "boolean"},
+            ],
+        },
+        {
+            "namespace": "desired",
+            "name": "payments",
+            "kind": "table",
+            "columns": [
+                {"name": "order_id", "data_type": "uuid"},
+                {"name": "status", "data_type": "text"},
+                {"name": "amount", "data_type": "numeric(12,2)"},
+                {"name": "paid_at", "data_type": "timestamp with time zone"},
+            ],
+        },
+    ]
+
+
+COMPLEX_VIEW_SQL = """
+WITH order_profitability AS (
+    SELECT
+        o.id AS order_id,
+        o.customer_id,
+        c.region,
+        c.name AS customer_name,
+        CONCAT(c.region, ' / ', item_rollup.category_mix) AS customer_market,
+        item_rollup.gross_item_value,
+        item_rollup.discount_total,
+        item_rollup.product_count,
+        payment_rollup.captured_total,
+        payment_rollup.last_paid_at,
+        item_rollup.gross_item_value
+            - item_rollup.discount_total
+            - GREATEST(o.total - payment_rollup.captured_total, 0)
+            AS recognized_revenue,
+        CASE
+            WHEN payment_rollup.captured_total >= o.total THEN 'settled'
+            ELSE 'partial'
+        END AS payment_state
+    FROM orders AS o
+    INNER JOIN customers AS c
+        ON c.id = o.customer_id
+    INNER JOIN (
+        SELECT
+            oi.order_id,
+            SUM(oi.quantity * oi.unit_price) AS gross_item_value,
+            SUM(oi.discount_amount) AS discount_total,
+            COUNT(DISTINCT pr.id) AS product_count,
+            STRING_AGG(DISTINCT pr.category, ', ' ORDER BY pr.category)
+                AS category_mix
+        FROM order_items AS oi
+        INNER JOIN products AS pr
+            ON pr.id = oi.product_id
+        WHERE pr.active = TRUE
+        GROUP BY oi.order_id
+        HAVING SUM(oi.quantity * oi.unit_price - oi.discount_amount) > 0
+    ) AS item_rollup
+        ON item_rollup.order_id = o.id
+    LEFT JOIN (
+        SELECT
+            p.order_id,
+            COALESCE(
+                SUM(p.amount) FILTER (WHERE p.status = 'captured'),
+                0
+            ) AS captured_total,
+            MAX(p.paid_at) FILTER (WHERE p.status = 'captured') AS last_paid_at,
+            COUNT(*) FILTER (WHERE p.status = 'captured') AS capture_events
+        FROM payments AS p
+        GROUP BY p.order_id
+    ) AS payment_rollup
+        ON payment_rollup.order_id = o.id
+    WHERE c.status = 'active'
+      AND o.status IN ('paid', 'shipped', 'completed')
+      AND o.ordered_at >= CURRENT_DATE - INTERVAL '365 days'
+      AND payment_rollup.capture_events > 0
+)
+SELECT
+    op.region,
+    op.customer_market,
+    COUNT(DISTINCT op.customer_id) AS customer_count,
+    COUNT(op.order_id) AS order_count,
+    SUM(op.gross_item_value - op.discount_total) AS merchandise_net,
+    SUM(op.recognized_revenue) AS recognized_revenue,
+    SUM(op.captured_total) AS captured_revenue,
+    SUM(op.recognized_revenue)
+        / NULLIF(SUM(op.gross_item_value - op.discount_total), 0)
+        AS recognition_rate,
+    AVG(op.product_count) AS average_products_per_order,
+    MAX(op.last_paid_at) AS last_payment_at
+FROM order_profitability AS op
+WHERE op.payment_state = 'settled'
+GROUP BY op.region, op.customer_market
+HAVING SUM(op.recognized_revenue) > 100
+ORDER BY recognized_revenue DESC, customer_count DESC
+LIMIT 50
+"""
+
+
 def test_analysis_derives_inputs_transformations_and_output_lineage() -> None:
     analysis = analyze_view_definition(
         """
@@ -262,6 +403,73 @@ def test_analysis_places_derived_subquery_before_its_outer_query() -> None:
     assert [(step["kind"], step["result_name"]) for step in analysis["query_steps"]] == [
         ("derived_table", "summary"),
         ("final", "view result"),
+    ]
+
+
+def test_analysis_propagates_complex_subquery_types_and_cross_source_lineage() -> None:
+    analysis = analyze_view_definition(COMPLEX_VIEW_SQL, commerce_relations())
+
+    assert analysis["status"] == "available"
+    assert analysis["warnings"] == []
+    assert [(step["kind"], step["result_name"]) for step in analysis["query_steps"]] == [
+        ("derived_table", "item_rollup"),
+        ("derived_table", "payment_rollup"),
+        ("cte", "order_profitability"),
+        ("final", "view result"),
+    ]
+
+    item_rollup, payment_rollup, profitability, final = analysis["query_steps"]
+    assert {output["name"]: output["data_type"] for output in item_rollup["outputs"]} == {
+        "order_id": "uuid",
+        "gross_item_value": "DECIMAL(12, 2)",
+        "discount_total": "DECIMAL(12, 2)",
+        "product_count": "BIGINT",
+        "category_mix": "VARCHAR",
+    }
+    assert payment_rollup["aggregate_filters"] == [
+        {
+            "expression": "p.status = 'captured'",
+            "inputs": [
+                {"source": "p", "column": "status", "resolved": True},
+            ],
+            "scope": "payment_rollup",
+        }
+    ]
+    assert {output["name"]: output["data_type"] for output in payment_rollup["outputs"]} == {
+        "order_id": "uuid",
+        "captured_total": "DECIMAL(12, 2)",
+        "last_paid_at": "TIMESTAMPTZ",
+        "capture_events": "BIGINT",
+    }
+
+    assert len(profitability["joins"]) == 3
+    customer_market = next(
+        output for output in profitability["outputs"] if output["name"] == "customer_market"
+    )
+    assert customer_market["data_type"] == "VARCHAR"
+    assert {item["source"] for item in customer_market["inputs"]} == {
+        "c",
+        "item_rollup",
+    }
+    recognized_revenue = next(
+        output
+        for output in profitability["outputs"]
+        if output["name"] == "recognized_revenue"
+    )
+    assert recognized_revenue["data_type"] == "DECIMAL(12, 2)"
+    assert {item["source"] for item in recognized_revenue["inputs"]} == {
+        "item_rollup",
+        "o",
+        "payment_rollup",
+    }
+
+    final_types = {output["name"]: output["data_type"] for output in final["outputs"]}
+    assert final_types["customer_count"] == "BIGINT"
+    assert final_types["recognition_rate"] == "DECIMAL"
+    assert final_types["last_payment_at"] == "TIMESTAMPTZ"
+    assert [item["expression"] for item in final["ordering"]] == [
+        "recognized_revenue DESC",
+        "customer_count DESC",
     ]
 
 

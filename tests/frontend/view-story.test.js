@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  compositeProjectionMappings,
   expressionSegments,
   queryStoryPhases,
   resultGrain,
@@ -96,5 +97,31 @@ test("view story defines selected output aliases from their source expressions",
   assert.deepEqual(
     selectProjectionsForColumn(step, { name: "payments", reference: "p" }, "amount"),
     [{ expression: "SUM(p.amount)", alias: "captured_revenue", derivation: "aggregate", inputs: [{ source: "payments", column: "amount" }] }],
+  );
+});
+
+test("view story renders multi-input transformations once instead of beside every input", () => {
+  const mapping = {
+    ordinal: 1,
+    name: "recognized_revenue",
+    expression: "items.gross - items.discount - payments.uncaptured",
+    derivation: "expression",
+    inputs: [
+      { source: "items", column: "gross" },
+      { source: "items", column: "discount" },
+      { source: "payments", column: "uncaptured" },
+    ],
+  };
+  const step = { outputs: [mapping] };
+
+  assert.deepEqual(compositeProjectionMappings(step), [{
+    expression: mapping.expression,
+    alias: mapping.name,
+    derivation: mapping.derivation,
+    inputs: mapping.inputs,
+  }]);
+  assert.deepEqual(
+    selectProjectionsForColumn(step, { name: "items", reference: "items" }, "gross"),
+    [],
   );
 });

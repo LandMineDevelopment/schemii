@@ -93,9 +93,17 @@ export function selectProjectionMappings(step) {
   }));
 }
 
+function projectionInputCount(mapping) {
+  return new Set(mapping.inputs.map(inputIdentity)).size;
+}
+
+export function compositeProjectionMappings(step) {
+  return selectProjectionMappings(step).filter(mapping => projectionInputCount(mapping) > 1);
+}
+
 export function selectProjectionsForColumn(step, participant, columnName) {
   const sources = new Set([participant?.reference, participant?.name].filter(Boolean));
-  return selectProjectionMappings(step).filter(mapping => mapping.inputs.some(input => (
+  return selectProjectionMappings(step).filter(mapping => projectionInputCount(mapping) <= 1 && mapping.inputs.some(input => (
     input.column === columnName && sources.has(input.source)
   )));
 }
@@ -240,7 +248,7 @@ function participantRow(participant, index, selectedKeys, step) {
       roles.append(element("i", { className: "filter-only", text: "FILTER ONLY" }));
     } else {
       for (const role of column.roles || []) {
-        if (role === "output") continue;
+        if (role === "output" && projections.length) continue;
         roles.append(element("i", { text: USE_LABELS[role] || role }));
       }
     }
@@ -285,6 +293,20 @@ function appendUnboundProjections(participants, step) {
   section.append(element("header", {}, [
     element("strong", { text: "SELECT" }),
     element("small", { text: "Output without a resolved source column" }),
+  ]));
+  const rows = element("div");
+  mappings.forEach(mapping => rows.append(selectProjectionLine(mapping, step)));
+  section.append(rows);
+  participants.append(section);
+}
+
+function appendCompositeProjections(participants, step) {
+  const mappings = compositeProjectionMappings(step);
+  if (!mappings.length) return;
+  const section = element("section", { className: "view-step-unbound-select view-step-composite-select" });
+  section.append(element("header", {}, [
+    element("strong", { text: "COMBINE" }),
+    element("small", { text: "Multiple SELECT inputs" }),
   ]));
   const rows = element("div");
   mappings.forEach(mapping => rows.append(selectProjectionLine(mapping, step)));
@@ -350,6 +372,7 @@ function operationCard(step, view, selected) {
   } else {
     step.participants.forEach((participant, index) => participants.append(participantRow(participant, index, selectedKeys, step)));
   }
+  appendCompositeProjections(participants, step);
   appendUnboundProjections(participants, step);
   card.append(participants, stepLogic(step));
   return card;

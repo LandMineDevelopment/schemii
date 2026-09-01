@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlglot import exp, parse
 from sqlglot.errors import SqlglotError
+from sqlglot.optimizer.annotate_types import annotate_types
 from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
 
 
@@ -90,6 +91,59 @@ def _sql(expression: exp.Expression | None) -> str | None:
     if len(value.encode("utf-8")) > MAX_FRAGMENT_BYTES:
         return None
     return value
+
+
+def _data_type_sql(expression: exp.Expression | None) -> str | None:
+    """Return one source-derived PostgreSQL type when SQLGlot can prove it."""
+
+    data_type = expression.type if expression is not None else None
+    if data_type is None or data_type.is_type(exp.DataType.Type.UNKNOWN):
+        return None
+    return data_type.sql(dialect="postgres")
+
+
+def _annotate_source_types(
+    statement: exp.Expression,
+    *,
+    current_namespace: str,
+    exact: dict[tuple[str, str], dict[str, Any]],
+    by_name: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Annotate expressions from known relation shapes without requiring database I/O."""
+
+    schema: dict[str, dict[str, str]] = {}
+    referenced_names = {table.name for table in statement.find_all(exp.Table)}
+    for name, candidates in by_name.items():
+        if name not in referenced_names:
+            continue
+        relation = exact.get((current_namespace, name))
+        if relation is None and len(candidates) == 1:
+            relation = candidates[0]
+        columns = {
+            str(column["name"]): str(column.get("data_type") or "")
+            for column in (relation or {}).get("columns", [])
+            if column.get("data_type")
+        }
+        if columns:
+            schema[name] = columns
+    if schema:
+        annotate_types(statement, schema=schema, dialect="postgres")
+
+
+def _unique_expression_details(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse repeated predicates while retaining all source inputs."""
+
+    unique: dict[tuple[str, str | None], dict[str, Any]] = {}
+    for item in items:
+        key = (item["expression"], item.get("scope"))
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = item
+            continue
+        for expression_input in item.get("inputs", []):
+            if expression_input not in existing["inputs"]:
+                existing["inputs"].append(expression_input)
+    return list(unique.values())
 
 
 def _scope_name(expression: exp.Expression) -> str | None:
@@ -434,6 +488,8 @@ def _query_steps(
                 participant = participant_for(value)
                 if participant is not None:
                     data_type = known_columns.get(participant["reference"], {}).get(value.name)
+            if data_type is None:
+                data_type = _data_type_sql(projection)
             outputs.append({
                 "ordinal": len(outputs) + 1,
                 "name": output_name,
@@ -474,14 +530,14 @@ def _query_steps(
             for term in (_and_terms(where.this) if where is not None else [])
             if (item := detail(term, "filter")) is not None
         ]
-        aggregate_filters = [
+        aggregate_filters = _unique_expression_details(
             item
             for aggregate_filter in query.find_all(exp.Filter)
             if _query_owner(aggregate_filter) is query
             and isinstance(aggregate_filter.expression, exp.Where)
             for term in _and_terms(aggregate_filter.expression.this)
             if (item := detail(term, "aggregate_filter")) is not None
-        ]
+        )
         group = query.args.get("group") if isinstance(query, exp.Select) else None
         grouping = [
             item
@@ -538,7 +594,14 @@ def analyze_view_definition(
     """Derive the compact view story from one query body without database I/O."""
 
     statement = parse_view_definition(definition)
-    exact, by_name = _relation_index(relations)
+    relation_list = list(relations)
+    exact, by_name = _relation_index(relation_list)
+    _annotate_source_types(
+        statement,
+        current_namespace=current_namespace,
+        exact=exact,
+        by_name=by_name,
+    )
     ctes = list(statement.find_all(exp.CTE))[:MAX_ANALYSIS_ITEMS]
     cte_names = {cte.alias_or_name for cte in ctes}
     warnings: set[str] = set()
@@ -592,6 +655,17 @@ def analyze_view_definition(
         aliases[reference_alias] = source
         aliases.setdefault(table.name, source)
 
+    for subquery in statement.find_all(exp.Subquery):
+        if not subquery.alias:
+            continue
+        aliases.setdefault(subquery.alias, {
+            "namespace": None,
+            "name": subquery.alias,
+            "kind": "stage",
+            "resolved": True,
+            "columns": [],
+        })
+
     sources = list(sources_by_key.values())
 
     def mark_usage(item: dict[str, Any], role: str) -> None:
@@ -641,20 +715,21 @@ def analyze_view_definition(
         inputs: list[dict[str, Any]],
     ) -> str | None:
         value = projection.this if isinstance(projection, exp.Alias) else projection
-        if not isinstance(value, exp.Column) or len(inputs) != 1:
-            return None
-        source = aliases.get(value.table) if value.table else None
-        if source is None and len(sources) == 1:
-            source = sources[0]
-        column = next(
-            (
-                item
-                for item in (source or {}).get("columns", [])
-                if item["name"] == value.name
-            ),
-            None,
-        )
-        return column["data_type"] or None if column else None
+        if isinstance(value, exp.Column) and len(inputs) == 1:
+            source = aliases.get(value.table) if value.table else None
+            if source is None and len(sources) == 1:
+                source = sources[0]
+            column = next(
+                (
+                    item
+                    for item in (source or {}).get("columns", [])
+                    if item["name"] == value.name
+                ),
+                None,
+            )
+            if column and column["data_type"]:
+                return column["data_type"]
+        return _data_type_sql(projection)
 
     def expression_detail(
         expression: exp.Expression,
@@ -825,11 +900,11 @@ def analyze_view_definition(
         if isinstance(aggregate_filter.expression, exp.Where)
         for term in _and_terms(aggregate_filter.expression.this)
     ][:MAX_ANALYSIS_ITEMS]
-    aggregate_filters = [
+    aggregate_filters = _unique_expression_details(
         detail
         for term in aggregate_filter_terms
         if (detail := expression_detail(term, role="aggregate_filter")) is not None
-    ]
+    )
 
     grouping = [
         item
