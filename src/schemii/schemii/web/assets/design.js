@@ -23,6 +23,7 @@ function tableCatalogEntry(table, columns) {
     initiallyDeferred: false,
   }));
   return {
+    designId: table.id,
     namespace: "desired",
     name: table.name,
     kind: "table",
@@ -88,6 +89,7 @@ export function designToCatalog(workspace, design) {
       const source = tables.get(relationship.sourceTableId);
       const target = tables.get(relationship.targetTableId);
       return {
+        designId: relationship.id,
         name: relationship.name,
         sourceNamespace: "desired",
         sourceTable: source.name,
@@ -155,11 +157,13 @@ function truncateBytes(value, maximum) {
 }
 
 export function createDesignTable(name, columnValues, randomUUID = () => crypto.randomUUID()) {
-  const tableName = name.trim();
-  if (!tableName) throw new Error("Enter a table name.");
-  if (byteLength(tableName) > 63) throw new Error("The table name must be at most 63 UTF-8 bytes.");
+  return designTableFromValues(null, name, columnValues, randomUUID);
+}
+
+function normalizedColumns(columnValues) {
   if (!columnValues.length) throw new Error("Add at least one column.");
   const columns = columnValues.map(value => ({
+    id: value.id || null,
     name: value.name.trim(),
     dataType: value.dataType.trim(),
     nullable: value.primary ? false : Boolean(value.nullable),
@@ -169,28 +173,124 @@ export function createDesignTable(name, columnValues, randomUUID = () => crypto.
   if (columns.some(column => byteLength(column.name) > 63)) throw new Error("Column names must be at most 63 UTF-8 bytes.");
   if (columns.some(column => !column.dataType)) throw new Error("Every column needs a PostgreSQL data type.");
   if (new Set(columns.map(column => column.name)).size !== columns.length) throw new Error("Column names must be unique within the table.");
+  if (columns.filter(column => column.id).length !== new Set(columns.filter(column => column.id).map(column => column.id)).size) {
+    throw new Error("A column cannot appear more than once.");
+  }
+  return columns;
+}
 
-  const designColumns = columns.map(column => ({
-    id: id("column", randomUUID),
-    name: column.name,
-    dataType: column.dataType,
-    nullable: column.nullable,
-    defaultExpression: null,
-    identity: null,
-  }));
+function validatedName(value, label) {
+  const name = value.trim();
+  if (!name) throw new Error(`Enter a ${label}.`);
+  if (byteLength(name) > 63) throw new Error(`The ${label} must be at most 63 UTF-8 bytes.`);
+  return name;
+}
+
+function designTableFromValues(existingTable, name, columnValues, randomUUID) {
+  const tableName = validatedName(name, "table name");
+  const columns = normalizedColumns(columnValues);
+  const existingColumns = new Map((existingTable?.columns || []).map(column => [column.id, column]));
+  for (const column of columns) {
+    if (column.id && !existingColumns.has(column.id)) throw new Error("The table changed while this editor was open. Reload the design and try again.");
+  }
+
+  const designColumns = columns.map(column => {
+    const existing = existingColumns.get(column.id);
+    return {
+      id: existing?.id || id("column", randomUUID),
+      name: column.name,
+      dataType: column.dataType,
+      nullable: column.nullable,
+      defaultExpression: existing?.defaultExpression ?? null,
+      identity: existing?.identity ?? null,
+    };
+  });
   const primaryColumnIds = designColumns.filter((_, index) => columns[index].primary).map(column => column.id);
-  const keys = primaryColumnIds.length ? [{
-    id: id("key", randomUUID),
-    name: `${truncateBytes(tableName, 58)}_pkey`,
-    kind: "primary",
-    columnIds: primaryColumnIds,
-  }] : [];
+  const existingPrimary = existingTable?.keys.find(key => key.kind === "primary") || null;
+  const otherKeys = (existingTable?.keys || []).filter(key => key.kind !== "primary");
+  const keys = [...otherKeys];
+  if (primaryColumnIds.length) {
+    keys.unshift({
+      id: existingPrimary?.id || id("key", randomUUID),
+      name: existingPrimary?.name || `${truncateBytes(tableName, 58)}_pkey`,
+      kind: "primary",
+      columnIds: primaryColumnIds,
+    });
+  }
   return {
-    id: id("table", randomUUID),
+    id: existingTable?.id || id("table", randomUUID),
     name: tableName,
     columns: designColumns,
     keys,
-    checks: [],
-    indexes: [],
+    checks: existingTable?.checks || [],
+    indexes: existingTable?.indexes || [],
+  };
+}
+
+function referencedRemovedColumn(content, table, retainedColumnIds) {
+  const removed = new Set(table.columns.filter(column => !retainedColumnIds.has(column.id)).map(column => column.id));
+  if (!removed.size) return null;
+  const key = table.keys.find(item => item.kind !== "primary" && item.columnIds.some(columnId => removed.has(columnId)));
+  if (key) return `unique key “${key.name}”`;
+  const index = table.indexes.find(item => item.columnIds.some(columnId => removed.has(columnId)));
+  if (index) return `index “${index.name}”`;
+  const relationship = content.relationships.find(item => (
+    (item.sourceTableId === table.id && item.sourceColumnIds.some(columnId => removed.has(columnId)))
+    || (item.targetTableId === table.id && item.targetColumnIds.some(columnId => removed.has(columnId)))
+  ));
+  if (relationship) return `relationship “${relationship.name}”`;
+  return null;
+}
+
+export function updateDesignTable(content, tableId, name, columnValues, randomUUID = () => crypto.randomUUID()) {
+  const table = content.tables.find(item => item.id === tableId);
+  if (!table) throw new Error("The selected table is no longer in this design.");
+  const duplicateName = content.tables.some(item => item.id !== tableId && item.name === name.trim());
+  if (duplicateName) throw new Error("A table with this name already exists in the design.");
+  const retainedColumnIds = new Set(columnValues.map(column => column.id).filter(Boolean));
+  const reference = referencedRemovedColumn(content, table, retainedColumnIds);
+  if (reference) throw new Error(`Remove or update ${reference} before removing its column.`);
+  const updated = designTableFromValues(table, name, columnValues, randomUUID);
+  const targetKeys = new Set(updated.keys
+    .filter(key => key.kind === "primary" || key.kind === "unique")
+    .map(key => key.columnIds.join("\u0000")));
+  const invalidRelationship = content.relationships.find(relationship => (
+    relationship.targetTableId === tableId
+    && !targetKeys.has(relationship.targetColumnIds.join("\u0000"))
+  ));
+  if (invalidRelationship) {
+    throw new Error(`Relationship “${invalidRelationship.name}” targets this key. Delete the relationship before changing the key.`);
+  }
+  return updated;
+}
+
+export function createDesignRelationship(content, values, randomUUID = () => crypto.randomUUID()) {
+  const relationshipName = validatedName(values.name, "relationship name");
+  if (content.relationships.some(item => item.name === relationshipName)) {
+    throw new Error("A relationship with this name already exists in the design.");
+  }
+  const source = content.tables.find(table => table.id === values.sourceTableId);
+  const target = content.tables.find(table => table.id === values.targetTableId);
+  if (!source || !target) throw new Error("Choose source and target tables from this design.");
+  const targetKey = target.keys.find(key => key.id === values.targetKeyId && ["primary", "unique"].includes(key.kind));
+  if (!targetKey) throw new Error("Choose a primary or unique key on the target table.");
+  const sourceColumnIds = [...values.sourceColumnIds];
+  const sourceIds = new Set(source.columns.map(column => column.id));
+  if (sourceColumnIds.length !== targetKey.columnIds.length || sourceColumnIds.some(columnId => !sourceIds.has(columnId))) {
+    throw new Error("Map one source column to every target key column.");
+  }
+  if (new Set(sourceColumnIds).size !== sourceColumnIds.length) throw new Error("Each source column can appear only once in a relationship.");
+  if (values.initiallyDeferred && !values.deferrable) throw new Error("Initially deferred relationships must be deferrable.");
+  return {
+    id: id("relationship", randomUUID),
+    name: relationshipName,
+    sourceTableId: source.id,
+    sourceColumnIds,
+    targetTableId: target.id,
+    targetColumnIds: [...targetKey.columnIds],
+    onUpdate: values.onUpdate,
+    onDelete: values.onDelete,
+    deferrable: Boolean(values.deferrable),
+    initiallyDeferred: Boolean(values.initiallyDeferred),
   };
 }

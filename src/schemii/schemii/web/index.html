@@ -65,7 +65,7 @@
 
         <aside class="tool-rail" aria-label="Workspace tools">
           <button id="create-table-button" type="button" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
-          <button type="button" data-ui-icon="relationship" data-unavailable="relationship-create" title="Create relationship" aria-label="Create relationship"></button>
+          <button id="create-relationship-button" type="button" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" disabled></button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button type="button" data-ui-icon="undo" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo"></button>
           <button type="button" data-ui-icon="redo" data-unavailable="semantic-redo" title="Semantic redo" aria-label="Semantic redo"></button>
@@ -106,8 +106,8 @@
               </button>
               <div class="ui-dock-pane__actions">
                 <button class="ui-icon-button compact" type="button" data-ui-icon="tables" data-unavailable="table-rows" aria-label="Browse table rows"></button>
-                <button class="ui-icon-button compact" type="button" data-ui-icon="edit" data-unavailable="table-edit" aria-label="Edit table"></button>
-                <button class="ui-icon-button compact danger" type="button" data-ui-icon="delete" data-unavailable="table-delete" aria-label="Delete table"></button>
+                <button class="ui-icon-button compact" id="edit-table-button" type="button" data-ui-icon="edit" aria-label="Edit designed table" disabled></button>
+                <button class="ui-icon-button compact danger" id="delete-table-button" type="button" data-ui-icon="delete" aria-label="Delete designed table" disabled></button>
                 <button class="ui-icon-button compact" id="table-inspector-close" type="button" data-ui-icon="close" aria-label="Close table inspector"></button>
               </div>
             </header>
@@ -224,7 +224,7 @@
 
     <dialog class="ui-dialog editor-dialog design-table-dialog" id="design-table-dialog" aria-labelledby="design-table-title">
       <form class="ui-dialog__shell" id="design-table-form">
-        <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="design-table-title">Create table</h2><p>Add a table and its initial columns. Saving replaces one exact design revision and never contacts PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close table editor"></button></header>
+        <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="design-table-title">Create table</h2><p id="design-table-copy">Add a table and its initial columns. Saving replaces one exact design revision and never contacts PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close table editor"></button></header>
         <div class="design-table-body">
           <label class="design-table-name"><span>Table name</span><input id="design-table-name" required maxlength="63" autocomplete="off" placeholder="customers" /></label>
           <div class="design-columns-head"><span>Columns</span><button class="ui-button compact" id="add-design-column-button" type="button">Add column</button></div>
@@ -232,6 +232,28 @@
         </div>
         <div class="form-status" id="design-table-status" aria-live="polite"></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-table-button" type="submit">Create table</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="ui-dialog editor-dialog design-relationship-dialog" id="design-relationship-dialog" aria-labelledby="design-relationship-title">
+      <form class="ui-dialog__shell" id="design-relationship-form">
+        <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="design-relationship-title">Create relationship</h2><p>Map columns from one designed table to an exact primary or unique key. Composite keys are mapped in their declared order.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close relationship editor"></button></header>
+        <div class="design-relationship-body">
+          <label class="design-field span-all"><span>Constraint name</span><input id="design-relationship-name" required maxlength="63" autocomplete="off" placeholder="orders_customer_id_fkey" /></label>
+          <label class="design-field"><span>Source table</span><select id="design-relationship-source" required></select></label>
+          <label class="design-field"><span>Target table</span><select id="design-relationship-target" required></select></label>
+          <label class="design-field span-all"><span>Target key</span><select id="design-relationship-key" required></select></label>
+          <section class="relationship-mapping span-all" aria-labelledby="relationship-mapping-title">
+            <header><strong id="relationship-mapping-title">Column mapping</strong><small>Source column → target key column</small></header>
+            <div id="design-relationship-mappings"></div>
+          </section>
+          <label class="design-field"><span>On update</span><select id="design-relationship-on-update"><option>NO ACTION</option><option>RESTRICT</option><option>CASCADE</option><option>SET NULL</option><option>SET DEFAULT</option></select></label>
+          <label class="design-field"><span>On delete</span><select id="design-relationship-on-delete"><option>NO ACTION</option><option>RESTRICT</option><option>CASCADE</option><option>SET NULL</option><option>SET DEFAULT</option></select></label>
+          <label class="check-row"><input id="design-relationship-deferrable" type="checkbox" /><span>Deferrable</span></label>
+          <label class="check-row"><input id="design-relationship-deferred" type="checkbox" disabled /><span>Initially deferred</span></label>
+        </div>
+        <div class="form-status" id="design-relationship-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-relationship-button" type="submit">Create relationship</button></footer>
       </form>
     </dialog>
 

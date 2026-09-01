@@ -279,6 +279,23 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-column-check input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
 .design-column-remove { align-self: end; }
 .design-table-dialog .form-status { min-height: 16px; padding-bottom: 5px; }
+.design-relationship-dialog { width: min(700px, calc(100vw - 28px)); }
+.design-relationship-dialog > .ui-dialog__shell { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.design-relationship-body { display: grid; min-height: 0; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 16px 18px; overflow-y: auto; }
+.design-relationship-body > .span-all { grid-column: 1 / -1; }
+.design-field { display: grid; min-width: 0; gap: 6px; color: #9aa6b4; font-size: 8px; }
+.design-field input, .design-field select, .relationship-mapping select { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
+.relationship-mapping { overflow: hidden; border: 1px solid #303946; border-radius: 7px; background: #11171e; }
+.relationship-mapping > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-bottom: 1px solid #29333f; }
+.relationship-mapping > header strong { color: #aeb9c5; font-size: 8px; }
+.relationship-mapping > header small { color: #697686; font-size: 7px; }
+#design-relationship-mappings { display: grid; gap: 1px; background: #29333f; }
+.relationship-mapping-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 9px; background: #141a21; }
+.relationship-mapping-row > span { color: #647182; font-size: 10px; }
+.relationship-mapping-target { display: grid; min-width: 0; gap: 3px; }
+.relationship-mapping-target small { color: #657283; font-size: 6px; text-transform: uppercase; letter-spacing: .08em; }
+.relationship-mapping-target code { overflow: hidden; color: #b8c3ce; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.design-relationship-dialog .form-status { min-height: 16px; padding-bottom: 5px; }
 .compact-search { display: flex; min-width: 180px; align-items: center; gap: 7px; color: #687585; font-size: 8px; }
 .compact-search input { min-width: 0; height: 32px; flex: 1; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: #0d1218; }
 .catalog-dialog { width: min(880px, calc(100vw - 28px)); }
@@ -390,6 +407,9 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .design-column-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
   .design-column-row > label:first-child, .design-column-row > label:nth-child(2) { grid-column: span 1; }
   .design-column-row > .design-column-check { min-height: 32px; }
+  .design-relationship-body { grid-template-columns: 1fr; }
+  .design-relationship-body > .span-all { grid-column: 1; }
+  .relationship-mapping-row { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
   .span-2 { grid-column: span 1; }
   .compact-search { min-width: 100%; }
   .intro-grid { grid-template-columns: 1fr; }

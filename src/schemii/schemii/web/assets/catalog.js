@@ -31,6 +31,16 @@ function section(title, count, action = null) {
   return wrapper;
 }
 
+function actionButton(label, onClick, { danger = false } = {}) {
+  const button = element("button", {
+    className: `ui-button compact${danger ? " danger-text" : ""}`,
+    type: "button",
+    text: label,
+  });
+  button.addEventListener("click", onClick);
+  return button;
+}
+
 function itemCard(title, kind, entries = [], definition = null, actions = []) {
   const card = element("article", { className: "inspector-item" });
   const head = element("header", { className: "inspector-item-head" });
@@ -46,18 +56,18 @@ function itemCard(title, kind, entries = [], definition = null, actions = []) {
   return card;
 }
 
-function listOrEmpty(wrapper, items) {
-  if (!items.length) wrapper.append(element("p", { className: "none-reported", text: "None reported by the live catalog." }));
+function listOrEmpty(wrapper, items, desired = false) {
+  if (!items.length) wrapper.append(element("p", { className: "none-reported", text: desired ? "None in this design." : "None reported by the live catalog." }));
   else wrapper.append(element("div", { className: "inspector-list" }, items));
 }
 
-function boundedInspectorList(wrapper, values, renderItem, noun) {
+function boundedInspectorList(wrapper, values, renderItem, noun, desired = false) {
   const visible = values.slice(0, MAX_INSPECTOR_ITEMS);
-  listOrEmpty(wrapper, visible.map(renderItem));
+  listOrEmpty(wrapper, visible.map(renderItem), desired);
   if (values.length > visible.length) {
     wrapper.append(element("p", {
       className: "none-reported",
-      text: `Showing the first ${visible.length} of ${values.length} ${noun}. Use the downloaded live catalog JSON for the complete set.`,
+      text: `Showing the first ${visible.length} of ${values.length} ${noun}. Use the downloaded ${desired ? "desired design" : "live catalog JSON"} for the complete set.`,
     }));
   }
 }
@@ -77,13 +87,24 @@ export function renderCatalogStats(container, catalog) {
   }
 }
 
-export function renderInspector({ inspector, empty, content, title = null, table, catalog }) {
+export function renderInspector({
+  inspector,
+  empty,
+  content,
+  title = null,
+  table,
+  catalog,
+  onEditTable = null,
+  onAddRelationship = null,
+  onDeleteRelationship = null,
+}) {
   inspector.classList.toggle("is-empty", !table);
   empty.hidden = Boolean(table);
   content.hidden = !table;
   replace(content);
   if (title) title.textContent = table?.name || "Table inspector";
   if (!table || !catalog) return;
+  const desired = catalog.source === "design";
 
   const identity = section("Table identity", 0);
   identity.append(metadataGrid([
@@ -107,7 +128,11 @@ export function renderInspector({ inspector, empty, content, title = null, table
     }
   }
 
-  const columns = section("Columns", table.columns.length, unavailableButton("column-create", "Add column"));
+  const columns = section(
+    "Columns",
+    table.columns.length,
+    desired && onEditTable ? actionButton("Edit table", onEditTable) : unavailableButton("column-create", "Add column"),
+  );
   boundedInspectorList(columns, table.columns, column => {
     const primary = table.primaryKey?.columns?.includes(column.name) || false;
     const collation = column.collationSchema && column.collationName ? `${column.collationSchema}.${column.collationName}` : null;
@@ -120,11 +145,11 @@ export function renderInspector({ inspector, empty, content, title = null, table
       ["Identity", column.identity],
       ["Generated", column.generated],
       ["Collation", collation],
-    ], null, [
+    ], null, desired ? [] : [
       unavailableButton("column-edit", "Edit"),
       unavailableButton("column-delete", "Delete"),
     ]);
-  }, "columns");
+  }, "columns", desired);
   content.append(columns);
 
   const constraintValues = [
@@ -140,7 +165,7 @@ export function renderInspector({ inspector, empty, content, title = null, table
     ["Validated", constraint.validated],
     ["Deferrable", constraint.deferrable],
     ["Initially deferred", constraint.initiallyDeferred],
-  ], constraint.definition), "constraints");
+  ], constraint.definition), "constraints", desired);
   content.append(constraints);
 
   const indexes = section("Indexes", table.indexes.length);
@@ -148,14 +173,18 @@ export function renderInspector({ inspector, empty, content, title = null, table
     ["Unique", index.unique],
     ["Valid", index.valid],
     ["Predicate", index.predicate],
-  ], index.definition), "indexes");
+  ], index.definition), "indexes", desired);
   content.append(indexes);
 
   const triggers = section("Triggers", table.triggers.length);
-  boundedInspectorList(triggers, table.triggers, trigger => itemCard(trigger.name, "Trigger", [["Enabled", trigger.enabled]], trigger.definition), "triggers");
+  boundedInspectorList(triggers, table.triggers, trigger => itemCard(trigger.name, "Trigger", [["Enabled", trigger.enabled]], trigger.definition), "triggers", desired);
   content.append(triggers);
 
-  const relationships = section("Relationships", relationshipValues.length, unavailableButton("relationship-create", "Add relationship"));
+  const relationships = section(
+    "Relationships",
+    relationshipValues.length,
+    desired && onAddRelationship ? actionButton("Add relationship", onAddRelationship) : unavailableButton("relationship-create", "Add relationship"),
+  );
   boundedInspectorList(relationships, relationshipValues, relationship => {
     const direction = relationship.sourceTable === table.name && relationship.sourceNamespace === table.namespace ? "Outgoing" : "Incoming";
     return itemCard(relationship.name, direction, [
@@ -167,11 +196,13 @@ export function renderInspector({ inspector, empty, content, title = null, table
       ["Validated", relationship.validated],
       ["Deferrable", relationship.deferrable],
       ["Initially deferred", relationship.initiallyDeferred],
-    ], relationship.definition, [
+    ], relationship.definition, desired ? [
+      ...(onDeleteRelationship ? [actionButton("Delete", () => onDeleteRelationship(relationship), { danger: true })] : []),
+    ] : [
       unavailableButton("relationship-edit", "Edit"),
       unavailableButton("relationship-delete", "Delete"),
     ]);
-  }, "relationships");
+  }, "relationships", desired);
   content.append(relationships);
 }
 

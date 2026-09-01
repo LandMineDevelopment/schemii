@@ -1,8 +1,6 @@
 import { element } from "./dom.js";
 
 export const UNAVAILABLE_CAPABILITIES = Object.freeze({
-  "table-edit": { title: "Edit table", description: "The active API has no contract for renaming or altering a table." },
-  "table-delete": { title: "Delete table", description: "The active API has no contract for deleting a PostgreSQL table." },
   "column-create": { title: "Create column", description: "The active API can inspect columns but has no contract for adding them." },
   "column-edit": { title: "Edit column", description: "The active API has no contract for changing column names, types, defaults, or constraints." },
   "column-delete": { title: "Delete column", description: "The active API has no contract for dropping PostgreSQL columns." },
