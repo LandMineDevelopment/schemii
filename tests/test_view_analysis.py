@@ -79,6 +79,44 @@ def test_analysis_derives_inputs_transformations_and_output_lineage() -> None:
     assert analysis["outputs"][2]["inputs"] == [
         {"source": "paid", "column": "total", "resolved": True}
     ]
+    assert analysis["stages"] == ["paid"]
+    assert analysis["joins"] == [
+        {
+            "join_type": "INNER",
+            "target": "paid",
+            "alias": "p",
+            "expression": "p.customer_id = c.id",
+            "inputs": [
+                {"source": "paid", "column": "customer_id", "resolved": True},
+                {"source": "customers", "column": "id", "resolved": True},
+            ],
+            "scope": None,
+        }
+    ]
+    assert analysis["row_filters"] == [
+        {
+            "expression": "state = 'paid'",
+            "inputs": [
+                {"source": "orders", "column": "state", "resolved": True}
+            ],
+            "scope": "paid",
+        }
+    ]
+    assert [item["expression"] for item in analysis["grouping"]] == [
+        "c.id",
+        "c.name",
+    ]
+    assert analysis["ordering"] == [
+        {"expression": "lifetime_value DESC", "inputs": [], "scope": None}
+    ]
+    assert "SUM(p.total) AS lifetime_value" in analysis["formatted_sql"]
+    customers = next(source for source in analysis["sources"] if source["name"] == "customers")
+    assert next(column for column in customers["columns"] if column["name"] == "id")["uses"] == [
+        "read",
+        "output",
+        "join",
+        "group",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -94,6 +132,23 @@ def test_analysis_accepts_only_one_select_query_body(definition: str, code: str)
     with pytest.raises(ViewDefinitionError) as invalid:
         analyze_view_definition(definition)
     assert invalid.value.code == code
+
+
+def test_analysis_reports_each_set_operation_once_and_preserves_all() -> None:
+    analysis = analyze_view_definition(
+        "SELECT 1 AS value UNION ALL SELECT 2 INTERSECT SELECT 3"
+    )
+
+    assert analysis["set_operations"] == ["INTERSECT", "UNION ALL"]
+    sets = next(
+        item for item in analysis["transformations"] if item["kind"] == "sets"
+    )
+    assert sets == {
+        "kind": "sets",
+        "count": 2,
+        "items": ["INTERSECT", "UNION ALL"],
+        "sql": None,
+    }
 
 
 def test_design_analysis_derives_downstream_consumers_without_persisting_lineage() -> None:

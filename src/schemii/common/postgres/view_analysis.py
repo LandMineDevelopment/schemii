@@ -91,6 +91,28 @@ def _sql(expression: exp.Expression | None) -> str | None:
     return value
 
 
+def _scope_name(expression: exp.Expression) -> str | None:
+    """Return the nearest named CTE containing one derived expression."""
+
+    parent = expression.parent
+    while parent is not None:
+        if isinstance(parent, exp.CTE):
+            return parent.alias_or_name or None
+        parent = parent.parent
+    return None
+
+
+def _join_type(join: exp.Join) -> str:
+    parts = [join.method, join.side, join.kind]
+    label = " ".join(part.upper() for part in parts if part)
+    return label or "INNER"
+
+
+def _set_operation_label(operation: exp.SetOperation) -> str:
+    label = type(operation).__name__.upper()
+    return f"{label} ALL" if operation.args.get("distinct") is False else label
+
+
 def _and_terms(expression: exp.Expression) -> list[exp.Expression]:
     if isinstance(expression, exp.And):
         return [*_and_terms(expression.this), *_and_terms(expression.expression)]
@@ -204,6 +226,7 @@ def analyze_view_definition(
                 {
                     "name": str(column["name"]),
                     "data_type": str(column.get("data_type") or ""),
+                    "uses": [],
                 }
                 for column in (resolved or {}).get("columns", [])
             ]
@@ -226,7 +249,23 @@ def analyze_view_definition(
 
     sources = list(sources_by_key.values())
 
-    def input_for(column: exp.Column) -> dict[str, Any]:
+    def mark_usage(item: dict[str, Any], role: str) -> None:
+        if not item["resolved"] or not item["source"]:
+            return
+        source = next(
+            (candidate for candidate in sources if candidate["name"] == item["source"]),
+            None,
+        )
+        if source is None:
+            return
+        column = next(
+            (candidate for candidate in source["columns"] if candidate["name"] == item["column"]),
+            None,
+        )
+        if column is not None and role not in column["uses"]:
+            column["uses"].append(role)
+
+    def input_for(column: exp.Column, *, warn: bool = True) -> dict[str, Any]:
         source = aliases.get(column.table) if column.table else None
         if source is None and not column.table:
             matching = [
@@ -239,7 +278,8 @@ def analyze_view_definition(
             elif len(sources) == 1:
                 source = sources[0]
         if source is None:
-            warnings.add("unresolved_column_source")
+            if warn:
+                warnings.add("unresolved_column_source")
             return {
                 "source": column.table or None,
                 "column": column.name,
@@ -271,6 +311,38 @@ def analyze_view_definition(
         )
         return column["data_type"] or None if column else None
 
+    def expression_detail(
+        expression: exp.Expression,
+        *,
+        role: str,
+    ) -> dict[str, Any] | None:
+        value = _sql(expression)
+        if not value:
+            return None
+        inputs: list[dict[str, Any]] = []
+        for column in expression.find_all(exp.Column):
+            if column.is_star:
+                continue
+            if (
+                role == "sort"
+                and not column.table
+                and any(output["name"] == column.name for output in outputs)
+            ):
+                continue
+            item = input_for(column)
+            mark_usage(item, role)
+            if item not in inputs:
+                inputs.append(item)
+        return {
+            "expression": value,
+            "inputs": inputs,
+            "scope": _scope_name(expression),
+        }
+
+    for column in statement.find_all(exp.Column):
+        if not column.is_star:
+            mark_usage(input_for(column, warn=False), "read")
+
     selects = list(getattr(statement, "selects", []) or [])
     if not selects and isinstance(statement, exp.SetOperation):
         selects = list(getattr(statement.this, "selects", []) or [])
@@ -285,6 +357,14 @@ def analyze_view_definition(
             star_source = aliases.get(value.table)
         if star_source and star_source.get("columns"):
             for column in star_source["columns"]:
+                mark_usage(
+                    {
+                        "source": star_source["name"],
+                        "column": column["name"],
+                        "resolved": True,
+                    },
+                    "output",
+                )
                 outputs.append({
                     "ordinal": len(outputs) + 1,
                     "name": column["name"],
@@ -307,6 +387,7 @@ def analyze_view_definition(
         inputs: list[dict[str, Any]] = []
         for column in value.find_all(exp.Column):
             item = input_for(column)
+            mark_usage(item, "output")
             if item not in inputs:
                 inputs.append(item)
         name = projection.alias or (
@@ -337,19 +418,36 @@ def analyze_view_definition(
         })
 
     joins = list(statement.find_all(exp.Join))[:MAX_ANALYSIS_ITEMS]
+    join_details: list[dict[str, Any]] = []
     if joins:
         items = []
         conditions = []
         for join in joins:
-            side = (join.side or join.kind or join.method or "inner").upper()
+            side = _join_type(join)
             target = join.this.alias_or_name or _sql(join.this) or "relation"
             items.append(f"{side} {target}")
             condition = join.args.get("on")
+            condition_sql = None
+            inputs: list[dict[str, Any]] = []
             if condition is not None and (value := _sql(condition)):
                 conditions.append(value)
+                condition_sql = value
+                detail = expression_detail(condition, role="join")
+                inputs = detail["inputs"] if detail else []
             elif join.args.get("using"):
                 using = join.args["using"]
-                conditions.append("USING (" + ", ".join(item.name for item in using) + ")")
+                condition_sql = "USING (" + ", ".join(item.name for item in using) + ")"
+                conditions.append(condition_sql)
+            target_name = join.this.name if isinstance(join.this, exp.Table) else target
+            target_alias = join.this.alias if isinstance(join.this, exp.Table) else None
+            join_details.append({
+                "join_type": side,
+                "target": target_name or target,
+                "alias": target_alias or None,
+                "expression": condition_sql,
+                "inputs": inputs,
+                "scope": _scope_name(join),
+            })
         transformations.append({
             "kind": "joins",
             "count": len(joins),
@@ -362,6 +460,11 @@ def analyze_view_definition(
         for where in statement.find_all(exp.Where)
         for term in _and_terms(where.this)
     ][:MAX_ANALYSIS_ITEMS]
+    row_filters = [
+        detail
+        for term in where_terms
+        if (detail := expression_detail(term, role="filter")) is not None
+    ]
     if where_terms:
         transformations.append({
             "kind": "filters",
@@ -375,6 +478,11 @@ def analyze_view_definition(
         for group in statement.find_all(exp.Group)
         for item in group.expressions
     ][:MAX_ANALYSIS_ITEMS]
+    grouping_details = [
+        detail
+        for item in grouping
+        if (detail := expression_detail(item, role="group")) is not None
+    ]
     if grouping:
         transformations.append({
             "kind": "groups",
@@ -410,6 +518,11 @@ def analyze_view_definition(
         for having in statement.find_all(exp.Having)
         for term in _and_terms(having.this)
     ][:MAX_ANALYSIS_ITEMS]
+    group_filters = [
+        detail
+        for term in having_terms
+        if (detail := expression_detail(term, role="having")) is not None
+    ]
     if having_terms:
         transformations.append({
             "kind": "having",
@@ -434,16 +547,11 @@ def analyze_view_definition(
         )
 
     set_operations = list(statement.find_all(exp.SetOperation))
-    if isinstance(statement, exp.SetOperation):
-        set_operations.insert(0, statement)
     if set_operations:
         transformations.append({
             "kind": "sets",
             "count": len(set_operations),
-            "items": [
-                type(item).__name__.replace("All", "").upper()
-                for item in set_operations
-            ],
+            "items": [_set_operation_label(item) for item in set_operations],
             "sql": None,
         })
 
@@ -451,6 +559,11 @@ def analyze_view_definition(
         item
         for order in statement.find_all(exp.Order)
         for item in order.expressions
+    ]
+    ordering = [
+        detail
+        for item in order_items[:MAX_ANALYSIS_ITEMS]
+        if (detail := expression_detail(item, role="sort")) is not None
     ]
     if order_items:
         transformations.append({
@@ -465,6 +578,10 @@ def analyze_view_definition(
         })
 
     limits = list(statement.find_all(exp.Limit))
+    limit = next(
+        (value for item in limits if (value := _sql(item.expression))),
+        None,
+    )
     if limits:
         transformations.append({
             "kind": "limits",
@@ -478,6 +595,20 @@ def analyze_view_definition(
         "sources": sources,
         "transformations": transformations,
         "outputs": outputs,
+        "formatted_sql": statement.sql(
+            dialect="postgres",
+            pretty=True,
+            comments=False,
+        ),
+        "stages": [cte.alias_or_name for cte in ctes],
+        "joins": join_details,
+        "row_filters": row_filters,
+        "grouping": grouping_details,
+        "group_filters": group_filters,
+        "ordering": ordering,
+        "distinct": bool(distinct_count),
+        "limit": limit,
+        "set_operations": [_set_operation_label(item) for item in set_operations],
         "stage_count": len(ctes),
         "join_count": len(joins),
         "filter_count": len(where_terms),

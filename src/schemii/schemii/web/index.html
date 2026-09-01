@@ -239,7 +239,7 @@
 
     <dialog class="ui-dialog editor-dialog design-view-dialog" id="design-view-dialog" aria-labelledby="design-view-title">
       <form class="ui-dialog__shell" id="design-view-form">
-        <header class="ui-dialog__head"><div><small>Source-derived view</small><h2 id="design-view-title">Create view</h2><p id="design-view-copy">Write one SELECT query. Schemii derives the inputs, transformations, outputs, and consumers without contacting PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close view editor"></button></header>
+        <header class="ui-dialog__head"><div><small>Source-derived view</small><h2 id="design-view-title">Create view</h2><p id="design-view-copy">Write one SELECT query. Schemii derives its result grain, relations, rules, and column lineage without contacting PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close view editor"></button></header>
         <div class="design-view-body">
           <section class="design-view-fields" aria-label="View definition">
             <div class="design-view-identity">
@@ -250,7 +250,7 @@
             <label class="design-field design-view-query"><span>SELECT query body</span><textarea id="design-view-definition" required spellcheck="false" placeholder="SELECT&#10;    customer_id,&#10;    sum(total) AS lifetime_value&#10;FROM orders&#10;GROUP BY customer_id"></textarea><small>Do not enter CREATE VIEW; the design owns the name and storage choice above.</small></label>
           </section>
           <section class="design-view-preview" aria-labelledby="design-view-preview-title">
-            <header><span><small>Derived at request time</small><strong id="design-view-preview-title">Query story preview</strong></span></header>
+            <header><span><small>Derived at request time</small><strong id="design-view-preview-title">Relational meaning map</strong></span></header>
             <div id="design-view-preview"></div>
           </section>
         </div>

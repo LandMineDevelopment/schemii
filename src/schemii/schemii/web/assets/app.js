@@ -1748,8 +1748,8 @@ function openDesignViewEditor(viewId = null) {
   replace(elements.designViewStatus);
   elements.designViewTitle.textContent = view ? `Edit ${view.name}` : "Create view";
   elements.designViewCopy.textContent = view
-    ? "Change the query and Schemii will re-derive its complete data story before anything is saved."
-    : "Write one SELECT query. Schemii derives the inputs, transformations, outputs, and consumers without contacting PostgreSQL.";
+    ? "Change the query and Schemii will re-derive its relational meaning before anything is saved."
+    : "Write one SELECT query. Schemii derives its result grain, relations, rules, and column lineage without contacting PostgreSQL.";
   elements.saveDesignViewButton.textContent = view ? "Save view" : "Create view";
   elements.designViewName.value = view?.name || "";
   elements.designViewKind.value = view?.kind || "view";

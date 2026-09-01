@@ -140,6 +140,7 @@ class DesignView(ApiModel):
 class ViewAnalysisSourceColumn(ApiModel):
     name: str
     data_type: str
+    uses: list[str] = Field(default_factory=list)
 
 
 class ViewAnalysisSource(ApiModel):
@@ -156,6 +157,21 @@ class ViewAnalysisInput(ApiModel):
     source: str | None = None
     column: str
     resolved: bool
+
+
+class ViewAnalysisExpression(ApiModel):
+    expression: str
+    inputs: list[ViewAnalysisInput] = Field(default_factory=list)
+    scope: str | None = None
+
+
+class ViewAnalysisJoin(ApiModel):
+    join_type: str
+    target: str
+    alias: str | None = None
+    expression: str | None = None
+    inputs: list[ViewAnalysisInput] = Field(default_factory=list)
+    scope: str | None = None
 
 
 class ViewAnalysisOutput(ApiModel):
@@ -204,6 +220,16 @@ class DesignViewAnalysis(ApiModel):
     transformations: list[ViewAnalysisTransformation] = Field(default_factory=list)
     outputs: list[ViewAnalysisOutput] = Field(default_factory=list)
     consumers: list[ViewAnalysisConsumer] = Field(default_factory=list)
+    formatted_sql: str
+    stages: list[str] = Field(default_factory=list)
+    joins: list[ViewAnalysisJoin] = Field(default_factory=list)
+    row_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
+    grouping: list[ViewAnalysisExpression] = Field(default_factory=list)
+    group_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
+    ordering: list[ViewAnalysisExpression] = Field(default_factory=list)
+    distinct: bool = False
+    limit: str | None = None
+    set_operations: list[str] = Field(default_factory=list)
     stage_count: int = 0
     join_count: int = 0
     filter_count: int = 0

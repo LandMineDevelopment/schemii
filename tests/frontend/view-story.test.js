@@ -1,20 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { transformationLabel, viewStorySummary } from "../../src/schemii/schemii/web/assets/view-story.js";
+import {
+  resultGrain,
+  transformationLabel,
+  viewStorySummary,
+} from "../../src/schemii/schemii/web/assets/view-story.js";
 
-test("view story summary is derived from analysis counts", () => {
+test("view story summary leads with the source-derived result grain", () => {
   const analysis = {
     sources: [{ name: "orders" }, { name: "customers" }],
     outputs: [{ name: "customer_id" }, { name: "total" }],
-    transformations: [{ kind: "joins", count: 1 }, { kind: "groups", count: 2 }],
+    grouping: [{ expression: "customers.id" }],
   };
-  assert.equal(viewStorySummary(analysis), "2 inputs pass through 3 operations to produce 2 outputs.");
+  assert.equal(resultGrain(analysis), "One row per customers.id");
+  assert.equal(viewStorySummary(analysis), "One row per customers.id, producing 2 columns from 2 source relations.");
   assert.equal(transformationLabel("aggregates"), "Calculate aggregates");
 });
 
 test("view story distinguishes pass-through and relation-free queries", () => {
-  assert.equal(viewStorySummary({ sources: [{ name: "orders" }], outputs: [{ name: "id" }], transformations: [] }), "1 input passed directly into 1 output.");
-  assert.equal(viewStorySummary({ sources: [{ name: "orders" }], outputs: [{ name: "total" }], transformations: [{ kind: "aggregates", count: 1 }] }), "1 input passes through 1 operation to produce 1 output.");
-  assert.equal(viewStorySummary({ sources: [], outputs: [{ name: "one" }], transformations: [] }), "1 output produced without a relation input.");
+  assert.equal(resultGrain({ sources: [{ name: "orders" }], outputs: [{ name: "id", derivation: "direct" }] }), "One row per matching source row");
+  assert.equal(resultGrain({ sources: [{ name: "orders" }], outputs: [{ name: "total", derivation: "aggregate" }] }), "One aggregate row");
+  assert.equal(resultGrain({ sources: [], outputs: [{ name: "one", derivation: "constant" }] }), "One constructed row");
+});
+
+test("view story keeps grouping expressions compact at a glance", () => {
+  const analysis = {
+    sources: [{ name: "orders" }],
+    outputs: [{ name: "total", derivation: "aggregate" }],
+    grouping: ["region", "year", "month", "channel"].map(expression => ({ expression })),
+  };
+  assert.equal(resultGrain(analysis), "One row per region + year + month + 1 more");
 });
