@@ -69,10 +69,11 @@ export function viewStorySummary(analysis) {
 }
 
 export function queryStoryPhases(analysis) {
-  return (analysis?.querySteps || []).flatMap(step => [
-    { kind: "operation", step },
-    { kind: "result", step },
-  ]);
+  return (analysis?.querySteps || []).flatMap(step => (
+    step.kind === "final"
+      ? [{ kind: "operation", step }, { kind: "result", step }]
+      : [{ kind: "operation", step }]
+  ));
 }
 
 function inputIdentity(input) {
@@ -122,23 +123,44 @@ function participantIndex(step) {
   return index;
 }
 
+export function expressionSegments(expression, step) {
+  const value = expression || "Not reported";
+  const accents = participantIndex(step);
+  const outputs = new Set((step?.outputs || []).map(output => outputIdentity(output).toLocaleLowerCase()));
+  const pattern = /'(?:''|[^'])*'|"(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)?/g;
+  const segments = [];
+  let cursor = 0;
+  for (const match of value.matchAll(pattern)) {
+    if (match.index > cursor) segments.push({ text: value.slice(cursor, match.index), className: "" });
+    const token = match[0];
+    let className = "";
+    if (token.includes(".") && !token.startsWith("'") && !token.startsWith('"')) {
+      const reference = token.split(".", 1)[0];
+      const accent = accents.get(reference);
+      if (accent !== undefined) className = `view-accent-text-${accent}`;
+    } else if (!token.startsWith("'")) {
+      const identifier = token.startsWith('"')
+        ? token.slice(1, -1).replaceAll('""', '"')
+        : token;
+      if (outputs.has(identifier.toLocaleLowerCase())) className = "view-output-reference";
+    }
+    segments.push({ text: token, className });
+    cursor = match.index + token.length;
+  }
+  if (cursor < value.length) segments.push({ text: value.slice(cursor), className: "" });
+  return segments;
+}
+
 function coloredExpression(expression, step) {
   const value = expression || "Not reported";
   const code = element("code", { className: "view-colored-expression", title: value });
-  const accents = participantIndex(step);
-  const pattern = /([A-Za-z_][A-Za-z0-9_$]*\.[A-Za-z_][A-Za-z0-9_$]*)/g;
-  let cursor = 0;
-  for (const match of value.matchAll(pattern)) {
-    if (match.index > cursor) code.append(document.createTextNode(value.slice(cursor, match.index)));
-    const reference = match[0].split(".", 1)[0];
-    const accent = accents.get(reference);
-    code.append(element("span", {
-      className: accent === undefined ? "" : `view-accent-text-${accent}`,
-      text: match[0],
-    }));
-    cursor = match.index + match[0].length;
+  for (const segment of expressionSegments(value, step)) {
+    if (segment.className) {
+      code.append(element("span", { className: segment.className, text: segment.text }));
+    } else {
+      code.append(document.createTextNode(segment.text));
+    }
   }
-  if (cursor < value.length) code.append(document.createTextNode(value.slice(cursor)));
   return code;
 }
 
@@ -391,7 +413,7 @@ function chronologicalStory(analysis, view, selected, onSelectOutput) {
   const heading = element("header", { className: "view-query-timeline-head" });
   heading.append(element("div", {}, [
     element("small", { text: "CHRONOLOGICAL QUERY STORY" }),
-    element("strong", { text: "Read each operation, then the relation it produces" }),
+    element("strong", { text: "Read each operation from source columns through the final view" }),
   ]));
   heading.append(element("span", { text: plural(analysis.querySteps.length, "query step") }));
   section.append(heading);

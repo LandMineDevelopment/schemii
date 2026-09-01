@@ -310,6 +310,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .view-step-logic > header > small { color: #697687; font: 6px ui-monospace, monospace; }
 .view-step-logic > div { display: grid; min-width: 0; gap: 5px; padding: 7px 8px; }
 .view-colored-expression { min-width: 0; overflow-wrap: anywhere; color: #9ba8b5; font: 7px/1.5 ui-monospace, monospace; }
+.view-output-reference { color: #d7c9f1; font-weight: 700; }
 .view-step-direct { grid-column: 1 / -1; margin: 0; padding: 8px; border: 1px dashed #303b47; border-radius: 6px; color: #6e7b89; font-size: 7px; }
 .view-query-result { margin-left: min(74px, 8%); border-color: #4e456b; background: #100f18; }
 .view-query-result-head > span { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid #51477d; border-radius: 50%; color: #b6a5ed; background: #1c192b; font: 750 10px ui-monospace, monospace; }

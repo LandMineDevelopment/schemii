@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  expressionSegments,
   queryStoryPhases,
   resultGrain,
   selectProjectionMappings,
@@ -49,7 +50,7 @@ test("view story derives final grain without flattening CTE grouping", () => {
   assert.equal(viewStorySummary(analysis), "One row per region, producing 2 columns from 1 source relation.");
 });
 
-test("view story interleaves every query operation with the relation it produces", () => {
+test("view story keeps intermediate outputs in their operation and renders only the final result card", () => {
   const analysis = {
     querySteps: [
       { ordinal: 1, kind: "cte", resultName: "paid_orders" },
@@ -60,10 +61,24 @@ test("view story interleaves every query operation with the relation it produces
     queryStoryPhases(analysis).map(phase => [phase.kind, phase.step.resultName]),
     [
       ["operation", "paid_orders"],
-      ["result", "paid_orders"],
       ["operation", "view result"],
       ["result", "view result"],
     ],
+  );
+});
+
+test("view story distinguishes output aliases from source-column references", () => {
+  const step = {
+    participants: [{ name: "payments", reference: "p" }],
+    outputs: [{ ordinal: 1, name: "captured_revenue" }],
+  };
+  const segments = expressionSegments("p.amount + captured_revenue DESC", step);
+  assert.equal(segments.find(segment => segment.text === "p.amount")?.className, "view-accent-text-0");
+  assert.equal(segments.find(segment => segment.text === "captured_revenue")?.className, "view-output-reference");
+  assert.equal(
+    expressionSegments("'captured_revenue' = captured_revenue", step)
+      .filter(segment => segment.className === "view-output-reference").length,
+    1,
   );
 });
 
