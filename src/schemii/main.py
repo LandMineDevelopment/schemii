@@ -1,5 +1,6 @@
 """Assemble the Schemii API application."""
 
+import os
 from dataclasses import dataclass
 
 from fastapi import APIRouter, FastAPI
@@ -9,11 +10,15 @@ from schemii.common.api import (
     install_api_middleware,
 )
 from schemii.common.api.models import ApiErrorResponse
+from schemii.common.api.inspection import install_developer_route_inspection
 from schemii.common.api.routes import router as runtime_router
+from schemii.common.ai.routes import router as ai_provider_router
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.service import ConnectionService
 from schemii.common.metadata import MetadataRepositories, create_metadata_repositories
 from schemii.common.postgres import PostgresGateway, PsycopgPostgresGateway
+from schemii.common.postgres.inspection import install_developer_database_inspection
+from schemii.common.system_inspection import install_developer_system_inspection
 from schemii.schemer.routes import router as schemer_router
 from schemii.schemii.frontend import install_schemii_frontend
 from schemii.schemii.routes import router as schemii_router
@@ -47,6 +52,7 @@ def create_services() -> ApplicationServices:
 COMMON_ROUTERS: tuple[APIRouter, ...] = (
     runtime_router,
     connections_router,
+    ai_provider_router,
 )
 
 
@@ -57,7 +63,11 @@ PRODUCT_ROUTERS: tuple[APIRouter, ...] = (
 )
 
 
-def create_app(services: ApplicationServices | None = None) -> FastAPI:
+def create_app(
+    services: ApplicationServices | None = None,
+    *,
+    developer_inspection: bool = False,
+) -> FastAPI:
     """Create the API and connect each product router."""
     application = FastAPI(
         title="Schemii",
@@ -83,9 +93,13 @@ def create_app(services: ApplicationServices | None = None) -> FastAPI:
     for router in PRODUCT_ROUTERS:
         application.include_router(router)
 
+    if developer_inspection:
+        install_developer_route_inspection(application)
+        install_developer_database_inspection(application)
+        install_developer_system_inspection(application)
     install_schemii_frontend(application)
 
     return application
 
 
-app = create_app()
+app = create_app(developer_inspection=os.environ.get("SCHEMII_DEVELOPER_INSPECTION") == "1")

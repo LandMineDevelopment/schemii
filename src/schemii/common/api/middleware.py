@@ -7,7 +7,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 
 LOCAL_PROTOTYPE_HOSTS = ("127.0.0.1", "localhost")
-FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map"))
+FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map"))
 
 
 FRONTEND_CONTENT_SECURITY_POLICY = "; ".join(

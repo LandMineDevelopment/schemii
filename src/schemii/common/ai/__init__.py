@@ -1,0 +1,1 @@
+"""Shared AI provider contracts."""

@@ -31,6 +31,17 @@ def test_workspace_targets_preserve_exact_postgres_identifiers() -> None:
         TablePosition(name="orders", x=True, y=0)
 
 
+def test_workspace_request_accepts_only_complete_or_absent_targets() -> None:
+    detached = SchemiiWorkspaceCreate(name="Detached")
+
+    assert detached.connection_id is None
+    assert detached.database is None
+    assert detached.namespace is None
+
+    with pytest.raises(ValidationError):
+        SchemiiWorkspaceCreate(name="Partial", database="analytics")
+
+
 def test_workspace_and_aggregate_position_counts_are_bounded() -> None:
     workspace_limited = InMemoryWorkspaceRepository(max_workspaces_per_owner=1)
     workspace_limited.create("owner", workspace_request())

@@ -107,6 +107,7 @@ class InMemoryWorkspaceRepository:
             workspace = SchemiiWorkspace(
                 id=f"ws_{secrets.token_hex(16)}",
                 revision=1,
+                name=request.name,
                 connection_id=request.connection_id,
                 database=request.database,
                 namespace=request.namespace,

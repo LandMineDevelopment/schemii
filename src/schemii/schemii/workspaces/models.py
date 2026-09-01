@@ -13,6 +13,7 @@ from schemii.common.connections.models import DatabaseName
 
 NamespaceName = Annotated[str, Field(min_length=1, max_length=63)]
 TableName = Annotated[str, Field(min_length=1, max_length=63)]
+WorkspaceName = Annotated[str, Field(min_length=1, max_length=128)]
 Coordinate = Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)]
 
 
@@ -23,6 +24,8 @@ def _identifier(value: str) -> str:
 
 
 class TablePosition(ApiModel):
+    """Saved canvas coordinates for one live PostgreSQL table."""
+
     name: TableName
     x: Coordinate
     y: Coordinate
@@ -34,17 +37,38 @@ class TablePosition(ApiModel):
 
 
 class SchemiiWorkspaceCreate(ApiModel):
-    connection_id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
-    database: DatabaseName
-    namespace: NamespaceName
+    """Create a design workspace, optionally attached to one exact PostgreSQL target."""
+
+    name: WorkspaceName = "Untitled schema"
+    connection_id: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
+    database: DatabaseName | None = None
+    namespace: NamespaceName | None = None
 
     @field_validator("database", "namespace")
     @classmethod
-    def normalize_target(cls, value: str) -> str:
-        return _identifier(value)
+    def normalize_target(cls, value: str | None) -> str | None:
+        return _identifier(value) if value is not None else None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def complete_optional_target(self) -> "SchemiiWorkspaceCreate":
+        target = (self.connection_id, self.database, self.namespace)
+        if any(value is not None for value in target) and not all(
+            value is not None for value in target
+        ):
+            raise ValueError(
+                "connectionId, database, and namespace must be supplied together"
+            )
+        return self
 
 
 class SchemiiWorkspaceLayoutUpdate(ApiModel):
+    """Optimistic revisions and unique live-table positions to persist."""
+
     expected_revision: Annotated[int, Field(strict=True, ge=1)]
     expected_connection_revision: Annotated[int, Field(strict=True, ge=1)]
     tables: list[TablePosition] = Field(max_length=10_000)
@@ -58,11 +82,14 @@ class SchemiiWorkspaceLayoutUpdate(ApiModel):
 
 
 class SchemiiWorkspace(ApiModel):
+    """Owner-scoped design workspace with an optional PostgreSQL target."""
+
     id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
     revision: Annotated[int, Field(strict=True, ge=1)]
-    connection_id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
-    database: DatabaseName
-    namespace: NamespaceName
+    name: WorkspaceName
+    connection_id: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
+    database: DatabaseName | None = None
+    namespace: NamespaceName | None = None
     tables: list[TablePosition]
     created_at: datetime
     updated_at: datetime
@@ -81,4 +108,9 @@ class SchemiiWorkspace(ApiModel):
         names = [table.name for table in self.tables]
         if len(names) != len(set(names)):
             raise ValueError("workspace table positions must have unique names")
+        target = (self.connection_id, self.database, self.namespace)
+        if any(value is not None for value in target) and not all(
+            value is not None for value in target
+        ):
+            raise ValueError("workspace PostgreSQL target must be complete or absent")
         return self

@@ -1,4 +1,4 @@
-"""FastAPI routes for Schemii workspace placement and live catalogs."""
+"""Schemii workspace lifecycle routes and retained prototype adapters."""
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 
@@ -28,13 +28,25 @@ from .store import (
 
 
 router = APIRouter(prefix="/workspaces", tags=["schemii-workspaces"])
+legacy_design_router = APIRouter(
+    prefix="/workspaces",
+    tags=["schemii-schema-design"],
+)
+legacy_database_browser_router = APIRouter(
+    prefix="/workspaces",
+    tags=["schemii-database-browser"],
+)
 
 
 class WorkspaceListResponse(ApiModel):
+    """Owner-visible Schemii workspaces."""
+
     workspaces: list[SchemiiWorkspace]
 
 
 class WorkspaceCatalogResponse(ApiModel):
+    """Live PostgreSQL catalog paired with a workspace's usable positions."""
+
     workspace: SchemiiWorkspace
     catalog: PostgresCatalog
     positions: list[TablePosition]
@@ -79,6 +91,8 @@ def list_workspaces(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> WorkspaceListResponse:
+    """List Schemii workspaces belonging to the current owner."""
+
     return WorkspaceListResponse(
         workspaces=_workspaces(request).list(principal.user_id)
     )
@@ -90,7 +104,11 @@ def create_workspace(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiWorkspace:
+    """Create a detached design or verify and attach its initial PostgreSQL target."""
+
     try:
+        if body.connection_id is None:
+            return _workspaces(request).create(principal.user_id, body)
         with _connections(request).use(
             principal.user_id,
             body.connection_id,
@@ -126,25 +144,42 @@ def get_workspace(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiWorkspace:
+    """Return one owner-scoped workspace and its optional target binding."""
+
     try:
         return _workspaces(request).get(principal.user_id, workspace_id)
     except WorkspaceNotFoundError as error:
         raise _workspace_not_found(error) from error
 
 
-@router.put("/{workspace_id}/layout", response_model=SchemiiWorkspace)
+@legacy_design_router.put(
+    "/{workspace_id}/layout",
+    response_model=SchemiiWorkspace,
+    deprecated=True,
+)
 def update_workspace_layout(
     workspace_id: str,
     body: SchemiiWorkspaceLayoutUpdate,
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiWorkspace:
+    """Validate revisions and live table names before saving layout positions."""
+
     try:
         workspace = _workspaces(request).get(principal.user_id, workspace_id)
     except WorkspaceNotFoundError as error:
         raise _workspace_not_found(error) from error
     if workspace.revision != body.expected_revision:
         raise _workspace_conflict(WorkspaceConflictError(workspace.revision))
+    if workspace.connection_id is None:
+        # TODO(schemii-detached-layout): Validate positions against persisted
+        # desired-design object IDs once the design repository is implemented.
+        raise ApiProblem(
+            501,
+            "planned_capability",
+            "Detached workspace layout requires the planned design repository",
+            details={"capability": "schemii.detached-layout", "status": "planned"},
+        )
     try:
         with _connections(request).use(
             principal.user_id,
@@ -202,6 +237,8 @@ def delete_workspace(
     expected_revision: int = Query(alias="expectedRevision", ge=1),
     principal: Principal = Depends(get_current_principal),
 ) -> Response:
+    """Delete a workspace when its expected revision still matches."""
+
     try:
         _workspaces(request).delete(
             principal.user_id,
@@ -215,16 +252,27 @@ def delete_workspace(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/{workspace_id}/catalog", response_model=WorkspaceCatalogResponse)
+@legacy_database_browser_router.get(
+    "/{workspace_id}/catalog",
+    response_model=WorkspaceCatalogResponse,
+)
 def get_workspace_catalog(
     workspace_id: str,
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> WorkspaceCatalogResponse:
+    """Read the live PostgreSQL catalog and pair it with valid saved positions."""
+
     try:
         workspace = _workspaces(request).get(principal.user_id, workspace_id)
     except WorkspaceNotFoundError as error:
         raise _workspace_not_found(error) from error
+    if workspace.connection_id is None:
+        raise ApiProblem(
+            409,
+            "workspace_target_required",
+            "Attach a PostgreSQL target before reading a live catalog",
+        )
     try:
         with _connections(request).use(
             principal.user_id,

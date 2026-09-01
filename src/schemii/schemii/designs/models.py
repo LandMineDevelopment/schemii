@@ -1,0 +1,197 @@
+"""Source-of-truth contracts for database-independent Schemii designs."""
+
+from typing import Annotated, Literal
+
+from pydantic import Field
+
+from schemii.common.api.models import ApiModel
+
+
+DesignIdentifier = Annotated[str, Field(min_length=1, max_length=63)]
+DesignObjectId = Annotated[str, Field(pattern=r"^[a-z]+_[0-9a-f]{32}$")]
+DesignExpression = Annotated[str, Field(max_length=262_144)]
+DesignRevision = Annotated[int, Field(strict=True, ge=0)]
+
+
+class DesignColumn(ApiModel):
+    """One stable design column independent of any live PostgreSQL OID."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    data_type: Annotated[str, Field(min_length=1, max_length=512)]
+    nullable: bool = True
+    default_expression: DesignExpression | None = None
+    identity: Literal["always", "by_default"] | None = None
+
+
+class DesignKeyConstraint(ApiModel):
+    """Primary or unique key over stable column IDs."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    kind: Literal["primary", "unique"]
+    column_ids: list[DesignObjectId] = Field(min_length=1, max_length=1600)
+
+
+class DesignCheckConstraint(ApiModel):
+    """Named table check retained as desired SQL intent."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    expression: DesignExpression
+
+
+class DesignIndex(ApiModel):
+    """Desired index definition attached to one design table."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    method: DesignIdentifier = "btree"
+    column_ids: list[DesignObjectId] = Field(default_factory=list, max_length=1600)
+    expression: DesignExpression | None = None
+    predicate: DesignExpression | None = None
+    unique: bool = False
+
+
+class DesignTable(ApiModel):
+    """Desired table shape and locally owned constraints."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    columns: list[DesignColumn] = Field(max_length=1600)
+    keys: list[DesignKeyConstraint] = Field(default_factory=list, max_length=1600)
+    checks: list[DesignCheckConstraint] = Field(default_factory=list, max_length=1600)
+    indexes: list[DesignIndex] = Field(default_factory=list, max_length=1600)
+
+
+class DesignRelationship(ApiModel):
+    """Desired foreign key expressed with stable table and column IDs."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    source_table_id: DesignObjectId
+    source_column_ids: list[DesignObjectId] = Field(min_length=1, max_length=1600)
+    target_table_id: DesignObjectId
+    target_column_ids: list[DesignObjectId] = Field(min_length=1, max_length=1600)
+    on_update: Literal["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"] = "NO ACTION"
+    on_delete: Literal["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"] = "NO ACTION"
+    deferrable: bool = False
+    initially_deferred: bool = False
+
+
+class DesignFunction(ApiModel):
+    """Desired function or procedure definition exportable without a live database."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    kind: Literal["function", "procedure"]
+    arguments: DesignExpression
+    return_type: Annotated[str, Field(max_length=512)] | None = None
+    language: DesignIdentifier
+    definition: DesignExpression
+
+
+class DesignView(ApiModel):
+    """Desired ordinary or materialized view definition."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    kind: Literal["view", "materialized_view"]
+    definition: DesignExpression
+    populated: bool | None = None
+
+
+class SchemiiDesignContent(ApiModel):
+    """Database-independent desired schema authored by the user."""
+
+    tables: list[DesignTable] = Field(default_factory=list, max_length=10_000)
+    relationships: list[DesignRelationship] = Field(default_factory=list, max_length=20_000)
+    functions: list[DesignFunction] = Field(default_factory=list, max_length=5_000)
+    views: list[DesignView] = Field(default_factory=list, max_length=5_000)
+
+
+class SchemiiDesign(ApiModel):
+    """Versioned desired state; live PostgreSQL state is never stored here."""
+
+    workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
+    revision: DesignRevision
+    content: SchemiiDesignContent
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class SchemiiDesignReplace(ApiModel):
+    """Optimistic complete replacement of user-authored desired state."""
+
+    expected_workspace_revision: Annotated[int, Field(strict=True, ge=1)]
+    expected_design_revision: DesignRevision
+    content: SchemiiDesignContent
+
+
+class DesignObjectPosition(ApiModel):
+    """Canvas position keyed by a stable desired-design object ID."""
+
+    object_id: DesignObjectId
+    layer: Literal["tables", "views"]
+    x: Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)]
+    y: Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)]
+
+
+class DesignViewport(ApiModel):
+    """Independent saved camera for one visual design layer."""
+
+    x: Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)] = 0
+    y: Annotated[float, Field(strict=True, ge=-1_000_000, le=1_000_000)] = 0
+    zoom: Annotated[float, Field(strict=True, ge=0.05, le=8)] = 1
+
+
+class SchemiiDesignLayoutContent(ApiModel):
+    """Target-independent object placement and per-layer cameras."""
+
+    objects: list[DesignObjectPosition] = Field(default_factory=list, max_length=20_000)
+    tables_viewport: DesignViewport = Field(default_factory=DesignViewport)
+    views_viewport: DesignViewport = Field(default_factory=DesignViewport)
+
+
+class SchemiiDesignLayout(ApiModel):
+    """Versioned visual state validated against one desired-design revision."""
+
+    workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
+    revision: Annotated[int, Field(strict=True, ge=0)]
+    design_revision: DesignRevision
+    content: SchemiiDesignLayoutContent
+
+
+class SchemiiDesignLayoutReplace(ApiModel):
+    """Optimistic complete replacement of target-independent visual state."""
+
+    expected_layout_revision: Annotated[int, Field(strict=True, ge=0)]
+    expected_design_revision: DesignRevision
+    content: SchemiiDesignLayoutContent
+
+
+class SchemiiDesignImportRequest(ApiModel):
+    """Import an attached live catalog into desired state under an explicit strategy."""
+
+    expected_workspace_revision: Annotated[int, Field(strict=True, ge=1)]
+    expected_design_revision: DesignRevision
+    expected_catalog_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    strategy: Literal["require_empty", "replace", "merge"] = "require_empty"
+
+
+class SchemiiDesignExportRequest(ApiModel):
+    """Render a design without requiring an attached PostgreSQL target."""
+
+    expected_design_revision: DesignRevision
+    format: Literal["postgresql_sql", "schemii_json"] = "postgresql_sql"
+    include_drop_statements: bool = False
+
+
+class SchemiiDesignExport(ApiModel):
+    """Deterministic downloadable representation of one design revision."""
+
+    workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
+    design_revision: DesignRevision
+    file_name: Annotated[str, Field(min_length=1, max_length=255)]
+    media_type: Literal["application/sql", "application/json"]
+    content: Annotated[str, Field(max_length=16 * 1024 * 1024)]
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

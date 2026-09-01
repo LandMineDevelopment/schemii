@@ -202,6 +202,7 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
     assert set(workspace) == {
         "id",
         "revision",
+        "name",
         "connectionId",
         "database",
         "namespace",
@@ -300,3 +301,47 @@ def test_workspace_creation_requires_a_live_namespace() -> None:
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "postgres_namespace_not_found"
+
+
+def test_workspace_can_start_detached_for_database_independent_design() -> None:
+    api, postgres = client()
+
+    response = api.post(
+        "/api/v1/schemii/workspaces",
+        json={"name": "Future inventory"},
+    )
+
+    assert response.status_code == 201
+    workspace = response.json()
+    assert workspace["name"] == "Future inventory"
+    assert workspace["connectionId"] is None
+    assert workspace["database"] is None
+    assert workspace["namespace"] is None
+    assert postgres.connections == []
+
+    catalog = api.get(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/catalog"
+    )
+    assert catalog.status_code == 409
+    assert catalog.json()["error"]["code"] == "workspace_target_required"
+
+    planned_design = api.get(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design"
+    )
+    assert planned_design.status_code == 501
+    assert planned_design.json()["error"]["details"] == {
+        "capability": "schemii.design.read",
+        "status": "planned",
+    }
+
+
+def test_workspace_rejects_an_incomplete_optional_target() -> None:
+    api, _ = client()
+
+    response = api.post(
+        "/api/v1/schemii/workspaces",
+        json={"name": "Incomplete", "database": "analytics"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
