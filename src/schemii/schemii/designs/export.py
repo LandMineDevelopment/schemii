@@ -115,9 +115,11 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
         lines.extend([_statement(routine.definition) + ";", ""])
     for view in content.views:
         kind = "MATERIALIZED VIEW" if view.kind == "materialized_view" else "VIEW"
-        lines.extend(
-            [f"CREATE {kind} {_quote(view.name)} AS", _statement(view.definition) + ";", ""]
-        )
+        statement = _statement(view.definition)
+        if view.kind == "materialized_view":
+            population = "WITH DATA" if view.populate_on_create else "WITH NO DATA"
+            statement = f"{statement}\n{population}"
+        lines.extend([f"CREATE {kind} {_quote(view.name)} AS", statement + ";", ""])
     return "\n".join(lines).rstrip() + "\n"
 
 

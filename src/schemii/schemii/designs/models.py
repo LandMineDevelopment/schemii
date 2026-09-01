@@ -112,7 +112,105 @@ class DesignView(ApiModel):
     name: DesignIdentifier
     kind: Literal["view", "materialized_view"]
     definition: DesignExpression
-    populated: bool | None = None
+    populate_on_create: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_population_intent(cls, value: object) -> object:
+        """Read the former ambiguous field without retaining it in new designs."""
+
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        legacy = migrated.pop("populated", None)
+        if "populateOnCreate" not in migrated and "populate_on_create" not in migrated:
+            if legacy is not None:
+                migrated["populateOnCreate"] = legacy
+        return migrated
+
+    @model_validator(mode="after")
+    def valid_population_intent(self) -> "DesignView":
+        if self.kind == "view" and self.populate_on_create is not None:
+            raise ValueError("ordinary views cannot have materialized population intent")
+        if self.kind == "materialized_view" and self.populate_on_create is None:
+            self.populate_on_create = True
+        return self
+
+
+class ViewAnalysisSourceColumn(ApiModel):
+    name: str
+    data_type: str
+
+
+class ViewAnalysisSource(ApiModel):
+    namespace: str
+    name: str
+    kind: str
+    resolved: bool
+    aliases: list[str] = Field(default_factory=list)
+    column_count: int = 0
+    columns: list[ViewAnalysisSourceColumn] = Field(default_factory=list)
+
+
+class ViewAnalysisInput(ApiModel):
+    source: str | None = None
+    column: str
+    resolved: bool
+
+
+class ViewAnalysisOutput(ApiModel):
+    ordinal: int
+    name: str | None = None
+    data_type: str | None = None
+    derivation: Literal["direct", "expression", "aggregate", "window", "constant"]
+    expression: str | None = None
+    inputs: list[ViewAnalysisInput] = Field(default_factory=list)
+
+
+class ViewAnalysisTransformation(ApiModel):
+    kind: Literal[
+        "stages",
+        "joins",
+        "filters",
+        "groups",
+        "aggregates",
+        "windows",
+        "having",
+        "distinct",
+        "sets",
+        "sorts",
+        "limits",
+    ]
+    count: int
+    items: list[str] = Field(default_factory=list)
+    sql: str | None = None
+
+
+class ViewAnalysisConsumer(ApiModel):
+    id: DesignObjectId
+    name: DesignIdentifier
+    kind: Literal["view", "materialized_view"]
+
+
+class DesignViewAnalysisRequest(ApiModel):
+    view_id: DesignObjectId | None = None
+    name: DesignIdentifier
+    definition: DesignExpression
+
+
+class DesignViewAnalysis(ApiModel):
+    status: Literal["available", "partial"]
+    sources: list[ViewAnalysisSource] = Field(default_factory=list)
+    transformations: list[ViewAnalysisTransformation] = Field(default_factory=list)
+    outputs: list[ViewAnalysisOutput] = Field(default_factory=list)
+    consumers: list[ViewAnalysisConsumer] = Field(default_factory=list)
+    stage_count: int = 0
+    join_count: int = 0
+    filter_count: int = 0
+    grouping_count: int = 0
+    aggregate_count: int = 0
+    window_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SchemiiDesignContent(ApiModel):

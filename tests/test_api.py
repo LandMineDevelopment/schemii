@@ -385,6 +385,26 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     assert saved.json()["revision"] == 1
     assert len(saved.json()["fingerprint"]) == 64
 
+    analyzed = api.post(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/view-analysis",
+        json={
+            "name": "inventory_names",
+            "definition": 'SELECT id, "display name" FROM "inventory item"',
+        },
+    )
+    assert analyzed.status_code == 200
+    story = analyzed.json()
+    assert story["sources"][0]["name"] == "inventory item"
+    assert [output["name"] for output in story["outputs"]] == [
+        "id",
+        "display name",
+    ]
+    assert [output["dataType"] for output in story["outputs"]] == [
+        "bigint",
+        "text",
+    ]
+    assert postgres.connections == []
+
     stale = api.put(
         f"/api/v1/schemii/workspaces/{workspace['id']}/design",
         json={"expectedDesignRevision": 0, "content": saved.json()["content"]},

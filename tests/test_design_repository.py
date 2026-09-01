@@ -30,6 +30,7 @@ NAME_LENGTH_COLUMN = "column_" + "e" * 32
 KEY = "key_" + "d" * 32
 CHECK = "check_" + "f" * 32
 INDEX = "index_" + "7" * 32
+VIEW = "view_" + "8" * 32
 
 
 def content() -> SchemiiDesignContent:
@@ -250,6 +251,60 @@ def test_new_dependency_fields_are_backward_compatible_with_saved_design_json() 
     assert parsed.tables[0].checks[0].column_ids == []
     assert parsed.tables[0].indexes[0].expression_source_column_ids == []
     assert parsed.tables[0].indexes[0].predicate_column_ids == []
+
+
+def test_legacy_materialized_population_intent_migrates_and_exports_explicitly() -> None:
+    legacy = {
+        "views": [
+            {
+                "id": VIEW,
+                "name": "empty_rollup",
+                "kind": "materialized_view",
+                "definition": "SELECT 1 AS total",
+                "populated": False,
+            }
+        ]
+    }
+    parsed = SchemiiDesignContent.model_validate(legacy)
+    assert parsed.views[0].populate_on_create is False
+    document = parsed.model_dump(mode="json", by_alias=True)
+    assert "populated" not in document["views"][0]
+    assert document["views"][0]["populateOnCreate"] is False
+
+    repository = InMemoryDesignRepository()
+    design = repository.replace(
+        OWNER,
+        WORKSPACE,
+        SchemiiDesignReplace(expected_design_revision=0, content=parsed),
+    )
+    exported = export_design(
+        design,
+        SchemiiDesignExportRequest(
+            expected_design_revision=1,
+            format="postgresql_sql",
+        ),
+    )
+    assert 'CREATE MATERIALIZED VIEW "empty_rollup" AS\nSELECT 1 AS total\nWITH NO DATA;' in exported.content
+
+
+def test_design_validation_rejects_non_query_view_definitions() -> None:
+    invalid = content().model_dump(mode="json", by_alias=True)
+    invalid["views"] = [
+        {
+            "id": VIEW,
+            "name": "unsafe",
+            "kind": "view",
+            "definition": "DELETE FROM accounts",
+        }
+    ]
+    with pytest.raises(DesignValidationError, match="SELECT query"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace.model_validate(
+                {"expectedDesignRevision": 0, "content": invalid}
+            ),
+        )
 
 
 def test_exports_are_deterministic_quoted_and_bound_to_the_saved_revision() -> None:

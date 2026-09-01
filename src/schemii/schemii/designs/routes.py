@@ -9,6 +9,7 @@ from schemii.common.api.planned import (
     planned_capability,
 )
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.common.postgres.view_analysis import ViewDefinitionError
 from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
 
 from .export import export_design
@@ -20,6 +21,8 @@ from .models import (
     SchemiiDesignLayout,
     SchemiiDesignLayoutReplace,
     SchemiiDesignReplace,
+    DesignViewAnalysis,
+    DesignViewAnalysisRequest,
 )
 from .store import (
     DesignConflictError,
@@ -28,6 +31,7 @@ from .store import (
     DesignValidationError,
     DesignWorkspaceNotFoundError,
 )
+from .view_analysis import analyze_design_view
 
 
 router = APIRouter(
@@ -113,6 +117,31 @@ def replace_workspace_design(
         raise _design_conflict(error) from error
     except DesignValidationError as error:
         raise _invalid_design(error) from error
+
+
+@router.post("/design/view-analysis", response_model=DesignViewAnalysis)
+def analyze_workspace_view(
+    workspace_id: str,
+    body: DesignViewAnalysisRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignViewAnalysis:
+    """Derive a draft view story from SQL without saving or contacting PostgreSQL."""
+
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        design = _designs(request).get(principal.user_id, workspace_id)
+    except DesignWorkspaceNotFoundError as error:
+        raise _design_not_found(error) from error
+    try:
+        return analyze_design_view(design.content, body)
+    except ViewDefinitionError as error:
+        raise ApiProblem(
+            422,
+            "invalid_view_definition",
+            str(error),
+            details={"reason": error.code},
+        ) from error
 
 
 @router.get("/design/layout", response_model=SchemiiDesignLayout)

@@ -44,7 +44,7 @@ def test_developer_route_inspection_derives_flow_objects_and_bounded_source() ->
     assert document["analysis"]["callGraph"] == "direct-first-party-calls"
     assert document["analysis"]["truncated"]["routes"] is False
     assert document["analysis"]["truncated"]["objects"] is False
-    assert len(document["routes"]) == 68
+    assert len(document["routes"]) == 69
     objects = {item["id"]: item for item in document["objects"]}
     layout = next(
         route
