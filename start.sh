@@ -167,7 +167,13 @@ compose_args=(
 docker "${compose_args[@]}" rm --stop --force ingress schemii
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
-docker "${compose_args[@]}" up --build --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"
+if ! docker "${compose_args[@]}" up --build --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
+  printf 'Schemii did not become healthy. Current service state:\n' >&2
+  docker "${compose_args[@]}" ps >&2 || true
+  printf 'Schemii service logs:\n' >&2
+  docker "${compose_args[@]}" logs --no-color --tail 200 schemii >&2 || true
+  fail "the application service did not become healthy"
+fi
 docker "${compose_args[@]}" ps
 printf 'Schemii is ready at https://localhost:%s/\n' "$SCHEMII_TEST_APP_PORT"
 printf 'API map: https://localhost:%s/api-map\n' "$SCHEMII_TEST_APP_PORT"

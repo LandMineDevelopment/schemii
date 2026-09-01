@@ -226,7 +226,7 @@ def callable_signature(subject: object) -> dict[str, Any]:
         }
     try:
         signature = inspect.signature(subject, eval_str=True)
-    except (NameError, TypeError, ValueError):
+    except (AttributeError, NameError, TypeError, ValueError):
         return {"parameters": [], "returnAnnotation": "Any", "available": False}
     parameters = [
         {

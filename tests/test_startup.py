@@ -30,6 +30,8 @@ def test_startup_script_owns_the_compose_launch_contract() -> None:
     assert "docker info" in source
     assert 'exec newgrp docker -c "$restart_command"' in source
     assert 'docker "${compose_args[@]}" up --build --detach --wait --wait-timeout' in source
+    assert 'docker "${compose_args[@]}" logs --no-color --tail 200 schemii' in source
+    assert 'fail "the application service did not become healthy"' in source
     assert "sudo" not in source
     assert "uvicorn" not in source
     assert "docker.sock" not in source
