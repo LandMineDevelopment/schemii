@@ -1,13 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DockPane, ICONS, setControlLoading } from "../../src/schemii/schemii/web/assets/ui.js";
+import {
+  closeDetailsMenus,
+  createStatePanel,
+  DockPane,
+  ICONS,
+  installDetailsMenu,
+  isOverflowingText,
+  renderStatePanel,
+  setControlLoading,
+} from "../../src/schemii/schemii/web/assets/ui.js";
 
 class ClassList {
   constructor() { this.values = new Set(); }
   add(...names) { names.forEach(name => this.values.add(name)); }
   remove(...names) { names.forEach(name => this.values.delete(name)); }
   contains(name) { return this.values.has(name); }
+  toggle(name, force) {
+    const present = force === undefined ? !this.values.has(name) : Boolean(force);
+    if (present) this.values.add(name);
+    else this.values.delete(name);
+    return present;
+  }
 }
 
 class Target {
@@ -40,6 +55,25 @@ class Target {
   click() { for (const callback of this.listeners.get("click") || []) callback({ target: this }); }
 }
 
+class ElementTarget extends Target {
+  constructor(documentRef, tagName) {
+    super(documentRef);
+    this.tagName = tagName.toUpperCase();
+    this.childNodes = [];
+    this.textContent = "";
+  }
+
+  append(...children) { this.childNodes.push(...children); }
+  replaceChildren(...children) { this.childNodes = [...children]; }
+}
+
+function uiDocument() {
+  const documentRef = new Target(null);
+  documentRef.ownerDocument = documentRef;
+  documentRef.createElement = tagName => new ElementTarget(documentRef, tagName);
+  return documentRef;
+}
+
 function dockFixture() {
   const documentRef = { activeElement: null };
   const container = new Target(documentRef);
@@ -65,10 +99,86 @@ function dockFixture() {
 }
 
 test("shared icon registry preserves the legacy visual vocabulary", () => {
-  for (const name of ["close", "sql", "database", "edit", "earlier", "later", "copy", "duplicate", "delete", "add", "refresh", "calendar", "schemas", "search", "more", "assistant", "history", "settings", "new-chat"]) {
+  for (const name of ["close", "sql", "database", "edit", "earlier", "later", "copy", "link", "check", "duplicate", "delete", "add", "refresh", "calendar", "schemas", "search", "more", "assistant", "history", "settings", "new-chat"]) {
     assert.match(ICONS[name], /^<svg viewBox="0 0 20 20" aria-hidden="true">/);
   }
   assert.equal(Object.isFrozen(ICONS), true);
+});
+
+test("overflow detection covers clipped inline and wrapped text", () => {
+  assert.equal(isOverflowingText({ clientWidth: 100, scrollWidth: 101, clientHeight: 20, scrollHeight: 20 }), true);
+  assert.equal(isOverflowingText({ clientWidth: 100, scrollWidth: 100, clientHeight: 20, scrollHeight: 21 }), true);
+  assert.equal(isOverflowingText({ clientWidth: 100, scrollWidth: 100, clientHeight: 20, scrollHeight: 20 }), false);
+  assert.equal(isOverflowingText(null), false);
+});
+
+test("shared state panels own stable mark and variant markup", () => {
+  const documentRef = uiDocument();
+  const action = documentRef.createElement("button");
+  const panel = createStatePanel({
+    mark: "…",
+    title: "Loading catalog",
+    message: "Reading the active PostgreSQL catalog.",
+    variant: "loading",
+    surface: true,
+    className: "catalog-state-card",
+    action,
+  }, documentRef);
+
+  assert.equal(panel.classList.contains("ui-state"), true);
+  assert.equal(panel.classList.contains("surface"), true);
+  assert.equal(panel.classList.contains("loading"), true);
+  assert.equal(panel.childNodes[0].classList.contains("ui-state__mark"), true);
+  assert.equal(panel.childNodes[0].getAttribute("aria-hidden"), "true");
+  assert.equal(panel.childNodes[1].textContent, "Loading catalog");
+  assert.equal(panel.childNodes.at(-1), action);
+
+  renderStatePanel(panel, {
+    mark: "!",
+    title: "Catalog unavailable",
+    message: "The live request failed.",
+    variant: "error",
+  });
+  assert.equal(panel.classList.contains("loading"), false);
+  assert.equal(panel.classList.contains("error"), true);
+  assert.equal(panel.childNodes[0].textContent, "!");
+  assert.equal(panel.childNodes.length, 3);
+});
+
+test("shared menu lifecycle closes siblings and restores focus from hidden content", async () => {
+  const documentRef = uiDocument();
+  const first = new Target(documentRef);
+  const second = new Target(documentRef);
+  const summary = new Target(documentRef);
+  const action = new Target(documentRef);
+  first.children.add(summary);
+  first.children.add(action);
+  first.querySelector = selector => selector === "summary" ? summary : null;
+  action.closest = () => action;
+  first.setAttribute("open", "");
+  second.setAttribute("open", "");
+  first.open = true;
+  second.open = true;
+  documentRef.querySelectorAll = () => [first, second].filter(menu => menu.getAttribute("open") !== null);
+
+  closeDetailsMenus(documentRef, { except: first });
+  assert.equal(first.getAttribute("open"), "");
+  assert.equal(second.getAttribute("open"), null);
+
+  second.setAttribute("open", "");
+  const removeFirstAttribute = first.removeAttribute.bind(first);
+  first.removeAttribute = name => {
+    removeFirstAttribute(name);
+    if (name === "open" && first.contains(documentRef.activeElement)) documentRef.activeElement = documentRef;
+  };
+  const controller = installDetailsMenu(first);
+  for (const callback of first.listeners.get("toggle")) callback({ target: first });
+  assert.equal(second.getAttribute("open"), null);
+  documentRef.activeElement = action;
+  for (const callback of first.listeners.get("click")) callback({ target: action });
+  await Promise.resolve();
+  assert.equal(summary.focused, true);
+  controller.destroy();
 });
 
 test("dock panes expose expanded and minimized state without discarding content", () => {
@@ -135,15 +245,19 @@ test("loading controls restore their prior disabled and accessible state", () =>
   const control = new Target(documentRef);
   control.setAttribute("aria-label", "Refresh");
   control.dataset.uiTooltip = "Refresh contract";
+  control.focus();
 
   setControlLoading(control, true, { loadingLabel: "Refreshing contract" });
-  assert.equal(control.disabled, true);
+  assert.equal(control.disabled, false);
+  assert.equal(control.getAttribute("aria-disabled"), "true");
   assert.equal(control.getAttribute("aria-busy"), "true");
   assert.equal(control.getAttribute("aria-label"), "Refreshing contract");
   assert.equal(control.classList.contains("ui-control-loading"), true);
+  assert.equal(documentRef.activeElement, control);
 
   setControlLoading(control, false);
   assert.equal(control.disabled, false);
+  assert.equal(control.getAttribute("aria-disabled"), null);
   assert.equal(control.getAttribute("aria-label"), "Refresh");
   assert.equal(control.dataset.uiTooltip, "Refresh contract");
   assert.equal(control.classList.contains("ui-control-loading"), false);

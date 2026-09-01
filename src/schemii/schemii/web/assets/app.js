@@ -11,7 +11,7 @@ import {
 } from "./catalog.js";
 import { element, emptyPanel, errorPanel, formatTimestamp, replace } from "./dom.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
-import { DockPane, downloadContent, initializeUi } from "./ui.js";
+import { closeDetailsMenus, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
 
 const byId = id => document.getElementById(id);
 
@@ -196,6 +196,7 @@ const canvas = new CatalogCanvas({
 });
 
 function openDialog(dialog) {
+  // TODO(ui-dialog-focus): Move modal lifecycle into a shared controller that records the invoking control and restores focus after every close path, including programmatic closes and nested editor/confirmation flows.
   if (!dialog.open) dialog.showModal();
 }
 
@@ -250,14 +251,20 @@ function updateHeader() {
 }
 
 function stateCard(mark, title, copy, actionLabel, onAction, loading = false) {
-  const card = element("div", { className: `state-card ui-state surface${loading ? " loading" : ""}` });
-  card.append(element("span", { text: mark }), element("strong", { text: title }), element("p", { text: copy }));
+  let action = null;
   if (actionLabel && onAction) {
-    const action = element("button", { type: "button", text: actionLabel });
+    action = element("button", { className: "ui-button compact", type: "button", text: actionLabel });
     action.addEventListener("click", onAction);
-    card.append(action);
   }
-  return card;
+  return createStatePanel({
+    mark,
+    title,
+    message: copy,
+    action,
+    variant: loading ? "loading" : null,
+    surface: true,
+    className: "state-card",
+  });
 }
 
 function renderCatalogState() {
@@ -272,7 +279,7 @@ function renderCatalogState() {
   }
   if (!state.activeWorkspace) {
     const card = stateCard("PG", "Open a PostgreSQL workspace", "Choose an existing workspace or create one from a live connection.", "Open workspaces", openWorkspaces);
-    const connectionAction = element("button", { type: "button", text: "Manage connections" });
+    const connectionAction = element("button", { className: "ui-button compact", type: "button", text: "Manage connections" });
     connectionAction.addEventListener("click", openConnections);
     card.append(connectionAction);
     elements.catalogState.append(card);
@@ -292,7 +299,7 @@ function renderCatalogState() {
   }
   if (state.layoutError && !state.layoutConflict) {
     const panel = errorPanel(state.layoutError, { retryLabel: "Retry layout save", onRetry: saveLayout });
-    const reload = element("button", { type: "button", text: "Reload live catalog and server layout" });
+    const reload = element("button", { className: "ui-button compact", type: "button", text: "Reload live catalog and server layout" });
     reload.addEventListener("click", () => loadActiveCatalog());
     panel.append(reload);
     elements.catalogState.append(panel);
@@ -384,7 +391,7 @@ async function loadConnections() {
 }
 
 function openConnections() {
-  document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
+  closeDetailsMenus();
   renderConnections();
   openDialog(elements.connectionsDialog);
 }
@@ -404,7 +411,7 @@ function renderConnections() {
   elements.connectionsCount.textContent = `${state.connections.length} ${state.connections.length === 1 ? "connection" : "connections"}`;
   if (state.connectionActionError) elements.connectionsList.append(errorPanel(state.connectionActionError, { retryLabel: "Reload connections", onRetry: loadConnections }));
   if (!state.connections.length) {
-    const action = element("button", { type: "button", text: "Create connection" });
+    const action = element("button", { className: "ui-button compact", type: "button", text: "Create connection" });
     action.addEventListener("click", () => openConnectionEditor());
     elements.connectionsList.append(emptyPanel("PG", "No connections", "The active server returned an empty connection list.", action));
     return;
@@ -421,12 +428,12 @@ function renderConnections() {
     if (testState?.loading) copy.append(element("p", { className: "connection-test", text: "Testing this live connection…" }));
     else if (testState?.result) copy.append(element("p", { className: "connection-test", text: `Connected to ${testState.result.database} · PostgreSQL ${testState.result.serverVersion}` }));
     else if (testState?.error) copy.append(errorPanel(testState.error));
-    const actions = element("div", { className: "manager-actions" });
-    const test = element("button", { type: "button", text: "Test" });
+    const actions = element("div", { className: "manager-actions ui-action-group end wrap" });
+    const test = element("button", { className: "ui-button compact", type: "button", text: "Test" });
     test.addEventListener("click", () => testConnection(connection));
-    const edit = element("button", { type: "button", text: "Edit" });
+    const edit = element("button", { className: "ui-button compact", type: "button", text: "Edit" });
     edit.addEventListener("click", () => openConnectionEditor(connection));
-    const remove = element("button", { className: "danger-text", type: "button", text: "Delete" });
+    const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
     remove.addEventListener("click", () => confirmDeleteConnection(connection));
     actions.append(test, edit, remove);
     card.append(copy, actions);
@@ -628,7 +635,7 @@ async function loadWorkspaces() {
 
 function openWorkspaces() {
   state.workspaceDialogGeneration += 1;
-  document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
+  closeDetailsMenus();
   renderWorkspaces();
   renderWorkspaceConnectionOptions();
   openDialog(elements.workspacesDialog);
@@ -675,12 +682,12 @@ function renderWorkspaces() {
       element("p", { text: connection ? connection.name : workspace.connectionId }),
       element("small", { text: `revision ${workspace.revision} · updated ${formatTimestamp(workspace.updatedAt)}` }),
     );
-    const actions = element("div", { className: "manager-actions" });
-    const open = element("button", { type: "button", text: current ? "Reload" : "Open" });
+    const actions = element("div", { className: "manager-actions ui-action-group end wrap" });
+    const open = element("button", { className: "ui-button compact", type: "button", text: current ? "Reload" : "Open" });
     open.addEventListener("click", async () => {
       if (await openWorkspace(workspace)) elements.workspacesDialog.close();
     });
-    const remove = element("button", { className: "danger-text", type: "button", text: "Delete" });
+    const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
     remove.addEventListener("click", () => confirmDeleteWorkspace(workspace));
     actions.append(open, remove);
     card.append(copy, actions);
@@ -1128,7 +1135,7 @@ function setLayer(layer) {
 }
 
 function downloadCatalog() {
-  document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
+  closeDetailsMenus();
   if (!state.catalog) {
     showToast("No live catalog is loaded. Open a workspace first.");
     return;
@@ -1179,7 +1186,7 @@ function bindEvents() {
   elements.saveLayoutButton.addEventListener("click", saveLayoutImmediately);
   elements.downloadCatalogButton.addEventListener("click", downloadCatalog);
   elements.introductionButton.addEventListener("click", () => {
-    document.querySelectorAll(".ui-menu[open]").forEach(menu => menu.removeAttribute("open"));
+    closeDetailsMenus();
     openDialog(elements.introductionDialog);
   });
   elements.fitButton.addEventListener("click", () => {

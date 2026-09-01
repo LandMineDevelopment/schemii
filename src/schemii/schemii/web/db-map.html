@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0e13" />
+    <title>Schemii DB call map</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/ui.css" />
+    <link rel="stylesheet" href="/assets/api-map.css" />
+    <link rel="stylesheet" href="/assets/db-map.css" />
+  </head>
+  <body>
+    <div class="map-shell db-map-shell">
+      <header class="map-topbar ui-topbar">
+        <a class="map-brand ui-brand" href="/" aria-label="Return to Schemii">
+          <span class="brand-mark ui-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="ui-brand-copy"><strong>Schemii</strong><small>Live DB call map</small></span>
+        </a>
+        <div class="api-topology-title">
+          <span class="ui-eyebrow">Derived from the installed gateway</span>
+          <div><h1 id="map-title">Server → PostgreSQL</h1><small id="map-description">Loading the active database interface…</small></div>
+        </div>
+        <dl class="map-stats ui-stat-grid" aria-label="Database interface totals">
+          <div><dt>Operations</dt><dd id="operation-count">—</dd></div>
+          <div><dt>Callables</dt><dd id="callable-count">—</dd></div>
+          <div><dt>SQL</dt><dd id="query-count">—</dd></div>
+          <div><dt>Callers</dt><dd id="caller-count">—</dd></div>
+        </dl>
+        <label class="map-search ui-search">
+          <span class="sr-only">Filter database calls</span>
+          <input id="operation-search" type="search" autocomplete="off" placeholder="Filter operation, route, helper, query, or catalog object" />
+        </label>
+        <nav class="map-links" aria-label="Database map actions">
+          <button class="ui-icon-button" id="refresh-map" type="button" data-ui-icon="refresh" aria-label="Refresh DB call map"></button>
+          <details class="ui-menu">
+            <summary class="ui-icon-button" data-ui-icon="more" aria-label="Developer maps"></summary>
+            <div class="ui-menu__surface">
+              <a href="/">Schema explorer</a>
+              <a href="/api-map">Live API map</a>
+              <a href="/_developer/database">DB inspection JSON</a>
+              <a href="/_developer/routes">Route inspection JSON</a>
+            </div>
+          </details>
+        </nav>
+      </header>
+
+      <main class="map-main">
+        <section class="map-workspace" id="db-map-workspace" data-right-pane-state="unavailable">
+          <section class="route-graph" aria-labelledby="db-graph-title">
+            <header class="surface-head">
+              <div class="surface-title">
+                <span class="root-pulse" aria-hidden="true"></span>
+                <div>
+                  <span class="eyebrow">Installed database boundary</span>
+                  <h2 id="db-graph-title">Gateway operations</h2>
+                </div>
+              </div>
+              <div class="surface-actions">
+                <div class="map-view-switch ui-segmented" role="group" aria-label="Database map view">
+                  <button id="list-view-button" type="button" data-ui-tooltip="Show the database interface overview" aria-pressed="true">Overview</button>
+                  <button id="canvas-view-button" type="button" data-ui-tooltip="Show the source-derived call topology" aria-pressed="false">Canvas</button>
+                </div>
+                <div class="api-canvas-tools" id="db-canvas-tools" hidden>
+                  <button class="ui-icon-button compact" id="db-canvas-fit" type="button" data-ui-icon="fit" aria-label="Fit DB canvas"></button>
+                  <button class="ui-icon-button compact" id="db-canvas-zoom-out" type="button" data-ui-icon="zoom-out" aria-label="Zoom out"></button>
+                  <output id="db-canvas-zoom" aria-label="DB canvas zoom">100%</output>
+                  <button class="ui-icon-button compact" id="db-canvas-zoom-in" type="button" data-ui-icon="zoom-in" aria-label="Zoom in"></button>
+                </div>
+                <div class="surface-status">
+                  <output id="filter-summary" aria-live="polite">Loading operations</output>
+                  <span id="inspection-status">Reading installed source</span>
+                  <span class="sr-only" id="inspection-alert" role="status" aria-live="polite"></span>
+                </div>
+              </div>
+            </header>
+            <div class="map-state ui-state loading" id="map-state" role="status" aria-live="polite">
+              <span class="ui-state__mark" aria-hidden="true">…</span>
+              <strong>Loading the installed database interface</strong>
+              <p>Deriving the gateway contract, runtime calls, SQL, and API callers from this Schemii process.</p>
+            </div>
+            <div class="route-groups db-operation-groups" id="operation-groups"></div>
+            <div class="api-canvas db-canvas" id="db-canvas" tabindex="0" aria-label="Database call topology canvas" hidden>
+              <div class="api-canvas-grid" aria-hidden="true"></div>
+              <div class="api-canvas-stage" id="db-canvas-stage">
+                <svg class="api-canvas-lines" id="db-canvas-lines" aria-hidden="true"></svg>
+                <div class="api-canvas-nodes" id="db-canvas-nodes"></div>
+              </div>
+              <div class="api-canvas-legend" aria-label="Database topology legend">
+                <span class="legend-call">Python call</span>
+                <span class="legend-query">SQL use</span>
+                <span class="legend-catalog">Catalog read</span>
+              </div>
+              <p class="api-canvas-hint"><kbd>Drag canvas</kbd> pan <span></span><kbd>Drag node</kbd> move <span></span><kbd>Arrows</kbd> move focused node</p>
+            </div>
+          </section>
+
+          <aside class="operation-inspector ui-dock-pane" id="db-operation-inspector" aria-labelledby="db-operation-pane-title">
+            <header class="ui-dock-pane__header">
+              <button class="ui-dock-pane__toggle" id="db-operation-inspector-toggle" type="button" aria-controls="db-operation-inspector-body" aria-expanded="true">
+                <span class="ui-eyebrow">Database call inspector</span>
+                <strong id="db-operation-pane-title" aria-live="polite">Select an operation</strong>
+              </button>
+              <div class="ui-dock-pane__actions">
+                <button class="ui-icon-button compact" id="db-operation-inspector-close" type="button" data-ui-icon="close" aria-label="Close database call inspector"></button>
+              </div>
+            </header>
+            <div class="ui-dock-pane__body" id="db-operation-inspector-body">
+              <div class="inspector-empty ui-state" id="db-operation-empty">
+                <span class="ui-state__mark" aria-hidden="true">DB</span>
+                <h2>Select an operation</h2>
+                <p>Choose a gateway operation to follow its callers, Python call sequence, SQL, catalog reads, result, and cleanup.</p>
+              </div>
+              <div id="db-operation-detail" hidden></div>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/assets/db-map.js"></script>
+  </body>
+</html>

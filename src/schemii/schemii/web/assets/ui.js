@@ -6,6 +6,8 @@ const ICON_PATHS = Object.freeze({
   earlier: '<path d="m9 5-5 5 5 5M4 10h12"/>',
   later: '<path d="m11 5 5 5-5 5M4 10h12"/>',
   copy: '<rect x="7" y="7" width="9" height="9" rx="1.5"/><path d="M13 7V5.5A1.5 1.5 0 0 0 11.5 4h-7A1.5 1.5 0 0 0 3 5.5v7A1.5 1.5 0 0 0 4.5 14H7"/>',
+  link: '<path d="M8.2 11.8 11.8 8.2"/><path d="m6.7 13.3-1.2 1.2a2.8 2.8 0 0 1-4-4l2.7-2.7a2.8 2.8 0 0 1 4 0M13.3 6.7l1.2-1.2a2.8 2.8 0 0 1 4 4l-2.7 2.7a2.8 2.8 0 0 1-4 0"/>',
+  check: '<path d="m4 10.5 3.5 3.5L16 5.5"/>',
   duplicate: '<rect x="7" y="7" width="9" height="9" rx="1.5"/><path d="M13 7V5.5A1.5 1.5 0 0 0 11.5 4h-7A1.5 1.5 0 0 0 3 5.5v7A1.5 1.5 0 0 0 4.5 14H7"/>',
   delete: '<path d="M4 6h12M8 3h4l1 3H7l1-3ZM6 6l1 11h6l1-11M9 9v5M11 9v5"/>',
   add: '<path d="M10 4v12M4 10h12"/>',
@@ -66,6 +68,7 @@ export function decorateIconControl(control, {
   }
   control.classList.add("ui-icon-button");
   if (className) control.classList.add(...className.split(/\s+/).filter(Boolean));
+  control.dataset.uiIcon = icon;
   control.setAttribute("aria-label", label);
   if (tooltip) control.dataset.uiTooltip = tooltip;
   if (placement) control.dataset.uiTooltipPlacement = placement;
@@ -79,7 +82,47 @@ export function createIconButton(options, documentRef = document) {
   return decorateIconControl(button, options);
 }
 
+const STATE_VARIANTS = new Set(["loading", "error"]);
+
+export function renderStatePanel(panel, {
+  mark,
+  title,
+  message,
+  variant = null,
+  action = null,
+} = {}) {
+  if (!panel) throw new TypeError("A state panel is required");
+  if (typeof title !== "string" || !title.trim()) throw new TypeError("A state title is required");
+  if (typeof message !== "string" || !message.trim()) throw new TypeError("A state message is required");
+  if (variant !== null && !STATE_VARIANTS.has(variant)) throw new TypeError(`Unsupported state variant: ${variant}`);
+
+  panel.classList.add("ui-state");
+  for (const name of STATE_VARIANTS) panel.classList.toggle(name, variant === name);
+  const documentRef = panel.ownerDocument;
+  const markNode = documentRef.createElement("span");
+  markNode.classList.add("ui-state__mark");
+  markNode.setAttribute("aria-hidden", "true");
+  markNode.textContent = mark ?? "";
+  const titleNode = documentRef.createElement("strong");
+  titleNode.textContent = title;
+  const messageNode = documentRef.createElement("p");
+  messageNode.textContent = message;
+  panel.replaceChildren(markNode, titleNode, messageNode);
+  if (action) panel.append(action);
+  return panel;
+}
+
+export function createStatePanel({ surface = false, className = "", ...content } = {}, documentRef = document) {
+  const panel = documentRef.createElement("div");
+  panel.classList.add("ui-state");
+  if (surface) panel.classList.add("surface");
+  if (className) panel.classList.add(...className.split(/\s+/).filter(Boolean));
+  return renderStatePanel(panel, content);
+}
+
 export function hydrateIconControls(root = document) {
+  // TODO(ui-icon-fallback): Preserve usable icon-control content before JavaScript runs. The HTML controls are currently empty until this hydrator replaces their children; move the essential icon or text fallback into markup and enhance it here without regressing accessible names.
+  // TODO(ui-tooltip-placement): Add an inherited placement contract so a vertical control group can declare `right` once. The control-only `top` default currently makes tool-rail tooltips overlap neighboring controls.
   const controls = [...root.querySelectorAll("[data-ui-icon]")];
   for (const control of controls) {
     const label = control.getAttribute("aria-label");
@@ -113,11 +156,17 @@ export function setControlLoading(control, loading, { loadingLabel = "Working…
     if (!control.__uiLoadingState) {
       control.__uiLoadingState = {
         disabled: control.disabled,
+        ariaDisabled: control.getAttribute("aria-disabled"),
         label: control.getAttribute("aria-label"),
         tooltip: control.dataset.uiTooltip,
+        activationGuard: event => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        },
       };
+      control.addEventListener("click", control.__uiLoadingState.activationGuard, true);
     }
-    control.disabled = true;
+    control.setAttribute("aria-disabled", "true");
     control.setAttribute("aria-busy", "true");
     control.classList.add("ui-control-loading");
     if (loadingLabel) {
@@ -130,7 +179,10 @@ export function setControlLoading(control, loading, { loadingLabel = "Working…
   control.removeAttribute("aria-busy");
   control.classList.remove("ui-control-loading");
   if (!previous) return;
+  control.removeEventListener("click", previous.activationGuard, true);
   control.disabled = previous.disabled;
+  if (previous.ariaDisabled === null) control.removeAttribute("aria-disabled");
+  else control.setAttribute("aria-disabled", previous.ariaDisabled);
   if (previous.label) control.setAttribute("aria-label", previous.label);
   else control.removeAttribute("aria-label");
   if (previous.tooltip) control.dataset.uiTooltip = previous.tooltip;
@@ -147,10 +199,24 @@ export async function withLoadingControl(control, options, operation) {
   }
 }
 
+export function closeDetailsMenus(root = document, { except = null } = {}) {
+  for (const menu of root.querySelectorAll(".ui-menu[open]")) {
+    if (menu !== except) menu.removeAttribute("open");
+  }
+}
+
 export function installDetailsMenu(menu) {
   const close = () => menu.removeAttribute("open");
+  const onToggle = () => {
+    if (menu.open) closeDetailsMenus(menu.ownerDocument, { except: menu });
+  };
   const onMenuClick = event => {
-    if (event.target.closest?.("button, a, [role='menuitem']")) close();
+    if (!event.target.closest?.("button, a, [role='menuitem']")) return;
+    const restoreFocus = menu.contains(menu.ownerDocument.activeElement);
+    close();
+    queueMicrotask(() => {
+      if (restoreFocus) menu.querySelector("summary")?.focus();
+    });
   };
   const onDocumentClick = event => {
     if (menu.open && !menu.contains(event.target)) close();
@@ -160,11 +226,13 @@ export function installDetailsMenu(menu) {
     close();
     menu.querySelector("summary")?.focus();
   };
+  menu.addEventListener("toggle", onToggle);
   menu.addEventListener("click", onMenuClick);
   menu.ownerDocument.addEventListener("click", onDocumentClick);
   menu.ownerDocument.addEventListener("keydown", onKeydown);
   return Object.freeze({
     destroy() {
+      menu.removeEventListener("toggle", onToggle);
       menu.removeEventListener("click", onMenuClick);
       menu.ownerDocument.removeEventListener("click", onDocumentClick);
       menu.ownerDocument.removeEventListener("keydown", onKeydown);
@@ -203,11 +271,11 @@ function createTooltipController(documentRef) {
     tooltip.style.left = `${Math.max(margin, Math.min(left, viewport.innerWidth - tooltipRect.width - margin))}px`;
     tooltip.style.top = `${Math.max(margin, Math.min(top, viewport.innerHeight - tooltipRect.height - margin))}px`;
   };
-  const show = target => {
-    if (!target?.dataset.uiTooltip) return;
+  const show = (target, content = target?.dataset.uiTooltip) => {
+    if (!target || !content) return;
     clearTimeout(hideTimer);
     activeTarget = target;
-    tooltip.textContent = target.dataset.uiTooltip;
+    tooltip.textContent = content;
     tooltip.hidden = false;
     tooltip.classList.remove("visible");
     position(target);
@@ -224,31 +292,61 @@ function createTooltipController(documentRef) {
   return { tooltip, show, hide, get activeTarget() { return activeTarget; } };
 }
 
+export function isOverflowingText(target) {
+  if (!target) return false;
+  return target.scrollWidth > target.clientWidth || target.scrollHeight > target.clientHeight;
+}
+
 export function initializeUi(root = document) {
   hydrateIconControls(root);
   const documentRef = root.ownerDocument || root;
   const tooltip = createTooltipController(documentRef);
-  const resolveTarget = target => target?.closest?.("[data-ui-tooltip]");
+  let touchHideTimer = null;
+  const resolveTarget = (target, { touch = false } = {}) => {
+    const candidate = target?.closest?.("[data-ui-tooltip], [data-ui-tooltip-overflow]");
+    if (!candidate) return null;
+    if (touch && candidate.dataset.uiTooltipTouch === undefined) return null;
+    const content = candidate.dataset.uiTooltip
+      || (isOverflowingText(candidate) ? candidate.dataset.uiTooltipOverflow : null);
+    return content ? { content, target: candidate } : null;
+  };
   const onPointerOver = event => {
-    const target = resolveTarget(event.target);
-    if (target && target !== tooltip.activeTarget) tooltip.show(target);
+    const resolved = resolveTarget(event.target);
+    if (resolved && resolved.target !== tooltip.activeTarget) tooltip.show(resolved.target, resolved.content);
   };
   const onPointerOut = event => {
     if (tooltip.activeTarget && !tooltip.activeTarget.contains(event.relatedTarget)) tooltip.hide();
   };
   const onFocusIn = event => {
-    const target = resolveTarget(event.target);
-    if (target) tooltip.show(target);
+    const resolved = resolveTarget(event.target);
+    if (resolved) tooltip.show(resolved.target, resolved.content);
   };
   const onFocusOut = event => {
     if (tooltip.activeTarget && !tooltip.activeTarget.contains(event.relatedTarget)) tooltip.hide();
   };
-  const hideTooltip = () => tooltip.hide();
+  const hideTooltip = () => {
+    clearTimeout(touchHideTimer);
+    touchHideTimer = null;
+    tooltip.hide();
+  };
+  const onPointerUp = event => {
+    if (event.pointerType === "mouse") return;
+    const resolved = resolveTarget(event.target, { touch: true });
+    if (!resolved) return;
+    tooltip.show(resolved.target, resolved.content);
+    clearTimeout(touchHideTimer);
+    touchHideTimer = setTimeout(hideTooltip, 2_500);
+  };
+  const hideTooltipOnActivation = event => {
+    if (event.key === "Enter" || event.key === " ") tooltip.hide();
+  };
   documentRef.addEventListener("pointerover", onPointerOver);
   documentRef.addEventListener("pointerout", onPointerOut);
   documentRef.addEventListener("focusin", onFocusIn);
   documentRef.addEventListener("focusout", onFocusOut);
   documentRef.addEventListener("pointerdown", hideTooltip);
+  documentRef.addEventListener("pointerup", onPointerUp);
+  documentRef.addEventListener("keydown", hideTooltipOnActivation);
   documentRef.addEventListener("scroll", hideTooltip, true);
   const menus = [...root.querySelectorAll(".ui-menu")].map(installDetailsMenu);
   return Object.freeze({
@@ -259,7 +357,10 @@ export function initializeUi(root = document) {
       documentRef.removeEventListener("focusin", onFocusIn);
       documentRef.removeEventListener("focusout", onFocusOut);
       documentRef.removeEventListener("pointerdown", hideTooltip);
+      documentRef.removeEventListener("pointerup", onPointerUp);
+      documentRef.removeEventListener("keydown", hideTooltipOnActivation);
       documentRef.removeEventListener("scroll", hideTooltip, true);
+      clearTimeout(touchHideTimer);
       tooltip.tooltip.remove();
     },
   });

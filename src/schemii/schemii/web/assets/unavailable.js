@@ -45,6 +45,7 @@ export function unavailableButton(id, label, options = {}) {
   capability(id);
   return element("button", {
     ...options,
+    className: ["ui-button compact", options.className].filter(Boolean).join(" "),
     type: "button",
     text: label,
     dataset: { ...(options.dataset || {}), unavailable: id },

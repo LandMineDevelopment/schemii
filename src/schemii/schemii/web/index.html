@@ -39,7 +39,9 @@
           <details class="ui-menu">
             <summary class="ui-icon-button" data-ui-icon="help" title="Help and app controls" aria-label="Help and app controls"></summary>
             <div class="ui-menu__surface menu-wide">
-              <a href="/api-map">Open live API map</a>
+              <a href="/system-map">Open live system map</a>
+              <a href="/api-map">Open API lens</a>
+              <a href="/db-map">Open database lens</a>
               <button id="introduction-button" type="button">Show introduction</button>
               <button type="button" data-unavailable="restore-examples">Restore examples</button>
               <button class="danger-text" type="button" data-unavailable="shutdown">Shut down Schemii</button>
@@ -84,8 +86,8 @@
             <div class="catalog-state" id="catalog-state" role="status" aria-live="polite"></div>
             <div class="conflict-banner" id="conflict-banner" role="alert" hidden>
               <span id="conflict-message"><strong>Layout conflict</strong> Local table positions are preserved and saving has stopped.</span>
-              <button id="apply-connection-layout-button" type="button" hidden>Apply to current target</button>
-              <button id="reload-conflict-button" type="button">Reload server layout</button>
+              <button class="ui-button compact" id="apply-connection-layout-button" type="button" hidden>Apply to current target</button>
+              <button class="ui-button compact" id="reload-conflict-button" type="button">Reload server layout</button>
             </div>
             <div class="canvas-stage" id="canvas-stage">
               <svg class="relationship-lines" id="relationship-lines" aria-hidden="true"></svg>
@@ -125,7 +127,7 @@
 
         <section class="views-workspace layer-panel" id="views-workspace" data-layer-panel="views" aria-label="Views browser" hidden>
           <aside class="views-sidebar">
-            <header><span><small>Live relation browser</small><strong>Views</strong></span><button id="refresh-views-button" type="button">Refresh</button></header>
+            <header><span><small>Live relation browser</small><strong>Views</strong></span><button class="ui-button compact" id="refresh-views-button" type="button">Refresh</button></header>
             <label class="search-field"><span>Search views</span><input id="views-search" type="search" autocomplete="off" /></label>
             <div class="view-filters" role="group" aria-label="View type filter">
               <button class="active" type="button" data-view-filter="all" aria-pressed="true">All</button>
@@ -135,13 +137,13 @@
             <div class="views-list" id="views-list"></div>
           </aside>
           <article class="view-detail" id="view-detail">
-            <div class="empty-panel ui-state surface"><span>VIEW</span><strong>No view selected</strong><p>Open a workspace, then select an ordinary or materialized view from its live catalog.</p></div>
+            <div class="empty-panel ui-state surface"><span class="ui-state__mark" aria-hidden="true">VIEW</span><strong>No view selected</strong><p>Open a workspace, then select an ordinary or materialized view from its live catalog.</p></div>
           </article>
-          <nav class="view-actions" aria-label="View actions">
-            <button type="button" data-unavailable="view-create">Create view</button>
-            <button type="button" data-unavailable="view-replace">Replace definition</button>
-            <button type="button" data-unavailable="view-delete">Delete view</button>
-            <button type="button" data-unavailable="view-lineage">View lineage</button>
+          <nav class="view-actions ui-action-group" aria-label="View actions">
+            <button class="ui-button compact" type="button" data-unavailable="view-create">Create view</button>
+            <button class="ui-button compact" type="button" data-unavailable="view-replace">Replace definition</button>
+            <button class="ui-button compact" type="button" data-unavailable="view-delete">Delete view</button>
+            <button class="ui-button compact" type="button" data-unavailable="view-lineage">View lineage</button>
           </nav>
         </section>
 
@@ -156,9 +158,9 @@
           </header>
           <div class="sql-body">
             <section class="sql-editor-panel">
-              <header><span><small>Unsaved draft</small><strong>Editor</strong></span><button id="new-sql-draft-button" type="button">Clear draft</button></header>
+              <header><span><small>Unsaved draft</small><strong>Editor</strong></span><button class="ui-button compact" id="new-sql-draft-button" type="button">Clear draft</button></header>
               <textarea id="sql-draft" aria-label="Unsaved SQL draft" spellcheck="false"></textarea>
-              <footer><span>Draft text is not sent or saved.</span><button type="button" data-unavailable="sql-upload">Upload</button><button type="button" data-unavailable="sql-save">Save</button><button class="primary" type="button" data-unavailable="sql-run">Run</button></footer>
+              <footer><span>Draft text is not sent or saved.</span><button class="ui-button compact" type="button" data-unavailable="sql-upload">Upload</button><button class="ui-button compact" type="button" data-unavailable="sql-save">Save</button><button class="ui-button compact primary" type="button" data-unavailable="sql-run">Run</button></footer>
             </section>
             <aside class="sql-capabilities">
               <header><small>Active boundary</small><strong>Execution controls</strong></header>
@@ -178,7 +180,7 @@
     <dialog class="ui-dialog manager-dialog" id="connections-dialog" aria-labelledby="connections-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>PostgreSQL</small><h2 id="connections-title">Connections</h2><p>Connection metadata and credentials are held by the active server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connections"></button></header>
-        <div class="dialog-toolbar"><span id="connections-count">Loading connections</span><button id="reload-connections-button" type="button">Reload</button><button class="primary" id="add-connection-button" type="button">New connection</button></div>
+        <div class="dialog-toolbar"><span id="connections-count">Loading connections</span><button class="ui-button compact" id="reload-connections-button" type="button">Reload</button><button class="ui-button compact primary" id="add-connection-button" type="button">New connection</button></div>
         <div class="manager-list" id="connections-list" aria-live="polite"></div>
       </div>
     </dialog>
@@ -198,22 +200,22 @@
           <label class="check-row span-2" id="remove-credential-row" hidden><input id="remove-credential" type="checkbox" /><span>Remove the credential currently stored by the server</span></label>
         </div>
         <div class="form-status" id="connection-form-status" aria-live="polite"></div>
-        <footer class="ui-dialog__actions"><button id="reload-editor-connection" type="button" hidden>Reload server version</button><button type="button" data-close-dialog>Cancel</button><button class="primary" id="save-connection-button" type="submit">Save connection</button></footer>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" id="reload-editor-connection" type="button" hidden>Reload server version</button><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-connection-button" type="submit">Save connection</button></footer>
       </form>
     </dialog>
 
     <dialog class="ui-dialog manager-dialog" id="workspaces-dialog" aria-labelledby="workspaces-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Live catalog targets</small><h2 id="workspaces-title">Workspaces</h2><p>Each workspace binds one connection, database, and PostgreSQL namespace for this server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>
-        <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button id="reload-workspaces-button" type="button">Reload</button></div>
+        <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button class="ui-button compact" id="reload-workspaces-button" type="button">Reload</button></div>
         <div class="manager-list" id="workspaces-list" aria-live="polite"></div>
         <form class="workspace-form" id="workspace-form">
           <header><strong>Create workspace</strong><small>The database is taken from the selected connection.</small></header>
           <label><span>Connection</span><select id="workspace-connection" required><option value="">Select a live connection</option></select></label>
           <label><span>Database</span><output id="workspace-database">Select a connection</output></label>
-          <label><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" required autocomplete="off" /><button type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
+          <label><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" required autocomplete="off" /><button class="ui-button compact" type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
           <div class="form-status span-3" id="workspace-form-status" aria-live="polite"></div>
-          <button class="primary" id="create-workspace-button" type="submit">Create and open</button>
+          <button class="ui-button primary" id="create-workspace-button" type="submit">Create and open</button>
         </form>
       </div>
     </dialog>
@@ -221,7 +223,7 @@
     <dialog class="ui-dialog catalog-dialog" id="functions-dialog" aria-labelledby="functions-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Live PostgreSQL catalog</small><h2 id="functions-title">Functions and procedures</h2><p>Definitions are read-only and come from the open workspace catalog.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close functions"></button></header>
-        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="functions-search" type="search" autocomplete="off" /></label><span id="functions-count">No catalog loaded</span><button type="button" data-unavailable="function-mutation">Create or edit</button></div>
+        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="functions-search" type="search" autocomplete="off" /></label><span id="functions-count">No catalog loaded</span><button class="ui-button compact" type="button" data-unavailable="function-mutation">Create or edit</button></div>
         <div class="catalog-browser-list" id="functions-list"></div>
       </div>
     </dialog>
@@ -229,9 +231,9 @@
     <dialog class="ui-dialog catalog-dialog" id="objects-dialog" aria-labelledby="objects-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Live PostgreSQL catalog</small><h2 id="objects-title">Database objects</h2><p>Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
-        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button type="button" data-unavailable="database-object-mutation">Mutate object</button></div>
+        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-button compact" type="button" data-unavailable="database-object-mutation">Mutate object</button></div>
         <div class="catalog-browser-list" id="objects-list"></div>
-        <footer class="ui-dialog__actions"><button type="button" data-unavailable="migration-preview">Preview migration</button><button class="primary" type="button" data-unavailable="migration-apply">Apply migration</button></footer>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-unavailable="migration-preview">Preview migration</button><button class="ui-button compact primary" type="button" data-unavailable="migration-apply">Apply migration</button></footer>
       </div>
     </dialog>
 
@@ -245,7 +247,7 @@
           <article><span>04</span><h3>Recover</h3><p>If a layout revision conflicts, local positions remain on screen until you explicitly reload the server layout.</p></article>
         </div>
         <div class="runtime-note"><strong>Process-scoped storage</strong><span>The active API reports in-memory persistence. Connections, workspaces, and layouts do not survive a server restart.</span></div>
-        <footer class="ui-dialog__actions"><button class="primary" type="button" data-close-dialog>Start exploring</button></footer>
+        <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-close-dialog>Start exploring</button></footer>
       </div>
     </dialog>
 
@@ -253,7 +255,7 @@
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Backend capability unavailable</small><h2 id="unavailable-title">Capability unavailable</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close capability notice"></button></header>
         <div class="unavailable-copy"><span class="unavailable-mark" aria-hidden="true">API</span><div><p id="unavailable-description"></p><strong>This capability needs an update to the active backend and API contract.</strong><code id="unavailable-id"></code></div></div>
-        <footer class="ui-dialog__actions"><button class="primary" type="button" data-close-dialog>Close</button></footer>
+        <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-close-dialog>Close</button></footer>
       </div>
     </dialog>
 
@@ -261,7 +263,7 @@
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Confirm action</small><h2 id="confirm-title">Confirm</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-confirm-cancel aria-label="Cancel confirmation"></button></header>
         <p id="confirm-message"></p>
-        <footer class="ui-dialog__actions"><button type="button" data-confirm-cancel>Cancel</button><button class="danger" id="confirm-action" type="button">Delete</button></footer>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-confirm-cancel>Cancel</button><button class="ui-button compact danger" id="confirm-action" type="button">Delete</button></footer>
       </div>
     </dialog>
 

@@ -37,6 +37,7 @@ export class GraphViewport {
     };
     this.pan = null;
     this.drag = null;
+    // TODO(graph-viewport-keyboard): Add configurable Arrow-key panning when the focus target is the viewport host itself, without stealing node-drag or form-control keys, and cover both catalog and API canvas consumers with keyboard tests.
     this.listeners = {
       pointerdown: event => this.startPan(event),
       pointermove: event => this.movePan(event),

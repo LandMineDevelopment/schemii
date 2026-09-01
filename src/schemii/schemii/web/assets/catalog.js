@@ -309,15 +309,15 @@ export function renderObjects(container, catalog, query = "", onOpen) {
     const body = element("div", { className: "catalog-object-body" });
     body.append(metadataGrid([["Type", object.kind], ["Identity", object.name], ["Catalog detail", object.meta]]));
     if (object.target === "table") {
-      const action = element("button", { type: "button", text: "Show table inspector" });
+      const action = element("button", { className: "ui-button compact", type: "button", text: "Show table inspector" });
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
     } else if (object.target === "view") {
-      const action = element("button", { type: "button", text: "Open view definition" });
+      const action = element("button", { className: "ui-button compact", type: "button", text: "Open view definition" });
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
     } else if (object.target === "routine") {
-      const action = element("button", { type: "button", text: "Open routines browser" });
+      const action = element("button", { className: "ui-button compact", type: "button", text: "Open routines browser" });
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
     }

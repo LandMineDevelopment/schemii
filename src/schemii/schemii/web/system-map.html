@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0e13" />
+    <title>Schemii system map</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/ui.css" />
+    <link rel="stylesheet" href="/assets/api-map.css" />
+    <link rel="stylesheet" href="/assets/system-map.css" />
+  </head>
+  <body>
+    <div class="system-shell" id="system-shell">
+      <header class="system-topbar ui-topbar">
+        <a class="ui-brand" href="/" aria-label="Return to Schemii">
+          <span class="ui-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="ui-brand-copy"><strong>Schemii</strong><small>System map</small></span>
+        </a>
+
+        <div class="system-title">
+          <span class="ui-eyebrow">Derived from the active process</span>
+          <strong>Follow the code, end to end</strong>
+        </div>
+
+        <dl class="system-stats ui-stat-grid" aria-label="Visible topology totals">
+          <div><dt id="step-stat-label">Areas</dt><dd id="step-count">—</dd></div>
+          <div><dt id="link-stat-label">Source</dt><dd id="link-count">—</dd></div>
+          <div><dt>SQL</dt><dd id="sql-count">—</dd></div>
+        </dl>
+
+        <nav class="system-actions" aria-label="System map actions">
+          <button class="ui-icon-button" id="refresh-system" type="button" data-ui-icon="refresh" aria-label="Refresh system map"></button>
+          <details class="ui-menu">
+            <summary class="ui-icon-button" data-ui-icon="more" aria-label="System map resources"></summary>
+            <div class="ui-menu__surface">
+              <a href="/">Schema explorer</a>
+              <a href="/docs">Swagger</a>
+              <a href="/_developer/system">System inspection JSON</a>
+              <a href="/_developer/routes">Route inspection JSON</a>
+              <a href="/_developer/database">Database inspection JSON</a>
+            </div>
+          </details>
+        </nav>
+      </header>
+
+      <section class="system-controls" aria-label="Flow controls">
+        <label class="browse-picker">
+          <span id="browse-label">Browse</span>
+          <select id="browse-select" aria-labelledby="browse-label">
+            <option value="e2e">Request journeys</option>
+            <option value="api">API routes</option>
+            <option value="internals">Internal components</option>
+            <option value="database">Database operations</option>
+          </select>
+        </label>
+        <div class="entry-picker">
+          <span id="entry-label">Route</span>
+          <button class="entry-picker-trigger" id="entry-picker-trigger" type="button" aria-labelledby="entry-label entry-picker-value" aria-haspopup="dialog">
+            <span class="entry-picker-value" id="entry-picker-value">Loading entries…</span>
+            <span class="entry-picker-disclosure" aria-hidden="true">⌄</span>
+          </button>
+        </div>
+        <label class="flow-search ui-search">
+          <span class="sr-only">Filter visible steps</span>
+          <input id="flow-search" type="search" autocomplete="off" placeholder="Filter function, source, branch, or SQL" />
+        </label>
+        <div class="depth-control">
+          <span>Call depth</span>
+          <div class="ui-segmented" role="group" aria-label="Call depth">
+            <button type="button" data-depth="1" aria-pressed="false">1</button>
+            <button type="button" data-depth="3" aria-pressed="true">3</button>
+            <button type="button" data-depth="all" aria-pressed="false">All</button>
+          </div>
+        </div>
+        <label class="outcome-control">
+          <input id="show-outcomes" type="checkbox" />
+          <span>Outcomes</span>
+        </label>
+        <output id="inspection-status" aria-live="polite">Loading source snapshot…</output>
+      </section>
+
+      <main class="system-workspace" id="system-workspace" data-inspector="closed">
+        <aside class="entry-rail" aria-label="Available entry points">
+          <header>
+            <div><span class="ui-eyebrow" id="rail-eyebrow">Registered routes</span><strong id="rail-title">Choose a journey</strong></div>
+            <small id="entry-count">—</small>
+          </header>
+          <div class="entry-rail-tools">
+            <label class="entry-search ui-search">
+              <span class="sr-only">Search entries</span>
+              <input id="rail-entry-search" type="search" autocomplete="off" placeholder="Search routes and source" />
+            </label>
+            <div class="entry-group-filters" id="rail-group-filters" aria-label="Filter entries by group"></div>
+          </div>
+          <div class="entry-list" id="entry-list"></div>
+        </aside>
+
+        <section class="flow-surface" aria-labelledby="flow-title">
+          <header class="flow-heading">
+            <div class="flow-heading-copy">
+              <span class="ui-eyebrow" id="flow-eyebrow">End-to-end request journey</span>
+              <div class="flow-title-row">
+                <span id="flow-method" class="method-badge method-get">GET</span>
+                <h1 id="flow-title">Loading system map</h1>
+              </div>
+              <p id="flow-description">Joining registered routes, installed implementations, Python calls, branches, and SQL.</p>
+            </div>
+            <div class="flow-facts" id="flow-facts"></div>
+          </header>
+
+          <div class="system-state ui-state loading" id="system-state" role="status" aria-live="polite">
+            <span class="ui-state__mark" aria-hidden="true">…</span>
+            <strong>Reading the active process</strong>
+            <p>Building a bounded static flow without executing application work or reading runtime values.</p>
+          </div>
+
+          <section class="journey-overview" id="journey-overview" aria-label="High-level request journey" hidden>
+            <nav class="journey-tabs" id="journey-tabs" aria-label="Jump to journey area"></nav>
+            <header class="journey-guide">
+              <div>
+                <span class="ui-eyebrow" id="journey-guide-eyebrow">How to read this</span>
+                <strong id="journey-guide-title">Follow the request across four ownership boundaries</strong>
+              </div>
+              <p id="journey-guide-description">Select an area to reveal only the source calls that make that part of the journey happen.</p>
+            </header>
+            <div class="journey-track" id="journey-track"></div>
+          </section>
+
+          <ol class="flow-list" id="flow-list" aria-label="Source-derived call flow" hidden></ol>
+          <footer class="flow-footer" id="flow-footer" hidden>
+            <span>Static source path</span>
+            <p>Branches show possible control flow, not an observed request trace.</p>
+          </footer>
+        </section>
+
+        <aside class="source-inspector" id="source-inspector" aria-labelledby="source-inspector-title">
+          <header>
+            <div><span class="ui-eyebrow">Source inspector</span><strong id="source-inspector-title">Select a step</strong></div>
+            <button class="ui-icon-button compact" id="close-source-inspector" type="button" data-ui-icon="close" aria-label="Close source inspector"></button>
+          </header>
+          <div class="source-inspector-body" id="source-inspector-body">
+            <div class="inspector-empty ui-state">
+              <span class="ui-state__mark" aria-hidden="true">CODE</span>
+              <strong>Inspect without losing your place</strong>
+              <p>Choose any flow step to view its complete bounded source and jump to its callers or dependencies.</p>
+            </div>
+          </div>
+        </aside>
+      </main>
+
+      <dialog class="ui-dialog entry-dialog" id="entry-dialog" aria-labelledby="entry-dialog-title">
+        <div class="ui-dialog__shell">
+          <header class="ui-dialog__head">
+            <div>
+              <small id="entry-dialog-eyebrow">Source-derived entries</small>
+              <h2 id="entry-dialog-title">Choose a journey</h2>
+              <p>Search the installed source and narrow the results by its owning group.</p>
+            </div>
+            <button class="ui-icon-button compact" id="close-entry-dialog" type="button" data-ui-icon="close" aria-label="Close entry picker"></button>
+          </header>
+          <div class="entry-dialog-tools">
+            <label class="entry-search ui-search">
+              <span class="sr-only">Search entries</span>
+              <input id="dialog-entry-search" type="search" autocomplete="off" placeholder="Search name, route, method, or source" />
+            </label>
+            <div class="entry-group-filters" id="dialog-group-filters" aria-label="Filter entries by group"></div>
+            <output id="entry-dialog-count" aria-live="polite">Loading entries…</output>
+          </div>
+          <div class="entry-dialog-list" id="entry-dialog-list"></div>
+        </div>
+      </dialog>
+    </div>
+    <script type="module" src="/assets/system-map.js"></script>
+  </body>
+</html>

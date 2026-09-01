@@ -1,4 +1,5 @@
 import { ApiError } from "./api.js";
+import { createStatePanel } from "./ui.js";
 
 export function element(tagName, options = {}, children = []) {
   const node = document.createElement(tagName);
@@ -43,7 +44,7 @@ export function errorPanel(error, { retryLabel, onRetry } = {}) {
     panel.append(details);
   }
   if (onRetry) {
-    const button = element("button", { type: "button", text: retryLabel || "Retry" });
+    const button = element("button", { className: "ui-button compact", type: "button", text: retryLabel || "Retry" });
     button.addEventListener("click", onRetry);
     panel.append(button);
   }
@@ -51,10 +52,7 @@ export function errorPanel(error, { retryLabel, onRetry } = {}) {
 }
 
 export function emptyPanel(mark, title, copy, action = null) {
-  const panel = element("div", { className: "empty-panel ui-state surface" });
-  panel.append(element("span", { text: mark }), element("strong", { text: title }), element("p", { text: copy }));
-  if (action) panel.append(action);
-  return panel;
+  return createStatePanel({ mark, title, message: copy, action, surface: true, className: "empty-panel" });
 }
 
 export function formatTimestamp(value) {

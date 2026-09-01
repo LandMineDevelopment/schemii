@@ -201,7 +201,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .view-column code { color: #727f8f; font: 7px ui-monospace, monospace; text-transform: uppercase; }
 .definition-panel { min-height: 0; padding: 15px 16px; }
 .definition-panel pre, .routine-definition { margin: 0; padding: 14px; overflow: auto; border: 1px solid #29333f; border-radius: 6px; color: #c6d2de; background: #090d12; font: 10px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.view-actions { position: absolute; z-index: 3; right: 22px; bottom: 20px; display: flex; gap: 5px; padding: 5px; border: 1px solid #313747; border-radius: 7px; background: rgba(17, 21, 28, .95); box-shadow: 0 12px 30px rgba(0, 0, 0, .32); }
+.view-actions { position: absolute; z-index: 3; right: 22px; bottom: 20px; padding: 5px; border: 1px solid #313747; border-radius: 7px; background: rgba(17, 21, 28, .95); box-shadow: 0 12px 30px rgba(0, 0, 0, .32); }
 .view-actions button:hover { color: #d8d0ff; border-color: #66599d; }
 
 .sql-workspace { --accent: var(--blue); display: grid; grid-template-rows: auto minmax(0, 1fr) minmax(130px, 28%); gap: 10px; padding: 58px 12px 12px 68px; background-color: #0b1016; background-image: linear-gradient(rgba(91, 106, 124, .05) 1px, transparent 1px), linear-gradient(90deg, rgba(91, 106, 124, .05) 1px, transparent 1px); background-size: 22px 22px; }
@@ -223,8 +223,6 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .sql-editor-panel footer { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 8px 9px; border-top: 1px solid #29313d; background: #11171e; }
 .sql-editor-panel footer span { margin-right: auto; color: #596676; font-size: 7px; }
 .sql-editor-panel footer button { min-height: 30px; padding: 0 9px; font-size: 8px; }
-button.primary, .primary { color: var(--accent-ink) !important; border-color: var(--accent) !important; background: var(--accent) !important; font-weight: 700; }
-button.primary:hover, .primary:hover { background: var(--accent-bright) !important; }
 .sql-capabilities { display: grid; align-content: start; grid-template-rows: auto; }
 .sql-capabilities > button { display: grid; min-height: 58px; align-content: center; gap: 3px; margin: 7px 8px 0; padding: 8px 9px; text-align: left; }
 .sql-capabilities > button:hover { color: #cfeaff; border-color: #315a78; background: #132533; }
@@ -237,8 +235,6 @@ button.primary:hover, .primary:hover { background: var(--accent-bright) !importa
 
 .dialog-toolbar { display: flex; min-height: 50px; align-items: center; justify-content: flex-end; gap: 7px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: #0f141a; }
 .dialog-toolbar > span { margin-right: auto; color: #697686; font-size: 8px; text-transform: uppercase; letter-spacing: .07em; }
-.dialog-toolbar button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 5px; color: #aeb8c4; background: var(--panel-2); font-size: 8px; cursor: pointer; }
-.dialog-toolbar button:hover { color: var(--text); border-color: #505b6a; background: var(--panel-3); }
 .manager-list, .catalog-browser-list { min-height: 180px; overflow-y: auto; padding: 10px 12px; background: #0c1117; }
 .manager-card { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid #29333f; border-radius: 7px; background: #141a21; }
 .manager-card + .manager-card { margin-top: 7px; }
@@ -247,10 +243,9 @@ button.primary:hover, .primary:hover { background: var(--accent-bright) !importa
 .manager-card strong { overflow: hidden; color: #d2dae3; font: 700 10px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .manager-card p { margin: 0; overflow: hidden; color: #74808f; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .manager-card small { color: #596676; font-size: 7px; }
-.manager-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
-.manager-actions button { min-height: 30px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; color: #9da9b6; background: var(--panel-2); font-size: 7px; cursor: pointer; }
-.manager-actions button:hover { color: var(--accent); border-color: #675426; }
-.manager-actions button.danger-text:hover { color: #ffadb4; border-color: #773840; background: var(--danger-bg); }
+.manager-actions .ui-button { color: #9da9b6; font-size: 7px; }
+.manager-actions .ui-button:hover { color: var(--accent); border-color: #675426; }
+.manager-actions .ui-button.danger-text:hover { color: #ffadb4; border-color: #773840; background: var(--danger-bg); }
 .connection-test { margin-top: 2px; padding-top: 6px; border-top: 1px solid #252d38; color: #8ca0b2 !important; white-space: normal !important; }
 .workspace-form { display: grid; grid-template-columns: 1.2fr .8fr 1fr auto; align-items: end; gap: 9px; padding: 13px 14px 15px; border-top: 1px solid var(--line); background: #11171e; }
 .workspace-form header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; }
@@ -259,10 +254,10 @@ button.primary:hover, .primary:hover { background: var(--accent-bright) !importa
 .workspace-form label, .form-grid label { display: grid; min-width: 0; gap: 6px; color: #9aa6b4; font-size: 8px; }
 .workspace-form input, .workspace-form select, .form-grid input, .form-grid select { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
 .workspace-form output { display: flex; height: 36px; min-width: 0; align-items: center; overflow: hidden; padding: 0 9px; border: 1px solid #29333f; border-radius: 5px; color: #83909e; background: #10151c; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-form > button { height: 36px; padding: 0 11px; border: 1px solid var(--accent); border-radius: 5px; cursor: pointer; font-size: 8px; }
+.workspace-form > .ui-button { height: 36px; font-size: 8px; }
 .joined-control { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; }
 .joined-control input { border-radius: 5px 0 0 5px; }
-.joined-control button { min-height: 36px; padding: 0 8px; border: 1px solid #394451; border-left: 0; border-radius: 0 5px 5px 0; color: #9ba8b5; background: var(--panel-2); font-size: 7px; cursor: pointer; }
+.joined-control .ui-button { min-height: 36px; border-color: #394451; border-left: 0; border-radius: 0 5px 5px 0; color: #9ba8b5; font-size: 7px; }
 .span-2 { grid-column: span 2; }
 .span-3 { grid-column: span 3; }
 .form-grid { display: grid; min-height: 0; grid-template-columns: 1fr 1fr; gap: 12px; padding: 17px 18px; overflow-y: auto; }
@@ -286,7 +281,7 @@ button.primary:hover, .primary:hover { background: var(--accent-bright) !importa
 .catalog-object-body dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 9px; margin: 0; }
 .catalog-object-body dt { color: #5f6c7b; font-size: 7px; }
 .catalog-object-body dd { margin: 0; overflow-wrap: anywhere; color: #aeb9c5; font: 8px/1.45 ui-monospace, monospace; }
-.catalog-object-body button { justify-self: start; min-height: 30px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; color: #9ca8b5; background: var(--panel-2); font-size: 7px; cursor: pointer; }
+.catalog-object-body .ui-button { justify-self: start; color: #9ca8b5; font-size: 7px; }
 .intro-dialog { width: min(720px, calc(100vw - 28px)); }
 .intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow-y: auto; background: var(--line); }
 .intro-grid article { position: relative; min-height: 145px; padding: 22px; background: #10151c; }
@@ -315,7 +310,7 @@ button.primary:hover, .primary:hover { background: var(--accent-bright) !importa
 .error-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; margin: 8px 0 0; }
 .error-details dt { color: #8f696d; }
 .error-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #ddb0b4; font-family: ui-monospace, monospace; }
-.error-panel > button { justify-self: start; min-height: 31px; padding: 0 9px; border: 1px solid #744047; border-radius: 5px; color: #efc9cc; background: #351d22; font-size: 8px; cursor: pointer; }
+.error-panel > .ui-button { justify-self: start; min-height: 31px; border-color: #744047; color: #efc9cc; background: #351d22; font-size: 8px; }
 .manager-list > .error-panel, .catalog-browser-list > .error-panel { margin: auto; max-width: 520px; }
 
 @media (max-width: 900px) {
@@ -376,7 +371,7 @@ button.primary:hover, .primary:hover { background: var(--accent-bright) !importa
   .manager-actions { justify-content: flex-start; }
   .workspace-form { grid-template-columns: 1fr; align-items: stretch; max-height: 42vh; overflow-y: auto; }
   .workspace-form header, .span-3 { grid-column: 1; }
-  .workspace-form > button { height: 42px; }
+  .workspace-form > .ui-button { height: 42px; }
   .form-grid { grid-template-columns: 1fr; }
   .span-2 { grid-column: span 1; }
   .compact-search { min-width: 100%; }
