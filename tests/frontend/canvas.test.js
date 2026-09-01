@@ -59,6 +59,10 @@ class PointerTarget {
     this.attributes.set(name, value);
   }
 
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+
   dispatch(type, values = {}) {
     const event = {
       button: 0,
@@ -119,6 +123,7 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
   const frames = new FrameScheduler();
   let savedPositionCount = 0;
   let selectionCount = 0;
+  const relationshipColumnSelections = [];
   const canvas = new CatalogCanvas({
     canvas: host,
     stage,
@@ -126,6 +131,9 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
     lines: { replaceChildren() {} },
     zoomOutput,
     onSelect() { selectionCount += 1; },
+    onRelationshipColumnSelect(table, column) {
+      relationshipColumnSelections.push([table.name, column.name]);
+    },
     onPositionsChanged() {
       savedPositionCount += 1;
     },
@@ -147,6 +155,7 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
     handle,
     savedPositionCount: () => savedPositionCount,
     selectionCount: () => selectionCount,
+    relationshipColumnSelections,
   };
 }
 
@@ -394,4 +403,42 @@ test("an explicit same-table selection notifies the inspector without redrawing 
   canvas.select("orders", { notify: true });
 
   assert.equal(selectionCount(), 1);
+});
+
+test("relationship mode exposes graphical source and eligible target columns", () => {
+  const { canvas, relationshipColumnSelections } = fixture();
+  const sourceTable = {
+    name: "orders",
+    columns: [{ name: "customer_id" }],
+    primaryKey: null,
+    uniqueConstraints: [],
+  };
+  const targetTable = {
+    name: "customers",
+    columns: [{ name: "id" }, { name: "email" }],
+    primaryKey: { columns: ["id"] },
+    uniqueConstraints: [],
+  };
+  const sourceRow = new PointerTarget();
+  const targetRow = new PointerTarget();
+  const invalidRow = new PointerTarget();
+  canvas.catalog.tables = [sourceTable, targetTable];
+  canvas.tableByName = new Map([[sourceTable.name, sourceTable], [targetTable.name, targetTable]]);
+  canvas.columnRows.set("orders\u0000customer_id", { row: sourceRow, table: sourceTable, column: sourceTable.columns[0] });
+  canvas.columnRows.set("customers\u0000id", { row: targetRow, table: targetTable, column: targetTable.columns[0] });
+  canvas.columnRows.set("customers\u0000email", { row: invalidRow, table: targetTable, column: targetTable.columns[1] });
+
+  canvas.setRelationshipMode({ enabled: true, source: { tableName: "orders", columnName: "customer_id" } });
+
+  assert.equal(canvas.canvas.classList.contains("relationship-mode"), true);
+  assert.equal(sourceRow.classList.contains("relationship-source"), true);
+  assert.equal(targetRow.classList.contains("relationship-target"), true);
+  assert.equal(invalidRow.classList.contains("relationship-invalid"), true);
+  assert.equal(targetRow.attributes.get("role"), "button");
+  assert.equal(canvas.selectRelationshipColumn("customers", "id"), true);
+  assert.deepEqual(relationshipColumnSelections, [["customers", "id"]]);
+
+  canvas.setRelationshipMode({ enabled: false });
+  assert.equal(canvas.canvas.classList.contains("relationship-mode"), false);
+  assert.equal(targetRow.attributes.has("role"), false);
 });

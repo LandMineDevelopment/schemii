@@ -1,11 +1,13 @@
 import { api, ApiError } from "./api.js";
 import { CatalogCanvas } from "./canvas.js";
 import {
+  alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
   designLayoutContent,
   designPositions,
   designToCatalog,
+  relationshipDraftFromColumns,
   updateDesignTable,
 } from "./design.js";
 import {
@@ -54,6 +56,10 @@ const elements = {
   reloadConflictButton: byId("reload-conflict-button"),
   zoomOutput: byId("zoom-output"),
   relationshipOutput: byId("relationship-output"),
+  relationshipAuthoringBanner: byId("relationship-authoring-banner"),
+  relationshipAuthoringStep: byId("relationship-authoring-step"),
+  relationshipAuthoringInstruction: byId("relationship-authoring-instruction"),
+  cancelRelationshipAuthoring: byId("cancel-relationship-authoring"),
   fitButton: byId("fit-button"),
   createTableButton: byId("create-table-button"),
   createRelationshipButton: byId("create-relationship-button"),
@@ -132,6 +138,7 @@ const elements = {
   designRelationshipTarget: byId("design-relationship-target"),
   designRelationshipKey: byId("design-relationship-key"),
   designRelationshipMappings: byId("design-relationship-mappings"),
+  designRelationshipTypeAlignment: byId("design-relationship-type-alignment"),
   designRelationshipOnUpdate: byId("design-relationship-on-update"),
   designRelationshipOnDelete: byId("design-relationship-on-delete"),
   designRelationshipDeferrable: byId("design-relationship-deferrable"),
@@ -200,6 +207,9 @@ const state = {
   designSubmitting: false,
   designTableEditorId: null,
   designRelationshipAutoName: null,
+  relationshipAuthoring: false,
+  relationshipSource: null,
+  designRelationshipAnchor: null,
   catalog: null,
   catalogLoading: false,
   catalogError: null,
@@ -245,6 +255,7 @@ const canvas = new CatalogCanvas({
     right: inspectorPane.containerState() === "expanded" || inspectorPane.containerState() === "minimized" ? 360 : 20,
   }),
   onSelect: selectTable,
+  onRelationshipColumnSelect: handleRelationshipColumnSelection,
   onPositionsChanged: positionsChanged,
   onRelationshipVisibilityChanged: (shown, available) => {
     elements.relationshipOutput.hidden = shown === available;
@@ -300,13 +311,16 @@ function selectedDesignTable() {
 
 function updateDesignControls() {
   const detached = isDetachedWorkspace();
-  const busy = state.catalogLoading || state.designSubmitting;
+  const busy = state.catalogLoading || state.designSubmitting || state.layoutConflict;
   const selected = selectedDesignTable();
   const hasTargetKey = state.design?.content.tables.some(table => (
     table.keys.some(key => key.kind === "primary" || key.kind === "unique")
   ));
   elements.createTableButton.disabled = !detached || busy;
   elements.createRelationshipButton.disabled = !detached || busy || !hasTargetKey;
+  elements.createRelationshipButton.classList.toggle("active", state.relationshipAuthoring);
+  elements.createRelationshipButton.setAttribute("aria-pressed", state.relationshipAuthoring ? "true" : "false");
+  elements.createRelationshipButton.title = state.relationshipAuthoring ? "Cancel relationship selection" : "Create relationship";
   elements.editTableButton.disabled = !selected || busy;
   elements.deleteTableButton.disabled = !selected || busy;
 }
@@ -1020,6 +1034,7 @@ function clearActiveWorkspace({ historyMode = "replace" } = {}) {
   state.layoutConflict = false;
   state.layoutConflictKind = null;
   if (state.preservedLayout?.workspaceId === workspaceId) state.preservedLayout = null;
+  setRelationshipAuthoring(false);
   canvas.clear();
   renderConflict();
   renderCatalogSurfaces();
@@ -1061,6 +1076,7 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
   state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
+  setRelationshipAuthoring(false);
   canvas.clear();
   renderConflict();
   renderCatalogSurfaces();
@@ -1082,6 +1098,7 @@ async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
+  setRelationshipAuthoring(false);
   canvas.clear();
   renderConflict();
   renderCatalogSurfaces();
@@ -1241,7 +1258,7 @@ function renderActiveInspector(table) {
     table,
     catalog: state.catalog,
     onEditTable: desired && table ? () => openDesignTableEditor(table.designId) : null,
-    onAddRelationship: desired && table ? () => openDesignRelationshipEditor(table.designId) : null,
+    onAddRelationship: desired && table ? startRelationshipAuthoring : null,
     onDeleteRelationship: desired ? confirmDeleteDesignRelationship : null,
   });
 }
@@ -1700,11 +1717,11 @@ function targetKey() {
   return target?.keys.find(key => key.id === elements.designRelationshipKey.value) || null;
 }
 
-function renderRelationshipMappings() {
+function renderRelationshipMappings(preferredSourceColumnIds = null) {
   const source = designTableById(elements.designRelationshipSource.value);
   const target = designTableById(elements.designRelationshipTarget.value);
   const key = targetKey();
-  const previous = [...elements.designRelationshipMappings.querySelectorAll("[data-relationship-source-column]")]
+  const previous = preferredSourceColumnIds || [...elements.designRelationshipMappings.querySelectorAll("[data-relationship-source-column]")]
     .map(select => select.value);
   replace(elements.designRelationshipMappings);
   if (!source || !target || !key) return;
@@ -1722,8 +1739,10 @@ function renderRelationshipMappings() {
       dataset: { relationshipSourceColumn: "" },
     });
     replaceSelectOptions(select, source.columns.map(column => ({ value: column.id, label: `${column.name} · ${column.dataType}` })), preferred);
+    const anchored = state.designRelationshipAnchor?.targetColumnId === targetColumnId;
+    select.disabled = anchored;
     const targetValue = element("span", { className: "relationship-mapping-target" }, [
-      element("small", { text: "Target" }),
+      element("small", { text: anchored ? "Selected target" : "Target" }),
       element("code", { text: `${targetColumn.name} · ${targetColumn.dataType}`, title: `${targetColumn.name} · ${targetColumn.dataType}` }),
     ]);
     elements.designRelationshipMappings.append(element("div", { className: "relationship-mapping-row" }, [
@@ -1732,36 +1751,143 @@ function renderRelationshipMappings() {
       targetValue,
     ]));
   });
+  renderRelationshipTypeAlignment();
 }
 
-function updateRelationshipTargetKeys() {
+function currentRelationshipMapping() {
+  const key = targetKey();
+  if (!key) return null;
+  return {
+    sourceTableId: elements.designRelationshipSource.value,
+    sourceColumnIds: [...elements.designRelationshipMappings.querySelectorAll("[data-relationship-source-column]")].map(select => select.value),
+    targetTableId: elements.designRelationshipTarget.value,
+    targetColumnIds: [...key.columnIds],
+  };
+}
+
+function renderRelationshipTypeAlignment() {
+  const mapping = currentRelationshipMapping();
+  replace(elements.designRelationshipTypeAlignment);
+  elements.designRelationshipTypeAlignment.hidden = true;
+  if (!mapping) return;
+  let changes;
+  try {
+    ({ changes } = alignRelationshipColumnTypes(state.design.content, mapping));
+  } catch {
+    return;
+  }
+  if (!changes.length) return;
+  elements.designRelationshipTypeAlignment.hidden = false;
+  elements.designRelationshipTypeAlignment.append(
+    element("strong", { text: "Automatic type match" }),
+    element("span", {
+      text: `${changes.length} foreign-key column type${changes.length === 1 ? "" : "s"} will change to match the referenced key.`,
+    }),
+    element("ul", {}, changes.map(change => element("li", {}, [
+      element("code", { text: `${change.sourceTableName}.${change.sourceColumnName}` }),
+      `: ${change.from} → ${change.to}`,
+    ]))),
+  );
+}
+
+function updateRelationshipTargetKeys(draft) {
   const target = designTableById(elements.designRelationshipTarget.value);
-  const keys = target?.keys.filter(key => key.kind === "primary" || key.kind === "unique") || [];
-  replaceSelectOptions(elements.designRelationshipKey, keys.map(key => ({ value: key.id, label: keyLabel(target, key) })));
-  renderRelationshipMappings();
+  const eligibleKeyIds = new Set(draft.eligibleTargetKeyIds);
+  const keys = target?.keys.filter(key => eligibleKeyIds.has(key.id)) || [];
+  replaceSelectOptions(elements.designRelationshipKey, keys.map(key => ({ value: key.id, label: keyLabel(target, key) })), draft.targetKeyId);
+  renderRelationshipMappings(draft.sourceColumnIds);
   updateGeneratedRelationshipName();
 }
 
-function openDesignRelationshipEditor(sourceTableId = null) {
+function openDesignRelationshipEditor(draft) {
   if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
-  const targets = state.design.content.tables.filter(table => table.keys.some(key => key.kind === "primary" || key.kind === "unique"));
-  if (!targets.length) {
-    showToast("Add a primary or unique key to a target table first.");
-    return;
-  }
   elements.designRelationshipForm.reset();
   replace(elements.designRelationshipStatus);
   state.designRelationshipAutoName = null;
-  const source = designTableById(sourceTableId) || state.design.content.tables[0];
-  replaceSelectOptions(elements.designRelationshipSource, state.design.content.tables.map(table => ({ value: table.id, label: table.name })), source?.id);
-  const target = targets.find(table => table.id !== source?.id) || targets[0];
-  replaceSelectOptions(elements.designRelationshipTarget, targets.map(table => ({ value: table.id, label: table.name })), target?.id);
-  updateRelationshipTargetKeys();
+  state.designRelationshipAnchor = draft;
+  const source = designTableById(draft.sourceTableId);
+  const target = designTableById(draft.targetTableId);
+  replaceSelectOptions(elements.designRelationshipSource, [{ value: source.id, label: source.name }], source.id);
+  replaceSelectOptions(elements.designRelationshipTarget, [{ value: target.id, label: target.name }], target.id);
+  elements.designRelationshipSource.disabled = true;
+  elements.designRelationshipTarget.disabled = true;
+  updateRelationshipTargetKeys(draft);
   elements.designRelationshipDeferrable.checked = false;
   elements.designRelationshipDeferred.checked = false;
   elements.designRelationshipDeferred.disabled = true;
   openDialog(elements.designRelationshipDialog);
   elements.designRelationshipName.focus();
+}
+
+function setRelationshipAuthoring(enabled) {
+  const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
+  state.relationshipAuthoring = active;
+  state.relationshipSource = null;
+  elements.relationshipAuthoringBanner.hidden = !active;
+  elements.relationshipAuthoringStep.textContent = "1";
+  elements.relationshipAuthoringInstruction.textContent = "Select the foreign key column";
+  canvas.setRelationshipMode({ enabled: active });
+  updateDesignControls();
+}
+
+function startRelationshipAuthoring() {
+  if (state.relationshipAuthoring) return;
+  const hasTargetKey = state.design?.content.tables.some(table => table.keys.some(key => key.kind === "primary" || key.kind === "unique"));
+  if (!hasTargetKey) {
+    showToast("Add a primary or unique key to a target table first.");
+    return;
+  }
+  setRelationshipAuthoring(true);
+}
+
+function toggleRelationshipAuthoring() {
+  if (state.relationshipAuthoring) setRelationshipAuthoring(false);
+  else startRelationshipAuthoring();
+}
+
+function handleRelationshipColumnSelection(table, column) {
+  if (!state.relationshipAuthoring || !table.designId || !column.designId) return;
+  if (!state.relationshipSource) {
+    state.relationshipSource = {
+      tableId: table.designId,
+      columnId: column.designId,
+      tableName: table.name,
+      columnName: column.name,
+    };
+    elements.relationshipAuthoringStep.textContent = "2";
+    elements.relationshipAuthoringInstruction.textContent = `Now select the referenced key column for ${table.name}.${column.name}`;
+    canvas.setRelationshipMode({ enabled: true, source: { tableName: table.name, columnName: column.name } });
+    return;
+  }
+  let draft;
+  try {
+    draft = relationshipDraftFromColumns(state.design.content, {
+      sourceTableId: state.relationshipSource.tableId,
+      sourceColumnId: state.relationshipSource.columnId,
+      targetTableId: table.designId,
+      targetColumnId: column.designId,
+    });
+  } catch (error) {
+    showToast(error.message, { error: true });
+    return;
+  }
+  setRelationshipAuthoring(false);
+  openDesignRelationshipEditor(draft);
+}
+
+function remapRelationshipForSelectedKey() {
+  const anchor = state.designRelationshipAnchor;
+  if (!anchor) return;
+  try {
+    const draft = relationshipDraftFromColumns(state.design.content, {
+      ...anchor,
+      targetKeyId: elements.designRelationshipKey.value,
+    });
+    state.designRelationshipAnchor = draft;
+    renderRelationshipMappings(draft.sourceColumnIds);
+  } catch (error) {
+    replace(elements.designRelationshipStatus, errorPanel(error));
+  }
 }
 
 function designRelationshipValues() {
@@ -1782,14 +1908,16 @@ async function submitDesignRelationship(event) {
   event.preventDefault();
   if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
   let relationship;
+  let aligned;
   try {
     relationship = createDesignRelationship(state.design.content, designRelationshipValues());
+    aligned = alignRelationshipColumnTypes(state.design.content, relationship);
   } catch (error) {
     replace(elements.designRelationshipStatus, errorPanel(error));
     return;
   }
   if (!await flushLayoutBeforeTransition()) return;
-  const content = structuredClone(state.design.content);
+  const content = aligned.content;
   content.relationships.push(relationship);
   state.designSubmitting = true;
   elements.saveDesignRelationshipButton.disabled = true;
@@ -1799,7 +1927,10 @@ async function submitDesignRelationship(event) {
     const design = await replaceActiveDesign(content);
     if (!design) return;
     elements.designRelationshipDialog.close();
-    showToast(`Created ${relationship.name} in design revision ${design.revision}.`);
+    const typeCopy = aligned.changes.length
+      ? ` Matched ${aligned.changes.length} foreign-key column type${aligned.changes.length === 1 ? "" : "s"}.`
+      : "";
+    showToast(`Created ${relationship.name} in design revision ${design.revision}.${typeCopy}`);
   } catch (error) {
     replace(elements.designRelationshipStatus, conflictPanel(error));
   } finally {
@@ -1836,6 +1967,7 @@ function confirmDeleteDesignRelationship(relationship) {
 }
 
 function setLayer(layer, { historyMode = "push" } = {}) {
+  if (layer !== "tables" && state.relationshipAuthoring) setRelationshipAuthoring(false);
   state.activeLayer = layer;
   for (const button of document.querySelectorAll("[data-layer]")) {
     const active = button.dataset.layer === layer;
@@ -1900,6 +2032,9 @@ function bindEvents() {
     const close = event.target.closest("[data-close-dialog]");
     if (close) close.closest("dialog")?.close();
   });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && state.relationshipAuthoring) setRelationshipAuthoring(false);
+  });
   document.querySelectorAll("[data-confirm-cancel]").forEach(button => button.addEventListener("click", () => {
     state.confirmCallback = null;
     elements.confirmDialog.close();
@@ -1929,7 +2064,8 @@ function bindEvents() {
   elements.downloadCatalogButton.addEventListener("click", downloadCatalog);
   elements.exportDesignSqlButton.addEventListener("click", exportDesignSql);
   elements.createTableButton.addEventListener("click", () => openDesignTableEditor());
-  elements.createRelationshipButton.addEventListener("click", () => openDesignRelationshipEditor(selectedDesignTable()?.id || null));
+  elements.createRelationshipButton.addEventListener("click", toggleRelationshipAuthoring);
+  elements.cancelRelationshipAuthoring.addEventListener("click", () => setRelationshipAuthoring(false));
   elements.editTableButton.addEventListener("click", () => {
     const table = selectedDesignTable();
     if (table) openDesignTableEditor(table.id);
@@ -1984,12 +2120,11 @@ function bindEvents() {
     state.designTableEditorId = null;
   });
   elements.designRelationshipForm.addEventListener("submit", submitDesignRelationship);
-  elements.designRelationshipSource.addEventListener("change", () => {
-    renderRelationshipMappings();
-    updateGeneratedRelationshipName();
+  elements.designRelationshipKey.addEventListener("change", remapRelationshipForSelectedKey);
+  elements.designRelationshipMappings.addEventListener("change", renderRelationshipTypeAlignment);
+  elements.designRelationshipDialog.addEventListener("close", () => {
+    state.designRelationshipAnchor = null;
   });
-  elements.designRelationshipTarget.addEventListener("change", updateRelationshipTargetKeys);
-  elements.designRelationshipKey.addEventListener("change", renderRelationshipMappings);
   elements.designRelationshipDeferrable.addEventListener("change", () => {
     elements.designRelationshipDeferred.disabled = !elements.designRelationshipDeferrable.checked;
     if (elements.designRelationshipDeferred.disabled) elements.designRelationshipDeferred.checked = false;

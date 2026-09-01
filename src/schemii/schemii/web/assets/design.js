@@ -30,6 +30,7 @@ function tableCatalogEntry(table, columns) {
     isPartition: false,
     partitionKey: null,
     columns: table.columns.map((column, index) => ({
+      designId: column.id,
       name: column.name,
       ordinal: index + 1,
       dataType: column.dataType,
@@ -293,4 +294,86 @@ export function createDesignRelationship(content, values, randomUUID = () => cry
     deferrable: Boolean(values.deferrable),
     initiallyDeferred: Boolean(values.initiallyDeferred),
   };
+}
+
+export function relationshipDraftFromColumns(content, selection) {
+  const source = content.tables.find(table => table.id === selection.sourceTableId);
+  const target = content.tables.find(table => table.id === selection.targetTableId);
+  if (!source || !target) throw new Error("Choose columns from tables in this design.");
+  const sourceColumn = source.columns.find(column => column.id === selection.sourceColumnId);
+  const targetColumn = target.columns.find(column => column.id === selection.targetColumnId);
+  if (!sourceColumn || !targetColumn) throw new Error("The selected column is no longer in this design.");
+  if (source.id === target.id && sourceColumn.id === targetColumn.id) throw new Error("Choose a different referenced column.");
+  const eligibleKeys = target.keys.filter(key => (
+    (key.kind === "primary" || key.kind === "unique")
+    && key.columnIds.includes(targetColumn.id)
+  ));
+  const targetKey = selection.targetKeyId
+    ? eligibleKeys.find(key => key.id === selection.targetKeyId)
+    : [...eligibleKeys].sort((left, right) => (
+      left.columnIds.length - right.columnIds.length
+      || Number(right.kind === "primary") - Number(left.kind === "primary")
+    ))[0];
+  if (!targetKey) throw new Error("Select a target column that belongs to a primary or unique key.");
+  if (source.columns.length < targetKey.columnIds.length) {
+    throw new Error(`The source table needs at least ${targetKey.columnIds.length} columns to reference this composite key.`);
+  }
+
+  const targetColumns = new Map(target.columns.map(column => [column.id, column]));
+  const used = new Set([sourceColumn.id]);
+  const selectedIndex = targetKey.columnIds.indexOf(targetColumn.id);
+  const sourceColumnIds = targetKey.columnIds.map((targetColumnId, index) => {
+    if (index === selectedIndex) return sourceColumn.id;
+    const targetName = targetColumns.get(targetColumnId)?.name;
+    const match = source.columns.find(column => column.name === targetName && !used.has(column.id))
+      || source.columns.find(column => !used.has(column.id));
+    used.add(match.id);
+    return match.id;
+  });
+  return {
+    sourceTableId: source.id,
+    sourceColumnId: sourceColumn.id,
+    sourceColumnIds,
+    targetTableId: target.id,
+    targetColumnId: targetColumn.id,
+    targetColumnIds: [...targetKey.columnIds],
+    targetKeyId: targetKey.id,
+    eligibleTargetKeyIds: eligibleKeys.map(key => key.id),
+  };
+}
+
+export function alignRelationshipColumnTypes(content, relationship) {
+  const source = content.tables.find(table => table.id === relationship.sourceTableId);
+  const target = content.tables.find(table => table.id === relationship.targetTableId);
+  if (!source || !target) throw new Error("Choose source and target tables from this design.");
+  const sourceColumnIds = [...relationship.sourceColumnIds];
+  const targetColumnIds = [...relationship.targetColumnIds];
+  if (!sourceColumnIds.length || sourceColumnIds.length !== targetColumnIds.length) {
+    throw new Error("Map one source column to every target key column.");
+  }
+  const sourceColumns = new Map(source.columns.map(column => [column.id, column]));
+  const targetColumns = new Map(target.columns.map(column => [column.id, column]));
+  const changes = sourceColumnIds.map((sourceColumnId, index) => {
+    const sourceColumn = sourceColumns.get(sourceColumnId);
+    const targetColumn = targetColumns.get(targetColumnIds[index]);
+    if (!sourceColumn || !targetColumn) throw new Error("A mapped relationship column is no longer in this design.");
+    return {
+      sourceTableId: source.id,
+      sourceTableName: source.name,
+      sourceColumnId: sourceColumn.id,
+      sourceColumnName: sourceColumn.name,
+      targetTableId: target.id,
+      targetTableName: target.name,
+      targetColumnId: targetColumn.id,
+      targetColumnName: targetColumn.name,
+      from: sourceColumn.dataType,
+      to: targetColumn.dataType,
+    };
+  }).filter(change => change.from !== change.to);
+
+  const revised = structuredClone(content);
+  const revisedSource = revised.tables.find(table => table.id === source.id);
+  const revisedColumns = new Map(revisedSource.columns.map(column => [column.id, column]));
+  for (const change of changes) revisedColumns.get(change.sourceColumnId).dataType = change.to;
+  return { content: revised, changes };
 }

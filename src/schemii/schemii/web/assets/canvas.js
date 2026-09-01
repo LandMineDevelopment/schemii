@@ -49,6 +49,7 @@ export class CatalogCanvas {
     lines,
     zoomOutput,
     onSelect,
+    onRelationshipColumnSelect = () => {},
     onPositionsChanged,
     onRelationshipVisibilityChanged,
     getViewportInsets = () => ({}),
@@ -61,6 +62,7 @@ export class CatalogCanvas {
     this.lines = lines;
     this.zoomOutput = zoomOutput;
     this.onSelect = onSelect;
+    this.onRelationshipColumnSelect = onRelationshipColumnSelect;
     this.onPositionsChanged = onPositionsChanged;
     this.onRelationshipVisibilityChanged = onRelationshipVisibilityChanged;
     this.getViewportInsets = getViewportInsets;
@@ -69,11 +71,13 @@ export class CatalogCanvas {
     this.cards = new Map();
     this.tableByName = new Map();
     this.columnIndexes = new Map();
+    this.columnRows = new Map();
     this.relationshipElements = new Map();
     this.diagramRelationships = [];
     this.relationshipsByTable = new Map();
     this.measuredCardWidth = CARD_WIDTH;
     this.selectedName = null;
+    this.relationshipMode = { enabled: false, source: null };
     this.interactive = true;
     this.viewport = new GraphViewport({
       host: canvas,
@@ -109,6 +113,7 @@ export class CatalogCanvas {
     this.cards.clear();
     this.tableByName.clear();
     this.columnIndexes.clear();
+    this.columnRows.clear();
     this.relationshipElements.clear();
     this.diagramRelationships = [];
     this.relationshipsByTable.clear();
@@ -116,6 +121,7 @@ export class CatalogCanvas {
     this.selectedName = null;
     replace(this.layer);
     replace(this.lines);
+    this.applyRelationshipMode();
   }
 
   setCatalog(catalog, serverPositions = []) {
@@ -137,6 +143,7 @@ export class CatalogCanvas {
   render() {
     replace(this.layer);
     this.cards.clear();
+    this.columnRows.clear();
     if (!this.catalog) return;
     const foreignColumns = new Set(this.catalog.relationships.flatMap(relationship =>
       relationship.sourceColumns.map(column => `${relationship.sourceTable}\u0000${column}`)));
@@ -166,12 +173,28 @@ export class CatalogCanvas {
       card.append(head);
 
       for (const column of table.columns.slice(0, MAX_CARD_COLUMNS)) {
-        const row = element("div", { className: "table-column" });
+        const row = element("div", {
+          className: "table-column",
+          dataset: { tableName: table.name, columnName: column.name },
+        });
         row.append(
           columnBadges(table, foreignColumns, column.name),
           element("span", { text: column.name }),
           element("code", { text: column.dataType }),
         );
+        row.addEventListener("click", event => {
+          if (!this.relationshipMode.enabled) return;
+          event.preventDefault();
+          event.stopPropagation();
+          this.selectRelationshipColumn(table.name, column.name);
+        });
+        row.addEventListener("keydown", event => {
+          if (!this.relationshipMode.enabled || !["Enter", " "].includes(event.key)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          this.selectRelationshipColumn(table.name, column.name);
+        });
+        this.columnRows.set(`${table.name}\u0000${column.name}`, { row, table, column });
         card.append(row);
       }
       if (table.columns.length > MAX_CARD_COLUMNS) {
@@ -191,6 +214,50 @@ export class CatalogCanvas {
     }
     this.measureCardWidth();
     this.drawRelationships();
+    this.applyRelationshipMode();
+  }
+
+  setRelationshipMode({ enabled, source = null }) {
+    this.relationshipMode = { enabled: Boolean(enabled), source: enabled ? source : null };
+    this.applyRelationshipMode();
+  }
+
+  applyRelationshipMode() {
+    const { enabled, source } = this.relationshipMode;
+    this.canvas.classList.toggle("relationship-mode", enabled);
+    for (const { row, table, column } of this.columnRows.values()) {
+      const selected = Boolean(source && source.tableName === table.name && source.columnName === column.name);
+      const keyColumns = new Set([
+        ...(table.primaryKey?.columns || []),
+        ...(table.uniqueConstraints || []).flatMap(key => key.columns),
+      ]);
+      const target = Boolean(source && keyColumns.has(column.name) && !selected);
+      row.classList.toggle("relationship-source", selected);
+      row.classList.toggle("relationship-target", target);
+      row.classList.toggle("relationship-invalid", Boolean(enabled && source && !target && !selected));
+      if (enabled) {
+        row.setAttribute("role", "button");
+        row.setAttribute("tabindex", "0");
+        row.setAttribute("aria-pressed", selected ? "true" : "false");
+        row.setAttribute("aria-label", source
+          ? `Reference ${table.name}.${column.name}`
+          : `Use ${table.name}.${column.name} as the foreign key column`);
+      } else {
+        row.removeAttribute("role");
+        row.removeAttribute("tabindex");
+        row.removeAttribute("aria-pressed");
+        row.removeAttribute("aria-label");
+      }
+    }
+  }
+
+  selectRelationshipColumn(tableName, columnName) {
+    if (!this.interactive || !this.relationshipMode.enabled) return false;
+    const table = this.tableByName.get(tableName);
+    const column = table?.columns.find(item => item.name === columnName);
+    if (!table || !column) return false;
+    this.onRelationshipColumnSelect(table, column);
+    return true;
   }
 
   select(name, { focus = false, notify = false } = {}) {
@@ -438,6 +505,7 @@ export class CatalogCanvas {
     this.interactive = interactive;
     this.canvas.classList.toggle("is-loading", !interactive);
     for (const card of this.cards.values()) card.setAttribute("aria-disabled", interactive ? "false" : "true");
+    this.applyRelationshipMode();
   }
 
   startPan(event) {

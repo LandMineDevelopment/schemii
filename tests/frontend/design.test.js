@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
   designLayoutContent,
   designPositions,
   designToCatalog,
+  relationshipDraftFromColumns,
   updateDesignTable,
 } from "../../src/schemii/schemii/web/assets/design.js";
 
@@ -155,4 +157,82 @@ test("relationship authoring maps source columns to a composite target key", () 
   assert.deepEqual(relationship.sourceColumnIds, [child.columns[1].id, child.columns[2].id]);
   assert.equal(relationship.onUpdate, "CASCADE");
   assert.equal(relationship.initiallyDeferred, true);
+});
+
+test("graphical column selection seeds the exact composite target key", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const parent = createDesignTable("parents", [
+    { name: "tenant_id", dataType: "uuid", nullable: false, primary: true },
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+  ], nextUuid);
+  const child = createDesignTable("children", [
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+    { name: "tenant_id", dataType: "uuid", nullable: false, primary: false },
+    { name: "parent_id", dataType: "bigint", nullable: false, primary: false },
+  ], nextUuid);
+  const content = { tables: [parent, child], relationships: [], functions: [], views: [] };
+
+  const draft = relationshipDraftFromColumns(content, {
+    sourceTableId: child.id,
+    sourceColumnId: child.columns[2].id,
+    targetTableId: parent.id,
+    targetColumnId: parent.columns[1].id,
+  });
+
+  assert.equal(draft.targetKeyId, parent.keys[0].id);
+  assert.deepEqual(draft.sourceColumnIds, [child.columns[1].id, child.columns[2].id]);
+  assert.deepEqual(draft.targetColumnIds, parent.keys[0].columnIds);
+  assert.deepEqual(draft.eligibleTargetKeyIds, [parent.keys[0].id]);
+});
+
+test("relationship type alignment makes foreign-key columns match the referenced key atomically", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const parent = createDesignTable("parents", [
+    { name: "tenant_id", dataType: "uuid", nullable: false, primary: true },
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+  ], nextUuid);
+  const child = createDesignTable("children", [
+    { name: "tenant_id", dataType: "text", nullable: false, primary: false },
+    { name: "parent_id", dataType: "integer", nullable: false, primary: false },
+  ], nextUuid);
+  const content = { tables: [parent, child], relationships: [], functions: [], views: [] };
+  const relationship = createDesignRelationship(content, {
+    name: "children_parents_fkey",
+    sourceTableId: child.id,
+    sourceColumnIds: child.columns.map(column => column.id),
+    targetTableId: parent.id,
+    targetKeyId: parent.keys[0].id,
+    onUpdate: "NO ACTION",
+    onDelete: "NO ACTION",
+    deferrable: false,
+    initiallyDeferred: false,
+  }, nextUuid);
+
+  const aligned = alignRelationshipColumnTypes(content, relationship);
+
+  assert.deepEqual(aligned.changes.map(change => [change.from, change.to]), [["text", "uuid"], ["integer", "bigint"]]);
+  assert.deepEqual(aligned.content.tables[1].columns.map(column => column.dataType), ["uuid", "bigint"]);
+  assert.deepEqual(content.tables[1].columns.map(column => column.dataType), ["text", "integer"]);
+});
+
+test("graphical target selection rejects columns that are not keys", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const source = createDesignTable("orders", [
+    { name: "customer_id", dataType: "bigint", nullable: false, primary: false },
+  ], nextUuid);
+  const target = createDesignTable("customers", [
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+    { name: "email", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const content = { tables: [source, target], relationships: [], functions: [], views: [] };
+
+  assert.throws(() => relationshipDraftFromColumns(content, {
+    sourceTableId: source.id,
+    sourceColumnId: source.columns[0].id,
+    targetTableId: target.id,
+    targetColumnId: target.columns[1].id,
+  }), /primary or unique key/);
 });

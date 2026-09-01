@@ -65,7 +65,7 @@
 
         <aside class="tool-rail" aria-label="Workspace tools">
           <button id="create-table-button" type="button" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
-          <button id="create-relationship-button" type="button" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" disabled></button>
+          <button id="create-relationship-button" type="button" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" aria-pressed="false" disabled></button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button type="button" data-ui-icon="undo" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo"></button>
           <button type="button" data-ui-icon="redo" data-unavailable="semantic-redo" title="Semantic redo" aria-label="Semantic redo"></button>
@@ -88,6 +88,11 @@
               <span id="conflict-message"><strong>Layout conflict</strong> Local table positions are preserved and saving has stopped.</span>
               <button class="ui-button compact" id="apply-connection-layout-button" type="button" hidden>Apply to current target</button>
               <button class="ui-button compact" id="reload-conflict-button" type="button">Reload server layout</button>
+            </div>
+            <div class="relationship-authoring-banner" id="relationship-authoring-banner" role="status" aria-live="polite" hidden>
+              <span id="relationship-authoring-step">1</span>
+              <strong id="relationship-authoring-instruction">Select the foreign key column</strong>
+              <button id="cancel-relationship-authoring" type="button">Cancel</button>
             </div>
             <div class="canvas-stage" id="canvas-stage">
               <svg class="relationship-lines" id="relationship-lines" aria-hidden="true"></svg>
@@ -237,7 +242,7 @@
 
     <dialog class="ui-dialog editor-dialog design-relationship-dialog" id="design-relationship-dialog" aria-labelledby="design-relationship-title">
       <form class="ui-dialog__shell" id="design-relationship-form">
-        <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="design-relationship-title">Create relationship</h2><p>Map columns from one designed table to an exact primary or unique key. Composite keys are mapped in their declared order.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close relationship editor"></button></header>
+        <header class="ui-dialog__head"><div><small>Selected columns</small><h2 id="design-relationship-title">Confirm relationship</h2><p>Review the columns selected on the canvas, then name the constraint and choose its referential actions.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close relationship editor"></button></header>
         <div class="design-relationship-body">
           <label class="design-field span-all"><span>Constraint name</span><input id="design-relationship-name" required maxlength="63" autocomplete="off" placeholder="orders_customer_id_fkey" /></label>
           <label class="design-field"><span>Source table</span><select id="design-relationship-source" required></select></label>
@@ -247,6 +252,7 @@
             <header><strong id="relationship-mapping-title">Column mapping</strong><small>Source column → target key column</small></header>
             <div id="design-relationship-mappings"></div>
           </section>
+          <div class="relationship-type-alignment span-all" id="design-relationship-type-alignment" role="note" hidden></div>
           <label class="design-field"><span>On update</span><select id="design-relationship-on-update"><option>NO ACTION</option><option>RESTRICT</option><option>CASCADE</option><option>SET NULL</option><option>SET DEFAULT</option></select></label>
           <label class="design-field"><span>On delete</span><select id="design-relationship-on-delete"><option>NO ACTION</option><option>RESTRICT</option><option>CASCADE</option><option>SET NULL</option><option>SET DEFAULT</option></select></label>
           <label class="check-row"><input id="design-relationship-deferrable" type="checkbox" /><span>Deferrable</span></label>
