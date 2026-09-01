@@ -181,7 +181,7 @@ function sourceType(dataType) {
   });
 }
 
-function selectProjectionLine(mapping, step, dataType = null) {
+function projectionLine(mapping, step, dataType = null) {
   const line = element("div", {
     className: `view-step-column-select-line${dataType ? "" : " no-type"}`,
     title: `${mapping.expression} → ${mapping.alias}`,
@@ -202,11 +202,19 @@ function selectProjectionLine(mapping, step, dataType = null) {
       element("small", { text: mapping.derivation }),
     ]),
   );
-  installOverflowDisclosure(line, {
-    targets: [type, expression, outputName],
+  return {
+    line,
+    targets: [type, expression, outputName].filter(Boolean),
+  };
+}
+
+function disclosedProjectionLine(mapping, step, dataType = null) {
+  const projection = projectionLine(mapping, step, dataType);
+  installOverflowDisclosure(projection.line, {
+    targets: projection.targets,
     label: `column mapping to ${mapping.alias}`,
   });
-  return line;
+  return projection.line;
 }
 
 function sourceColumnLine(participant, column, step) {
@@ -218,11 +226,7 @@ function sourceColumnLine(participant, column, step) {
   const type = sourceType(column.dataType);
   const expression = coloredExpression(identity, step);
   line.append(type, expression);
-  installOverflowDisclosure(line, {
-    targets: [type, expression],
-    label: `source column ${identity}`,
-  });
-  return line;
+  return { line, targets: [type, expression] };
 }
 
 function participantRow(participant, index, selectedKeys, step) {
@@ -255,10 +259,17 @@ function participantRow(participant, index, selectedKeys, step) {
       title: `${participant.reference}.${column.name} · ${column.dataType || "type unresolved"} · ${(column.roles || []).map(role => USE_LABELS[role] || role).join(", ")}${projections.length ? ` · ${projections.map(mapping => `${mapping.expression} → ${mapping.alias}`).join("; ")}` : ""}`,
     });
     const select = element("div", { className: "view-step-column-select" });
+    const overflowTargets = [];
     if (projections.length) {
-      projections.forEach(mapping => select.append(selectProjectionLine(mapping, step, column.dataType)));
+      for (const mapping of projections) {
+        const projection = projectionLine(mapping, step, column.dataType);
+        select.append(projection.line);
+        overflowTargets.push(...projection.targets);
+      }
     } else {
-      select.append(sourceColumnLine(participant, column, step));
+      const source = sourceColumnLine(participant, column, step);
+      select.append(source.line);
+      overflowTargets.push(...source.targets);
     }
     card.append(select);
 
@@ -272,6 +283,10 @@ function participantRow(participant, index, selectedKeys, step) {
       }
     }
     card.append(roles);
+    installOverflowDisclosure(card, {
+      targets: overflowTargets,
+      label: `column ${participant.reference}.${column.name}`,
+    });
     columns.append(card);
   }
   row.append(columns);
@@ -314,7 +329,7 @@ function appendUnboundProjections(participants, step) {
     element("small", { text: "Output without a resolved source column" }),
   ]));
   const rows = element("div");
-  mappings.forEach(mapping => rows.append(selectProjectionLine(mapping, step)));
+  mappings.forEach(mapping => rows.append(disclosedProjectionLine(mapping, step)));
   section.append(rows);
   participants.append(section);
 }
@@ -328,7 +343,7 @@ function appendCompositeProjections(participants, step) {
     element("small", { text: "Multiple SELECT inputs" }),
   ]));
   const rows = element("div");
-  mappings.forEach(mapping => rows.append(selectProjectionLine(mapping, step)));
+  mappings.forEach(mapping => rows.append(disclosedProjectionLine(mapping, step)));
   section.append(rows);
   participants.append(section);
 }
