@@ -88,7 +88,15 @@ export function selectProjectionMappings(step) {
     expression: output.expression || "Expression not reported",
     alias: outputIdentity(output),
     derivation: output.derivation || "derived",
+    inputs: output.inputs || [],
   }));
+}
+
+export function selectProjectionsForColumn(step, participant, columnName) {
+  const sources = new Set([participant?.reference, participant?.name].filter(Boolean));
+  return selectProjectionMappings(step).filter(mapping => mapping.inputs.some(input => (
+    input.column === columnName && sources.has(input.source)
+  )));
 }
 
 function selectedInputKeys(output) {
@@ -134,7 +142,27 @@ function coloredExpression(expression, step) {
   return code;
 }
 
-function participantRow(participant, index, selectedKeys) {
+function selectProjectionLine(mapping, step) {
+  const line = element("div", {
+    className: "view-step-column-select-line",
+    title: `${mapping.expression} → ${mapping.alias}`,
+  });
+  line.append(
+    coloredExpression(mapping.expression, step),
+    element("span", {
+      className: "view-step-column-select-arrow",
+      text: "→",
+      attrs: { "aria-hidden": "true" },
+    }),
+    element("div", {}, [
+      element("strong", { text: mapping.alias }),
+      element("small", { text: mapping.derivation }),
+    ]),
+  );
+  return line;
+}
+
+function participantRow(participant, index, selectedKeys, step) {
   const row = element("article", {
     className: `view-step-participant view-accent-${index}${participant.resolved ? "" : " unresolved"}`,
   });
@@ -154,18 +182,30 @@ function participantRow(participant, index, selectedKeys) {
     columns.append(element("p", { text: "No named column reference" }));
   }
   for (const column of participant.columns || []) {
-    const identityKey = `${participant.reference}.${column.name}`;
+    const identityKeys = new Set([
+      `${participant.reference}.${column.name}`,
+      `${participant.name}.${column.name}`,
+    ]);
+    const projections = selectProjectionsForColumn(step, participant, column.name);
     const card = element("div", {
-      className: `view-step-column${column.filterOnly ? " filter-only" : ""}${selectedKeys.has(identityKey) ? " lineage-active" : ""}`,
-      title: `${identityKey} · ${column.dataType || "type unresolved"} · ${(column.roles || []).map(role => USE_LABELS[role] || role).join(", ")}`,
+      className: `view-step-column${column.filterOnly ? " filter-only" : ""}${[...identityKeys].some(key => selectedKeys.has(key)) ? " lineage-active" : ""}`,
+      title: `${participant.reference}.${column.name} · ${column.dataType || "type unresolved"} · ${(column.roles || []).map(role => USE_LABELS[role] || role).join(", ")}${projections.length ? ` · ${projections.map(mapping => `${mapping.expression} → ${mapping.alias}`).join("; ")}` : ""}`,
     });
-    card.append(element("strong", { text: column.name }));
-    if (column.dataType) card.append(element("code", { text: column.dataType }));
-    const roles = element("span");
+    const source = element("div", { className: "view-step-column-source" });
+    source.append(element("strong", { text: column.name }));
+    if (column.dataType) source.append(element("code", { text: column.dataType }));
+    card.append(source);
+
+    const select = element("div", { className: "view-step-column-select" });
+    projections.forEach(mapping => select.append(selectProjectionLine(mapping, step)));
+    card.append(select);
+
+    const roles = element("span", { className: "view-step-column-roles" });
     if (column.filterOnly) {
       roles.append(element("i", { className: "filter-only", text: "FILTER ONLY" }));
     } else {
       for (const role of column.roles || []) {
+        if (role === "output") continue;
         roles.append(element("i", { text: USE_LABELS[role] || role }));
       }
     }
@@ -191,39 +231,30 @@ function logicCard(kind, label, title, expressions, step) {
   return card;
 }
 
-function selectProjectionCard(step) {
-  const mappings = selectProjectionMappings(step);
-  const card = element("section", { className: "view-step-select" });
-  const head = element("header");
-  head.append(
-    element("span", { text: "SELECT" }),
-    element("strong", { text: "Expression → output column" }),
-    element("small", { text: plural(mappings.length, "column") }),
-  );
-  card.append(head);
+function unboundProjectionMappings(step) {
+  const participantInputs = new Set((step.participants || []).flatMap(participant => (
+    (participant.columns || []).flatMap(column => [
+      `${participant.reference}.${column.name}`,
+      `${participant.name}.${column.name}`,
+    ])
+  )));
+  return selectProjectionMappings(step).filter(mapping => (
+    !mapping.inputs.some(input => participantInputs.has(inputIdentity(input)))
+  ));
+}
 
+function appendUnboundProjections(participants, step) {
+  const mappings = unboundProjectionMappings(step);
+  if (!mappings.length) return;
+  const section = element("section", { className: "view-step-unbound-select" });
+  section.append(element("header", {}, [
+    element("strong", { text: "SELECT" }),
+    element("small", { text: "Output without a resolved source column" }),
+  ]));
   const rows = element("div");
-  for (const mapping of mappings) {
-    const row = element("div", {
-      className: "view-step-select-row",
-      title: `${mapping.expression} → ${mapping.alias}`,
-    });
-    row.append(
-      coloredExpression(mapping.expression, step),
-      element("span", {
-        className: "view-step-select-arrow",
-        text: "→",
-        attrs: { "aria-hidden": "true" },
-      }),
-      element("div", {}, [
-        element("strong", { text: mapping.alias }),
-        element("small", { text: mapping.derivation }),
-      ]),
-    );
-    rows.append(row);
-  }
-  card.append(rows);
-  return card;
+  mappings.forEach(mapping => rows.append(selectProjectionLine(mapping, step)));
+  section.append(rows);
+  participants.append(section);
 }
 
 function stepLogic(step) {
@@ -272,8 +303,8 @@ function operationCard(step, view, selected) {
 
   const participants = element("section", { className: "view-step-participants" });
   participants.append(element("header", {}, [
-    element("strong", { text: "Participating columns" }),
-    element("small", { text: "Grouped and colored by relation" }),
+    element("strong", { text: "Source columns → SELECT outputs" }),
+    element("small", { text: "Relation color · expression → output" }),
   ]));
   const stepSelected = isFinal
     ? step.outputs.find(output => output.ordinal === selected?.ordinal) || selected
@@ -282,9 +313,10 @@ function operationCard(step, view, selected) {
   if (!step.participants.length) {
     participants.append(element("p", { className: "view-meaning-empty", text: "This step does not read a relation." }));
   } else {
-    step.participants.forEach((participant, index) => participants.append(participantRow(participant, index, selectedKeys)));
+    step.participants.forEach((participant, index) => participants.append(participantRow(participant, index, selectedKeys, step)));
   }
-  card.append(participants, selectProjectionCard(step), stepLogic(step));
+  appendUnboundProjections(participants, step);
+  card.append(participants, stepLogic(step));
   return card;
 }
 
