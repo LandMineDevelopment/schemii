@@ -127,15 +127,58 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
         for column in table.columns:
             _valid_identifier(column.name, category="column name")
             _safe_fragment(column.data_type, category=f"data type for {table.name}.{column.name}")
-            if column.identity is not None and column.default_expression is not None:
+            value_generators = sum(
+                value is not None
+                for value in (
+                    column.default_expression,
+                    column.identity,
+                    column.generated_expression,
+                )
+            )
+            if value_generators > 1:
                 raise DesignValidationError(
-                    "Identity columns cannot also have a default expression",
+                    "Columns may have only one default, identity, or generated value behavior",
+                    details={"table": table.name, "column": column.name},
+                )
+            if column.identity is not None and column.nullable:
+                raise DesignValidationError(
+                    "Identity columns must be non-nullable",
                     details={"table": table.name, "column": column.name},
                 )
             if column.default_expression is not None:
+                if not column.default_expression.strip():
+                    raise DesignValidationError(
+                        "Default expressions cannot be empty",
+                        details={"table": table.name, "column": column.name},
+                    )
                 _safe_fragment(
                     column.default_expression,
                     category=f"default for {table.name}.{column.name}",
+                )
+            if column.generated_expression is not None:
+                if not column.generated_expression.strip():
+                    raise DesignValidationError(
+                        "Generated expressions cannot be empty",
+                        details={"table": table.name, "column": column.name},
+                    )
+                _safe_fragment(
+                    column.generated_expression,
+                    category=f"generated expression for {table.name}.{column.name}",
+                )
+                if (
+                    len(column.generated_source_column_ids)
+                    != len(set(column.generated_source_column_ids))
+                    or not set(column.generated_source_column_ids) <= column_ids
+                    or column.id in column.generated_source_column_ids
+                ):
+                    raise DesignValidationError(
+                        "Generated columns may reference unique sibling columns only",
+                        details={"table": table.name, "column": column.name},
+                    )
+            elif column.generated_source_column_ids:
+                raise DesignValidationError(
+                    "Generated column dependencies require a generated expression",
+                    details={"table": table.name, "column": column.name},
                 )
             all_ids.append(column.id)
         _unique(
@@ -157,7 +200,20 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
             all_ids.append(key.id)
         for check in table.checks:
             _valid_identifier(check.name, category="check constraint name")
+            if not check.expression.strip():
+                raise DesignValidationError(
+                    "Check constraint expressions cannot be empty",
+                    details={"table": table.name, "constraint": check.name},
+                )
             _safe_fragment(check.expression, category=f"check constraint {check.name}")
+            if (
+                len(check.column_ids) != len(set(check.column_ids))
+                or not set(check.column_ids) <= column_ids
+            ):
+                raise DesignValidationError(
+                    "Check constraints may reference unique columns on their own table only",
+                    details={"table": table.name, "constraint": check.name},
+                )
             all_ids.append(check.id)
         _unique([index.name for index in table.indexes], category=f"indexes in {table.name}")
         for index in table.indexes:

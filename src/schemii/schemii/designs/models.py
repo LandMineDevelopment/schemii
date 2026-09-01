@@ -22,6 +22,11 @@ class DesignColumn(ApiModel):
     nullable: bool = True
     default_expression: DesignExpression | None = None
     identity: Literal["always", "by_default"] | None = None
+    generated_expression: DesignExpression | None = None
+    generated_source_column_ids: list[DesignObjectId] = Field(
+        default_factory=list,
+        max_length=1600,
+    )
 
 
 class DesignKeyConstraint(ApiModel):
@@ -34,11 +39,12 @@ class DesignKeyConstraint(ApiModel):
 
 
 class DesignCheckConstraint(ApiModel):
-    """Named table check retained as desired SQL intent."""
+    """Named table check with source-derived stable column dependencies."""
 
     id: DesignObjectId
     name: DesignIdentifier
     expression: DesignExpression
+    column_ids: list[DesignObjectId] = Field(default_factory=list, max_length=1600)
 
 
 class DesignIndex(ApiModel):

@@ -4,13 +4,17 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignCheck,
   deleteDesignKey,
   designLayoutContent,
   designPositions,
   designToCatalog,
   relationshipDraftFromColumns,
   relationshipDraftFromExisting,
+  expressionColumnIds,
+  saveDesignCheck,
   saveDesignKey,
+  suggestDesignCheckName,
   suggestDesignKeyName,
   updateDesignRelationship,
   updateDesignTable,
@@ -147,6 +151,15 @@ const elements = {
   designKeyColumns: byId("design-key-columns"),
   designKeyStatus: byId("design-key-status"),
   saveDesignKeyButton: byId("save-design-key-button"),
+  designCheckDialog: byId("design-check-dialog"),
+  designCheckForm: byId("design-check-form"),
+  designCheckTitle: byId("design-check-title"),
+  designCheckTable: byId("design-check-table"),
+  designCheckName: byId("design-check-name"),
+  designCheckExpression: byId("design-check-expression"),
+  designCheckDependencies: byId("design-check-dependencies"),
+  designCheckStatus: byId("design-check-status"),
+  saveDesignCheckButton: byId("save-design-check-button"),
   designRelationshipDialog: byId("design-relationship-dialog"),
   designRelationshipForm: byId("design-relationship-form"),
   designRelationshipTitle: byId("design-relationship-title"),
@@ -238,6 +251,9 @@ const state = {
   designKeyTableId: null,
   designKeyColumnIds: [],
   designKeyAutoName: null,
+  designCheckEditorId: null,
+  designCheckTableId: null,
+  designCheckAutoName: null,
   catalog: null,
   catalogLoading: false,
   catalogError: null,
@@ -1294,6 +1310,9 @@ function renderActiveInspector(table) {
     onAddKey: desired && table ? () => startKeyAuthoring({ tableId: table.designId }) : null,
     onEditKey: desired ? editDesignKey : null,
     onDeleteKey: desired ? confirmDeleteDesignKey : null,
+    onAddCheck: desired && table ? () => openDesignCheckEditor({ tableId: table.designId }) : null,
+    onEditCheck: desired ? editDesignCheck : null,
+    onDeleteCheck: desired ? confirmDeleteDesignCheck : null,
     onAddRelationship: desired && table ? () => startRelationshipAuthoring() : null,
     onEditRelationship: desired ? editDesignRelationship : null,
     onDeleteRelationship: desired ? confirmDeleteDesignRelationship : null,
@@ -1529,7 +1548,16 @@ function renderSqlTarget() {
   elements.sqlTargetNamespace.textContent = workspace?.namespace || "No workspace open";
 }
 
-function appendDesignColumn({ id = null, name = "", dataType = "text", nullable = true, primary = false } = {}) {
+function appendDesignColumn({
+  id = null,
+  name = "",
+  dataType = "text",
+  nullable = true,
+  primary = false,
+  defaultExpression = null,
+  identity = null,
+  generatedExpression = null,
+} = {}) {
   const row = element("div", { className: "design-column-row", dataset: { designColumnId: id || "" } });
   const nameInput = element("input", { attrs: { required: "", maxlength: "63", autocomplete: "off", value: name, placeholder: "column_name" }, dataset: { designColumnName: "" } });
   const typeInput = element("input", { attrs: { required: "", maxlength: "512", autocomplete: "off", value: dataType, placeholder: "text" }, dataset: { designColumnType: "" } });
@@ -1537,9 +1565,42 @@ function appendDesignColumn({ id = null, name = "", dataType = "text", nullable 
   nullableInput.checked = nullable && !primary;
   const primaryInput = element("input", { type: "checkbox", dataset: { designColumnPrimary: "" } });
   primaryInput.checked = primary;
-  primaryInput.addEventListener("change", () => {
-    if (primaryInput.checked) nullableInput.checked = false;
+  const behaviorSelect = element("select", { dataset: { designColumnBehavior: "" }, attrs: { "aria-label": `Value behavior for ${name || "column"}` } });
+  const behaviorOptions = [
+    ["none", "Entered by the application"],
+    ["default", "Default expression"],
+    ["identity_by_default", "Identity · by default"],
+    ["identity_always", "Identity · always"],
+    ["generated", "Generated from columns"],
+  ];
+  for (const [value, label] of behaviorOptions) behaviorSelect.append(element("option", { text: label, attrs: { value } }));
+  behaviorSelect.value = generatedExpression
+    ? "generated"
+    : identity === "always"
+      ? "identity_always"
+      : identity === "by_default"
+        ? "identity_by_default"
+        : defaultExpression
+          ? "default"
+          : "none";
+  const expressionInput = element("input", {
+    attrs: { maxlength: "262144", autocomplete: "off", value: generatedExpression || defaultExpression || "" },
+    dataset: { designColumnExpression: "" },
   });
+  const expressionLabel = element("label", {}, [element("span"), expressionInput]);
+  const syncBehavior = () => {
+    const generated = behaviorSelect.value === "generated";
+    const defaulted = behaviorSelect.value === "default";
+    const identityBehavior = behaviorSelect.value.startsWith("identity_");
+    expressionLabel.hidden = !generated && !defaulted;
+    expressionLabel.querySelector("span").textContent = generated ? "Generation expression" : "Default expression";
+    expressionInput.placeholder = generated ? "quantity * unit_price" : "now()";
+    expressionInput.required = generated || defaulted;
+    nullableInput.disabled = primaryInput.checked || identityBehavior;
+    if (nullableInput.disabled) nullableInput.checked = false;
+  };
+  primaryInput.addEventListener("change", syncBehavior);
+  behaviorSelect.addEventListener("change", syncBehavior);
   const remove = element("button", { className: "ui-button compact danger-text design-column-remove", type: "button", text: "Remove", attrs: { "aria-label": "Remove column" } });
   remove.addEventListener("click", () => {
     if (elements.designColumns.childElementCount === 1) {
@@ -1554,7 +1615,12 @@ function appendDesignColumn({ id = null, name = "", dataType = "text", nullable 
     element("label", { className: "design-column-check" }, [nullableInput, element("span", { text: "Nullable" })]),
     element("label", { className: "design-column-check" }, [primaryInput, element("span", { text: "Primary" })]),
     remove,
+    element("div", { className: "design-column-value" }, [
+      element("label", {}, [element("span", { text: "Value behavior" }), behaviorSelect]),
+      expressionLabel,
+    ]),
   );
+  syncBehavior();
   elements.designColumns.append(row);
   return row;
 }
@@ -1592,13 +1658,20 @@ function openDesignTableEditor(tableId = null) {
 }
 
 function designColumnValues() {
-  return [...elements.designColumns.children].map(row => ({
-    id: row.dataset.designColumnId || null,
-    name: row.querySelector("[data-design-column-name]").value,
-    dataType: row.querySelector("[data-design-column-type]").value,
-    nullable: row.querySelector("[data-design-column-nullable]").checked,
-    primary: row.querySelector("[data-design-column-primary]").checked,
-  }));
+  return [...elements.designColumns.children].map(row => {
+    const behavior = row.querySelector("[data-design-column-behavior]").value;
+    const expression = row.querySelector("[data-design-column-expression]").value;
+    return {
+      id: row.dataset.designColumnId || null,
+      name: row.querySelector("[data-design-column-name]").value,
+      dataType: row.querySelector("[data-design-column-type]").value,
+      nullable: row.querySelector("[data-design-column-nullable]").checked,
+      primary: row.querySelector("[data-design-column-primary]").checked,
+      defaultExpression: behavior === "default" ? expression : null,
+      identity: behavior === "identity_always" ? "always" : behavior === "identity_by_default" ? "by_default" : null,
+      generatedExpression: behavior === "generated" ? expression : null,
+    };
+  });
 }
 
 function conflictPanel(error) {
@@ -1717,6 +1790,10 @@ function designTableById(tableId) {
 
 function designKeyById(tableId, keyId) {
   return designTableById(tableId)?.keys.find(key => key.id === keyId) || null;
+}
+
+function designCheckById(tableId, checkId) {
+  return designTableById(tableId)?.checks.find(check => check.id === checkId) || null;
 }
 
 function designRelationshipById(relationshipId) {
@@ -1973,6 +2050,143 @@ function confirmDeleteDesignKey(constraint) {
         const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
         if (!design) return;
         showToast(`Deleted ${result.key.name} in design revision ${design.revision}.`);
+      } catch (error) {
+        errorToast(error);
+      } finally {
+        state.designSubmitting = false;
+        updateHeader();
+      }
+    },
+  });
+}
+
+function renderDesignCheckDependencies() {
+  const table = designTableById(state.designCheckTableId);
+  replace(elements.designCheckDependencies);
+  if (!table) return;
+  const columnIds = new Set(expressionColumnIds(elements.designCheckExpression.value, table.columns));
+  const dependencies = table.columns.filter(column => columnIds.has(column.id));
+  if (!dependencies.length) {
+    elements.designCheckDependencies.append(element("span", {
+      className: "design-dependency-empty",
+      text: "No table columns recognized yet.",
+    }));
+    return;
+  }
+  for (const column of dependencies) {
+    elements.designCheckDependencies.append(element("span", {
+      className: "design-dependency-chip",
+      text: `${column.name} · ${column.dataType}`,
+    }));
+  }
+}
+
+function updateGeneratedCheckName() {
+  if (!state.design || !state.designCheckTableId) return;
+  const current = elements.designCheckName.value;
+  const generated = suggestDesignCheckName(state.design.content, {
+    tableId: state.designCheckTableId,
+    checkId: state.designCheckEditorId,
+    expression: elements.designCheckExpression.value,
+  });
+  if (!current || current === state.designCheckAutoName) elements.designCheckName.value = generated;
+  state.designCheckAutoName = generated;
+}
+
+function updateDesignCheckDraft() {
+  renderDesignCheckDependencies();
+  updateGeneratedCheckName();
+}
+
+function openDesignCheckEditor({ tableId, checkId = null }) {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  const table = designTableById(tableId);
+  const check = checkId ? designCheckById(tableId, checkId) : null;
+  if (!table || (checkId && !check)) {
+    showToast("The selected check is no longer in this design.", { error: true });
+    return;
+  }
+  elements.designCheckForm.reset();
+  replace(elements.designCheckStatus);
+  state.designCheckEditorId = check?.id || null;
+  state.designCheckTableId = table.id;
+  state.designCheckAutoName = null;
+  elements.designCheckTitle.textContent = check ? `Edit ${check.name}` : "Create check";
+  elements.saveDesignCheckButton.textContent = check ? "Save check" : "Create check";
+  elements.designCheckTable.textContent = table.name;
+  elements.designCheckExpression.value = check?.expression || "";
+  elements.designCheckName.value = check?.name || "";
+  updateDesignCheckDraft();
+  if (check) state.designCheckAutoName = null;
+  openDialog(elements.designCheckDialog);
+  (check ? elements.designCheckExpression : elements.designCheckName).focus();
+}
+
+async function submitDesignCheck(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  let result;
+  try {
+    result = saveDesignCheck(state.design.content, {
+      tableId: state.designCheckTableId,
+      checkId: state.designCheckEditorId,
+      name: elements.designCheckName.value,
+      expression: elements.designCheckExpression.value,
+    });
+  } catch (error) {
+    replace(elements.designCheckStatus, errorPanel(error));
+    return;
+  }
+  if (!await flushLayoutBeforeTransition()) return;
+  state.designSubmitting = true;
+  elements.saveDesignCheckButton.disabled = true;
+  updateDesignControls();
+  replace(elements.designCheckStatus, element("span", { text: "Validating and saving the check…" }));
+  try {
+    const table = designTableById(state.designCheckTableId);
+    const editing = Boolean(state.designCheckEditorId);
+    const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+    if (!design) return;
+    elements.designCheckDialog.close();
+    canvas.select(table.name, { notify: true });
+    showToast(`${editing ? "Updated" : "Created"} ${result.check.name} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designCheckStatus, conflictPanel(error));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignCheckButton.disabled = false;
+    updateHeader();
+  }
+}
+
+function editDesignCheck(constraint) {
+  const table = selectedDesignTable();
+  if (!table || !constraint?.designId) return;
+  openDesignCheckEditor({ tableId: table.id, checkId: constraint.designId });
+}
+
+function confirmDeleteDesignCheck(constraint) {
+  const table = selectedDesignTable();
+  if (!table || !constraint?.designId || state.designSubmitting) return;
+  askConfirmation({
+    title: "Delete check",
+    message: `Delete check “${constraint.name}” from ${table.name}? The columns remain in the design.`,
+    label: "Delete check",
+    callback: async () => {
+      let result;
+      try {
+        result = deleteDesignCheck(state.design.content, table.id, constraint.designId);
+      } catch (error) {
+        errorToast(error);
+        return;
+      }
+      if (!await flushLayoutBeforeTransition()) return;
+      state.designSubmitting = true;
+      updateDesignControls();
+      try {
+        const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+        if (!design) return;
+        showToast(`Deleted ${result.check.name} in design revision ${design.revision}.`);
       } catch (error) {
         errorToast(error);
       } finally {
@@ -2537,6 +2751,13 @@ function bindEvents() {
     state.designKeyTableId = null;
     state.designKeyColumnIds = [];
     state.designKeyAutoName = null;
+  });
+  elements.designCheckForm.addEventListener("submit", submitDesignCheck);
+  elements.designCheckExpression.addEventListener("input", updateDesignCheckDraft);
+  elements.designCheckDialog.addEventListener("close", () => {
+    state.designCheckEditorId = null;
+    state.designCheckTableId = null;
+    state.designCheckAutoName = null;
   });
   elements.designRelationshipForm.addEventListener("submit", submitDesignRelationship);
   elements.reselectDesignRelationship.addEventListener("click", reselectDesignRelationship);

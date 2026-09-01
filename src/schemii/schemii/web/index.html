@@ -259,6 +259,23 @@
       </form>
     </dialog>
 
+    <dialog class="ui-dialog editor-dialog design-check-dialog" id="design-check-dialog" aria-labelledby="design-check-title">
+      <form class="ui-dialog__shell" id="design-check-form">
+        <header class="ui-dialog__head"><div><small>Table rule</small><h2 id="design-check-title">Create check</h2><p>Enter the condition only. Schemii derives its column dependencies and generates the surrounding PostgreSQL CHECK clause.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close check editor"></button></header>
+        <div class="design-check-body">
+          <label class="design-field"><span>Table</span><output id="design-check-table"></output></label>
+          <label class="design-field"><span>Constraint name</span><input id="design-check-name" required maxlength="63" autocomplete="off" /></label>
+          <label class="design-field span-all"><span>Condition</span><textarea id="design-check-expression" required spellcheck="false" placeholder="quantity &gt; 0 AND unit_price &gt;= 0"></textarea></label>
+          <section class="design-check-dependencies span-all" aria-labelledby="design-check-dependencies-title">
+            <header><strong id="design-check-dependencies-title">Referenced columns</strong><small>Derived from the condition</small></header>
+            <div id="design-check-dependencies"></div>
+          </section>
+        </div>
+        <div class="form-status" id="design-check-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-check-button" type="submit">Create check</button></footer>
+      </form>
+    </dialog>
+
     <dialog class="ui-dialog editor-dialog design-relationship-dialog" id="design-relationship-dialog" aria-labelledby="design-relationship-title">
       <form class="ui-dialog__shell" id="design-relationship-form">
         <header class="ui-dialog__head"><div><small>Selected columns</small><h2 id="design-relationship-title">Confirm relationship</h2><p id="design-relationship-copy">Review the columns selected on the canvas, then name the constraint and choose its referential actions.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close relationship editor"></button></header>

@@ -38,15 +38,16 @@ function tableCatalogEntry(table, columns) {
       nullable: column.nullable,
       defaultExpression: column.defaultExpression,
       identity: column.identity,
-      generated: null,
+      generated: column.generatedExpression,
       collationSchema: null,
       collationName: null,
     })),
     primaryKey: keys.find((_, index) => table.keys[index].kind === "primary") || null,
     uniqueConstraints: keys.filter((_, index) => table.keys[index].kind === "unique"),
     checks: table.checks.map(check => ({
+      designId: check.id,
       name: check.name,
-      columns: [],
+      columns: (check.columnIds || []).map(id => columns.get(id)?.name || id),
       definition: check.expression,
       validated: true,
       deferrable: false,
@@ -174,15 +175,135 @@ function normalizedColumns(columnValues) {
     dataType: value.dataType.trim(),
     nullable: value.primary ? false : Boolean(value.nullable),
     primary: Boolean(value.primary),
+    defaultExpression: value.defaultExpression === undefined ? undefined : optionalExpression(value.defaultExpression),
+    identity: value.identity === undefined ? undefined : value.identity || null,
+    generatedExpression: value.generatedExpression === undefined ? undefined : optionalExpression(value.generatedExpression),
   }));
   if (columns.some(column => !column.name)) throw new Error("Every column needs a name.");
   if (columns.some(column => byteLength(column.name) > 63)) throw new Error("Column names must be at most 63 UTF-8 bytes.");
   if (columns.some(column => !column.dataType)) throw new Error("Every column needs a PostgreSQL data type.");
+  for (const column of columns) {
+    const behaviors = [column.defaultExpression, column.identity, column.generatedExpression].filter(value => value !== null && value !== undefined);
+    if (behaviors.length > 1) throw new Error(`Choose one value behavior for “${column.name}”.`);
+    if (column.identity && !["always", "by_default"].includes(column.identity)) throw new Error(`Choose a valid identity behavior for “${column.name}”.`);
+    if (column.defaultExpression) validateExpression(column.defaultExpression, `default for “${column.name}”`);
+    if (column.generatedExpression) validateExpression(column.generatedExpression, `generated expression for “${column.name}”`);
+  }
   if (new Set(columns.map(column => column.name)).size !== columns.length) throw new Error("Column names must be unique within the table.");
   if (columns.filter(column => column.id).length !== new Set(columns.filter(column => column.id).map(column => column.id)).size) {
     throw new Error("A column cannot appear more than once.");
   }
   return columns;
+}
+
+function optionalExpression(value) {
+  const expression = String(value || "").trim();
+  return expression || null;
+}
+
+function validateExpression(expression, label) {
+  if (["\0", ";", "--", "/*", "*/"].some(boundary => expression.includes(boundary))) {
+    throw new Error(`The ${label} contains an unsupported SQL statement boundary.`);
+  }
+}
+
+function sqlIdentifierTokens(expression) {
+  const tokens = [];
+  let index = 0;
+  while (index < expression.length) {
+    const character = expression[index];
+    if (character === "'") {
+      index += 1;
+      while (index < expression.length) {
+        if (expression[index] !== "'") { index += 1; continue; }
+        if (expression[index + 1] === "'") { index += 2; continue; }
+        index += 1;
+        break;
+      }
+      continue;
+    }
+    if (character === "$") {
+      const delimiter = expression.slice(index).match(/^\$[A-Za-z_0-9]*\$/)?.[0];
+      if (delimiter) {
+        const closing = expression.indexOf(delimiter, index + delimiter.length);
+        index = closing < 0 ? expression.length : closing + delimiter.length;
+        continue;
+      }
+    }
+    if (character === '"') {
+      const start = index;
+      let name = "";
+      index += 1;
+      while (index < expression.length) {
+        if (expression[index] !== '"') { name += expression[index]; index += 1; continue; }
+        if (expression[index + 1] === '"') { name += '"'; index += 2; continue; }
+        index += 1;
+        break;
+      }
+      tokens.push({ start, end: index, name, quoted: true, call: false });
+      continue;
+    }
+    if (/[A-Za-z_]/.test(character)) {
+      const start = index;
+      index += 1;
+      while (index < expression.length && /[A-Za-z0-9_$]/.test(expression[index])) index += 1;
+      let lookahead = index;
+      while (/\s/.test(expression[lookahead] || "")) lookahead += 1;
+      tokens.push({
+        start,
+        end: index,
+        name: expression.slice(start, index),
+        quoted: false,
+        call: expression[lookahead] === "(",
+      });
+      continue;
+    }
+    index += 1;
+  }
+  return tokens;
+}
+
+function tokenReferencesColumn(token, columnName) {
+  if (token.call) return false;
+  return token.quoted ? token.name === columnName : token.name.toLowerCase() === columnName;
+}
+
+export function expressionColumnIds(expression, columns) {
+  const identifiers = sqlIdentifierTokens(expression);
+  return columns
+    .filter(column => identifiers.some(token => tokenReferencesColumn(token, column.name)))
+    .map(column => column.id);
+}
+
+function quotedIdentifier(name) {
+  return `"${name.replaceAll('"', '""')}"`;
+}
+
+function rewriteColumnReferences(expression, oldColumns, newColumns, referencedColumnIds) {
+  if (!expression) return expression;
+  const oldById = new Map(oldColumns.map(column => [column.id, column]));
+  const newById = new Map(newColumns.map(column => [column.id, column]));
+  const renames = [...newById.entries()].flatMap(([columnId, column]) => {
+    const old = oldById.get(columnId);
+    return old && old.name !== column.name && referencedColumnIds.has(columnId)
+      ? [{ columnId, oldName: old.name, newName: column.name }]
+      : [];
+  });
+  if (!renames.length) return expression;
+  const replacements = [];
+  for (const token of sqlIdentifierTokens(expression)) {
+    const rename = renames.find(item => tokenReferencesColumn(token, item.oldName));
+    if (!rename) continue;
+    const replacement = token.quoted || !/^[a-z_][a-z0-9_$]*$/.test(rename.newName)
+      ? quotedIdentifier(rename.newName)
+      : rename.newName;
+    replacements.push({ start: token.start, end: token.end, replacement });
+  }
+  let rewritten = expression;
+  for (const item of replacements.reverse()) {
+    rewritten = `${rewritten.slice(0, item.start)}${item.replacement}${rewritten.slice(item.end)}`;
+  }
+  return rewritten;
 }
 
 function validatedName(value, label) {
@@ -202,15 +323,37 @@ function designTableFromValues(existingTable, name, columnValues, randomUUID) {
 
   const designColumns = columns.map(column => {
     const existing = existingColumns.get(column.id);
+    const identity = column.identity === undefined ? existing?.identity ?? null : column.identity;
     return {
       id: existing?.id || id("column", randomUUID),
       name: column.name,
       dataType: column.dataType,
-      nullable: column.nullable,
-      defaultExpression: existing?.defaultExpression ?? null,
-      identity: existing?.identity ?? null,
+      nullable: identity ? false : column.nullable,
+      defaultExpression: column.defaultExpression === undefined ? existing?.defaultExpression ?? null : column.defaultExpression,
+      identity,
+      generatedExpression: column.generatedExpression === undefined ? existing?.generatedExpression ?? null : column.generatedExpression,
+      generatedSourceColumnIds: [],
     };
   });
+  for (const column of designColumns) {
+    if (!column.generatedExpression) continue;
+    const existing = existingColumns.get(column.id);
+    const previousReferences = new Set(
+      existing?.generatedSourceColumnIds?.length
+        ? existing.generatedSourceColumnIds
+        : expressionColumnIds(existing?.generatedExpression || column.generatedExpression, existingTable?.columns || designColumns),
+    );
+    column.generatedExpression = rewriteColumnReferences(
+      column.generatedExpression,
+      existingTable?.columns || designColumns,
+      designColumns,
+      previousReferences,
+    );
+    column.generatedSourceColumnIds = expressionColumnIds(column.generatedExpression, designColumns);
+    if (column.generatedSourceColumnIds.includes(column.id)) {
+      throw new Error(`Generated column “${column.name}” cannot reference itself.`);
+    }
+  }
   const primaryColumnIds = designColumns.filter((_, index) => columns[index].primary).map(column => column.id);
   const existingPrimary = existingTable?.keys.find(key => key.kind === "primary") || null;
   const otherKeys = (existingTable?.keys || []).filter(key => key.kind !== "primary");
@@ -223,12 +366,30 @@ function designTableFromValues(existingTable, name, columnValues, randomUUID) {
       columnIds: primaryColumnIds,
     });
   }
+  const checks = (existingTable?.checks || []).map(check => {
+    const previousReferences = new Set(
+      check.columnIds?.length
+        ? check.columnIds
+        : expressionColumnIds(check.expression, existingTable.columns),
+    );
+    const expression = rewriteColumnReferences(
+      check.expression,
+      existingTable.columns,
+      designColumns,
+      previousReferences,
+    );
+    return {
+      ...check,
+      expression,
+      columnIds: expressionColumnIds(expression, designColumns),
+    };
+  });
   return {
     id: existingTable?.id || id("table", randomUUID),
     name: tableName,
     columns: designColumns,
     keys,
-    checks: existingTable?.checks || [],
+    checks,
     indexes: existingTable?.indexes || [],
   };
 }
@@ -240,6 +401,18 @@ function referencedRemovedColumn(content, table, retainedColumnIds) {
   if (key) return `unique key “${key.name}”`;
   const index = table.indexes.find(item => item.columnIds.some(columnId => removed.has(columnId)));
   if (index) return `index “${index.name}”`;
+  const generated = table.columns.find(item => (
+    (item.generatedSourceColumnIds?.length
+      ? item.generatedSourceColumnIds
+      : expressionColumnIds(item.generatedExpression || "", table.columns)
+    ).some(columnId => removed.has(columnId))
+  ));
+  if (generated) return `generated column “${generated.name}”`;
+  const check = table.checks.find(item => (
+    (item.columnIds?.length ? item.columnIds : expressionColumnIds(item.expression, table.columns))
+      .some(columnId => removed.has(columnId))
+  ));
+  if (check) return `check constraint “${check.name}”`;
   const relationship = content.relationships.find(item => (
     (item.sourceTableId === table.id && item.sourceColumnIds.some(columnId => removed.has(columnId)))
     || (item.targetTableId === table.id && item.targetColumnIds.some(columnId => removed.has(columnId)))
@@ -353,6 +526,62 @@ export function deleteDesignKey(content, tableId, keyId) {
     throw new Error(`Relationship “${invalidRelationship.name}” targets this key. Delete the relationship before deleting it.`);
   }
   return { content: revised, key };
+}
+
+export function suggestDesignCheckName(content, { tableId, expression = "", checkId = null }) {
+  const table = content.tables.find(item => item.id === tableId);
+  if (!table) return "";
+  const columnIds = expressionColumnIds(expression, table.columns);
+  const columnNames = new Map(table.columns.map(column => [column.id, column.name]));
+  const stem = columnIds.length
+    ? `${table.name}_${columnIds.map(columnId => columnNames.get(columnId)).join("_")}`
+    : table.name;
+  const base = nameWithSuffix(stem, "_check");
+  const used = new Set([
+    ...table.keys.map(key => key.name),
+    ...table.checks.filter(check => check.id !== checkId).map(check => check.name),
+  ]);
+  if (!used.has(base)) return base;
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = nameWithSuffix(stem, `_check_${index}`);
+    if (!used.has(candidate)) return candidate;
+  }
+  return base;
+}
+
+export function saveDesignCheck(content, values, randomUUID = () => crypto.randomUUID()) {
+  const table = content.tables.find(item => item.id === values.tableId);
+  if (!table) throw new Error("The selected table is no longer in this design.");
+  const existing = values.checkId ? table.checks.find(check => check.id === values.checkId) : null;
+  if (values.checkId && !existing) throw new Error("The selected check is no longer in this design.");
+  const name = validatedName(values.name, "check name");
+  const expression = String(values.expression || "").trim();
+  if (!expression) throw new Error("Enter the condition this check must enforce.");
+  if (/^CHECK\s*\(/i.test(expression)) throw new Error("Enter only the condition; Schemii adds CHECK (…) during export.");
+  validateExpression(expression, `check “${name}”`);
+  const duplicateName = [...table.keys, ...table.checks].some(item => item.id !== values.checkId && item.name === name);
+  if (duplicateName) throw new Error("A constraint with this name already exists on the table.");
+  const check = {
+    id: existing?.id || id("check", randomUUID),
+    name,
+    expression,
+    columnIds: expressionColumnIds(expression, table.columns),
+  };
+  const revised = structuredClone(content);
+  const revisedTable = revised.tables.find(item => item.id === table.id);
+  if (existing) revisedTable.checks = revisedTable.checks.map(item => item.id === existing.id ? check : item);
+  else revisedTable.checks.push(check);
+  return { content: revised, check };
+}
+
+export function deleteDesignCheck(content, tableId, checkId) {
+  const table = content.tables.find(item => item.id === tableId);
+  const check = table?.checks.find(item => item.id === checkId);
+  if (!table || !check) throw new Error("The selected check is no longer in this design.");
+  const revised = structuredClone(content);
+  const revisedTable = revised.tables.find(item => item.id === table.id);
+  revisedTable.checks = revisedTable.checks.filter(item => item.id !== check.id);
+  return { content: revised, check };
 }
 
 function designRelationshipFromValues(content, values, relationshipId, randomUUID) {

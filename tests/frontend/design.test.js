@@ -5,13 +5,17 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignCheck,
   deleteDesignKey,
   designLayoutContent,
   designPositions,
   designToCatalog,
+  expressionColumnIds,
   relationshipDraftFromColumns,
   relationshipDraftFromExisting,
+  saveDesignCheck,
   saveDesignKey,
+  suggestDesignCheckName,
   suggestDesignKeyName,
   updateDesignRelationship,
   updateDesignTable,
@@ -95,6 +99,134 @@ test("table editing preserves stable object identities and column-owned details"
   assert.equal(updated.columns[1].defaultExpression, "'unknown'::text");
   assert.equal(updated.columns[0].nullable, false);
   assert.equal(updated.columns[2].id, `column_${"5".repeat(32)}`);
+});
+
+test("column value behaviors and generated dependencies are authored from one table editor payload", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("line_items", [
+    { name: "quantity", dataType: "integer", nullable: false },
+    { name: "unit_price", dataType: "numeric(12,2)", nullable: false },
+    { name: "total", dataType: "numeric(12,2)", nullable: false, generatedExpression: "quantity * unit_price" },
+    { name: "created_at", dataType: "timestamptz", nullable: false, defaultExpression: "now()" },
+    { name: "sequence", dataType: "bigint", nullable: true, identity: "by_default" },
+  ], nextUuid);
+
+  assert.deepEqual(table.columns[2].generatedSourceColumnIds, [table.columns[0].id, table.columns[1].id]);
+  assert.equal(table.columns[3].defaultExpression, "now()");
+  assert.equal(table.columns[4].identity, "by_default");
+  assert.equal(table.columns[4].nullable, false);
+  const withoutIdentity = updateDesignTable(
+    { tables: [table], relationships: [], functions: [], views: [] },
+    table.id,
+    table.name,
+    table.columns.map(column => ({
+      ...column,
+      nullable: column.id === table.columns[4].id ? true : column.nullable,
+      identity: column.id === table.columns[4].id ? null : column.identity,
+      primary: false,
+    })),
+    nextUuid,
+  );
+  assert.equal(withoutIdentity.columns[4].identity, null);
+  assert.equal(withoutIdentity.columns[4].nullable, true);
+  assert.throws(() => createDesignTable("invalid", [{
+    name: "id",
+    dataType: "bigint",
+    defaultExpression: "1",
+    identity: "always",
+  }], nextUuid), /one value behavior/);
+});
+
+test("check constraints derive stable dependencies and column renames rewrite SQL identifiers only", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("line_items", [
+    { name: "quantity", dataType: "integer", nullable: false },
+    { name: "unit_price", dataType: "numeric", nullable: false },
+    { name: "note", dataType: "text", nullable: true },
+    { name: "total", dataType: "numeric", nullable: false, generatedExpression: "quantity * unit_price" },
+  ], nextUuid);
+  const base = { tables: [table], relationships: [], functions: [], views: [] };
+  assert.deepEqual(expressionColumnIds("quantity > 0 AND note <> 'quantity'", table.columns), [
+    table.columns[0].id,
+    table.columns[2].id,
+  ]);
+  const saved = saveDesignCheck(base, {
+    tableId: table.id,
+    name: "line_items_quantity_check",
+    expression: "quantity > 0 AND note <> 'quantity'",
+  }, nextUuid);
+
+  const updated = updateDesignTable(saved.content, table.id, table.name, table.columns.map(column => ({
+    ...column,
+    name: column.name === "quantity" ? "qty" : column.name,
+    primary: false,
+  })), nextUuid);
+
+  assert.equal(updated.columns[3].generatedExpression, "qty * unit_price");
+  assert.equal(updated.checks[0].expression, "qty > 0 AND note <> 'quantity'");
+  assert.deepEqual(updated.checks[0].columnIds, [updated.columns[0].id, updated.columns[2].id]);
+});
+
+test("check constraints support stable create, edit, catalog projection, and delete", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("products", [
+    { name: "price", dataType: "numeric", nullable: false },
+  ], nextUuid);
+  const base = { tables: [table], relationships: [], functions: [], views: [] };
+  const suggested = suggestDesignCheckName(base, {
+    tableId: table.id,
+    expression: "price >= 0",
+  });
+  assert.equal(suggested, "products_price_check");
+  const created = saveDesignCheck(base, {
+    tableId: table.id,
+    name: suggested,
+    expression: "price >= 0",
+  }, nextUuid);
+  const edited = saveDesignCheck(created.content, {
+    tableId: table.id,
+    checkId: created.check.id,
+    name: suggested,
+    expression: "price > 0",
+  }, nextUuid);
+  assert.equal(edited.check.id, created.check.id);
+  assert.deepEqual(edited.check.columnIds, [table.columns[0].id]);
+
+  const design = { revision: 1, fingerprint: "a".repeat(64), content: edited.content };
+  const catalogCheck = designToCatalog({ name: "Products" }, design).tables[0].checks[0];
+  assert.equal(catalogCheck.designId, created.check.id);
+  assert.deepEqual(catalogCheck.columns, ["price"]);
+  assert.equal(deleteDesignCheck(edited.content, table.id, created.check.id).content.tables[0].checks.length, 0);
+});
+
+test("table editing blocks removal of generated and check dependency columns", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const generatedTable = createDesignTable("totals", [
+    { name: "amount", dataType: "numeric", nullable: false },
+    { name: "doubled", dataType: "numeric", nullable: false, generatedExpression: "amount * 2" },
+  ], nextUuid);
+  const generatedContent = { tables: [generatedTable], relationships: [], functions: [], views: [] };
+  assert.throws(() => updateDesignTable(generatedContent, generatedTable.id, generatedTable.name, [{
+    ...generatedTable.columns[1], primary: false,
+  }]), /generated column/);
+
+  const checkedTable = createDesignTable("inventory", [
+    { name: "quantity", dataType: "integer", nullable: false },
+    { name: "sku", dataType: "text", nullable: false },
+  ], nextUuid);
+  const checkedBase = { tables: [checkedTable], relationships: [], functions: [], views: [] };
+  const checked = saveDesignCheck(checkedBase, {
+    tableId: checkedTable.id,
+    name: "inventory_quantity_check",
+    expression: "quantity >= 0",
+  }, nextUuid);
+  assert.throws(() => updateDesignTable(checked.content, checkedTable.id, checkedTable.name, [{
+    ...checkedTable.columns[1], primary: false,
+  }]), /check constraint/);
 });
 
 test("table editing blocks removal of columns used by relationships", () => {

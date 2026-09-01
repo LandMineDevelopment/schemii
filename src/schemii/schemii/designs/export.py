@@ -49,7 +49,11 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
         definitions: list[str] = []
         for column in table.columns:
             parts = [_quote(column.name), column.data_type.strip()]
-            if column.identity is not None:
+            if column.generated_expression is not None:
+                parts.append(
+                    f"GENERATED ALWAYS AS ({column.generated_expression.strip()}) STORED"
+                )
+            elif column.identity is not None:
                 identity = "ALWAYS" if column.identity == "always" else "BY DEFAULT"
                 parts.append(f"GENERATED {identity} AS IDENTITY")
             elif column.default_expression is not None:

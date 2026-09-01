@@ -181,6 +181,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 11px; }
 .section-title h3 { margin: 0; color: #a0abb8; font-size: 8px; text-transform: uppercase; letter-spacing: .12em; }
 .section-title > span { color: var(--faint); font: 8px ui-monospace, monospace; }
+.section-title > .section-actions { display: flex; gap: 4px; }
 .section-title button { min-height: 27px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 4px; color: #9ca8b5; background: var(--panel-2); font-size: 7px; cursor: pointer; }
 .metadata-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin: 0; }
 .metadata-grid > div { min-width: 0; padding: 8px; border: 1px solid #262f3a; border-radius: 5px; background: #141920; }
@@ -299,7 +300,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-table-dialog > .ui-dialog__shell { grid-template-rows: auto minmax(0, 1fr) auto auto; }
 .design-table-body { display: grid; min-height: 0; gap: 13px; padding: 16px 18px; overflow-y: auto; }
 .design-table-name { display: grid; gap: 6px; color: #9aa6b4; font-size: 8px; }
-.design-table-name input, .design-column-row input { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
+.design-table-name input, .design-column-row input, .design-column-row select { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
 .design-columns-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #9aa6b4; font-size: 8px; }
 .design-columns { display: grid; gap: 7px; }
 .design-column-row { display: grid; min-width: 0; grid-template-columns: minmax(120px, 1fr) minmax(150px, 1.25fr) auto auto auto; align-items: end; gap: 8px; padding: 9px; border: 1px solid #29333f; border-radius: 7px; background: #141a21; }
@@ -307,6 +308,9 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-column-row > .design-column-check { display: flex; min-height: 36px; align-items: center; gap: 5px; white-space: nowrap; }
 .design-column-check input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
 .design-column-remove { align-self: end; }
+.design-column-value { grid-column: 1 / -1; display: grid; min-width: 0; grid-template-columns: minmax(180px, .65fr) minmax(0, 1.35fr); gap: 8px; padding-top: 8px; border-top: 1px solid #29333f; }
+.design-column-value > label { display: grid; min-width: 0; gap: 5px; color: #778493; font-size: 7px; }
+.design-column-value > label[hidden] { display: none; }
 .design-table-dialog .form-status { min-height: 16px; padding-bottom: 5px; }
 .design-key-dialog { width: min(620px, calc(100vw - 28px)); }
 .design-key-dialog > .ui-dialog__shell { grid-template-rows: auto minmax(0, 1fr) auto auto; }
@@ -326,6 +330,21 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-key-column-actions { display: flex; gap: 4px; }
 .design-key-column-actions button { width: 30px; min-height: 30px; padding: 0; }
 .design-key-dialog .form-status { min-height: 16px; padding-bottom: 5px; }
+.design-check-dialog { width: min(660px, calc(100vw - 28px)); }
+.design-check-dialog > .ui-dialog__shell { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.design-check-body { display: grid; min-height: 0; grid-template-columns: minmax(0, .75fr) minmax(0, 1.25fr); gap: 12px; padding: 16px 18px; overflow-y: auto; }
+.design-check-body > .span-all { grid-column: 1 / -1; }
+.design-check-body output { display: flex; min-height: 36px; align-items: center; padding: 0 9px; border: 1px solid #29333f; border-radius: 5px; color: #b7c1cc; background: #131920; font: 8px ui-monospace, monospace; }
+.design-check-body textarea { width: 100%; min-height: 112px; resize: vertical; padding: 10px; border: 1px solid #303a46; border-radius: 5px; outline: 0; color: #d8e0e8; background: #0d1218; font: 9px/1.55 ui-monospace, monospace; }
+.design-check-body textarea:focus { border-color: #5c7890; }
+.design-check-dependencies { overflow: hidden; border: 1px solid #303946; border-radius: 7px; background: #11171e; }
+.design-check-dependencies > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-bottom: 1px solid #29333f; }
+.design-check-dependencies strong { color: #aeb9c5; font-size: 8px; }
+.design-check-dependencies small { color: #697686; font-size: 7px; }
+#design-check-dependencies { display: flex; min-height: 42px; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; }
+.design-dependency-chip { padding: 4px 7px; border: 1px solid #355d58; border-radius: 999px; color: #73cdbf; background: #11211f; font: 7px ui-monospace, monospace; }
+.design-dependency-empty { color: #647182; font-size: 7px; }
+.design-check-dialog .form-status { min-height: 16px; padding-bottom: 5px; }
 .design-relationship-dialog { width: min(700px, calc(100vw - 28px)); }
 .design-relationship-dialog > .ui-dialog__shell { grid-template-rows: auto minmax(0, 1fr) auto auto; }
 .design-relationship-body { display: grid; min-height: 0; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 16px 18px; overflow-y: auto; }
@@ -463,12 +482,15 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .design-column-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
   .design-column-row > label:first-child, .design-column-row > label:nth-child(2) { grid-column: span 1; }
   .design-column-row > .design-column-check { min-height: 32px; }
+  .design-column-value { grid-template-columns: 1fr; }
   .design-relationship-body { grid-template-columns: 1fr; }
   .design-relationship-body > .span-all { grid-column: 1; }
   .relationship-mapping > header { flex-wrap: wrap; }
   .relationship-mapping > header .ui-button { min-height: 36px; }
   .design-key-body { grid-template-columns: 1fr; }
   .design-key-body > .span-all { grid-column: 1; }
+  .design-check-body { grid-template-columns: 1fr; }
+  .design-check-body > .span-all { grid-column: 1; }
   .relationship-mapping-row { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
   .span-2 { grid-column: span 1; }
   .compact-search { min-width: 100%; }

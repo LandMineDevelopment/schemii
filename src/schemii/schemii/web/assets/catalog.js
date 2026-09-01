@@ -98,6 +98,9 @@ export function renderInspector({
   onAddKey = null,
   onEditKey = null,
   onDeleteKey = null,
+  onAddCheck = null,
+  onEditCheck = null,
+  onDeleteCheck = null,
   onAddRelationship = null,
   onEditRelationship = null,
   onDeleteRelationship = null,
@@ -166,11 +169,15 @@ export function renderInspector({
   const constraints = section(
     "Constraints",
     constraintValues.length,
-    desired && onAddKey ? actionButton("Add key", onAddKey) : null,
+    desired && (onAddKey || onAddCheck) ? element("span", { className: "section-actions" }, [
+      ...(onAddKey ? [actionButton("Add key", onAddKey)] : []),
+      ...(onAddCheck ? [actionButton("Add check", onAddCheck)] : []),
+    ]) : null,
   );
   boundedInspectorList(constraints, constraintValues, constraint => {
     const editableKey = desired && constraint.designId
       && (constraint.displayKind === "Primary key" || constraint.displayKind === "Unique");
+    const editableCheck = desired && constraint.designId && constraint.displayKind === "Check";
     return itemCard(constraint.name, constraint.displayKind, [
       ["Columns", constraint.columns],
       ["Validated", constraint.validated],
@@ -179,6 +186,9 @@ export function renderInspector({
     ], constraint.definition, editableKey ? [
       ...(onEditKey ? [actionButton("Edit", () => onEditKey(constraint))] : []),
       ...(onDeleteKey ? [actionButton("Delete", () => onDeleteKey(constraint), { danger: true })] : []),
+    ] : editableCheck ? [
+      ...(onEditCheck ? [actionButton("Edit", () => onEditCheck(constraint))] : []),
+      ...(onDeleteCheck ? [actionButton("Delete", () => onDeleteCheck(constraint), { danger: true })] : []),
     ] : []);
   }, "constraints", desired);
   content.append(constraints);
