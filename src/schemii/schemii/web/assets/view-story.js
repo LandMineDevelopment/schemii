@@ -25,7 +25,7 @@ const WARNING_COPY = Object.freeze({
 });
 
 const USE_LABELS = Object.freeze({
-  output: "result",
+  output: "select",
   join: "join",
   filter: "filter",
   aggregate_filter: "aggregate filter",
@@ -81,6 +81,14 @@ function inputIdentity(input) {
 
 function outputIdentity(output) {
   return output.name || `expression ${output.ordinal}`;
+}
+
+export function selectProjectionMappings(step) {
+  return (step?.outputs || []).map(output => ({
+    expression: output.expression || "Expression not reported",
+    alias: outputIdentity(output),
+    derivation: output.derivation || "derived",
+  }));
 }
 
 function selectedInputKeys(output) {
@@ -183,6 +191,41 @@ function logicCard(kind, label, title, expressions, step) {
   return card;
 }
 
+function selectProjectionCard(step) {
+  const mappings = selectProjectionMappings(step);
+  const card = element("section", { className: "view-step-select" });
+  const head = element("header");
+  head.append(
+    element("span", { text: "SELECT" }),
+    element("strong", { text: "Expression → output column" }),
+    element("small", { text: plural(mappings.length, "column") }),
+  );
+  card.append(head);
+
+  const rows = element("div");
+  for (const mapping of mappings) {
+    const row = element("div", {
+      className: "view-step-select-row",
+      title: `${mapping.expression} → ${mapping.alias}`,
+    });
+    row.append(
+      coloredExpression(mapping.expression, step),
+      element("span", {
+        className: "view-step-select-arrow",
+        text: "→",
+        attrs: { "aria-hidden": "true" },
+      }),
+      element("div", {}, [
+        element("strong", { text: mapping.alias }),
+        element("small", { text: mapping.derivation }),
+      ]),
+    );
+    rows.append(row);
+  }
+  card.append(rows);
+  return card;
+}
+
 function stepLogic(step) {
   const logic = element("div", { className: "view-step-logic-grid" });
   for (const join of step.joins || []) {
@@ -241,7 +284,7 @@ function operationCard(step, view, selected) {
   } else {
     step.participants.forEach((participant, index) => participants.append(participantRow(participant, index, selectedKeys)));
   }
-  card.append(participants, stepLogic(step));
+  card.append(participants, selectProjectionCard(step), stepLogic(step));
   return card;
 }
 

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   queryStoryPhases,
   resultGrain,
+  selectProjectionMappings,
   transformationLabel,
   viewStorySummary,
 } from "../../src/schemii/schemii/web/assets/view-story.js";
@@ -63,4 +64,17 @@ test("view story interleaves every query operation with the relation it produces
       ["result", "view result"],
     ],
   );
+});
+
+test("view story defines selected output aliases from their source expressions", () => {
+  const step = {
+    outputs: [
+      { ordinal: 1, name: "customer_id", expression: "o.customer_id", derivation: "direct" },
+      { ordinal: 2, name: "captured_revenue", expression: "SUM(p.amount)", derivation: "aggregate" },
+    ],
+  };
+  assert.deepEqual(selectProjectionMappings(step), [
+    { expression: "o.customer_id", alias: "customer_id", derivation: "direct" },
+    { expression: "SUM(p.amount)", alias: "captured_revenue", derivation: "aggregate" },
+  ]);
 });
