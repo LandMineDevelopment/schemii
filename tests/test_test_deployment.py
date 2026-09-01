@@ -29,10 +29,15 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     assert "/docker.sock" not in compose
     assert "ports:" not in schemii
     assert "ports:" not in postgres
-    assert '"127.0.0.1:${SCHEMII_TEST_APP_PORT:-8001}:8080"' in ingress
+    assert '"127.0.0.1:${SCHEMII_TEST_APP_PORT:-8001}:8443"' in ingress
+    assert "/etc/nginx/tls/localhost.crt:ro" in ingress
+    assert "/etc/nginx/tls/localhost.key:ro" in ingress
+    assert '"${SCHEMII_TLS_READER_GID:-101}"' in ingress
+    assert '"https://127.0.0.1:8443/api/v1/readiness"' in ingress
     assert "  database:\n    internal: true" in networks
     assert "  app-ingress:\n    internal: true" in networks
     assert "postgres:17-alpine@sha256:" in compose
+    assert 'SCHEMII_DEVELOPER_INSPECTION: "1"' in schemii
     assert compose.count("ports:") == 1
     assert "condition: service_completed_successfully" in compose
     assert "condition: service_healthy\n        restart: true" in ingress
@@ -57,6 +62,19 @@ def test_containerized_application_is_non_root_and_read_only() -> None:
     assert "no-new-privileges:true" in schemii
     assert "no-new-privileges:true" in ingress
     assert "no-new-privileges:true" in seed
+
+
+def test_ingress_terminates_local_https_and_private_keys_never_enter_the_image() -> None:
+    nginx = (ROOT / "dev" / "ingress" / "nginx.conf").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+    assert "listen 8443 ssl;" in nginx
+    assert "ssl_certificate /etc/nginx/tls/localhost.crt;" in nginx
+    assert "ssl_certificate_key /etc/nginx/tls/localhost.key;" in nginx
+    assert "ssl_protocols TLSv1.2 TLSv1.3;" in nginx
+    assert "proxy_set_header Host localhost;" in nginx
+    assert "proxy_set_header X-Forwarded-Host localhost;" in nginx
+    assert ".schemii" in dockerignore
 
 
 def test_seed_contains_archived_tutorial_and_catalog_coverage_namespaces() -> None:

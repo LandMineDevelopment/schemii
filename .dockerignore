@@ -8,6 +8,7 @@ __pycache__
 *.log
 .coverage
 .env*
+.schemii
 archive
 build
 dev

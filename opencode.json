@@ -1,0 +1,21 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "permission": {
+    "bash": {
+      "docker": "deny",
+      "docker *": "deny",
+      "/usr/bin/docker": "deny",
+      "/usr/bin/docker *": "deny",
+      "/usr/local/bin/docker": "deny",
+      "/usr/local/bin/docker *": "deny",
+      "sudo docker *": "deny",
+      "*uvicorn *": "deny",
+      "*fastapi dev*": "deny",
+      "*fastapi run*": "deny",
+      "*http.server*": "deny"
+    }
+  }
+}
