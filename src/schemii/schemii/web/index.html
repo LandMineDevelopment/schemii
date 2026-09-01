@@ -261,14 +261,14 @@
 
     <dialog class="ui-dialog editor-dialog design-relationship-dialog" id="design-relationship-dialog" aria-labelledby="design-relationship-title">
       <form class="ui-dialog__shell" id="design-relationship-form">
-        <header class="ui-dialog__head"><div><small>Selected columns</small><h2 id="design-relationship-title">Confirm relationship</h2><p>Review the columns selected on the canvas, then name the constraint and choose its referential actions.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close relationship editor"></button></header>
+        <header class="ui-dialog__head"><div><small>Selected columns</small><h2 id="design-relationship-title">Confirm relationship</h2><p id="design-relationship-copy">Review the columns selected on the canvas, then name the constraint and choose its referential actions.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close relationship editor"></button></header>
         <div class="design-relationship-body">
           <label class="design-field span-all"><span>Constraint name</span><input id="design-relationship-name" required maxlength="63" autocomplete="off" placeholder="orders_customer_id_fkey" /></label>
           <label class="design-field"><span>Source table</span><select id="design-relationship-source" required></select></label>
           <label class="design-field"><span>Target table</span><select id="design-relationship-target" required></select></label>
           <label class="design-field span-all"><span>Target key</span><select id="design-relationship-key" required></select></label>
           <section class="relationship-mapping span-all" aria-labelledby="relationship-mapping-title">
-            <header><strong id="relationship-mapping-title">Column mapping</strong><small>Source column → target key column</small></header>
+            <header><span><strong id="relationship-mapping-title">Column mapping</strong><small>Source column → target key column</small></span><button class="ui-button compact" id="reselect-design-relationship" type="button" hidden>Reselect on canvas</button></header>
             <div id="design-relationship-mappings"></div>
           </section>
           <div class="relationship-type-alignment span-all" id="design-relationship-type-alignment" role="note" hidden></div>

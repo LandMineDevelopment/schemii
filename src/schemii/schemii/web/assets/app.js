@@ -9,8 +9,10 @@ import {
   designPositions,
   designToCatalog,
   relationshipDraftFromColumns,
+  relationshipDraftFromExisting,
   saveDesignKey,
   suggestDesignKeyName,
+  updateDesignRelationship,
   updateDesignTable,
 } from "./design.js";
 import {
@@ -147,11 +149,14 @@ const elements = {
   saveDesignKeyButton: byId("save-design-key-button"),
   designRelationshipDialog: byId("design-relationship-dialog"),
   designRelationshipForm: byId("design-relationship-form"),
+  designRelationshipTitle: byId("design-relationship-title"),
+  designRelationshipCopy: byId("design-relationship-copy"),
   designRelationshipName: byId("design-relationship-name"),
   designRelationshipSource: byId("design-relationship-source"),
   designRelationshipTarget: byId("design-relationship-target"),
   designRelationshipKey: byId("design-relationship-key"),
   designRelationshipMappings: byId("design-relationship-mappings"),
+  reselectDesignRelationship: byId("reselect-design-relationship"),
   designRelationshipTypeAlignment: byId("design-relationship-type-alignment"),
   designRelationshipOnUpdate: byId("design-relationship-on-update"),
   designRelationshipOnDelete: byId("design-relationship-on-delete"),
@@ -221,8 +226,11 @@ const state = {
   designSubmitting: false,
   designTableEditorId: null,
   designRelationshipAutoName: null,
+  designRelationshipEditorId: null,
   relationshipAuthoring: false,
   relationshipSource: null,
+  relationshipAuthoringEditId: null,
+  relationshipAuthoringDefaults: null,
   designRelationshipAnchor: null,
   keyAuthoring: false,
   keySelection: null,
@@ -1286,7 +1294,8 @@ function renderActiveInspector(table) {
     onAddKey: desired && table ? () => startKeyAuthoring({ tableId: table.designId }) : null,
     onEditKey: desired ? editDesignKey : null,
     onDeleteKey: desired ? confirmDeleteDesignKey : null,
-    onAddRelationship: desired && table ? startRelationshipAuthoring : null,
+    onAddRelationship: desired && table ? () => startRelationshipAuthoring() : null,
+    onEditRelationship: desired ? editDesignRelationship : null,
     onDeleteRelationship: desired ? confirmDeleteDesignRelationship : null,
   });
 }
@@ -1710,6 +1719,10 @@ function designKeyById(tableId, keyId) {
   return designTableById(tableId)?.keys.find(key => key.id === keyId) || null;
 }
 
+function designRelationshipById(relationshipId) {
+  return state.design?.content.relationships.find(relationship => relationship.id === relationshipId) || null;
+}
+
 function updateKeyAuthoringPresentation() {
   const selection = state.keySelection;
   const table = designTableById(selection?.tableId);
@@ -1985,9 +1998,7 @@ function replaceSelectOptions(select, values, selectedValue = null) {
   }
 }
 
-function generatedRelationshipName() {
-  const source = designTableById(elements.designRelationshipSource.value);
-  const target = designTableById(elements.designRelationshipTarget.value);
+function relationshipNameForTables(source, target) {
   if (!source || !target) return "";
   const stem = `${source.name}_${target.name}_fkey`;
   let value = "";
@@ -1996,6 +2007,13 @@ function generatedRelationshipName() {
     value += character;
   }
   return value;
+}
+
+function generatedRelationshipName() {
+  return relationshipNameForTables(
+    designTableById(elements.designRelationshipSource.value),
+    designTableById(elements.designRelationshipTarget.value),
+  );
 }
 
 function updateGeneratedRelationshipName() {
@@ -2092,47 +2110,93 @@ function updateRelationshipTargetKeys(draft) {
   updateGeneratedRelationshipName();
 }
 
-function openDesignRelationshipEditor(draft) {
+function openDesignRelationshipEditor(draft, { relationshipId = null, defaults = null } = {}) {
   if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
-  elements.designRelationshipForm.reset();
-  replace(elements.designRelationshipStatus);
-  state.designRelationshipAutoName = null;
-  state.designRelationshipAnchor = draft;
+  const existing = relationshipId ? designRelationshipById(relationshipId) : null;
+  if (relationshipId && !existing) {
+    showToast("The selected relationship is no longer in this design.", { error: true });
+    return;
+  }
   const source = designTableById(draft.sourceTableId);
   const target = designTableById(draft.targetTableId);
+  if (!source || !target) {
+    showToast("The selected relationship references a table that is no longer in this design.", { error: true });
+    return;
+  }
+  elements.designRelationshipForm.reset();
+  replace(elements.designRelationshipStatus);
+  state.designRelationshipEditorId = existing?.id || null;
+  state.designRelationshipAnchor = draft;
+  elements.designRelationshipTitle.textContent = existing ? `Edit ${existing.name}` : "Confirm relationship";
+  elements.designRelationshipCopy.textContent = existing
+    ? "Adjust the mapping and referential actions, or reselect both endpoints directly on the canvas."
+    : "Review the columns selected on the canvas, then name the constraint and choose its referential actions.";
+  elements.saveDesignRelationshipButton.textContent = existing ? "Save relationship" : "Create relationship";
+  elements.reselectDesignRelationship.hidden = !existing;
   replaceSelectOptions(elements.designRelationshipSource, [{ value: source.id, label: source.name }], source.id);
   replaceSelectOptions(elements.designRelationshipTarget, [{ value: target.id, label: target.name }], target.id);
   elements.designRelationshipSource.disabled = true;
   elements.designRelationshipTarget.disabled = true;
+  const initialName = defaults?.name ?? existing?.name ?? "";
+  const existingGeneratedName = existing
+    ? relationshipNameForTables(designTableById(existing.sourceTableId), designTableById(existing.targetTableId))
+    : null;
+  const tracksGeneratedName = defaults?.tracksGeneratedName
+    ?? Boolean(existing && existing.name === existingGeneratedName);
+  elements.designRelationshipName.value = initialName;
+  state.designRelationshipAutoName = tracksGeneratedName ? initialName : null;
   updateRelationshipTargetKeys(draft);
-  elements.designRelationshipDeferrable.checked = false;
-  elements.designRelationshipDeferred.checked = false;
-  elements.designRelationshipDeferred.disabled = true;
+  elements.designRelationshipOnUpdate.value = defaults?.onUpdate ?? existing?.onUpdate ?? "NO ACTION";
+  elements.designRelationshipOnDelete.value = defaults?.onDelete ?? existing?.onDelete ?? "NO ACTION";
+  elements.designRelationshipDeferrable.checked = defaults?.deferrable ?? existing?.deferrable ?? false;
+  elements.designRelationshipDeferred.checked = defaults?.initiallyDeferred ?? existing?.initiallyDeferred ?? false;
+  elements.designRelationshipDeferred.disabled = !elements.designRelationshipDeferrable.checked;
   openDialog(elements.designRelationshipDialog);
   elements.designRelationshipName.focus();
 }
 
-function setRelationshipAuthoring(enabled) {
+function editDesignRelationship(relationship) {
+  if (!relationship?.designId || state.designSubmitting) return;
+  let draft;
+  try {
+    draft = relationshipDraftFromExisting(state.design.content, relationship.designId);
+  } catch (error) {
+    showToast(error.message, { error: true });
+    return;
+  }
+  openDesignRelationshipEditor(draft, { relationshipId: relationship.designId });
+}
+
+function setRelationshipAuthoring(enabled, { relationshipId = null, defaults = null } = {}) {
   const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
   if (active && state.keyAuthoring) setKeyAuthoring(false);
   state.relationshipAuthoring = active;
   state.relationshipSource = null;
+  state.relationshipAuthoringEditId = active ? relationshipId : null;
+  state.relationshipAuthoringDefaults = active ? defaults : null;
   elements.relationshipAuthoringBanner.hidden = !active;
   elements.relationshipAuthoringStep.textContent = "1";
-  elements.relationshipAuthoringInstruction.textContent = "Select the foreign key column";
+  elements.relationshipAuthoringInstruction.textContent = relationshipId
+    ? "Select the new foreign key column"
+    : "Select the foreign key column";
   elements.reviewKeyAuthoring.hidden = true;
   canvas.setRelationshipMode({ enabled: active });
   updateDesignControls();
 }
 
-function startRelationshipAuthoring() {
-  if (state.relationshipAuthoring) return;
+function startRelationshipAuthoring({ relationshipId = null, defaults = null } = {}) {
+  if (state.relationshipAuthoring) return false;
+  if (relationshipId && !designRelationshipById(relationshipId)) {
+    showToast("The selected relationship is no longer in this design.", { error: true });
+    return false;
+  }
   const hasTargetKey = state.design?.content.tables.some(table => table.keys.some(key => key.kind === "primary" || key.kind === "unique"));
   if (!hasTargetKey) {
     showToast("Add a primary or unique key to a target table first.");
-    return;
+    return false;
   }
-  setRelationshipAuthoring(true);
+  setRelationshipAuthoring(true, { relationshipId, defaults });
+  return true;
 }
 
 function toggleRelationshipAuthoring() {
@@ -2166,23 +2230,65 @@ function handleRelationshipColumnSelection(table, column) {
     showToast(error.message, { error: true });
     return;
   }
+  const relationshipId = state.relationshipAuthoringEditId;
+  const defaults = state.relationshipAuthoringDefaults;
   setRelationshipAuthoring(false);
-  openDesignRelationshipEditor(draft);
+  openDesignRelationshipEditor(draft, { relationshipId, defaults });
 }
 
 function remapRelationshipForSelectedKey() {
   const anchor = state.designRelationshipAnchor;
   if (!anchor) return;
   try {
-    const draft = relationshipDraftFromColumns(state.design.content, {
-      ...anchor,
-      targetKeyId: elements.designRelationshipKey.value,
-    });
+    let draft;
+    if (anchor.targetColumnId) {
+      draft = relationshipDraftFromColumns(state.design.content, {
+        ...anchor,
+        targetKeyId: elements.designRelationshipKey.value,
+      });
+    } else {
+      const source = designTableById(anchor.sourceTableId);
+      const target = designTableById(anchor.targetTableId);
+      const key = target?.keys.find(item => item.id === elements.designRelationshipKey.value && ["primary", "unique"].includes(item.kind));
+      if (!source || !target || !key) throw new Error("The selected target key is no longer in this design.");
+      if (source.columns.length < key.columnIds.length) {
+        throw new Error(`The source table needs at least ${key.columnIds.length} columns to reference this composite key.`);
+      }
+      draft = {
+        ...anchor,
+        targetKeyId: key.id,
+        targetColumnIds: [...key.columnIds],
+      };
+    }
     state.designRelationshipAnchor = draft;
     renderRelationshipMappings(draft.sourceColumnIds);
+    state.designRelationshipAnchor.sourceColumnIds = [...elements.designRelationshipMappings.querySelectorAll("[data-relationship-source-column]")]
+      .map(select => select.value);
   } catch (error) {
+    elements.designRelationshipKey.value = anchor.targetKeyId;
     replace(elements.designRelationshipStatus, errorPanel(error));
   }
+}
+
+function reselectDesignRelationship() {
+  const relationshipId = state.designRelationshipEditorId;
+  if (!relationshipId || !designRelationshipById(relationshipId)) {
+    showToast("The selected relationship is no longer in this design.", { error: true });
+    return;
+  }
+  const defaults = {
+    name: elements.designRelationshipName.value,
+    onUpdate: elements.designRelationshipOnUpdate.value,
+    onDelete: elements.designRelationshipOnDelete.value,
+    deferrable: elements.designRelationshipDeferrable.checked,
+    initiallyDeferred: elements.designRelationshipDeferred.checked,
+    tracksGeneratedName: Boolean(
+      state.designRelationshipAutoName
+      && elements.designRelationshipName.value === state.designRelationshipAutoName
+    ),
+  };
+  elements.designRelationshipDialog.close();
+  startRelationshipAuthoring({ relationshipId, defaults });
 }
 
 function designRelationshipValues() {
@@ -2204,8 +2310,12 @@ async function submitDesignRelationship(event) {
   if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
   let relationship;
   let aligned;
+  const relationshipId = state.designRelationshipEditorId;
+  const editing = Boolean(relationshipId);
   try {
-    relationship = createDesignRelationship(state.design.content, designRelationshipValues());
+    relationship = editing
+      ? updateDesignRelationship(state.design.content, relationshipId, designRelationshipValues())
+      : createDesignRelationship(state.design.content, designRelationshipValues());
     aligned = alignRelationshipColumnTypes(state.design.content, relationship);
   } catch (error) {
     replace(elements.designRelationshipStatus, errorPanel(error));
@@ -2213,7 +2323,11 @@ async function submitDesignRelationship(event) {
   }
   if (!await flushLayoutBeforeTransition()) return;
   const content = aligned.content;
-  content.relationships.push(relationship);
+  if (editing) {
+    content.relationships = content.relationships.map(item => item.id === relationshipId ? relationship : item);
+  } else {
+    content.relationships.push(relationship);
+  }
   state.designSubmitting = true;
   elements.saveDesignRelationshipButton.disabled = true;
   updateDesignControls();
@@ -2225,7 +2339,7 @@ async function submitDesignRelationship(event) {
     const typeCopy = aligned.changes.length
       ? ` Matched ${aligned.changes.length} foreign-key column type${aligned.changes.length === 1 ? "" : "s"}.`
       : "";
-    showToast(`Created ${relationship.name} in design revision ${design.revision}.${typeCopy}`);
+    showToast(`${editing ? "Updated" : "Created"} ${relationship.name} in design revision ${design.revision}.${typeCopy}`);
   } catch (error) {
     replace(elements.designRelationshipStatus, conflictPanel(error));
   } finally {
@@ -2425,10 +2539,13 @@ function bindEvents() {
     state.designKeyAutoName = null;
   });
   elements.designRelationshipForm.addEventListener("submit", submitDesignRelationship);
+  elements.reselectDesignRelationship.addEventListener("click", reselectDesignRelationship);
   elements.designRelationshipKey.addEventListener("change", remapRelationshipForSelectedKey);
   elements.designRelationshipMappings.addEventListener("change", renderRelationshipTypeAlignment);
   elements.designRelationshipDialog.addEventListener("close", () => {
     state.designRelationshipAnchor = null;
+    state.designRelationshipAutoName = null;
+    state.designRelationshipEditorId = null;
   });
   elements.designRelationshipDeferrable.addEventListener("change", () => {
     elements.designRelationshipDeferred.disabled = !elements.designRelationshipDeferrable.checked;

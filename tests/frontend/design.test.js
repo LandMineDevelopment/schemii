@@ -10,8 +10,10 @@ import {
   designPositions,
   designToCatalog,
   relationshipDraftFromColumns,
+  relationshipDraftFromExisting,
   saveDesignKey,
   suggestDesignKeyName,
+  updateDesignRelationship,
   updateDesignTable,
 } from "../../src/schemii/schemii/web/assets/design.js";
 
@@ -219,6 +221,112 @@ test("relationship type alignment makes foreign-key columns match the referenced
   assert.deepEqual(aligned.changes.map(change => [change.from, change.to]), [["text", "uuid"], ["integer", "bigint"]]);
   assert.deepEqual(aligned.content.tables[1].columns.map(column => column.dataType), ["uuid", "bigint"]);
   assert.deepEqual(content.tables[1].columns.map(column => column.dataType), ["text", "integer"]);
+});
+
+test("relationship editing preserves identity and revalidates mappings against target keys", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const parent = createDesignTable("parents", [
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+    { name: "code", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const withUnique = saveDesignKey({ tables: [parent], relationships: [], functions: [], views: [] }, {
+    tableId: parent.id,
+    name: "parents_code_key",
+    kind: "unique",
+    columnIds: [parent.columns[1].id],
+  }, nextUuid);
+  const child = createDesignTable("children", [
+    { name: "parent_id", dataType: "bigint", nullable: false, primary: false },
+    { name: "parent_code", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const base = { ...withUnique.content, tables: [withUnique.content.tables[0], child] };
+  const created = createDesignRelationship(base, {
+    name: "children_parent_id_fkey",
+    sourceTableId: child.id,
+    sourceColumnIds: [child.columns[0].id],
+    targetTableId: parent.id,
+    targetKeyId: parent.keys[0].id,
+    onUpdate: "NO ACTION",
+    onDelete: "NO ACTION",
+    deferrable: false,
+    initiallyDeferred: false,
+  }, nextUuid);
+  const content = { ...base, relationships: [created] };
+
+  const sameName = updateDesignRelationship(content, created.id, {
+    name: created.name,
+    sourceTableId: child.id,
+    sourceColumnIds: [child.columns[0].id],
+    targetTableId: parent.id,
+    targetKeyId: parent.keys[0].id,
+    onUpdate: "NO ACTION",
+    onDelete: "NO ACTION",
+    deferrable: false,
+    initiallyDeferred: false,
+  }, nextUuid);
+  assert.equal(sameName.id, created.id);
+  assert.equal(sameName.name, created.name);
+
+  const updated = updateDesignRelationship(content, created.id, {
+    name: "children_parent_code_fkey",
+    sourceTableId: child.id,
+    sourceColumnIds: [child.columns[1].id],
+    targetTableId: parent.id,
+    targetKeyId: withUnique.key.id,
+    onUpdate: "CASCADE",
+    onDelete: "RESTRICT",
+    deferrable: true,
+    initiallyDeferred: true,
+  }, nextUuid);
+
+  assert.equal(updated.id, created.id);
+  assert.deepEqual(updated.targetColumnIds, [parent.columns[1].id]);
+  assert.equal(updated.onUpdate, "CASCADE");
+  assert.equal(updated.initiallyDeferred, true);
+  assert.equal(content.relationships[0].name, "children_parent_id_fkey");
+  assert.throws(() => updateDesignRelationship(content, `relationship_${"f".repeat(32)}`, {
+    ...updated,
+    targetKeyId: withUnique.key.id,
+  }), /no longer/);
+});
+
+test("relationship editing drafts retain exact mappings and expose every target key", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const parent = createDesignTable("parents", [
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+    { name: "code", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const keyed = saveDesignKey({ tables: [parent], relationships: [], functions: [], views: [] }, {
+    tableId: parent.id,
+    name: "parents_code_key",
+    kind: "unique",
+    columnIds: [parent.columns[1].id],
+  }, nextUuid);
+  const child = createDesignTable("children", [
+    { name: "parent_code", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const base = { ...keyed.content, tables: [keyed.content.tables[0], child] };
+  const relationship = createDesignRelationship(base, {
+    name: "children_parent_code_fkey",
+    sourceTableId: child.id,
+    sourceColumnIds: [child.columns[0].id],
+    targetTableId: parent.id,
+    targetKeyId: keyed.key.id,
+    onUpdate: "NO ACTION",
+    onDelete: "NO ACTION",
+    deferrable: false,
+    initiallyDeferred: false,
+  }, nextUuid);
+
+  const draft = relationshipDraftFromExisting({ ...base, relationships: [relationship] }, relationship.id);
+
+  assert.deepEqual(draft.sourceColumnIds, relationship.sourceColumnIds);
+  assert.equal(draft.targetKeyId, keyed.key.id);
+  assert.deepEqual(draft.eligibleTargetKeyIds, keyed.content.tables[0].keys.map(key => key.id));
+  assert.equal(draft.sourceColumnId, null);
+  assert.equal(draft.targetColumnId, null);
 });
 
 test("graphical target selection rejects columns that are not keys", () => {

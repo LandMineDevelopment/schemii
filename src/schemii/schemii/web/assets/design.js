@@ -355,9 +355,9 @@ export function deleteDesignKey(content, tableId, keyId) {
   return { content: revised, key };
 }
 
-export function createDesignRelationship(content, values, randomUUID = () => crypto.randomUUID()) {
+function designRelationshipFromValues(content, values, relationshipId, randomUUID) {
   const relationshipName = validatedName(values.name, "relationship name");
-  if (content.relationships.some(item => item.name === relationshipName)) {
+  if (content.relationships.some(item => item.id !== relationshipId && item.name === relationshipName)) {
     throw new Error("A relationship with this name already exists in the design.");
   }
   const source = content.tables.find(table => table.id === values.sourceTableId);
@@ -373,7 +373,7 @@ export function createDesignRelationship(content, values, randomUUID = () => cry
   if (new Set(sourceColumnIds).size !== sourceColumnIds.length) throw new Error("Each source column can appear only once in a relationship.");
   if (values.initiallyDeferred && !values.deferrable) throw new Error("Initially deferred relationships must be deferrable.");
   return {
-    id: id("relationship", randomUUID),
+    id: relationshipId || id("relationship", randomUUID),
     name: relationshipName,
     sourceTableId: source.id,
     sourceColumnIds,
@@ -383,6 +383,40 @@ export function createDesignRelationship(content, values, randomUUID = () => cry
     onDelete: values.onDelete,
     deferrable: Boolean(values.deferrable),
     initiallyDeferred: Boolean(values.initiallyDeferred),
+  };
+}
+
+export function createDesignRelationship(content, values, randomUUID = () => crypto.randomUUID()) {
+  return designRelationshipFromValues(content, values, null, randomUUID);
+}
+
+export function updateDesignRelationship(content, relationshipId, values, randomUUID = () => crypto.randomUUID()) {
+  if (!content.relationships.some(relationship => relationship.id === relationshipId)) {
+    throw new Error("The selected relationship is no longer in this design.");
+  }
+  return designRelationshipFromValues(content, values, relationshipId, randomUUID);
+}
+
+export function relationshipDraftFromExisting(content, relationshipId) {
+  const relationship = content.relationships.find(item => item.id === relationshipId);
+  if (!relationship) throw new Error("The selected relationship is no longer in this design.");
+  const source = content.tables.find(table => table.id === relationship.sourceTableId);
+  const target = content.tables.find(table => table.id === relationship.targetTableId);
+  if (!source || !target) throw new Error("The relationship references a table that is no longer in this design.");
+  const targetKeys = target.keys.filter(key => key.kind === "primary" || key.kind === "unique");
+  const targetKey = targetKeys.find(key => (
+    key.columnIds.join("\u0000") === relationship.targetColumnIds.join("\u0000")
+  ));
+  if (!targetKey) throw new Error("The relationship target no longer matches a primary or unique key.");
+  return {
+    sourceTableId: source.id,
+    sourceColumnId: null,
+    sourceColumnIds: [...relationship.sourceColumnIds],
+    targetTableId: target.id,
+    targetColumnId: null,
+    targetColumnIds: [...targetKey.columnIds],
+    targetKeyId: targetKey.id,
+    eligibleTargetKeyIds: targetKeys.map(key => key.id),
   };
 }
 

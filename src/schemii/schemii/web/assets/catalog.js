@@ -99,6 +99,7 @@ export function renderInspector({
   onEditKey = null,
   onDeleteKey = null,
   onAddRelationship = null,
+  onEditRelationship = null,
   onDeleteRelationship = null,
 }) {
   inspector.classList.toggle("is-empty", !table);
@@ -211,6 +212,7 @@ export function renderInspector({
       ["Deferrable", relationship.deferrable],
       ["Initially deferred", relationship.initiallyDeferred],
     ], relationship.definition, desired ? [
+      ...(onEditRelationship ? [actionButton("Edit", () => onEditRelationship(relationship))] : []),
       ...(onDeleteRelationship ? [actionButton("Delete", () => onDeleteRelationship(relationship), { danger: true })] : []),
     ] : [
       unavailableButton("relationship-edit", "Edit"),
