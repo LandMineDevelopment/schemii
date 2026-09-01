@@ -104,4 +104,9 @@ export const api = Object.freeze({
   updateLayout: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/layout`, { method: "PUT", body }),
   deleteWorkspace: (id, expectedRevision) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { method: "DELETE" }),
   getCatalog: id => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/catalog`),
+  getDesign: id => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design`),
+  replaceDesign: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design`, { method: "PUT", body }),
+  getDesignLayout: id => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`),
+  replaceDesignLayout: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, { method: "PUT", body }),
+  exportDesign: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/exports`, { method: "POST", body }),
 });

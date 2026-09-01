@@ -1,6 +1,12 @@
 import { api, ApiError } from "./api.js";
 import { CatalogCanvas } from "./canvas.js";
 import {
+  createDesignTable,
+  designLayoutContent,
+  designPositions,
+  designToCatalog,
+} from "./design.js";
+import {
   allViews,
   renderCatalogStats,
   renderFunctions,
@@ -32,6 +38,7 @@ const elements = {
   refreshCatalogButton: byId("refresh-catalog-button"),
   saveLayoutButton: byId("save-layout-button"),
   downloadCatalogButton: byId("download-catalog-button"),
+  exportDesignSqlButton: byId("export-design-sql-button"),
   introductionButton: byId("introduction-button"),
   mainLayout: byId("main-layout"),
   canvas: byId("canvas"),
@@ -46,6 +53,7 @@ const elements = {
   zoomOutput: byId("zoom-output"),
   relationshipOutput: byId("relationship-output"),
   fitButton: byId("fit-button"),
+  createTableButton: byId("create-table-button"),
   zoomInButton: byId("zoom-in-button"),
   zoomOutButton: byId("zoom-out-button"),
   inspector: byId("inspector"),
@@ -53,6 +61,8 @@ const elements = {
   inspectorToggle: byId("table-inspector-toggle"),
   inspectorClose: byId("table-inspector-close"),
   inspectorTitle: byId("table-inspector-title"),
+  inspectorEyebrow: byId("table-inspector-eyebrow"),
+  inspectorEmptyCopy: byId("inspector-empty-copy"),
   inspectorEmpty: byId("inspector-empty"),
   inspectorContent: byId("inspector-content"),
   catalogStats: byId("catalog-stats"),
@@ -92,11 +102,22 @@ const elements = {
   workspacesList: byId("workspaces-list"),
   reloadWorkspacesButton: byId("reload-workspaces-button"),
   workspaceForm: byId("workspace-form"),
+  workspaceName: byId("workspace-name"),
+  workspaceMode: byId("workspace-mode"),
+  workspaceFormCopy: byId("workspace-form-copy"),
+  workspaceTargetFields: [...document.querySelectorAll(".workspace-target-field")],
   workspaceConnection: byId("workspace-connection"),
   workspaceDatabase: byId("workspace-database"),
   workspaceNamespace: byId("workspace-namespace"),
   workspaceFormStatus: byId("workspace-form-status"),
   createWorkspaceButton: byId("create-workspace-button"),
+  designTableDialog: byId("design-table-dialog"),
+  designTableForm: byId("design-table-form"),
+  designTableName: byId("design-table-name"),
+  designColumns: byId("design-columns"),
+  addDesignColumnButton: byId("add-design-column-button"),
+  designTableStatus: byId("design-table-status"),
+  saveDesignTableButton: byId("save-design-table-button"),
   functionsButton: byId("functions-button"),
   functionsDialog: byId("functions-dialog"),
   functionsSearch: byId("functions-search"),
@@ -154,6 +175,9 @@ const state = {
   workspacesError: null,
   workspaceActionError: null,
   activeWorkspace: null,
+  design: null,
+  designLayout: null,
+  designSubmitting: false,
   catalog: null,
   catalogLoading: false,
   catalogError: null,
@@ -241,6 +265,10 @@ function workspaceLabel(workspace) {
 function workspaceTargetLabel(workspace) {
   if (!workspace.connectionId) return "Detached design";
   return connectionById(workspace.connectionId)?.name || workspace.connectionId;
+}
+
+function isDetachedWorkspace(workspace = state.activeWorkspace) {
+  return Boolean(workspace && !workspace.connectionId);
 }
 
 function workspaceStorage() {
@@ -363,6 +391,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } =
 }
 
 function updateHeader() {
+  const detached = isDetachedWorkspace();
   elements.workspaceTitle.textContent = state.activeWorkspace ? workspaceLabel(state.activeWorkspace) : "No workspace open";
   elements.runtimeDot.className = "status-dot";
   if (state.runtimeError) {
@@ -378,14 +407,24 @@ function updateHeader() {
     elements.runtimeDot.classList.add("ready");
     if (state.layoutConflict) elements.runtimeStatus.textContent = "Layout saving stopped · conflict";
     else if (state.layoutSaving) elements.runtimeStatus.textContent = "Saving layout";
-    else if (state.catalogLoading) elements.runtimeStatus.textContent = "Loading live catalog";
+    else if (state.catalogLoading) elements.runtimeStatus.textContent = detached ? "Loading saved design" : "Loading live catalog";
     else elements.runtimeStatus.textContent = `Ready · ${state.readiness.persistence}`;
   }
   elements.saveLayoutButton.disabled = !state.catalog || state.catalogLoading || state.layoutSaving || state.layoutConflict;
   elements.refreshCatalogButton.disabled = state.catalogLoading;
+  elements.refreshCatalogButton.title = detached ? "Refresh saved design" : "Refresh live catalog";
+  elements.refreshCatalogButton.setAttribute("aria-label", elements.refreshCatalogButton.title);
   elements.refreshViewsButton.disabled = state.catalogLoading;
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
+  elements.createTableButton.disabled = !detached || state.catalogLoading || state.designSubmitting;
+  elements.downloadCatalogButton.textContent = detached ? "Download desired design JSON" : "Download live catalog JSON";
+  elements.exportDesignSqlButton.disabled = !detached || !state.design || state.catalogLoading;
+  elements.inspectorEyebrow.textContent = detached ? "Desired table inspector" : "Read-only table inspector";
+  elements.inspectorEmptyCopy.textContent = detached
+    ? "Select a designed table to inspect its columns, constraints, indexes, and relationships."
+    : "Select a live table to inspect columns, constraints, indexes, triggers, and relationships.";
+  elements.canvas.setAttribute("aria-label", detached ? "Desired schema table diagram canvas" : "Live table diagram canvas");
   renderSqlTarget();
 }
 
@@ -417,7 +456,7 @@ function renderCatalogState() {
     return;
   }
   if (!state.activeWorkspace) {
-    const card = stateCard("PG", "Open a PostgreSQL workspace", "Choose an existing workspace or create one from a live connection.", "Open workspaces", openWorkspaces);
+    const card = stateCard("WS", "Open a schema workspace", "Create a database-independent design or open a workspace attached to live PostgreSQL.", "Open workspaces", openWorkspaces);
     const connectionAction = element("button", { className: "ui-button compact", type: "button", text: "Manage connections" });
     connectionAction.addEventListener("click", openConnections);
     card.append(connectionAction);
@@ -425,7 +464,7 @@ function renderCatalogState() {
     return;
   }
   if (state.catalogLoading) {
-    elements.catalogState.append(stateCard("…", "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
+    elements.catalogState.append(stateCard("…", isDetachedWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
     return;
   }
   if (state.catalogError) {
@@ -438,14 +477,18 @@ function renderCatalogState() {
   }
   if (state.layoutError && !state.layoutConflict) {
     const panel = errorPanel(state.layoutError, { retryLabel: "Retry layout save", onRetry: saveLayout });
-    const reload = element("button", { className: "ui-button compact", type: "button", text: "Reload live catalog and server layout" });
-    reload.addEventListener("click", () => loadActiveCatalog());
+    const reload = element("button", { className: "ui-button compact", type: "button", text: isDetachedWorkspace() ? "Reload saved design and layout" : "Reload live catalog and server layout" });
+    reload.addEventListener("click", () => loadActiveWorkspace());
     panel.append(reload);
     elements.catalogState.append(panel);
     return;
   }
   if (state.catalog && !state.catalog.tables.length) {
-    elements.catalogState.append(stateCard("0", "No live tables", `PostgreSQL reported no tables in ${state.catalog.namespace}.`, "Refresh catalog", refreshCatalog));
+    if (isDetachedWorkspace()) {
+      elements.catalogState.append(stateCard("+", "Start with a table", "This design is empty. Add a table and its initial columns; Schemii will save the desired schema independently of PostgreSQL.", "Create table", openDesignTableEditor));
+    } else {
+      elements.catalogState.append(stateCard("0", "No live tables", `PostgreSQL reported no tables in ${state.catalog.namespace}.`, "Refresh catalog", refreshCatalog));
+    }
   }
 }
 
@@ -779,6 +822,7 @@ function openWorkspaces() {
   closeDetailsMenus();
   renderWorkspaces();
   renderWorkspaceConnectionOptions();
+  updateWorkspaceMode();
   openDialog(elements.workspacesDialog);
 }
 
@@ -793,6 +837,17 @@ function renderWorkspaceConnectionOptions() {
 function updateWorkspaceDatabase() {
   const connection = connectionById(elements.workspaceConnection.value);
   elements.workspaceDatabase.textContent = connection ? connection.database : "Select a connection";
+}
+
+function updateWorkspaceMode() {
+  const attached = elements.workspaceMode.value === "attached";
+  for (const field of elements.workspaceTargetFields) field.hidden = !attached;
+  elements.workspaceConnection.required = attached;
+  elements.workspaceNamespace.required = attached;
+  elements.workspaceFormCopy.textContent = attached
+    ? "Validate and attach an exact PostgreSQL database and namespace."
+    : "Start a durable database-independent schema design.";
+  elements.createWorkspaceButton.textContent = attached ? "Create and inspect" : "Create and design";
 }
 
 function renderWorkspaces() {
@@ -838,32 +893,40 @@ function renderWorkspaces() {
 async function submitWorkspace(event) {
   event.preventDefault();
   if (state.workspaceSubmitting) return;
+  const attached = elements.workspaceMode.value === "attached";
   const connection = connectionById(elements.workspaceConnection.value);
+  const name = elements.workspaceName.value.trim();
   const namespace = elements.workspaceNamespace.value;
-  if (!connection) {
+  if (!name) {
+    replace(elements.workspaceFormStatus, element("span", { text: "Enter a workspace name." }));
+    return;
+  }
+  if (attached && !connection) {
     replace(elements.workspaceFormStatus, element("span", { text: "Select a connection returned by the active API." }));
     return;
   }
   state.workspaceSubmitting = true;
   const dialogGeneration = state.workspaceDialogGeneration;
   elements.createWorkspaceButton.disabled = true;
-  replace(elements.workspaceFormStatus, element("span", { text: "Creating and validating the workspace target…" }));
+  replace(elements.workspaceFormStatus, element("span", { text: attached ? "Creating and validating the workspace target…" : "Creating the detached schema design…" }));
   try {
     if (!await flushLayoutBeforeTransition()) {
       replace(elements.workspaceFormStatus, element("span", { text: "The current layout must be saved or reloaded before opening another workspace." }));
       return;
     }
     if (dialogGeneration !== state.workspaceDialogGeneration) return;
-    const workspace = await api.createWorkspace({
+    const workspace = await api.createWorkspace(attached ? {
+      name,
       connectionId: connection.id,
       database: connection.database,
       namespace,
-    });
+    } : { name });
     state.workspaces.push(workspace);
     state.workspaceActionError = null;
     renderWorkspaces();
     if (dialogGeneration === state.workspaceDialogGeneration) {
       elements.workspaceNamespace.value = "";
+      elements.workspaceName.value = "";
       replace(elements.workspaceFormStatus);
       const opened = await openWorkspace(workspace);
       if (opened && dialogGeneration === state.workspaceDialogGeneration && elements.workspacesDialog.open) elements.workspacesDialog.close();
@@ -906,6 +969,8 @@ function clearActiveWorkspace({ historyMode = "replace" } = {}) {
   state.catalogGeneration += 1;
   resetLayoutSaveState();
   state.activeWorkspace = null;
+  state.design = null;
+  state.designLayout = null;
   state.catalog = null;
   state.catalogError = null;
   state.catalogLoading = false;
@@ -947,6 +1012,8 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
   state.catalogGeneration += 1;
   resetLayoutSaveState();
   state.catalog = null;
+  state.design = null;
+  state.designLayout = null;
   state.catalogError = null;
   state.catalogLoading = false;
   state.selectedTableName = null;
@@ -967,6 +1034,8 @@ async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   resetLayoutSaveState();
   state.activeWorkspace = workspace;
   state.catalog = null;
+  state.design = null;
+  state.designLayout = null;
   state.catalogError = null;
   state.selectedTableName = null;
   state.selectedViewName = null;
@@ -978,9 +1047,60 @@ async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   renderCatalogSurfaces();
   updateHeader();
   syncWorkspaceNavigation(historyMode);
-  await loadActiveCatalog({ clearConflictOnSuccess: true });
+  await loadActiveWorkspace({ clearConflictOnSuccess: true });
   if (state.catalog && state.activeWorkspace?.id === workspace.id) restoreCanvasView(workspace.id);
   return true;
+}
+
+async function loadActiveWorkspace(options = {}) {
+  if (isDetachedWorkspace()) return loadActiveDesign(options);
+  return loadActiveCatalog(options);
+}
+
+async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
+  if (!isDetachedWorkspace()) return;
+  const workspaceId = state.activeWorkspace.id;
+  const generation = ++state.catalogGeneration;
+  state.catalogLoading = true;
+  canvas.setInteractive(false);
+  state.catalogError = null;
+  renderCatalogState();
+  updateHeader();
+  try {
+    const [design, layout] = await Promise.all([
+      api.getDesign(workspaceId),
+      api.getDesignLayout(workspaceId),
+    ]);
+    if (generation !== state.catalogGeneration || state.activeWorkspace?.id !== workspaceId) return;
+    state.design = design;
+    state.designLayout = layout;
+    state.catalog = designToCatalog(state.activeWorkspace, design);
+    state.catalogError = null;
+    state.layoutError = null;
+    state.layoutDirty = false;
+    if (clearConflictOnSuccess) {
+      state.layoutConflict = false;
+      state.layoutConflictKind = null;
+    }
+    canvas.setCatalog(state.catalog, designPositions(design, layout));
+    renderConflict();
+    renderCatalogSurfaces();
+    const navigation = readWorkspaceNavigation(window.location.href);
+    if (navigation.workspaceId === workspaceId) {
+      applyWorkspaceNavigation(navigation);
+      syncWorkspaceNavigation("replace");
+    }
+  } catch (error) {
+    if (generation !== state.catalogGeneration) return;
+    state.catalogError = error;
+  } finally {
+    if (generation === state.catalogGeneration) {
+      state.catalogLoading = false;
+      canvas.setInteractive(true);
+      renderCatalogState();
+      updateHeader();
+    }
+  }
 }
 
 async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
@@ -1063,12 +1183,12 @@ async function refreshCatalog() {
     showToast("Wait for the pending layout save before refreshing the catalog.");
     return;
   }
-  await loadActiveCatalog();
+  await loadActiveWorkspace();
 }
 
 function reloadConflict() {
   if (!state.activeWorkspace || !state.layoutConflict || state.catalogLoading) return;
-  loadActiveCatalog({ clearConflictOnSuccess: true });
+  loadActiveWorkspace({ clearConflictOnSuccess: true });
 }
 
 function selectTable(name, { historyMode = "push" } = {}) {
@@ -1102,14 +1222,18 @@ async function saveLayout() {
   window.clearTimeout(state.layoutTimer);
   if (!state.layoutDirty || state.layoutSaving || state.layoutConflict || !state.activeWorkspace || !state.catalog) return;
   const workspaceId = state.activeWorkspace.id;
-  const expectedRevision = state.activeWorkspace.revision;
-  const connection = connectionById(state.activeWorkspace.connectionId);
-  if (!connection) {
+  const detached = isDetachedWorkspace();
+  const connection = detached ? null : connectionById(state.activeWorkspace.connectionId);
+  if (!detached && !connection) {
     state.layoutError = new Error("The workspace connection is unavailable. Reload connections before saving this layout");
     renderCatalogState();
     return;
   }
-  const expectedConnectionRevision = connection.revision;
+  if (detached && (!state.design || !state.designLayout)) {
+    state.layoutError = new Error("The saved design layout is unavailable. Refresh the design before saving positions");
+    renderCatalogState();
+    return;
+  }
   const version = state.layoutVersion;
   const saveGeneration = state.layoutSaveGeneration;
   const positions = canvas.getPositions();
@@ -1117,21 +1241,40 @@ async function saveLayout() {
   state.layoutError = null;
   renderCatalogState();
   updateHeader();
-  const savePromise = api.updateLayout(workspaceId, { expectedRevision, expectedConnectionRevision, tables: positions });
+  const savePromise = detached
+    ? api.replaceDesignLayout(workspaceId, {
+      expectedLayoutRevision: state.designLayout.revision,
+      expectedDesignRevision: state.design.revision,
+      content: designLayoutContent(state.design, positions, state.designLayout.content.objects),
+    })
+    : api.updateLayout(workspaceId, {
+      expectedRevision: state.activeWorkspace.revision,
+      expectedConnectionRevision: connection.revision,
+      tables: positions,
+    });
   state.layoutSavePromise = savePromise;
   try {
-    const workspace = await savePromise;
+    const result = await savePromise;
     if (saveGeneration !== state.layoutSaveGeneration || state.activeWorkspace?.id !== workspaceId) return;
-    state.activeWorkspace = workspace;
-    state.workspaces = state.workspaces.map(item => item.id === workspace.id ? workspace : item);
+    if (detached) {
+      state.designLayout = result;
+    } else {
+      state.activeWorkspace = result;
+      state.workspaces = state.workspaces.map(item => item.id === result.id ? result : item);
+      renderWorkspaces();
+    }
     state.layoutDirty = state.layoutVersion !== version;
     state.layoutError = null;
-    renderWorkspaces();
   } catch (error) {
     if (saveGeneration !== state.layoutSaveGeneration || state.activeWorkspace?.id !== workspaceId) return;
     state.layoutDirty = true;
     state.layoutError = error;
-    if (error instanceof ApiError && error.status === 409 && error.code === "workspace_conflict") {
+    if (error instanceof ApiError && error.status === 409 && error.code === "design_layout_conflict") {
+      state.layoutConflict = true;
+      state.layoutConflictKind = "design";
+      state.layoutError = null;
+      renderConflict(error);
+    } else if (error instanceof ApiError && error.status === 409 && error.code === "workspace_conflict") {
       state.layoutConflict = true;
       state.layoutConflictKind = "workspace";
       state.layoutError = null;
@@ -1245,7 +1388,8 @@ function renderViews() {
 
 function renderFunctionsBrowser() {
   const result = renderFunctions(elements.functionsList, state.catalog, elements.functionsSearch.value);
-  elements.functionsCount.textContent = state.catalog ? `${result.shown} shown · ${result.matching} matching · ${state.catalog.functions.length} live` : "No catalog loaded";
+  const source = state.catalog?.source === "design" ? "designed" : "live";
+  elements.functionsCount.textContent = state.catalog ? `${result.shown} shown · ${result.matching} matching · ${state.catalog.functions.length} ${source}` : "No catalog loaded";
 }
 
 function renderObjectsBrowser() {
@@ -1269,10 +1413,115 @@ function renderObjectsBrowser() {
 
 function renderSqlTarget() {
   const workspace = state.activeWorkspace;
+  if (isDetachedWorkspace(workspace)) {
+    elements.sqlTargetConnection.textContent = "Detached design";
+    elements.sqlTargetDatabase.textContent = workspace.name;
+    elements.sqlTargetNamespace.textContent = "Desired schema";
+    return;
+  }
   const connection = workspace ? connectionById(workspace.connectionId) : null;
   elements.sqlTargetConnection.textContent = workspace ? (connection?.name || workspace.connectionId) : "No workspace open";
   elements.sqlTargetDatabase.textContent = workspace?.database || "No workspace open";
   elements.sqlTargetNamespace.textContent = workspace?.namespace || "No workspace open";
+}
+
+function appendDesignColumn({ name = "", dataType = "text", nullable = true, primary = false } = {}) {
+  const row = element("div", { className: "design-column-row" });
+  const nameInput = element("input", { attrs: { required: "", maxlength: "63", autocomplete: "off", value: name, placeholder: "column_name" }, dataset: { designColumnName: "" } });
+  const typeInput = element("input", { attrs: { required: "", maxlength: "512", autocomplete: "off", value: dataType, placeholder: "text" }, dataset: { designColumnType: "" } });
+  const nullableInput = element("input", { type: "checkbox", dataset: { designColumnNullable: "" } });
+  nullableInput.checked = nullable && !primary;
+  const primaryInput = element("input", { type: "checkbox", dataset: { designColumnPrimary: "" } });
+  primaryInput.checked = primary;
+  primaryInput.addEventListener("change", () => {
+    if (primaryInput.checked) nullableInput.checked = false;
+  });
+  const remove = element("button", { className: "ui-button compact danger-text design-column-remove", type: "button", text: "Remove", attrs: { "aria-label": "Remove column" } });
+  remove.addEventListener("click", () => {
+    if (elements.designColumns.childElementCount === 1) {
+      showToast("A designed table needs at least one column.");
+      return;
+    }
+    row.remove();
+  });
+  row.append(
+    element("label", {}, [element("span", { text: "Name" }), nameInput]),
+    element("label", {}, [element("span", { text: "PostgreSQL type" }), typeInput]),
+    element("label", { className: "design-column-check" }, [nullableInput, element("span", { text: "Nullable" })]),
+    element("label", { className: "design-column-check" }, [primaryInput, element("span", { text: "Primary" })]),
+    remove,
+  );
+  elements.designColumns.append(row);
+  return row;
+}
+
+function openDesignTableEditor() {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  elements.designTableForm.reset();
+  replace(elements.designColumns);
+  replace(elements.designTableStatus);
+  appendDesignColumn({ name: "id", dataType: "bigint", nullable: false, primary: true });
+  appendDesignColumn({ name: "name", dataType: "text", nullable: false });
+  openDialog(elements.designTableDialog);
+  elements.designTableName.focus();
+}
+
+function designColumnValues() {
+  return [...elements.designColumns.children].map(row => ({
+    name: row.querySelector("[data-design-column-name]").value,
+    dataType: row.querySelector("[data-design-column-type]").value,
+    nullable: row.querySelector("[data-design-column-nullable]").checked,
+    primary: row.querySelector("[data-design-column-primary]").checked,
+  }));
+}
+
+async function submitDesignTable(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  let table;
+  try {
+    table = createDesignTable(elements.designTableName.value, designColumnValues());
+    if (state.design.content.tables.some(item => item.name === table.name)) throw new Error("A table with this name already exists in the design.");
+  } catch (error) {
+    replace(elements.designTableStatus, errorPanel(error));
+    return;
+  }
+  if (!await flushLayoutBeforeTransition()) return;
+  const workspaceId = state.activeWorkspace.id;
+  const content = structuredClone(state.design.content);
+  content.tables.push(table);
+  state.designSubmitting = true;
+  elements.saveDesignTableButton.disabled = true;
+  elements.createTableButton.disabled = true;
+  replace(elements.designTableStatus, element("span", { text: "Validating and saving the desired schema…" }));
+  try {
+    const design = await api.replaceDesign(workspaceId, {
+      expectedDesignRevision: state.design.revision,
+      content,
+    });
+    const layout = await api.getDesignLayout(workspaceId);
+    if (state.activeWorkspace?.id !== workspaceId) return;
+    state.design = design;
+    state.designLayout = layout;
+    state.catalog = designToCatalog(state.activeWorkspace, design);
+    state.catalogError = null;
+    state.layoutError = null;
+    canvas.setCatalog(state.catalog, designPositions(design, layout));
+    renderCatalogSurfaces();
+    renderCatalogState();
+    elements.designTableDialog.close();
+    canvas.select(table.name, { notify: true });
+    state.layoutDirty = true;
+    state.layoutVersion += 1;
+    await saveLayout();
+    showToast(`Created ${table.name} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designTableStatus, errorPanel(error, { retryLabel: error instanceof ApiError && error.code === "design_conflict" ? "Reload design" : null, onRetry: error instanceof ApiError && error.code === "design_conflict" ? () => loadActiveDesign({ clearConflictOnSuccess: true }) : null }));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignTableButton.disabled = false;
+    updateHeader();
+  }
 }
 
 function setLayer(layer, { historyMode = "push" } = {}) {
@@ -1288,15 +1537,43 @@ function setLayer(layer, { historyMode = "push" } = {}) {
   syncWorkspaceNavigation(historyMode);
 }
 
-function downloadCatalog() {
+async function downloadCatalog() {
   closeDetailsMenus();
   if (!state.catalog) {
-    showToast("No live catalog is loaded. Open a workspace first.");
+    showToast("No schema workspace is loaded. Open a workspace first.");
+    return;
+  }
+  if (isDetachedWorkspace()) {
+    try {
+      const exported = await api.exportDesign(state.activeWorkspace.id, {
+        expectedDesignRevision: state.design.revision,
+        format: "schemii_json",
+      });
+      downloadContent(exported.content, exported.fileName, exported.mediaType);
+      showToast(`Desired design revision ${exported.designRevision} downloaded.`);
+    } catch (error) {
+      errorToast(error);
+    }
     return;
   }
   const safeTarget = `${state.catalog.database}-${state.catalog.namespace}`.replace(/[^a-zA-Z0-9._-]+/g, "-");
   downloadContent(`${JSON.stringify(state.catalog, null, 2)}\n`, `${safeTarget}-catalog.json`, "application/json");
   showToast("Live catalog JSON downloaded.");
+}
+
+async function exportDesignSql() {
+  closeDetailsMenus();
+  if (!isDetachedWorkspace() || !state.design) return;
+  try {
+    const exported = await api.exportDesign(state.activeWorkspace.id, {
+      expectedDesignRevision: state.design.revision,
+      format: "postgresql_sql",
+    });
+    downloadContent(exported.content, exported.fileName, exported.mediaType);
+    showToast(`PostgreSQL SQL for design revision ${exported.designRevision} downloaded.`);
+  } catch (error) {
+    errorToast(error);
+  }
 }
 
 function bindEvents() {
@@ -1331,7 +1608,7 @@ function bindEvents() {
 
   elements.newWorkspaceButton.addEventListener("click", () => {
     openWorkspaces();
-    elements.workspaceConnection.focus();
+    elements.workspaceName.focus();
   });
   elements.connectionsButton.addEventListener("click", openConnections);
   elements.postgresButton.addEventListener("click", openConnections);
@@ -1339,6 +1616,8 @@ function bindEvents() {
   elements.refreshCatalogButton.addEventListener("click", refreshCatalog);
   elements.saveLayoutButton.addEventListener("click", saveLayoutImmediately);
   elements.downloadCatalogButton.addEventListener("click", downloadCatalog);
+  elements.exportDesignSqlButton.addEventListener("click", exportDesignSql);
+  elements.createTableButton.addEventListener("click", openDesignTableEditor);
   elements.introductionButton.addEventListener("click", () => {
     closeDetailsMenus();
     openDialog(elements.introductionDialog);
@@ -1376,10 +1655,14 @@ function bindEvents() {
 
   elements.reloadWorkspacesButton.addEventListener("click", loadWorkspaces);
   elements.workspaceConnection.addEventListener("change", updateWorkspaceDatabase);
+  elements.workspaceMode.addEventListener("change", updateWorkspaceMode);
   elements.workspaceForm.addEventListener("submit", submitWorkspace);
   elements.workspacesDialog.addEventListener("close", () => {
     state.workspaceDialogGeneration += 1;
   });
+
+  elements.addDesignColumnButton.addEventListener("click", () => appendDesignColumn());
+  elements.designTableForm.addEventListener("submit", submitDesignTable);
 
   elements.functionsButton.addEventListener("click", () => {
     renderFunctionsBrowser();

@@ -33,7 +33,7 @@
             <summary class="ui-icon-button" data-ui-icon="download" title="Download" aria-label="Download"></summary>
             <div class="ui-menu__surface">
               <button id="download-catalog-button" type="button">Download live catalog JSON</button>
-              <button type="button" data-unavailable="sql-export">Export SQL</button>
+              <button id="export-design-sql-button" type="button" disabled>Export desired schema SQL</button>
             </div>
           </details>
           <details class="ui-menu">
@@ -64,7 +64,7 @@
         </nav>
 
         <aside class="tool-rail" aria-label="Workspace tools">
-          <button type="button" data-ui-icon="tables" data-unavailable="table-create" title="Create table" aria-label="Create table"></button>
+          <button id="create-table-button" type="button" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
           <button type="button" data-ui-icon="relationship" data-unavailable="relationship-create" title="Create relationship" aria-label="Create relationship"></button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button type="button" data-ui-icon="undo" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo"></button>
@@ -101,7 +101,7 @@
           <aside class="inspector ui-dock-pane" id="inspector" aria-labelledby="table-inspector-title">
             <header class="ui-dock-pane__header">
               <button class="ui-dock-pane__toggle" id="table-inspector-toggle" type="button" aria-controls="table-inspector-body" aria-expanded="true">
-                <span class="ui-eyebrow">Read-only table inspector</span>
+                <span class="ui-eyebrow" id="table-inspector-eyebrow">Read-only table inspector</span>
                 <strong id="table-inspector-title">Table inspector</strong>
               </button>
               <div class="ui-dock-pane__actions">
@@ -117,7 +117,7 @@
                   <svg viewBox="0 0 48 48"><rect x="7" y="8" width="34" height="31" rx="4"/><path d="M7 18h34M17 18v21M30 18v21"/></svg>
                 </span>
                 <h2>Nothing selected</h2>
-                <p>Select a live table to inspect columns, constraints, indexes, triggers, and relationships.</p>
+                <p id="inspector-empty-copy">Select a live table to inspect columns, constraints, indexes, triggers, and relationships.</p>
                 <dl class="catalog-stats ui-stat-grid" id="catalog-stats"></dl>
               </div>
               <div id="inspector-content" hidden></div>
@@ -210,14 +210,29 @@
         <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button class="ui-button compact" id="reload-workspaces-button" type="button">Reload</button></div>
         <div class="manager-list" id="workspaces-list" aria-live="polite"></div>
         <form class="workspace-form" id="workspace-form">
-          <header><strong>Create workspace</strong><small>The database is taken from the selected connection.</small></header>
-          <label><span>Connection</span><select id="workspace-connection" required><option value="">Select a live connection</option></select></label>
-          <label><span>Database</span><output id="workspace-database">Select a connection</output></label>
-          <label><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" required autocomplete="off" /><button class="ui-button compact" type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
-          <div class="form-status span-3" id="workspace-form-status" aria-live="polite"></div>
+          <header><strong>Create workspace</strong><small id="workspace-form-copy">Start a database-independent schema design.</small></header>
+          <label><span>Name</span><input id="workspace-name" required maxlength="128" autocomplete="off" placeholder="Inventory design" /></label>
+          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Design only</option><option value="attached">Live PostgreSQL</option></select></label>
+          <label class="workspace-target-field" hidden><span>Connection</span><select id="workspace-connection"><option value="">Select a live connection</option></select></label>
+          <label class="workspace-target-field" hidden><span>Database</span><output id="workspace-database">Select a connection</output></label>
+          <label class="workspace-target-field" hidden><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" autocomplete="off" /><button class="ui-button compact" type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
+          <div class="form-status span-all" id="workspace-form-status" aria-live="polite"></div>
           <button class="ui-button primary" id="create-workspace-button" type="submit">Create and open</button>
         </form>
       </div>
+    </dialog>
+
+    <dialog class="ui-dialog editor-dialog design-table-dialog" id="design-table-dialog" aria-labelledby="design-table-title">
+      <form class="ui-dialog__shell" id="design-table-form">
+        <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="design-table-title">Create table</h2><p>Add a table and its initial columns. Saving replaces one exact design revision and never contacts PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close table editor"></button></header>
+        <div class="design-table-body">
+          <label class="design-table-name"><span>Table name</span><input id="design-table-name" required maxlength="63" autocomplete="off" placeholder="customers" /></label>
+          <div class="design-columns-head"><span>Columns</span><button class="ui-button compact" id="add-design-column-button" type="button">Add column</button></div>
+          <div class="design-columns" id="design-columns"></div>
+        </div>
+        <div class="form-status" id="design-table-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-table-button" type="submit">Create table</button></footer>
+      </form>
     </dialog>
 
     <dialog class="ui-dialog catalog-dialog" id="functions-dialog" aria-labelledby="functions-title">

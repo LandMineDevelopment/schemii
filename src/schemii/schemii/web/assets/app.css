@@ -247,7 +247,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .manager-actions .ui-button:hover { color: var(--accent); border-color: #675426; }
 .manager-actions .ui-button.danger-text:hover { color: #ffadb4; border-color: #773840; background: var(--danger-bg); }
 .connection-test { margin-top: 2px; padding-top: 6px; border-top: 1px solid #252d38; color: #8ca0b2 !important; white-space: normal !important; }
-.workspace-form { display: grid; grid-template-columns: 1.2fr .8fr 1fr auto; align-items: end; gap: 9px; padding: 13px 14px 15px; border-top: 1px solid var(--line); background: #11171e; }
+.workspace-form { display: grid; grid-template-columns: 1fr .75fr 1.15fr .75fr 1fr auto; align-items: end; gap: 9px; padding: 13px 14px 15px; border-top: 1px solid var(--line); background: #11171e; }
 .workspace-form header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; }
 .workspace-form header strong { font-size: 10px; }
 .workspace-form header small { color: var(--faint); font-size: 7px; }
@@ -260,11 +260,25 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .joined-control .ui-button { min-height: 36px; border-color: #394451; border-left: 0; border-radius: 0 5px 5px 0; color: #9ba8b5; font-size: 7px; }
 .span-2 { grid-column: span 2; }
 .span-3 { grid-column: span 3; }
+.span-all { grid-column: 1 / -2; }
 .form-grid { display: grid; min-height: 0; grid-template-columns: 1fr 1fr; gap: 12px; padding: 17px 18px; overflow-y: auto; }
 .check-row { display: flex !important; grid-template-columns: none; flex-direction: row; align-items: center; gap: 8px !important; padding: 9px; border: 1px solid #303946; border-radius: 5px; background: #121820; }
 .check-row input { width: 14px; height: 14px; flex: none; margin: 0; accent-color: var(--accent); }
 .form-status { min-height: 0; color: #8f9ba8; font-size: 8px; line-height: 1.5; }
 .editor-dialog .form-status { padding: 0 18px; }
+.design-table-dialog { width: min(820px, calc(100vw - 28px)); }
+.design-table-dialog > .ui-dialog__shell { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.design-table-body { display: grid; min-height: 0; gap: 13px; padding: 16px 18px; overflow-y: auto; }
+.design-table-name { display: grid; gap: 6px; color: #9aa6b4; font-size: 8px; }
+.design-table-name input, .design-column-row input { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
+.design-columns-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #9aa6b4; font-size: 8px; }
+.design-columns { display: grid; gap: 7px; }
+.design-column-row { display: grid; min-width: 0; grid-template-columns: minmax(120px, 1fr) minmax(150px, 1.25fr) auto auto auto; align-items: end; gap: 8px; padding: 9px; border: 1px solid #29333f; border-radius: 7px; background: #141a21; }
+.design-column-row > label { display: grid; min-width: 0; gap: 5px; color: #778493; font-size: 7px; }
+.design-column-row > .design-column-check { display: flex; min-height: 36px; align-items: center; gap: 5px; white-space: nowrap; }
+.design-column-check input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.design-column-remove { align-self: end; }
+.design-table-dialog .form-status { min-height: 16px; padding-bottom: 5px; }
 .compact-search { display: flex; min-width: 180px; align-items: center; gap: 7px; color: #687585; font-size: 8px; }
 .compact-search input { min-width: 0; height: 32px; flex: 1; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: #0d1218; }
 .catalog-dialog { width: min(880px, calc(100vw - 28px)); }
@@ -370,9 +384,12 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .manager-card { grid-template-columns: 1fr; }
   .manager-actions { justify-content: flex-start; }
   .workspace-form { grid-template-columns: 1fr; align-items: stretch; max-height: 42vh; overflow-y: auto; }
-  .workspace-form header, .span-3 { grid-column: 1; }
+  .workspace-form header, .span-3, .span-all { grid-column: 1; }
   .workspace-form > .ui-button { height: 42px; }
   .form-grid { grid-template-columns: 1fr; }
+  .design-column-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+  .design-column-row > label:first-child, .design-column-row > label:nth-child(2) { grid-column: span 1; }
+  .design-column-row > .design-column-check { min-height: 32px; }
   .span-2 { grid-column: span 1; }
   .compact-search { min-width: 100%; }
   .intro-grid { grid-template-columns: 1fr; }
