@@ -10,6 +10,7 @@ from cryptography.exceptions import InvalidTag
 from pydantic import SecretStr
 
 from schemii.common.metadata.crypto import CredentialCipher, EncryptedCredential
+from schemii.common.metadata.users import ensure_local_metadata_user
 
 from .models import (
     PostgresConnectionCreate,
@@ -80,19 +81,7 @@ class PostgresConnectionRepository:
         encrypted = self._encrypt(owner_id, connection_id, request.password)
         with self._transaction() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO metadata.users (id, display_name)
-                    VALUES (%s, %s)
-                    ON CONFLICT (id) DO NOTHING
-                    """,
-                    (owner_id, "Local user"),
-                )
-                cursor.execute(
-                    "SELECT id FROM metadata.users WHERE id = %s FOR UPDATE",
-                    (owner_id,),
-                )
-                cursor.fetchone()
+                ensure_local_metadata_user(cursor, owner_id)
                 cursor.execute(
                     """
                     SELECT count(*) AS connection_count

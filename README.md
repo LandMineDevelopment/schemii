@@ -46,7 +46,7 @@ The current API deliberately uses one local application user while product workf
 
 This phase has no application authentication and the Compose ingress remains bound to loopback. Remote ingress is a deployment concern. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures.
 
-Connection profiles survive application rebuilds and restarts in the deployment's private PostgreSQL volume. Passwords are accepted only by write models, represented as `SecretStr`, authenticated-encrypted before entering metadata PostgreSQL, omitted from profiles and errors, and decrypted only while opening the selected target. The persistent encryption key lives outside PostgreSQL under `.schemii/secrets`; losing that key makes stored passwords unrecoverable. Workspaces remain in memory during this implementation stage.
+Connection profiles, workspaces, optional target bindings, and table positions survive application rebuilds and restarts in the deployment's private PostgreSQL volume. Passwords are accepted only by write models, represented as `SecretStr`, authenticated-encrypted before entering metadata PostgreSQL, omitted from profiles and errors, and decrypted only while opening the selected target. The persistent encryption key lives outside PostgreSQL under `.schemii/secrets`; losing that key makes stored passwords unrecoverable.
 
 Each profile targets exactly one PostgreSQL host. TLS certificate and hostname verification (`verify-full`) is the default; weaker libpq SSL modes must be selected explicitly for environments that require them.
 
@@ -62,7 +62,7 @@ Promote a frontend implementation into the shared UI layer when multiple real pa
 
 The current catalog experience is read-only. Schema mutation, SQL execution, migration, and AI workflows remain planned contracts rather than implemented capabilities. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
-`common/metadata/factory.py` selects the durable PostgreSQL repositories when metadata deployment settings are present and retains in-memory adapters for isolated unit tests. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
+`common/metadata/factory.py` selects the durable PostgreSQL connection boundary when metadata deployment settings are present; Schemii composes its workspace repository over that same boundary. In-memory adapters remain available for isolated unit tests. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
 
 Start the local application stack with the repository launcher:
 

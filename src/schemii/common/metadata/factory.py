@@ -1,7 +1,7 @@
 """Metadata repository composition boundary."""
 
-from dataclasses import dataclass
-from typing import Mapping
+from dataclasses import dataclass, field
+from typing import Any, Callable, Mapping
 
 from schemii.common.connections.store import (
     ConnectionRepository,
@@ -19,6 +19,11 @@ class MetadataRepositories:
     connections: ConnectionRepository
     storage: str = "memory"
     durable: bool = False
+    connection_factory: Callable[[], Any] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 def create_metadata_repositories(
@@ -38,4 +43,5 @@ def create_metadata_repositories(
         connections=PostgresConnectionRepository(connection_factory, cipher),
         storage="postgresql",
         durable=True,
+        connection_factory=connection_factory,
     )

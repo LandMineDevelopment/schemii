@@ -13,6 +13,7 @@ from schemii.common.connections.store import (
     ConnectionCredentialUnreadableError,
     ConnectionStorageUnavailableError,
 )
+from schemii.common.errors import MetadataStorageUnavailableError
 
 
 class ApiProblem(RuntimeError):
@@ -125,6 +126,21 @@ def install_api_error_handlers(application: FastAPI) -> None:
             ApiProblem(
                 503,
                 "connection_storage_unavailable",
+                str(error),
+                retryable=True,
+            ),
+        )
+
+    @application.exception_handler(MetadataStorageUnavailableError)
+    async def handle_metadata_storage_error(
+        request: Request,
+        error: MetadataStorageUnavailableError,
+    ) -> JSONResponse:
+        return _response(
+            request,
+            ApiProblem(
+                503,
+                "metadata_storage_unavailable",
                 str(error),
                 retryable=True,
             ),

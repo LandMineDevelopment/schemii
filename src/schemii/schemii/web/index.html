@@ -206,7 +206,7 @@
 
     <dialog class="ui-dialog manager-dialog" id="workspaces-dialog" aria-labelledby="workspaces-title">
       <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small>Live catalog targets</small><h2 id="workspaces-title">Workspaces</h2><p>Each workspace binds one connection, database, and PostgreSQL namespace for this server process.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>
+        <header class="ui-dialog__head"><div><small>Saved schema work</small><h2 id="workspaces-title">Workspaces</h2><p>Workspaces are saved by this server and may be detached designs or exact PostgreSQL catalog targets.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>
         <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button class="ui-button compact" id="reload-workspaces-button" type="button">Reload</button></div>
         <div class="manager-list" id="workspaces-list" aria-live="polite"></div>
         <form class="workspace-form" id="workspace-form">
@@ -246,7 +246,7 @@
           <article><span>03</span><h3>Inspect</h3><p>Drag table cards, follow foreign-key lines, inspect database objects, and browse view or routine definitions.</p></article>
           <article><span>04</span><h3>Recover</h3><p>If a layout revision conflicts, local positions remain on screen until you explicitly reload the server layout.</p></article>
         </div>
-        <div class="runtime-note"><strong>Process-scoped storage</strong><span>The active API reports in-memory persistence. Connections, workspaces, and layouts do not survive a server restart.</span></div>
+        <div class="runtime-note"><strong>Durable server storage</strong><span>Connections, workspaces, and layouts survive application rebuilds and restarts. Live catalogs are still read directly from PostgreSQL.</span></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-close-dialog>Start exploring</button></footer>
       </div>
     </dialog>

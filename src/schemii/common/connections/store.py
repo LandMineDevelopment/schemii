@@ -9,6 +9,8 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
+from schemii.common.errors import MetadataStorageUnavailableError
+
 from .models import (
     PostgresConnectionCreate,
     PostgresConnectionMetadata,
@@ -44,7 +46,10 @@ class ConnectionLimitError(ConnectionRepositoryError):
         super().__init__("The PostgreSQL connection limit has been reached")
 
 
-class ConnectionStorageUnavailableError(ConnectionRepositoryError):
+class ConnectionStorageUnavailableError(
+    ConnectionRepositoryError,
+    MetadataStorageUnavailableError,
+):
     """Durable connection metadata cannot currently be read or changed."""
 
 

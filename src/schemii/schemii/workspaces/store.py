@@ -7,6 +7,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
+from schemii.common.errors import MetadataStorageUnavailableError
+
 from .models import (
     SchemiiWorkspace,
     SchemiiWorkspaceCreate,
@@ -40,6 +42,13 @@ class WorkspaceLimitError(WorkspaceRepositoryError):
         self.category = category
         self.limit = limit
         super().__init__(f"The Schemii {category} limit has been reached")
+
+
+class WorkspaceStorageUnavailableError(
+    WorkspaceRepositoryError,
+    MetadataStorageUnavailableError,
+):
+    """Durable workspace metadata cannot currently be read or changed."""
 
 
 @runtime_checkable

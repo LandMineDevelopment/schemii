@@ -220,7 +220,14 @@ function connectionById(id) {
 }
 
 function workspaceLabel(workspace) {
-  return `${workspace.database} · ${workspace.namespace}`;
+  return workspace.connectionId
+    ? `${workspace.database} · ${workspace.namespace}`
+    : workspace.name;
+}
+
+function workspaceTargetLabel(workspace) {
+  if (!workspace.connectionId) return "Detached design";
+  return connectionById(workspace.connectionId)?.name || workspace.connectionId;
 }
 
 function updateHeader() {
@@ -238,7 +245,7 @@ function updateHeader() {
   } else {
     elements.runtimeDot.classList.add("ready");
     if (state.layoutConflict) elements.runtimeStatus.textContent = "Layout saving stopped · conflict";
-    else if (state.layoutSaving) elements.runtimeStatus.textContent = "Saving layout to server memory";
+    else if (state.layoutSaving) elements.runtimeStatus.textContent = "Saving layout";
     else if (state.catalogLoading) elements.runtimeStatus.textContent = "Loading live catalog";
     else elements.runtimeStatus.textContent = `Ready · ${state.readiness.persistence}`;
   }
@@ -447,7 +454,7 @@ function fillConnectionForm(connection = null) {
   elements.connectionEditorTitle.textContent = connection ? "Edit connection" : "New connection";
   elements.connectionEditorCopy.textContent = connection
     ? "Password is never returned. Leave it empty to retain the currently stored credential."
-    : "Enter connection metadata for the active server process.";
+    : "Save a reusable PostgreSQL target on this server.";
   elements.connectionName.value = connection?.name || "";
   elements.connectionHost.value = connection?.host || "";
   elements.connectionPort.value = connection?.port ?? 5432;
@@ -598,7 +605,7 @@ function askConfirmation({ title, message, label, callback }) {
 function confirmDeleteConnection(connection) {
   askConfirmation({
     title: "Delete connection",
-    message: `Delete “${connection.name}” from the active server process? Workspaces using it will block this request.`,
+    message: `Delete “${connection.name}” from this server? Saved workspaces using it will block this request.`,
     label: "Delete connection",
     callback: async () => {
       try {
@@ -675,11 +682,10 @@ function renderWorkspaces() {
   for (const workspace of state.workspaces) {
     const current = workspace.id === state.activeWorkspace?.id;
     const card = element("article", { className: `manager-card${current ? " current" : ""}` });
-    const connection = connectionById(workspace.connectionId);
     const copy = element("div");
     copy.append(
       element("strong", { text: workspaceLabel(workspace) }),
-      element("p", { text: connection ? connection.name : workspace.connectionId }),
+      element("p", { text: workspaceTargetLabel(workspace) }),
       element("small", { text: `revision ${workspace.revision} · updated ${formatTimestamp(workspace.updatedAt)}` }),
     );
     const actions = element("div", { className: "manager-actions ui-action-group end wrap" });
@@ -740,7 +746,7 @@ async function submitWorkspace(event) {
 function confirmDeleteWorkspace(workspace) {
   askConfirmation({
     title: "Delete workspace",
-    message: `Delete the ${workspace.database} · ${workspace.namespace} workspace and its saved layout from this server process?`,
+    message: `Delete the ${workspaceLabel(workspace)} workspace and its saved layout from this server?`,
     label: "Delete workspace",
     callback: async () => {
       try {
@@ -1038,7 +1044,7 @@ async function saveLayoutImmediately() {
   state.layoutError = null;
   state.layoutVersion += 1;
   await saveLayout();
-  if (!state.layoutDirty && !state.layoutError && !state.layoutConflict) showToast("Layout saved to server memory.");
+  if (!state.layoutDirty && !state.layoutError && !state.layoutConflict) showToast("Layout saved.");
 }
 
 function renderCatalogSurfaces() {

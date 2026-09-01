@@ -26,6 +26,7 @@ from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
     WorkspaceRepository,
 )
+from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepository
 from schemii.schemoo.routes import router as schemoo_router
 
 
@@ -39,7 +40,11 @@ class ApplicationServices:
 
 def create_services() -> ApplicationServices:
     metadata = create_metadata_repositories()
-    workspaces = InMemoryWorkspaceRepository()
+    workspaces: WorkspaceRepository = (
+        PostgresWorkspaceRepository(metadata.connection_factory)
+        if metadata.connection_factory is not None
+        else InMemoryWorkspaceRepository()
+    )
     connections = ConnectionService(metadata.connections, (workspaces,))
     return ApplicationServices(
         metadata=metadata,
