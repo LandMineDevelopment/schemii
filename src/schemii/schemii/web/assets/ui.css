@@ -22,6 +22,8 @@
   --shadow-popup: 0 16px 42px rgba(0, 0, 0, .55);
   --shadow-dialog: 0 22px 70px rgba(0, 0, 0, .55);
   --pane-header-height: 52px;
+  --ui-visual-viewport-height: 100vh;
+  --ui-visual-viewport-center-y: 50vh;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -128,7 +130,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .ui-dock-pane[data-ui-dock-state="dismissed"] { visibility: hidden; opacity: 0; pointer-events: none; transform: translate3d(var(--ui-dock-dismiss-x, 100%), var(--ui-dock-dismiss-y, 0), 0); transition: visibility 0s .26s, opacity .2s ease-out, transform .26s cubic-bezier(.22, 1, .36, 1); }
 .ui-dock-pane[data-ui-dock-side="left"] { --ui-dock-dismiss-x: -100%; }
 
-.ui-dialog { width: min(760px, calc(100vw - 28px)); max-height: min(820px, calc(100vh - 28px)); padding: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 10px; color: var(--text); background: #10151c; box-shadow: var(--shadow-dialog); }
+.ui-dialog { position: fixed; top: var(--ui-visual-viewport-center-y); right: 0; bottom: auto; left: 0; width: min(760px, calc(100vw - 28px)); max-height: min(820px, calc(var(--ui-visual-viewport-height) - 28px)); margin: 0 auto; padding: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 10px; color: var(--text); background: #10151c; box-shadow: var(--shadow-dialog); transform: translateY(-50%); }
 .ui-dialog::backdrop { background: rgba(4, 6, 9, .76); backdrop-filter: blur(3px); }
 .ui-dialog__shell { display: grid; min-width: 0; max-height: inherit; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; }
 .ui-dialog__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 17px 18px 14px; border-bottom: 1px solid var(--line); background: #121820; }
@@ -136,7 +138,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .ui-dialog__head small { color: var(--faint); font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .14em; }
 .ui-dialog__head h2 { margin: 0; color: #edf1f5; font-size: 17px; }
 .ui-dialog__head p { max-width: 580px; margin: 3px 0 0; color: #747f8d; font-size: 9px; line-height: 1.5; }
-.ui-dialog__actions { display: flex; min-height: 54px; align-items: center; justify-content: flex-end; gap: 7px; padding: 10px 14px; border-top: 1px solid var(--line); background: #11171e; }
+.ui-dialog__actions { display: flex; min-height: 54px; align-items: center; justify-content: flex-end; gap: 7px; padding: 10px 14px max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: #11171e; }
 .ui-dialog__actions > .ui-button { min-height: 32px; font-size: 8px; }
 .ui-dialog__actions > .ui-button:first-child[hidden] + .ui-button { margin-left: auto; }
 
@@ -149,7 +151,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
   .ui-button.compact { min-height: 40px; }
   .ui-icon-button { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
   .ui-icon-button.compact { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
-  .ui-dialog { width: calc(100vw - 14px); max-height: calc(100vh - 14px); }
+  .ui-dialog { width: calc(100vw - 14px); max-height: calc(var(--ui-visual-viewport-height) - 14px); }
   .ui-dialog__head { padding: 14px; }
   .ui-dialog__head > .ui-icon-button { flex: none; }
   .ui-dialog__actions > .ui-button { min-height: 40px; }

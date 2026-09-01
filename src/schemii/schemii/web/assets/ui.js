@@ -297,9 +297,36 @@ export function isOverflowingText(target) {
   return target.scrollWidth > target.clientWidth || target.scrollHeight > target.clientHeight;
 }
 
+export function installVisualViewportSizing(documentRef = document) {
+  const windowRef = documentRef.defaultView;
+  const style = documentRef.documentElement?.style;
+  if (!windowRef || !style) return Object.freeze({ destroy() {} });
+  const visualViewport = windowRef.visualViewport;
+  const update = () => {
+    const height = visualViewport?.height || windowRef.innerHeight;
+    const offsetTop = visualViewport?.offsetTop || 0;
+    style.setProperty("--ui-visual-viewport-height", `${height}px`);
+    style.setProperty("--ui-visual-viewport-center-y", `${offsetTop + height / 2}px`);
+  };
+  update();
+  windowRef.addEventListener("resize", update);
+  visualViewport?.addEventListener("resize", update);
+  visualViewport?.addEventListener("scroll", update);
+  return Object.freeze({
+    destroy() {
+      windowRef.removeEventListener("resize", update);
+      visualViewport?.removeEventListener("resize", update);
+      visualViewport?.removeEventListener("scroll", update);
+      style.removeProperty("--ui-visual-viewport-height");
+      style.removeProperty("--ui-visual-viewport-center-y");
+    },
+  });
+}
+
 export function initializeUi(root = document) {
   hydrateIconControls(root);
   const documentRef = root.ownerDocument || root;
+  const viewportSizing = installVisualViewportSizing(documentRef);
   const tooltip = createTooltipController(documentRef);
   let touchHideTimer = null;
   const resolveTarget = (target, { touch = false } = {}) => {
@@ -351,6 +378,7 @@ export function initializeUi(root = document) {
   const menus = [...root.querySelectorAll(".ui-menu")].map(installDetailsMenu);
   return Object.freeze({
     destroy() {
+      viewportSizing.destroy();
       menus.forEach(menu => menu.destroy());
       documentRef.removeEventListener("pointerover", onPointerOver);
       documentRef.removeEventListener("pointerout", onPointerOut);

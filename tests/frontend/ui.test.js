@@ -7,6 +7,7 @@ import {
   DockPane,
   ICONS,
   installDetailsMenu,
+  installVisualViewportSizing,
   isOverflowingText,
   renderStatePanel,
   setControlLoading,
@@ -110,6 +111,47 @@ test("overflow detection covers clipped inline and wrapped text", () => {
   assert.equal(isOverflowingText({ clientWidth: 100, scrollWidth: 100, clientHeight: 20, scrollHeight: 21 }), true);
   assert.equal(isOverflowingText({ clientWidth: 100, scrollWidth: 100, clientHeight: 20, scrollHeight: 20 }), false);
   assert.equal(isOverflowingText(null), false);
+});
+
+test("dialog viewport sizing follows the actually visible mobile viewport", () => {
+  const listeners = new Map();
+  const visualListeners = new Map();
+  const values = new Map();
+  const windowRef = {
+    innerHeight: 800,
+    addEventListener(type, callback) { listeners.set(type, callback); },
+    removeEventListener(type) { listeners.delete(type); },
+    visualViewport: {
+      height: 620,
+      offsetTop: 18,
+      addEventListener(type, callback) { visualListeners.set(type, callback); },
+      removeEventListener(type) { visualListeners.delete(type); },
+    },
+  };
+  const documentRef = {
+    defaultView: windowRef,
+    documentElement: {
+      style: {
+        setProperty(name, value) { values.set(name, value); },
+        removeProperty(name) { values.delete(name); },
+      },
+    },
+  };
+
+  const sizing = installVisualViewportSizing(documentRef);
+  assert.equal(values.get("--ui-visual-viewport-height"), "620px");
+  assert.equal(values.get("--ui-visual-viewport-center-y"), "328px");
+
+  windowRef.visualViewport.height = 540;
+  windowRef.visualViewport.offsetTop = 30;
+  visualListeners.get("resize")();
+  assert.equal(values.get("--ui-visual-viewport-height"), "540px");
+  assert.equal(values.get("--ui-visual-viewport-center-y"), "300px");
+
+  sizing.destroy();
+  assert.equal(values.size, 0);
+  assert.equal(listeners.size, 0);
+  assert.equal(visualListeners.size, 0);
 });
 
 test("shared state panels own stable mark and variant markup", () => {
