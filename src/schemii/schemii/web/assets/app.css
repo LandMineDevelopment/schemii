@@ -277,16 +277,16 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .view-step-participant > header code { color: #7b8794; font: 6px ui-monospace, monospace; }
 .view-step-columns { display: grid; min-width: 0; align-content: center; }
 .view-step-columns > p { margin: auto 0; color: #667382; font-size: 7px; }
-.view-step-column { display: grid; width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px 9px; padding: 7px 9px; border-bottom: 1px solid #28333e; background: #0f161d; transition: background .15s ease, border-color .15s ease; }
+.view-step-column { --view-output-width: 160px; --view-role-width: 58px; display: grid; width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr) var(--view-role-width); align-items: center; gap: 7px 9px; padding: 7px 9px; border-bottom: 1px solid #28333e; background: #0f161d; transition: background .15s ease, border-color .15s ease; }
 .view-step-column:last-child { border-bottom: 0; }
 .view-step-column.filter-only { border-bottom-style: dashed; border-color: #806a37; background: #1b180f; }
 .view-step-column.lineage-active { border-color: var(--view-accent); background: color-mix(in srgb, var(--view-accent) 12%, #111820); box-shadow: inset 3px 0 var(--view-accent); }
 .view-step-column-roles { display: flex; min-width: 0; justify-content: flex-end; flex-wrap: wrap; gap: 3px; }
-.view-step-column-roles:empty { display: none; }
+.view-step-column-roles:empty { visibility: hidden; }
 .view-step-column i { padding: 2px 4px; border: 1px solid #35414d; border-radius: 999px; color: #8492a0; font: normal 5.5px ui-monospace, monospace; text-transform: uppercase; }
 .view-step-column i.filter-only { border-color: #806a37; color: #d7b45c; background: #251e0e; }
 .view-step-column-select { display: grid; min-width: 0; gap: 4px; }
-.view-step-column-select-line { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) 18px auto; align-items: center; gap: 5px; }
+.view-step-column-select-line { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) 18px var(--view-output-width); align-items: center; gap: 5px; }
 .view-step-column-select-line.no-type { grid-template-columns: minmax(0, 1fr) 18px auto; }
 .view-step-column-select-line > .view-colored-expression { overflow: hidden; color: #a8b2bd; text-overflow: ellipsis; white-space: nowrap; }
 .view-step-column-select-arrow { display: grid; place-items: center; color: #a98ae6; font: 800 10px/1 ui-monospace, monospace; }
@@ -652,17 +652,18 @@ button.view-step-output:hover { background: #131a23; }
   .view-query-operation::before, .view-query-result::before { left: -17px; }
   .view-query-card-head, .view-query-result-head { grid-template-columns: auto minmax(0, 1fr); }
   .view-query-card-head > code, .view-query-result-head > code { max-width: none; grid-column: 2; }
-  .view-step-participant { grid-template-columns: 78px minmax(0, 1fr); }
+  .view-step-participant { grid-template-columns: 64px minmax(0, 1fr); }
   .view-step-participant > header { padding: 6px; }
-  .view-step-column { grid-template-columns: minmax(0, 1fr) auto; gap: 3px 7px; padding: 7px; }
+  .view-step-column { --view-output-width: 72px; --view-role-width: 50px; grid-template-columns: minmax(0, 1fr) var(--view-role-width); gap: 3px 5px; padding: 7px; }
   .view-step-column-roles { align-self: center; }
-  .view-step-column-select-line { grid-template-columns: auto minmax(0, 1fr) 14px auto; gap: 2px; }
+  .view-step-column-select-line { grid-template-columns: auto minmax(0, 1fr) 14px var(--view-output-width); gap: 1px; }
   .view-step-column-select-line.no-type { grid-template-columns: minmax(0, 1fr) 14px auto; }
-  .view-step-column-select-line > div { max-width: 90px; gap: 3px; }
+  .view-step-column-select-line > div { max-width: var(--view-output-width); gap: 3px; }
+  .view-step-column-select-line strong { font-size: 7px; }
   .view-step-column-select-line > div small { display: none; }
-  .view-step-column-type { max-width: 48px; padding-inline: 3px; font-size: 5px; }
+  .view-step-column-type { max-width: 36px; padding-inline: 3px; font-size: 5px; }
   .view-step-column-source-line { grid-template-columns: auto minmax(0, 1fr); gap: 3px; }
-  .view-step-unbound-select { grid-template-columns: 78px minmax(0, 1fr); }
+  .view-step-unbound-select { grid-template-columns: 64px minmax(0, 1fr); }
   .view-step-logic-grid { grid-template-columns: 1fr; gap: 6px; padding: 0 7px 7px; }
   .view-query-result { margin-left: 7px; }
   .view-step-outputs { grid-template-columns: 1fr; }
