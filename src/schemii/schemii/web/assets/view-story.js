@@ -142,11 +142,20 @@ function coloredExpression(expression, step) {
   return code;
 }
 
-function selectProjectionLine(mapping, step) {
+function sourceType(dataType) {
+  return element("small", {
+    className: `view-step-column-type${dataType ? "" : " unresolved"}`,
+    text: dataType || "?",
+    title: dataType ? `Source type · ${dataType}` : "Source type unresolved",
+  });
+}
+
+function selectProjectionLine(mapping, step, dataType = null) {
   const line = element("div", {
-    className: "view-step-column-select-line",
+    className: `view-step-column-select-line${dataType ? "" : " no-type"}`,
     title: `${mapping.expression} → ${mapping.alias}`,
   });
+  if (dataType) line.append(sourceType(dataType));
   line.append(
     coloredExpression(mapping.expression, step),
     element("span", {
@@ -191,13 +200,17 @@ function participantRow(participant, index, selectedKeys, step) {
       className: `view-step-column${column.filterOnly ? " filter-only" : ""}${[...identityKeys].some(key => selectedKeys.has(key)) ? " lineage-active" : ""}`,
       title: `${participant.reference}.${column.name} · ${column.dataType || "type unresolved"} · ${(column.roles || []).map(role => USE_LABELS[role] || role).join(", ")}${projections.length ? ` · ${projections.map(mapping => `${mapping.expression} → ${mapping.alias}`).join("; ")}` : ""}`,
     });
-    const source = element("div", { className: "view-step-column-source" });
-    source.append(element("strong", { text: column.name }));
-    if (column.dataType) source.append(element("code", { text: column.dataType }));
-    card.append(source);
-
     const select = element("div", { className: "view-step-column-select" });
-    projections.forEach(mapping => select.append(selectProjectionLine(mapping, step)));
+    if (projections.length) {
+      projections.forEach(mapping => select.append(selectProjectionLine(mapping, step, column.dataType)));
+    } else {
+      const source = element("div", { className: "view-step-column-source-line" });
+      source.append(
+        sourceType(column.dataType),
+        coloredExpression(`${participant.reference}.${column.name}`, step),
+      );
+      select.append(source);
+    }
     card.append(select);
 
     const roles = element("span", { className: "view-step-column-roles" });
