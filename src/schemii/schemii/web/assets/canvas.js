@@ -12,24 +12,113 @@ function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-function columnBadges(table, foreignColumns, columnName) {
-  const labels = [];
-  const primary = table.primaryKey?.columns?.includes(columnName);
-  const unique = table.uniqueConstraints?.some(key => key.columns.includes(columnName));
-  const foreign = foreignColumns.has(`${table.name}\u0000${columnName}`);
-  if (primary) labels.push("Primary key");
-  if (unique) labels.push("Unique key");
-  if (foreign) labels.push("Foreign key");
+function namesLabel(singular, plural, names) {
+  if (names.length === 1) return `${singular}: ${names[0]}`;
+  return `${names.length} ${plural}: ${names.join(", ")}`;
+}
+
+export function columnBadgeDescriptors(table, foreignKeys, columnName) {
+  const descriptors = [];
+  if (table.primaryKey?.columns?.includes(columnName)) {
+    descriptors.push({
+      kind: "primary",
+      label: table.primaryKey.name ? `Primary key: ${table.primaryKey.name}` : "Primary key",
+      count: 1,
+    });
+  }
+  const unique = (table.uniqueConstraints || []).filter(key => key.columns.includes(columnName));
+  const singleUnique = unique.filter(key => key.columns.length === 1).map(key => key.name || "Unnamed unique key");
+  const compositeUnique = unique.filter(key => key.columns.length > 1).map(key => key.name || "Unnamed unique key");
+  if (singleUnique.length) descriptors.push({
+    kind: "unique",
+    label: namesLabel("Unique key", "unique keys", singleUnique),
+    count: singleUnique.length,
+  });
+  if (compositeUnique.length) descriptors.push({
+    kind: "composite-unique",
+    label: namesLabel("Composite unique key", "composite unique keys", compositeUnique),
+    count: compositeUnique.length,
+  });
+  if (foreignKeys?.single?.length) descriptors.push({
+    kind: "foreign",
+    label: namesLabel("Foreign key", "foreign keys", foreignKeys.single),
+    count: foreignKeys.single.length,
+  });
+  if (foreignKeys?.composite?.length) descriptors.push({
+    kind: "composite-foreign",
+    label: namesLabel("Composite foreign key", "composite foreign keys", foreignKeys.composite),
+    count: foreignKeys.composite.length,
+  });
+  return descriptors;
+}
+
+function svgElement(tagName, attributes = {}) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tagName);
+  for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, String(value));
+  return node;
+}
+
+function keySymbol({ composite = false } = {}) {
+  const svg = svgElement("svg", { viewBox: composite ? "0 0 19 16" : "0 0 16 16", "aria-hidden": "true" });
+  const appendKey = (parent, transform = null) => {
+    const group = transform ? svgElement("g", { transform }) : parent;
+    group.append(
+      svgElement("circle", { cx: "5", cy: "7", r: composite ? "2.6" : "3" }),
+      svgElement("path", { d: composite ? "m7.2 8.3 4.5 3.7M9.3 10l1.3-1.3" : "m7.5 8.5 5 4M10 10.5l1.5-1.5" }),
+    );
+    if (transform) parent.append(group);
+  };
+  if (composite) {
+    appendKey(svg, "translate(0 -1.5)");
+    appendKey(svg, "translate(4 2)");
+  } else appendKey(svg);
+  return svg;
+}
+
+function uniqueSymbol({ composite = false } = {}) {
+  const svg = svgElement("svg", { viewBox: "0 0 12 12", "aria-hidden": "true" });
+  svg.append(svgElement("path", composite
+    ? { d: "M3.5 2v5.5a2.5 2.5 0 0 0 5 0V2" }
+    : { d: "M6 1.5 10.5 6 6 10.5 1.5 6Z" }));
+  return svg;
+}
+
+function badgeSymbol(descriptor) {
+  const badge = element("span", {
+    className: `column-symbol ${descriptor.kind}`,
+    attrs: { "aria-hidden": "true" },
+    dataset: { uiTooltip: descriptor.label, uiTooltipTouch: "" },
+  });
+  badge.append(descriptor.kind.includes("unique")
+    ? uniqueSymbol({ composite: descriptor.kind === "composite-unique" })
+    : keySymbol({ composite: descriptor.kind === "composite-foreign" }));
+  if (descriptor.count > 1) badge.append(element("span", { className: "column-symbol-count", text: descriptor.count }));
+  return badge;
+}
+
+function columnBadges(table, foreignKeys, columnName) {
+  const descriptors = columnBadgeDescriptors(table, foreignKeys, columnName);
   const badges = element("span", {
     className: "column-badges",
-    attrs: { "aria-label": labels.join(", ") || "No key constraints" },
-    dataset: labels.length ? { uiTooltip: labels.join(" · "), uiTooltipTouch: "" } : {},
+    attrs: { role: "img", "aria-label": descriptors.map(descriptor => descriptor.label).join("; ") || "No key constraints" },
   });
-  if (primary) badges.append(element("span", { className: "pk", text: "PK" }));
-  if (unique) badges.append(element("span", { className: "uq", text: "UQ" }));
-  if (foreign) badges.append(element("span", { className: "fk", text: "FK" }));
-  if (!badges.childElementCount) badges.append(element("span", { text: "·" }));
+  badges.append(...descriptors.map(badgeSymbol));
+  if (!badges.childElementCount) badges.append(element("span", { className: "column-symbol-empty", text: "·", attrs: { "aria-hidden": "true" } }));
   return badges;
+}
+
+function foreignKeysByColumn(relationships) {
+  const result = new Map();
+  for (const relationship of relationships) {
+    const kind = relationship.sourceColumns.length > 1 ? "composite" : "single";
+    for (const columnName of relationship.sourceColumns) {
+      const key = `${relationship.sourceTable}\u0000${columnName}`;
+      const value = result.get(key) || { single: [], composite: [] };
+      value[kind].push(relationship.name || "Unnamed foreign key");
+      result.set(key, value);
+    }
+  }
+  return result;
 }
 
 function initialPositions(tables) {
@@ -160,8 +249,7 @@ export class CatalogCanvas {
     this.cards.clear();
     this.columnRows.clear();
     if (!this.catalog) return;
-    const foreignColumns = new Set(this.catalog.relationships.flatMap(relationship =>
-      relationship.sourceColumns.map(column => `${relationship.sourceTable}\u0000${column}`)));
+    const foreignKeys = foreignKeysByColumn(this.catalog.relationships);
     for (const table of this.catalog.tables) {
       const card = element("article", {
         className: `table-card${table.name === this.selectedName ? " selected" : ""}`,
@@ -193,7 +281,7 @@ export class CatalogCanvas {
           dataset: { tableName: table.name, columnName: column.name },
         });
         row.append(
-          columnBadges(table, foreignColumns, column.name),
+          columnBadges(table, foreignKeys.get(`${table.name}\u0000${column.name}`), column.name),
           element("span", { text: column.name }),
           element("code", { text: column.dataType }),
         );

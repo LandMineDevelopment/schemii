@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CatalogCanvas } from "../../src/schemii/schemii/web/assets/canvas.js";
+import { CatalogCanvas, columnBadgeDescriptors } from "../../src/schemii/schemii/web/assets/canvas.js";
 
 class ClassList {
   values = new Set();
@@ -487,4 +487,29 @@ test("key mode preserves ordered same-table graphical column selection", () => {
   assert.equal(canvas.canvas.classList.contains("key-mode"), false);
   assert.equal(tenantRow.attributes.has("role"), false);
   assert.equal(otherTableRow.classList.contains("key-invalid"), false);
+});
+
+test("column symbols distinguish primary, unique, composite, and foreign roles", () => {
+  const table = {
+    primaryKey: { name: "orders_pkey", columns: ["tenant_id"] },
+    uniqueConstraints: [
+      { name: "orders_number_key", columns: ["number"] },
+      { name: "orders_tenant_number_key", columns: ["tenant_id", "number"] },
+      { name: "orders_tenant_external_key", columns: ["tenant_id", "external_id"] },
+    ],
+  };
+
+  assert.deepEqual(columnBadgeDescriptors(table, {
+    single: ["orders_tenant_fkey"],
+    composite: ["orders_account_fkey", "orders_region_fkey"],
+  }, "tenant_id"), [
+    { kind: "primary", label: "Primary key: orders_pkey", count: 1 },
+    { kind: "composite-unique", label: "2 composite unique keys: orders_tenant_number_key, orders_tenant_external_key", count: 2 },
+    { kind: "foreign", label: "Foreign key: orders_tenant_fkey", count: 1 },
+    { kind: "composite-foreign", label: "2 composite foreign keys: orders_account_fkey, orders_region_fkey", count: 2 },
+  ]);
+  assert.deepEqual(columnBadgeDescriptors(table, null, "number"), [
+    { kind: "unique", label: "Unique key: orders_number_key", count: 1 },
+    { kind: "composite-unique", label: "Composite unique key: orders_tenant_number_key", count: 1 },
+  ]);
 });
