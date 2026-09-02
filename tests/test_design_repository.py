@@ -33,6 +33,7 @@ CHECK = "check_" + "f" * 32
 INDEX = "index_" + "7" * 32
 VIEW = "view_" + "8" * 32
 ROUTINE = "function_" + "9" * 32
+TRIGGER = "trigger_" + "6" * 32
 
 
 def content() -> SchemiiDesignContent:
@@ -324,6 +325,103 @@ def test_routine_export_uses_derived_identity_signature() -> None:
     )
 
     assert 'DROP FUNCTION IF EXISTS "format_name"(text, text) CASCADE;' in exported.content
+
+
+def test_trigger_metadata_is_rederived_and_exported_after_its_dependencies() -> None:
+    document = content().model_dump(mode="json", by_alias=True)
+    document["functions"].append(
+        {
+            "id": ROUTINE,
+            "definition": "CREATE FUNCTION touch_account() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+        }
+    )
+    document["triggers"].append(
+        {
+            "id": TRIGGER,
+            "name": "stale",
+            "relationName": "stale",
+            "timing": "after",
+            "events": ["insert"],
+            "orientation": "statement",
+            "functionName": "stale",
+            "constraint": False,
+            "deferrable": False,
+            "initiallyDeferred": False,
+            "definition": 'CREATE TRIGGER account_touch BEFORE UPDATE OF email ON "user ""account""" FOR EACH ROW EXECUTE FUNCTION touch_account()',
+        }
+    )
+    parsed = SchemiiDesignContent.model_validate(document)
+
+    trigger = parsed.triggers[0]
+    assert trigger.name == "account_touch"
+    assert trigger.relation_name == 'user "account"'
+    assert trigger.timing == "before"
+    assert trigger.events == ["update"]
+    assert trigger.orientation == "row"
+    assert trigger.function_name == "touch_account"
+    assert trigger.referenced_columns == ["email"]
+    assert authored_content_document(parsed)["triggers"] == [
+        {"id": TRIGGER, "definition": trigger.definition}
+    ]
+
+    repository = InMemoryDesignRepository()
+    design = repository.replace(
+        OWNER,
+        WORKSPACE,
+        SchemiiDesignReplace(expected_design_revision=0, content=parsed),
+    )
+    exported = export_design(
+        design,
+        SchemiiDesignExportRequest(
+            expected_design_revision=1,
+            format="postgresql_sql",
+            include_drop_statements=True,
+        ),
+    )
+
+    assert 'DROP TRIGGER IF EXISTS "account_touch" ON "user ""account""" CASCADE;' in exported.content
+    assert exported.content.index("CREATE FUNCTION touch_account") < exported.content.index("CREATE TRIGGER account_touch")
+
+
+def test_trigger_validation_rejects_missing_targets_columns_and_invalid_routines() -> None:
+    base = content().model_dump(mode="json", by_alias=True)
+    base["triggers"] = [
+        {
+            "id": TRIGGER,
+            "definition": "CREATE TRIGGER account_touch BEFORE UPDATE OF missing ON missing_table FOR EACH ROW EXECUTE FUNCTION touch_account()",
+        }
+    ]
+    missing_target = SchemiiDesignContent.model_validate(base)
+    with pytest.raises(DesignValidationError, match="target a table or view"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=missing_target),
+        )
+
+    base["triggers"][0]["definition"] = 'CREATE TRIGGER account_touch BEFORE UPDATE OF missing ON "user ""account""" FOR EACH ROW EXECUTE FUNCTION touch_account()'
+    missing_column = SchemiiDesignContent.model_validate(base)
+    with pytest.raises(DesignValidationError, match="column references"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=missing_column),
+        )
+
+    base["triggers"][0]["definition"] = 'CREATE TRIGGER account_touch BEFORE UPDATE OF email ON "user ""account""" FOR EACH ROW EXECUTE FUNCTION touch_account()'
+    base["functions"] = [
+        {
+            "id": ROUTINE,
+            "definition": "CREATE FUNCTION touch_account() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
+        }
+    ]
+    wrong_function = SchemiiDesignContent.model_validate(base)
+    with pytest.raises(DesignValidationError, match="returning trigger"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=wrong_function),
+        )
 
 
 def test_legacy_materialized_population_intent_migrates_and_exports_explicitly() -> None:

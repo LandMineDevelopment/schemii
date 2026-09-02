@@ -14,6 +14,10 @@ from schemii.common.postgres.routine_analysis import (
     RoutineDefinitionError,
     analyze_routine_definition,
 )
+from schemii.common.postgres.trigger_analysis import (
+    TriggerDefinitionError,
+    analyze_trigger_definition,
+)
 from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
 
 from .export import export_design
@@ -27,6 +31,8 @@ from .models import (
     SchemiiDesignReplace,
     DesignRoutineAnalysis,
     DesignRoutineAnalysisRequest,
+    DesignTriggerAnalysis,
+    DesignTriggerAnalysisRequest,
     DesignViewAnalysis,
     DesignViewAnalysisRequest,
 )
@@ -177,6 +183,45 @@ def analyze_workspace_routine(
             "identityArguments": contract.identity_arguments,
             "returnType": contract.return_type,
             "language": contract.language,
+        }
+    )
+
+
+@router.post("/design/trigger-analysis", response_model=DesignTriggerAnalysis)
+def analyze_workspace_trigger(
+    workspace_id: str,
+    body: DesignTriggerAnalysisRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignTriggerAnalysis:
+    """Derive a trigger contract from SQL without saving or contacting PostgreSQL."""
+
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        contract = analyze_trigger_definition(body.definition)
+    except TriggerDefinitionError as error:
+        raise ApiProblem(
+            422,
+            "invalid_trigger_definition",
+            str(error),
+            details={"reason": error.code},
+        ) from error
+    return DesignTriggerAnalysis.model_validate(
+        {
+            "name": contract.name,
+            "relationName": contract.relation_name,
+            "timing": contract.timing,
+            "events": list(contract.events),
+            "orientation": contract.orientation,
+            "functionName": contract.function_name,
+            "functionArguments": list(contract.function_arguments),
+            "updateColumns": list(contract.update_columns),
+            "referencedColumns": list(contract.referenced_columns),
+            "whenExpression": contract.when_expression,
+            "transitionRelations": list(contract.transition_relations),
+            "constraint": contract.constraint,
+            "deferrable": contract.deferrable,
+            "initiallyDeferred": contract.initially_deferred,
         }
     )
 

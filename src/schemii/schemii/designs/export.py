@@ -27,6 +27,10 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
         "",
     ]
     if include_drops:
+        for trigger in reversed(content.triggers):
+            lines.append(
+                f"DROP TRIGGER IF EXISTS {_quote(trigger.name)} ON {_quote(trigger.relation_name)} CASCADE;"
+            )
         for view in reversed(content.views):
             kind = "MATERIALIZED VIEW" if view.kind == "materialized_view" else "VIEW"
             lines.append(f"DROP {kind} IF EXISTS {_quote(view.name)} CASCADE;")
@@ -37,7 +41,7 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
             )
         for table in reversed(content.tables):
             lines.append(f"DROP TABLE IF EXISTS {_quote(table.name)} CASCADE;")
-        if content.tables or content.views or content.functions:
+        if content.tables or content.views or content.functions or content.triggers:
             lines.append("")
 
     table_by_id = {table.id: table for table in content.tables}
@@ -121,6 +125,8 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
             population = "WITH DATA" if view.populate_on_create else "WITH NO DATA"
             statement = f"{statement}\n{population}"
         lines.extend([f"CREATE {kind} {_quote(view.name)} AS", statement + ";", ""])
+    for trigger in content.triggers:
+        lines.extend([_statement(trigger.definition) + ";", ""])
     return "\n".join(lines).rstrip() + "\n"
 
 

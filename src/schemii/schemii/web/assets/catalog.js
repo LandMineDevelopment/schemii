@@ -79,6 +79,7 @@ export function renderCatalogStats(container, catalog) {
     ["Tables", catalog.tables.length],
     ["Views", catalog.views.length + catalog.materializedViews.length],
     ["Routines", catalog.functions.length],
+    ["Triggers", catalog.triggers?.length ?? catalog.tables.reduce((total, table) => total + table.triggers.length, 0)],
   ];
   for (const [label, value] of entries) {
     const item = element("div");
@@ -104,6 +105,9 @@ export function renderInspector({
   onAddIndex = null,
   onEditIndex = null,
   onDeleteIndex = null,
+  onAddTrigger = null,
+  onEditTrigger = null,
+  onDeleteTrigger = null,
   onAddRelationship = null,
   onEditRelationship = null,
   onDeleteRelationship = null,
@@ -213,8 +217,22 @@ export function renderInspector({
   ] : []), "indexes", desired);
   content.append(indexes);
 
-  const triggers = section("Triggers", table.triggers.length);
-  boundedInspectorList(triggers, table.triggers, trigger => itemCard(trigger.name, "Trigger", [["Enabled", trigger.enabled]], trigger.definition), "triggers", desired);
+  const triggers = section(
+    "Triggers",
+    table.triggers.length,
+    desired && onAddTrigger ? actionButton("Add trigger", onAddTrigger) : null,
+  );
+  boundedInspectorList(triggers, table.triggers, trigger => itemCard(trigger.name, "Trigger", [
+    ["Timing", trigger.timing?.replaceAll("_", " ")],
+    ["Events", trigger.events],
+    ["Scope", trigger.orientation],
+    ["Function", trigger.functionName],
+    ["Condition", trigger.whenExpression],
+    ["Enabled", trigger.enabled],
+  ], trigger.definition, desired && trigger.designId ? [
+    ...(onEditTrigger ? [actionButton("Edit", () => onEditTrigger(trigger))] : []),
+    ...(onDeleteTrigger ? [actionButton("Delete", () => onDeleteTrigger(trigger), { danger: true })] : []),
+  ] : []), "triggers", desired);
   content.append(triggers);
 
   const relationships = section(
@@ -363,28 +381,38 @@ export function renderFunctions(container, catalog, query = "", { onEdit = null,
 
 function objectDescriptors(catalog) {
   const objects = [];
+  const hasTopLevelTriggers = Array.isArray(catalog.triggers);
   for (const table of catalog.tables) {
     objects.push({ kind: table.kind, name: `${table.namespace}.${table.name}`, meta: `${table.columns.length} columns`, target: "table", table: table.name });
     if (table.primaryKey) objects.push({ kind: "primary key", name: table.primaryKey.name, meta: table.primaryKey.definition, target: "table", table: table.name });
     for (const constraint of [...table.uniqueConstraints, ...table.checks, ...table.notNullConstraints, ...table.exclusionConstraints]) objects.push({ kind: "constraint", name: constraint.name, meta: constraint.definition, target: "table", table: table.name });
     for (const index of table.indexes) objects.push({ kind: "index", name: index.name, meta: index.definition, target: "table", table: table.name });
-    for (const trigger of table.triggers) objects.push({ kind: "trigger", name: trigger.name, meta: trigger.definition, target: "table", table: table.name });
+    if (!hasTopLevelTriggers) {
+      for (const trigger of table.triggers) objects.push({ kind: "trigger", name: trigger.name, meta: trigger.definition, target: "table", table: table.name });
+    }
   }
   for (const view of allViews(catalog)) objects.push({ kind: view.catalogKind, name: `${view.namespace}.${view.name}`, meta: `${view.columns.length} columns`, target: "view", view });
   for (const routine of catalog.functions) objects.push({ kind: routine.kind, name: `${routine.namespace}.${routine.name}(${routine.identityArguments})`, meta: routine.language, target: "routine" });
+  for (const trigger of catalog.triggers || []) objects.push({
+    kind: "trigger",
+    name: `${trigger.relationName}.${trigger.name}`,
+    meta: `${trigger.timing.replaceAll("_", " ")} ${trigger.events.join(" or ")} · ${trigger.orientation}`,
+    target: "trigger",
+    trigger,
+  });
   return objects.sort((left, right) => left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name));
 }
 
 export function renderObjects(container, catalog, query = "", onOpen) {
   replace(container);
   if (!catalog) {
-    container.append(emptyPanel("DB", "No catalog loaded", "Open a workspace to browse its live database objects."));
+    container.append(emptyPanel("DB", "No catalog loaded", "Open a workspace to browse its database objects."));
     return { shown: 0, matching: 0 };
   }
   const needle = normalizedSearch(query);
   const objects = objectDescriptors(catalog).filter(item => !needle || `${item.kind} ${item.name} ${item.meta}`.toLocaleLowerCase().includes(needle));
   if (!objects.length) {
-    container.append(emptyPanel("0", "No matching objects", "No live catalog objects match this search."));
+    container.append(emptyPanel("0", "No matching objects", "No workspace objects match this search."));
     return { shown: 0, matching: 0 };
   }
   const visible = objects.slice(0, MAX_BROWSER_ITEMS);
@@ -408,10 +436,14 @@ export function renderObjects(container, catalog, query = "", onOpen) {
       const action = element("button", { className: "ui-button compact", type: "button", text: "Open routines browser" });
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
+    } else if (object.target === "trigger") {
+      const action = element("button", { className: "ui-button compact", type: "button", text: "Edit trigger source" });
+      action.addEventListener("click", () => onOpen(object));
+      body.append(action);
     }
     wrapper.append(summary, body);
     container.append(wrapper);
   }
-  if (objects.length > visible.length) container.append(element("p", { className: "none-reported", text: `Showing the first ${visible.length} of ${objects.length} matching live objects. Refine the search to narrow the list.` }));
+  if (objects.length > visible.length) container.append(element("p", { className: "none-reported", text: `Showing the first ${visible.length} of ${objects.length} matching objects. Refine the search to narrow the list.` }));
   return { shown: visible.length, matching: objects.length };
 }

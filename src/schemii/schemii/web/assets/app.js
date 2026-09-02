@@ -5,6 +5,7 @@ import {
   createDesignRelationship,
   createDesignTable,
   deleteDesignRoutine,
+  deleteDesignTrigger,
   deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
@@ -19,6 +20,7 @@ import {
   saveDesignIndex,
   saveDesignKey,
   saveDesignRoutine,
+  saveDesignTrigger,
   saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
@@ -231,11 +233,22 @@ const elements = {
   designRoutinePreview: byId("design-routine-preview"),
   designRoutineStatus: byId("design-routine-status"),
   saveDesignRoutineButton: byId("save-design-routine-button"),
+  designTriggerDialog: byId("design-trigger-dialog"),
+  designTriggerForm: byId("design-trigger-form"),
+  designTriggerTitle: byId("design-trigger-title"),
+  designTriggerDefinition: byId("design-trigger-definition"),
+  designTriggerPreview: byId("design-trigger-preview"),
+  designTriggerStatus: byId("design-trigger-status"),
+  saveDesignTriggerButton: byId("save-design-trigger-button"),
+  deleteDesignTriggerButton: byId("delete-design-trigger-button"),
   objectsButton: byId("objects-button"),
   objectsDialog: byId("objects-dialog"),
+  objectsSource: byId("objects-source"),
+  objectsCopy: byId("objects-copy"),
   objectsSearch: byId("objects-search"),
   objectsCount: byId("objects-count"),
   objectsList: byId("objects-list"),
+  createTriggerButton: byId("create-trigger-button"),
   postgresButton: byId("postgres-button"),
   introductionDialog: byId("introduction-dialog"),
   unavailableDialog: byId("unavailable-dialog"),
@@ -338,6 +351,13 @@ const state = {
   designRoutineAnalysisLoading: false,
   designRoutineAnalysisTimer: null,
   designRoutineAnalysisGeneration: 0,
+  designTriggerEditorId: null,
+  designTriggerAnalysis: null,
+  designTriggerAnalysisDefinition: null,
+  designTriggerAnalysisError: null,
+  designTriggerAnalysisLoading: false,
+  designTriggerAnalysisTimer: null,
+  designTriggerAnalysisGeneration: 0,
   activeLayer: "tables",
   viewFilter: "all",
   connectionEditorId: null,
@@ -456,6 +476,9 @@ function updateDesignControls() {
   elements.deleteTableButton.disabled = !selected || busy;
   elements.createViewButton.disabled = !detached || busy;
   elements.createFunctionButton.disabled = !detached || busy;
+  elements.createTriggerButton.disabled = !detached || busy || !(
+    state.design?.content.tables.length || state.design?.content.views.length
+  );
 }
 
 function workspaceStorage() {
@@ -1401,6 +1424,9 @@ function renderActiveInspector(table) {
     onAddIndex: desired && table ? () => startIndexAuthoring({ tableId: table.designId }) : null,
     onEditIndex: desired ? editDesignIndex : null,
     onDeleteIndex: desired ? confirmDeleteDesignIndex : null,
+    onAddTrigger: desired && table ? () => openDesignTriggerEditor(null, table.name) : null,
+    onEditTrigger: desired ? trigger => openDesignTriggerEditor(trigger.designId) : null,
+    onDeleteTrigger: desired ? confirmDeleteDesignTrigger : null,
     onAddRelationship: desired && table ? () => startRelationshipAuthoring() : null,
     onEditRelationship: desired ? editDesignRelationship : null,
     onDeleteRelationship: desired ? confirmDeleteDesignRelationship : null,
@@ -1832,9 +1858,13 @@ function confirmDeleteDesignView(viewId) {
   const consumerCopy = analysis?.consumers.length
     ? ` ${analysis.consumers.length} other designed view${analysis.consumers.length === 1 ? "" : "s"} currently reference it and will become unresolved.`
     : "";
+  const triggerCount = (state.design.content.triggers || []).filter(trigger => trigger.relationName === view.name).length;
+  const triggerCopy = triggerCount
+    ? ` ${triggerCount} trigger${triggerCount === 1 ? "" : "s"} on this view will also be removed.`
+    : "";
   askConfirmation({
     title: "Delete designed view",
-    message: `Delete “${view.name}” from the desired schema?${consumerCopy}`,
+    message: `Delete “${view.name}” from the desired schema?${consumerCopy}${triggerCopy}`,
     label: "Delete view",
     callback: async () => {
       if (!await flushLayoutBeforeTransition()) return;
@@ -2048,7 +2078,216 @@ function confirmDeleteDesignRoutine(routineId) {
   });
 }
 
+function triggerIdentity(contract) {
+  return `${contract.relationName}.${contract.name}`;
+}
+
+function renderDesignTriggerPreview() {
+  replace(elements.designTriggerPreview);
+  const definition = elements.designTriggerDefinition.value.trim();
+  if (!definition) {
+    elements.designTriggerPreview.append(emptyPanel("TRG", "Write the trigger source", "Its target, activation rules, and function call will appear here."));
+    return;
+  }
+  if (state.designTriggerAnalysisLoading) {
+    elements.designTriggerPreview.append(createStatePanel({ mark: "…", title: "Deriving contract", message: "Parsing the PostgreSQL statement without contacting a database.", surface: true }));
+    return;
+  }
+  if (state.designTriggerAnalysisError) {
+    elements.designTriggerPreview.append(errorPanel(state.designTriggerAnalysisError));
+    return;
+  }
+  const contract = state.designTriggerAnalysis;
+  if (!contract || state.designTriggerAnalysisDefinition !== definition) {
+    elements.designTriggerPreview.append(createStatePanel({ mark: "SQL", title: "Waiting for valid source", message: "The preview updates after the statement can be parsed.", surface: true }));
+    return;
+  }
+  const knownRelation = [
+    ...state.design.content.tables.map(table => table.name),
+    ...state.design.content.views.map(view => view.name),
+  ].includes(contract.relationName);
+  const preview = element("article", { className: "routine-contract" });
+  const signature = element("div", { className: "routine-contract-signature" });
+  signature.append(
+    element("small", { text: contract.constraint ? "constraint trigger" : "trigger" }),
+    element("code", { text: triggerIdentity(contract) }),
+  );
+  const details = element("dl");
+  for (const [label, value] of [
+    ["Target", knownRelation ? `${contract.relationName} · in this design` : `${contract.relationName} · not in this design`],
+    ["Activation", `${contract.timing.replaceAll("_", " ")} ${contract.events.join(" or ")}`],
+    ["Scope", `For each ${contract.orientation}`],
+    ["Function", `${contract.functionName}(${contract.functionArguments.join(", ")})`],
+    ["Columns", contract.referencedColumns.join(", ") || "No direct OLD/NEW column references"],
+    ["Condition", contract.whenExpression || "Always"],
+    ["Transition relations", contract.transitionRelations.join(", ") || "None"],
+    ["Deferral", contract.deferrable ? (contract.initiallyDeferred ? "Deferrable · initially deferred" : "Deferrable · initially immediate") : "Not deferrable"],
+  ]) {
+    details.append(element("dt", { text: label }), element("dd", { text: value }));
+  }
+  preview.append(signature, details);
+  elements.designTriggerPreview.append(preview);
+}
+
+async function analyzeDesignTriggerDraft() {
+  window.clearTimeout(state.designTriggerAnalysisTimer);
+  const definition = elements.designTriggerDefinition.value.trim();
+  if (!elements.designTriggerDialog.open || !definition || !state.activeWorkspace) {
+    state.designTriggerAnalysis = null;
+    state.designTriggerAnalysisDefinition = null;
+    state.designTriggerAnalysisError = null;
+    state.designTriggerAnalysisLoading = false;
+    renderDesignTriggerPreview();
+    return null;
+  }
+  const generation = ++state.designTriggerAnalysisGeneration;
+  const workspaceId = state.activeWorkspace.id;
+  state.designTriggerAnalysisLoading = true;
+  state.designTriggerAnalysisError = null;
+  renderDesignTriggerPreview();
+  try {
+    const analysis = await api.analyzeDesignTrigger(workspaceId, { definition });
+    if (generation !== state.designTriggerAnalysisGeneration || !elements.designTriggerDialog.open) return null;
+    state.designTriggerAnalysis = analysis;
+    state.designTriggerAnalysisDefinition = definition;
+    return analysis;
+  } catch (error) {
+    if (generation !== state.designTriggerAnalysisGeneration || !elements.designTriggerDialog.open) return null;
+    state.designTriggerAnalysis = null;
+    state.designTriggerAnalysisDefinition = null;
+    state.designTriggerAnalysisError = error;
+    return null;
+  } finally {
+    if (generation === state.designTriggerAnalysisGeneration) {
+      state.designTriggerAnalysisLoading = false;
+      renderDesignTriggerPreview();
+    }
+  }
+}
+
+function scheduleDesignTriggerAnalysis(delay = 280) {
+  window.clearTimeout(state.designTriggerAnalysisTimer);
+  state.designTriggerAnalysisTimer = window.setTimeout(analyzeDesignTriggerDraft, delay);
+}
+
+function quotedTriggerIdentifier(value) {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function defaultTriggerDefinition(relationName) {
+  if (!relationName) return "";
+  const triggerRoutine = state.design.content.functions.find(routine => (
+    routine.kind === "function"
+    && routine.identityArguments === ""
+    && routine.returnType?.toLocaleLowerCase() === "trigger"
+  ));
+  const functionName = triggerRoutine?.name || `handle_${relationName.replaceAll(/[^a-zA-Z0-9_]+/g, "_")}_change`;
+  return [
+    `CREATE TRIGGER ${quotedTriggerIdentifier(`${relationName}_changed`)}`,
+    `AFTER INSERT OR UPDATE OR DELETE ON ${quotedTriggerIdentifier(relationName)}`,
+    "FOR EACH ROW",
+    `EXECUTE FUNCTION ${quotedTriggerIdentifier(functionName)}();`,
+  ].join("\n");
+}
+
+function openDesignTriggerEditor(triggerId = null, relationName = null) {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  const trigger = triggerId ? (state.design.content.triggers || []).find(item => item.id === triggerId) : null;
+  if (triggerId && !trigger) {
+    showToast("The selected trigger is no longer in this design.", { error: true });
+    return;
+  }
+  const fallbackRelation = relationName || selectedDesignTable()?.name || state.design.content.tables[0]?.name || state.design.content.views[0]?.name || null;
+  if (!trigger && !fallbackRelation) {
+    showToast("Create a table or view before adding a trigger.", { error: true });
+    return;
+  }
+  state.designTriggerEditorId = trigger?.id || null;
+  state.designTriggerAnalysisGeneration += 1;
+  state.designTriggerAnalysis = null;
+  state.designTriggerAnalysisDefinition = null;
+  state.designTriggerAnalysisError = null;
+  state.designTriggerAnalysisLoading = false;
+  elements.designTriggerForm.reset();
+  replace(elements.designTriggerStatus);
+  elements.designTriggerTitle.textContent = trigger ? `Edit ${trigger.name}` : "Create trigger";
+  elements.saveDesignTriggerButton.textContent = trigger ? "Save trigger" : "Create trigger";
+  elements.deleteDesignTriggerButton.hidden = !trigger;
+  elements.designTriggerDefinition.value = trigger?.definition || defaultTriggerDefinition(fallbackRelation);
+  openDialog(elements.designTriggerDialog);
+  renderDesignTriggerPreview();
+  scheduleDesignTriggerAnalysis(0);
+  elements.designTriggerDefinition.focus();
+}
+
+async function submitDesignTrigger(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  const editing = Boolean(state.designTriggerEditorId);
+  const definition = elements.designTriggerDefinition.value.trim();
+  state.designSubmitting = true;
+  elements.saveDesignTriggerButton.disabled = true;
+  updateDesignControls();
+  replace(elements.designTriggerStatus, element("span", { text: "Deriving the contract and saving the trigger…" }));
+  try {
+    const analysis = await api.analyzeDesignTrigger(state.activeWorkspace.id, { definition });
+    const result = saveDesignTrigger(state.design.content, {
+      triggerId: state.designTriggerEditorId,
+      definition,
+    });
+    if (!await flushLayoutBeforeTransition()) return;
+    const design = await replaceActiveDesign(result.content, {
+      selectedTableName: state.design.content.tables.some(table => table.name === analysis.relationName)
+        ? analysis.relationName
+        : state.selectedTableName,
+    });
+    if (!design) return;
+    elements.designTriggerDialog.close();
+    showToast(`${editing ? "Updated" : "Created"} ${triggerIdentity(analysis)} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designTriggerStatus, conflictPanel(error));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignTriggerButton.disabled = false;
+    updateHeader();
+  }
+}
+
+function confirmDeleteDesignTrigger(trigger) {
+  const triggerId = trigger?.designId || trigger?.id || state.designTriggerEditorId;
+  const designTrigger = state.design?.content.triggers?.find(item => item.id === triggerId);
+  if (!designTrigger || state.designSubmitting) return;
+  askConfirmation({
+    title: "Delete designed trigger",
+    message: `Delete trigger “${designTrigger.name}” from ${designTrigger.relationName}? The target relation and function remain unchanged.`,
+    label: "Delete trigger",
+    callback: async () => {
+      if (!await flushLayoutBeforeTransition()) return;
+      state.designSubmitting = true;
+      updateDesignControls();
+      try {
+        const content = deleteDesignTrigger(state.design.content, designTrigger.id);
+        const design = await replaceActiveDesign(content);
+        if (!design) return;
+        if (elements.objectsDialog.open) renderObjectsBrowser();
+        showToast(`Deleted ${designTrigger.name} from design revision ${design.revision}.`);
+      } catch (error) {
+        errorToast(error);
+      } finally {
+        state.designSubmitting = false;
+        updateHeader();
+      }
+    },
+  });
+}
+
 function renderObjectsBrowser() {
+  const desired = state.catalog?.source === "design";
+  elements.objectsSource.textContent = desired ? "Desired schema" : "Live PostgreSQL catalog";
+  elements.objectsCopy.textContent = desired
+    ? "Search the desired schema and edit source-derived triggers from the same catalog used by the canvas."
+    : "Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.";
+  elements.createTriggerButton.hidden = !desired;
   const result = renderObjects(elements.objectsList, state.catalog, elements.objectsSearch.value, object => {
     if (object.target === "table") {
       elements.objectsDialog.close();
@@ -2058,6 +2297,9 @@ function renderObjectsBrowser() {
       elements.objectsDialog.close();
       setLayer("views", { historyMode: null });
       selectView(object.view);
+    } else if (object.target === "trigger") {
+      elements.objectsDialog.close();
+      openDesignTriggerEditor(object.trigger.designId);
     } else {
       elements.objectsDialog.close();
       renderFunctionsBrowser();
@@ -2323,9 +2565,13 @@ function confirmDeleteDesignTable() {
   const relationshipCopy = relationships.length
     ? ` This also removes ${relationships.length} connected relationship${relationships.length === 1 ? "" : "s"}.`
     : "";
+  const triggers = (state.design.content.triggers || []).filter(item => item.relationName === table.name);
+  const triggerCopy = triggers.length
+    ? ` This also removes ${triggers.length} trigger${triggers.length === 1 ? "" : "s"} owned by the table.`
+    : "";
   askConfirmation({
     title: "Delete designed table",
-    message: `Delete “${table.name}” and its columns from the desired schema?${relationshipCopy}`,
+    message: `Delete “${table.name}” and its columns from the desired schema?${relationshipCopy}${triggerCopy}`,
     label: "Delete table",
     callback: async () => {
       if (!await flushLayoutBeforeTransition()) return;
@@ -2334,6 +2580,7 @@ function confirmDeleteDesignTable() {
       content.relationships = content.relationships.filter(item => (
         item.sourceTableId !== table.id && item.targetTableId !== table.id
       ));
+      content.triggers = (content.triggers || []).filter(item => item.relationName !== table.name);
       state.designSubmitting = true;
       updateDesignControls();
       try {
@@ -3683,6 +3930,26 @@ function bindEvents() {
     state.designRoutineAnalysisDefinition = null;
     state.designRoutineAnalysisError = null;
     state.designRoutineAnalysisLoading = false;
+  });
+  elements.createTriggerButton.addEventListener("click", () => {
+    elements.objectsDialog.close();
+    openDesignTriggerEditor();
+  });
+  elements.designTriggerForm.addEventListener("submit", submitDesignTrigger);
+  elements.designTriggerDefinition.addEventListener("input", () => scheduleDesignTriggerAnalysis());
+  elements.deleteDesignTriggerButton.addEventListener("click", () => {
+    const triggerId = state.designTriggerEditorId;
+    elements.designTriggerDialog.close();
+    confirmDeleteDesignTrigger({ id: triggerId });
+  });
+  elements.designTriggerDialog.addEventListener("close", () => {
+    window.clearTimeout(state.designTriggerAnalysisTimer);
+    state.designTriggerAnalysisGeneration += 1;
+    state.designTriggerEditorId = null;
+    state.designTriggerAnalysis = null;
+    state.designTriggerAnalysisDefinition = null;
+    state.designTriggerAnalysisError = null;
+    state.designTriggerAnalysisLoading = false;
   });
   elements.objectsButton.addEventListener("click", () => {
     renderObjectsBrowser();

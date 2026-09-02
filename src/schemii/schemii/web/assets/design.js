@@ -13,7 +13,7 @@ function keyDefinition(key, columns) {
   return `${kind} (${key.columnIds.map(id => columns.get(id)?.name || id).join(", ")})`;
 }
 
-function tableCatalogEntry(table, columns) {
+function tableCatalogEntry(table, columns, triggers = []) {
   const keys = table.keys.map(key => ({
     designId: key.id,
     name: key.name,
@@ -69,13 +69,34 @@ function tableCatalogEntry(table, columns) {
         ...(index.expression ? [index.expression] : []),
       ].join(", "),
     })),
-    triggers: [],
+    triggers,
   };
 }
 
 export function designToCatalog(workspace, design) {
   const columns = columnMap(design);
   const tables = tableMap(design);
+  const triggers = (design.content.triggers || []).map(trigger => ({
+    designId: trigger.id,
+    namespace: "desired",
+    name: trigger.name,
+    table: trigger.relationName,
+    relationName: trigger.relationName,
+    timing: trigger.timing,
+    events: trigger.events,
+    orientation: trigger.orientation,
+    functionName: trigger.functionName,
+    functionArguments: trigger.functionArguments,
+    updateColumns: trigger.updateColumns,
+    referencedColumns: trigger.referencedColumns,
+    whenExpression: trigger.whenExpression,
+    transitionRelations: trigger.transitionRelations,
+    constraint: trigger.constraint,
+    deferrable: trigger.deferrable,
+    initiallyDeferred: trigger.initiallyDeferred,
+    enabled: "origin",
+    definition: trigger.definition,
+  }));
   const views = design.content.views.map(view => ({
     designId: view.id,
     namespace: "desired",
@@ -94,7 +115,11 @@ export function designToCatalog(workspace, design) {
     capturedAt: null,
     fingerprint: design.fingerprint,
     designRevision: design.revision,
-    tables: design.content.tables.map(table => tableCatalogEntry(table, columns)),
+    tables: design.content.tables.map(table => tableCatalogEntry(
+      table,
+      columns,
+      triggers.filter(trigger => trigger.relationName === table.name),
+    )),
     relationships: design.content.relationships.map(relationship => {
       const source = tables.get(relationship.sourceTableId);
       const target = tables.get(relationship.targetTableId);
@@ -129,6 +154,7 @@ export function designToCatalog(workspace, design) {
     })),
     views: views.filter((_, index) => design.content.views[index].kind === "view"),
     materializedViews: views.filter((_, index) => design.content.views[index].kind === "materialized_view"),
+    triggers,
   };
 }
 
@@ -489,12 +515,26 @@ function referencedRemovedColumn(content, table, retainedColumnIds) {
 export function updateDesignTable(content, tableId, name, columnValues, randomUUID = () => crypto.randomUUID()) {
   const table = content.tables.find(item => item.id === tableId);
   if (!table) throw new Error("The selected table is no longer in this design.");
+  if (table.name !== name.trim() && (content.triggers || []).some(trigger => trigger.relationName === table.name)) {
+    throw new Error(`Delete or retarget the triggers on “${table.name}” before renaming it.`);
+  }
   const duplicateName = content.tables.some(item => item.id !== tableId && item.name === name.trim());
   if (duplicateName) throw new Error("A table with this name already exists in the design.");
   const retainedColumnIds = new Set(columnValues.map(column => column.id).filter(Boolean));
   const reference = referencedRemovedColumn(content, table, retainedColumnIds);
   if (reference) throw new Error(`Remove or update ${reference} before removing its column.`);
   const updated = designTableFromValues(table, name, columnValues, randomUUID);
+  const updatedColumns = new Map(updated.columns.map(column => [column.id, column]));
+  const referencedRename = (content.triggers || []).find(trigger => (
+    trigger.relationName === table.name
+    && table.columns.some(column => (
+      trigger.referencedColumns?.includes(column.name)
+      && updatedColumns.get(column.id)?.name !== column.name
+    ))
+  ));
+  if (referencedRename) {
+    throw new Error(`Update or delete trigger “${referencedRename.name}” before renaming one of its referenced columns.`);
+  }
   const invalidRelationship = relationshipWithoutTargetKey(content, tableId, updated.keys);
   if (invalidRelationship) {
     throw new Error(`Relationship “${invalidRelationship.name}” targets this key. Delete the relationship before changing the key.`);
@@ -891,6 +931,9 @@ export function saveDesignView(content, values, randomUUID = crypto.randomUUID.b
     ? content.views.find(view => view.id === values.viewId)
     : null;
   if (values.viewId && !existing) throw new Error("The view changed while this editor was open. Reload the design and try again.");
+  if (existing && existing.name !== name && (content.triggers || []).some(trigger => trigger.relationName === existing.name)) {
+    throw new Error(`Delete or retarget the triggers on “${existing.name}” before renaming it.`);
+  }
   const duplicateTable = content.tables.some(table => table.name === name);
   const duplicateView = content.views.some(view => view.id !== existing?.id && view.name === name);
   if (duplicateTable || duplicateView) throw new Error(`A table or view named “${name}” already exists in the design.`);
@@ -908,9 +951,11 @@ export function saveDesignView(content, values, randomUUID = crypto.randomUUID.b
 }
 
 export function deleteDesignView(content, viewId) {
-  if (!content.views.some(view => view.id === viewId)) throw new Error("The selected view is no longer in this design.");
+  const view = content.views.find(item => item.id === viewId);
+  if (!view) throw new Error("The selected view is no longer in this design.");
   const revised = structuredClone(content);
   revised.views = revised.views.filter(view => view.id !== viewId);
+  revised.triggers = (revised.triggers || []).filter(trigger => trigger.relationName !== view.name);
   return { content: revised };
 }
 
@@ -933,5 +978,28 @@ export function deleteDesignRoutine(content, routineId) {
     throw new Error("The selected routine is no longer in this design.");
   }
   next.functions = next.functions.filter(routine => routine.id !== routineId);
+  return next;
+}
+
+export function saveDesignTrigger(content, values, randomUUID = crypto.randomUUID.bind(crypto)) {
+  const definition = String(values.definition || "").trim();
+  if (!definition) throw new Error("Enter one CREATE TRIGGER statement.");
+  const next = structuredClone(content);
+  if (!next.triggers) next.triggers = [];
+  const triggerId = values.triggerId || id("trigger", randomUUID);
+  const trigger = { id: triggerId, definition };
+  const existingIndex = next.triggers.findIndex(item => item.id === triggerId);
+  if (values.triggerId && existingIndex < 0) throw new Error("The selected trigger is no longer in this design.");
+  if (existingIndex >= 0) next.triggers[existingIndex] = trigger;
+  else next.triggers.push(trigger);
+  return { content: next, trigger };
+}
+
+export function deleteDesignTrigger(content, triggerId) {
+  const next = structuredClone(content);
+  if (!(next.triggers || []).some(trigger => trigger.id === triggerId)) {
+    throw new Error("The selected trigger is no longer in this design.");
+  }
+  next.triggers = next.triggers.filter(trigger => trigger.id !== triggerId);
   return next;
 }

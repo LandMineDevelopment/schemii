@@ -379,10 +379,25 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       </form>
     </dialog>
 
+    <dialog class="ui-dialog editor-dialog design-routine-dialog" id="design-trigger-dialog" aria-labelledby="design-trigger-title">
+      <form class="ui-dialog__shell" id="design-trigger-form">
+        <header class="ui-dialog__head"><div><small>Source-first trigger</small><h2 id="design-trigger-title">Create trigger</h2><p>Write one target-independent PostgreSQL statement. Schemii derives the target, timing, events, scope, function, condition, and column references from it.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close trigger editor"></button></header>
+        <div class="design-routine-body">
+          <label class="design-field design-routine-source"><span>CREATE TRIGGER</span><textarea id="design-trigger-definition" required spellcheck="false" placeholder="CREATE TRIGGER orders_changed&#10;AFTER INSERT OR UPDATE OR DELETE ON orders&#10;FOR EACH ROW&#10;EXECUTE FUNCTION audit_order_change();"></textarea><small>Leave the schema off the target relation. The target table or view must already exist in this desired design.</small></label>
+          <section class="design-routine-preview" aria-labelledby="design-trigger-preview-title">
+            <header><small>Derived at request time</small><strong id="design-trigger-preview-title">Trigger contract</strong></header>
+            <div id="design-trigger-preview" aria-live="polite"></div>
+          </section>
+        </div>
+        <div class="form-status" id="design-trigger-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact danger-text" id="delete-design-trigger-button" type="button" hidden>Delete</button><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-trigger-button" type="submit">Create trigger</button></footer>
+      </form>
+    </dialog>
+
     <dialog class="ui-dialog catalog-dialog" id="objects-dialog" aria-labelledby="objects-title">
       <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small>Live PostgreSQL catalog</small><h2 id="objects-title">Database objects</h2><p>Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
-        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-button compact" type="button" data-unavailable="database-object-mutation">Mutate object</button></div>
+        <header class="ui-dialog__head"><div><small id="objects-source">Workspace catalog</small><h2 id="objects-title">Database objects</h2><p id="objects-copy">Browse tables, views, constraints, indexes, triggers, functions, and procedures in the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
+        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-button compact primary" id="create-trigger-button" type="button" hidden>Create trigger</button></div>
         <div class="catalog-browser-list" id="objects-list"></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-unavailable="migration-preview">Preview migration</button><button class="ui-button compact primary" type="button" data-unavailable="migration-apply">Apply migration</button></footer>
       </div>

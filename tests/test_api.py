@@ -338,6 +338,7 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
         "relationships": [],
         "functions": [],
         "views": [],
+        "triggers": [],
     }
 
     table_id = "table_" + "a" * 32
@@ -425,11 +426,44 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
         "language": "sql",
     }
 
+    trigger_definition = """
+        CREATE TRIGGER inventory_name_changed
+        AFTER UPDATE OF "display name" ON "inventory item"
+        FOR EACH ROW EXECUTE FUNCTION audit_inventory()
+    """
+    trigger_analysis = api.post(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/trigger-analysis",
+        json={"definition": trigger_definition},
+    )
+    assert trigger_analysis.status_code == 200
+    assert trigger_analysis.json() == {
+        "name": "inventory_name_changed",
+        "relationName": "inventory item",
+        "timing": "after",
+        "events": ["update"],
+        "orientation": "row",
+        "functionName": "audit_inventory",
+        "functionArguments": [],
+        "updateColumns": ["display name"],
+        "referencedColumns": ["display name"],
+        "whenExpression": None,
+        "transitionRelations": [],
+        "constraint": False,
+        "deferrable": False,
+        "initiallyDeferred": False,
+    }
+
     content_with_routine = saved.json()["content"]
     content_with_routine["functions"] = [
         {
             "id": "function_" + "e" * 32,
             "definition": routine_definition,
+        }
+    ]
+    content_with_routine["triggers"] = [
+        {
+            "id": "trigger_" + "f" * 32,
+            "definition": trigger_definition,
         }
     ]
     saved_routine = api.put(
@@ -439,6 +473,7 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     assert saved_routine.status_code == 200
     assert saved_routine.json()["content"]["functions"][0]["name"] == "display_label"
     assert saved_routine.json()["content"]["functions"][0]["identityArguments"] == "text, text"
+    assert saved_routine.json()["content"]["triggers"][0]["relationName"] == "inventory item"
     assert postgres.connections == []
 
     stale = api.put(
@@ -481,6 +516,7 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     assert 'CREATE TABLE "inventory item"' in exported.json()["content"]
     assert '"display name" text NOT NULL' in exported.json()["content"]
     assert "CREATE FUNCTION display_label" in exported.json()["content"]
+    assert "CREATE TRIGGER inventory_name_changed" in exported.json()["content"]
     assert postgres.connections == []
 
 

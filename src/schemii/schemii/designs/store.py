@@ -69,12 +69,16 @@ def authored_content_document(
     *,
     by_alias: bool = False,
 ) -> dict[str, Any]:
-    """Serialize only authored inputs; routine metadata is always re-derived."""
+    """Serialize only authored inputs; SQL object metadata is always re-derived."""
 
     document = content.model_dump(mode="json", by_alias=by_alias)
     document["functions"] = [
         {"id": routine.id, "definition": routine.definition}
         for routine in content.functions
+    ]
+    document["triggers"] = [
+        {"id": trigger.id, "definition": trigger.definition}
+        for trigger in content.triggers
     ]
     return document
 
@@ -358,6 +362,70 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                 details={"view": view.name, "reason": error.code},
             ) from error
         all_ids.append(view.id)
+    relation_by_name = {
+        **{table.name: ("table", table) for table in content.tables},
+        **{view.name: ("view", view) for view in content.views},
+    }
+    _unique(
+        [f"{trigger.relation_name}.{trigger.name}" for trigger in content.triggers],
+        category="trigger names per relation",
+    )
+    routine_by_signature = {
+        (routine.name, routine.identity_arguments): routine
+        for routine in content.functions
+    }
+    for trigger in content.triggers:
+        _valid_identifier(trigger.name, category="trigger name")
+        target = relation_by_name.get(trigger.relation_name)
+        if target is None:
+            raise DesignValidationError(
+                "Triggers must target a table or view in this design",
+                details={"trigger": trigger.name, "relation": trigger.relation_name},
+            )
+        relation_kind, relation = target
+        if trigger.timing == "instead_of" and relation_kind != "view":
+            raise DesignValidationError(
+                "INSTEAD OF triggers must target a designed view",
+                details={"trigger": trigger.name, "relation": trigger.relation_name},
+            )
+        if relation_kind == "view" and trigger.timing != "instead_of" and trigger.orientation == "row":
+            raise DesignValidationError(
+                "Row-level triggers on designed views must use INSTEAD OF",
+                details={"trigger": trigger.name, "relation": trigger.relation_name},
+            )
+        if trigger.timing == "instead_of" and trigger.orientation != "row":
+            raise DesignValidationError(
+                "INSTEAD OF triggers must run for each row",
+                details={"trigger": trigger.name},
+            )
+        if "truncate" in trigger.events and trigger.orientation == "row":
+            raise DesignValidationError(
+                "TRUNCATE triggers must run for each statement",
+                details={"trigger": trigger.name},
+            )
+        if relation_kind == "table":
+            column_names = {column.name for column in relation.columns}
+            unknown_columns = sorted(set(trigger.referenced_columns) - column_names)
+            if unknown_columns:
+                raise DesignValidationError(
+                    "Trigger column references must exist on the target table",
+                    details={
+                        "trigger": trigger.name,
+                        "relation": trigger.relation_name,
+                        "columns": unknown_columns,
+                    },
+                )
+        function_parts = trigger.function_name.split(".")
+        if len(function_parts) == 1:
+            routine = routine_by_signature.get((function_parts[0], ""))
+            if routine is not None and (
+                routine.kind != "function" or routine.return_type.lower() != "trigger"
+            ):
+                raise DesignValidationError(
+                    "A designed trigger function must be a no-argument function returning trigger",
+                    details={"trigger": trigger.name, "function": trigger.function_name},
+                )
+        all_ids.append(trigger.id)
     _unique(all_ids, category="design object IDs")
 
 

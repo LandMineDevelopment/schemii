@@ -6,6 +6,7 @@ import {
   createDesignRelationship,
   createDesignTable,
   deleteDesignRoutine,
+  deleteDesignTrigger,
   deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
@@ -20,6 +21,7 @@ import {
   saveDesignIndex,
   saveDesignKey,
   saveDesignRoutine,
+  saveDesignTrigger,
   saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
@@ -122,6 +124,65 @@ test("routine authoring stores source only and retains stable identity on edit",
   assert.equal(edited.content.functions[0].definition, revisedDefinition);
 
   assert.deepEqual(deleteDesignRoutine(edited.content, created.routine.id).functions, []);
+});
+
+test("trigger authoring stores source only and projects derived contracts into the catalog", () => {
+  let index = 0;
+  const table = createDesignTable("orders", [
+    { name: "id", dataType: "bigint", nullable: false },
+    { name: "status", dataType: "text", nullable: false },
+  ], () => uuids[index++]);
+  const base = { tables: [table], relationships: [], functions: [], views: [], triggers: [] };
+  const definition = "CREATE TRIGGER orders_touch BEFORE UPDATE OF status ON orders FOR EACH ROW EXECUTE FUNCTION touch_order()";
+  const created = saveDesignTrigger(base, { definition }, () => uuids[index++]);
+
+  assert.deepEqual(created.trigger, {
+    id: `trigger_${"4".repeat(32)}`,
+    definition,
+  });
+  created.content.triggers[0] = {
+    ...created.content.triggers[0],
+    name: "orders_touch",
+    relationName: "orders",
+    timing: "before",
+    events: ["update"],
+    orientation: "row",
+    functionName: "touch_order",
+    functionArguments: [],
+    updateColumns: ["status"],
+    referencedColumns: ["status"],
+    whenExpression: null,
+    transitionRelations: [],
+    constraint: false,
+    deferrable: false,
+    initiallyDeferred: false,
+  };
+  const design = { revision: 1, fingerprint: "a".repeat(64), content: created.content };
+  const catalog = designToCatalog({ name: "Orders" }, design);
+
+  assert.equal(catalog.triggers[0].relationName, "orders");
+  assert.equal(catalog.tables[0].triggers[0].functionName, "touch_order");
+  assert.deepEqual(deleteDesignTrigger(created.content, created.trigger.id).triggers, []);
+});
+
+test("table and column renames cannot silently desynchronize trigger source", () => {
+  let index = 0;
+  const table = createDesignTable("orders", [
+    { name: "id", dataType: "bigint", nullable: false },
+    { name: "status", dataType: "text", nullable: false },
+  ], () => uuids[index++]);
+  const content = {
+    tables: [table],
+    relationships: [],
+    functions: [],
+    views: [],
+    triggers: [{ name: "orders_touch", relationName: "orders", referencedColumns: ["status"] }],
+  };
+  const values = table.columns.map(column => ({ ...column, primary: false }));
+
+  assert.throws(() => updateDesignTable(content, table.id, "purchases", values), /triggers/);
+  values[1].name = "state";
+  assert.throws(() => updateDesignTable(content, table.id, "orders", values), /orders_touch/);
 });
 
 test("desired routine catalog entries expose the server-derived identity signature", () => {

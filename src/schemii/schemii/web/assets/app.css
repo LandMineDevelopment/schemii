@@ -261,7 +261,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-routine-preview > header { display: grid; gap: 2px; padding: 11px 12px; border-bottom: 1px solid var(--line); background: #151a22; }
 .design-routine-preview > header small { color: #70668f; font-size: 7px; text-transform: uppercase; letter-spacing: .12em; }
 .design-routine-preview > header strong { font-size: 10px; }
-#design-routine-preview { min-width: 0; overflow-y: auto; padding: 12px; }
+#design-routine-preview, #design-trigger-preview { min-width: 0; overflow-y: auto; padding: 12px; }
 .routine-contract { display: grid; gap: 10px; }
 .routine-contract-signature { display: grid; gap: 5px; padding: 11px; border: 1px solid #584779; border-radius: 7px; background: #181425; }
 .routine-contract-signature small { color: #9577c9; font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .1em; }

@@ -17,7 +17,6 @@ export const UNAVAILABLE_CAPABILITIES = Object.freeze({
   "sql-save": { title: "Save SQL", description: "The active API has no saved-query contract." },
   "sql-write": { title: "SQL write mode", description: "The active API has no authorization or execution contract for SQL writes." },
   "sql-transactions": { title: "SQL transactions", description: "The active API has no server-owned transaction lifecycle contract." },
-  "database-object-mutation": { title: "Mutate database object", description: "The active API can browse catalog objects but has no general object mutation contract." },
   "migration-preview": { title: "Preview migration", description: "The active API has no migration planner or reviewed DDL preview contract." },
   "migration-apply": { title: "Apply migration", description: "The active API has no migration authorization or apply contract." },
   "ai-assistant": { title: "AI schema assistant", description: "The active API has no assistant, model, conversation, or proposal contract." },

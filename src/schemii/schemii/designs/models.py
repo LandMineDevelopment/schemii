@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 from schemii.common.api.models import ApiModel
 from schemii.common.postgres.query_models import QueryAnalysis
 from schemii.common.postgres.routine_analysis import analyze_routine_definition
+from schemii.common.postgres.trigger_analysis import analyze_trigger_definition
 
 
 DesignIdentifier = Annotated[str, Field(min_length=1, max_length=63)]
@@ -156,6 +157,108 @@ class DesignRoutineAnalysis(ApiModel):
     language: DesignIdentifier
 
 
+class DesignTrigger(ApiModel):
+    """Desired trigger whose complete presentation contract comes from SQL."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    relation_name: DesignIdentifier
+    timing: Literal["before", "after", "instead_of"]
+    events: list[Literal["insert", "update", "delete", "truncate"]] = Field(
+        min_length=1,
+        max_length=4,
+    )
+    orientation: Literal["row", "statement"]
+    function_name: Annotated[str, Field(min_length=1, max_length=255)]
+    function_arguments: list[DesignExpression] = Field(default_factory=list, max_length=100)
+    update_columns: list[DesignIdentifier] = Field(default_factory=list, max_length=1600)
+    referenced_columns: list[DesignIdentifier] = Field(default_factory=list, max_length=1600)
+    when_expression: DesignExpression | None = None
+    transition_relations: list[DesignExpression] = Field(default_factory=list, max_length=2)
+    constraint: bool
+    deferrable: bool
+    initially_deferred: bool
+    definition: DesignExpression
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_contract_from_definition(cls, value: object) -> object:
+        """Discard submitted trigger metadata and derive it from source."""
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        definition = normalized.get("definition")
+        if not isinstance(definition, str):
+            return normalized
+        contract = analyze_trigger_definition(definition)
+        for key in (
+            "name",
+            "relationName",
+            "relation_name",
+            "timing",
+            "events",
+            "orientation",
+            "functionName",
+            "function_name",
+            "functionArguments",
+            "function_arguments",
+            "updateColumns",
+            "update_columns",
+            "referencedColumns",
+            "referenced_columns",
+            "whenExpression",
+            "when_expression",
+            "transitionRelations",
+            "transition_relations",
+            "constraint",
+            "deferrable",
+            "initiallyDeferred",
+            "initially_deferred",
+        ):
+            normalized.pop(key, None)
+        normalized.update(
+            {
+                "name": contract.name,
+                "relation_name": contract.relation_name,
+                "timing": contract.timing,
+                "events": list(contract.events),
+                "orientation": contract.orientation,
+                "function_name": contract.function_name,
+                "function_arguments": list(contract.function_arguments),
+                "update_columns": list(contract.update_columns),
+                "referenced_columns": list(contract.referenced_columns),
+                "when_expression": contract.when_expression,
+                "transition_relations": list(contract.transition_relations),
+                "constraint": contract.constraint,
+                "deferrable": contract.deferrable,
+                "initially_deferred": contract.initially_deferred,
+            }
+        )
+        return normalized
+
+
+class DesignTriggerAnalysisRequest(ApiModel):
+    definition: DesignExpression
+
+
+class DesignTriggerAnalysis(ApiModel):
+    name: DesignIdentifier
+    relation_name: DesignIdentifier
+    timing: Literal["before", "after", "instead_of"]
+    events: list[Literal["insert", "update", "delete", "truncate"]]
+    orientation: Literal["row", "statement"]
+    function_name: Annotated[str, Field(min_length=1, max_length=255)]
+    function_arguments: list[DesignExpression]
+    update_columns: list[DesignIdentifier]
+    referenced_columns: list[DesignIdentifier]
+    when_expression: DesignExpression | None = None
+    transition_relations: list[DesignExpression]
+    constraint: bool
+    deferrable: bool
+    initially_deferred: bool
+
+
 class DesignView(ApiModel):
     """Desired ordinary or materialized view definition."""
 
@@ -211,6 +314,7 @@ class SchemiiDesignContent(ApiModel):
     relationships: list[DesignRelationship] = Field(default_factory=list, max_length=20_000)
     functions: list[DesignFunction] = Field(default_factory=list, max_length=5_000)
     views: list[DesignView] = Field(default_factory=list, max_length=5_000)
+    triggers: list[DesignTrigger] = Field(default_factory=list, max_length=10_000)
 
 
 class SchemiiDesign(ApiModel):
