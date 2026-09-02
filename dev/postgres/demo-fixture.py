@@ -21,7 +21,6 @@ from schemii.main import create_services
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import SchemiiDesignContent, SchemiiDesignReplace
 from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
-from schemii.schemii.workspaces.store import WorkspaceDesignBootstrap
 
 
 FIXTURE_CONNECTION_ID = "pg_" + hashlib.sha256(
@@ -404,29 +403,20 @@ def main() -> None:
         LOCAL_PROTOTYPE_USER_ID, FIXTURE_CONNECTION_ID
     ) as target:
         catalog = services.postgres.introspect(target, "public")
-        connection_revision = target.revision
-    imported = import_postgres_catalog(catalog)
-    workspace = services.workspaces.create(
-        LOCAL_PROTOTYPE_USER_ID,
-        SchemiiWorkspaceCreate(
-            name=f"Demo · {manifest['title']}",
-            connection_id=FIXTURE_CONNECTION_ID,
-            database=database,
-            namespace="public",
-        ),
-        bootstrap=WorkspaceDesignBootstrap(
-            content=imported.content,
-            layout=imported.layout,
-            import_summary=imported.summary,
-        ),
-    )
-    assert services.migrations is not None
-    services.migrations.record_import_baseline(
-        LOCAL_PROTOTYPE_USER_ID,
-        workspace.id,
-        connection_revision,
-        catalog,
-    )
+        imported = import_postgres_catalog(catalog)
+        assert services.migrations is not None
+        workspace = services.migrations.create_import_workspace(
+            LOCAL_PROTOTYPE_USER_ID,
+            SchemiiWorkspaceCreate(
+                name=f"Demo · {manifest['title']}",
+                connection_id=FIXTURE_CONNECTION_ID,
+                database=database,
+                namespace="public",
+            ),
+            imported,
+            target.revision,
+            catalog,
+        )
     for alteration in manifest["designAlterations"]:
         _apply_design_alteration(services, workspace.id, directory / alteration)
 
