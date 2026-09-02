@@ -152,9 +152,14 @@ function fixture({ getViewportInsets = () => ({}) } = {}) {
   });
   const card = new PointerTarget();
   const handle = new PointerTarget();
-  canvas.catalog = { namespace: "public", tables: [{ name: "orders" }], relationships: [] };
-  canvas.positions.set("orders", { x: 100, y: 200 });
-  canvas.cards.set("orders", card);
+  const orders = { namespace: "public", name: "orders" };
+  const ordersId = "catalog-table:public:orders";
+  canvas.catalog = { namespace: "public", tables: [orders], relationships: [] };
+  canvas.tableById.set(ordersId, orders);
+  canvas.tableIdByName.set("orders", ordersId);
+  canvas.tableByName.set("orders", orders);
+  canvas.positions.set(ordersId, { x: 100, y: 200 });
+  canvas.cards.set(ordersId, card);
   handle.addEventListener("pointerdown", event => canvas.startDrag(event, "orders", card));
   return {
     canvas,
@@ -181,7 +186,7 @@ test("pointerup drops a table after the pointerdown event has finished dispatchi
 
   assert.equal(canvas.drag, null);
   assert.equal(card.classList.contains("dragging"), false);
-  assert.deepEqual(canvas.positions.get("orders"), { x: 140, y: 250 });
+  assert.deepEqual(canvas.positions.get("catalog-table:public:orders"), { x: 140, y: 250 });
   assert.equal(savedPositionCount(), 1);
   assert.equal(frames.callbacks.size, 0);
   assert.equal(handle.hasPointerCapture(7), false);
@@ -201,7 +206,7 @@ test("lost pointer capture also closes an active table drag", () => {
   assert.equal(canvas.drag, null);
   assert.equal(card.classList.contains("dragging"), false);
   assert.equal(savedPositionCount(), 1);
-  assert.deepEqual(canvas.positions.get("orders"), { x: 115, y: 215 });
+  assert.deepEqual(canvas.positions.get("catalog-table:public:orders"), { x: 115, y: 215 });
 });
 
 test("authoring banner controls do not start a canvas pan", () => {
@@ -220,11 +225,11 @@ test("authoring banner controls do not start a canvas pan", () => {
 
 test("clearing a table selection updates the card and notifies navigation", () => {
   const { canvas, card, selectionCount } = fixture();
-  canvas.selectedName = "orders";
+  canvas.selectedId = "catalog-table:public:orders";
   card.classList.add("selected");
 
   assert.equal(canvas.clearSelection({ notify: true }), true);
-  assert.equal(canvas.selectedName, null);
+  assert.equal(canvas.selectedId, null);
   assert.equal(card.classList.contains("selected"), false);
   assert.equal(card.attributes.get("aria-pressed"), "false");
   assert.equal(selectionCount(), 1);
@@ -261,7 +266,11 @@ test("many pointer events produce one frame and mutate only incident relationshi
   });
   const connectedEntry = entry();
   const unrelatedEntry = entry();
-  canvas.positions.set("customers", { x: 600, y: 300 });
+  const customers = { namespace: "public", name: "customers" };
+  canvas.tableByName.set("customers", customers);
+  canvas.tableById.set("catalog-table:public:customers", customers);
+  canvas.tableIdByName.set("customers", "catalog-table:public:customers");
+  canvas.positions.set("catalog-table:public:customers", { x: 600, y: 300 });
   canvas.columnIndexes.set("orders", new Map([["customer_id", 1]]));
   canvas.columnIndexes.set("customers", new Map([["id", 0]]));
   canvas.relationshipsByTable.set("orders", [connected]);
@@ -300,7 +309,7 @@ test("many pointer events produce one frame and mutate only incident relationshi
 
   handle.dispatch("pointerup", { clientX: 110, clientY: 120 });
   assert.equal(card.style.transform, "");
-  assert.deepEqual(canvas.positions.get("orders"), { x: 200, y: 300 });
+  assert.deepEqual(canvas.positions.get("catalog-table:public:orders"), { x: 200, y: 300 });
   assert.equal(savedPositionCount(), 1);
   assert.equal(connectedEntry.line.writes.length, 1);
 });
@@ -404,29 +413,71 @@ test("relationship indexing includes target edges and indexes self-edges once", 
 
 test("selection updates only the previous and next cards in a large catalog", () => {
   const { canvas } = fixture();
-  canvas.selectedName = "orders";
+  canvas.selectedId = "catalog-table:public:orders";
   for (let index = 0; index < 2_000; index += 1) {
     const name = `table_${index}`;
-    canvas.tableByName.set(name, { name });
-    canvas.cards.set(name, new PointerTarget());
+    const table = { namespace: "public", name };
+    const tableId = `catalog-table:public:${name}`;
+    canvas.tableByName.set(name, table);
+    canvas.tableById.set(tableId, table);
+    canvas.tableIdByName.set(name, tableId);
+    canvas.cards.set(tableId, new PointerTarget());
   }
 
   canvas.select("table_1999");
 
   const changedCards = [...canvas.cards.entries()].filter(([, card]) => card.attributes.has("aria-pressed"));
-  assert.deepEqual(changedCards.map(([name]) => name), ["orders", "table_1999"]);
-  assert.equal(canvas.cards.get("orders").attributes.get("aria-pressed"), "false");
-  assert.equal(canvas.cards.get("table_1999").attributes.get("aria-pressed"), "true");
+  assert.deepEqual(changedCards.map(([id]) => id), [
+    "catalog-table:public:orders",
+    "catalog-table:public:table_1999",
+  ]);
+  assert.equal(canvas.cards.get("catalog-table:public:orders").attributes.get("aria-pressed"), "false");
+  assert.equal(canvas.cards.get("catalog-table:public:table_1999").attributes.get("aria-pressed"), "true");
 });
 
 test("an explicit same-table selection notifies the inspector without redrawing selection", () => {
   const { canvas, selectionCount } = fixture();
-  canvas.tableByName.set("orders", { name: "orders" });
-  canvas.selectedName = "orders";
+  canvas.selectedId = "catalog-table:public:orders";
 
   canvas.select("orders", { notify: true });
 
   assert.equal(selectionCount(), 1);
+});
+
+test("detached canvas selection and positions survive a table rename by stable ID", () => {
+  const { canvas } = fixture();
+  canvas.render = () => {};
+  const before = {
+    namespace: "desired",
+    tables: [{ designId: "table-1", namespace: "desired", name: "orders", columns: [] }],
+    relationships: [],
+  };
+  const after = {
+    namespace: "desired",
+    tables: [{ designId: "table-1", namespace: "desired", name: "purchases", columns: [] }],
+    relationships: [],
+  };
+
+  canvas.setCatalog(before, [{ name: "orders", x: 140, y: 220 }]);
+  canvas.select("table-1");
+  canvas.setCatalog(after, [{ name: "purchases", x: 140, y: 220 }]);
+
+  assert.equal(canvas.selectedId, "table-1");
+  assert.equal(canvas.selectedTable().name, "purchases");
+  assert.deepEqual(canvas.getPositions(), [{ name: "purchases", x: 140, y: 220 }]);
+});
+
+test("authoritative layout positions update existing cards without rebuilding the canvas", () => {
+  const { canvas, card } = fixture();
+  let renderCount = 0;
+  canvas.render = () => { renderCount += 1; };
+
+  canvas.setPositions([{ name: "orders", x: 360, y: 410 }]);
+
+  assert.equal(renderCount, 0);
+  assert.equal(card.style.left, "360px");
+  assert.equal(card.style.top, "410px");
+  assert.deepEqual(canvas.getPositions(), [{ name: "orders", x: 360, y: 410 }]);
 });
 
 test("relationship mode exposes graphical source and eligible target columns", () => {

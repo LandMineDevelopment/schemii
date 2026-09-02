@@ -557,6 +557,13 @@ function renderQueryStory(container, {
   );
   heading.append(title);
   const headingActions = element("div", { className: "query-story-actions" });
+  if (loading && analysis) {
+    headingActions.append(element("span", {
+      className: "query-story-refreshing",
+      text: "Refreshing analysis…",
+      attrs: { role: "status" },
+    }));
+  }
   if (analysis) headingActions.append(impactBadge(impactItems));
   if (onEdit || onDelete) {
     const actions = element("div", { className: "ui-action-group" });
@@ -575,7 +582,7 @@ function renderQueryStory(container, {
   if (headingActions.childNodes.length) heading.append(headingActions);
   story.append(heading);
 
-  if (loading) {
+  if (loading && !analysis) {
     story.append(element("div", { className: "query-story-loading", attrs: { role: "status" } }, [
       element("span", { attrs: { "aria-hidden": "true" } }),
       element("strong", { text: "Reading the query structure…" }),
@@ -583,7 +590,7 @@ function renderQueryStory(container, {
     container.append(story);
     return;
   }
-  if (error) {
+  if (error && !analysis) {
     story.append(errorPanel(error, { retryLabel: onRetry ? "Analyze again" : null, onRetry }));
     const sql = element("details", { className: "query-sql-panel", attrs: { open: "" } });
     sql.append(element("summary", { text: "Query definition" }), element("pre", { text: subject.definition }));
@@ -591,6 +598,7 @@ function renderQueryStory(container, {
     container.append(story);
     return;
   }
+  if (error) story.append(errorPanel(error, { retryLabel: onRetry ? "Analyze again" : null, onRetry }));
   if (!analysis) {
     story.append(emptyPanel("SQL", "No query analysis", "Enter a valid SELECT query to reveal its relational meaning."));
     container.append(story);

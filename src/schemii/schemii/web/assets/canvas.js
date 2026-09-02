@@ -1,5 +1,6 @@
 import { element, replace } from "./dom.js";
 import { GraphViewport } from "./graph-viewport.js";
+import { catalogTableId } from "./workspace-state.js";
 
 const CARD_WIDTH = 270;
 const HEADER_HEIGHT = 48;
@@ -128,7 +129,7 @@ function initialPositions(tables) {
   for (const table of tables) {
     const column = columnHeights.indexOf(Math.min(...columnHeights));
     const y = clamp(columnHeights[column], -MAX_COORDINATE, MAX_COORDINATE);
-    positions.set(table.name, { x: clamp(90 + column * 350, -MAX_COORDINATE, MAX_COORDINATE), y });
+    positions.set(catalogTableId(table), { x: clamp(90 + column * 350, -MAX_COORDINATE, MAX_COORDINATE), y });
     const visibleRows = Math.min(table.columns.length, MAX_CARD_COLUMNS)
       + (table.columns.length > MAX_CARD_COLUMNS ? 1 : 0);
     columnHeights[column] += HEADER_HEIGHT + visibleRows * COLUMN_HEIGHT + 80;
@@ -174,6 +175,8 @@ export class CatalogCanvas {
     this.catalog = null;
     this.positions = new Map();
     this.cards = new Map();
+    this.tableById = new Map();
+    this.tableIdByName = new Map();
     this.tableByName = new Map();
     this.columnIndexes = new Map();
     this.columnRows = new Map();
@@ -181,7 +184,7 @@ export class CatalogCanvas {
     this.diagramRelationships = [];
     this.relationshipsByTable = new Map();
     this.measuredCardWidth = CARD_WIDTH;
-    this.selectedName = null;
+    this.selectedId = null;
     this.relationshipMode = { enabled: false, source: null };
     this.keyMode = { enabled: false, tableName: null, columnNames: [] };
     this.indexMode = { enabled: false, tableName: null, columnNames: [] };
@@ -220,6 +223,8 @@ export class CatalogCanvas {
     this.catalog = null;
     this.positions.clear();
     this.cards.clear();
+    this.tableById.clear();
+    this.tableIdByName.clear();
     this.tableByName.clear();
     this.columnIndexes.clear();
     this.columnRows.clear();
@@ -227,7 +232,7 @@ export class CatalogCanvas {
     this.diagramRelationships = [];
     this.relationshipsByTable.clear();
     this.onRelationshipVisibilityChanged(0, 0);
-    this.selectedName = null;
+    this.selectedId = null;
     replace(this.layer);
     replace(this.lines);
     this.applyColumnAuthoringMode();
@@ -236,6 +241,8 @@ export class CatalogCanvas {
   setCatalog(catalog, serverPositions = []) {
     this.discardDrag();
     this.catalog = catalog;
+    this.tableById = new Map(catalog.tables.map(table => [catalogTableId(table), table]));
+    this.tableIdByName = new Map(catalog.tables.map(table => [table.name, catalogTableId(table)]));
     this.tableByName = new Map(catalog.tables.map(table => [table.name, table]));
     this.columnIndexes = new Map(catalog.tables.map(table => [
       table.name,
@@ -243,10 +250,30 @@ export class CatalogCanvas {
     ]));
     const saved = new Map(serverPositions.map(position => [position.name, { x: position.x, y: position.y }]));
     const generated = initialPositions(catalog.tables);
-    this.positions = new Map(catalog.tables.map(table => [table.name, saved.get(table.name) || generated.get(table.name)]));
-    if (!this.tableByName.has(this.selectedName)) this.selectedName = null;
+    this.positions = new Map(catalog.tables.map(table => {
+      const tableId = catalogTableId(table);
+      return [tableId, saved.get(table.name) || generated.get(tableId)];
+    }));
+    if (!this.tableById.has(this.selectedId)) this.selectedId = null;
     this.updateDiagramRelationships();
     this.render();
+  }
+
+  setPositions(serverPositions = []) {
+    if (!this.catalog) return;
+    const saved = new Map(serverPositions.map(position => [position.name, { x: position.x, y: position.y }]));
+    for (const table of this.catalog.tables) {
+      const position = saved.get(table.name);
+      if (!position) continue;
+      const tableId = catalogTableId(table);
+      this.positions.set(tableId, position);
+      const card = this.cards.get(tableId);
+      if (card) {
+        card.style.left = `${position.x}px`;
+        card.style.top = `${position.y}px`;
+      }
+    }
+    this.drawRelationships();
   }
 
   render() {
@@ -256,18 +283,19 @@ export class CatalogCanvas {
     if (!this.catalog) return;
     const foreignKeys = foreignKeysByColumn(this.catalog.relationships);
     for (const table of this.catalog.tables) {
+      const tableId = catalogTableId(table);
       const card = element("article", {
-        className: `table-card${table.name === this.selectedName ? " selected" : ""}`,
+        className: `table-card${tableId === this.selectedId ? " selected" : ""}`,
         attrs: {
           tabindex: "0",
           role: "button",
           "aria-label": `${table.name}, ${table.columns.length} columns. Use arrow keys to move this table.`,
-          "aria-pressed": table.name === this.selectedName ? "true" : "false",
+          "aria-pressed": tableId === this.selectedId ? "true" : "false",
           "aria-disabled": this.interactive ? "false" : "true",
         },
-        dataset: { tableName: table.name, changeObjectId: table.designId || "", changeRoot: "" },
+        dataset: { tableId, tableName: table.name, changeObjectId: table.designId || "", changeRoot: "" },
       });
-      const position = this.positions.get(table.name);
+      const position = this.positions.get(tableId);
       card.style.left = `${position.x}px`;
       card.style.top = `${position.y}px`;
 
@@ -280,7 +308,7 @@ export class CatalogCanvas {
         }),
         element("small", { text: `${table.columns.length} ${table.columns.length === 1 ? "column" : "columns"}` }),
       );
-      head.addEventListener("pointerdown", event => this.startDrag(event, table.name, card));
+      head.addEventListener("pointerdown", event => this.startDrag(event, tableId, card));
       card.append(head);
 
       for (const column of table.columns.slice(0, MAX_CARD_COLUMNS)) {
@@ -337,9 +365,9 @@ export class CatalogCanvas {
         );
         card.append(row);
       }
-      card.addEventListener("click", () => this.select(table.name, { notify: true }));
-      card.addEventListener("keydown", event => this.handleCardKeydown(event, table.name));
-      this.cards.set(table.name, card);
+      card.addEventListener("click", () => this.select(tableId, { notify: true }));
+      card.addEventListener("keydown", event => this.handleCardKeydown(event, table.name, tableId));
+      this.cards.set(tableId, card);
       this.layer.append(card);
     }
     this.measureCardWidth();
@@ -446,37 +474,48 @@ export class CatalogCanvas {
     return true;
   }
 
-  select(name, { focus = false, notify = false } = {}) {
-    if (!this.tableByName.has(name)) return;
-    const selectionChanged = this.selectedName !== name;
+  resolveTableId(value) {
+    if (value && typeof value === "object") return catalogTableId(value);
+    if (this.tableById.has(value)) return value;
+    return this.tableIdByName.get(value) || null;
+  }
+
+  selectedTable() {
+    return this.tableById.get(this.selectedId) || null;
+  }
+
+  select(value, { focus = false, notify = false } = {}) {
+    const tableId = this.resolveTableId(value);
+    if (!tableId) return;
+    const selectionChanged = this.selectedId !== tableId;
     if (!selectionChanged) {
-      if (focus) this.cards.get(name)?.focus();
-      if (notify) this.onSelect(name);
+      if (focus) this.cards.get(tableId)?.focus();
+      if (notify) this.onSelect(this.tableById.get(tableId));
       return;
     }
-    const previousName = this.selectedName;
-    this.selectedName = name;
-    for (const tableName of [previousName, name]) {
-      if (!tableName) continue;
-      const card = this.cards.get(tableName);
+    const previousId = this.selectedId;
+    this.selectedId = tableId;
+    for (const candidateId of [previousId, tableId]) {
+      if (!candidateId) continue;
+      const card = this.cards.get(candidateId);
       if (!card) continue;
-      const selected = tableName === name;
+      const selected = candidateId === tableId;
       card.classList.toggle("selected", selected);
       card.setAttribute("aria-pressed", selected ? "true" : "false");
     }
-    if (focus) this.cards.get(name)?.focus();
+    if (focus) this.cards.get(tableId)?.focus();
     if (selectionChanged && this.catalog.relationships.length > MAX_DIAGRAM_RELATIONSHIPS) {
       this.updateDiagramRelationships();
       this.drawRelationships();
     }
-    this.onSelect(name);
+    this.onSelect(this.tableById.get(tableId));
   }
 
   clearSelection({ notify = false } = {}) {
-    if (!this.selectedName) return false;
-    const previousName = this.selectedName;
-    this.selectedName = null;
-    const previous = this.cards.get(previousName);
+    if (!this.selectedId) return false;
+    const previousId = this.selectedId;
+    this.selectedId = null;
+    const previous = this.cards.get(previousId);
     previous?.classList.toggle("selected", false);
     previous?.setAttribute("aria-pressed", "false");
     if (this.catalog?.relationships.length > MAX_DIAGRAM_RELATIONSHIPS) {
@@ -501,8 +540,9 @@ export class CatalogCanvas {
     else {
       const connected = [];
       const remaining = [];
+      const selectedName = this.selectedTable()?.name || null;
       for (const relationship of eligible) {
-        if (relationship.sourceTable === this.selectedName || relationship.targetTable === this.selectedName) connected.push(relationship);
+        if (relationship.sourceTable === selectedName || relationship.targetTable === selectedName) connected.push(relationship);
         else remaining.push(relationship);
       }
       this.diagramRelationships = connected.concat(remaining).slice(0, MAX_DIAGRAM_RELATIONSHIPS);
@@ -520,26 +560,28 @@ export class CatalogCanvas {
     this.onRelationshipVisibilityChanged(this.diagramRelationships.length, eligible.length);
   }
 
-  focusTable(name) {
-    this.select(name, { focus: true, notify: true });
+  focusTable(table) {
+    this.select(table, { focus: true, notify: true });
   }
 
-  startDrag(event, name, card) {
+  startDrag(event, value, card) {
     if (!this.interactive) return;
-    const position = this.positions.get(name);
-    if (!position) return;
+    const tableId = this.resolveTableId(value);
+    const table = this.tableById.get(tableId);
+    const position = this.positions.get(tableId);
+    if (!table || !position) return;
     this.viewport.beginNodeDrag(event, {
-      key: name,
+      key: tableId,
       element: card,
       position,
       constrain: candidate => ({
         x: clamp(candidate.x, -MAX_COORDINATE, MAX_COORDINATE),
         y: clamp(candidate.y, -MAX_COORDINATE, MAX_COORDINATE),
       }),
-      onStart: () => this.select(name),
-      onFrame: () => this.drawRelationships(name),
+      onStart: () => this.select(tableId),
+      onFrame: () => this.drawRelationships(table.name),
       onCommit: next => {
-        this.positions.set(name, next);
+        this.positions.set(tableId, next);
         this.onPositionsChanged();
       },
     });
@@ -565,11 +607,11 @@ export class CatalogCanvas {
     this.viewport.cancelNodeDrag();
   }
 
-  handleCardKeydown(event, name) {
+  handleCardKeydown(event, name, tableId = this.resolveTableId(name)) {
     if (!this.interactive) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      this.select(name, { notify: true });
+      this.select(tableId, { notify: true });
       return;
     }
     const delta = {
@@ -580,16 +622,16 @@ export class CatalogCanvas {
     }[event.key];
     if (!delta) return;
     event.preventDefault();
-    this.select(name);
+    this.select(tableId);
     const step = event.shiftKey ? 32 : 8;
-    const position = this.positions.get(name);
+    const position = this.positions.get(tableId);
     const next = {
       x: clamp(position.x + delta[0] * step, -MAX_COORDINATE, MAX_COORDINATE),
       y: clamp(position.y + delta[1] * step, -MAX_COORDINATE, MAX_COORDINATE),
     };
     if (next.x === position.x && next.y === position.y) return;
-    this.positions.set(name, next);
-    const card = this.cards.get(name);
+    this.positions.set(tableId, next);
+    const card = this.cards.get(tableId);
     card.style.left = `${next.x}px`;
     card.style.top = `${next.y}px`;
     this.drawRelationships(name);
@@ -599,7 +641,7 @@ export class CatalogCanvas {
   getPositions() {
     if (!this.catalog) return [];
     return this.catalog.tables.map(table => {
-      const position = this.positions.get(table.name);
+      const position = this.positions.get(catalogTableId(table));
       return { name: table.name, x: position.x, y: position.y };
     });
   }
@@ -614,8 +656,9 @@ export class CatalogCanvas {
     this.drawRelationships();
   }
 
-  positionFor(name) {
-    return this.viewport.dragPosition(name) || this.positions.get(name);
+  positionFor(value) {
+    const tableId = this.resolveTableId(value);
+    return tableId ? this.viewport.dragPosition(tableId) || this.positions.get(tableId) : null;
   }
 
   drawRelationships(changedTable = null) {
@@ -738,7 +781,7 @@ export class CatalogCanvas {
   fit() {
     if (!this.catalog?.tables.length) return false;
     const entries = this.catalog.tables.map(table => {
-      const position = this.positions.get(table.name);
+      const position = this.positions.get(catalogTableId(table));
       return { ...position, width: this.measuredCardWidth, height: cardHeight(table) };
     });
     const minX = Math.min(...entries.map(item => item.x));

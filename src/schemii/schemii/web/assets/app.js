@@ -72,6 +72,14 @@ import {
   workspaceNavigationHref,
 } from "./workspace-navigation.js";
 import { renderDesignViewStory } from "./view-story.js";
+import { createViewAnalysisController } from "./view-analysis.js";
+import {
+  catalogTableId,
+  catalogViewId,
+  createWorkspaceStateCommitter,
+  selectedCatalogTable,
+  selectedCatalogView,
+} from "./workspace-state.js";
 import {
   designChangePresentation,
   designChangeTargets,
@@ -80,7 +88,6 @@ import {
 
 const byId = id => document.getElementById(id);
 const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
-const MAX_VIEW_ANALYSIS_CACHE_ENTRIES = 48;
 
 const elements = {
   runtimeDot: byId("runtime-dot"),
@@ -334,7 +341,7 @@ const inspectorPane = new DockPane({
   side: "right",
   expandedLabel: "Minimize table inspector",
   minimizedLabel: "Expand table inspector",
-  getRestoreFocusTarget: () => document.querySelector(`.table-card[data-table-name="${CSS.escape(state.selectedTableName || "")}"]`) || elements.canvas,
+  getRestoreFocusTarget: () => document.querySelector(`.table-card[data-table-id="${CSS.escape(state.selectedTableId || "")}"]`) || elements.canvas,
   onStateChange: persistInspectorState,
 });
 inspectorPane.setAvailable(false);
@@ -392,15 +399,10 @@ const state = {
   catalogLoading: false,
   catalogError: null,
   catalogGeneration: 0,
-  selectedTableName: null,
-  selectedViewName: null,
-  selectedViewKind: null,
+  catalogRequestController: null,
+  selectedTableId: null,
+  selectedViewId: null,
   selectedViewOutputOrdinal: null,
-  viewAnalysisCache: new Map(),
-  viewAnalysisLoadingKey: null,
-  viewAnalysisError: null,
-  viewAnalysisErrorKey: null,
-  viewAnalysisGeneration: 0,
   designViewEditorId: null,
   designViewPreviewAnalysis: null,
   designViewPreviewError: null,
@@ -518,11 +520,8 @@ function focusChangedViewState(target) {
   if (!view) return null;
   elements.viewsSearch.value = "";
   setViewFilterState("all");
-  state.selectedViewName = view.name;
-  state.selectedViewKind = view.catalogKind;
+  commitWorkspaceState({ selectedViewId: catalogViewId(view) }, { render: false, canvas: false });
   state.selectedViewOutputOrdinal = null;
-  state.viewAnalysisError = null;
-  state.viewAnalysisErrorKey = null;
   return view;
 }
 
@@ -546,7 +545,7 @@ function revealChangedSchema(target, presentation) {
   const wasRestoring = state.restoringNavigation;
   state.restoringNavigation = true;
   try {
-    canvas.select(table.name, { focus: true, notify: true });
+    canvas.select(table, { focus: true, notify: true });
   } finally {
     state.restoringNavigation = wasRestoring;
   }
@@ -651,6 +650,82 @@ const canvas = new CatalogCanvas({
   },
 });
 
+function selectedViewAnalysisContext(view = currentCatalogView()) {
+  if (!isDetachedWorkspace() || !state.activeWorkspace || !state.design || !view?.designId) return null;
+  return {
+    key: [
+      state.activeWorkspace.id,
+      view.designId,
+      viewAnalysisContextSignature(state.design.content),
+    ].join(":"),
+    workspaceId: state.activeWorkspace.id,
+    view,
+  };
+}
+
+const viewAnalysis = createViewAnalysisController({
+  keyOf: context => context.key,
+  load: (context, { signal }) => api.analyzeDesignView(context.workspaceId, {
+    viewId: context.view.designId,
+    name: context.view.name,
+    definition: context.view.queryDefinition,
+  }, { signal }),
+  onChange: () => {
+    if (state.activeLayer === "views") renderSelectedViewDetail();
+  },
+});
+
+function syncViewAnalysisSelection({ force = false, notify = false } = {}) {
+  const context = selectedViewAnalysisContext();
+  return viewAnalysis.select(context, { force, notify });
+}
+
+function workspaceCanvasPositions(metadata = {}) {
+  if (metadata.canvasPositions) return metadata.canvasPositions;
+  if (state.catalog?.source === "design" && state.design && state.designLayout) {
+    return designPositions(state.design, state.designLayout);
+  }
+  return canvas.getPositions();
+}
+
+function notifyWorkspaceTransition(transition, metadata = {}) {
+  if (transition.changed.selectedViewId) state.selectedViewOutputOrdinal = null;
+  const catalogSurfaceChanged = transition.changed.catalog || transition.changed.designLayout;
+  if (metadata.canvas !== false && (catalogSurfaceChanged || metadata.canvasPositions)) {
+    if (state.catalog && metadata.canvasMode === "positions") {
+      canvas.setPositions(workspaceCanvasPositions(metadata));
+    } else if (state.catalog) canvas.setCatalog(state.catalog, workspaceCanvasPositions(metadata));
+    else canvas.clear();
+  }
+  void syncViewAnalysisSelection({ notify: false });
+  if (metadata.render === false) {
+    updateHeader();
+    return;
+  }
+  renderConflict();
+  renderCatalogSurfaces();
+  renderCatalogState();
+  updateHeader();
+}
+
+const commitWorkspaceState = createWorkspaceStateCommitter({
+  state,
+  projectDesign: designToCatalog,
+  notify: notifyWorkspaceTransition,
+});
+
+function cancelCatalogRequest() {
+  state.catalogRequestController?.abort();
+  state.catalogRequestController = null;
+}
+
+function startCatalogRequest() {
+  cancelCatalogRequest();
+  const controller = new AbortController();
+  state.catalogRequestController = controller;
+  return controller;
+}
+
 function openDialog(dialog) {
   // TODO(ui-dialog-focus): Move modal lifecycle into a shared controller that records the invoking control and restores focus after every close path, including programmatic closes and nested editor/confirmation flows.
   if (!dialog.open) dialog.showModal();
@@ -696,9 +771,17 @@ function isDetachedWorkspace(workspace = state.activeWorkspace) {
   ));
 }
 
+function currentCatalogTable() {
+  return selectedCatalogTable(state.catalog, state.selectedTableId);
+}
+
+function currentCatalogView() {
+  return selectedCatalogView(state.catalog, state.selectedViewId);
+}
+
 function selectedDesignTable() {
-  if (!isDetachedWorkspace() || !state.design || !state.selectedTableName) return null;
-  return state.design.content.tables.find(table => table.name === state.selectedTableName) || null;
+  if (!isDetachedWorkspace() || !state.design || !state.selectedTableId) return null;
+  return state.design.content.tables.find(table => table.id === state.selectedTableId) || null;
 }
 
 function updateDesignControls() {
@@ -755,12 +838,14 @@ function workspaceStorage() {
 }
 
 function currentWorkspaceNavigation() {
+  const table = currentCatalogTable();
+  const view = currentCatalogView();
   return {
     workspaceId: state.activeWorkspace?.id || null,
     layer: state.activeLayer,
-    table: state.activeLayer === "tables" ? state.selectedTableName : null,
-    view: state.activeLayer === "views" ? state.selectedViewName : null,
-    viewKind: state.activeLayer === "views" ? state.selectedViewKind : null,
+    table: state.activeLayer === "tables" ? table?.name || null : null,
+    view: state.activeLayer === "views" ? view?.name || null : null,
+    viewKind: state.activeLayer === "views" ? view?.catalogKind || null : null,
   };
 }
 
@@ -809,7 +894,7 @@ function applyWorkspaceNavigation(navigation) {
     setLayer(navigation.layer, { historyMode: null });
     if (navigation.layer === "tables") {
       const table = state.catalog?.tables.find(item => item.name === navigation.table) || null;
-      if (table) canvas.select(table.name, { notify: true });
+      if (table) canvas.select(table, { notify: true });
       else {
         canvas.clearSelection();
         selectTable(null, { historyMode: null });
@@ -1423,20 +1508,19 @@ function syncDraftAfterDeletedObject(result) {
 async function persistDesignObjectDeletion(node, { historyGroupId = null } = {}) {
   if (!await flushLayoutBeforeTransition()) return;
   const result = deleteDesignObject(state.design.content, node.objectId);
-  if (["table", "column", "view"].includes(result.kind)) state.viewAnalysisCache.clear();
+  if (["table", "column", "view"].includes(result.kind)) viewAnalysis.clear();
   state.designSubmitting = true;
   updateDesignControls();
   try {
-    const selectedTableName = result.kind === "table" && state.selectedTableName === result.object.name
+    const selectedTableId = result.kind === "table" && state.selectedTableId === result.object.id
       ? null
-      : state.selectedTableName;
-    const selectedViewName = result.kind === "view" && state.selectedViewName === result.object.name
+      : state.selectedTableId;
+    const selectedViewId = result.kind === "view" && state.selectedViewId === result.object.id
       ? null
-      : state.selectedViewName;
+      : state.selectedViewId;
     const design = await replaceActiveDesign(result.content, {
-      selectedTableName,
-      selectedViewName,
-      selectedViewKind: selectedViewName ? state.selectedViewKind : null,
+      selectedTableId,
+      selectedViewId,
       historyGroupId,
       revealChanges: true,
     });
@@ -1734,28 +1818,26 @@ function clearActiveWorkspace({ historyMode = "replace" } = {}) {
   const workspaceId = state.activeWorkspace?.id;
   persistCanvasView();
   state.catalogGeneration += 1;
+  cancelCatalogRequest();
+  viewAnalysis.clear();
   resetLayoutSaveState();
-  state.activeWorkspace = null;
-  state.design = null;
-  state.designLayout = null;
-  state.designHistory = null;
-  state.catalog = null;
-  state.databaseCatalog = null;
   state.columnOrderModes.clear();
   state.catalogError = null;
   state.catalogLoading = false;
-  state.selectedTableName = null;
-  state.selectedViewName = null;
-  state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
   if (state.preservedLayout?.workspaceId === workspaceId) state.preservedLayout = null;
   cancelColumnAuthoring();
-  canvas.clear();
-  renderConflict();
-  renderCatalogSurfaces();
-  renderCatalogState();
-  updateHeader();
+  commitWorkspaceState({
+    activeWorkspace: null,
+    design: null,
+    designLayout: null,
+    designHistory: null,
+    catalog: null,
+    databaseCatalog: null,
+    selectedTableId: null,
+    selectedViewId: null,
+  });
   syncWorkspaceNavigation(historyMode);
 }
 
@@ -1782,48 +1864,48 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
     };
   }
   state.catalogGeneration += 1;
+  cancelCatalogRequest();
+  viewAnalysis.clear();
   resetLayoutSaveState();
-  state.catalog = null;
-  state.databaseCatalog = null;
   state.columnOrderModes.clear();
-  state.design = null;
-  state.designLayout = null;
   state.catalogError = null;
   state.catalogLoading = false;
-  state.selectedTableName = null;
-  state.selectedViewName = null;
-  state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
   cancelColumnAuthoring();
-  canvas.clear();
-  renderConflict();
-  renderCatalogSurfaces();
-  renderCatalogState();
-  updateHeader();
+  commitWorkspaceState({
+    design: null,
+    designLayout: null,
+    designHistory: null,
+    catalog: null,
+    databaseCatalog: null,
+    selectedTableId: null,
+    selectedViewId: null,
+  });
 }
 
 async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   if (!await flushLayoutBeforeTransition()) return false;
   persistCanvasView();
+  state.catalogGeneration += 1;
+  cancelCatalogRequest();
+  viewAnalysis.clear();
   resetLayoutSaveState();
-  state.activeWorkspace = workspace;
-  state.catalog = null;
-  state.databaseCatalog = null;
   state.columnOrderModes.clear();
-  state.design = null;
-  state.designLayout = null;
   state.catalogError = null;
-  state.selectedTableName = null;
-  state.selectedViewName = null;
-  state.selectedViewKind = null;
   state.layoutConflict = false;
   state.layoutConflictKind = null;
   cancelColumnAuthoring();
-  canvas.clear();
-  renderConflict();
-  renderCatalogSurfaces();
-  updateHeader();
+  commitWorkspaceState({
+    activeWorkspace: workspace,
+    design: null,
+    designLayout: null,
+    designHistory: null,
+    catalog: null,
+    databaseCatalog: null,
+    selectedTableId: null,
+    selectedViewId: null,
+  });
   syncWorkspaceNavigation(historyMode);
   await loadActiveWorkspace({ clearConflictOnSuccess: true });
   if (state.catalog && state.activeWorkspace?.id === workspace.id) restoreCanvasView(workspace.id);
@@ -1839,6 +1921,7 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
   if (!isDetachedWorkspace()) return;
   const workspaceId = state.activeWorkspace.id;
   const generation = ++state.catalogGeneration;
+  const request = startCatalogRequest();
   state.catalogLoading = true;
   canvas.setInteractive(false);
   state.catalogError = null;
@@ -1846,16 +1929,11 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
   updateHeader();
   try {
     const [design, layout, history] = await Promise.all([
-      api.getDesign(workspaceId),
-      api.getDesignLayout(workspaceId),
-      api.getDesignHistory(workspaceId),
+      api.getDesign(workspaceId, { signal: request.signal }),
+      api.getDesignLayout(workspaceId, { signal: request.signal }),
+      api.getDesignHistory(workspaceId, { signal: request.signal }),
     ]);
     if (generation !== state.catalogGeneration || state.activeWorkspace?.id !== workspaceId) return;
-    state.design = design;
-    state.designLayout = layout;
-    state.designHistory = history;
-    state.databaseCatalog = null;
-    state.catalog = designToCatalog(state.activeWorkspace, design);
     state.catalogError = null;
     state.layoutError = null;
     state.layoutDirty = false;
@@ -1863,9 +1941,9 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
       state.layoutConflict = false;
       state.layoutConflictKind = null;
     }
-    canvas.setCatalog(state.catalog, designPositions(design, layout));
-    renderConflict();
-    renderCatalogSurfaces();
+    commitWorkspaceState({ design, designLayout: layout, designHistory: history, databaseCatalog: null }, {
+      canvasPositions: designPositions(design, layout),
+    });
     const navigation = readWorkspaceNavigation(window.location.href);
     if (navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
@@ -1873,9 +1951,11 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
     }
   } catch (error) {
     if (generation !== state.catalogGeneration) return;
+    if (error instanceof ApiError && error.code === "request_cancelled") return;
     state.catalogError = error;
   } finally {
     if (generation === state.catalogGeneration) {
+      if (state.catalogRequestController === request) state.catalogRequestController = null;
       state.catalogLoading = false;
       canvas.setInteractive(true);
       renderCatalogState();
@@ -1888,28 +1968,28 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
   if (!state.activeWorkspace) return;
   const workspaceId = state.activeWorkspace.id;
   const generation = ++state.catalogGeneration;
+  const request = startCatalogRequest();
   state.catalogLoading = true;
   canvas.setInteractive(false);
   state.catalogError = null;
   renderCatalogState();
   updateHeader();
   try {
-    const response = await api.getCatalog(workspaceId);
+    const response = await api.getCatalog(workspaceId, { signal: request.signal });
     if (generation !== state.catalogGeneration || state.activeWorkspace?.id !== workspaceId) return;
     const preservedLayout = state.preservedLayout?.workspaceId === workspaceId
       ? state.preservedLayout
       : null;
-    state.activeWorkspace = preservedLayout
+    const activeWorkspace = preservedLayout
       ? { ...response.workspace, columnOrders: preservedLayout.columnOrders }
       : response.workspace;
     state.workspaces = state.workspaces.map(workspace => (
-      workspace.id === response.workspace.id ? state.activeWorkspace : workspace
+      workspace.id === response.workspace.id ? activeWorkspace : workspace
     ));
-    state.databaseCatalog = response.catalog;
-    synchronizeColumnOrderModes();
-    state.catalog = applyColumnDisplayOrders(
-      state.databaseCatalog,
-      state.activeWorkspace.columnOrders,
+    synchronizeColumnOrderModes(response.catalog, activeWorkspace);
+    const catalog = applyColumnDisplayOrders(
+      response.catalog,
+      activeWorkspace.columnOrders,
       state.columnOrderModes,
     );
     state.catalogError = null;
@@ -1933,15 +2013,15 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
         ? "workspace"
         : "connection";
     }
-    canvas.setCatalog(state.catalog, preservedLayout?.positions || response.positions);
+    commitWorkspaceState({ activeWorkspace, databaseCatalog: response.catalog, catalog }, {
+      canvasPositions: preservedLayout?.positions || response.positions,
+    });
     if (preservedLayout) {
       state.preservedLayout = null;
       state.layoutVersion += 1;
       if (!preservedLayoutConflict) state.layoutTimer = window.setTimeout(saveLayout, 550);
     }
-    renderConflict();
     renderWorkspaces();
-    renderCatalogSurfaces();
     const navigation = readWorkspaceNavigation(window.location.href);
     if (navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
@@ -1949,9 +2029,11 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
     }
   } catch (error) {
     if (generation !== state.catalogGeneration) return;
+    if (error instanceof ApiError && error.code === "request_cancelled") return;
     state.catalogError = error;
   } finally {
     if (generation === state.catalogGeneration) {
+      if (state.catalogRequestController === request) state.catalogRequestController = null;
       state.catalogLoading = false;
       canvas.setInteractive(true);
       renderCatalogState();
@@ -1982,16 +2064,16 @@ function reloadConflict() {
   loadActiveWorkspace({ clearConflictOnSuccess: true });
 }
 
-function synchronizeColumnOrderModes() {
-  if (!state.databaseCatalog) {
+function synchronizeColumnOrderModes(databaseCatalog = state.databaseCatalog, workspace = state.activeWorkspace) {
+  if (!databaseCatalog) {
     state.columnOrderModes.clear();
     return;
   }
   const customTables = new Set(
-    (state.activeWorkspace?.columnOrders || []).map(order => order.name),
+    (workspace?.columnOrders || []).map(order => order.name),
   );
   const next = new Map();
-  for (const table of state.databaseCatalog.tables) {
+  for (const table of databaseCatalog.tables) {
     next.set(
       table.name,
       state.columnOrderModes.get(table.name)
@@ -2009,16 +2091,12 @@ function customColumnOrder(tableName) {
 function refreshColumnDisplay({ focusSortKey = null } = {}) {
   if (!state.databaseCatalog || !state.activeWorkspace) return;
   const positions = canvas.getPositions();
-  state.catalog = applyColumnDisplayOrders(
+  const catalog = applyColumnDisplayOrders(
     state.databaseCatalog,
     state.activeWorkspace.columnOrders,
     state.columnOrderModes,
   );
-  canvas.setCatalog(state.catalog, positions);
-  const selected = state.catalog.tables.find(
-    table => table.name === state.selectedTableName,
-  ) || null;
-  renderActiveInspector(selected);
+  commitWorkspaceState({ catalog }, { canvasPositions: positions });
   if (focusSortKey) {
     window.requestAnimationFrame(() => {
       elements.inspectorContent.querySelector(
@@ -2038,7 +2116,7 @@ function updateLiveColumnOrder(tableName, columnNames, details = {}) {
   if (!state.databaseCatalog || !state.activeWorkspace) return;
   const table = state.databaseCatalog.tables.find(item => item.name === tableName);
   if (!table || columnNames.length !== table.columns.length) return;
-  state.activeWorkspace = {
+  const activeWorkspace = {
     ...state.activeWorkspace,
     columnOrders: replaceColumnDisplayOrder(
       state.activeWorkspace.columnOrders || [],
@@ -2046,8 +2124,9 @@ function updateLiveColumnOrder(tableName, columnNames, details = {}) {
       columnNames,
     ),
   };
+  commitWorkspaceState({ activeWorkspace }, { render: false, canvas: false });
   state.workspaces = state.workspaces.map(workspace => (
-    workspace.id === state.activeWorkspace.id ? state.activeWorkspace : workspace
+    workspace.id === activeWorkspace.id ? activeWorkspace : workspace
   ));
   state.columnOrderModes.set(tableName, "custom");
   refreshColumnDisplay({
@@ -2058,15 +2137,16 @@ function updateLiveColumnOrder(tableName, columnNames, details = {}) {
 
 function resetLiveColumnOrder(tableName) {
   if (!state.databaseCatalog || !state.activeWorkspace) return;
-  state.activeWorkspace = {
+  const activeWorkspace = {
     ...state.activeWorkspace,
     columnOrders: removeColumnDisplayOrder(
       state.activeWorkspace.columnOrders || [],
       tableName,
     ),
   };
+  commitWorkspaceState({ activeWorkspace }, { render: false, canvas: false });
   state.workspaces = state.workspaces.map(workspace => (
-    workspace.id === state.activeWorkspace.id ? state.activeWorkspace : workspace
+    workspace.id === activeWorkspace.id ? activeWorkspace : workspace
   ));
   state.columnOrderModes.set(tableName, "database");
   refreshColumnDisplay();
@@ -2116,17 +2196,22 @@ function renderActiveInspector(table) {
   renderInspectorTableEditor(desired ? table : null);
 }
 
-function selectTable(name, { historyMode = "push" } = {}) {
-  if (state.inspectorTableEditorDirty && name !== state.selectedTableName) {
+function selectTable(value, { historyMode = "push" } = {}) {
+  const table = value && typeof value === "object"
+    ? state.catalog?.tables.find(item => catalogTableId(item) === catalogTableId(value)) || null
+    : state.catalog?.tables.find(item => (
+      catalogTableId(item) === value || item.name === value
+    )) || null;
+  const tableId = catalogTableId(table);
+  if (state.inspectorTableEditorDirty && tableId !== state.selectedTableId) {
     const selected = selectedDesignTable();
     showToast("Save or discard the current table changes before selecting another table.");
-    if (selected) canvas.select(selected.name, { focus: true });
+    if (selected) canvas.select(selected.id, { focus: true });
     inspectorPane.reveal();
     elements.inspectorTableName.focus();
     return;
   }
-  state.selectedTableName = name;
-  const table = state.catalog?.tables.find(item => item.name === name) || null;
+  commitWorkspaceState({ selectedTableId: tableId }, { render: false, canvas: false });
   renderActiveInspector(table);
   if (table) inspectorPane.reveal();
   else inspectorPane.setAvailable(false, { reset: true });
@@ -2185,9 +2270,9 @@ async function saveLayout() {
     const result = await savePromise;
     if (saveGeneration !== state.layoutSaveGeneration || state.activeWorkspace?.id !== workspaceId) return;
     if (detached) {
-      state.designLayout = result;
+      commitWorkspaceState({ designLayout: result }, { render: false, canvas: false });
     } else {
-      state.activeWorkspace = result;
+      commitWorkspaceState({ activeWorkspace: result }, { render: false, canvas: false });
       state.workspaces = state.workspaces.map(item => item.id === result.id ? result : item);
       renderWorkspaces();
     }
@@ -2266,18 +2351,12 @@ async function saveLayoutImmediately() {
 
 function renderCatalogSurfaces() {
   renderCatalogStats(elements.catalogStats, state.catalog);
-  const selectedTable = state.catalog?.tables.find(table => table.name === state.selectedTableName) || null;
-  if (!selectedTable) state.selectedTableName = null;
+  const selectedTable = currentCatalogTable();
   renderActiveInspector(selectedTable);
   if (selectedTable) {
     if (!inspectorPane.available) inspectorPane.reveal();
   } else inspectorPane.setAvailable(false, { reset: true });
   updateDesignControls();
-  const selectedView = allViews(state.catalog).find(view => view.name === state.selectedViewName && view.catalogKind === state.selectedViewKind) || null;
-  if (!selectedView) {
-    state.selectedViewName = null;
-    state.selectedViewKind = null;
-  }
   if (state.activeLayer === "views") renderViews();
   else {
     replace(elements.viewsList);
@@ -2305,107 +2384,82 @@ function renderCatalogSurfaces() {
 }
 
 function selectView(view, { historyMode = "push" } = {}) {
-  state.selectedViewName = view?.name || null;
-  state.selectedViewKind = view?.catalogKind || null;
+  commitWorkspaceState({ selectedViewId: catalogViewId(view) }, { render: false, canvas: false });
   state.selectedViewOutputOrdinal = null;
-  state.viewAnalysisError = null;
-  state.viewAnalysisErrorKey = null;
   renderViews();
   syncWorkspaceNavigation(historyMode);
 }
 
-function viewAnalysisKey(view) {
-  return [
-    state.activeWorkspace?.id || "none",
-    view.designId || view.name,
-    viewAnalysisContextSignature(state.design?.content),
-  ].join(":");
-}
-
-function cacheViewAnalysis(key, analysis) {
-  state.viewAnalysisCache.delete(key);
-  state.viewAnalysisCache.set(key, analysis);
-  while (state.viewAnalysisCache.size > MAX_VIEW_ANALYSIS_CACHE_ENTRIES) {
-    state.viewAnalysisCache.delete(state.viewAnalysisCache.keys().next().value);
-  }
-}
-
-async function analyzeSelectedDesignView(view, { force = false } = {}) {
-  if (!isDetachedWorkspace() || !state.design || !view?.designId) return;
-  const key = viewAnalysisKey(view);
-  if (!force && (state.viewAnalysisCache.has(key) || state.viewAnalysisLoadingKey === key)) return;
-  const generation = ++state.viewAnalysisGeneration;
-  const workspaceId = state.activeWorkspace.id;
-  state.viewAnalysisLoadingKey = key;
-  state.viewAnalysisError = null;
-  state.viewAnalysisErrorKey = null;
-  renderViews();
-  try {
-    const analysis = await api.analyzeDesignView(workspaceId, {
-      viewId: view.designId,
-      name: view.name,
-      definition: view.queryDefinition,
-    });
-    if (generation !== state.viewAnalysisGeneration || state.activeWorkspace?.id !== workspaceId) return;
-    cacheViewAnalysis(key, analysis);
-  } catch (error) {
-    if (generation !== state.viewAnalysisGeneration) return;
-    state.viewAnalysisError = error;
-    state.viewAnalysisErrorKey = key;
-  } finally {
-    if (generation === state.viewAnalysisGeneration) {
-      state.viewAnalysisLoadingKey = null;
-      renderViews();
-    }
-  }
-}
-
 function renderViews() {
   const desired = state.catalog?.source === "design";
+  const view = currentCatalogView();
   elements.viewsSourceLabel.textContent = desired ? "Desired schema" : "Live PostgreSQL";
   elements.createViewButton.hidden = !desired;
   renderViewsList(elements.viewsList, {
     catalog: state.catalog,
     query: elements.viewsSearch.value,
     filter: state.viewFilter,
-    selectedName: state.selectedViewName,
+    selectedName: view?.name || null,
     onSelect: selectView,
   });
-  const view = allViews(state.catalog).find(item => item.name === state.selectedViewName && item.catalogKind === state.selectedViewKind) || null;
+  renderSelectedViewDetail();
+}
+
+function renderSelectedViewDetail() {
+  const desired = state.catalog?.source === "design";
+  const view = currentCatalogView();
   if (!desired) {
+    delete elements.viewDetail.dataset.analysisKey;
     renderViewDetail(elements.viewDetail, view);
     return;
   }
   if (!view) {
+    delete elements.viewDetail.dataset.analysisKey;
     renderDesignViewStory(elements.viewDetail, { view: null });
     return;
   }
-  const key = viewAnalysisKey(view);
-  const analysis = state.viewAnalysisCache.get(key) || null;
+  const context = selectedViewAnalysisContext(view);
+  const analysisState = viewAnalysis.snapshot();
+  const selectedState = context && analysisState.key === context.key
+    ? analysisState
+    : { status: "idle", analysis: null, error: null };
+  if (
+    selectedState.status === "loading"
+    && selectedState.analysis
+    && elements.viewDetail.dataset.analysisKey === context.key
+  ) {
+    let status = elements.viewDetail.querySelector(".query-story-refreshing");
+    if (!status) {
+      status = element("span", {
+        className: "query-story-refreshing",
+        text: "Refreshing analysis…",
+        attrs: { role: "status" },
+      });
+      elements.viewDetail.querySelector(".query-story-actions")?.prepend(status);
+    }
+    return;
+  }
   renderDesignViewStory(elements.viewDetail, {
     view,
-    analysis,
-    loading: state.viewAnalysisLoadingKey === key,
-    error: state.viewAnalysisErrorKey === key ? state.viewAnalysisError : null,
+    analysis: selectedState.analysis,
+    loading: selectedState.status === "loading",
+    error: selectedState.error,
     selectedOutputOrdinal: state.selectedViewOutputOrdinal,
     onSelectOutput: output => {
       state.selectedViewOutputOrdinal = output.ordinal;
-      renderViews();
+      renderSelectedViewDetail();
     },
     onEdit: () => openDesignViewEditor(view.designId),
     onDelete: () => confirmDeleteDesignView(view.designId),
-    onRetry: () => analyzeSelectedDesignView(view, { force: true }),
+    onRetry: () => syncViewAnalysisSelection({ force: true }),
   });
-  if (!analysis && state.viewAnalysisLoadingKey !== key && state.viewAnalysisErrorKey !== key) {
-    void analyzeSelectedDesignView(view);
-  }
+  if (context) elements.viewDetail.dataset.analysisKey = context.key;
+  else delete elements.viewDetail.dataset.analysisKey;
 }
 
 function selectedDesignView() {
-  if (!isDetachedWorkspace() || !state.design || !state.selectedViewName) return null;
-  return state.design.content.views.find(view => (
-    view.name === state.selectedViewName && view.kind === state.selectedViewKind
-  )) || null;
+  if (!isDetachedWorkspace() || !state.design || !state.selectedViewId) return null;
+  return state.design.content.views.find(view => view.id === state.selectedViewId) || null;
 }
 
 function quotedSqlIdentifier(value) {
@@ -2542,10 +2596,9 @@ async function submitDesignView(event) {
   updateDesignControls();
   replace(elements.designViewStatus, element("span", { text: "Validating the query and saving the desired view…" }));
   try {
-    state.viewAnalysisCache.clear();
+    viewAnalysis.clear();
     const design = await replaceActiveDesign(result.content, {
-      selectedViewName: result.view.name,
-      selectedViewKind: result.view.kind,
+      selectedViewId: result.view.id,
     });
     if (!design) return;
     elements.designViewDialog.close();
@@ -3065,10 +3118,9 @@ async function submitDesignTrigger(event) {
       definition,
     });
     if (!await flushLayoutBeforeTransition()) return;
+    const relationTable = state.design.content.tables.find(table => table.name === analysis.relationName) || null;
     const design = await replaceActiveDesign(result.content, {
-      selectedTableName: state.design.content.tables.some(table => table.name === analysis.relationName)
-        ? analysis.relationName
-        : state.selectedTableName,
+      selectedTableId: relationTable?.id || state.selectedTableId,
     });
     if (!design) return;
     elements.designTriggerDialog.close();
@@ -3419,7 +3471,7 @@ function openDesignTableEditor(tableId = null) {
     return;
   }
   if (table) {
-    canvas.select(table.name, { focus: true, notify: true });
+    canvas.select(table.id, { focus: true, notify: true });
     inspectorPane.reveal();
     elements.inspectorTableName.focus();
     return;
@@ -3582,9 +3634,9 @@ async function submitInspectorTable(event) {
     const content = structuredClone(state.design.content);
     content.tables = content.tables.map(item => item.id === editingId ? table : item);
     state.inspectorTableEditorDirty = false;
-    const design = await replaceActiveDesign(content, { selectedTableName: table.name });
+    const design = await replaceActiveDesign(content, { selectedTableId: table.id });
     if (!design) return;
-    canvas.select(table.name, { focus: true, notify: true });
+    canvas.select(table.id, { focus: true, notify: true });
     showToast(`Updated ${table.name} in design revision ${design.revision}.`);
   } catch (error) {
     state.inspectorTableEditorDirty = true;
@@ -3605,9 +3657,8 @@ function conflictPanel(error) {
 }
 
 async function replaceActiveDesign(content, {
-  selectedTableName = state.selectedTableName,
-  selectedViewName = state.selectedViewName,
-  selectedViewKind = state.selectedViewKind,
+  selectedTableId = state.selectedTableId,
+  selectedViewId = state.selectedViewId,
   historyGroupId = null,
   revealChanges = false,
 } = {}) {
@@ -3629,45 +3680,40 @@ async function replaceActiveDesign(content, {
     changeTransitions.restore(prepared);
     return null;
   }
-  state.design = design;
-  state.designLayout = layout;
-  state.designHistory = history;
-  state.catalog = designToCatalog(state.activeWorkspace, design);
-  state.selectedTableName = selectedTableName;
-  state.selectedViewName = selectedViewName;
-  state.selectedViewKind = selectedViewKind;
   state.catalogError = null;
   state.layoutError = null;
-  canvas.setCatalog(state.catalog, designPositions(design, layout));
-  renderCatalogSurfaces();
-  renderCatalogState();
+  commitWorkspaceState({
+    design,
+    designLayout: layout,
+    designHistory: history,
+    selectedTableId,
+    selectedViewId,
+  }, { canvasPositions: designPositions(design, layout) });
   completeDesignChangeTransition(targets, prepared, { reveal: revealChanges });
   return design;
 }
 
 function applyDesignHistoryMutation(mutation, { cue = true, render = true } = {}) {
   const beforeContent = state.design?.content || {};
-  state.design = mutation.design;
-  state.designLayout = mutation.layout;
-  state.designHistory = mutation.history;
   if (!render) {
-    updateHeader();
+    commitWorkspaceState({
+      design: mutation.design,
+      designLayout: mutation.layout,
+      designHistory: mutation.history,
+      catalog: state.catalog,
+    }, {
+      render: false,
+      canvasMode: "positions",
+      canvasPositions: designPositions(mutation.design, mutation.layout),
+    });
     return;
   }
-  state.catalog = designToCatalog(state.activeWorkspace, mutation.design);
-  if (!state.catalog.tables.some(table => table.name === state.selectedTableName)) {
-    state.selectedTableName = null;
-  }
-  if (!allViews(state.catalog).some(view => view.name === state.selectedViewName)) {
-    state.selectedViewName = null;
-    state.selectedViewKind = null;
-    state.selectedViewOutputOrdinal = null;
-  }
   cancelColumnAuthoring();
-  canvas.setCatalog(state.catalog, designPositions(mutation.design, mutation.layout));
-  renderCatalogSurfaces();
-  renderCatalogState();
-  updateHeader();
+  commitWorkspaceState({
+    design: mutation.design,
+    designLayout: mutation.layout,
+    designHistory: mutation.history,
+  }, { canvasPositions: designPositions(mutation.design, mutation.layout) });
   if (cue) showDesignChanges(beforeContent, mutation.design.content);
 }
 
@@ -3676,29 +3722,19 @@ async function applyDesignHistoryPreview(delta) {
   const afterContent = applyJsonDelta(state.design.content, delta);
   const targets = designChangeTargets(beforeContent, afterContent);
   const prepared = await prepareDesignChangeTransition(targets, { reveal: true });
-  state.design = {
+  const design = {
     ...state.design,
     content: afterContent,
   };
-  state.catalog = designToCatalog(state.activeWorkspace, state.design);
-  if (!state.catalog.tables.some(table => table.name === state.selectedTableName)) {
-    state.selectedTableName = null;
-  }
-  if (!allViews(state.catalog).some(view => view.name === state.selectedViewName)) {
-    state.selectedViewName = null;
-    state.selectedViewKind = null;
-    state.selectedViewOutputOrdinal = null;
-    if (state.viewAnalysisLoadingKey) {
-      state.viewAnalysisGeneration += 1;
-      state.viewAnalysisLoadingKey = null;
-    }
-  }
+  commitWorkspaceState({ design }, {
+    canvasPositions: designPositions(design, state.designLayout),
+    render: false,
+  });
   const revealTarget = designChangeRevealTarget(targets, "after");
   const focusedView = revealTarget?.scope === "views"
     ? focusChangedViewState(revealTarget)
     : null;
   cancelColumnAuthoring();
-  canvas.setCatalog(state.catalog, designPositions(state.design, state.designLayout));
   renderCatalogSurfaces();
   renderCatalogState();
   const presentation = designChangePresentation(targets);
@@ -3747,9 +3783,8 @@ async function executeDesignHistoryMoveConfirmed(direction) {
     layout: state.designLayout,
     history: state.designHistory,
     activeLayer: state.activeLayer,
-    selectedTableName: state.selectedTableName,
-    selectedViewName: state.selectedViewName,
-    selectedViewKind: state.selectedViewKind,
+    selectedTableId: state.selectedTableId,
+    selectedViewId: state.selectedViewId,
   };
   const delta = state.designHistory?.[direction]?.delta || [];
   const action = state.designHistory?.[direction] || null;
@@ -3778,11 +3813,11 @@ async function executeDesignHistoryMoveConfirmed(direction) {
     if (previewApplied && state.activeWorkspace?.id === workspaceId) {
       changeCues.clear();
       applyDesignHistoryMutation(rollback, { cue: false });
-      state.selectedTableName = rollback.selectedTableName;
-      state.selectedViewName = rollback.selectedViewName;
-      state.selectedViewKind = rollback.selectedViewKind;
+      commitWorkspaceState({
+        selectedTableId: rollback.selectedTableId,
+        selectedViewId: rollback.selectedViewId,
+      });
       setLayer(rollback.activeLayer, { historyMode: "replace" });
-      renderCatalogSurfaces();
     }
     errorToast(error);
     if (error instanceof ApiError && ["design_changed", "nothing_to_undo", "nothing_to_redo"].includes(error.code)) {
@@ -3880,10 +3915,10 @@ async function submitDesignTable(event) {
   updateDesignControls();
   replace(elements.designTableStatus, element("span", { text: "Validating and saving the desired schema…" }));
   try {
-    const design = await replaceActiveDesign(content, { selectedTableName: table.name });
+    const design = await replaceActiveDesign(content, { selectedTableId: table.id });
     if (!design) return;
     elements.designTableDialog.close();
-    canvas.select(table.name, { notify: true });
+    canvas.select(table.id, { notify: true });
     state.layoutDirty = true;
     state.layoutVersion += 1;
     await saveLayout();
@@ -4261,10 +4296,10 @@ async function submitDesignKey(event) {
   try {
     const table = designTableById(state.designKeyTableId);
     const editing = Boolean(state.designKeyEditorId);
-    const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+    const design = await replaceActiveDesign(result.content, { selectedTableId: table.id });
     if (!design) return;
     elements.designKeyDialog.close();
-    canvas.select(table.name, { notify: true });
+    canvas.select(table.id, { notify: true });
     showToast(`${editing ? "Updated" : "Created"} ${result.key.name} in design revision ${design.revision}.`);
   } catch (error) {
     replace(elements.designKeyStatus, conflictPanel(error));
@@ -4370,10 +4405,10 @@ async function submitDesignCheck(event) {
   try {
     const table = designTableById(state.designCheckTableId);
     const editing = Boolean(state.designCheckEditorId);
-    const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+    const design = await replaceActiveDesign(result.content, { selectedTableId: table.id });
     if (!design) return;
     elements.designCheckDialog.close();
-    canvas.select(table.name, { notify: true });
+    canvas.select(table.id, { notify: true });
     showToast(`${editing ? "Updated" : "Created"} ${result.check.name} in design revision ${design.revision}.`);
   } catch (error) {
     replace(elements.designCheckStatus, conflictPanel(error));
@@ -4518,10 +4553,10 @@ async function submitDesignIndex(event) {
   try {
     const table = designTableById(state.designIndexTableId);
     const editing = Boolean(state.designIndexEditorId);
-    const design = await replaceActiveDesign(result.content, { selectedTableName: table.name });
+    const design = await replaceActiveDesign(result.content, { selectedTableId: table.id });
     if (!design) return;
     elements.designIndexDialog.close();
-    canvas.select(table.name, { notify: true });
+    canvas.select(table.id, { notify: true });
     showToast(`${editing ? "Updated" : "Created"} ${result.index.name} in design revision ${design.revision}.`);
   } catch (error) {
     replace(elements.designIndexStatus, conflictPanel(error));
