@@ -421,6 +421,9 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-relationship-body > .span-all { grid-column: 1 / -1; }
 .design-field { display: grid; min-width: 0; gap: 6px; color: #9aa6b4; font-size: 8px; }
 .design-field input, .design-field select, .relationship-mapping select { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
+.design-select { padding-right: 34px !important; appearance: none; background-image: linear-gradient(45deg, transparent 50%, #788696 50%), linear-gradient(135deg, #788696 50%, transparent 50%) !important; background-position: calc(100% - 15px) 15px, calc(100% - 10px) 15px !important; background-repeat: no-repeat !important; background-size: 5px 5px !important; cursor: pointer; }
+.design-select:hover { border-color: #465361; background-color: #111820; }
+.design-select option { color: #d8e0e8; background: #11171e; }
 .design-field select:disabled, .relationship-mapping select:disabled { opacity: 1; color: #aeb8c3; border-color: #29333f; background: #131920; cursor: default; }
 .relationship-mapping { overflow: hidden; border: 1px solid #303946; border-radius: 7px; background: #11171e; }
 .relationship-mapping > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-bottom: 1px solid #29333f; }

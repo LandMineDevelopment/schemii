@@ -316,9 +316,8 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <div class="design-index-body">
           <label class="design-field"><span>Table</span><output id="design-index-table"></output></label>
           <label class="design-field"><span>Index name</span><input id="design-index-name" required maxlength="63" autocomplete="off" /></label>
-          <label class="design-field"><span>Access method</span><input id="design-index-method" required maxlength="63" list="postgres-index-methods" value="btree" autocomplete="off" /></label>
+          <label class="design-field"><span>Access method</span><select class="design-select" id="design-index-method" required><option value="btree">B-tree · default</option><option value="hash">Hash</option><option value="gist">GiST</option><option value="spgist">SP-GiST</option><option value="gin">GIN</option><option value="brin">BRIN</option></select></label>
           <label class="check-row"><input id="design-index-unique" type="checkbox" /><span>Unique index</span></label>
-          <datalist id="postgres-index-methods"><option value="btree"></option><option value="hash"></option><option value="gist"></option><option value="spgist"></option><option value="gin"></option><option value="brin"></option></datalist>
           <section class="design-key-columns span-all" aria-labelledby="design-index-columns-title">
             <header><strong id="design-index-columns-title">Ordered columns</strong><small>Drag the six-dot handle · optional with an expression</small></header>
             <div class="design-ordered-columns" id="design-index-columns"></div>

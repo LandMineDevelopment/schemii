@@ -34,6 +34,29 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert head.headers["content-type"].startswith("text/html")
 
 
+def test_index_access_method_uses_the_complete_styled_selector() -> None:
+    index = (
+        files("schemii.schemii")
+        .joinpath("web", "index.html")
+        .read_text(encoding="utf-8")
+    )
+    match = re.search(
+        r'<select class="design-select" id="design-index-method"[^>]*>(.*?)</select>',
+        index,
+    )
+
+    assert match is not None
+    assert re.findall(r'<option value="([^"]+)">([^<]+)</option>', match.group(1)) == [
+        ("btree", "B-tree · default"),
+        ("hash", "Hash"),
+        ("gist", "GiST"),
+        ("spgist", "SP-GiST"),
+        ("gin", "GIN"),
+        ("brin", "BRIN"),
+    ]
+    assert "postgres-index-methods" not in index
+
+
 def test_api_route_opens_the_unified_system_map_with_its_api_lens() -> None:
     api = TestClient(create_app(), base_url="http://localhost")
 
