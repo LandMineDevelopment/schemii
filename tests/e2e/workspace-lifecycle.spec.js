@@ -80,6 +80,25 @@ async function cleanupWorkspaces(request, name) {
   }
 }
 
+async function createDetachedWorkspace(page, workspaceName) {
+  await page.goto("/");
+  await expect(page).toHaveTitle("Schemii");
+  await expect(page.locator("#workspace-title")).toHaveText("No workspace open");
+
+  await page.getByRole("button", { name: "Open workspaces", exact: true }).click();
+  const manager = page.locator("#workspaces-dialog");
+  await expect(manager).toBeVisible();
+  await manager.locator("#workspace-name").fill(workspaceName);
+  await manager.locator("#workspace-mode").selectOption("detached");
+  await manager.getByRole("button", { name: "Create empty design" }).click();
+
+  await expect(manager).not.toBeVisible();
+  await expect(page.locator("#workspace-title")).toHaveText(workspaceName);
+  const workspaceId = workspaceIdFrom(page);
+  expect(workspaceId).toMatch(/^ws_[0-9a-f]{32}$/);
+  return workspaceId;
+}
+
 let workspaceNameToCleanup = null;
 
 test.afterEach(async ({ request }) => {
@@ -96,27 +115,14 @@ test("detached workspace survives navigation and keeps its table/view surfaces a
   const viewName = `order_totals_${suffix.replaceAll("-", "")}`;
   workspaceNameToCleanup = workspaceName;
 
-  await page.goto("/");
-  await expect(page).toHaveTitle("Schemii");
-  await expect(page.locator("#workspace-title")).toHaveText("No workspace open");
-
-  await page.getByRole("button", { name: "Open workspaces", exact: true }).click();
-  const manager = page.locator("#workspaces-dialog");
-  await expect(manager).toBeVisible();
-  await manager.locator("#workspace-name").fill(workspaceName);
-  await manager.locator("#workspace-mode").selectOption("detached");
-  await manager.getByRole("button", { name: "Create empty design" }).click();
-
-  await expect(manager).not.toBeVisible();
-  await expect(page.locator("#workspace-title")).toHaveText(workspaceName);
-  const workspaceId = workspaceIdFrom(page);
-  expect(workspaceId).toMatch(/^ws_[0-9a-f]{32}$/);
+  const workspaceId = await createDetachedWorkspace(page, workspaceName);
 
   await seedDesign(request, workspaceId, designFixture(tableName, viewName));
 
   await page.goto("/");
   await expect(page.locator("#workspace-title")).toHaveText("No workspace open");
   await page.getByRole("button", { name: "Workspaces", exact: true }).click();
+  const manager = page.locator("#workspaces-dialog");
   const card = manager.locator(".manager-card").filter({ hasText: workspaceName });
   await expect(card).toBeVisible();
   await card.getByRole("button", { name: "Open", exact: true }).click();
@@ -160,13 +166,13 @@ test("detached workspace survives navigation and keeps its table/view surfaces a
   const designRequestPaused = new Promise(resolve => {
     releaseDesignRequest = resolve;
   });
-  await page.route(new RegExp(`${API_ROOT}/${workspaceId}/design$`), async route => {
+  await page.route(new RegExp(`${API_ROOT}/${workspaceId}/design/snapshot$`), async route => {
     releaseDesignRequest(route);
   }, { times: 1 });
 
   const designResponse = page.waitForResponse(response => (
     response.request().method() === "GET"
-      && response.url().endsWith(`${API_ROOT}/${workspaceId}/design`)
+      && response.url().endsWith(`${API_ROOT}/${workspaceId}/design/snapshot`)
   ));
   await page.locator("#refresh-views-button").click();
   const pausedRoute = await designRequestPaused;
@@ -177,5 +183,56 @@ test("detached workspace survives navigation and keeps its table/view surfaces a
   expect((await designResponse).ok()).toBe(true);
   await expect(detail.locator(".query-story h2")).toHaveText(viewName);
   await expect.poll(() => page.evaluate(() => window.__schemiiE2eBlankViewSeen)).toBe(false);
+  expect(new URL(page.url()).searchParams.get("view")).toBe(viewName);
+});
+
+test("redo restores a removed view as one fully assembled analyzed surface", async ({ page, request }, testInfo) => {
+  const suffix = randomUUID().slice(0, 8);
+  const workspaceName = `E2E history ${testInfo.project.name} ${suffix}`;
+  const tableName = `ledger_${suffix.replaceAll("-", "")}`;
+  const viewName = `ledger_totals_${suffix.replaceAll("-", "")}`;
+  workspaceNameToCleanup = workspaceName;
+
+  const workspaceId = await createDetachedWorkspace(page, workspaceName);
+  const complete = designFixture(tableName, viewName);
+  await seedDesign(request, workspaceId, { ...complete, views: [] });
+  await seedDesign(request, workspaceId, complete);
+  await page.reload();
+
+  await page.getByRole("button", { name: "Views", exact: true }).click();
+  const viewButton = page.locator(".view-list-button").filter({ hasText: viewName });
+  await expect(viewButton).toBeVisible();
+  await viewButton.click();
+  const detail = page.locator("#view-detail");
+  await expect(detail.locator(".query-story h2")).toHaveText(viewName);
+  await expect(detail.locator(".query-sql-panel")).toBeVisible();
+
+  await page.locator("#undo-design-button").click();
+  await expect(viewButton).toHaveCount(0);
+  await expect(detail).toContainText("No view selected");
+  await expect(page.locator("#redo-design-button")).toBeEnabled();
+
+  await page.evaluate(() => {
+    const detailNode = document.querySelector("#view-detail");
+    window.__schemiiE2eRedoBlankSeen = false;
+    window.__schemiiE2eRedoObserver = new MutationObserver(() => {
+      const text = detailNode?.textContent || "";
+      if (text.includes("No view selected") || text.includes("Reading the query structure")) {
+        window.__schemiiE2eRedoBlankSeen = true;
+      }
+    });
+    window.__schemiiE2eRedoObserver.observe(detailNode, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
+
+  await page.locator("#redo-design-button").click();
+  await expect(viewButton).toBeVisible();
+  await expect(detail.locator(".query-story h2")).toHaveText(viewName);
+  await expect(detail.locator(".query-sql-panel")).toBeVisible();
+  await expect(detail.locator(".query-story-loading")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__schemiiE2eRedoBlankSeen)).toBe(false);
   expect(new URL(page.url()).searchParams.get("view")).toBe(viewName);
 });
