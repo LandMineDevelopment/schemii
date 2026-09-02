@@ -1,4 +1,4 @@
-"""Packaged, checksum-verified common metadata migrations."""
+"""Ordered Schemii product metadata migrations."""
 
 
 MIGRATION_PACKAGE = __name__

@@ -379,10 +379,11 @@ def test_system_map_joins_only_same_origin_source_documents() -> None:
         .read_text(encoding="utf-8")
     )
 
-    assert 'fetchDocument("/_developer/system"' in map_source
-    assert 'fetchDocument("/_developer/routes"' in map_source
-    assert 'fetchDocument("/_developer/database"' in map_source
-    assert 'fetchDocument("/openapi.json"' in map_source
+    assert 'fetchDocument("/_developer/inspection"' in map_source
+    assert 'fetchDocument("/_developer/system"' not in map_source
+    assert 'fetchDocument("/_developer/routes"' not in map_source
+    assert 'fetchDocument("/_developer/database"' not in map_source
+    assert 'fetchDocument("/openapi.json"' not in map_source
     assert 'credentials: "same-origin"' in map_source
     assert 'cache: "no-store"' in map_source
     assert "http://" not in map_source

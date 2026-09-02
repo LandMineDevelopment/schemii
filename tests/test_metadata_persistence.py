@@ -14,7 +14,13 @@ from schemii.common.metadata.database import (
     packaged_migrations,
 )
 from schemii.common.metadata.factory import create_metadata_repositories
+from schemii.common.metadata.migrations import (
+    MIGRATION_PACKAGE as COMMON_MIGRATION_PACKAGE,
+)
 from schemii.common.metadata.secrets import read_encryption_key, read_secret_file
+from schemii.schemii.metadata import (
+    MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
+)
 
 
 def test_metadata_storage_mode_is_explicit_and_memory_is_test_selectable() -> None:
@@ -127,11 +133,31 @@ def test_metadata_readiness_probe_executes_and_closes_or_wraps_failure() -> None
     assert broken.closed is True
 
 
-def test_packaged_metadata_migrations_are_contiguous_and_checksum_guarded() -> None:
-    migrations = packaged_migrations()
+def test_common_metadata_migrations_are_product_independent() -> None:
+    migrations = packaged_migrations((COMMON_MIGRATION_PACKAGE,))
+
+    assert [migration.version for migration in migrations] == [1]
+    assert migrations[0].name == "0001_connections.sql"
+    assert "CREATE TABLE metadata.postgres_connections" in migrations[0].sql
+    assert "CREATE SCHEMA IF NOT EXISTS schemii" not in migrations[0].sql
+
+
+def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> None:
+    migrations = packaged_migrations(
+        (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE)
+    )
 
     assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
-    assert migrations[0].name == "0001_connections.sql"
+    assert {migration.name: migration.checksum for migration in migrations} == {
+        "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
+        "0002_schemii_workspaces.sql": "06e20fb4ff4624a7246616307dc1d81db53ca2bffe8f9a261b53b097d1725c91",
+        "0003_schemii_designs.sql": "2a92c8fceaf2c1edd7793f4205b5fc65f7c283bdae6ec778af1f9845dc20650e",
+        "0004_workspace_column_display_orders.sql": "b796f89804fb1144d9f3d1ff71040117dd15aa6be2d6e77db6c169758985063c",
+        "0005_workspace_design_imports.sql": "2914f5484fcac5d1a0bca4aa33b61cadb130149882704d5aea05d6738c00c28b",
+        "0006_schemii_migrations.sql": "d41dab9b6db1bf1b7e859e241c89200825594d8c92022157375f5faf34dc5d91",
+        "0007_design_history.sql": "f5bd7323f69fe20a17eedbe988079845dab36c77533b5424f4dbad3ea1200635",
+        "0008_migration_execution_leases.sql": "3e88e8793cce822a50a563df389b0d97416dc8b8ec4ebf8062f3309f2fcebf9c",
+    }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
     assert "CREATE TABLE schemii.workspace_targets" in migrations[1].sql
@@ -169,3 +195,16 @@ def test_packaged_metadata_migrations_are_contiguous_and_checksum_guarded() -> N
                 }
             ]
         )
+
+
+def test_migration_composition_rejects_duplicate_and_gapped_versions() -> None:
+    common = packaged_migrations((COMMON_MIGRATION_PACKAGE,))
+
+    with pytest.raises(MetadataMigrationError, match="must not be empty"):
+        packaged_migrations(())
+    with pytest.raises(MetadataMigrationError, match="registered twice"):
+        packaged_migrations((COMMON_MIGRATION_PACKAGE, COMMON_MIGRATION_PACKAGE))
+    with pytest.raises(MetadataMigrationError, match="contiguous history"):
+        packaged_migrations((SCHEMII_MIGRATION_PACKAGE,))
+    with pytest.raises(MetadataMigrationError, match="versions must be unique"):
+        MetadataMigrator(lambda: None, (common[0], common[0]))

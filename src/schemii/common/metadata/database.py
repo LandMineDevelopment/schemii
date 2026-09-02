@@ -32,26 +32,47 @@ class MetadataMigrationError(RuntimeError):
     """The durable metadata schema cannot be trusted or migrated."""
 
 
-def packaged_migrations() -> tuple[Migration, ...]:
+def packaged_migrations(migration_packages: tuple[str, ...]) -> tuple[Migration, ...]:
+    """Load and validate one explicitly composed migration history."""
+
+    if not migration_packages:
+        raise MetadataMigrationError("metadata migration composition must not be empty")
     found: list[Migration] = []
-    root = resources.files("schemii.common.metadata.migrations")
-    for entry in root.iterdir():
-        match = _MIGRATION_FILE.fullmatch(entry.name)
-        if match is None:
-            continue
-        sql = entry.read_text(encoding="utf-8")
-        found.append(
-            Migration(
-                version=int(match.group(1)),
-                name=entry.name,
-                checksum=hashlib.sha256(sql.encode("utf-8")).hexdigest(),
-                sql=sql,
+    if len(set(migration_packages)) != len(migration_packages):
+        raise MetadataMigrationError("metadata migration package is registered twice")
+    for migration_package in migration_packages:
+        root = resources.files(migration_package)
+        for entry in root.iterdir():
+            match = _MIGRATION_FILE.fullmatch(entry.name)
+            if match is None:
+                continue
+            sql = entry.read_text(encoding="utf-8")
+            found.append(
+                Migration(
+                    version=int(match.group(1)),
+                    name=entry.name,
+                    checksum=hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                    sql=sql,
+                )
             )
+    return _validated_migrations(tuple(found))
+
+
+def _validated_migrations(migrations: tuple[Migration, ...]) -> tuple[Migration, ...]:
+    ordered = tuple(sorted(migrations, key=lambda migration: migration.version))
+    if not ordered:
+        raise MetadataMigrationError("metadata migration composition must not be empty")
+    versions = [migration.version for migration in ordered]
+    if len(set(versions)) != len(versions):
+        raise MetadataMigrationError("metadata migration versions must be unique")
+    names = [migration.name for migration in ordered]
+    if len(set(names)) != len(names):
+        raise MetadataMigrationError("metadata migration names must be unique")
+    if versions != list(range(1, len(ordered) + 1)):
+        raise MetadataMigrationError(
+            "metadata migrations must form one contiguous history beginning at version 1"
         )
-    found.sort(key=lambda migration: migration.version)
-    if [migration.version for migration in found] != list(range(1, len(found) + 1)):
-        raise MetadataMigrationError("metadata migrations must be contiguous")
-    return tuple(found)
+    return ordered
 
 
 class MetadataConnectionFactory:
@@ -120,10 +141,10 @@ class MetadataMigrator:
     def __init__(
         self,
         connection_factory: Callable[[], Any],
-        migrations: tuple[Migration, ...] | None = None,
+        migrations: tuple[Migration, ...],
     ) -> None:
         self._connection_factory = connection_factory
-        self._migrations = packaged_migrations() if migrations is None else migrations
+        self._migrations = _validated_migrations(migrations)
 
     def migrate(self) -> int:
         connection = self._connection_factory()

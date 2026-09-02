@@ -2568,6 +2568,21 @@ async function fetchDocument(path, signal) {
   return response.json();
 }
 
+function inspectionDocuments(snapshot) {
+  const value = asRecord(snapshot);
+  if (value.schemaVersion !== 1 || value.generation !== "application-startup") {
+    throw new Error("Developer inspection returned an unsupported snapshot contract");
+  }
+  if (typeof value.snapshotId !== "string" || value.snapshotId.length !== 64) {
+    throw new Error("Developer inspection returned an invalid snapshot identity");
+  }
+  const documents = asRecord(value.documents);
+  return {
+    id: value.snapshotId,
+    values: [documents.system, documents.routes, documents.database, documents.openapi],
+  };
+}
+
 function scheduleRefresh() {
   window.clearTimeout(uiState.refreshTimer);
   uiState.refreshTimer = window.setTimeout(loadSystem, REFRESH_INTERVAL);
@@ -2581,13 +2596,11 @@ async function loadSystem() {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
   try {
-    const documents = await Promise.all([
-      fetchDocument("/_developer/system", controller.signal),
-      fetchDocument("/_developer/routes", controller.signal),
-      fetchDocument("/_developer/database", controller.signal),
-      fetchDocument("/openapi.json", controller.signal),
-    ]);
-    const fingerprint = JSON.stringify(documents);
+    const snapshot = inspectionDocuments(
+      await fetchDocument("/_developer/inspection", controller.signal),
+    );
+    const documents = snapshot.values;
+    const fingerprint = snapshot.id;
     if (!uiState.model || fingerprint !== uiState.fingerprint) {
       uiState.model = buildSystemMapModel(...documents);
       if (!uiState.fingerprint) applyInitialState();

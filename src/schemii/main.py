@@ -9,16 +9,17 @@ from schemii.common.api import (
     install_api_middleware,
 )
 from schemii.common.api.models import ApiErrorResponse
-from schemii.common.api.inspection import install_developer_route_inspection
 from schemii.common.api.routes import router as runtime_router
 from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.ai.routes import router as ai_provider_router
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.service import ConnectionService
+from schemii.common.developer_inspection import install_developer_inspection
 from schemii.common.metadata import MetadataRepositories, create_metadata_repositories
+from schemii.common.metadata.migrations import (
+    MIGRATION_PACKAGE as COMMON_METADATA_MIGRATION_PACKAGE,
+)
 from schemii.common.postgres import PostgresGateway, PsycopgPostgresGateway
-from schemii.common.postgres.inspection import install_developer_database_inspection
-from schemii.common.system_inspection import install_developer_system_inspection
 from schemii.schemer.routes import router as schemer_router
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
 from schemii.schemii.designs.store import DesignRepository, InMemoryDesignRepository
@@ -28,6 +29,9 @@ from schemii.schemii.migrations.repository import (
     PostgresMigrationRepository,
 )
 from schemii.schemii.migrations.service import MigrationService
+from schemii.schemii.metadata import (
+    MIGRATION_PACKAGE as SCHEMII_METADATA_MIGRATION_PACKAGE,
+)
 from schemii.schemii.routes import router as schemii_router
 from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
@@ -48,7 +52,12 @@ class ApplicationServices:
 
 
 def create_services() -> ApplicationServices:
-    metadata = create_metadata_repositories()
+    metadata = create_metadata_repositories(
+        migration_packages=(
+            COMMON_METADATA_MIGRATION_PACKAGE,
+            SCHEMII_METADATA_MIGRATION_PACKAGE,
+        )
+    )
     designs: DesignRepository = (
         PostgresDesignRepository(metadata.connection_factory)
         if metadata.connection_factory is not None
@@ -151,9 +160,7 @@ def create_app(
         application.include_router(router)
 
     if developer_inspection:
-        install_developer_route_inspection(application)
-        install_developer_database_inspection(application)
-        install_developer_system_inspection(application)
+        install_developer_inspection(application)
     install_schemii_frontend(application)
 
     return application

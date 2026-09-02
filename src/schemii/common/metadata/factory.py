@@ -19,7 +19,9 @@ from .database import (
     MetadataConnectionFactory,
     MetadataMigrator,
     MetadataReadinessProbe,
+    packaged_migrations,
 )
+from .migrations import MIGRATION_PACKAGE as COMMON_MIGRATION_PACKAGE
 from .secrets import read_encryption_key
 
 
@@ -54,8 +56,10 @@ class MetadataRepositories:
 
 def create_metadata_repositories(
     env: Mapping[str, str] | None = None,
+    *,
+    migration_packages: tuple[str, ...] = (COMMON_MIGRATION_PACKAGE,),
 ) -> MetadataRepositories:
-    """Use durable PostgreSQL when configured, otherwise isolate tests in memory."""
+    """Build metadata adapters with an explicitly owned migration composition."""
 
     config = MetadataConfig.from_env(env)
     if config is None:
@@ -63,7 +67,10 @@ def create_metadata_repositories(
     from schemii.common.connections.postgres_store import PostgresConnectionRepository
 
     connection_factory = MetadataConnectionFactory(config)
-    MetadataMigrator(connection_factory).migrate()
+    MetadataMigrator(
+        connection_factory,
+        packaged_migrations(migration_packages),
+    ).migrate()
     cipher = CredentialCipher(read_encryption_key(config.encryption_key_file))
     readiness_factory = MetadataConnectionFactory(
         config,

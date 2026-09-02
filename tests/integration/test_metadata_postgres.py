@@ -12,6 +12,12 @@ from schemii.common.connections.models import PostgresConnectionCreate
 from schemii.common.connections.policy import ConnectionTargetForbiddenError
 from schemii.common.metadata.database import packaged_migrations
 from schemii.common.metadata.factory import create_metadata_repositories
+from schemii.common.metadata.migrations import (
+    MIGRATION_PACKAGE as COMMON_MIGRATION_PACKAGE,
+)
+from schemii.schemii.metadata import (
+    MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -41,7 +47,11 @@ def test_postgres_metadata_migrates_persists_encrypts_and_reports_ready(
     }
     owner_id = f"integration_{uuid.uuid4().hex}"
 
-    repositories = create_metadata_repositories(environment)
+    migration_packages = (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE)
+    repositories = create_metadata_repositories(
+        environment,
+        migration_packages=migration_packages,
+    )
     try:
         repositories.check_readiness()
         assert repositories.storage == "postgresql"
@@ -59,7 +69,10 @@ def test_postgres_metadata_migrates_persists_encrypts_and_reports_ready(
             ),
         )
 
-        reopened = create_metadata_repositories(environment)
+        reopened = create_metadata_repositories(
+            environment,
+            migration_packages=migration_packages,
+        )
         assert reopened.connections.list(owner_id) == [saved]
         resolved = reopened.connections.resolve(owner_id, saved.id)
         assert resolved.password is not None
@@ -81,7 +94,9 @@ def test_postgres_metadata_migrates_persists_encrypts_and_reports_ready(
                 )
                 applied_versions = [row["version"] for row in cursor.fetchall()]
         assert b"target-only-secret" not in ciphertext
-        assert applied_versions == [migration.version for migration in packaged_migrations()]
+        assert applied_versions == [
+            migration.version for migration in packaged_migrations(migration_packages)
+        ]
 
         forbidden = PostgresConnectionCreate(
             name="Metadata bypass",
