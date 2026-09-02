@@ -762,6 +762,23 @@ export function saveDesignIndex(content, values, randomUUID = () => crypto.rando
   return { content: revised, index };
 }
 
+export function toggleDesignIndexColumn(selection, tableId, columnId) {
+  if (!tableId || !columnId) throw new TypeError("An index table and column are required.");
+  const current = selection || { tableId: null, indexId: null, columnIds: [] };
+  const columnIds = [...(current.columnIds || [])];
+  const tableLocked = Boolean(current.indexId || columnIds.length);
+  if (tableLocked && current.tableId !== tableId) return null;
+
+  const existingIndex = columnIds.indexOf(columnId);
+  if (existingIndex >= 0) columnIds.splice(existingIndex, 1);
+  else columnIds.push(columnId);
+  return {
+    ...current,
+    tableId: columnIds.length || current.indexId ? (current.tableId || tableId) : null,
+    columnIds,
+  };
+}
+
 export function deleteDesignIndex(content, tableId, indexId) {
   const table = content.tables.find(item => item.id === tableId);
   const index = table?.indexes.find(item => item.id === indexId);

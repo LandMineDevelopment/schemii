@@ -204,6 +204,20 @@ test("lost pointer capture also closes an active table drag", () => {
   assert.deepEqual(canvas.positions.get("orders"), { x: 115, y: 215 });
 });
 
+test("authoring banner controls do not start a canvas pan", () => {
+  const { canvas } = fixture();
+  const control = {
+    closest(selector) {
+      return selector.includes(".relationship-authoring-banner") ? {} : null;
+    },
+  };
+
+  canvas.canvas.dispatch("pointerdown", { target: control, clientX: 20, clientY: 30 });
+
+  assert.equal(canvas.pan, null);
+  assert.equal(canvas.canvas.hasPointerCapture(7), false);
+});
+
 test("clearing a table selection updates the card and notifies navigation", () => {
   const { canvas, card, selectionCount } = fixture();
   canvas.selectedName = "orders";
@@ -529,6 +543,35 @@ test("index mode exposes ordered same-table graphical column selection", () => {
   canvas.setIndexMode({ enabled: false });
   assert.equal(canvas.canvas.classList.contains("index-mode"), false);
   assert.equal(createdRow.attributes.has("role"), false);
+});
+
+test("unbound index mode allows the first column to come from any table", () => {
+  const { canvas, indexColumnSelections } = fixture();
+  const orders = {
+    name: "orders",
+    columns: [{ name: "created_at" }],
+    primaryKey: null,
+    uniqueConstraints: [],
+  };
+  const customers = {
+    name: "customers",
+    columns: [{ name: "email" }],
+    primaryKey: null,
+    uniqueConstraints: [],
+  };
+  const orderRow = new PointerTarget();
+  const customerRow = new PointerTarget();
+  canvas.catalog.tables = [orders, customers];
+  canvas.tableByName = new Map([[orders.name, orders], [customers.name, customers]]);
+  canvas.columnRows.set("orders\u0000created_at", { row: orderRow, table: orders, column: orders.columns[0] });
+  canvas.columnRows.set("customers\u0000email", { row: customerRow, table: customers, column: customers.columns[0] });
+
+  canvas.setIndexMode({ enabled: true });
+
+  assert.equal(orderRow.classList.contains("index-invalid"), false);
+  assert.equal(customerRow.classList.contains("index-invalid"), false);
+  assert.equal(canvas.selectIndexColumn("customers", "email"), true);
+  assert.deepEqual(indexColumnSelections, [["customers", "email"]]);
 });
 
 test("column symbols distinguish primary, unique, composite, and foreign roles", () => {

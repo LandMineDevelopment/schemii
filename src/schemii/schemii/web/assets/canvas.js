@@ -191,7 +191,9 @@ export class CatalogCanvas {
       stage,
       zoomOutput,
       initialView: { x: 75, y: 70, zoom: 1 },
-      canStartPan: event => !event.target?.closest?.(".table-card, .catalog-state, .conflict-banner"),
+      canStartPan: event => !event.target?.closest?.(
+        ".table-card, .catalog-state, .conflict-banner, .relationship-authoring-banner",
+      ),
       scheduleFrame,
       cancelFrame,
     });

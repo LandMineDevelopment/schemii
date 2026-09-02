@@ -25,6 +25,7 @@ import {
   suggestDesignCheckName,
   suggestDesignIndexName,
   suggestDesignKeyName,
+  toggleDesignIndexColumn,
   updateDesignRelationship,
   updateDesignTable,
 } from "./design.js";
@@ -468,10 +469,10 @@ function updateDesignControls() {
   elements.createKeyButton.classList.toggle("active", state.keyAuthoring);
   elements.createKeyButton.setAttribute("aria-pressed", state.keyAuthoring ? "true" : "false");
   elements.createKeyButton.title = state.keyAuthoring ? "Cancel key selection" : "Create primary or unique key";
-  elements.createIndexButton.disabled = !detached || busy || !selected;
+  elements.createIndexButton.disabled = !detached || busy || !state.design?.content.tables.length;
   elements.createIndexButton.classList.toggle("active", state.indexAuthoring);
   elements.createIndexButton.setAttribute("aria-pressed", state.indexAuthoring ? "true" : "false");
-  elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index on selected table";
+  elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index";
   elements.editTableButton.disabled = !selected || busy;
   elements.deleteTableButton.disabled = !selected || busy;
   elements.createViewButton.disabled = !detached || busy;
@@ -2721,16 +2722,23 @@ function reviewKeyAuthoring() {
 function updateIndexAuthoringPresentation() {
   const selection = state.indexSelection;
   const table = designTableById(selection?.tableId);
+  const suggestedTable = designTableById(selection?.suggestedTableId);
   const columnNames = new Map((table?.columns || []).map(column => [column.id, column.name]));
   const selectedNames = (selection?.columnIds || []).map(columnId => columnNames.get(columnId)).filter(Boolean);
   elements.relationshipAuthoringStep.textContent = String(Math.max(1, selectedNames.length));
-  elements.relationshipAuthoringInstruction.textContent = selectedNames.length
-    ? `${table.name}: ${selectedNames.join(" → ")}`
-    : `Select ordered columns on ${table.name}, or configure an expression index`;
-  elements.reviewKeyAuthoring.hidden = false;
+  elements.relationshipAuthoringInstruction.textContent = table
+    ? selectedNames.length
+      ? `${table.name}: ${selectedNames.join(" → ")}`
+      : `Select ordered columns on ${table.name}, or configure an expression index`
+    : suggestedTable
+      ? `Select the first index column from any table, or configure an expression index on ${suggestedTable.name}`
+      : "Select the first index column from any table";
+  elements.reviewKeyAuthoring.hidden = !table && !suggestedTable;
   elements.reviewKeyAuthoring.textContent = selectedNames.length
     ? `Configure index (${selectedNames.length})`
-    : "Configure expression index";
+    : suggestedTable && !table
+      ? `Expression index on ${suggestedTable.name}`
+      : "Configure expression index";
   canvas.setIndexMode({
     enabled: state.indexAuthoring,
     tableName: table?.name || null,
@@ -2738,7 +2746,12 @@ function updateIndexAuthoringPresentation() {
   });
 }
 
-function setIndexAuthoring(enabled, { tableId = null, indexId = null, columnIds = null } = {}) {
+function setIndexAuthoring(enabled, {
+  tableId = null,
+  suggestedTableId = null,
+  indexId = null,
+  columnIds = null,
+} = {}) {
   const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
   if (active && state.relationshipAuthoring) setRelationshipAuthoring(false);
   if (active && state.keyAuthoring) setKeyAuthoring(false);
@@ -2748,6 +2761,7 @@ function setIndexAuthoring(enabled, { tableId = null, indexId = null, columnIds 
     const index = table && indexId ? designIndexById(table.id, indexId) : null;
     state.indexSelection = {
       tableId: table?.id || null,
+      suggestedTableId: index?.id ? null : designTableById(suggestedTableId)?.id || null,
       indexId: index?.id || null,
       columnIds: [...(columnIds || index?.columnIds || [])],
     };
@@ -2763,18 +2777,22 @@ function setIndexAuthoring(enabled, { tableId = null, indexId = null, columnIds 
   updateDesignControls();
 }
 
-function startIndexAuthoring({ tableId = selectedDesignTable()?.id || null, indexId = null } = {}) {
+function startIndexAuthoring({ tableId = null, indexId = null } = {}) {
   if (state.indexAuthoring) return;
-  const table = designTableById(tableId);
-  if (!table) {
-    showToast("Select a designed table before creating an index.");
+  if (!state.design?.content.tables.length) {
+    showToast("Add a table before creating an index.");
     return;
   }
-  if (indexId && !designIndexById(table.id, indexId)) {
+  const table = tableId ? designTableById(tableId) : null;
+  if (indexId && (!table || !designIndexById(table.id, indexId))) {
     showToast("The selected index is no longer in this design.", { error: true });
     return;
   }
-  setIndexAuthoring(true, { tableId: table.id, indexId });
+  setIndexAuthoring(true, {
+    tableId: indexId ? table.id : null,
+    suggestedTableId: indexId ? null : table?.id || selectedDesignTable()?.id || null,
+    indexId,
+  });
 }
 
 function toggleIndexAuthoring() {
@@ -2784,23 +2802,23 @@ function toggleIndexAuthoring() {
 
 function handleIndexColumnSelection(table, column) {
   if (!state.indexAuthoring || !table.designId || !column.designId) return;
-  const selection = state.indexSelection;
-  if (!selection || selection.tableId !== table.designId) {
-    showToast("All index columns must come from the selected table.");
+  const nextSelection = toggleDesignIndexColumn(
+    state.indexSelection,
+    table.designId,
+    column.designId,
+  );
+  if (!nextSelection) {
+    showToast("Remove the selected columns before choosing a different table.");
     return;
   }
-  const columnIds = [...selection.columnIds];
-  const existingIndex = columnIds.indexOf(column.designId);
-  if (existingIndex >= 0) columnIds.splice(existingIndex, 1);
-  else columnIds.push(column.designId);
-  state.indexSelection = { ...selection, columnIds };
+  state.indexSelection = nextSelection;
   updateIndexAuthoringPresentation();
 }
 
 function reviewIndexAuthoring() {
-  if (!state.indexAuthoring || !state.indexSelection?.tableId) return;
+  if (!state.indexAuthoring || !(state.indexSelection?.tableId || state.indexSelection?.suggestedTableId)) return;
   const draft = {
-    tableId: state.indexSelection.tableId,
+    tableId: state.indexSelection.tableId || state.indexSelection.suggestedTableId,
     indexId: state.indexSelection.indexId,
     columnIds: [...state.indexSelection.columnIds],
   };

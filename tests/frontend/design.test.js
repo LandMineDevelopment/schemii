@@ -26,6 +26,7 @@ import {
   suggestDesignCheckName,
   suggestDesignIndexName,
   suggestDesignKeyName,
+  toggleDesignIndexColumn,
   updateDesignRelationship,
   updateDesignTable,
 } from "../../src/schemii/schemii/web/assets/design.js";
@@ -471,6 +472,54 @@ test("index authoring supports ordered, expression, partial, unique, edit, and c
     predicate: "active",
     unique: false,
   }, nextUuid), /Select a column or enter an index expression/);
+});
+
+test("index column selection binds to the first chosen table and unlocks when cleared", () => {
+  const first = toggleDesignIndexColumn(null, "table_accounts", "column_email");
+  assert.deepEqual(first, {
+    tableId: "table_accounts",
+    indexId: null,
+    columnIds: ["column_email"],
+  });
+  assert.equal(
+    toggleDesignIndexColumn(first, "table_orders", "column_created_at"),
+    null,
+  );
+
+  const cleared = toggleDesignIndexColumn(first, "table_accounts", "column_email");
+  assert.deepEqual(cleared, {
+    tableId: null,
+    indexId: null,
+    columnIds: [],
+  });
+  assert.deepEqual(
+    toggleDesignIndexColumn(cleared, "table_orders", "column_created_at"),
+    {
+      tableId: "table_orders",
+      indexId: null,
+      columnIds: ["column_created_at"],
+    },
+  );
+});
+
+test("editing an expression index remains bound to its owning table", () => {
+  const editing = {
+    tableId: "table_accounts",
+    indexId: "index_email",
+    columnIds: [],
+  };
+  assert.equal(
+    toggleDesignIndexColumn(editing, "table_orders", "column_created_at"),
+    null,
+  );
+  assert.deepEqual(
+    toggleDesignIndexColumn(editing, "table_accounts", "column_email"),
+    {
+      tableId: "table_accounts",
+      indexId: "index_email",
+      columnIds: ["column_email"],
+    },
+  );
 });
 
 test("index dependencies follow column renames and block unsafe removal", () => {
