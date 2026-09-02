@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 import threading
 from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
@@ -55,6 +55,36 @@ class ConnectionStorageUnavailableError(
 
 class ConnectionCredentialUnreadableError(ConnectionRepositoryError):
     """A stored credential failed authenticated decryption."""
+
+
+class ConnectionInUseError(ConnectionRepositoryError):
+    """Product-owned metadata currently prevents a connection mutation."""
+
+    def __init__(self, dependencies: dict[str, int]) -> None:
+        self.dependencies = dependencies
+        super().__init__("The PostgreSQL connection is used by product resources")
+
+
+ConnectionMutationOperation = Literal["update", "delete"]
+
+
+class ConnectionMutationGuard(Protocol):
+    """Validate a connection mutation inside its metadata transaction."""
+
+    def __call__(
+        self,
+        cursor: Any,
+        owner_id: str,
+        connection_id: str,
+        operation: ConnectionMutationOperation,
+    ) -> None: ...
+
+
+@runtime_checkable
+class ConnectionMutationGuardRegistrar(Protocol):
+    """Repository capability for transaction-aware product dependency checks."""
+
+    def set_mutation_guard(self, guard: ConnectionMutationGuard) -> None: ...
 
 
 @runtime_checkable

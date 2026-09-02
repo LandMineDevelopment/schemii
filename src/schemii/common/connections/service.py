@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from typing import Iterator, Protocol
+from typing import Any, Iterator, Protocol, runtime_checkable
 
 from .models import (
     PostgresConnectionCreate,
@@ -14,7 +14,13 @@ from .models import (
     ResolvedPostgresConnection,
 )
 from .policy import AllowAllConnectionTargetPolicy, ConnectionTargetPolicy
-from .store import ConnectionRepository
+from .store import (
+    ConnectionInUseError,
+    ConnectionMutationGuard,
+    ConnectionMutationGuardRegistrar,
+    ConnectionMutationOperation,
+    ConnectionRepository,
+)
 
 
 class ConnectionDependencyProvider(Protocol):
@@ -23,19 +29,26 @@ class ConnectionDependencyProvider(Protocol):
     def count_for_connection(self, owner_id: str, connection_id: str) -> int: ...
 
 
-class ConnectionInUseError(RuntimeError):
-    def __init__(self, dependencies: dict[str, int]) -> None:
-        self.dependencies = dependencies
-        super().__init__("The PostgreSQL connection is used by product resources")
+@runtime_checkable
+class TransactionalConnectionDependencyProvider(Protocol):
+    """Product dependency checks that share a durable connection transaction."""
+
+    def guard_connection_mutation(
+        self,
+        cursor: Any,
+        owner_id: str,
+        connection_id: str,
+        operation: ConnectionMutationOperation,
+    ) -> None: ...
 
 
 class ConnectionService:
     """Keep connection mutations and product references coherent.
 
-    The prototype serializes each connection lifecycle through a bounded set
-    of process locks. A future metadata PostgreSQL adapter can implement this
-    boundary with transactions and foreign keys without changing route or
-    product-service contracts.
+    Process locks serialize in-memory mutations with live uses. Durable
+    repositories additionally run product dependency checks under the same
+    transaction and row lock as the connection mutation, closing cross-process
+    check-then-change races without coupling common code to product tables.
     """
 
     def __init__(
@@ -49,6 +62,37 @@ class ConnectionService:
         self._dependency_providers = dependency_providers
         self._target_policy = target_policy or AllowAllConnectionTargetPolicy()
         self._locks = tuple(threading.RLock() for _ in range(64))
+        transactional_providers = tuple(
+            provider
+            for provider in dependency_providers
+            if isinstance(provider, TransactionalConnectionDependencyProvider)
+        )
+        if transactional_providers and isinstance(
+            repository, ConnectionMutationGuardRegistrar
+        ):
+            repository.set_mutation_guard(
+                self._transactional_guard(transactional_providers)
+            )
+
+    @staticmethod
+    def _transactional_guard(
+        providers: tuple[TransactionalConnectionDependencyProvider, ...],
+    ) -> ConnectionMutationGuard:
+        def guard(
+            cursor: Any,
+            owner_id: str,
+            connection_id: str,
+            operation: ConnectionMutationOperation,
+        ) -> None:
+            for provider in providers:
+                provider.guard_connection_mutation(
+                    cursor,
+                    owner_id,
+                    connection_id,
+                    operation,
+                )
+
+        return guard
 
     def _lock_for(self, owner_id: str, connection_id: str) -> threading.RLock:
         return self._locks[hash((owner_id, connection_id)) % len(self._locks)]

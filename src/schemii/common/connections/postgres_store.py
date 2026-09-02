@@ -24,6 +24,7 @@ from .store import (
     ConnectionConflictError,
     ConnectionCredentialUnreadableError,
     ConnectionLimitError,
+    ConnectionMutationGuard,
     ConnectionNotFoundError,
     ConnectionRepositoryError,
     ConnectionStorageUnavailableError,
@@ -45,6 +46,14 @@ class PostgresConnectionRepository:
         self._connection_factory = connection_factory
         self._cipher = cipher
         self._max_connections_per_owner = max_connections_per_owner
+        self._mutation_guard: ConnectionMutationGuard | None = None
+
+    def set_mutation_guard(self, guard: ConnectionMutationGuard) -> None:
+        """Register the product dependency check run under each mutation lock."""
+
+        if self._mutation_guard is not None:
+            raise RuntimeError("a connection mutation guard is already registered")
+        self._mutation_guard = guard
 
     def list(self, owner_id: str) -> list[PostgresConnectionProfile]:
         with self._transaction() as connection:
@@ -141,6 +150,8 @@ class PostgresConnectionRepository:
                     raise ConnectionNotFoundError("PostgreSQL connection was not found")
                 if current["revision"] != request.expected_revision:
                     raise ConnectionConflictError(current["revision"])
+                if self._mutation_guard is not None:
+                    self._mutation_guard(cursor, owner_id, connection_id, "update")
                 changes = request.model_dump(
                     exclude_unset=True,
                     exclude={"expected_revision", "password"},
@@ -228,6 +239,8 @@ class PostgresConnectionRepository:
                     raise ConnectionNotFoundError("PostgreSQL connection was not found")
                 if current["revision"] != expected_revision:
                     raise ConnectionConflictError(current["revision"])
+                if self._mutation_guard is not None:
+                    self._mutation_guard(cursor, owner_id, connection_id, "delete")
                 cursor.execute(
                     """
                     DELETE FROM metadata.postgres_connections
