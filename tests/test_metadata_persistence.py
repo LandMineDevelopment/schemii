@@ -147,7 +147,18 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE)
     )
 
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [migration.version for migration in migrations] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+    ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
         "0002_schemii_workspaces.sql": "06e20fb4ff4624a7246616307dc1d81db53ca2bffe8f9a261b53b097d1725c91",
@@ -158,6 +169,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0007_design_history.sql": "f5bd7323f69fe20a17eedbe988079845dab36c77533b5424f4dbad3ea1200635",
         "0008_migration_execution_leases.sql": "3e88e8793cce822a50a563df389b0d97416dc8b8ec4ebf8062f3309f2fcebf9c",
         "0009_async_migration_execution.sql": "d752bbef98a6d639f90d9a25c6423c41aea28801d3e4a1c12c86fcff9f706adc",
+        "0010_metadata_retention_indexes.sql": "2f5a939e2a0f2f199db11f81a330908551d07c926019983a686b7defea76af52",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
@@ -177,6 +189,9 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
     assert "lease_expires_at" in migrations[7].sql
     assert migrations[8].name == "0009_async_migration_execution.sql"
     assert "durable queued work" in migrations[8].sql
+    assert migrations[9].name == "0010_metadata_retention_indexes.sql"
+    assert "migration_plans_retention_idx" in migrations[9].sql
+    assert "workspace_design_history_transitions_retention_idx" in migrations[9].sql
     migrator = MetadataMigrator(lambda: None, migrations)
     assert migrator._validate_applied(
         [

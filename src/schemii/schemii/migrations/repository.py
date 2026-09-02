@@ -20,6 +20,7 @@ from typing import (
 )
 
 from schemii.common.postgres.models import PostgresCatalog
+from schemii.schemii.designs.history_retention import prune_postgres_history
 from schemii.schemii.designs.models import (
     SchemiiDesignContent,
     SchemiiDesignReplace,
@@ -173,6 +174,7 @@ _LEGAL_EXECUTION_TRANSITIONS: dict[
 _ACTIVE_EXECUTION_STATUSES: frozenset[MigrationExecutionStatus] = frozenset(
     {"reserved", "applying", "uncertain", "reconciliation_required"}
 )
+_ABANDONED_PLAN_STATUSES = frozenset({"reviewable", "blocked", "expired"})
 
 
 def _blocks_workspace_lifecycle(record: ExecutionRecord) -> bool:
@@ -461,6 +463,16 @@ class InMemoryMigrationRepository:
 
     def create_plan(self, record: PlanRecord) -> MigrationPlan:
         with self._lock:
+            expired = [
+                key
+                for key, candidate in self._plans.items()
+                if candidate.owner_id == record.owner_id
+                and candidate.plan.status in _ABANDONED_PLAN_STATUSES
+                and candidate.plan.expires_at <= record.plan.created_at
+                and key not in self._execution_by_plan
+            ]
+            for key in expired:
+                del self._plans[key]
             self._plans[(record.owner_id, record.plan.id)] = record
             return record.plan.model_copy(deep=True)
 
@@ -977,6 +989,25 @@ class PostgresMigrationRepository:
         authority = self._authority_document(record.authority)
         with self._transaction() as connection:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM schemii.migration_plans AS plan
+                    WHERE plan.owner_id = %s
+                      AND plan.expires_at <= %s
+                      AND plan.status IN ('reviewable', 'blocked', 'expired')
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM schemii.migration_executions AS execution
+                          WHERE execution.plan_id = plan.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM schemii.drift_reconciliations AS reconciliation
+                          WHERE reconciliation.plan_id = plan.id
+                      )
+                    """,
+                    (record.owner_id, record.plan.created_at),
+                )
                 cursor.execute(
                     """
                     INSERT INTO schemii.migration_plans (
@@ -1608,6 +1639,11 @@ class PostgresMigrationRepository:
                         record.owner_id,
                         record.plan.workspace_id,
                     ),
+                )
+                prune_postgres_history(
+                    cursor,
+                    record.owner_id,
+                    record.plan.workspace_id,
                 )
                 cursor.execute(
                     "SELECT revision, objects FROM schemii.workspace_design_layouts WHERE owner_id = %s AND workspace_id = %s FOR UPDATE",

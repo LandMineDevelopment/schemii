@@ -1,6 +1,9 @@
 """Behavior parity for durable design-history retention."""
 
-from schemii.schemii.designs.history_retention import MAX_RETAINED_HISTORY_ACTIONS
+from schemii.schemii.designs.history_retention import (
+    MAX_RETAINED_HISTORY_ACTIONS,
+    MAX_RETAINED_HISTORY_TRANSITIONS,
+)
 from schemii.schemii.designs.models import SchemiiDesignContent, SchemiiDesignReplace
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
 from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
@@ -78,6 +81,18 @@ def _stored_history_counts(
 def test_postgres_history_is_physically_bounded_and_discards_redo_branches(
     postgres_metadata: PostgresMetadataHarness,
 ) -> None:
+    with postgres_metadata.connection_factory() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT delete_rule
+                FROM information_schema.referential_constraints
+                WHERE constraint_schema = 'schemii'
+                  AND constraint_name =
+                      'workspace_design_history_entries_parent_id_fkey'
+                """
+            )
+            assert cursor.fetchone()["delete_rule"] == "RESTRICT"
     workspaces = PostgresWorkspaceRepository(postgres_metadata.connection_factory)
     designs = PostgresDesignRepository(postgres_metadata.connection_factory)
     workspace = workspaces.create(
@@ -158,3 +173,29 @@ def test_postgres_history_is_physically_bounded_and_discards_redo_branches(
         0,
         SchemiiDesignContent(),
     )
+
+    revision = reset.revision
+    for _ in range((MAX_RETAINED_HISTORY_TRANSITIONS // 2) + 5):
+        revision = designs.undo(
+            postgres_metadata.owner_id,
+            workspace.id,
+            revision,
+        ).revision
+        revision = designs.redo(
+            postgres_metadata.owner_id,
+            workspace.id,
+            revision,
+        ).revision
+    with postgres_metadata.connection_factory() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*) AS transition_count
+                FROM schemii.workspace_design_history_transitions
+                WHERE owner_id = %s AND workspace_id = %s
+                """,
+                (postgres_metadata.owner_id, workspace.id),
+            )
+            assert int(cursor.fetchone()["transition_count"]) == (
+                MAX_RETAINED_HISTORY_TRANSITIONS
+            )
