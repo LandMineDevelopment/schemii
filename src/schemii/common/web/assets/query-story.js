@@ -510,7 +510,7 @@ function sqlPanel(analysis, subject, selected) {
   const summary = element("summary");
   summary.append(
     element("span", {}, [element("small", { text: "Source of truth" }), element("strong", { text: "Query definition" })]),
-    element("code", { text: selected ? `focused: ${outputIdentity(selected)}` : "formatted PostgreSQL" }),
+    element("code", { text: "formatted PostgreSQL" }),
   );
   const pre = element("pre");
   appendHighlightedSql(pre, analysis.formattedSql || subject.definition, selected?.expression);
@@ -597,9 +597,7 @@ function renderQueryStory(container, {
     return;
   }
 
-  const selected = analysis.outputs.find(output => output.ordinal === selectedOutputOrdinal)
-    || analysis.outputs[0]
-    || null;
+  const selected = analysis.outputs.find(output => output.ordinal === selectedOutputOrdinal) || null;
   if (analysis.querySteps?.length) {
     story.append(chronologicalStory(analysis, subject, selected, onSelectOutput));
   } else {

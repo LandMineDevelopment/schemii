@@ -1590,9 +1590,6 @@ async function analyzeSelectedDesignView(view, { force = false } = {}) {
     });
     if (generation !== state.viewAnalysisGeneration || state.activeWorkspace?.id !== workspaceId) return;
     state.viewAnalysisCache.set(key, analysis);
-    if (!state.selectedViewOutputOrdinal && analysis.outputs.length) {
-      state.selectedViewOutputOrdinal = analysis.outputs[0].ordinal;
-    }
   } catch (error) {
     if (generation !== state.viewAnalysisGeneration) return;
     state.viewAnalysisError = error;
@@ -1708,7 +1705,6 @@ async function analyzeDesignViewDraft() {
     });
     if (generation !== state.designViewPreviewGeneration || !elements.designViewDialog.open) return;
     state.designViewPreviewAnalysis = analysis;
-    state.designViewPreviewOutputOrdinal = analysis.outputs[0]?.ordinal || null;
   } catch (error) {
     if (generation !== state.designViewPreviewGeneration || !elements.designViewDialog.open) return;
     state.designViewPreviewAnalysis = null;
