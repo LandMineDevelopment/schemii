@@ -132,14 +132,9 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: schemii_demo_admin
       POSTGRES_PASSWORD_FILE: /run/secrets/demo_admin_password
-      SCHEMII_DEMO_TARGET_DATABASE: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
-      SCHEMII_DEMO_TARGET_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
-      SCHEMII_DEMO_TARGET_PASSWORD_FILE: /run/secrets/demo_target_password
     volumes:
       - schemii-test-demo-postgres:/var/lib/postgresql/data
-      - ./dev/postgres/demo-init.sh:/docker-entrypoint-initdb.d/010-demo-role.sh:ro
       - "${SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_admin_password}:/run/secrets/demo_admin_password:ro"
-      - "${SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_target_password}:/run/secrets/demo_target_password:ro"
     group_add:
       - "${SCHEMII_SECRET_READER_GID:-999}"
     networks:
@@ -155,11 +150,43 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
-  postgres-seed:
+  demo-bootstrap:
     image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     depends_on:
       demo-postgres:
         condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      SCHEMII_DEMO_ADMIN_USER: schemii_demo_admin
+      SCHEMII_DEMO_TARGET_DATABASE: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
+      SCHEMII_DEMO_TARGET_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
+      SCHEMII_DEMO_ADMIN_PASSWORD_FILE: /run/secrets/demo_admin_password
+      SCHEMII_DEMO_TARGET_PASSWORD_FILE: /run/secrets/demo_target_password
+    command: ["/bin/sh", "/bootstrap/demo-bootstrap.sh"]
+    user: postgres
+    volumes:
+      - ./dev/postgres/demo-bootstrap.sh:/bootstrap/demo-bootstrap.sh:ro
+      - "${SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_admin_password}:/run/secrets/demo_admin_password:ro"
+      - "${SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_target_password}:/run/secrets/demo_target_password:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-999}"
+    networks:
+      - database
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  postgres-seed:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    depends_on:
+      demo-bootstrap:
+        condition: service_completed_successfully
     environment:
       PGHOST: postgres
       PGPORT: 5432

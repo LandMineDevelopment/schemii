@@ -26,6 +26,7 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     metadata_postgres = _service(compose, "metadata-postgres")
     demo_postgres = _service(compose, "demo-postgres")
     metadata_bootstrap = _service(compose, "metadata-bootstrap")
+    demo_bootstrap = _service(compose, "demo-bootstrap")
     networks = compose.split("\nnetworks:\n", 1)[1]
 
     assert "/docker.sock" not in compose
@@ -61,6 +62,8 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     assert "POSTGRES_USER: schemii_demo_admin" in demo_postgres
     assert "SCHEMII_METADATA_APP_USER:" in metadata_bootstrap
     assert "metadata_app_password" in metadata_bootstrap
+    assert "condition: service_completed_successfully" in _service(compose, "postgres-seed")
+    assert "demo_target_password" in demo_bootstrap
     assert "schemii-test-postgres:/var/lib/postgresql/data" in metadata_postgres
     assert "schemii-test-demo-postgres:/var/lib/postgresql/data" in demo_postgres
 
@@ -72,6 +75,7 @@ def test_containerized_application_is_non_root_and_read_only() -> None:
     ingress = _service(compose, "ingress")
     seed = _service(compose, "postgres-seed")
     metadata_bootstrap = _service(compose, "metadata-bootstrap")
+    demo_bootstrap = _service(compose, "demo-bootstrap")
 
     assert "USER 10001:10001" in dockerfile
     assert "schemii.main:app" in dockerfile
@@ -81,10 +85,12 @@ def test_containerized_application_is_non_root_and_read_only() -> None:
     assert "read_only: true" in ingress
     assert "user: postgres" in seed
     assert "user: postgres" in metadata_bootstrap
+    assert "user: postgres" in demo_bootstrap
     assert "no-new-privileges:true" in schemii
     assert "no-new-privileges:true" in ingress
     assert "no-new-privileges:true" in seed
     assert "no-new-privileges:true" in metadata_bootstrap
+    assert "no-new-privileges:true" in demo_bootstrap
 
 
 def test_database_roles_are_split_by_control_plane_and_demo_responsibility() -> None:
@@ -92,7 +98,7 @@ def test_database_roles_are_split_by_control_plane_and_demo_responsibility() -> 
     metadata_bootstrap = (ROOT / "dev" / "postgres" / "metadata-bootstrap.sh").read_text(
         encoding="utf-8"
     )
-    demo_init = (ROOT / "dev" / "postgres" / "demo-init.sh").read_text(
+    demo_bootstrap = (ROOT / "dev" / "postgres" / "demo-bootstrap.sh").read_text(
         encoding="utf-8"
     )
     seed = (ROOT / "dev" / "postgres" / "seed.sh").read_text(encoding="utf-8")
@@ -100,7 +106,14 @@ def test_database_roles_are_split_by_control_plane_and_demo_responsibility() -> 
     assert "metadata-postgres:" in compose
     assert "demo-postgres:" in compose
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in metadata_bootstrap
-    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in demo_init
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in demo_bootstrap
+    assert "ALTER ROLE %I LOGIN" in demo_bootstrap
+    assert "ALTER DATABASE %I OWNER TO %I" in demo_bootstrap
+    assert "ALTER SCHEMA metadata OWNER TO %I" in metadata_bootstrap
+    assert "pg_get_function_identity_arguments" in metadata_bootstrap
+    assert "object.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')" in metadata_bootstrap
+    assert "dependency.deptype IN ('a', 'i')" in metadata_bootstrap
+    assert "GRANT USAGE, CREATE ON SCHEMA metadata TO %I" in metadata_bootstrap
     assert 'dropdb --username "$SCHEMII_DEMO_ADMIN_USER"' in seed
     assert 'createdb --username "$SCHEMII_DEMO_ADMIN_USER" --owner "$PGUSER"' in seed
 

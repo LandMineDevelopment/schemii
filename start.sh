@@ -313,7 +313,8 @@ fi
 
 # The launcher is also the restart boundary. Build first so a compilation
 # failure does not interrupt the last known-good HTTP processes.
-docker "${compose_args[@]}" rm --stop --force ingress schemii metadata-bootstrap
+docker "${compose_args[@]}" rm --stop --force \
+  ingress schemii metadata-bootstrap demo-bootstrap
 
 # The former single PostgreSQL service used the control-plane volume now owned
 # by metadata-postgres. Remove only that exact legacy container before mounting
@@ -332,7 +333,8 @@ if [[ -n "$legacy_postgres_container" ]]; then
   docker rm --force "$legacy_postgres_container"
 fi
 if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
-  docker "${compose_args[@]}" --profile demo-fixture rm --stop --force postgres-seed demo-fixture
+  docker "${compose_args[@]}" --profile demo-fixture rm --stop --force \
+    postgres-seed demo-bootstrap demo-fixture
 fi
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
@@ -345,6 +347,8 @@ if ! docker "${compose_args[@]}" up --detach --wait --wait-timeout "$SCHEMII_STA
   docker "${compose_args[@]}" logs --no-color --tail 200 metadata-bootstrap >&2 || true
   printf 'Demo seed logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 postgres-seed >&2 || true
+  printf 'Demo role bootstrap logs:\n' >&2
+  docker "${compose_args[@]}" logs --no-color --tail 200 demo-bootstrap >&2 || true
   if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
     printf 'Demo fixture logs:\n' >&2
     docker "${compose_args[@]}" --profile demo-fixture logs --no-color --tail 200 demo-fixture >&2 || true
