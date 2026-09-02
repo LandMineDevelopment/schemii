@@ -32,19 +32,27 @@ def test_developer_route_inspection_is_opt_in_and_hidden_from_openapi() -> None:
 
 
 def test_developer_route_inspection_derives_flow_objects_and_bounded_source() -> None:
+    application = create_app(developer_inspection=True)
     api = TestClient(
-        create_app(developer_inspection=True),
+        application,
         base_url="http://localhost",
     )
 
     document = api.get("/_developer/routes").json()
+    openapi = application.openapi()
+    expected_route_ids = {
+        f"{method}:{path}"
+        for path, path_item in openapi["paths"].items()
+        for method in path_item
+        if method in {"get", "post", "put", "patch", "delete"}
+    }
 
     assert document["schemaVersion"] == 1
     assert document["analysis"]["generation"] == "application-startup"
     assert document["analysis"]["callGraph"] == "direct-first-party-calls"
     assert document["analysis"]["truncated"]["routes"] is False
     assert document["analysis"]["truncated"]["objects"] is False
-    assert len(document["routes"]) == 79
+    assert {route["id"] for route in document["routes"]} == expected_route_ids
     objects = {item["id"]: item for item in document["objects"]}
     layout = next(
         route

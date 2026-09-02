@@ -232,5 +232,5 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior() -> None:
     assert "python -m pytest -q" in workflow
     assert "npm test" in workflow
     assert "postgres:17-alpine@sha256:" in workflow
-    assert "tests/integration/test_metadata_postgres.py" in workflow
+    assert "python -m pytest -q tests/integration" in workflow
     assert "SCHEMII_TEST_METADATA_DSN:" in workflow

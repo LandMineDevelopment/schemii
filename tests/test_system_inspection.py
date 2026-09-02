@@ -77,7 +77,15 @@ def test_system_inspection_preserves_application_route_registration_order() -> N
 
 
 def test_system_inspection_joins_routes_services_repositories_and_gateway_calls() -> None:
-    document = build_developer_system_document(create_app())
+    application = create_app()
+    document = build_developer_system_document(application)
+    openapi = application.openapi()
+    expected_route_ids = {
+        f"{method}:{path}"
+        for path, path_item in openapi["paths"].items()
+        for method in path_item
+        if method in {"get", "post", "put", "patch", "delete"}
+    }
 
     assert document["schemaVersion"] == 1
     assert document["analysis"]["generation"] == "application-startup"
@@ -93,7 +101,7 @@ def test_system_inspection_joins_routes_services_repositories_and_gateway_calls(
         "objects": False,
         "source": False,
     }
-    assert len(document["routes"]) == 79
+    assert {route["id"] for route in document["routes"]} == expected_route_ids
 
     objects = {item["id"]: item for item in document["objects"]}
     callables = {item["objectId"]: item for item in document["callables"]}

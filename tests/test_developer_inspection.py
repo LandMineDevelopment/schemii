@@ -50,6 +50,45 @@ def test_inspection_snapshot_is_versioned_coherent_and_stable_for_one_app() -> N
     )
 
 
+def test_snapshot_documents_describe_the_same_registered_operations() -> None:
+    documents = build_developer_inspection_snapshot(create_app())["documents"]
+    openapi_operations = {
+        f"{method}:{path}": operation
+        for path, path_item in documents["openapi"]["paths"].items()
+        for method, operation in path_item.items()
+        if method in {"get", "post", "put", "patch", "delete"}
+    }
+    route_document = documents["routes"]
+    routes = {route["id"]: route for route in route_document["routes"]}
+    system_routes = {
+        route["id"]: route for route in documents["system"]["routes"]
+    }
+
+    assert routes.keys() == system_routes.keys() == openapi_operations.keys()
+    assert all(
+        routes[route_id]["operationId"]
+        == system_routes[route_id]["operationId"]
+        == operation["operationId"]
+        for route_id, operation in openapi_operations.items()
+    )
+
+    objects = {item["id"]: item for item in route_document["objects"]}
+    planned_from_source = {
+        route_id
+        for route_id, route in routes.items()
+        if any(
+            objects[call["objectId"]]["qualname"] == "planned_capability"
+            for call in route["calls"]
+        )
+    }
+    planned_from_openapi = {
+        route_id
+        for route_id, operation in openapi_operations.items()
+        if operation.get("x-schemii-status") == "planned"
+    }
+    assert planned_from_source == planned_from_openapi
+
+
 def test_canonical_snapshot_and_compatibility_routes_share_exact_documents() -> None:
     api = TestClient(
         create_app(developer_inspection=True),

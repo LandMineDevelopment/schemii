@@ -58,11 +58,11 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
-      - name: Exercise migrations, durable credentials, readiness, and target isolation
+      - name: Exercise metadata migrations, credentials, isolation, and atomic imports
         env:
           SCHEMII_TEST_METADATA_DSN: host=127.0.0.1 port=5432 dbname=schemii_ci user=postgres
           SCHEMII_TEST_METADATA_PASSWORD: postgres-ci-password
-        run: python -m pytest -q tests/integration/test_metadata_postgres.py
+        run: python -m pytest -q tests/integration
 
   browser-smoke:
     name: Assembled browser smoke
