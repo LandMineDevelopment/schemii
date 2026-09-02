@@ -13,7 +13,7 @@ import psycopg
 
 from schemii.common.metadata.config import MetadataConfig
 from schemii.common.metadata.crypto import CredentialCipher
-from schemii.common.metadata.factory import create_metadata_repositories
+from schemii.common.metadata.factory import MetadataRepositories
 from schemii.common.metadata.models import LOCAL_PROTOTYPE_USER_ID
 from schemii.common.metadata.secrets import read_encryption_key, read_secret_file
 from schemii.common.metadata.users import ensure_local_metadata_user
@@ -109,6 +109,7 @@ def _metadata_config() -> MetadataConfig:
 
 def _cleanup_and_create_connection(
     config: MetadataConfig,
+    repositories: MetadataRepositories,
     *,
     host: str,
     port: int,
@@ -116,7 +117,6 @@ def _cleanup_and_create_connection(
     username: str,
     password: str,
 ) -> None:
-    repositories = create_metadata_repositories()
     if repositories.connection_factory is None:
         raise FixtureError("durable metadata repositories are required")
     cipher = CredentialCipher(read_encryption_key(config.encryption_key_file))
@@ -390,15 +390,16 @@ def main() -> None:
     )
     fixture_digest = _fixture_digest(root, directory, manifest)
 
+    services = create_services()
     _cleanup_and_create_connection(
         config,
+        services.metadata,
         host=host,
         port=port,
         database=database,
         username=username,
         password=password,
     )
-    services = create_services()
     with services.connections.use(
         LOCAL_PROTOTYPE_USER_ID, FIXTURE_CONNECTION_ID
     ) as target:
