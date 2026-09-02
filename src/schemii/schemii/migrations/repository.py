@@ -8,7 +8,15 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Collection, Iterator, Protocol, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    ContextManager,
+    Iterator,
+    Protocol,
+    runtime_checkable,
+)
 
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.models import (
@@ -22,6 +30,7 @@ from schemii.schemii.designs.store import (
     design_fingerprint,
     design_object_ids,
 )
+from schemii.schemii.workspaces.store import WorkspaceImportBaseline
 
 from .models import (
     MigrationDriftResolution,
@@ -223,6 +232,18 @@ class MigrationRepository(Protocol):
         source_execution_id: str | None = None,
     ) -> BaselineRecord: ...
 
+    def create_import_baseline(
+        self,
+        *,
+        metadata_cursor: Any | None,
+        owner_id: str,
+        workspace_id: str,
+        connection_id: str,
+        database: str,
+        namespace: str,
+        baseline: WorkspaceImportBaseline,
+    ) -> BaselineRecord: ...
+
     def create_plan(self, record: PlanRecord) -> MigrationPlan: ...
     def get_plan(self, owner_id: str, plan_id: str) -> PlanRecord: ...
     def claim_execution(
@@ -288,7 +309,16 @@ class InMemoryMigrationRepository:
         self._plans: dict[tuple[str, str], PlanRecord] = {}
         self._executions: dict[tuple[str, str], ExecutionRecord] = {}
         self._execution_by_plan: dict[tuple[str, str], str] = {}
+        self._workspace_claim_guard: (
+            Callable[[str, str], ContextManager[None]] | None
+        ) = None
         self._lock = threading.RLock()
+
+    def set_workspace_claim_guard(
+        self,
+        guard: Callable[[str, str], ContextManager[None]],
+    ) -> None:
+        self._workspace_claim_guard = guard
 
     def current_baseline(self, owner_id: str, workspace_id: str) -> BaselineRecord | None:
         with self._lock:
@@ -339,6 +369,35 @@ class InMemoryMigrationRepository:
             rows.append(record)
             return record
 
+    def create_import_baseline(
+        self,
+        *,
+        metadata_cursor: Any | None,
+        owner_id: str,
+        workspace_id: str,
+        connection_id: str,
+        database: str,
+        namespace: str,
+        baseline: WorkspaceImportBaseline,
+    ) -> BaselineRecord:
+        if metadata_cursor is not None:
+            raise ValueError("In-memory imports cannot join a PostgreSQL transaction")
+        return self.create_baseline(
+            owner_id=owner_id,
+            workspace_id=workspace_id,
+            connection_id=connection_id,
+            connection_revision=baseline.connection_revision,
+            database=database,
+            namespace=namespace,
+            design_revision=1,
+            content=baseline.content,
+            catalog=baseline.catalog,
+            complete=baseline.complete,
+            issues=baseline.issues,
+            source="import",
+            expected_predecessor_id=None,
+        )
+
     def create_plan(self, record: PlanRecord) -> MigrationPlan:
         with self._lock:
             self._plans[(record.owner_id, record.plan.id)] = record
@@ -352,6 +411,44 @@ class InMemoryMigrationRepository:
                 raise MigrationNotFoundError("Migration plan was not found") from error
 
     def claim_execution(
+        self,
+        owner_id: str,
+        plan_id: str,
+        review_digest: str,
+        confirm_destructive: bool,
+        confirm_external_changes: bool,
+        *,
+        claimed_at: datetime,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> ExecutionClaim:
+        with self._lock:
+            record = self.get_plan(owner_id, plan_id)
+            workspace_id = record.plan.workspace_id
+        if self._workspace_claim_guard is None:
+            return self._claim_execution_locked(
+                owner_id,
+                plan_id,
+                review_digest,
+                confirm_destructive,
+                confirm_external_changes,
+                claimed_at=claimed_at,
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
+            )
+        with self._workspace_claim_guard(owner_id, workspace_id):
+            return self._claim_execution_locked(
+                owner_id,
+                plan_id,
+                review_digest,
+                confirm_destructive,
+                confirm_external_changes,
+                claimed_at=claimed_at,
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
+            )
+
+    def _claim_execution_locked(
         self,
         owner_id: str,
         plan_id: str,
@@ -637,6 +734,36 @@ class PostgresMigrationRepository:
             with connection.cursor() as cursor:
                 return self._insert_baseline(cursor, **values)
 
+    def create_import_baseline(
+        self,
+        *,
+        metadata_cursor: Any | None,
+        owner_id: str,
+        workspace_id: str,
+        connection_id: str,
+        database: str,
+        namespace: str,
+        baseline: WorkspaceImportBaseline,
+    ) -> BaselineRecord:
+        values = {
+            "owner_id": owner_id,
+            "workspace_id": workspace_id,
+            "connection_id": connection_id,
+            "connection_revision": baseline.connection_revision,
+            "database": database,
+            "namespace": namespace,
+            "design_revision": 1,
+            "content": baseline.content,
+            "catalog": baseline.catalog,
+            "complete": baseline.complete,
+            "issues": baseline.issues,
+            "source": "import",
+            "expected_predecessor_id": None,
+        }
+        if metadata_cursor is not None:
+            return self._insert_baseline(metadata_cursor, **values)
+        return self.create_baseline(**values)
+
     def create_plan(self, record: PlanRecord) -> MigrationPlan:
         review = record.plan.model_dump(mode="json", by_alias=False)
         authority = self._authority_document(record.authority)
@@ -712,6 +839,28 @@ class PostgresMigrationRepository:
     ) -> ExecutionClaim:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT workspace_id, connection_id FROM schemii.migration_plans WHERE owner_id = %s AND id = %s",
+                    (owner_id, plan_id),
+                )
+                authority_row = cursor.fetchone()
+                if authority_row is None:
+                    raise MigrationNotFoundError("Migration plan was not found")
+                cursor.execute(
+                    "SELECT id FROM metadata.postgres_connections WHERE owner_id = %s AND id = %s FOR UPDATE",
+                    (owner_id, authority_row["connection_id"]),
+                )
+                if cursor.fetchone() is None:
+                    raise MigrationConflictError(
+                        "workspace_target_changed",
+                        "The migration target connection no longer exists",
+                    )
+                cursor.execute(
+                    "SELECT id FROM schemii.workspaces WHERE owner_id = %s AND id = %s FOR UPDATE",
+                    (owner_id, authority_row["workspace_id"]),
+                )
+                if cursor.fetchone() is None:
+                    raise MigrationNotFoundError("Migration plan was not found")
                 cursor.execute(
                     "SELECT * FROM schemii.migration_plans WHERE owner_id = %s AND id = %s FOR UPDATE",
                     (owner_id, plan_id),

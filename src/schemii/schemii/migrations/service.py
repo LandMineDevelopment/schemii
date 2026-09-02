@@ -17,6 +17,8 @@ from schemii.common.postgres.errors import (
     PostgresMigrationExecutionError,
     PostgresMigrationStaleError,
 )
+from schemii.common.postgres.models import PostgresCatalog
+from schemii.schemii.designs.importer import ImportedDesign
 from schemii.schemii.designs.history import design_change_summary
 from schemii.schemii.designs.models import (
     DesignBaselineResetPreview,
@@ -38,9 +40,13 @@ from schemii.schemii.designs.store import (
     design_fingerprint,
 )
 from schemii.schemii.workspaces.store import (
+    WorkspaceDesignBootstrap,
+    WorkspaceImportBaseline,
+    WorkspaceImportTargetChangedError,
     WorkspaceNotFoundError,
     WorkspaceRepository,
 )
+from schemii.schemii.workspaces.models import SchemiiWorkspace, SchemiiWorkspaceCreate
 
 from .models import (
     MigrationDriftResolution,
@@ -88,6 +94,92 @@ class MigrationServiceError(RuntimeError):
         super().__init__(message)
 
 
+def _install_workspace_execution_guards(
+    workspaces: WorkspaceRepository,
+    repository: MigrationRepository,
+) -> None:
+    workspace_guard = getattr(workspaces, "set_mutation_guard", None)
+    if callable(workspace_guard):
+        workspace_guard(repository.has_active_execution)
+    claim_guard = getattr(workspaces, "execution_claim_guard", None)
+    install_claim_guard = getattr(repository, "set_workspace_claim_guard", None)
+    if callable(claim_guard) and callable(install_claim_guard):
+        install_claim_guard(claim_guard)
+
+
+def _migration_storage_error(
+    error: MigrationStorageUnavailableError,
+) -> MigrationServiceError:
+    details = {
+        key: value
+        for key, value in {
+            "sqlstate": error.sqlstate,
+            "constraint": error.constraint,
+            "errorType": error.error_type,
+        }.items()
+        if value is not None
+    }
+    return MigrationServiceError(
+        503,
+        "migration_metadata_unavailable",
+        "Migration metadata is temporarily unavailable",
+        details=details,
+        retryable=True,
+    )
+
+
+def _create_import_workspace(
+    workspaces: WorkspaceRepository,
+    baselines: MigrationRepository,
+    owner_id: str,
+    request: SchemiiWorkspaceCreate,
+    imported: ImportedDesign,
+    connection_revision: int,
+    catalog: PostgresCatalog,
+) -> SchemiiWorkspace:
+    """Build and persist one imported design through its atomic repository boundary."""
+
+    baseline_content, warnings, complete = new_baseline_content(
+        catalog,
+        imported.content,
+    )
+    try:
+        return workspaces.create_import(
+            owner_id,
+            request,
+            bootstrap=WorkspaceDesignBootstrap(
+                content=imported.content,
+                layout=imported.layout,
+                import_summary=imported.summary,
+            ),
+            baseline=WorkspaceImportBaseline(
+                connection_revision=connection_revision,
+                content=baseline_content,
+                catalog=catalog,
+                complete=complete,
+                issues=[
+                    warning.model_dump(mode="json", by_alias=True)
+                    for warning in warnings
+                ],
+            ),
+            baselines=baselines,
+        )
+    except WorkspaceImportTargetChangedError as error:
+        raise MigrationServiceError(
+            409,
+            "connection_changed_during_import",
+            str(error),
+            details={
+                "expectedRevision": error.expected_revision,
+                "currentRevision": error.current_revision,
+                "expectedDatabase": error.expected_database,
+                "currentDatabase": error.current_database,
+            },
+        ) from error
+    except MigrationStorageUnavailableError as error:
+        raise _migration_storage_error(error) from error
+
+
 class MigrationService:
     """Own every validation decision from live inspection through reconciliation."""
 
@@ -115,6 +207,27 @@ class MigrationService:
         self._plan_ttl = plan_ttl
         self._execution_lease_ttl = execution_lease_ttl
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        _install_workspace_execution_guards(self._workspaces, self._repository)
+
+    def create_import_workspace(
+        self,
+        owner_id: str,
+        request: SchemiiWorkspaceCreate,
+        imported: ImportedDesign,
+        connection_revision: int,
+        catalog: PostgresCatalog,
+    ) -> SchemiiWorkspace:
+        """Atomically persist one inspected catalog as a targeted design baseline."""
+
+        return _create_import_workspace(
+            self._workspaces,
+            self._repository,
+            owner_id,
+            request,
+            imported,
+            connection_revision,
+            catalog,
+        )
 
     def design_history_state(self, owner_id: str, workspace_id: str) -> DesignHistoryState:
         """Return the durable cursor relative to the server-owned sync point."""
@@ -1181,19 +1294,4 @@ class MigrationService:
 
     @staticmethod
     def _storage_error(error: MigrationStorageUnavailableError) -> MigrationServiceError:
-        details = {
-            key: value
-            for key, value in {
-                "sqlstate": error.sqlstate,
-                "constraint": error.constraint,
-                "errorType": error.error_type,
-            }.items()
-            if value is not None
-        }
-        return MigrationServiceError(
-            503,
-            "migration_metadata_unavailable",
-            "Migration metadata is temporarily unavailable",
-            details=details,
-            retryable=True,
-        )
+        return _migration_storage_error(error)

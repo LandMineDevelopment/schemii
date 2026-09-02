@@ -6,8 +6,9 @@ import json
 import secrets
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
+from schemii.common.connections.store import ConnectionInUseError
 from schemii.common.metadata.users import ensure_local_metadata_user
 from schemii.schemii.designs.store import (
     authored_content_document,
@@ -30,7 +31,11 @@ from .store import (
     MAX_TABLE_POSITIONS_PER_OWNER,
     MAX_WORKSPACES_PER_OWNER,
     WorkspaceConflictError,
+    WorkspaceImportBaseline,
+    WorkspaceImportBaselineStore,
+    WorkspaceImportTargetChangedError,
     WorkspaceLimitError,
+    WorkspaceMutationBlockedError,
     WorkspaceNotFoundError,
     WorkspaceRepositoryError,
     WorkspaceStorageUnavailableError,
@@ -120,159 +125,255 @@ class PostgresWorkspaceRepository:
         *,
         bootstrap: WorkspaceDesignBootstrap | None = None,
     ) -> SchemiiWorkspace:
-        if bootstrap is not None:
-            validate_design_content(bootstrap.content)
-            allowed = design_object_ids(bootstrap.content)
-            if any(
-                allowed.get(position.object_id) != position.layer
-                for position in bootstrap.layout.objects
-            ):
-                raise WorkspaceStorageUnavailableError(
-                    "Imported workspace layout contains an invalid object reference"
-                )
+        self._validate_bootstrap(bootstrap)
         workspace_id = f"ws_{secrets.token_hex(16)}"
         with self._transaction() as connection:
             with connection.cursor() as cursor:
-                ensure_local_metadata_user(cursor, owner_id)
-                cursor.execute(
-                    """
-                    SELECT count(*) AS workspace_count
-                    FROM schemii.workspaces
-                    WHERE owner_id = %s
-                    """,
-                    (owner_id,),
+                return self._insert_workspace(
+                    cursor,
+                    owner_id,
+                    workspace_id,
+                    request,
+                    bootstrap=bootstrap,
                 )
-                if int(cursor.fetchone()["workspace_count"]) >= self._max_workspaces_per_owner:
-                    raise WorkspaceLimitError(
-                        "workspace",
-                        self._max_workspaces_per_owner,
-                    )
-                cursor.execute(
-                    """
-                    INSERT INTO schemii.workspaces (id, owner_id, name, mode)
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING *
-                    """,
-                    (
-                        workspace_id,
-                        owner_id,
-                        request.name,
-                        (
-                            "design"
-                            if bootstrap is not None or request.connection_id is None
-                            else "live"
-                        ),
-                    ),
+
+    def create_import(
+        self,
+        owner_id: str,
+        request: SchemiiWorkspaceCreate,
+        *,
+        bootstrap: WorkspaceDesignBootstrap,
+        baseline: WorkspaceImportBaseline,
+        baselines: WorkspaceImportBaselineStore,
+    ) -> SchemiiWorkspace:
+        """Commit target validation, design state, provenance, and baseline together."""
+
+        if (
+            request.connection_id is None
+            or request.database is None
+            or request.namespace is None
+        ):
+            raise ValueError("Imported workspaces require a complete PostgreSQL target")
+        self._validate_bootstrap(bootstrap)
+        workspace_id = f"ws_{secrets.token_hex(16)}"
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                self._lock_import_connection(
+                    cursor,
+                    owner_id,
+                    request.connection_id,
+                    request.database,
+                    baseline.connection_revision,
                 )
-                row = cursor.fetchone()
-                if request.connection_id is not None:
-                    cursor.execute(
-                        """
-                        INSERT INTO schemii.workspace_targets (
-                            owner_id, workspace_id, connection_id,
-                            database_name, namespace
-                        )
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (
-                            owner_id,
-                            workspace_id,
-                            request.connection_id,
-                            request.database,
-                            request.namespace,
-                        ),
-                    )
-                if bootstrap is None:
-                    cursor.execute(
-                        """
-                        INSERT INTO schemii.workspace_designs (workspace_id, owner_id)
-                        VALUES (%s, %s)
-                        """,
-                        (workspace_id, owner_id),
-                    )
-                    cursor.execute(
-                        """
-                        INSERT INTO schemii.workspace_design_layouts (workspace_id, owner_id)
-                        VALUES (%s, %s)
-                        """,
-                        (workspace_id, owner_id),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO schemii.workspace_designs (
-                            workspace_id, owner_id, revision, content, fingerprint
-                        )
-                        VALUES (%s, %s, 1, %s::jsonb, %s)
-                        """,
-                        (
-                            workspace_id,
-                            owner_id,
-                            json.dumps(
-                                authored_content_document(bootstrap.content),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ),
-                            design_fingerprint(bootstrap.content),
-                        ),
-                    )
-                    cursor.execute(
-                        """
-                        INSERT INTO schemii.workspace_design_layouts (
-                            workspace_id, owner_id, revision, design_revision, objects
-                        )
-                        VALUES (%s, %s, 1, 1, %s::jsonb)
-                        """,
-                        (
-                            workspace_id,
-                            owner_id,
-                            json.dumps(
-                                bootstrap.layout.model_dump(mode="json")["objects"],
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ),
-                        ),
-                    )
-                    summary = bootstrap.import_summary
-                    cursor.execute(
-                        """
-                        INSERT INTO schemii.workspace_design_imports (
-                            workspace_id, owner_id, catalog_fingerprint,
-                            catalog_captured_at, complete, imported_objects, issues
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
-                        """,
-                        (
-                            workspace_id,
-                            owner_id,
-                            summary.catalog_fingerprint,
-                            summary.catalog_captured_at,
-                            summary.complete,
-                            json.dumps(
-                                summary.imported_objects,
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ),
-                            json.dumps(
-                                [issue.model_dump(mode="json") for issue in summary.issues],
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ),
-                        ),
-                    )
-                row.update(
+                workspace = self._insert_workspace(
+                    cursor,
+                    owner_id,
+                    workspace_id,
+                    request,
+                    bootstrap=bootstrap,
+                )
+                baselines.create_import_baseline(
+                    metadata_cursor=cursor,
+                    owner_id=owner_id,
+                    workspace_id=workspace_id,
                     connection_id=request.connection_id,
-                    database_name=request.database,
+                    database=request.database,
                     namespace=request.namespace,
+                    baseline=baseline,
                 )
-                return self._workspace(
-                    row,
-                    [],
-                    [],
-                    bootstrap.import_summary if bootstrap is not None else None,
+                return workspace
+
+    def _insert_workspace(
+        self,
+        cursor: Any,
+        owner_id: str,
+        workspace_id: str,
+        request: SchemiiWorkspaceCreate,
+        *,
+        bootstrap: WorkspaceDesignBootstrap | None,
+    ) -> SchemiiWorkspace:
+        ensure_local_metadata_user(cursor, owner_id)
+        cursor.execute(
+            """
+            SELECT count(*) AS workspace_count
+            FROM schemii.workspaces
+            WHERE owner_id = %s
+            """,
+            (owner_id,),
+        )
+        if int(cursor.fetchone()["workspace_count"]) >= self._max_workspaces_per_owner:
+            raise WorkspaceLimitError("workspace", self._max_workspaces_per_owner)
+        cursor.execute(
+            """
+            INSERT INTO schemii.workspaces (id, owner_id, name, mode)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+            """,
+            (
+                workspace_id,
+                owner_id,
+                request.name,
+                (
+                    "design"
+                    if bootstrap is not None or request.connection_id is None
+                    else "live"
+                ),
+            ),
+        )
+        row = cursor.fetchone()
+        if request.connection_id is not None:
+            cursor.execute(
+                """
+                INSERT INTO schemii.workspace_targets (
+                    owner_id, workspace_id, connection_id,
+                    database_name, namespace
                 )
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    owner_id,
+                    workspace_id,
+                    request.connection_id,
+                    request.database,
+                    request.namespace,
+                ),
+            )
+        if bootstrap is None:
+            cursor.execute(
+                """
+                INSERT INTO schemii.workspace_designs (workspace_id, owner_id)
+                VALUES (%s, %s)
+                """,
+                (workspace_id, owner_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO schemii.workspace_design_layouts (workspace_id, owner_id)
+                VALUES (%s, %s)
+                """,
+                (workspace_id, owner_id),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO schemii.workspace_designs (
+                    workspace_id, owner_id, revision, content, fingerprint
+                )
+                VALUES (%s, %s, 1, %s::jsonb, %s)
+                """,
+                (
+                    workspace_id,
+                    owner_id,
+                    json.dumps(
+                        authored_content_document(bootstrap.content),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    design_fingerprint(bootstrap.content),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO schemii.workspace_design_layouts (
+                    workspace_id, owner_id, revision, design_revision, objects
+                )
+                VALUES (%s, %s, 1, 1, %s::jsonb)
+                """,
+                (
+                    workspace_id,
+                    owner_id,
+                    json.dumps(
+                        bootstrap.layout.model_dump(mode="json")["objects"],
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            summary = bootstrap.import_summary
+            cursor.execute(
+                """
+                INSERT INTO schemii.workspace_design_imports (
+                    workspace_id, owner_id, catalog_fingerprint,
+                    catalog_captured_at, complete, imported_objects, issues
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                """,
+                (
+                    workspace_id,
+                    owner_id,
+                    summary.catalog_fingerprint,
+                    summary.catalog_captured_at,
+                    summary.complete,
+                    json.dumps(
+                        summary.imported_objects,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    json.dumps(
+                        [issue.model_dump(mode="json") for issue in summary.issues],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+        row.update(
+            connection_id=request.connection_id,
+            database_name=request.database,
+            namespace=request.namespace,
+        )
+        return self._workspace(
+            row,
+            [],
+            [],
+            bootstrap.import_summary if bootstrap is not None else None,
+        )
+
+    @staticmethod
+    def _validate_bootstrap(bootstrap: WorkspaceDesignBootstrap | None) -> None:
+        if bootstrap is None:
+            return
+        validate_design_content(bootstrap.content)
+        allowed = design_object_ids(bootstrap.content)
+        if any(
+            allowed.get(position.object_id) != position.layer
+            for position in bootstrap.layout.objects
+        ):
+            raise WorkspaceStorageUnavailableError(
+                "Imported workspace layout contains an invalid object reference"
+            )
+
+    @staticmethod
+    def _lock_import_connection(
+        cursor: Any,
+        owner_id: str,
+        connection_id: str,
+        expected_database: str,
+        expected_revision: int,
+    ) -> None:
+        cursor.execute(
+            """
+            SELECT revision, database_name
+            FROM metadata.postgres_connections
+            WHERE owner_id = %s AND id = %s
+            FOR UPDATE
+            """,
+            (owner_id, connection_id),
+        )
+        current = cursor.fetchone()
+        current_revision = int(current["revision"]) if current is not None else None
+        current_database = current["database_name"] if current is not None else None
+        if (
+            current_revision != expected_revision
+            or current_database != expected_database
+        ):
+            raise WorkspaceImportTargetChangedError(
+                expected_revision=expected_revision,
+                current_revision=current_revision,
+                expected_database=expected_database,
+                current_database=current_database,
+            )
 
     def update_layout(
         self,
@@ -427,20 +528,13 @@ class PostgresWorkspaceRepository:
     def delete(self, owner_id: str, workspace_id: str, expected_revision: int) -> None:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT revision
-                    FROM schemii.workspaces
-                    WHERE owner_id = %s AND id = %s
-                    FOR UPDATE
-                    """,
-                    (owner_id, workspace_id),
+                current = self._lock_lifecycle_mutation(
+                    cursor,
+                    owner_id,
+                    workspace_id,
+                    operation="deleted",
+                    expected_revision=expected_revision,
                 )
-                current = cursor.fetchone()
-                if current is None:
-                    raise WorkspaceNotFoundError("Schemii workspace was not found")
-                if current["revision"] != expected_revision:
-                    raise WorkspaceConflictError(current["revision"])
                 cursor.execute(
                     """
                     DELETE FROM schemii.workspaces
@@ -448,6 +542,49 @@ class PostgresWorkspaceRepository:
                     """,
                     (owner_id, workspace_id),
                 )
+
+    @staticmethod
+    def _lock_lifecycle_mutation(
+        cursor: Any,
+        owner_id: str,
+        workspace_id: str,
+        *,
+        operation: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Serialize lifecycle changes with claims and reject durable active work."""
+
+        cursor.execute(
+            """
+            SELECT revision
+            FROM schemii.workspaces
+            WHERE owner_id = %s AND id = %s
+            FOR UPDATE
+            """,
+            (owner_id, workspace_id),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            raise WorkspaceNotFoundError("Schemii workspace was not found")
+        if current["revision"] != expected_revision:
+            raise WorkspaceConflictError(current["revision"])
+        cursor.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM schemii.migration_executions
+                WHERE owner_id = %s AND workspace_id = %s
+                  AND status IN (
+                      'reserved', 'applying', 'uncertain',
+                      'reconciliation_required'
+                  )
+            ) AS active
+            """,
+            (owner_id, workspace_id),
+        )
+        if bool(cursor.fetchone()["active"]):
+            raise WorkspaceMutationBlockedError(operation)
+        return current
 
     def count_for_connection(self, owner_id: str, connection_id: str) -> int:
         with self._transaction() as connection:
@@ -461,6 +598,54 @@ class PostgresWorkspaceRepository:
                     (owner_id, connection_id),
                 )
                 return int(cursor.fetchone()["workspace_count"])
+
+    @staticmethod
+    def guard_connection_mutation(
+        cursor: Any,
+        owner_id: str,
+        connection_id: str,
+        operation: Literal["update", "delete"],
+    ) -> None:
+        """Join a connection mutation transaction to the execution lifecycle lock."""
+
+        cursor.execute(
+            """
+            SELECT workspace.id
+            FROM schemii.workspace_targets AS target
+            JOIN schemii.workspaces AS workspace
+              ON workspace.owner_id = target.owner_id
+             AND workspace.id = target.workspace_id
+            WHERE target.owner_id = %s AND target.connection_id = %s
+            ORDER BY workspace.id
+            FOR UPDATE OF workspace
+            """,
+            (owner_id, connection_id),
+        )
+        workspace_count = len(cursor.fetchall())
+        if operation == "delete" and workspace_count:
+            raise ConnectionInUseError(
+                {PostgresWorkspaceRepository.dependency_name: workspace_count}
+            )
+        cursor.execute(
+            """
+            SELECT count(DISTINCT execution.workspace_id) AS active_count
+            FROM schemii.migration_executions AS execution
+            JOIN schemii.workspace_targets AS target
+              ON target.owner_id = execution.owner_id
+             AND target.workspace_id = execution.workspace_id
+            WHERE target.owner_id = %s AND target.connection_id = %s
+              AND execution.status IN (
+                  'reserved', 'applying', 'uncertain',
+                  'reconciliation_required'
+              )
+            """,
+            (owner_id, connection_id),
+        )
+        active_count = int(cursor.fetchone()["active_count"])
+        if active_count:
+            raise ConnectionInUseError(
+                {PostgresWorkspaceRepository.dependency_name: active_count}
+            )
 
     def _select_workspace(
         self,

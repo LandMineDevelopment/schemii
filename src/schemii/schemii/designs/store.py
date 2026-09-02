@@ -645,6 +645,17 @@ class InMemoryDesignRepository:
             }
             return design.model_copy(deep=True), saved_layout.model_copy(deep=True)
 
+    def discard_initialization(self, owner_id: str, workspace_id: str) -> None:
+        """Remove every process-local child created for a rolled-back workspace."""
+
+        key = (owner_id, workspace_id)
+        with self._lock:
+            self._designs.pop(key, None)
+            self._layouts.pop(key, None)
+            self._history.pop(key, None)
+            self._history_state.pop(key, None)
+            self._position_memory.pop(key, None)
+
     def get(self, owner_id: str, workspace_id: str) -> SchemiiDesign:
         with self._lock:
             return self._design(owner_id, workspace_id).model_copy(deep=True)

@@ -30,7 +30,7 @@ from .store import (
     WorkspaceLimitError,
     WorkspaceNotFoundError,
     WorkspaceRepository,
-    WorkspaceDesignBootstrap,
+    WorkspaceMutationBlockedError,
 )
 
 
@@ -208,24 +208,16 @@ def create_workspace_from_postgres(
                 connection,
                 body.namespace,
             )
-        imported = import_postgres_catalog(catalog)
-        workspace = _workspaces(request).create(
-            principal.user_id,
-            body.workspace_create(),
-            bootstrap=WorkspaceDesignBootstrap(
-                content=imported.content,
-                layout=imported.layout,
-                import_summary=imported.summary,
-            ),
-        )
-        migrations = request.app.state.services.migrations
-        assert migrations is not None
-        migrations.record_import_baseline(
-            principal.user_id,
-            workspace.id,
-            connection.revision,
-            catalog,
-        )
+            imported = import_postgres_catalog(catalog)
+            migrations = request.app.state.services.migrations
+            assert migrations is not None
+            workspace = migrations.create_import_workspace(
+                principal.user_id,
+                body.workspace_create(),
+                imported,
+                connection.revision,
+                catalog,
+            )
         design = _designs(request).get(principal.user_id, workspace.id)
         layout = _designs(request).get_layout(principal.user_id, workspace.id)
         return SchemiiWorkspaceImportResponse(
@@ -395,6 +387,13 @@ def delete_workspace(
         raise _workspace_not_found(error) from error
     except WorkspaceConflictError as error:
         raise _workspace_conflict(error) from error
+    except WorkspaceMutationBlockedError as error:
+        raise ApiProblem(
+            409,
+            "workspace_mutation_blocked",
+            str(error),
+            details={"operation": error.operation},
+        ) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
