@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterator
 
 from .deletion_impact import validate_design_transition
+from .history_retention import history_target_index, prune_postgres_history
 from .models import (
     DesignHistoryBaseline,
     DesignHistoryState,
@@ -30,7 +31,6 @@ from .store import (
     DesignValidationError,
     DesignWorkspaceNotFoundError,
     _history_state,
-    _history_target_index,
     authored_content_document,
     design_fingerprint,
     design_object_ids,
@@ -204,6 +204,7 @@ class PostgresDesignRepository:
                     """,
                     (entry_id, entry_id, owner_id, workspace_id),
                 )
+                prune_postgres_history(cursor, owner_id, workspace_id)
                 design = SchemiiDesign(
                     workspace_id=workspace_id,
                     revision=next_revision,
@@ -332,7 +333,7 @@ class PostgresDesignRepository:
                 self._guard_mutation(cursor, owner_id, workspace_id, "edit")
                 self._ensure_history(cursor, owner_id, workspace_id, current_row)
                 entries, cursor_index = self._active_chain(cursor, owner_id, workspace_id)
-                target_index = _history_target_index(entries, cursor_index, action)
+                target_index = history_target_index(entries, cursor_index, action)
                 if target_index is None:
                     raise DesignHistoryBoundaryError(action)
                 target = entries[target_index]
@@ -369,6 +370,7 @@ class PostgresDesignRepository:
                     """,
                     (workspace_id, owner_id, action, from_id, target.id, next_revision),
                 )
+                prune_postgres_history(cursor, owner_id, workspace_id)
                 design = SchemiiDesign(
                     workspace_id=workspace_id,
                     revision=next_revision,

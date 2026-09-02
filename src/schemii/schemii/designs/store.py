@@ -17,6 +17,7 @@ from schemii.common.postgres.type_analysis import analyze_type_definition
 
 from .deletion_impact import validate_design_transition
 from .history import design_change_summary
+from .history_retention import history_target_index, retained_history_entries
 from .models import (
     DesignHistoryAction,
     DesignHistoryBaseline,
@@ -704,6 +705,7 @@ class InMemoryDesignRepository:
                 content=revised.content,
             )
             self._history_state[key] = (entry.id, entry.id)
+            self._prune_history(key)
             self._advance_layout(owner_id, workspace_id, revised)
             return revised.model_copy(deep=True)
 
@@ -858,6 +860,25 @@ class InMemoryDesignRepository:
         self._history.setdefault(key, {})[entry.id] = entry
         return entry
 
+    def _prune_history(self, key: tuple[str, str]) -> None:
+        entries, _ = self._active_chain(*key)
+        retained = retained_history_entries(entries)
+        previous_id: int | None = None
+        compacted: dict[int, _MemoryHistoryEntry] = {}
+        for entry in retained:
+            kept = _MemoryHistoryEntry(
+                id=entry.id,
+                parent_id=previous_id,
+                source_design_revision=entry.source_design_revision,
+                operation_kind=entry.operation_kind,
+                operation_group_id=entry.operation_group_id,
+                content=entry.content,
+                created_at=entry.created_at,
+            )
+            compacted[kept.id] = kept
+            previous_id = kept.id
+        self._history[key] = compacted
+
     def _active_chain(self, owner_id: str, workspace_id: str) -> tuple[list["_MemoryHistoryEntry"], int]:
         key = (owner_id, workspace_id)
         cursor_id, tip_id = self._history_state[key]
@@ -885,7 +906,7 @@ class InMemoryDesignRepository:
                 raise DesignConflictError(current.revision)
             self._ensure_history(owner_id, workspace_id, current)
             entries, cursor_index = self._active_chain(owner_id, workspace_id)
-            target_index = _history_target_index(entries, cursor_index, action)
+            target_index = history_target_index(entries, cursor_index, action)
             if target_index is None:
                 raise DesignHistoryBoundaryError(action)
             target = entries[target_index]
@@ -914,47 +935,14 @@ class _MemoryHistoryEntry:
     created_at: datetime
 
 
-def _history_group(entry: Any) -> str:
-    return entry.operation_group_id or f"entry:{entry.id}"
-
-
-def _history_boundary_index(entries: list[Any], retained_limit: int = 100) -> int:
-    index = len(entries) - 1
-    actions = 0
-    while index > 0 and actions < retained_limit:
-        group = _history_group(entries[index])
-        while index > 0 and _history_group(entries[index]) == group:
-            index -= 1
-        actions += 1
-    return index
-
-
-def _history_target_index(entries: list[Any], cursor_index: int, action: str) -> int | None:
-    if action == "undo":
-        if cursor_index == 0:
-            return None
-        group = _history_group(entries[cursor_index])
-        target = cursor_index - 1
-        while target > 0 and _history_group(entries[target]) == group:
-            target -= 1
-        return target if target >= _history_boundary_index(entries) else None
-    if cursor_index >= len(entries) - 1:
-        return None
-    group = _history_group(entries[cursor_index + 1])
-    target = cursor_index + 1
-    while target + 1 < len(entries) and _history_group(entries[target + 1]) == group:
-        target += 1
-    return target
-
-
 def _history_state(
     design: SchemiiDesign,
     entries: list[Any],
     cursor_index: int,
     baseline: DesignHistoryBaseline,
 ) -> DesignHistoryState:
-    undo_index = _history_target_index(entries, cursor_index, "undo")
-    redo_index = _history_target_index(entries, cursor_index, "redo")
+    undo_index = history_target_index(entries, cursor_index, "undo")
+    redo_index = history_target_index(entries, cursor_index, "redo")
     baseline_index = next(
         (
             index
