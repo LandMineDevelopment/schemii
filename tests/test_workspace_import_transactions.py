@@ -122,8 +122,14 @@ def test_in_memory_import_rolls_back_workspace_and_design_when_baseline_fails() 
 
     assert workspaces.list(OWNER_ID) == []
     assert failing.workspace_id is not None
-    assert designs.get(OWNER_ID, failing.workspace_id).revision == 0
-    assert designs.get_layout(OWNER_ID, failing.workspace_id).revision == 0
+    restored_design, restored_layout = designs.initialize(
+        OWNER_ID,
+        failing.workspace_id,
+        bootstrap.content,
+        bootstrap.layout,
+    )
+    assert restored_design.revision == 1
+    assert restored_layout.revision == 1
 
 
 def test_migration_service_installs_workspace_lifecycle_guard() -> None:
