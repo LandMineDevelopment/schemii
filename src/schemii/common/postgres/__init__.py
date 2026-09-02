@@ -20,6 +20,7 @@ from .gateway import (
     PostgresCatalogLimits,
     PostgresGateway,
     PostgresMigrationResult,
+    PostgresTransactionRecovery,
     PsycopgPostgresGateway,
 )
 from .models import (
@@ -74,6 +75,7 @@ __all__ = [
     "PostgresGatewayError",
     "PostgresMigrationExecutionError",
     "PostgresMigrationResult",
+    "PostgresTransactionRecovery",
     "PostgresMigrationStaleError",
     "PostgresIndex",
     "PostgresInvalidNamespaceError",

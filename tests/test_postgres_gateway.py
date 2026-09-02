@@ -392,6 +392,37 @@ def test_connection_uses_safe_bounded_parameters_and_omits_missing_password() ->
     assert any("statement_timeout" in query for query, _ in connection.executed)
 
 
+def test_transaction_recovery_binds_status_to_fresh_target_identity() -> None:
+    responses = {
+        "current_database() AS database": [
+            {
+                "database": "analytics",
+                "database_oid": "16384",
+                "server_version_num": "170002",
+                "server_address": "10.0.0.12",
+                "server_port": 5432,
+            }
+        ],
+        "pg_xact_status": [{"status": "committed"}],
+    }
+    factory = FakeConnectFactory(responses)
+
+    recovery = PsycopgPostgresGateway(
+        connect_factory=factory,
+    ).transaction_status(resolved_connection(), "42")
+
+    assert recovery.status == "committed"
+    assert recovery.target_identity == responses["current_database() AS database"][0]
+    connection = factory.connections[0]
+    assert connection.rollbacks == 1
+    assert connection.closed is True
+    assert any(
+        parameters == ("42",)
+        for query, parameters in connection.executed
+        if "pg_xact_status" in query
+    )
+
+
 def test_driver_failures_are_mapped_without_leaking_credentials_or_driver_text() -> None:
     secret = "this-password-must-not-leak"
 

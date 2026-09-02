@@ -180,6 +180,15 @@ def test_postgres_plan_retention_preserves_execution_and_reconciliation_records(
         reserved_at=REFERENCE_TIME - timedelta(minutes=90),
     )
     assert reservation.reserved_now is True
+    repository.transition_execution(
+        owner_id,
+        reservation.record.execution.id,
+        expected_revision=reservation.record.execution.revision,
+        allowed_from={"reserved"},
+        status="failed",
+        commit_outcome="rolled_back",
+        error_code="test_execution_settled",
+    )
     with postgres_metadata.connection_factory() as connection:
         with connection.cursor() as cursor:
             # Keep the review status eligible for cleanup so the execution FK,

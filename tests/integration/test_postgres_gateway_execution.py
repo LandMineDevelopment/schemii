@@ -134,7 +134,9 @@ def test_execute_migration_requires_reviewed_fingerprint_and_returns_commit_evid
     assert result.completed_step_count == 2
     assert result.target_identity["database"] == connection.database
     assert result.transaction_id.isdigit()
-    assert gateway.transaction_status(connection, result.transaction_id) == "committed"
+    recovery = gateway.transaction_status(connection, result.transaction_id)
+    assert recovery.status == "committed"
+    assert recovery.target_identity == result.target_identity
     intended_table = _table(result.catalog, "committed_widgets")
     assert intended_table is not None
     assert [index.name for index in intended_table.indexes] == [
@@ -180,7 +182,9 @@ def test_failed_multi_step_migration_rolls_back_every_target_statement(
     assert transaction_id.isdigit()
     assert identity["database"] == connection.database
     assert intended == []
-    assert gateway.transaction_status(connection, transaction_id) == "aborted"
+    recovery = gateway.transaction_status(connection, transaction_id)
+    assert recovery.status == "aborted"
+    assert recovery.target_identity == identity
 
     visible = gateway.introspect(connection, namespace)
     assert visible.fingerprint == baseline.fingerprint

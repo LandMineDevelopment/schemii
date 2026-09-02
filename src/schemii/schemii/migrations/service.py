@@ -328,12 +328,17 @@ class MigrationService:
                 "workspace_target_required",
                 "Attach a PostgreSQL target before planning a migration",
             )
-        if workspace.revision != request.expected_workspace_revision:
+        try:
+            execution_unsettled = self._repository.blocks_workspace_lifecycle(
+                owner_id, workspace_id
+            )
+        except MigrationStorageUnavailableError as error:
+            raise self._storage_error(error) from error
+        if execution_unsettled:
             raise MigrationServiceError(
                 409,
-                "workspace_changed",
-                "The workspace changed after it was opened",
-                details={"currentWorkspaceRevision": workspace.revision},
+                "migration_execution_active",
+                "Finish or reconcile the current migration execution before creating another review",
             )
         design = self._design(owner_id, workspace_id)
         if design.revision != request.expected_design_revision:
@@ -524,25 +529,30 @@ class MigrationService:
             created_at=now,
             expires_at=now + self._plan_ttl,
         )
-        return self._repository.create_plan(
-            PlanRecord(
-                owner_id=owner_id,
-                baseline_id=baseline.id,
-                plan=plan,
-                authority=PlanAuthority(
-                    baseline_content=baseline.content,
-                    desired_content=design.content,
-                    merged_content=merged,
-                    live_content=reconciliation.live,
-                    live_catalog=catalog,
-                    allow_destructive=request.allow_destructive,
-                    connection_id=workspace.connection_id,
-                    connection_revision=connection_revision,
-                    database=workspace.database,
-                    namespace=workspace.namespace,
-                ),
+        try:
+            return self._repository.create_plan(
+                PlanRecord(
+                    owner_id=owner_id,
+                    baseline_id=baseline.id,
+                    plan=plan,
+                    authority=PlanAuthority(
+                        baseline_content=baseline.content,
+                        desired_content=design.content,
+                        merged_content=merged,
+                        live_content=reconciliation.live,
+                        live_catalog=catalog,
+                        allow_destructive=request.allow_destructive,
+                        connection_id=workspace.connection_id,
+                        connection_revision=connection_revision,
+                        database=workspace.database,
+                        namespace=workspace.namespace,
+                    ),
+                )
             )
-        )
+        except MigrationConflictError as error:
+            raise self._repository_conflict(error) from error
+        except MigrationStorageUnavailableError as error:
+            raise self._storage_error(error) from error
 
     def get_plan(self, owner_id: str, plan_id: str) -> MigrationPlan:
         record = self._plan(owner_id, plan_id)
@@ -597,8 +607,16 @@ class MigrationService:
                 )
 
         workspace = self._workspace(owner_id, plan.workspace_id)
-        if workspace.connection_id != record.authority.connection_id:
-            raise MigrationServiceError(409, "workspace_target_changed", "Workspace target changed after review")
+        if (
+            workspace.connection_id != record.authority.connection_id
+            or workspace.database != record.authority.database
+            or workspace.namespace != record.authority.namespace
+        ):
+            raise MigrationServiceError(
+                409,
+                "workspace_target_changed",
+                "Workspace target changed after review",
+            )
         try:
             with self._connections.use(owner_id, record.authority.connection_id) as connection:
                 if connection.revision != record.authority.connection_revision:

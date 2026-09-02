@@ -127,6 +127,15 @@ def test_new_plan_prunes_only_expired_unclaimed_owner_reviews() -> None:
         reserved_at=NOW - timedelta(minutes=90),
     )
     assert reservation.reserved_now is True
+    repository.transition_execution(
+        OWNER_ID,
+        reservation.record.execution.id,
+        expected_revision=reservation.record.execution.revision,
+        allowed_from={"reserved"},
+        status="failed",
+        commit_outcome="rolled_back",
+        error_code="test_execution_settled",
+    )
 
     current = _plan_record("7", expired=False)
     repository.create_plan(current)

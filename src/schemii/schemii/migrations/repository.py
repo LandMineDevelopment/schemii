@@ -462,7 +462,23 @@ class InMemoryMigrationRepository:
         )
 
     def create_plan(self, record: PlanRecord) -> MigrationPlan:
+        if self._workspace_claim_guard is None:
+            return self._create_plan_locked(record)
+        with self._workspace_claim_guard(record.owner_id, record.plan.workspace_id):
+            return self._create_plan_locked(record)
+
+    def _create_plan_locked(self, record: PlanRecord) -> MigrationPlan:
         with self._lock:
+            if any(
+                candidate_owner == record.owner_id
+                and candidate.execution.workspace_id == record.plan.workspace_id
+                and _blocks_workspace_lifecycle(candidate)
+                for (candidate_owner, _), candidate in self._executions.items()
+            ):
+                raise MigrationConflictError(
+                    "migration_execution_active",
+                    "Finish or reconcile the current migration execution before creating another review",
+                )
             expired = [
                 key
                 for key, candidate in self._plans.items()
@@ -836,7 +852,45 @@ class InMemoryMigrationRepository:
         live_content: SchemiiDesignContent,
         resolutions: list[dict[str, str]],
     ) -> MigrationDriftResolution:
+        if self._workspace_claim_guard is None:
+            return self._reconcile_drift_locked(
+                record=record,
+                expected_design_revision=expected_design_revision,
+                resolved_content=resolved_content,
+                live_content=live_content,
+                resolutions=resolutions,
+            )
+        with self._workspace_claim_guard(
+            record.owner_id, record.plan.workspace_id
+        ):
+            return self._reconcile_drift_locked(
+                record=record,
+                expected_design_revision=expected_design_revision,
+                resolved_content=resolved_content,
+                live_content=live_content,
+                resolutions=resolutions,
+            )
+
+    def _reconcile_drift_locked(
+        self,
+        *,
+        record: PlanRecord,
+        expected_design_revision: int,
+        resolved_content: SchemiiDesignContent,
+        live_content: SchemiiDesignContent,
+        resolutions: list[dict[str, str]],
+    ) -> MigrationDriftResolution:
         with self._lock:
+            if any(
+                candidate_owner == record.owner_id
+                and candidate.execution.workspace_id == record.plan.workspace_id
+                and _blocks_workspace_lifecycle(candidate)
+                for (candidate_owner, _), candidate in self._executions.items()
+            ):
+                raise MigrationConflictError(
+                    "migration_execution_active",
+                    "Finish or reconcile the current migration execution before resolving drift",
+                )
             design = self._designs.replace(
                 record.owner_id,
                 record.plan.workspace_id,
@@ -923,31 +977,9 @@ class PostgresMigrationRepository:
     def blocks_workspace_lifecycle(self, owner_id: str, workspace_id: str) -> bool:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM schemii.migration_executions AS execution
-                        LEFT JOIN schemii.migration_syncs AS sync
-                          ON sync.execution_id = execution.id
-                        WHERE execution.owner_id = %s
-                          AND execution.workspace_id = %s
-                          AND (
-                              execution.status IN (
-                                  'reserved', 'applying', 'uncertain',
-                                  'reconciliation_required'
-                              )
-                              OR (
-                                  execution.status = 'succeeded'
-                                  AND execution.commit_outcome = 'committed'
-                                  AND sync.status IN ('pending', 'failed')
-                              )
-                          )
-                    ) AS active
-                    """,
-                    (owner_id, workspace_id),
+                return self._workspace_lifecycle_blocked(
+                    cursor, owner_id, workspace_id
                 )
-                return bool(cursor.fetchone()["active"])
 
     def create_baseline(self, **values: Any) -> BaselineRecord:
         with self._transaction() as connection:
@@ -989,6 +1021,24 @@ class PostgresMigrationRepository:
         authority = self._authority_document(record.authority)
         with self._transaction() as connection:
             with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM schemii.workspaces
+                    WHERE owner_id = %s AND id = %s
+                    FOR UPDATE
+                    """,
+                    (record.owner_id, record.plan.workspace_id),
+                )
+                if cursor.fetchone() is None:
+                    raise MigrationNotFoundError("Workspace was not found")
+                if self._workspace_lifecycle_blocked(
+                    cursor, record.owner_id, record.plan.workspace_id
+                ):
+                    raise MigrationConflictError(
+                        "migration_execution_active",
+                        "Finish or reconcile the current migration execution before creating another review",
+                    )
                 cursor.execute(
                     """
                     DELETE FROM schemii.migration_plans AS plan
@@ -1532,6 +1582,41 @@ class PostgresMigrationRepository:
         fingerprint = design_fingerprint(resolved_content)
         with self._transaction() as connection:
             with connection.cursor() as cursor:
+                # Match execution reservation's lock order so target changes,
+                # workspace lifecycle changes, and drift resolution cannot
+                # cross after their respective authority checks.
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM metadata.postgres_connections
+                    WHERE owner_id = %s AND id = %s
+                    FOR UPDATE
+                    """,
+                    (record.owner_id, record.authority.connection_id),
+                )
+                if cursor.fetchone() is None:
+                    raise MigrationConflictError(
+                        "workspace_target_changed",
+                        "The migration target connection no longer exists",
+                    )
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM schemii.workspaces
+                    WHERE owner_id = %s AND id = %s
+                    FOR UPDATE
+                    """,
+                    (record.owner_id, record.plan.workspace_id),
+                )
+                if cursor.fetchone() is None:
+                    raise MigrationNotFoundError("Workspace was not found")
+                if self._workspace_lifecycle_blocked(
+                    cursor, record.owner_id, record.plan.workspace_id
+                ):
+                    raise MigrationConflictError(
+                        "migration_execution_active",
+                        "Finish or reconcile the current migration execution before resolving drift",
+                    )
                 cursor.execute(
                     "SELECT status, review_digest FROM schemii.migration_plans WHERE owner_id = %s AND id = %s FOR UPDATE",
                     (record.owner_id, record.plan.id),
@@ -1760,6 +1845,38 @@ class PostgresMigrationRepository:
                     incorporated_external_changes=record.plan.external_changes,
                     created_at=_now(),
                 )
+
+    @staticmethod
+    def _workspace_lifecycle_blocked(
+        cursor: Any,
+        owner_id: str,
+        workspace_id: str,
+    ) -> bool:
+        cursor.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM schemii.migration_executions AS execution
+                LEFT JOIN schemii.migration_syncs AS sync
+                  ON sync.execution_id = execution.id
+                WHERE execution.owner_id = %s
+                  AND execution.workspace_id = %s
+                  AND (
+                      execution.status IN (
+                          'reserved', 'applying', 'uncertain',
+                          'reconciliation_required'
+                      )
+                      OR (
+                          execution.status = 'succeeded'
+                          AND execution.commit_outcome = 'committed'
+                          AND sync.status IN ('pending', 'failed')
+                      )
+                  )
+            ) AS active
+            """,
+            (owner_id, workspace_id),
+        )
+        return bool(cursor.fetchone()["active"])
 
     def _insert_baseline(self, cursor: Any, **values: Any) -> BaselineRecord:
         cursor.execute(

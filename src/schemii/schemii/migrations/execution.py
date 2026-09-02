@@ -229,8 +229,7 @@ class MigrationExecutionCoordinator:
         workspace = self._workspace(owner_id, plan.workspace_id)
         design = self._design(owner_id, plan.workspace_id)
         if (
-            workspace.revision != plan.workspace_revision
-            or workspace.connection_id != record.authority.connection_id
+            workspace.connection_id != record.authority.connection_id
             or workspace.database != record.authority.database
             or workspace.namespace != record.authority.namespace
         ):
@@ -244,6 +243,26 @@ class MigrationExecutionCoordinator:
                 execution_record,
                 "design_changed",
                 "The desired design changed after the migration review",
+            )
+        try:
+            baseline = self._repository.current_baseline(owner_id, plan.workspace_id)
+        except MigrationStorageUnavailableError as error:
+            raise migration_storage_error(error) from error
+        if (
+            baseline is None
+            or baseline.id != record.baseline_id
+            or baseline.revision != plan.baseline_revision
+        ):
+            return self._fail_before_apply(
+                execution_record,
+                "baseline_changed",
+                "The PostgreSQL synchronization baseline changed after the migration review",
+                details={
+                    "reviewedBaselineId": record.baseline_id,
+                    "reviewedBaselineRevision": plan.baseline_revision,
+                    "currentBaselineId": baseline.id if baseline else None,
+                    "currentBaselineRevision": baseline.revision if baseline else None,
+                },
             )
 
         executor = getattr(self._postgres, "execute_migration", None)
@@ -441,7 +460,7 @@ class MigrationExecutionCoordinator:
             with self._connections.use(
                 owner_id, plan.authority.connection_id
             ) as connection:
-                transaction_status = status_reader(connection, execution.transaction_id)
+                recovery = status_reader(connection, execution.transaction_id)
         except (ConnectionNotFoundError, PostgresGatewayError) as error:
             if automatic:
                 return self._transition_execution(
@@ -456,6 +475,23 @@ class MigrationExecutionCoordinator:
                 str(error),
                 retryable=True,
             ) from error
+        if (
+            execution_record.target_identity is None
+            or recovery.target_identity != execution_record.target_identity
+        ):
+            return self._transition_execution(
+                execution_record,
+                status="reconciliation_required",
+                commit_outcome="uncertain",
+                error_code="migration_target_identity_changed",
+                error_detail={
+                    "reconciliationRequired": True,
+                    "expectedTargetIdentity": execution_record.target_identity,
+                    "currentTargetIdentity": recovery.target_identity,
+                },
+                recover_expired=not automatic,
+            ).execution
+        transaction_status = recovery.status
         if transaction_status == "aborted":
             return self._transition_execution(
                 execution_record,
@@ -697,16 +733,22 @@ class MigrationExecutionCoordinator:
         message: str,
         *,
         status: int = 409,
+        details: dict[str, Any] | None = None,
     ) -> MigrationExecution:
         failed = self._transition_execution(
             execution_record,
             status="failed",
             commit_outcome="rolled_back",
             error_code=code,
-            error_detail={"beforeTargetMutation": True},
+            error_detail={"beforeTargetMutation": True, **(details or {})},
         )
         # The worker consumes this error and leaves the durable receipt readable.
-        raise MigrationServiceError(status, code, message, details={"executionId": failed.execution.id})
+        raise MigrationServiceError(
+            status,
+            code,
+            message,
+            details={"executionId": failed.execution.id, **(details or {})},
+        )
 
     def _workspace(self, owner_id: str, workspace_id: str) -> Any:
         try:

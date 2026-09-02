@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 import secrets
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
@@ -117,6 +117,14 @@ class PostgresMigrationResult:
     completed_step_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class PostgresTransactionRecovery:
+    """Transaction outcome bound to the PostgreSQL target that reported it."""
+
+    status: Literal["committed", "aborted", "in progress"]
+    target_identity: dict[str, Any]
+
+
 @runtime_checkable
 class PostgresGateway(Protocol):
     def test_connection(
@@ -151,7 +159,7 @@ class PostgresGateway(Protocol):
         self,
         connection: ResolvedPostgresConnection,
         transaction_id: str,
-    ) -> str: ...
+    ) -> PostgresTransactionRecovery: ...
 
 
 def _portable_dict_row(cursor: Any) -> Callable[[Sequence[Any]], dict[str, Any]]:
@@ -266,18 +274,7 @@ class PsycopgPostgresGateway:
             live = self._introspect_connection(database_connection, connection, namespace)
             if live.fingerprint != expected_catalog_fingerprint:
                 raise PostgresMigrationStaleError(live.fingerprint)
-            identity = self._one(
-                self._execute_rows(
-                    database_connection,
-                    """
-                    SELECT current_database() AS database,
-                           (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS database_oid,
-                           current_setting('server_version_num') AS server_version_num,
-                           COALESCE(inet_server_addr()::text, 'local') AS server_address,
-                           COALESCE(inet_server_port(), 0) AS server_port
-                    """,
-                )
-            )
+            identity = self._target_identity(database_connection, connection)
             xid_row = self._one(
                 self._execute_rows(
                     database_connection,
@@ -327,13 +324,14 @@ class PsycopgPostgresGateway:
         self,
         connection: ResolvedPostgresConnection,
         transaction_id: str,
-    ) -> str:
+    ) -> PostgresTransactionRecovery:
         if not isinstance(transaction_id, str) or not transaction_id.isdigit():
             raise PostgresTransactionStatusError()
         database_connection: Any | None = None
         try:
             database_connection = self._connect(connection)
             self._begin_read_only(database_connection)
+            identity = self._target_identity(database_connection, connection)
             row = self._one(
                 self._execute_rows(
                     database_connection,
@@ -344,13 +342,50 @@ class PsycopgPostgresGateway:
             status = row.get("status")
             if status not in {"committed", "aborted", "in progress"}:
                 raise PostgresTransactionStatusError()
-            return status
+            return PostgresTransactionRecovery(
+                status=status,
+                target_identity=identity,
+            )
         except PostgresGatewayError:
             raise
         except Exception:
             raise PostgresTransactionStatusError() from None
         finally:
             self._cleanup(database_connection)
+
+    def _target_identity(
+        self,
+        database_connection: Any,
+        connection: ResolvedPostgresConnection,
+    ) -> dict[str, Any]:
+        """Read the stable target evidence persisted before any migration DDL."""
+
+        identity = self._one(
+            self._execute_rows(
+                database_connection,
+                """
+                SELECT current_database() AS database,
+                       (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS database_oid,
+                       current_setting('server_version_num') AS server_version_num,
+                       COALESCE(inet_server_addr()::text, 'local') AS server_address,
+                       COALESCE(inet_server_port(), 0) AS server_port
+                """,
+            )
+        )
+        self._require_database(identity, connection.database)
+        if (
+            not isinstance(identity.get("database_oid"), str)
+            or not identity["database_oid"]
+            or not isinstance(identity.get("server_version_num"), str)
+            or not identity["server_version_num"].isdigit()
+            or not isinstance(identity.get("server_address"), str)
+            or not identity["server_address"]
+            or isinstance(identity.get("server_port"), bool)
+            or not isinstance(identity.get("server_port"), int)
+            or identity["server_port"] < 0
+        ):
+            raise PostgresCatalogValidationError()
+        return identity
 
     def _connect(self, connection: ResolvedPostgresConnection) -> Any:
         factory = self._connect_factory

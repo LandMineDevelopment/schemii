@@ -15,7 +15,10 @@ from schemii.common.connections.store import InMemoryConnectionRepository
 from schemii.common.metadata.factory import MetadataRepositories
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.errors import PostgresCommitUncertainError
-from schemii.common.postgres.gateway import PostgresMigrationResult
+from schemii.common.postgres.gateway import (
+    PostgresMigrationResult,
+    PostgresTransactionRecovery,
+)
 from schemii.common.postgres.models import build_postgres_catalog
 from schemii.main import ApplicationServices, create_app
 from schemii.schemii.designs.models import SchemiiDesignContent
@@ -23,17 +26,22 @@ from schemii.schemii.designs.store import design_fingerprint
 from schemii.schemii.migrations.models import (
     MigrationExecutionCreate,
     MigrationPlan,
+    MigrationPlanCreate,
 )
 from schemii.schemii.migrations.repository import (
     ExecutionWork,
     InMemoryMigrationRepository,
     MigrationConflictError,
+    MigrationNotFoundError,
     PlanAuthority,
     PlanRecord,
 )
 from schemii.schemii.migrations.service import MigrationService, MigrationServiceError
 from schemii.schemii.migrations.worker import MigrationExecutionWorker
-from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
+from schemii.schemii.workspaces.models import (
+    SchemiiWorkspaceCreate,
+    SchemiiWorkspaceLayoutUpdate,
+)
 from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
     WorkspaceMutationBlockedError,
@@ -48,14 +56,21 @@ CONNECTION_ID = "pg_" + "2" * 32
 PLAN_ID = "mpl_" + "3" * 32
 REVIEW_DIGEST = "4" * 64
 WORKER_ID = "mls_" + "6" * 32
+TARGET_IDENTITY = {
+    "database": "analytics",
+    "database_oid": "16384",
+    "server_version_num": "170002",
+    "server_address": "10.0.0.12",
+    "server_port": 5432,
+}
 
 
-def _catalog() -> Any:
+def _catalog(*, server_version: str = "17.2", server_version_num: int = 170002) -> Any:
     return build_postgres_catalog(
         database="analytics",
         namespace="public",
-        server_version="17.2",
-        server_version_num=170002,
+        server_version=server_version,
+        server_version_num=server_version_num,
         server_timezone="UTC",
         tables=(),
         relationships=(),
@@ -72,18 +87,22 @@ def _plan_record(
     external_acknowledgement: bool = False,
     plan_id: str = PLAN_ID,
     workspace_id: str = WORKSPACE_ID,
+    baseline_id: str = "mbl_" + "5" * 32,
+    baseline_revision: int = 1,
+    workspace_revision: int = 1,
+    catalog: Any | None = None,
 ) -> PlanRecord:
     content = SchemiiDesignContent()
     fingerprint = design_fingerprint(content)
-    catalog = _catalog()
+    catalog = catalog or _catalog()
     plan = MigrationPlan(
         id=plan_id,
         workspace_id=workspace_id,
         status="reviewable",
-        workspace_revision=1,
+        workspace_revision=workspace_revision,
         design_revision=1,
         design_fingerprint=fingerprint,
-        baseline_revision=1,
+        baseline_revision=baseline_revision,
         catalog_fingerprint=catalog.fingerprint,
         merged_design_fingerprint=fingerprint,
         review_digest=REVIEW_DIGEST,
@@ -102,7 +121,7 @@ def _plan_record(
     )
     return PlanRecord(
         owner_id=OWNER_ID,
-        baseline_id="mbl_" + "5" * 32,
+        baseline_id=baseline_id,
         plan=plan,
         authority=PlanAuthority(
             baseline_content=content,
@@ -120,13 +139,28 @@ def _plan_record(
 
 
 class _WorkspaceRepository:
+    def __init__(
+        self,
+        *,
+        revision: int = 1,
+        connection_id: str = CONNECTION_ID,
+        database: str = "analytics",
+        namespace: str = "public",
+    ) -> None:
+        self.revision = revision
+        self.connection_id = connection_id
+        self.database = database
+        self.namespace = namespace
+
     def get(self, owner_id: str, workspace_id: str) -> Any:
         assert (owner_id, workspace_id) == (OWNER_ID, WORKSPACE_ID)
         return SimpleNamespace(
-            revision=1,
-            connection_id=CONNECTION_ID,
-            database="analytics",
-            namespace="public",
+            revision=self.revision,
+            mode="design",
+            connection_id=self.connection_id,
+            database=self.database,
+            namespace=self.namespace,
+            import_summary=None,
         )
 
 
@@ -137,12 +171,33 @@ class _MissingWorkspaceRepository:
 
 
 class _DesignRepository:
-    def __init__(self, fingerprint: str) -> None:
+    def __init__(
+        self,
+        fingerprint: str,
+        *,
+        workspace_id: str = WORKSPACE_ID,
+        revision: int = 1,
+        content: SchemiiDesignContent | None = None,
+    ) -> None:
         self._fingerprint = fingerprint
+        self._workspace_id = workspace_id
+        self._revision = revision
+        self._content = content or SchemiiDesignContent()
+        self.replace_calls = 0
 
     def get(self, owner_id: str, workspace_id: str) -> Any:
-        assert (owner_id, workspace_id) == (OWNER_ID, WORKSPACE_ID)
-        return SimpleNamespace(revision=1, fingerprint=self._fingerprint)
+        assert (owner_id, workspace_id) == (OWNER_ID, self._workspace_id)
+        return SimpleNamespace(
+            revision=self._revision,
+            fingerprint=self._fingerprint,
+            content=self._content,
+        )
+
+    def replace(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.replace_calls += 1
+        self._revision += 1
+        self._fingerprint = design_fingerprint(self._content)
+        return self.get(OWNER_ID, self._workspace_id)
 
 
 class _ConcurrentDesignRepository:
@@ -164,7 +219,7 @@ class _Connections:
     @contextmanager
     def use(self, owner_id: str, connection_id: str) -> Iterator[Any]:
         assert (owner_id, connection_id) == (OWNER_ID, CONNECTION_ID)
-        yield SimpleNamespace(revision=1)
+        yield SimpleNamespace(revision=1, database="analytics")
 
 
 class _UncertainGateway:
@@ -184,7 +239,7 @@ class _UncertainGateway:
         del connection, expected_catalog_fingerprint, statements, on_intended
         assert namespace == "public"
         self.execution_calls += 1
-        on_started("42", {"database": "analytics"})
+        on_started("42", TARGET_IDENTITY)
         raise PostgresCommitUncertainError()
 
 
@@ -192,6 +247,13 @@ class _SuccessfulGateway:
     def __init__(self) -> None:
         self.execution_calls = 0
         self.status_calls = 0
+        self.introspection_calls = 0
+
+    def introspect(self, connection: Any, namespace: str) -> Any:
+        del connection
+        assert namespace == "public"
+        self.introspection_calls += 1
+        return _catalog()
 
     def execute_migration(
         self,
@@ -207,7 +269,7 @@ class _SuccessfulGateway:
         assert namespace == "public"
         self.execution_calls += 1
         catalog = _catalog()
-        identity = {"database": "analytics"}
+        identity = TARGET_IDENTITY
         on_started("42", identity)
         on_intended(catalog)
         return PostgresMigrationResult(
@@ -217,11 +279,18 @@ class _SuccessfulGateway:
             completed_step_count=0,
         )
 
-    def transaction_status(self, connection: Any, transaction_id: str) -> str:
+    def transaction_status(
+        self,
+        connection: Any,
+        transaction_id: str,
+    ) -> PostgresTransactionRecovery:
         del connection
         assert transaction_id == "42"
         self.status_calls += 1
-        return "committed"
+        return PostgresTransactionRecovery(
+            status="committed",
+            target_identity=TARGET_IDENTITY,
+        )
 
 
 class _BlockingGateway(_SuccessfulGateway):
@@ -236,12 +305,78 @@ class _BlockingGateway(_SuccessfulGateway):
         return super().execute_migration(*args, **kwargs)
 
 
+class _WrongTargetGateway(_SuccessfulGateway):
+    def transaction_status(
+        self,
+        connection: Any,
+        transaction_id: str,
+    ) -> PostgresTransactionRecovery:
+        del connection
+        assert transaction_id == "42"
+        self.status_calls += 1
+        return PostgresTransactionRecovery(
+            status="committed",
+            target_identity={
+                **TARGET_IDENTITY,
+                "database_oid": "24576",
+                "server_address": "10.0.0.99",
+            },
+        )
+
+
 class _MutableClock:
     def __init__(self, value: datetime = NOW) -> None:
         self.value = value
 
     def __call__(self) -> datetime:
         return self.value
+
+
+def _seed_baseline(
+    repository: InMemoryMigrationRepository,
+    *,
+    workspace_id: str = WORKSPACE_ID,
+    catalog: Any | None = None,
+) -> Any:
+    current = repository.current_baseline(OWNER_ID, workspace_id)
+    if current is not None:
+        return current
+    return repository.create_baseline(
+        owner_id=OWNER_ID,
+        workspace_id=workspace_id,
+        connection_id=CONNECTION_ID,
+        connection_revision=1,
+        database="analytics",
+        namespace="public",
+        design_revision=1,
+        content=SchemiiDesignContent(),
+        catalog=catalog or _catalog(),
+        complete=True,
+        issues=[],
+        source="target_attach",
+        expected_predecessor_id=None,
+    )
+
+
+def _store_plan(
+    repository: InMemoryMigrationRepository,
+    *,
+    baseline_catalog: Any | None = None,
+    **plan_values: Any,
+) -> PlanRecord:
+    workspace_id = plan_values.get("workspace_id", WORKSPACE_ID)
+    baseline = _seed_baseline(
+        repository,
+        workspace_id=workspace_id,
+        catalog=baseline_catalog,
+    )
+    record = _plan_record(
+        baseline_id=baseline.id,
+        baseline_revision=baseline.revision,
+        **plan_values,
+    )
+    repository.create_plan(record)
+    return record
 
 
 def _service(
@@ -256,8 +391,8 @@ def _service(
     active_repository = repository or InMemoryMigrationRepository(designs)
     try:
         active_repository.get_plan(OWNER_ID, PLAN_ID)
-    except Exception:
-        active_repository.create_plan(plan)
+    except MigrationNotFoundError:
+        _store_plan(active_repository)
     service = MigrationService(
         repository=active_repository,
         connections=_Connections(),
@@ -319,7 +454,11 @@ def test_submission_only_reserves_and_duplicate_authorization_is_idempotent() ->
     plan_record = _plan_record(destructive=True, external_acknowledgement=True)
     designs = _DesignRepository(plan_record.plan.design_fingerprint)
     repository = InMemoryMigrationRepository(designs)
-    repository.create_plan(plan_record)
+    plan_record = _store_plan(
+        repository,
+        destructive=True,
+        external_acknowledgement=True,
+    )
     gateway = _UncertainGateway()
     service = MigrationService(
         repository=repository,
@@ -382,7 +521,7 @@ def test_worker_service_error_before_target_start_is_durably_terminal() -> None:
     plan = _plan_record()
     designs = _DesignRepository(plan.plan.design_fingerprint)
     repository = InMemoryMigrationRepository(designs)
-    repository.create_plan(plan)
+    _store_plan(repository)
     gateway = _UncertainGateway()
     service = MigrationService(
         repository=repository,
@@ -471,7 +610,7 @@ def test_transition_can_explicitly_clear_evidence_fields() -> None:
         lease_owner=claimed.lease_owner,
         lease_expires_at=NOW + timedelta(minutes=2),
         transaction_id="42",
-        target_identity={"database": "analytics"},
+        target_identity=TARGET_IDENTITY,
         error_code="old_error",
         error_detail={"old": True},
     )
@@ -568,7 +707,7 @@ def test_expired_applying_work_reconciles_and_never_replays_ddl() -> None:
         lease_owner=claimed.lease_owner,
         lease_expires_at=NOW + timedelta(seconds=30),
         transaction_id="42",
-        target_identity={"database": "analytics"},
+        target_identity=TARGET_IDENTITY,
         intended_result=_intended_result(),
         completed_step_count=0,
     )
@@ -603,7 +742,7 @@ def test_committed_target_sync_is_retried_without_replaying_ddl() -> None:
         lease_owner=claimed.lease_owner,
         lease_expires_at=NOW + timedelta(minutes=2),
         transaction_id="42",
-        target_identity={"database": "analytics"},
+        target_identity=TARGET_IDENTITY,
         intended_result=_intended_result(),
     )
     committed = repository.transition_execution(
@@ -638,7 +777,13 @@ def test_committed_target_sync_is_retried_without_replaying_ddl() -> None:
 def test_committed_sync_advances_baseline_without_overwriting_newer_design() -> None:
     designs = _ConcurrentDesignRepository()
     repository = InMemoryMigrationRepository(designs)
-    repository.create_plan(_plan_record())
+    _store_plan(
+        repository,
+        baseline_catalog=_catalog(
+            server_version="17.1",
+            server_version_num=170001,
+        ),
+    )
     service = MigrationService(
         repository=repository,
         connections=_Connections(),
@@ -657,7 +802,7 @@ def test_committed_sync_advances_baseline_without_overwriting_newer_design() -> 
         lease_owner=claimed.lease_owner,
         lease_expires_at=NOW + timedelta(minutes=2),
         transaction_id="42",
-        target_identity={"database": "analytics"},
+        target_identity=TARGET_IDENTITY,
         intended_result=_intended_result(),
     )
     committed = repository.transition_execution(
@@ -690,15 +835,17 @@ def test_committed_sync_advances_baseline_without_overwriting_newer_design() -> 
 
 
 def test_workspace_lifecycle_stays_blocked_until_committed_sync_is_resolved() -> None:
-    designs = _DesignRepository(_plan_record().plan.design_fingerprint)
     workspaces = InMemoryWorkspaceRepository()
     workspace = workspaces.create(
         OWNER_ID,
         SchemiiWorkspaceCreate(name="Lifecycle guard"),
     )
+    designs = _DesignRepository(
+        _plan_record().plan.design_fingerprint,
+        workspace_id=workspace.id,
+    )
     repository = InMemoryMigrationRepository(designs)
-    plan = _plan_record(workspace_id=workspace.id)
-    repository.create_plan(plan)
+    plan = _store_plan(repository, workspace_id=workspace.id)
     MigrationService(
         repository=repository,
         connections=_Connections(),
@@ -745,19 +892,16 @@ def test_workspace_lifecycle_stays_blocked_until_committed_sync_is_resolved() ->
     assert repository.has_active_execution(OWNER_ID, workspace.id) is False
     assert repository.blocks_workspace_lifecycle(OWNER_ID, workspace.id) is True
     next_plan_id = "mpl_" + "8" * 32
-    repository.create_plan(
-        _plan_record(plan_id=next_plan_id, workspace_id=workspace.id)
-    )
-    with pytest.raises(MigrationConflictError) as blocked_execution:
-        repository.reserve_execution(
-            OWNER_ID,
-            next_plan_id,
-            REVIEW_DIGEST,
-            False,
-            False,
-            reserved_at=NOW,
+    with pytest.raises(MigrationConflictError) as blocked_plan:
+        repository.create_plan(
+            _plan_record(
+                plan_id=next_plan_id,
+                workspace_id=workspace.id,
+                baseline_id=plan.baseline_id,
+                baseline_revision=plan.plan.baseline_revision,
+            )
         )
-    assert blocked_execution.value.code == "migration_execution_active"
+    assert blocked_plan.value.code == "migration_execution_active"
     with pytest.raises(WorkspaceMutationBlockedError):
         workspaces.delete(OWNER_ID, workspace.id, workspace.revision)
 
@@ -773,6 +917,298 @@ def test_workspace_lifecycle_stays_blocked_until_committed_sync_is_resolved() ->
     assert settled.lease_owner is None
     assert repository.blocks_workspace_lifecycle(OWNER_ID, workspace.id) is False
     workspaces.delete(OWNER_ID, workspace.id, workspace.revision)
+
+
+def test_plan_creation_during_unsettled_sync_is_rejected_without_target_io() -> None:
+    gateway = _SuccessfulGateway()
+    service, repository = _service(gateway)
+    claimed = _reserve_and_claim(repository)
+    applying = repository.transition_execution(
+        OWNER_ID,
+        claimed.execution.id,
+        expected_revision=claimed.execution.revision,
+        allowed_from={"reserved"},
+        status="applying",
+        lease_owner=claimed.lease_owner,
+        lease_expires_at=NOW + timedelta(minutes=2),
+        transaction_id="42",
+        target_identity=TARGET_IDENTITY,
+        intended_result=_intended_result(),
+    )
+    repository.transition_execution(
+        OWNER_ID,
+        applying.execution.id,
+        expected_revision=applying.execution.revision,
+        allowed_from={"applying"},
+        status="succeeded",
+        lease_owner=applying.lease_owner,
+        lease_expires_at=NOW + timedelta(minutes=2),
+        commit_outcome="committed",
+        sync_status="pending",
+    )
+
+    with pytest.raises(MigrationServiceError) as blocked:
+        service.create_plan(
+            OWNER_ID,
+            WORKSPACE_ID,
+            MigrationPlanCreate(
+                expected_workspace_revision=1,
+                expected_design_revision=1,
+            ),
+        )
+
+    assert blocked.value.code == "migration_execution_active"
+    assert gateway.introspection_calls == 0
+
+
+def test_execution_rejects_a_stale_baseline_before_target_io() -> None:
+    gateway = _SuccessfulGateway()
+    service, repository = _service(gateway)
+    current = repository.current_baseline(OWNER_ID, WORKSPACE_ID)
+    assert current is not None
+    service.create_execution(OWNER_ID, PLAN_ID, _request())
+    work = service.execution_coordinator.claim_next(WORKER_ID)
+    assert work is not None
+    advanced = repository.create_baseline(
+        owner_id=OWNER_ID,
+        workspace_id=WORKSPACE_ID,
+        connection_id=CONNECTION_ID,
+        connection_revision=1,
+        database="analytics",
+        namespace="public",
+        design_revision=1,
+        content=SchemiiDesignContent(),
+        catalog=_catalog(),
+        complete=True,
+        issues=[],
+        source="migration",
+        expected_predecessor_id=current.id,
+    )
+
+    terminal = service.execution_coordinator.process(work)
+
+    assert terminal.status == "failed"
+    assert terminal.commit_outcome == "rolled_back"
+    assert terminal.error_code == "baseline_changed"
+    assert gateway.execution_calls == 0
+    error_detail = repository.get_execution(OWNER_ID, terminal.id).error_detail
+    assert error_detail is not None
+    assert error_detail["reviewedBaselineId"] == current.id
+    assert error_detail["currentBaselineId"] == advanced.id
+
+
+def test_layout_save_after_reservation_does_not_invalidate_target_authority() -> None:
+    workspaces = InMemoryWorkspaceRepository()
+    workspace = workspaces.create(
+        OWNER_ID,
+        SchemiiWorkspaceCreate(
+            name="Layout-safe execution",
+            connection_id=CONNECTION_ID,
+            database="analytics",
+            namespace="public",
+        ),
+    )
+    fingerprint = design_fingerprint(SchemiiDesignContent())
+    designs = _DesignRepository(fingerprint, workspace_id=workspace.id)
+    repository = InMemoryMigrationRepository(designs)
+    _store_plan(repository, workspace_id=workspace.id)
+    gateway = _SuccessfulGateway()
+    service = MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=gateway,
+        workspaces=workspaces,
+        designs=designs,
+        clock=lambda: NOW,
+    )
+    service.create_execution(OWNER_ID, PLAN_ID, _request())
+
+    saved = workspaces.update_layout(
+        OWNER_ID,
+        workspace.id,
+        SchemiiWorkspaceLayoutUpdate(
+            expected_revision=workspace.revision,
+            expected_connection_revision=1,
+            tables=[],
+            column_orders=[],
+        ),
+    )
+    assert saved.revision == workspace.revision + 1
+    work = service.execution_coordinator.claim_next(WORKER_ID)
+    assert work is not None
+
+    terminal = service.execution_coordinator.process(work)
+
+    assert terminal.status == "succeeded"
+    assert terminal.sync_status == "succeeded"
+    assert gateway.execution_calls == 1
+
+
+def test_target_change_after_reservation_fails_before_target_io() -> None:
+    gateway = _SuccessfulGateway()
+    workspaces = _WorkspaceRepository()
+    plan = _plan_record()
+    designs = _DesignRepository(plan.plan.design_fingerprint)
+    repository = InMemoryMigrationRepository(designs)
+    _store_plan(repository)
+    service = MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=gateway,
+        workspaces=workspaces,
+        designs=designs,
+        clock=lambda: NOW,
+    )
+    service.create_execution(OWNER_ID, PLAN_ID, _request())
+    workspaces.database = "other_database"
+    work = service.execution_coordinator.claim_next(WORKER_ID)
+    assert work is not None
+
+    terminal = service.execution_coordinator.process(work)
+
+    assert terminal.status == "failed"
+    assert terminal.error_code == "workspace_changed"
+    assert gateway.execution_calls == 0
+
+
+def test_plan_creation_ignores_presentation_only_workspace_revision() -> None:
+    gateway = _SuccessfulGateway()
+    design = SchemiiDesignContent()
+    designs = _DesignRepository(design_fingerprint(design), content=design)
+    repository = InMemoryMigrationRepository(designs)
+    service = MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=gateway,
+        workspaces=_WorkspaceRepository(revision=4),
+        designs=designs,
+        clock=lambda: NOW,
+    )
+
+    plan = service.create_plan(
+        OWNER_ID,
+        WORKSPACE_ID,
+        MigrationPlanCreate(
+            expected_workspace_revision=1,
+            expected_design_revision=1,
+        ),
+    )
+
+    assert plan.workspace_revision == 4
+    assert plan.apply_capable is True
+    assert gateway.introspection_calls == 1
+
+
+@pytest.mark.parametrize("execution_status", ["reserved", "applying"])
+def test_drift_reconciliation_is_blocked_by_unsettled_execution(
+    execution_status: str,
+) -> None:
+    workspaces = InMemoryWorkspaceRepository()
+    workspace = workspaces.create(OWNER_ID, SchemiiWorkspaceCreate(name="Drift guard"))
+    designs = _DesignRepository(
+        design_fingerprint(SchemiiDesignContent()),
+        workspace_id=workspace.id,
+    )
+    repository = InMemoryMigrationRepository(designs)
+    executing = _store_plan(repository, workspace_id=workspace.id)
+    drift_plan = _plan_record(
+        plan_id="mpl_" + "9" * 32,
+        workspace_id=workspace.id,
+        baseline_id=executing.baseline_id,
+        baseline_revision=executing.plan.baseline_revision,
+    )
+    repository.create_plan(drift_plan)
+    MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=_SuccessfulGateway(),
+        workspaces=workspaces,
+        designs=designs,
+        clock=lambda: NOW,
+    )
+    repository.reserve_execution(
+        OWNER_ID,
+        PLAN_ID,
+        REVIEW_DIGEST,
+        False,
+        False,
+        reserved_at=NOW,
+    )
+    claimed = repository.claim_next_execution(
+        claimed_at=NOW,
+        lease_owner=WORKER_ID,
+        lease_expires_at=NOW + timedelta(minutes=2),
+    )
+    assert claimed is not None
+    if execution_status == "applying":
+        repository.transition_execution(
+            OWNER_ID,
+            claimed.record.execution.id,
+            expected_revision=claimed.record.execution.revision,
+            allowed_from={"reserved"},
+            status="applying",
+            lease_owner=claimed.record.lease_owner,
+            lease_expires_at=NOW + timedelta(minutes=2),
+            transaction_id="42",
+            target_identity=TARGET_IDENTITY,
+        )
+    baseline = repository.current_baseline(OWNER_ID, workspace.id)
+    assert baseline is not None
+
+    with pytest.raises(MigrationConflictError) as blocked:
+        repository.reconcile_drift(
+            record=drift_plan,
+            expected_design_revision=1,
+            resolved_content=SchemiiDesignContent(),
+            live_content=SchemiiDesignContent(),
+            resolutions=[],
+        )
+
+    assert blocked.value.code == "migration_execution_active"
+    assert designs.replace_calls == 0
+    assert repository.current_baseline(OWNER_ID, workspace.id) == baseline
+
+
+def test_recovery_refuses_transaction_status_from_a_different_target() -> None:
+    clock = _MutableClock()
+    gateway = _WrongTargetGateway()
+    service, repository = _service(
+        gateway,
+        clock=clock,
+        lease_ttl=timedelta(seconds=30),
+    )
+    claimed = _reserve_and_claim(
+        repository,
+        lease_expires_at=NOW + timedelta(seconds=30),
+    )
+    applying = repository.transition_execution(
+        OWNER_ID,
+        claimed.execution.id,
+        expected_revision=claimed.execution.revision,
+        allowed_from={"reserved"},
+        status="applying",
+        lease_owner=claimed.lease_owner,
+        lease_expires_at=NOW + timedelta(seconds=30),
+        transaction_id="42",
+        target_identity=TARGET_IDENTITY,
+        intended_result=_intended_result(),
+    )
+    clock.value = NOW + timedelta(seconds=31)
+    work = service.execution_coordinator.claim_next("mls_" + "7" * 32)
+    assert work is not None
+    assert work.kind == "reconcile"
+
+    terminal = service.execution_coordinator.process(work)
+
+    assert terminal.status == "reconciliation_required"
+    assert terminal.commit_outcome == "uncertain"
+    assert terminal.error_code == "migration_target_identity_changed"
+    assert gateway.status_calls == 1
+    assert gateway.execution_calls == 0
+    stored = repository.get_execution(OWNER_ID, applying.execution.id)
+    assert stored.error_detail is not None
+    assert stored.error_detail["expectedTargetIdentity"] == TARGET_IDENTITY
+    assert stored.error_detail["currentTargetIdentity"]["database_oid"] == "24576"
 
 
 def test_http_submission_returns_202_while_target_io_is_blocked() -> None:
