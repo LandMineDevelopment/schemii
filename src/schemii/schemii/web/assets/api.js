@@ -135,6 +135,7 @@ export const api = Object.freeze({
   deleteWorkspace: (id, expectedRevision, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
   getCatalog: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/catalog`, options),
   getDesign: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design`, options),
+  getDesignSnapshot: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/snapshot`, options),
   getDesignHistory: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/history`, options),
   undoDesign: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/undo`, { ...options, method: "POST", body }),
   redoDesign: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/redo`, { ...options, method: "POST", body }),

@@ -27,7 +27,9 @@ test("workspace navigation round-trips the active table and preserves unrelated 
   assert.deepEqual(readWorkspaceNavigation(`https://example.test${href}`), {
     workspaceId: WORKSPACE,
     layer: "tables",
+    tableId: null,
     table: "order items",
+    viewId: null,
     view: null,
     viewKind: null,
   });
@@ -51,7 +53,9 @@ test("workspace navigation represents view kind and removes stale object paramet
   assert.deepEqual(readWorkspaceNavigation(`https://example.test${href}`), {
     workspaceId: WORKSPACE,
     layer: "views",
+    tableId: null,
     table: null,
+    viewId: null,
     view: "monthly_sales",
     viewKind: "materialized_view",
   });
@@ -61,7 +65,9 @@ test("invalid or absent workspace navigation safely returns the landing state", 
   assert.deepEqual(readWorkspaceNavigation("https://example.test/?workspace=not-a-workspace&layer=sql&table=orders"), {
     workspaceId: null,
     layer: "sql",
+    tableId: null,
     table: null,
+    viewId: null,
     view: null,
     viewKind: null,
   });
@@ -69,6 +75,30 @@ test("invalid or absent workspace navigation safely returns the landing state", 
     workspaceNavigationHref(`https://example.test/?workspace=${WORKSPACE}&layer=views&view=orders`, {}),
     "/",
   );
+});
+
+test("detached navigation keeps stable IDs and names for rename-safe restoration", () => {
+  const href = workspaceNavigationHref("https://example.test/", {
+    workspaceId: WORKSPACE,
+    layer: "views",
+    viewId: "view-1",
+    view: "renamed_sales",
+    viewKind: "view",
+  });
+
+  assert.equal(
+    href,
+    `/?workspace=${WORKSPACE}&layer=views&viewId=view-1&view=renamed_sales&viewKind=view`,
+  );
+  assert.deepEqual(readWorkspaceNavigation(`https://example.test${href}`), {
+    workspaceId: WORKSPACE,
+    layer: "views",
+    tableId: null,
+    table: null,
+    viewId: "view-1",
+    view: "renamed_sales",
+    viewKind: "view",
+  });
 });
 
 test("workspace preferences retain only bounded camera and dock state", () => {

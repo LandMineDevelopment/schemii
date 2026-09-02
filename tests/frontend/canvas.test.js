@@ -458,13 +458,29 @@ test("detached canvas selection and positions survive a table rename by stable I
     relationships: [],
   };
 
-  canvas.setCatalog(before, [{ name: "orders", x: 140, y: 220 }]);
+  canvas.setCatalog(before, [{ name: "orders", x: 140, y: 220 }], "table-1");
   canvas.select("table-1");
-  canvas.setCatalog(after, [{ name: "purchases", x: 140, y: 220 }]);
+  canvas.setCatalog(after, [{ name: "purchases", x: 140, y: 220 }], "table-1");
 
   assert.equal(canvas.selectedId, "table-1");
   assert.equal(canvas.selectedTable().name, "purchases");
   assert.deepEqual(canvas.getPositions(), [{ name: "purchases", x: 140, y: 220 }]);
+});
+
+test("catalog rendering takes selection only from canonical workspace state", () => {
+  const { canvas } = fixture();
+  canvas.render = () => {};
+  const catalog = {
+    namespace: "desired",
+    tables: [{ designId: "table-1", namespace: "desired", name: "orders", columns: [] }],
+    relationships: [],
+  };
+  canvas.selectedId = "table-1";
+
+  canvas.setCatalog(catalog, [], null);
+
+  assert.equal(canvas.selectedId, null);
+  assert.equal(canvas.selectedTable(), null);
 });
 
 test("authoritative layout positions update existing cards without rebuilding the canvas", () => {

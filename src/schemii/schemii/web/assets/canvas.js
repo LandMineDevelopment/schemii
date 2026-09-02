@@ -238,7 +238,7 @@ export class CatalogCanvas {
     this.applyColumnAuthoringMode();
   }
 
-  setCatalog(catalog, serverPositions = []) {
+  setCatalog(catalog, serverPositions = [], selectedTableId = null) {
     this.discardDrag();
     this.catalog = catalog;
     this.tableById = new Map(catalog.tables.map(table => [catalogTableId(table), table]));
@@ -254,7 +254,7 @@ export class CatalogCanvas {
       const tableId = catalogTableId(table);
       return [tableId, saved.get(table.name) || generated.get(tableId)];
     }));
-    if (!this.tableById.has(this.selectedId)) this.selectedId = null;
+    this.selectedId = this.tableById.has(selectedTableId) ? selectedTableId : null;
     this.updateDiagramRelationships();
     this.render();
   }

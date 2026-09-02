@@ -77,6 +77,8 @@ import {
   catalogTableId,
   catalogViewId,
   createWorkspaceStateCommitter,
+  navigatedCatalogTable,
+  navigatedCatalogView,
   selectedCatalogTable,
   selectedCatalogView,
 } from "./workspace-state.js";
@@ -85,6 +87,10 @@ import {
   designChangeTargets,
   viewAnalysisContextSignature,
 } from "./design-change.js";
+import {
+  createLatestRequestController,
+  createWorkspaceOperationController,
+} from "./request-coordinator.js";
 
 const byId = id => document.getElementById(id);
 const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
@@ -398,8 +404,6 @@ const state = {
   columnOrderModes: new Map(),
   catalogLoading: false,
   catalogError: null,
-  catalogGeneration: 0,
-  catalogRequestController: null,
   selectedTableId: null,
   selectedViewId: null,
   selectedViewOutputOrdinal: null,
@@ -464,6 +468,10 @@ const state = {
 };
 inspectorPreferenceReady = true;
 
+const workspaceOperations = createWorkspaceOperationController();
+const runtimeRequests = createLatestRequestController();
+const connectionRequests = createLatestRequestController();
+const workspaceListRequests = createLatestRequestController();
 const changeCues = createTransientCueManager({ root: document });
 const changeTransitions = createChangeTransitionManager({ root: document });
 
@@ -694,8 +702,9 @@ function notifyWorkspaceTransition(transition, metadata = {}) {
   if (metadata.canvas !== false && (catalogSurfaceChanged || metadata.canvasPositions)) {
     if (state.catalog && metadata.canvasMode === "positions") {
       canvas.setPositions(workspaceCanvasPositions(metadata));
-    } else if (state.catalog) canvas.setCatalog(state.catalog, workspaceCanvasPositions(metadata));
-    else canvas.clear();
+    } else if (state.catalog) {
+      canvas.setCatalog(state.catalog, workspaceCanvasPositions(metadata), state.selectedTableId);
+    } else canvas.clear();
   }
   void syncViewAnalysisSelection({ notify: false });
   if (metadata.render === false) {
@@ -714,16 +723,15 @@ const commitWorkspaceState = createWorkspaceStateCommitter({
   notify: notifyWorkspaceTransition,
 });
 
-function cancelCatalogRequest() {
-  state.catalogRequestController?.abort();
-  state.catalogRequestController = null;
-}
-
-function startCatalogRequest() {
-  cancelCatalogRequest();
-  const controller = new AbortController();
-  state.catalogRequestController = controller;
-  return controller;
+function beginWorkspaceMutation() {
+  const operation = workspaceOperations.beginMutation();
+  if (operation.interruptedRead) {
+    state.catalogLoading = false;
+    canvas.setInteractive(true);
+    renderCatalogState();
+    updateHeader();
+  }
+  return operation;
 }
 
 function openDialog(dialog) {
@@ -843,7 +851,9 @@ function currentWorkspaceNavigation() {
   return {
     workspaceId: state.activeWorkspace?.id || null,
     layer: state.activeLayer,
+    tableId: state.activeLayer === "tables" ? table?.designId || null : null,
     table: state.activeLayer === "tables" ? table?.name || null : null,
+    viewId: state.activeLayer === "views" ? view?.designId || null : null,
     view: state.activeLayer === "views" ? view?.name || null : null,
     viewKind: state.activeLayer === "views" ? view?.catalogKind || null : null,
   };
@@ -893,7 +903,7 @@ function applyWorkspaceNavigation(navigation) {
   try {
     setLayer(navigation.layer, { historyMode: null });
     if (navigation.layer === "tables") {
-      const table = state.catalog?.tables.find(item => item.name === navigation.table) || null;
+      const table = navigatedCatalogTable(state.catalog, navigation);
       if (table) canvas.select(table, { notify: true });
       else {
         canvas.clearSelection();
@@ -904,9 +914,7 @@ function applyWorkspaceNavigation(navigation) {
         if (preferences.inspector) inspectorPane.setState(preferences.inspector);
       }
     } else if (navigation.layer === "views") {
-      const view = allViews(state.catalog).find(item => (
-        item.name === navigation.view && item.catalogKind === navigation.viewKind
-      )) || null;
+      const view = navigatedCatalogView(state.catalog, navigation);
       selectView(view, { historyMode: null });
     }
   } finally {
@@ -971,7 +979,10 @@ function updateHeader() {
     else elements.runtimeStatus.textContent = `Ready · ${state.readiness.persistence}`;
   }
   elements.saveLayoutButton.disabled = !state.catalog || state.catalogLoading || state.layoutSaving || state.layoutConflict;
-  elements.refreshCatalogButton.disabled = state.catalogLoading;
+  elements.refreshCatalogButton.disabled = state.catalogLoading
+    || state.designSubmitting
+    || state.historySubmitting
+    || workspaceOperations.isMutating();
   elements.refreshCatalogButton.title = detached ? "Refresh saved design" : "Refresh live catalog";
   elements.refreshCatalogButton.setAttribute("aria-label", elements.refreshCatalogButton.title);
   elements.refreshViewsButton.disabled = state.catalogLoading;
@@ -1072,17 +1083,26 @@ function renderConflict(error = null) {
 }
 
 async function loadRuntime() {
+  const request = runtimeRequests.begin();
   state.runtimeError = null;
   try {
-    const [session, readiness] = await Promise.all([api.session(), api.readiness()]);
+    const [session, readiness] = await Promise.all([
+      api.session({ signal: request.signal }),
+      api.readiness({ signal: request.signal }),
+    ]);
+    if (!request.isCurrent()) return;
     state.session = session;
     state.readiness = readiness;
   } catch (error) {
+    if (!request.isCurrent()) return;
     state.runtimeError = error;
     state.session = null;
     state.readiness = null;
+  } finally {
+    const current = request.isCurrent();
+    request.finish();
+    if (current) updateHeader();
   }
-  updateHeader();
 }
 
 async function bootstrap() {
@@ -1101,12 +1121,14 @@ async function bootstrap() {
 }
 
 async function loadConnections() {
+  const request = connectionRequests.begin();
   state.connectionsLoading = true;
   state.connectionsError = null;
   renderConnections();
   try {
     const previousConnections = new Map(state.connections.map(connection => [connection.id, connection]));
-    const connections = await api.listConnections();
+    const connections = await api.listConnections({ signal: request.signal });
+    if (!request.isCurrent()) return;
     const activeConnectionId = state.activeWorkspace?.connectionId;
     const previousActiveConnection = activeConnectionId ? previousConnections.get(activeConnectionId) : null;
     const activeConnection = activeConnectionId ? connections.find(connection => connection.id === activeConnectionId) : null;
@@ -1124,15 +1146,21 @@ async function loadConnections() {
       });
       await loadActiveCatalog();
     }
+    if (!request.isCurrent()) return;
     state.connectionsLoaded = true;
   } catch (error) {
+    if (!request.isCurrent()) return;
     state.connectionsError = error;
     state.connectionsLoaded = false;
   } finally {
-    state.connectionsLoading = false;
-    renderConnections();
-    renderWorkspaceConnectionOptions();
-    renderSqlTarget();
+    const current = request.isCurrent();
+    request.finish();
+    if (current) {
+      state.connectionsLoading = false;
+      renderConnections();
+      renderWorkspaceConnectionOptions();
+      renderSqlTarget();
+    }
   }
 }
 
@@ -1508,7 +1536,6 @@ function syncDraftAfterDeletedObject(result) {
 async function persistDesignObjectDeletion(node, { historyGroupId = null } = {}) {
   if (!await flushLayoutBeforeTransition()) return;
   const result = deleteDesignObject(state.design.content, node.objectId);
-  if (["table", "column", "view"].includes(result.kind)) viewAnalysis.clear();
   state.designSubmitting = true;
   updateDesignControls();
   try {
@@ -1609,18 +1636,26 @@ function confirmDeleteConnection(connection) {
 }
 
 async function loadWorkspaces() {
+  const request = workspaceListRequests.begin();
   state.workspacesLoading = true;
   state.workspacesError = null;
   renderWorkspaces();
   try {
-    state.workspaces = await api.listWorkspaces();
+    const workspaces = await api.listWorkspaces({ signal: request.signal });
+    if (!request.isCurrent()) return;
+    state.workspaces = workspaces;
     state.workspacesLoaded = true;
   } catch (error) {
+    if (!request.isCurrent()) return;
     state.workspacesError = error;
     state.workspacesLoaded = false;
   } finally {
-    state.workspacesLoading = false;
-    renderWorkspaces();
+    const current = request.isCurrent();
+    request.finish();
+    if (current) {
+      state.workspacesLoading = false;
+      renderWorkspaces();
+    }
   }
 }
 
@@ -1817,8 +1852,7 @@ function confirmDeleteWorkspace(workspace) {
 function clearActiveWorkspace({ historyMode = "replace" } = {}) {
   const workspaceId = state.activeWorkspace?.id;
   persistCanvasView();
-  state.catalogGeneration += 1;
-  cancelCatalogRequest();
+  workspaceOperations.invalidate();
   viewAnalysis.clear();
   resetLayoutSaveState();
   state.columnOrderModes.clear();
@@ -1863,8 +1897,7 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
       columnOrders: structuredClone(state.activeWorkspace.columnOrders || []),
     };
   }
-  state.catalogGeneration += 1;
-  cancelCatalogRequest();
+  workspaceOperations.invalidate();
   viewAnalysis.clear();
   resetLayoutSaveState();
   state.columnOrderModes.clear();
@@ -1887,8 +1920,7 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
 async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   if (!await flushLayoutBeforeTransition()) return false;
   persistCanvasView();
-  state.catalogGeneration += 1;
-  cancelCatalogRequest();
+  workspaceOperations.invalidate();
   viewAnalysis.clear();
   resetLayoutSaveState();
   state.columnOrderModes.clear();
@@ -1920,20 +1952,17 @@ async function loadActiveWorkspace(options = {}) {
 async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
   if (!isDetachedWorkspace()) return;
   const workspaceId = state.activeWorkspace.id;
-  const generation = ++state.catalogGeneration;
-  const request = startCatalogRequest();
+  const request = workspaceOperations.beginRead();
   state.catalogLoading = true;
   canvas.setInteractive(false);
   state.catalogError = null;
   renderCatalogState();
   updateHeader();
   try {
-    const [design, layout, history] = await Promise.all([
-      api.getDesign(workspaceId, { signal: request.signal }),
-      api.getDesignLayout(workspaceId, { signal: request.signal }),
-      api.getDesignHistory(workspaceId, { signal: request.signal }),
-    ]);
-    if (generation !== state.catalogGeneration || state.activeWorkspace?.id !== workspaceId) return;
+    const { design, layout, history } = await api.getDesignSnapshot(workspaceId, {
+      signal: request.signal,
+    });
+    if (!request.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
     state.catalogError = null;
     state.layoutError = null;
     state.layoutDirty = false;
@@ -1950,12 +1979,13 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
       syncWorkspaceNavigation("replace");
     }
   } catch (error) {
-    if (generation !== state.catalogGeneration) return;
+    if (!request.isCurrent()) return;
     if (error instanceof ApiError && error.code === "request_cancelled") return;
     state.catalogError = error;
   } finally {
-    if (generation === state.catalogGeneration) {
-      if (state.catalogRequestController === request) state.catalogRequestController = null;
+    const current = request.isCurrent();
+    request.finish();
+    if (current) {
       state.catalogLoading = false;
       canvas.setInteractive(true);
       renderCatalogState();
@@ -1967,8 +1997,7 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
 async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
   if (!state.activeWorkspace) return;
   const workspaceId = state.activeWorkspace.id;
-  const generation = ++state.catalogGeneration;
-  const request = startCatalogRequest();
+  const request = workspaceOperations.beginRead();
   state.catalogLoading = true;
   canvas.setInteractive(false);
   state.catalogError = null;
@@ -1976,7 +2005,7 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
   updateHeader();
   try {
     const response = await api.getCatalog(workspaceId, { signal: request.signal });
-    if (generation !== state.catalogGeneration || state.activeWorkspace?.id !== workspaceId) return;
+    if (!request.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
     const preservedLayout = state.preservedLayout?.workspaceId === workspaceId
       ? state.preservedLayout
       : null;
@@ -2028,12 +2057,13 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
       syncWorkspaceNavigation("replace");
     }
   } catch (error) {
-    if (generation !== state.catalogGeneration) return;
+    if (!request.isCurrent()) return;
     if (error instanceof ApiError && error.code === "request_cancelled") return;
     state.catalogError = error;
   } finally {
-    if (generation === state.catalogGeneration) {
-      if (state.catalogRequestController === request) state.catalogRequestController = null;
+    const current = request.isCurrent();
+    request.finish();
+    if (current) {
       state.catalogLoading = false;
       canvas.setInteractive(true);
       renderCatalogState();
@@ -2043,7 +2073,7 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
 }
 
 async function refreshCatalog() {
-  if (state.catalogLoading) return;
+  if (state.catalogLoading || state.designSubmitting || state.historySubmitting || workspaceOperations.isMutating()) return;
   if (!state.activeWorkspace) {
     openWorkspaces();
     return;
@@ -2596,7 +2626,6 @@ async function submitDesignView(event) {
   updateDesignControls();
   replace(elements.designViewStatus, element("span", { text: "Validating the query and saving the desired view…" }));
   try {
-    viewAnalysis.clear();
     const design = await replaceActiveDesign(result.content, {
       selectedViewId: result.view.id,
     });
@@ -3664,33 +3693,38 @@ async function replaceActiveDesign(content, {
 } = {}) {
   const workspaceId = state.activeWorkspace.id;
   const beforeContent = state.design?.content || {};
-  const design = await api.replaceDesign(workspaceId, {
-    expectedDesignRevision: state.design.revision,
-    content,
-    ...(historyGroupId ? { historyGroupId } : {}),
-  });
-  const [layout, history] = await Promise.all([
-    api.getDesignLayout(workspaceId),
-    api.getDesignHistory(workspaceId),
-  ]);
-  if (state.activeWorkspace?.id !== workspaceId) return null;
-  const targets = designChangeTargets(beforeContent, design.content);
-  const prepared = await prepareDesignChangeTransition(targets, { reveal: revealChanges });
-  if (state.activeWorkspace?.id !== workspaceId) {
-    changeTransitions.restore(prepared);
-    return null;
+  const operation = beginWorkspaceMutation();
+  try {
+    await api.replaceDesign(workspaceId, {
+      expectedDesignRevision: state.design.revision,
+      content,
+      ...(historyGroupId ? { historyGroupId } : {}),
+    }, { signal: operation.signal });
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return null;
+    const { design, layout, history } = await api.getDesignSnapshot(workspaceId, {
+      signal: operation.signal,
+    });
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return null;
+    const targets = designChangeTargets(beforeContent, design.content);
+    const prepared = await prepareDesignChangeTransition(targets, { reveal: revealChanges });
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) {
+      changeTransitions.restore(prepared);
+      return null;
+    }
+    state.catalogError = null;
+    state.layoutError = null;
+    commitWorkspaceState({
+      design,
+      designLayout: layout,
+      designHistory: history,
+      selectedTableId,
+      selectedViewId,
+    }, { canvasPositions: designPositions(design, layout) });
+    completeDesignChangeTransition(targets, prepared, { reveal: revealChanges });
+    return design;
+  } finally {
+    operation.finish();
   }
-  state.catalogError = null;
-  state.layoutError = null;
-  commitWorkspaceState({
-    design,
-    designLayout: layout,
-    designHistory: history,
-    selectedTableId,
-    selectedViewId,
-  }, { canvasPositions: designPositions(design, layout) });
-  completeDesignChangeTransition(targets, prepared, { reveal: revealChanges });
-  return design;
 }
 
 function applyDesignHistoryMutation(mutation, { cue = true, render = true } = {}) {
@@ -3790,8 +3824,10 @@ async function executeDesignHistoryMoveConfirmed(direction) {
   const action = state.designHistory?.[direction] || null;
   let previewApplied = false;
   let presentation = null;
+  let reloadAfterFailure = false;
   state.historySubmitting = true;
   updateDesignControls();
+  const operation = beginWorkspaceMutation();
   try {
     if (delta.length) {
       const preview = await applyDesignHistoryPreview(delta);
@@ -3801,8 +3837,9 @@ async function executeDesignHistoryMoveConfirmed(direction) {
     const mutation = await api[direction === "undo" ? "undoDesign" : "redoDesign"](
       workspaceId,
       { expectedDesignRevision },
+      { signal: operation.signal },
     );
-    if (state.activeWorkspace?.id !== workspaceId) return;
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
     const previewMatches = previewApplied
       && JSON.stringify(state.design.content) === JSON.stringify(mutation.design.content);
     applyDesignHistoryMutation(mutation, { cue: !previewMatches, render: !previewMatches });
@@ -3810,7 +3847,8 @@ async function executeDesignHistoryMoveConfirmed(direction) {
     const next = state.designHistory?.[direction]?.title;
     showToast(`${result} · ${direction} complete.${next ? ` Next ${direction}: ${next}.` : ""}`);
   } catch (error) {
-    if (previewApplied && state.activeWorkspace?.id === workspaceId) {
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
+    if (previewApplied) {
       changeCues.clear();
       applyDesignHistoryMutation(rollback, { cue: false });
       commitWorkspaceState({
@@ -3821,12 +3859,14 @@ async function executeDesignHistoryMoveConfirmed(direction) {
     }
     errorToast(error);
     if (error instanceof ApiError && ["design_changed", "nothing_to_undo", "nothing_to_redo"].includes(error.code)) {
-      await loadActiveDesign({ clearConflictOnSuccess: true });
+      reloadAfterFailure = true;
     }
   } finally {
+    operation.finish();
     state.historySubmitting = false;
     updateHeader();
   }
+  if (reloadAfterFailure) await loadActiveDesign({ clearConflictOnSuccess: true });
 }
 
 function baselineResetChangeLabel(change) {
@@ -3863,20 +3903,22 @@ async function executeDesignBaselineReset(preview) {
   if (!state.activeWorkspace || state.historySubmitting) return;
   if (!await flushLayoutBeforeTransition()) return;
   const workspaceId = state.activeWorkspace.id;
+  let reloadAfterFailure = false;
   state.historySubmitting = true;
   updateDesignControls();
+  const operation = beginWorkspaceMutation();
   try {
     const mutation = await api.resetDesignToBaseline(workspaceId, {
       expectedDesignRevision: preview.designRevision,
       baselineId: preview.baseline.id,
       baselineRevision: preview.baseline.revision,
       reviewDigest: preview.reviewDigest,
-    });
-    if (state.activeWorkspace?.id !== workspaceId) return;
+    }, { signal: operation.signal });
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
     const beforeContent = state.design.content;
     const targets = designChangeTargets(beforeContent, mutation.design.content);
     const prepared = await prepareDesignChangeTransition(targets, { reveal: true });
-    if (state.activeWorkspace?.id !== workspaceId) {
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) {
       changeTransitions.restore(prepared);
       return;
     }
@@ -3884,14 +3926,17 @@ async function executeDesignBaselineReset(preview) {
     completeDesignChangeTransition(targets, prepared, { reveal: true });
     showToast(`Reset desired design to ${preview.baseline.label}.`);
   } catch (error) {
+    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
     errorToast(error);
     if (error instanceof ApiError && error.status === 409) {
-      await loadActiveDesign({ clearConflictOnSuccess: true });
+      reloadAfterFailure = true;
     }
   } finally {
+    operation.finish();
     state.historySubmitting = false;
     updateHeader();
   }
+  if (reloadAfterFailure) await loadActiveDesign({ clearConflictOnSuccess: true });
 }
 
 async function submitDesignTable(event) {

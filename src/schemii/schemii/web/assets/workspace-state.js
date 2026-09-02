@@ -36,6 +36,22 @@ export function selectedCatalogView(catalog, selectionId) {
   return catalogViews(catalog).find(view => catalogViewId(view) === selectionId) || null;
 }
 
+export function navigatedCatalogTable(catalog, navigation) {
+  const tables = catalog?.tables || [];
+  return tables.find(table => navigation?.tableId && table.designId === navigation.tableId)
+    || tables.find(table => table.name === navigation?.table)
+    || null;
+}
+
+export function navigatedCatalogView(catalog, navigation) {
+  const views = catalogViews(catalog);
+  return views.find(view => navigation?.viewId && view.designId === navigation.viewId)
+    || views.find(view => (
+      view.name === navigation?.view && view.catalogKind === navigation?.viewKind
+    ))
+    || null;
+}
+
 export function transitionWorkspaceState(current, patch, { projectDesign }) {
   const activeWorkspace = owns(patch, "activeWorkspace")
     ? patch.activeWorkspace

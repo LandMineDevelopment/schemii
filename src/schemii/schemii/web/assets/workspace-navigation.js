@@ -39,20 +39,28 @@ export function readWorkspaceNavigation(urlValue) {
     : null;
   const requestedLayer = url.searchParams.get("layer");
   const layer = LAYERS.has(requestedLayer) ? requestedLayer : "tables";
+  const tableId = workspaceId && layer === "tables"
+    ? identifier(url.searchParams.get("tableId"))
+    : null;
   const table = workspaceId && layer === "tables"
     ? identifier(url.searchParams.get("table"))
+    : null;
+  const viewId = workspaceId && layer === "views"
+    ? identifier(url.searchParams.get("viewId"))
     : null;
   const requestedViewKind = url.searchParams.get("viewKind");
   const viewKind = workspaceId && layer === "views" && VIEW_KINDS.has(requestedViewKind)
     ? requestedViewKind
     : null;
-  const view = viewKind ? identifier(url.searchParams.get("view")) : null;
-  return { workspaceId, layer, table, view, viewKind };
+  const view = workspaceId && layer === "views"
+    ? identifier(url.searchParams.get("view"))
+    : null;
+  return { workspaceId, layer, tableId, table, viewId, view, viewKind };
 }
 
 export function workspaceNavigationHref(urlValue, navigation) {
   const url = new URL(urlValue, "https://schemii.invalid/");
-  for (const name of ["workspace", "layer", "table", "view", "viewKind"]) {
+  for (const name of ["workspace", "layer", "tableId", "table", "viewId", "view", "viewKind"]) {
     url.searchParams.delete(name);
   }
   if (navigation?.workspaceId && WORKSPACE_ID.test(navigation.workspaceId)) {
@@ -60,16 +68,18 @@ export function workspaceNavigationHref(urlValue, navigation) {
     url.searchParams.set("workspace", navigation.workspaceId);
     if (layer !== "tables") url.searchParams.set("layer", layer);
     if (layer === "tables") {
+      const tableId = identifier(navigation.tableId);
       const table = identifier(navigation.table);
+      if (tableId) url.searchParams.set("tableId", tableId);
       if (table) url.searchParams.set("table", table);
     }
     if (layer === "views") {
+      const viewId = identifier(navigation.viewId);
       const view = identifier(navigation.view);
       const viewKind = VIEW_KINDS.has(navigation.viewKind) ? navigation.viewKind : null;
-      if (view && viewKind) {
-        url.searchParams.set("view", view);
-        url.searchParams.set("viewKind", viewKind);
-      }
+      if (viewId) url.searchParams.set("viewId", viewId);
+      if (view) url.searchParams.set("view", view);
+      if (viewKind) url.searchParams.set("viewKind", viewKind);
     }
   }
   return `${url.pathname}${url.search}${url.hash}`;

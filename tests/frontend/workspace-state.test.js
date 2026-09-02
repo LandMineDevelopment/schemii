@@ -5,6 +5,8 @@ import {
   catalogTableId,
   catalogViewId,
   createWorkspaceStateCommitter,
+  navigatedCatalogTable,
+  navigatedCatalogView,
   selectedCatalogTable,
   selectedCatalogView,
 } from "../../src/schemii/schemii/web/assets/workspace-state.js";
@@ -86,6 +88,43 @@ test("workspace commits clear only selections whose stable object disappeared", 
 
   assert.equal(state.selectedTableId, "table-1");
   assert.equal(state.selectedViewId, null);
+});
+
+test("an explicitly selected object is canonical immediately after create or restore", () => {
+  const initial = design();
+  const state = {
+    activeWorkspace: { id: "workspace-1", name: "Design" },
+    design: initial,
+    designLayout: null,
+    designHistory: null,
+    databaseCatalog: null,
+    catalog: projectDesign({ name: "Design" }, initial),
+    selectedTableId: null,
+    selectedViewId: null,
+  };
+  const commit = createWorkspaceStateCommitter({ state, projectDesign });
+
+  commit({ selectedTableId: "table-1", selectedViewId: "view-1" });
+
+  assert.equal(state.selectedTableId, "table-1");
+  assert.equal(state.selectedViewId, "view-1");
+});
+
+test("stable navigation IDs survive refreshes after object renames", () => {
+  const refreshed = projectDesign(
+    { name: "Design" },
+    design("purchases", "renamed_totals", "materialized_view"),
+  );
+
+  assert.equal(navigatedCatalogTable(refreshed, {
+    tableId: "table-1",
+    table: "orders",
+  }).name, "purchases");
+  assert.equal(navigatedCatalogView(refreshed, {
+    viewId: "view-1",
+    view: "order_totals",
+    viewKind: "view",
+  }).name, "renamed_totals");
 });
 
 test("live catalog selection keys remain explicit and do not collide across object kinds", () => {
