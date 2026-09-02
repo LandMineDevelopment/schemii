@@ -200,6 +200,7 @@ class MigrationExecution(ApiModel):
     sync_status: Literal["pending", "succeeded", "conflict", "failed"] | None = None
     error_code: str | None = Field(default=None, max_length=128)
     reconcile_required: bool = False
+    recovery_available_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

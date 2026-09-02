@@ -8,7 +8,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator, Protocol, runtime_checkable
+from typing import Any, Callable, Collection, Iterator, Protocol, runtime_checkable
 
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.models import (
@@ -26,6 +26,7 @@ from schemii.schemii.designs.store import (
 from .models import (
     MigrationDriftResolution,
     MigrationExecution,
+    MigrationExecutionStatus,
     MigrationExternalChange,
     MigrationPlan,
 )
@@ -112,6 +113,89 @@ class ExecutionRecord:
     external_changes_confirmed: bool
     target_identity: dict[str, Any] | None = None
     intended_result: dict[str, Any] | None = None
+    error_detail: dict[str, Any] | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionClaim:
+    """Atomic claim result distinguishing a new attempt from an idempotent read."""
+
+    record: ExecutionRecord
+    claimed_now: bool
+
+
+class _Unset:
+    __slots__ = ()
+
+
+UNSET = _Unset()
+
+
+_LEGAL_EXECUTION_TRANSITIONS: dict[
+    MigrationExecutionStatus,
+    frozenset[MigrationExecutionStatus],
+] = {
+    "reserved": frozenset({"applying", "failed"}),
+    "applying": frozenset(
+        {"applying", "succeeded", "failed", "uncertain", "reconciliation_required"}
+    ),
+    "uncertain": frozenset({"succeeded", "failed", "reconciliation_required"}),
+    "reconciliation_required": frozenset(
+        {"succeeded", "failed", "reconciliation_required"}
+    ),
+    "succeeded": frozenset({"succeeded", "reconciliation_required"}),
+    "failed": frozenset(),
+}
+
+
+def _validate_execution_transition(
+    current: MigrationExecution,
+    *,
+    expected_revision: int,
+    allowed_from: Collection[MigrationExecutionStatus],
+    status: MigrationExecutionStatus,
+) -> None:
+    if current.revision != expected_revision:
+        raise MigrationConflictError(
+            "migration_execution_changed",
+            "The migration execution changed in another request",
+            {"currentExecutionRevision": current.revision},
+        )
+    if (
+        current.status not in allowed_from
+        or status not in _LEGAL_EXECUTION_TRANSITIONS[current.status]
+    ):
+        raise MigrationConflictError(
+            "migration_execution_transition_invalid",
+            f"Migration execution cannot transition from {current.status} to {status}",
+            {"currentStatus": current.status, "requestedStatus": status},
+        )
+
+
+def _validate_execution_authorization(
+    plan: MigrationPlan,
+    *,
+    review_digest: str,
+    confirm_destructive: bool,
+    confirm_external_changes: bool,
+) -> None:
+    if review_digest != plan.review_digest:
+        raise MigrationConflictError(
+            "migration_review_changed",
+            "Migration review digest does not match",
+        )
+    if plan.destructive and not confirm_destructive:
+        raise MigrationConflictError(
+            "destructive_confirmation_required",
+            "Destructive changes require confirmation",
+        )
+    if plan.requires_external_change_acknowledgement and not confirm_external_changes:
+        raise MigrationConflictError(
+            "external_changes_confirmation_required",
+            "Compatible external changes require acknowledgement",
+        )
 
 
 @runtime_checkable
@@ -148,23 +232,37 @@ class MigrationRepository(Protocol):
         review_digest: str,
         confirm_destructive: bool,
         confirm_external_changes: bool,
-    ) -> ExecutionRecord: ...
+        *,
+        claimed_at: datetime,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> ExecutionClaim: ...
     def get_execution(self, owner_id: str, execution_id: str) -> ExecutionRecord: ...
     def list_executions(self, owner_id: str, workspace_id: str, limit: int) -> list[MigrationExecution]: ...
-    def update_execution(
+    def list_recoverable_executions(
+        self,
+        stale_at: datetime,
+        limit: int,
+    ) -> list[ExecutionRecord]: ...
+    def transition_execution(
         self,
         owner_id: str,
         execution_id: str,
         *,
-        status: str,
-        completed_step_count: int | None = None,
-        transaction_id: str | None = None,
-        target_identity: dict[str, Any] | None = None,
-        intended_result: dict[str, Any] | None = None,
-        commit_outcome: str | None = None,
-        sync_status: str | None = None,
-        error_code: str | None = None,
-        error_detail: dict[str, Any] | None = None,
+        expected_revision: int,
+        allowed_from: Collection[MigrationExecutionStatus],
+        status: MigrationExecutionStatus,
+        lease_owner: str | None = None,
+        lease_expires_at: datetime | None = None,
+        recover_expired_before: datetime | None = None,
+        completed_step_count: int | _Unset = UNSET,
+        transaction_id: str | None | _Unset = UNSET,
+        target_identity: dict[str, Any] | None | _Unset = UNSET,
+        intended_result: dict[str, Any] | None | _Unset = UNSET,
+        commit_outcome: str | None | _Unset = UNSET,
+        sync_status: str | None | _Unset = UNSET,
+        error_code: str | None | _Unset = UNSET,
+        error_detail: dict[str, Any] | None | _Unset = UNSET,
     ) -> ExecutionRecord: ...
     def reconcile_drift(
         self,
@@ -260,21 +358,33 @@ class InMemoryMigrationRepository:
         review_digest: str,
         confirm_destructive: bool,
         confirm_external_changes: bool,
-    ) -> ExecutionRecord:
+        *,
+        claimed_at: datetime,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> ExecutionClaim:
         with self._lock:
-            existing_id = self._execution_by_plan.get((owner_id, plan_id))
-            if existing_id:
-                return self._executions[(owner_id, existing_id)]
             record = self.get_plan(owner_id, plan_id)
             plan = record.plan
+            _validate_execution_authorization(
+                plan,
+                review_digest=review_digest,
+                confirm_destructive=confirm_destructive,
+                confirm_external_changes=confirm_external_changes,
+            )
+            existing_id = self._execution_by_plan.get((owner_id, plan_id))
+            if existing_id:
+                return ExecutionClaim(
+                    record=self._executions[(owner_id, existing_id)],
+                    claimed_now=False,
+                )
+            if plan.expires_at <= claimed_at:
+                raise MigrationConflictError(
+                    "migration_plan_expired",
+                    "Refresh the migration review",
+                )
             if plan.status != "reviewable" or not plan.apply_capable:
                 raise MigrationConflictError("migration_plan_not_executable", "Migration plan cannot be executed")
-            if review_digest != plan.review_digest:
-                raise MigrationConflictError("migration_review_changed", "Migration review digest does not match")
-            if plan.destructive and not confirm_destructive:
-                raise MigrationConflictError("destructive_confirmation_required", "Destructive changes require confirmation")
-            if plan.requires_external_change_acknowledgement and not confirm_external_changes:
-                raise MigrationConflictError("external_changes_confirmation_required", "Compatible external changes require acknowledgement")
             now = _now()
             execution = MigrationExecution(
                 id=f"mex_{secrets.token_hex(16)}",
@@ -283,6 +393,7 @@ class InMemoryMigrationRepository:
                 revision=1,
                 status="reserved",
                 completed_step_count=0,
+                recovery_available_at=lease_expires_at,
                 created_at=now,
                 updated_at=now,
             )
@@ -292,6 +403,8 @@ class InMemoryMigrationRepository:
                 confirmed_review_digest=review_digest,
                 destructive_confirmed=confirm_destructive,
                 external_changes_confirmed=confirm_external_changes,
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
             )
             self._execution_by_plan[(owner_id, plan_id)] = execution.id
             self._executions[(owner_id, execution.id)] = execution_record
@@ -301,7 +414,7 @@ class InMemoryMigrationRepository:
                 plan=record.plan.model_copy(update={"status": "claimed"}),
                 authority=record.authority,
             )
-            return execution_record
+            return ExecutionClaim(record=execution_record, claimed_now=True)
 
     def get_execution(self, owner_id: str, execution_id: str) -> ExecutionRecord:
         with self._lock:
@@ -319,12 +432,77 @@ class InMemoryMigrationRepository:
             ]
         return sorted(values, key=lambda item: item.created_at, reverse=True)[:limit]
 
-    def update_execution(self, owner_id: str, execution_id: str, **changes: Any) -> ExecutionRecord:
+    def list_recoverable_executions(
+        self,
+        stale_at: datetime,
+        limit: int,
+    ) -> list[ExecutionRecord]:
+        with self._lock:
+            values = [
+                record
+                for record in self._executions.values()
+                if record.execution.status in {"reserved", "applying"}
+                and record.lease_expires_at is not None
+                and record.lease_expires_at <= stale_at
+            ]
+        return sorted(
+            values,
+            key=lambda item: (item.lease_expires_at, item.execution.id),
+        )[:limit]
+
+    def transition_execution(
+        self,
+        owner_id: str,
+        execution_id: str,
+        *,
+        expected_revision: int,
+        allowed_from: Collection[MigrationExecutionStatus],
+        status: MigrationExecutionStatus,
+        lease_owner: str | None = None,
+        lease_expires_at: datetime | None = None,
+        recover_expired_before: datetime | None = None,
+        completed_step_count: int | _Unset = UNSET,
+        transaction_id: str | None | _Unset = UNSET,
+        target_identity: dict[str, Any] | None | _Unset = UNSET,
+        intended_result: dict[str, Any] | None | _Unset = UNSET,
+        commit_outcome: str | None | _Unset = UNSET,
+        sync_status: str | None | _Unset = UNSET,
+        error_code: str | None | _Unset = UNSET,
+        error_detail: dict[str, Any] | None | _Unset = UNSET,
+    ) -> ExecutionRecord:
         with self._lock:
             current = self.get_execution(owner_id, execution_id)
+            _validate_execution_transition(
+                current.execution,
+                expected_revision=expected_revision,
+                allowed_from=allowed_from,
+                status=status,
+            )
+            if current.execution.status in {"reserved", "applying"}:
+                lease_matches = lease_owner is not None and lease_owner == current.lease_owner
+                lease_is_stale = (
+                    recover_expired_before is not None
+                    and current.lease_expires_at is not None
+                    and current.lease_expires_at <= recover_expired_before
+                )
+                if not lease_matches and not lease_is_stale:
+                    raise MigrationConflictError(
+                        "migration_execution_lease_active",
+                        "The migration execution is owned by an active worker lease",
+                        {"recoveryAvailableAt": current.lease_expires_at},
+                    )
+            if status in {"reserved", "applying"} and (
+                lease_owner is None or lease_expires_at is None
+            ):
+                raise ValueError(
+                    "active migration execution transitions require a lease owner and expiry"
+                )
+            next_lease_owner = lease_owner if status in {"reserved", "applying"} else None
+            next_lease_expires_at = lease_expires_at if status in {"reserved", "applying"} else None
             update = {
                 "revision": current.execution.revision + 1,
-                "status": changes["status"],
+                "status": status,
+                "recovery_available_at": next_lease_expires_at,
                 "updated_at": _now(),
             }
             mapping = {
@@ -335,9 +513,10 @@ class InMemoryMigrationRepository:
                 "error_code": "error_code",
             }
             for source, target in mapping.items():
-                if changes.get(source) is not None:
-                    update[target] = changes[source]
-            update["reconcile_required"] = changes["status"] in {"uncertain", "reconciliation_required"}
+                value = locals()[source]
+                if value is not UNSET:
+                    update[target] = value
+            update["reconcile_required"] = status in {"uncertain", "reconciliation_required"}
             revised = current.execution.model_copy(update=update)
             record = ExecutionRecord(
                 owner_id=owner_id,
@@ -345,8 +524,17 @@ class InMemoryMigrationRepository:
                 confirmed_review_digest=current.confirmed_review_digest,
                 destructive_confirmed=current.destructive_confirmed,
                 external_changes_confirmed=current.external_changes_confirmed,
-                target_identity=changes.get("target_identity") or current.target_identity,
-                intended_result=changes.get("intended_result") or current.intended_result,
+                target_identity=(
+                    current.target_identity if target_identity is UNSET else target_identity
+                ),
+                intended_result=(
+                    current.intended_result if intended_result is UNSET else intended_result
+                ),
+                error_detail=(
+                    current.error_detail if error_detail is UNSET else error_detail
+                ),
+                lease_owner=next_lease_owner,
+                lease_expires_at=next_lease_expires_at,
             )
             self._executions[(owner_id, execution_id)] = record
             return record
@@ -517,7 +705,11 @@ class PostgresMigrationRepository:
         review_digest: str,
         confirm_destructive: bool,
         confirm_external_changes: bool,
-    ) -> ExecutionRecord:
+        *,
+        claimed_at: datetime,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> ExecutionClaim:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -527,30 +719,38 @@ class PostgresMigrationRepository:
                 row = cursor.fetchone()
                 if row is None:
                     raise MigrationNotFoundError("Migration plan was not found")
+                plan = self._plan(row).plan
+                _validate_execution_authorization(
+                    plan,
+                    review_digest=review_digest,
+                    confirm_destructive=confirm_destructive,
+                    confirm_external_changes=confirm_external_changes,
+                )
                 cursor.execute(
                     "SELECT * FROM schemii.migration_executions WHERE owner_id = %s AND plan_id = %s",
                     (owner_id, plan_id),
                 )
                 existing = cursor.fetchone()
                 if existing:
-                    return self._execution(cursor, existing)
-                plan = self._plan(row).plan
+                    return ExecutionClaim(
+                        record=self._execution(cursor, existing),
+                        claimed_now=False,
+                    )
+                if plan.expires_at <= claimed_at:
+                    raise MigrationConflictError(
+                        "migration_plan_expired",
+                        "Refresh the migration review",
+                    )
                 if plan.status != "reviewable" or not plan.apply_capable:
                     raise MigrationConflictError("migration_plan_not_executable", "Migration plan cannot be executed")
-                if review_digest != plan.review_digest:
-                    raise MigrationConflictError("migration_review_changed", "Migration review digest does not match")
-                if plan.destructive and not confirm_destructive:
-                    raise MigrationConflictError("destructive_confirmation_required", "Destructive changes require confirmation")
-                if plan.requires_external_change_acknowledgement and not confirm_external_changes:
-                    raise MigrationConflictError("external_changes_confirmation_required", "Compatible external changes require acknowledgement")
                 execution_id = f"mex_{secrets.token_hex(16)}"
                 cursor.execute(
                     """
                     INSERT INTO schemii.migration_executions (
                         id, plan_id, workspace_id, owner_id, status,
                         confirmed_review_digest, destructive_confirmed,
-                        external_changes_confirmed
-                    ) VALUES (%s, %s, %s, %s, 'reserved', %s, %s, %s)
+                        external_changes_confirmed, lease_owner, lease_expires_at
+                    ) VALUES (%s, %s, %s, %s, 'reserved', %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -561,6 +761,8 @@ class PostgresMigrationRepository:
                         review_digest,
                         confirm_destructive,
                         confirm_external_changes,
+                        lease_owner,
+                        lease_expires_at,
                     ),
                 )
                 execution_row = cursor.fetchone()
@@ -573,7 +775,10 @@ class PostgresMigrationRepository:
                     """,
                     (execution_id,),
                 )
-                return self._execution(cursor, execution_row)
+                return ExecutionClaim(
+                    record=self._execution(cursor, execution_row),
+                    claimed_now=True,
+                )
 
     def get_execution(self, owner_id: str, execution_id: str) -> ExecutionRecord:
         with self._transaction() as connection:
@@ -603,7 +808,46 @@ class PostgresMigrationRepository:
                 )
                 return [self._public_execution(row) for row in cursor.fetchall()]
 
-    def update_execution(self, owner_id: str, execution_id: str, **changes: Any) -> ExecutionRecord:
+    def list_recoverable_executions(
+        self,
+        stale_at: datetime,
+        limit: int,
+    ) -> list[ExecutionRecord]:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM schemii.migration_executions
+                    WHERE status IN ('reserved', 'applying')
+                      AND lease_expires_at <= %s
+                    ORDER BY lease_expires_at, id
+                    LIMIT %s
+                    """,
+                    (stale_at, limit),
+                )
+                return [self._execution(cursor, row) for row in cursor.fetchall()]
+
+    def transition_execution(
+        self,
+        owner_id: str,
+        execution_id: str,
+        *,
+        expected_revision: int,
+        allowed_from: Collection[MigrationExecutionStatus],
+        status: MigrationExecutionStatus,
+        lease_owner: str | None = None,
+        lease_expires_at: datetime | None = None,
+        recover_expired_before: datetime | None = None,
+        completed_step_count: int | _Unset = UNSET,
+        transaction_id: str | None | _Unset = UNSET,
+        target_identity: dict[str, Any] | None | _Unset = UNSET,
+        intended_result: dict[str, Any] | None | _Unset = UNSET,
+        commit_outcome: str | None | _Unset = UNSET,
+        sync_status: str | None | _Unset = UNSET,
+        error_code: str | None | _Unset = UNSET,
+        error_detail: dict[str, Any] | None | _Unset = UNSET,
+    ) -> ExecutionRecord:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -613,36 +857,92 @@ class PostgresMigrationRepository:
                 current = cursor.fetchone()
                 if current is None:
                     raise MigrationNotFoundError("Migration execution was not found")
+                current_record = self._execution(cursor, current)
+                _validate_execution_transition(
+                    current_record.execution,
+                    expected_revision=expected_revision,
+                    allowed_from=allowed_from,
+                    status=status,
+                )
+                if current_record.execution.status in {"reserved", "applying"}:
+                    lease_matches = (
+                        lease_owner is not None
+                        and lease_owner == current_record.lease_owner
+                    )
+                    lease_is_stale = (
+                        recover_expired_before is not None
+                        and current_record.lease_expires_at is not None
+                        and current_record.lease_expires_at <= recover_expired_before
+                    )
+                    if not lease_matches and not lease_is_stale:
+                        raise MigrationConflictError(
+                            "migration_execution_lease_active",
+                            "The migration execution is owned by an active worker lease",
+                            {"recoveryAvailableAt": current_record.lease_expires_at},
+                        )
+                if status in {"reserved", "applying"} and (
+                    lease_owner is None or lease_expires_at is None
+                ):
+                    raise ValueError(
+                        "active migration execution transitions require a lease owner and expiry"
+                    )
+                next_lease_owner = (
+                    lease_owner if status in {"reserved", "applying"} else None
+                )
+                next_lease_expires_at = (
+                    lease_expires_at if status in {"reserved", "applying"} else None
+                )
+                assignments = [
+                    "revision = revision + 1",
+                    "status = %s",
+                    "lease_owner = %s",
+                    "lease_expires_at = %s",
+                    "updated_at = clock_timestamp()",
+                ]
+                parameters: list[Any] = [
+                    status,
+                    next_lease_owner,
+                    next_lease_expires_at,
+                ]
+                scalar_updates = (
+                    ("completed_step_count", completed_step_count),
+                    ("target_xid", transaction_id),
+                    ("commit_outcome", commit_outcome),
+                    ("error_code", error_code),
+                )
+                for column, value in scalar_updates:
+                    if value is UNSET:
+                        continue
+                    assignments.append(f"{column} = %s")
+                    parameters.append(value)
+                json_updates = (
+                    ("target_identity", target_identity),
+                    ("intended_result", intended_result),
+                    ("error_detail", error_detail),
+                )
+                for column, value in json_updates:
+                    if value is UNSET:
+                        continue
+                    assignments.append(f"{column} = %s::jsonb")
+                    parameters.append(
+                        self._json_dump(value) if value is not None else None
+                    )
+                parameters.extend((owner_id, execution_id, expected_revision))
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE schemii.migration_executions
-                    SET revision = revision + 1,
-                        status = %s,
-                        completed_step_count = COALESCE(%s, completed_step_count),
-                        target_xid = COALESCE(%s, target_xid),
-                        target_identity = COALESCE(%s::jsonb, target_identity),
-                        intended_result = COALESCE(%s::jsonb, intended_result),
-                        commit_outcome = COALESCE(%s, commit_outcome),
-                        error_code = COALESCE(%s, error_code),
-                        error_detail = COALESCE(%s::jsonb, error_detail),
-                        updated_at = clock_timestamp()
-                    WHERE owner_id = %s AND id = %s
+                    SET {", ".join(assignments)}
+                    WHERE owner_id = %s AND id = %s AND revision = %s
                     RETURNING *
                     """,
-                    (
-                        changes["status"],
-                        changes.get("completed_step_count"),
-                        changes.get("transaction_id"),
-                        self._json_dump(changes.get("target_identity")) if changes.get("target_identity") is not None else None,
-                        self._json_dump(changes.get("intended_result")) if changes.get("intended_result") is not None else None,
-                        changes.get("commit_outcome"),
-                        changes.get("error_code"),
-                        self._json_dump(changes.get("error_detail")) if changes.get("error_detail") is not None else None,
-                        owner_id,
-                        execution_id,
-                    ),
+                    parameters,
                 )
                 row = cursor.fetchone()
+                if row is None:
+                    raise MigrationConflictError(
+                        "migration_execution_changed",
+                        "The migration execution changed in another request",
+                    )
                 cursor.execute(
                     """
                     INSERT INTO schemii.migration_execution_transitions
@@ -652,11 +952,20 @@ class PostgresMigrationRepository:
                     (
                         execution_id,
                         current["status"],
-                        changes["status"],
-                        self._json_dump(changes.get("error_detail")) if changes.get("error_detail") is not None else None,
+                        status,
+                        (
+                            self._json_dump(error_detail)
+                            if error_detail is not UNSET and error_detail is not None
+                            else None
+                        ),
                     ),
                 )
-                if changes.get("sync_status") is not None:
+                if sync_status is not UNSET and sync_status is None:
+                    cursor.execute(
+                        "DELETE FROM schemii.migration_syncs WHERE execution_id = %s",
+                        (execution_id,),
+                    )
+                elif sync_status is not UNSET:
                     cursor.execute(
                         """
                         INSERT INTO schemii.migration_syncs (execution_id, status)
@@ -664,7 +973,7 @@ class PostgresMigrationRepository:
                         ON CONFLICT (execution_id) DO UPDATE
                         SET status = EXCLUDED.status, updated_at = clock_timestamp()
                         """,
-                        (execution_id, changes["sync_status"]),
+                        (execution_id, sync_status),
                     )
                 return self._execution(cursor, row)
 
@@ -1032,6 +1341,13 @@ class PostgresMigrationRepository:
             external_changes_confirmed=row["external_changes_confirmed"],
             target_identity=self._json_load(row["target_identity"]) if row["target_identity"] is not None else None,
             intended_result=self._json_load(row["intended_result"]) if row["intended_result"] is not None else None,
+            error_detail=(
+                self._json_load(row["error_detail"])
+                if row["error_detail"] is not None
+                else None
+            ),
+            lease_owner=row["lease_owner"],
+            lease_expires_at=row["lease_expires_at"],
         )
 
     @staticmethod
@@ -1043,6 +1359,11 @@ class PostgresMigrationRepository:
             commit_outcome=row["commit_outcome"], sync_status=row.get("sync_status"),
             error_code=row["error_code"],
             reconcile_required=row["status"] in {"uncertain", "reconciliation_required"},
+            recovery_available_at=(
+                row.get("lease_expires_at")
+                if row["status"] in {"reserved", "applying"}
+                else None
+            ),
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
 
