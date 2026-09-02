@@ -142,6 +142,7 @@ class WorkspaceRepository(Protocol):
         request: SchemiiWorkspaceCreate,
         *,
         bootstrap: WorkspaceDesignBootstrap | None = None,
+        expected_connection_revision: int | None = None,
     ) -> SchemiiWorkspace: ...
 
     def create_import(
@@ -232,7 +233,9 @@ class InMemoryWorkspaceRepository:
         request: SchemiiWorkspaceCreate,
         *,
         bootstrap: WorkspaceDesignBootstrap | None = None,
+        expected_connection_revision: int | None = None,
     ) -> SchemiiWorkspace:
+        del expected_connection_revision
         with self._lock:
             owner_records = self._records.setdefault(owner_id, {})
             if len(owner_records) >= self._max_workspaces_per_owner:

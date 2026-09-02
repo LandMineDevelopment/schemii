@@ -124,11 +124,26 @@ class PostgresWorkspaceRepository:
         request: SchemiiWorkspaceCreate,
         *,
         bootstrap: WorkspaceDesignBootstrap | None = None,
+        expected_connection_revision: int | None = None,
     ) -> SchemiiWorkspace:
         self._validate_bootstrap(bootstrap)
+        if request.connection_id is not None and expected_connection_revision is None:
+            raise ValueError(
+                "Targeted workspaces require the inspected connection revision"
+            )
         workspace_id = f"ws_{secrets.token_hex(16)}"
         with self._transaction() as connection:
             with connection.cursor() as cursor:
+                if request.connection_id is not None:
+                    assert request.database is not None
+                    assert expected_connection_revision is not None
+                    self._lock_target_connection(
+                        cursor,
+                        owner_id,
+                        request.connection_id,
+                        request.database,
+                        expected_connection_revision,
+                    )
                 return self._insert_workspace(
                     cursor,
                     owner_id,
@@ -158,7 +173,7 @@ class PostgresWorkspaceRepository:
         workspace_id = f"ws_{secrets.token_hex(16)}"
         with self._transaction() as connection:
             with connection.cursor() as cursor:
-                self._lock_import_connection(
+                self._lock_target_connection(
                     cursor,
                     owner_id,
                     request.connection_id,
@@ -345,7 +360,7 @@ class PostgresWorkspaceRepository:
             )
 
     @staticmethod
-    def _lock_import_connection(
+    def _lock_target_connection(
         cursor: Any,
         owner_id: str,
         connection_id: str,

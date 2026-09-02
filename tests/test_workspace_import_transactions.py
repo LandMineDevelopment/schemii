@@ -351,6 +351,25 @@ def test_postgres_import_rejects_changed_connection_before_staging_workspace() -
     assert connection.rollbacks == 1
 
 
+def test_postgres_targeted_workspace_rechecks_connection_before_any_insert() -> None:
+    state = _MetadataState(connection_revision=2)
+    connection = _MetadataConnection(state)
+    repository = PostgresWorkspaceRepository(lambda: connection)
+
+    with pytest.raises(WorkspaceImportTargetChangedError) as changed:
+        repository.create(
+            OWNER_ID,
+            _request(),
+            expected_connection_revision=1,
+        )
+
+    assert changed.value.expected_revision == 1
+    assert changed.value.current_revision == 2
+    assert state.pending == []
+    assert state.durable == []
+    assert connection.rollbacks == 1
+
+
 def test_postgres_workspace_delete_is_blocked_by_durable_active_execution() -> None:
     state = _MetadataState(workspace_revision=3, active_execution=True)
     connection = _MetadataConnection(state)

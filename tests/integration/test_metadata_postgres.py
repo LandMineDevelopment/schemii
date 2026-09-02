@@ -30,6 +30,7 @@ from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepositor
 from schemii.schemii.workspaces.store import (
     WorkspaceDesignBootstrap,
     WorkspaceImportBaseline,
+    WorkspaceImportTargetChangedError,
     WorkspaceStorageUnavailableError,
 )
 from tests.integration.postgres_fixture import PostgresMetadataHarness
@@ -291,6 +292,7 @@ def test_postgres_connection_delete_guard_preserves_referenced_target(
             database=target.database,
             namespace="public",
         ),
+        expected_connection_revision=target.revision,
     )
     repository = postgres_metadata.repositories.connections
     ConnectionService(repository, (workspaces,))
@@ -316,3 +318,28 @@ def test_postgres_connection_delete_guard_preserves_referenced_target(
         expected_revision=target.revision,
     )
     assert repository.list(postgres_metadata.owner_id) == []
+
+
+def test_targeted_workspace_creation_rechecks_the_inspected_connection_revision(
+    postgres_metadata: PostgresMetadataHarness,
+) -> None:
+    target = _target(postgres_metadata)
+    request = SchemiiWorkspaceCreate(
+        name="Stale inspected target",
+        connection_id=target.id,
+        database=target.database,
+        namespace="public",
+    )
+
+    with pytest.raises(WorkspaceImportTargetChangedError) as changed:
+        PostgresWorkspaceRepository(postgres_metadata.connection_factory).create(
+            postgres_metadata.owner_id,
+            request,
+            expected_connection_revision=target.revision + 1,
+        )
+
+    assert changed.value.expected_revision == target.revision + 1
+    assert changed.value.current_revision == target.revision
+    assert PostgresWorkspaceRepository(
+        postgres_metadata.connection_factory
+    ).list(postgres_metadata.owner_id) == []

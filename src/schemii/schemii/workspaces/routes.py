@@ -31,6 +31,7 @@ from .store import (
     WorkspaceNotFoundError,
     WorkspaceRepository,
     WorkspaceMutationBlockedError,
+    WorkspaceImportTargetChangedError,
 )
 
 
@@ -172,11 +173,25 @@ def create_workspace(
                     "postgres_namespace_not_found",
                     "The requested PostgreSQL namespace was not found",
                 )
-            return _workspaces(request).create(principal.user_id, body)
+            return _workspaces(request).create(
+                principal.user_id,
+                body,
+                expected_connection_revision=connection.revision,
+            )
     except ConnectionNotFoundError as error:
         raise _connection_not_found(error) from error
     except PostgresGatewayError as error:
         raise postgres_api_problem(error) from error
+    except WorkspaceImportTargetChangedError as error:
+        raise ApiProblem(
+            409,
+            "workspace_target_changed",
+            str(error),
+            details={
+                "expectedConnectionRevision": error.expected_revision,
+                "currentConnectionRevision": error.current_revision,
+            },
+        ) from error
     except WorkspaceLimitError as error:
         raise _workspace_limit(error) from error
 
