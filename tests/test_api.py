@@ -334,6 +334,7 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     assert empty_design.status_code == 200
     assert empty_design.json()["revision"] == 0
     assert empty_design.json()["content"] == {
+        "types": [],
         "tables": [],
         "relationships": [],
         "functions": [],
@@ -453,7 +454,30 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
         "initiallyDeferred": False,
     }
 
+    type_definition = "CREATE TYPE inventory_state AS ENUM ('draft', 'available', 'retired')"
+    type_analysis = api.post(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/type-analysis",
+        json={"definition": type_definition},
+    )
+    assert type_analysis.status_code == 200
+    assert type_analysis.json() == {
+        "name": "inventory_state",
+        "kind": "enum",
+        "enumValues": ["draft", "available", "retired"],
+        "baseType": None,
+        "defaultExpression": None,
+        "notNull": False,
+        "checks": [],
+        "collation": None,
+    }
+
     content_with_routine = saved.json()["content"]
+    content_with_routine["types"] = [
+        {
+            "id": "type_" + "7" * 32,
+            "definition": type_definition,
+        }
+    ]
     content_with_routine["functions"] = [
         {
             "id": "function_" + "e" * 32,
@@ -472,6 +496,11 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     )
     assert saved_routine.status_code == 200
     assert saved_routine.json()["content"]["functions"][0]["name"] == "display_label"
+    assert saved_routine.json()["content"]["types"][0]["enumValues"] == [
+        "draft",
+        "available",
+        "retired",
+    ]
     assert saved_routine.json()["content"]["functions"][0]["identityArguments"] == "text, text"
     assert saved_routine.json()["content"]["triggers"][0]["relationName"] == "inventory item"
     assert postgres.connections == []
@@ -514,6 +543,7 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     )
     assert exported.status_code == 200
     assert 'CREATE TABLE "inventory item"' in exported.json()["content"]
+    assert exported.json()["content"].index("CREATE TYPE inventory_state") < exported.json()["content"].index('CREATE TABLE "inventory item"')
     assert '"display name" text NOT NULL' in exported.json()["content"]
     assert "CREATE FUNCTION display_label" in exported.json()["content"]
     assert "CREATE TRIGGER inventory_name_changed" in exported.json()["content"]

@@ -78,6 +78,7 @@ export function renderCatalogStats(container, catalog) {
   const entries = [
     ["Tables", catalog.tables.length],
     ["Views", catalog.views.length + catalog.materializedViews.length],
+    ["Types", (catalog.types || []).length],
     ["Routines", catalog.functions.length],
     ["Triggers", catalog.triggers?.length ?? catalog.tables.reduce((total, table) => total + table.triggers.length, 0)],
   ];
@@ -379,6 +380,93 @@ export function renderFunctions(container, catalog, query = "", { onEdit = null,
   return { shown: visible.length, matching: routines.length };
 }
 
+export function renderTypes(container, catalog, query = "", filter = "all", { onEdit = null, onDelete = null } = {}) {
+  replace(container);
+  if (!catalog) {
+    container.append(emptyPanel("TYPE", "No catalog loaded", "Open a detached design to browse its custom types."));
+    return { shown: 0, matching: 0, total: 0 };
+  }
+  const available = catalog.types || [];
+  const needle = normalizedSearch(query);
+  const types = available.filter(designType => {
+    if (filter !== "all" && designType.kind !== filter) return false;
+    const checks = (designType.checks || []).map(check => `${check.name || ""} ${check.expression}`).join(" ");
+    const searchable = `${designType.kind} ${designType.name} ${(designType.enumValues || []).join(" ")} ${designType.baseType || ""} ${designType.defaultExpression || ""} ${checks} ${designType.definition}`;
+    return !needle || searchable.toLocaleLowerCase().includes(needle);
+  });
+  if (!types.length) {
+    const message = query || filter !== "all"
+      ? "No custom types match this search and filter."
+      : catalog.source === "design"
+        ? "This design has no enums or domains yet."
+        : "Custom-type browsing is not available for this live catalog.";
+    container.append(emptyPanel("0", "No matching types", message));
+    return { shown: 0, matching: 0, total: available.length };
+  }
+
+  const visible = types.slice(0, MAX_BROWSER_ITEMS);
+  for (const kind of ["enum", "domain"]) {
+    const group = visible.filter(designType => designType.kind === kind);
+    if (!group.length) continue;
+    const section = element("section", { className: "catalog-object-group" });
+    section.append(element("h3", { text: `${kind === "enum" ? "Enums" : "Domains"} · ${group.length}` }));
+    for (const designType of group) {
+      const wrapper = element("details", { className: "catalog-object type-object" });
+      const summary = element("summary");
+      const identity = element("span");
+      const summaryDetail = kind === "enum"
+        ? `${designType.enumValues.length} ${designType.enumValues.length === 1 ? "value" : "values"}`
+        : `Based on ${designType.baseType}`;
+      identity.append(
+        element("strong", { text: designType.name }),
+        element("small", { text: summaryDetail }),
+      );
+      summary.append(identity, element("span", { className: "object-kind", text: kind }));
+      const body = element("div", { className: "catalog-object-body" });
+      if (kind === "enum") {
+        body.append(element("div", { className: "type-enum-values" }, designType.enumValues.map(value => (
+          element("code", { text: value, title: value })
+        ))));
+      } else {
+        body.append(metadataGrid([
+          ["Base type", designType.baseType],
+          ["Default", designType.defaultExpression],
+          ["Not null", designType.notNull],
+          ["Collation", designType.collation],
+        ]));
+        if (designType.checks.length) {
+          const checks = element("div", { className: "type-domain-checks" });
+          checks.append(element("strong", { text: `Checks · ${designType.checks.length}` }));
+          for (const check of designType.checks) {
+            checks.append(element("code", { text: `${check.name ? `${check.name}: ` : ""}${check.expression}` }));
+          }
+          body.append(checks);
+        }
+      }
+      body.append(element("pre", { className: "routine-definition", text: designType.definition }));
+      if (designType.designId && (onEdit || onDelete)) {
+        const actions = element("div", { className: "catalog-object-actions" });
+        if (onEdit) {
+          const edit = element("button", { className: "ui-button compact", type: "button", text: "Edit source" });
+          edit.addEventListener("click", () => onEdit(designType));
+          actions.append(edit);
+        }
+        if (onDelete) {
+          const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
+          remove.addEventListener("click", () => onDelete(designType));
+          actions.append(remove);
+        }
+        body.append(actions);
+      }
+      wrapper.append(summary, body);
+      section.append(wrapper);
+    }
+    container.append(section);
+  }
+  if (types.length > visible.length) container.append(element("p", { className: "none-reported", text: `Showing the first ${visible.length} of ${types.length} matching types. Refine the search to narrow the list.` }));
+  return { shown: visible.length, matching: types.length, total: available.length };
+}
+
 function objectDescriptors(catalog) {
   const objects = [];
   const hasTopLevelTriggers = Array.isArray(catalog.triggers);
@@ -399,6 +487,13 @@ function objectDescriptors(catalog) {
     meta: `${trigger.timing.replaceAll("_", " ")} ${trigger.events.join(" or ")} · ${trigger.orientation}`,
     target: "trigger",
     trigger,
+  });
+  for (const designType of catalog.types || []) objects.push({
+    kind: designType.kind,
+    name: designType.name,
+    meta: designType.kind === "enum" ? designType.enumValues.join(", ") : designType.baseType,
+    target: "type",
+    designType,
   });
   return objects.sort((left, right) => left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name));
 }
@@ -438,6 +533,10 @@ export function renderObjects(container, catalog, query = "", onOpen) {
       body.append(action);
     } else if (object.target === "trigger") {
       const action = element("button", { className: "ui-button compact", type: "button", text: "Edit trigger source" });
+      action.addEventListener("click", () => onOpen(object));
+      body.append(action);
+    } else if (object.target === "type") {
+      const action = element("button", { className: "ui-button compact", type: "button", text: "Open custom types" });
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
     }

@@ -78,6 +78,7 @@
           <button id="zoom-out-button" type="button" data-ui-icon="zoom-out" title="Zoom out" aria-label="Zoom out"></button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button id="functions-button" type="button" data-ui-icon="routines" title="Functions and procedures" aria-label="Functions and procedures"></button>
+          <button id="types-button" type="button" data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
           <button id="objects-button" type="button" data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
           <button id="postgres-button" type="button" data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
           <button type="button" data-ui-icon="assistant" data-unavailable="ai-assistant" title="AI schema assistant" aria-label="AI schema assistant"></button>
@@ -355,6 +356,34 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       </form>
     </dialog>
 
+    <dialog class="ui-dialog catalog-dialog" id="types-dialog" aria-labelledby="types-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="types-title">Enums and domains</h2><p>Browse custom PostgreSQL types whose complete contracts are derived from saved source statements.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close custom types"></button></header>
+        <div class="dialog-toolbar type-dialog-toolbar">
+          <label class="compact-search"><span>Search</span><input id="types-search" type="search" autocomplete="off" /></label>
+          <div class="type-filters" role="group" aria-label="Custom type filter"><button class="active" type="button" data-type-filter="all" aria-pressed="true">All</button><button type="button" data-type-filter="enum" aria-pressed="false">Enums</button><button type="button" data-type-filter="domain" aria-pressed="false">Domains</button></div>
+          <span id="types-count">No design loaded</span>
+          <button class="ui-button compact primary" id="create-type-button" type="button">Create type</button>
+        </div>
+        <div class="catalog-browser-list" id="types-list"></div>
+      </div>
+    </dialog>
+
+    <dialog class="ui-dialog editor-dialog design-routine-dialog" id="design-type-dialog" aria-labelledby="design-type-title">
+      <form class="ui-dialog__shell" id="design-type-form">
+        <header class="ui-dialog__head"><div><small>Source-first custom type</small><h2 id="design-type-title">Create enum or domain</h2><p>Write one target-independent PostgreSQL statement. Schemii derives the name, values, base type, defaults, nullability, collation, and checks.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close type editor"></button></header>
+        <div class="design-routine-body">
+          <label class="design-field design-routine-source"><span>CREATE TYPE AS ENUM or CREATE DOMAIN</span><textarea id="design-type-definition" required spellcheck="false" placeholder="CREATE TYPE order_status AS ENUM (&#10;    'draft',&#10;    'submitted',&#10;    'fulfilled',&#10;    'cancelled'&#10;);"></textarea><small>Domains are supported too—for example, CREATE DOMAIN positive_amount AS numeric(12, 2) CHECK (VALUE &gt;= 0). Leave schemas off custom names.</small></label>
+          <section class="design-routine-preview" aria-labelledby="design-type-preview-title">
+            <header><small>Derived at request time</small><strong id="design-type-preview-title">Type contract</strong></header>
+            <div id="design-type-preview" aria-live="polite"></div>
+          </section>
+        </div>
+        <div class="form-status" id="design-type-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-type-button" type="submit">Create type</button></footer>
+      </form>
+    </dialog>
+
     <dialog class="ui-dialog catalog-dialog" id="functions-dialog" aria-labelledby="functions-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small id="functions-source">Workspace routines</small><h2 id="functions-title">Functions and procedures</h2><p id="functions-copy">Browse routine signatures and source definitions from the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close functions"></button></header>
@@ -395,7 +424,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
 
     <dialog class="ui-dialog catalog-dialog" id="objects-dialog" aria-labelledby="objects-title">
       <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small id="objects-source">Workspace catalog</small><h2 id="objects-title">Database objects</h2><p id="objects-copy">Browse tables, views, constraints, indexes, triggers, functions, and procedures in the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
+        <header class="ui-dialog__head"><div><small id="objects-source">Workspace catalog</small><h2 id="objects-title">Database objects</h2><p id="objects-copy">Browse types, tables, views, constraints, indexes, triggers, functions, and procedures in the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
         <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-button compact primary" id="create-trigger-button" type="button" hidden>Create trigger</button></div>
         <div class="catalog-browser-list" id="objects-list"></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-unavailable="migration-preview">Preview migration</button><button class="ui-button compact primary" type="button" data-unavailable="migration-apply">Apply migration</button></footer>

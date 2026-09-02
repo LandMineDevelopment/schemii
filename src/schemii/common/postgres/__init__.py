@@ -42,6 +42,12 @@ from .query_analysis import (
     referenced_relations,
 )
 from .query_models import QueryAnalysis
+from .type_analysis import (
+    DomainCheckDefinition,
+    TypeDefinition,
+    TypeDefinitionError,
+    analyze_type_definition,
+)
 
 __all__ = [
     "MAX_CONNECT_TIMEOUT_SECONDS",
@@ -74,7 +80,11 @@ __all__ = [
     "PsycopgPostgresGateway",
     "QueryAnalysis",
     "QueryDefinitionError",
+    "DomainCheckDefinition",
+    "TypeDefinition",
+    "TypeDefinitionError",
     "analyze_query_definition",
+    "analyze_type_definition",
     "compute_catalog_fingerprint",
     "parse_query_definition",
     "referenced_relations",

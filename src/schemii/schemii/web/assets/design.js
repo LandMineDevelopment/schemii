@@ -115,6 +115,19 @@ export function designToCatalog(workspace, design) {
     capturedAt: null,
     fingerprint: design.fingerprint,
     designRevision: design.revision,
+    types: (design.content.types || []).map(designType => ({
+      designId: designType.id,
+      namespace: "desired",
+      name: designType.name,
+      kind: designType.kind,
+      enumValues: designType.enumValues || [],
+      baseType: designType.baseType,
+      defaultExpression: designType.defaultExpression,
+      notNull: designType.notNull,
+      checks: designType.checks || [],
+      collation: designType.collation,
+      definition: designType.definition,
+    })),
     tables: design.content.tables.map(table => tableCatalogEntry(
       table,
       columns,
@@ -1018,5 +1031,28 @@ export function deleteDesignTrigger(content, triggerId) {
     throw new Error("The selected trigger is no longer in this design.");
   }
   next.triggers = next.triggers.filter(trigger => trigger.id !== triggerId);
+  return next;
+}
+
+export function saveDesignType(content, values, randomUUID = crypto.randomUUID.bind(crypto)) {
+  const definition = String(values.definition || "").trim();
+  if (!definition) throw new Error("Enter one CREATE TYPE AS ENUM or CREATE DOMAIN statement.");
+  const next = structuredClone(content);
+  if (!next.types) next.types = [];
+  const typeId = values.typeId || id("type", randomUUID);
+  const designType = { id: typeId, definition };
+  const existingIndex = next.types.findIndex(item => item.id === typeId);
+  if (values.typeId && existingIndex < 0) throw new Error("The selected type is no longer in this design.");
+  if (existingIndex >= 0) next.types[existingIndex] = designType;
+  else next.types.push(designType);
+  return { content: next, designType };
+}
+
+export function deleteDesignType(content, typeId) {
+  const next = structuredClone(content);
+  if (!(next.types || []).some(designType => designType.id === typeId)) {
+    throw new Error("The selected type is no longer in this design.");
+  }
+  next.types = next.types.filter(designType => designType.id !== typeId);
   return next;
 }

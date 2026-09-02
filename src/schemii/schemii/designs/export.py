@@ -6,7 +6,7 @@ import hashlib
 import json
 
 from .models import SchemiiDesign, SchemiiDesignExport, SchemiiDesignExportRequest
-from .store import authored_content_document
+from .store import authored_content_document, design_types_in_dependency_order
 
 
 def _quote(identifier: str) -> str:
@@ -41,8 +41,14 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
             )
         for table in reversed(content.tables):
             lines.append(f"DROP TABLE IF EXISTS {_quote(table.name)} CASCADE;")
-        if content.tables or content.views or content.functions or content.triggers:
+        for design_type in reversed(design_types_in_dependency_order(content)):
+            kind = "DOMAIN" if design_type.kind == "domain" else "TYPE"
+            lines.append(f"DROP {kind} IF EXISTS {_quote(design_type.name)} CASCADE;")
+        if content.types or content.tables or content.views or content.functions or content.triggers:
             lines.append("")
+
+    for design_type in design_types_in_dependency_order(content):
+        lines.extend([_statement(design_type.definition) + ";", ""])
 
     table_by_id = {table.id: table for table in content.tables}
     column_by_id = {

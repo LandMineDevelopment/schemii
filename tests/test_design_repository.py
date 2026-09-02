@@ -290,6 +290,120 @@ def test_routine_metadata_is_rederived_from_its_definition() -> None:
     ]
 
 
+def test_type_metadata_is_rederived_and_exports_before_dependents() -> None:
+    parsed = SchemiiDesignContent.model_validate(
+        {
+            "types": [
+                {
+                    "id": "type_" + "9" * 32,
+                    "name": "stale",
+                    "kind": "domain",
+                    "enumValues": ["wrong"],
+                    "definition": "CREATE TYPE account_state AS ENUM ('active', 'disabled')",
+                },
+                {
+                    "id": "type_" + "8" * 32,
+                    "definition": "CREATE DOMAIN active_account_state AS account_state NOT NULL",
+                },
+            ],
+            "tables": [
+                {
+                    "id": "table_" + "7" * 32,
+                    "name": "accounts",
+                    "columns": [
+                        {
+                            "id": "column_" + "6" * 32,
+                            "name": "state",
+                            "dataType": "active_account_state",
+                            "nullable": False,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert parsed.types[0].name == "account_state"
+    assert parsed.types[0].kind == "enum"
+    assert parsed.types[0].enum_values == ["active", "disabled"]
+    assert authored_content_document(parsed)["types"] == [
+        {"id": design_type.id, "definition": design_type.definition}
+        for design_type in parsed.types
+    ]
+
+    design = InMemoryDesignRepository().replace(
+        OWNER,
+        WORKSPACE,
+        SchemiiDesignReplace(expected_design_revision=0, content=parsed),
+    )
+    exported = export_design(
+        design,
+        SchemiiDesignExportRequest(
+            expected_design_revision=1,
+            format="postgresql_sql",
+            include_drop_statements=True,
+        ),
+    ).content
+
+    assert exported.index("CREATE TYPE account_state") < exported.index("CREATE DOMAIN active_account_state")
+    assert exported.index("CREATE DOMAIN active_account_state") < exported.index('CREATE TABLE "accounts"')
+    assert exported.index('DROP TABLE IF EXISTS "accounts"') < exported.index('DROP DOMAIN IF EXISTS "active_account_state"')
+    assert exported.index('DROP DOMAIN IF EXISTS "active_account_state"') < exported.index('DROP TYPE IF EXISTS "account_state"')
+
+
+def test_type_names_cannot_collide_with_relations_or_form_dependency_cycles() -> None:
+    collision = SchemiiDesignContent.model_validate(
+        {
+            "types": [
+                {
+                    "id": "type_" + "9" * 32,
+                    "definition": "CREATE TYPE accounts AS ENUM ('active')",
+                }
+            ],
+            "tables": [
+                {
+                    "id": "table_" + "7" * 32,
+                    "name": "accounts",
+                    "columns": [
+                        {
+                            "id": "column_" + "6" * 32,
+                            "name": "id",
+                            "dataType": "uuid",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    with pytest.raises(DesignValidationError, match="type, table, and view names"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=collision),
+        )
+
+    cycle = SchemiiDesignContent.model_validate(
+        {
+            "types": [
+                {
+                    "id": "type_" + "9" * 32,
+                    "definition": "CREATE DOMAIN first_domain AS second_domain",
+                },
+                {
+                    "id": "type_" + "8" * 32,
+                    "definition": "CREATE DOMAIN second_domain AS first_domain",
+                },
+            ]
+        }
+    )
+    with pytest.raises(DesignValidationError, match="circular"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=cycle),
+        )
+
+
 def test_routine_export_uses_derived_identity_signature() -> None:
     parsed = SchemiiDesignContent.model_validate(
         {

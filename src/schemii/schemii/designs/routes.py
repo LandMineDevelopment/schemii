@@ -18,6 +18,10 @@ from schemii.common.postgres.trigger_analysis import (
     TriggerDefinitionError,
     analyze_trigger_definition,
 )
+from schemii.common.postgres.type_analysis import (
+    TypeDefinitionError,
+    analyze_type_definition,
+)
 from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
 
 from .export import export_design
@@ -33,6 +37,8 @@ from .models import (
     DesignRoutineAnalysisRequest,
     DesignTriggerAnalysis,
     DesignTriggerAnalysisRequest,
+    DesignTypeAnalysis,
+    DesignTypeAnalysisRequest,
     DesignViewAnalysis,
     DesignViewAnalysisRequest,
 )
@@ -129,6 +135,42 @@ def replace_workspace_design(
         raise _design_conflict(error) from error
     except DesignValidationError as error:
         raise _invalid_design(error) from error
+
+
+@router.post("/design/type-analysis", response_model=DesignTypeAnalysis)
+def analyze_workspace_type(
+    workspace_id: str,
+    body: DesignTypeAnalysisRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignTypeAnalysis:
+    """Derive an enum or domain contract from SQL without contacting PostgreSQL."""
+
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        contract = analyze_type_definition(body.definition)
+    except TypeDefinitionError as error:
+        raise ApiProblem(
+            422,
+            "invalid_type_definition",
+            str(error),
+            details={"reason": error.code},
+        ) from error
+    return DesignTypeAnalysis.model_validate(
+        {
+            "name": contract.name,
+            "kind": contract.kind,
+            "enumValues": list(contract.enum_values),
+            "baseType": contract.base_type,
+            "defaultExpression": contract.default_expression,
+            "notNull": contract.not_null,
+            "checks": [
+                {"name": check.name, "expression": check.expression}
+                for check in contract.checks
+            ],
+            "collation": contract.collation,
+        }
+    )
 
 
 @router.post("/design/view-analysis", response_model=DesignViewAnalysis)

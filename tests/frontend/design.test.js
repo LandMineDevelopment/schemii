@@ -7,6 +7,7 @@ import {
   createDesignTable,
   deleteDesignRoutine,
   deleteDesignTrigger,
+  deleteDesignType,
   deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
@@ -22,6 +23,7 @@ import {
   saveDesignKey,
   saveDesignRoutine,
   saveDesignTrigger,
+  saveDesignType,
   saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
@@ -125,6 +127,41 @@ test("routine authoring stores source only and retains stable identity on edit",
   assert.equal(edited.content.functions[0].definition, revisedDefinition);
 
   assert.deepEqual(deleteDesignRoutine(edited.content, created.routine.id).functions, []);
+});
+
+test("custom type authoring stores source only and projects server-derived contracts", () => {
+  const base = { types: [], tables: [], relationships: [], functions: [], views: [], triggers: [] };
+  const definition = "CREATE TYPE account_state AS ENUM ('active', 'disabled')";
+  const created = saveDesignType(base, { definition }, () => uuids[0]);
+
+  assert.deepEqual(created.designType, {
+    id: `type_${"1".repeat(32)}`,
+    definition,
+  });
+  created.content.types[0] = {
+    ...created.content.types[0],
+    name: "account_state",
+    kind: "enum",
+    enumValues: ["active", "disabled"],
+    baseType: null,
+    defaultExpression: null,
+    notNull: false,
+    checks: [],
+    collation: null,
+  };
+  const catalog = designToCatalog(
+    { name: "Accounts" },
+    { revision: 1, fingerprint: "a".repeat(64), content: created.content },
+  );
+  assert.equal(catalog.types[0].name, "account_state");
+  assert.deepEqual(catalog.types[0].enumValues, ["active", "disabled"]);
+
+  const revised = saveDesignType(created.content, {
+    typeId: created.designType.id,
+    definition: "CREATE TYPE account_state AS ENUM ('active', 'disabled', 'pending')",
+  });
+  assert.equal(revised.designType.id, created.designType.id);
+  assert.deepEqual(deleteDesignType(revised.content, created.designType.id).types, []);
 });
 
 test("trigger authoring stores source only and projects derived contracts into the catalog", () => {

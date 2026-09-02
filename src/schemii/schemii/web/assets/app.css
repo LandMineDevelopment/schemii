@@ -462,6 +462,19 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .catalog-object-body .ui-button { justify-self: start; color: #9ca8b5; font-size: 7px; }
 .catalog-object-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .catalog-object-actions .ui-button.danger-text { color: #d8969d; }
+.type-dialog-toolbar { display: grid; grid-template-columns: minmax(190px, 1fr) auto auto auto; }
+.type-dialog-toolbar > span { margin-right: 0; white-space: nowrap; }
+.type-filters { display: flex; gap: 3px; }
+.type-filters button { min-height: 32px; padding: 0 8px; border: 1px solid transparent; border-radius: 5px; color: #6f7c8b; background: transparent; font-size: 7px; cursor: pointer; }
+.type-filters button.active { border-color: #51477d; color: #c0adff; background: #1d1930; }
+.catalog-object-group { display: grid; gap: 7px; }
+.catalog-object-group > h3 { margin: 4px 2px 0; color: #777f91; font-size: 7px; text-transform: uppercase; letter-spacing: .1em; }
+.type-object .object-kind { border-color: #584779; color: #b9a0e4; background: #1a1625; }
+.type-enum-values { display: flex; flex-wrap: wrap; gap: 5px; }
+.type-enum-values code { max-width: 100%; padding: 4px 7px; overflow: hidden; border: 1px solid #51477d; border-radius: 5px; color: #c7b5ec; background: #191523; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.type-domain-checks { display: grid; gap: 5px; }
+.type-domain-checks > strong { color: #707d8d; font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
+.type-domain-checks > code { padding: 7px 8px; border: 1px solid #29333f; border-radius: 5px; color: #afbbc7; background: #0a0f14; font: 8px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
 .intro-dialog { width: min(720px, calc(100vw - 28px)); }
 .intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow-y: auto; background: var(--line); }
 .intro-grid article { position: relative; min-height: 145px; padding: 22px; background: #10151c; }
@@ -550,6 +563,10 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .sql-editor-panel footer span { display: none; }
   .ui-dialog__head p { font-size: 8px; }
   .dialog-toolbar { flex-wrap: wrap; }
+  .type-dialog-toolbar { display: flex; }
+  .type-dialog-toolbar > span { margin-right: auto; }
+  .type-filters { order: 3; width: 100%; }
+  .type-filters button { min-height: 38px; flex: 1; }
   .dialog-toolbar button, .manager-actions button { min-height: 40px; }
   .manager-card { grid-template-columns: 1fr; }
   .manager-actions { justify-content: flex-start; }

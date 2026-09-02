@@ -6,6 +6,7 @@ import {
   createDesignTable,
   deleteDesignRoutine,
   deleteDesignTrigger,
+  deleteDesignType,
   deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
@@ -21,6 +22,7 @@ import {
   saveDesignKey,
   saveDesignRoutine,
   saveDesignTrigger,
+  saveDesignType,
   saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
@@ -35,6 +37,7 @@ import {
   renderFunctions,
   renderInspector,
   renderObjects,
+  renderTypes,
   renderViewDetail,
   renderViewsList,
 } from "./catalog.js";
@@ -234,6 +237,19 @@ const elements = {
   designRoutinePreview: byId("design-routine-preview"),
   designRoutineStatus: byId("design-routine-status"),
   saveDesignRoutineButton: byId("save-design-routine-button"),
+  typesButton: byId("types-button"),
+  typesDialog: byId("types-dialog"),
+  typesSearch: byId("types-search"),
+  typesCount: byId("types-count"),
+  typesList: byId("types-list"),
+  createTypeButton: byId("create-type-button"),
+  designTypeDialog: byId("design-type-dialog"),
+  designTypeForm: byId("design-type-form"),
+  designTypeTitle: byId("design-type-title"),
+  designTypeDefinition: byId("design-type-definition"),
+  designTypePreview: byId("design-type-preview"),
+  designTypeStatus: byId("design-type-status"),
+  saveDesignTypeButton: byId("save-design-type-button"),
   designTriggerDialog: byId("design-trigger-dialog"),
   designTriggerForm: byId("design-trigger-form"),
   designTriggerTitle: byId("design-trigger-title"),
@@ -352,6 +368,14 @@ const state = {
   designRoutineAnalysisLoading: false,
   designRoutineAnalysisTimer: null,
   designRoutineAnalysisGeneration: 0,
+  typeFilter: "all",
+  designTypeEditorId: null,
+  designTypeAnalysis: null,
+  designTypeAnalysisDefinition: null,
+  designTypeAnalysisError: null,
+  designTypeAnalysisLoading: false,
+  designTypeAnalysisTimer: null,
+  designTypeAnalysisGeneration: 0,
   designTriggerEditorId: null,
   designTriggerAnalysis: null,
   designTriggerAnalysisDefinition: null,
@@ -477,6 +501,8 @@ function updateDesignControls() {
   elements.deleteTableButton.disabled = !selected || busy;
   elements.createViewButton.disabled = !detached || busy;
   elements.createFunctionButton.disabled = !detached || busy;
+  elements.typesButton.disabled = !detached || busy;
+  elements.createTypeButton.disabled = !detached || busy;
   elements.createTriggerButton.disabled = !detached || busy || !(
     state.design?.content.tables.length || state.design?.content.views.length
   );
@@ -1598,6 +1624,13 @@ function renderCatalogSurfaces() {
     const source = state.catalog?.source === "design" ? "designed" : "live";
     elements.functionsCount.textContent = state.catalog ? `${state.catalog.functions.length} ${source} · open to browse` : "No catalog loaded";
   }
+  if (elements.typesDialog.open) renderTypesBrowser();
+  else {
+    replace(elements.typesList);
+    elements.typesCount.textContent = state.catalog?.source === "design"
+      ? `${state.catalog.types.length} designed · open to browse`
+      : "Open a detached design";
+  }
   if (elements.objectsDialog.open) renderObjectsBrowser();
   else {
     replace(elements.objectsList);
@@ -1882,6 +1915,209 @@ function confirmDeleteDesignView(viewId) {
         state.selectedViewOutputOrdinal = null;
         syncWorkspaceNavigation("replace");
         showToast(`Deleted ${view.name} from design revision ${design.revision}.`);
+      } catch (error) {
+        errorToast(error);
+      } finally {
+        state.designSubmitting = false;
+        updateHeader();
+      }
+    },
+  });
+}
+
+function renderTypesBrowser() {
+  const desired = state.catalog?.source === "design";
+  elements.createTypeButton.hidden = !desired;
+  const result = renderTypes(
+    elements.typesList,
+    state.catalog,
+    elements.typesSearch.value,
+    state.typeFilter,
+    {
+      onEdit: desired ? designType => {
+        elements.typesDialog.close();
+        openDesignTypeEditor(designType.designId);
+      } : null,
+      onDelete: desired ? designType => {
+        elements.typesDialog.close();
+        confirmDeleteDesignType(designType.designId);
+      } : null,
+    },
+  );
+  elements.typesCount.textContent = state.catalog
+    ? `${result.shown} shown · ${result.matching} matching · ${result.total} designed`
+    : "No design loaded";
+}
+
+function renderDesignTypePreview() {
+  replace(elements.designTypePreview);
+  const definition = elements.designTypeDefinition.value.trim();
+  if (!definition) {
+    elements.designTypePreview.append(emptyPanel("TYPE", "Write the type source", "Its enum values or domain contract will appear here."));
+    return;
+  }
+  if (state.designTypeAnalysisLoading) {
+    elements.designTypePreview.append(createStatePanel({ mark: "…", title: "Deriving contract", message: "Parsing the PostgreSQL statement without contacting a database.", surface: true }));
+    return;
+  }
+  if (state.designTypeAnalysisError) {
+    elements.designTypePreview.append(errorPanel(state.designTypeAnalysisError));
+    return;
+  }
+  const contract = state.designTypeAnalysis;
+  if (!contract || state.designTypeAnalysisDefinition !== definition) {
+    elements.designTypePreview.append(createStatePanel({ mark: "SQL", title: "Waiting for valid source", message: "The preview updates after the statement can be parsed.", surface: true }));
+    return;
+  }
+
+  const preview = element("article", { className: "routine-contract" });
+  const identity = element("div", { className: "routine-contract-signature" });
+  identity.append(
+    element("small", { text: contract.kind }),
+    element("code", { text: contract.name }),
+  );
+  preview.append(identity);
+  if (contract.kind === "enum") {
+    preview.append(element("div", { className: "type-enum-values" }, contract.enumValues.map(value => (
+      element("code", { text: value, title: value })
+    ))));
+  } else {
+    const details = element("dl");
+    for (const [label, value] of [
+      ["Base type", contract.baseType],
+      ["Default", contract.defaultExpression || "None"],
+      ["Nullability", contract.notNull ? "NOT NULL" : "Nullable"],
+      ["Collation", contract.collation || "Default"],
+    ]) {
+      details.append(element("dt", { text: label }), element("dd", { text: value }));
+    }
+    preview.append(details);
+    if (contract.checks.length) {
+      const checks = element("div", { className: "type-domain-checks" });
+      checks.append(element("strong", { text: `Checks · ${contract.checks.length}` }));
+      for (const check of contract.checks) {
+        checks.append(element("code", { text: `${check.name ? `${check.name}: ` : ""}${check.expression}` }));
+      }
+      preview.append(checks);
+    }
+  }
+  elements.designTypePreview.append(preview);
+}
+
+async function analyzeDesignTypeDraft() {
+  window.clearTimeout(state.designTypeAnalysisTimer);
+  const definition = elements.designTypeDefinition.value.trim();
+  if (!elements.designTypeDialog.open || !definition || !state.activeWorkspace) {
+    state.designTypeAnalysis = null;
+    state.designTypeAnalysisDefinition = null;
+    state.designTypeAnalysisError = null;
+    state.designTypeAnalysisLoading = false;
+    renderDesignTypePreview();
+    return null;
+  }
+  const generation = ++state.designTypeAnalysisGeneration;
+  const workspaceId = state.activeWorkspace.id;
+  state.designTypeAnalysisLoading = true;
+  state.designTypeAnalysisError = null;
+  renderDesignTypePreview();
+  try {
+    const analysis = await api.analyzeDesignType(workspaceId, { definition });
+    if (generation !== state.designTypeAnalysisGeneration || !elements.designTypeDialog.open) return null;
+    state.designTypeAnalysis = analysis;
+    state.designTypeAnalysisDefinition = definition;
+    return analysis;
+  } catch (error) {
+    if (generation !== state.designTypeAnalysisGeneration || !elements.designTypeDialog.open) return null;
+    state.designTypeAnalysis = null;
+    state.designTypeAnalysisDefinition = null;
+    state.designTypeAnalysisError = error;
+    return null;
+  } finally {
+    if (generation === state.designTypeAnalysisGeneration) {
+      state.designTypeAnalysisLoading = false;
+      renderDesignTypePreview();
+    }
+  }
+}
+
+function scheduleDesignTypeAnalysis(delay = 280) {
+  window.clearTimeout(state.designTypeAnalysisTimer);
+  state.designTypeAnalysisTimer = window.setTimeout(analyzeDesignTypeDraft, delay);
+}
+
+function openDesignTypeEditor(typeId = null) {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  const designType = typeId ? (state.design.content.types || []).find(item => item.id === typeId) : null;
+  if (typeId && !designType) {
+    showToast("The selected type is no longer in this design.", { error: true });
+    return;
+  }
+  state.designTypeEditorId = designType?.id || null;
+  state.designTypeAnalysisGeneration += 1;
+  state.designTypeAnalysis = null;
+  state.designTypeAnalysisDefinition = null;
+  state.designTypeAnalysisError = null;
+  state.designTypeAnalysisLoading = false;
+  elements.designTypeForm.reset();
+  replace(elements.designTypeStatus);
+  elements.designTypeTitle.textContent = designType ? `Edit ${designType.name}` : "Create enum or domain";
+  elements.saveDesignTypeButton.textContent = designType ? "Save type" : "Create type";
+  elements.designTypeDefinition.value = designType?.definition || "CREATE TYPE order_status AS ENUM (\n    'draft',\n    'submitted',\n    'fulfilled',\n    'cancelled'\n);";
+  openDialog(elements.designTypeDialog);
+  renderDesignTypePreview();
+  scheduleDesignTypeAnalysis(0);
+  elements.designTypeDefinition.focus();
+}
+
+async function submitDesignType(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  const editing = Boolean(state.designTypeEditorId);
+  const definition = elements.designTypeDefinition.value.trim();
+  state.designSubmitting = true;
+  elements.saveDesignTypeButton.disabled = true;
+  updateDesignControls();
+  replace(elements.designTypeStatus, element("span", { text: "Deriving the contract and saving the custom type…" }));
+  try {
+    const analysis = await api.analyzeDesignType(state.activeWorkspace.id, { definition });
+    const result = saveDesignType(state.design.content, {
+      typeId: state.designTypeEditorId,
+      definition,
+    });
+    if (!await flushLayoutBeforeTransition()) return;
+    const design = await replaceActiveDesign(result.content);
+    if (!design) return;
+    elements.designTypeDialog.close();
+    renderTypesBrowser();
+    openDialog(elements.typesDialog);
+    showToast(`${editing ? "Updated" : "Created"} ${analysis.kind} ${analysis.name} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designTypeStatus, conflictPanel(error));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignTypeButton.disabled = false;
+    updateHeader();
+  }
+}
+
+function confirmDeleteDesignType(typeId) {
+  const designType = state.design?.content.types?.find(item => item.id === typeId);
+  if (!designType || state.designSubmitting) return;
+  askConfirmation({
+    title: "Delete custom type",
+    message: `Delete ${designType.kind} “${designType.name}” from the desired schema? Update any columns or source definitions that use it first.`,
+    label: "Delete type",
+    callback: async () => {
+      if (!await flushLayoutBeforeTransition()) return;
+      state.designSubmitting = true;
+      updateDesignControls();
+      try {
+        const content = deleteDesignType(state.design.content, designType.id);
+        const design = await replaceActiveDesign(content);
+        if (!design) return;
+        renderTypesBrowser();
+        openDialog(elements.typesDialog);
+        showToast(`Deleted ${designType.name} from design revision ${design.revision}.`);
       } catch (error) {
         errorToast(error);
       } finally {
@@ -2286,7 +2522,7 @@ function renderObjectsBrowser() {
   const desired = state.catalog?.source === "design";
   elements.objectsSource.textContent = desired ? "Desired schema" : "Live PostgreSQL catalog";
   elements.objectsCopy.textContent = desired
-    ? "Search the desired schema and edit source-derived triggers from the same catalog used by the canvas."
+    ? "Search types, relations, constraints, routines, and source-derived triggers from the same desired schema used by the canvas."
     : "Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.";
   elements.createTriggerButton.hidden = !desired;
   const result = renderObjects(elements.objectsList, state.catalog, elements.objectsSearch.value, object => {
@@ -2301,6 +2537,9 @@ function renderObjectsBrowser() {
     } else if (object.target === "trigger") {
       elements.objectsDialog.close();
       openDesignTriggerEditor(object.trigger.designId);
+    } else if (object.target === "type") {
+      elements.objectsDialog.close();
+      openDesignTypeEditor(object.designType.designId);
     } else {
       elements.objectsDialog.close();
       renderFunctionsBrowser();
@@ -3948,6 +4187,35 @@ function bindEvents() {
     state.designRoutineAnalysisDefinition = null;
     state.designRoutineAnalysisError = null;
     state.designRoutineAnalysisLoading = false;
+  });
+  elements.typesButton.addEventListener("click", () => {
+    renderTypesBrowser();
+    openDialog(elements.typesDialog);
+  });
+  elements.typesSearch.addEventListener("input", renderTypesBrowser);
+  document.querySelectorAll("[data-type-filter]").forEach(button => button.addEventListener("click", () => {
+    state.typeFilter = button.dataset.typeFilter;
+    document.querySelectorAll("[data-type-filter]").forEach(item => {
+      const active = item.dataset.typeFilter === state.typeFilter;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    renderTypesBrowser();
+  }));
+  elements.createTypeButton.addEventListener("click", () => {
+    elements.typesDialog.close();
+    openDesignTypeEditor();
+  });
+  elements.designTypeForm.addEventListener("submit", submitDesignType);
+  elements.designTypeDefinition.addEventListener("input", () => scheduleDesignTypeAnalysis());
+  elements.designTypeDialog.addEventListener("close", () => {
+    window.clearTimeout(state.designTypeAnalysisTimer);
+    state.designTypeAnalysisGeneration += 1;
+    state.designTypeEditorId = null;
+    state.designTypeAnalysis = null;
+    state.designTypeAnalysisDefinition = null;
+    state.designTypeAnalysisError = null;
+    state.designTypeAnalysisLoading = false;
   });
   elements.createTriggerButton.addEventListener("click", () => {
     elements.objectsDialog.close();

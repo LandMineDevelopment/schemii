@@ -10,8 +10,10 @@ from typing import Any, Protocol, runtime_checkable
 
 from schemii.common.errors import MetadataStorageUnavailableError
 from schemii.common.postgres.query_analysis import QueryDefinitionError, parse_query_definition
+from schemii.common.postgres.type_analysis import analyze_type_definition
 
 from .models import (
+    DesignType,
     SchemiiDesign,
     SchemiiDesignContent,
     SchemiiDesignLayout,
@@ -72,6 +74,10 @@ def authored_content_document(
     """Serialize only authored inputs; SQL object metadata is always re-derived."""
 
     document = content.model_dump(mode="json", by_alias=by_alias)
+    document["types"] = [
+        {"id": design_type.id, "definition": design_type.definition}
+        for design_type in content.types
+    ]
     document["functions"] = [
         {"id": routine.id, "definition": routine.definition}
         for routine in content.functions
@@ -129,14 +135,62 @@ def _safe_fragment(value: str, *, category: str) -> None:
         )
 
 
+def design_types_in_dependency_order(content: SchemiiDesignContent) -> list[DesignType]:
+    """Order domains after designed base types while retaining authored order."""
+
+    type_by_name = {design_type.name: design_type for design_type in content.types}
+    dependency_by_name: dict[str, str | None] = {}
+    for design_type in content.types:
+        contract = analyze_type_definition(design_type.definition)
+        dependency = contract.base_type_name
+        dependency_by_name[design_type.name] = (
+            dependency if dependency in type_by_name else None
+        )
+
+    ordered: list[DesignType] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            raise DesignValidationError(
+                "Designed domains cannot contain circular base-type dependencies",
+                details={"type": name},
+            )
+        visiting.add(name)
+        dependency = dependency_by_name[name]
+        if dependency is not None:
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(type_by_name[name])
+
+    for design_type in content.types:
+        visit(design_type.name)
+    return ordered
+
+
 def validate_design_content(content: SchemiiDesignContent) -> None:
     """Validate cross-object invariants Pydantic cannot express locally."""
 
     all_ids: list[str] = []
+    _unique([design_type.name for design_type in content.types], category="type names")
     relation_names = [table.name for table in content.tables] + [
         view.name for view in content.views
     ]
-    _unique(relation_names, category="table and view names")
+    _unique(
+        [*[design_type.name for design_type in content.types], *relation_names],
+        category="type, table, and view names",
+    )
+    for design_type in content.types:
+        _valid_identifier(design_type.name, category="type name")
+        for check in design_type.checks:
+            if check.name is not None:
+                _valid_identifier(check.name, category="domain constraint name")
+        all_ids.append(design_type.id)
+    design_types_in_dependency_order(content)
 
     table_by_id = {table.id: table for table in content.tables}
     for table in content.tables:

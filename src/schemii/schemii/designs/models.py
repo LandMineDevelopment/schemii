@@ -8,12 +8,97 @@ from schemii.common.api.models import ApiModel
 from schemii.common.postgres.query_models import QueryAnalysis
 from schemii.common.postgres.routine_analysis import analyze_routine_definition
 from schemii.common.postgres.trigger_analysis import analyze_trigger_definition
+from schemii.common.postgres.type_analysis import analyze_type_definition
 
 
 DesignIdentifier = Annotated[str, Field(min_length=1, max_length=63)]
 DesignObjectId = Annotated[str, Field(pattern=r"^[a-z]+_[0-9a-f]{32}$")]
 DesignExpression = Annotated[str, Field(max_length=262_144)]
 DesignRevision = Annotated[int, Field(strict=True, ge=0)]
+
+
+class DesignDomainCheck(ApiModel):
+    """One source-derived domain CHECK constraint."""
+
+    name: DesignIdentifier | None = None
+    expression: DesignExpression
+
+
+class DesignType(ApiModel):
+    """Desired enum or domain whose complete contract is derived from SQL."""
+
+    id: DesignObjectId
+    name: DesignIdentifier
+    kind: Literal["enum", "domain"]
+    enum_values: list[Annotated[str, Field(max_length=63)]] = Field(
+        default_factory=list,
+        max_length=10_000,
+    )
+    base_type: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+    default_expression: DesignExpression | None = None
+    not_null: bool = False
+    checks: list[DesignDomainCheck] = Field(default_factory=list, max_length=10_000)
+    collation: Annotated[str, Field(min_length=1, max_length=255)] | None = None
+    definition: DesignExpression
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_contract_from_definition(cls, value: object) -> object:
+        """Discard submitted type metadata and derive it from source."""
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        definition = normalized.get("definition")
+        if not isinstance(definition, str):
+            return normalized
+        contract = analyze_type_definition(definition)
+        for key in (
+            "name",
+            "kind",
+            "enumValues",
+            "enum_values",
+            "baseType",
+            "base_type",
+            "defaultExpression",
+            "default_expression",
+            "notNull",
+            "not_null",
+            "checks",
+            "collation",
+        ):
+            normalized.pop(key, None)
+        normalized.update(
+            {
+                "name": contract.name,
+                "kind": contract.kind,
+                "enum_values": list(contract.enum_values),
+                "base_type": contract.base_type,
+                "default_expression": contract.default_expression,
+                "not_null": contract.not_null,
+                "checks": [
+                    {"name": check.name, "expression": check.expression}
+                    for check in contract.checks
+                ],
+                "collation": contract.collation,
+            }
+        )
+        return normalized
+
+
+class DesignTypeAnalysisRequest(ApiModel):
+    definition: DesignExpression
+
+
+class DesignTypeAnalysis(ApiModel):
+    name: DesignIdentifier
+    kind: Literal["enum", "domain"]
+    enum_values: list[Annotated[str, Field(max_length=63)]]
+    base_type: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+    default_expression: DesignExpression | None = None
+    not_null: bool
+    checks: list[DesignDomainCheck]
+    collation: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
 
 class DesignColumn(ApiModel):
@@ -310,6 +395,7 @@ class DesignViewAnalysis(QueryAnalysis):
 class SchemiiDesignContent(ApiModel):
     """Database-independent desired schema authored by the user."""
 
+    types: list[DesignType] = Field(default_factory=list, max_length=5_000)
     tables: list[DesignTable] = Field(default_factory=list, max_length=10_000)
     relationships: list[DesignRelationship] = Field(default_factory=list, max_length=20_000)
     functions: list[DesignFunction] = Field(default_factory=list, max_length=5_000)
