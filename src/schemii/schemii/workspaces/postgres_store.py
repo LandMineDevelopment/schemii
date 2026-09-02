@@ -572,11 +572,21 @@ class PostgresWorkspaceRepository:
             """
             SELECT EXISTS (
                 SELECT 1
-                FROM schemii.migration_executions
-                WHERE owner_id = %s AND workspace_id = %s
-                  AND status IN (
-                      'reserved', 'applying', 'uncertain',
-                      'reconciliation_required'
+                FROM schemii.migration_executions AS execution
+                LEFT JOIN schemii.migration_syncs AS sync
+                  ON sync.execution_id = execution.id
+                WHERE execution.owner_id = %s
+                  AND execution.workspace_id = %s
+                  AND (
+                      execution.status IN (
+                          'reserved', 'applying', 'uncertain',
+                          'reconciliation_required'
+                      )
+                      OR (
+                          execution.status = 'succeeded'
+                          AND execution.commit_outcome = 'committed'
+                          AND sync.status IN ('pending', 'failed')
+                      )
                   )
             ) AS active
             """,
@@ -633,10 +643,19 @@ class PostgresWorkspaceRepository:
             JOIN schemii.workspace_targets AS target
               ON target.owner_id = execution.owner_id
              AND target.workspace_id = execution.workspace_id
+            LEFT JOIN schemii.migration_syncs AS sync
+              ON sync.execution_id = execution.id
             WHERE target.owner_id = %s AND target.connection_id = %s
-              AND execution.status IN (
-                  'reserved', 'applying', 'uncertain',
-                  'reconciliation_required'
+              AND (
+                  execution.status IN (
+                      'reserved', 'applying', 'uncertain',
+                      'reconciliation_required'
+                  )
+                  OR (
+                      execution.status = 'succeeded'
+                      AND execution.commit_outcome = 'committed'
+                      AND sync.status IN ('pending', 'failed')
+                  )
               )
             """,
             (owner_id, connection_id),

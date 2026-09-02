@@ -18,6 +18,8 @@ from schemii.common.errors import MetadataStorageUnavailableError
 from schemii.common.metadata.factory import MetadataRepositories
 from schemii.main import ApplicationServices, create_app
 from schemii.schemii.designs.store import InMemoryDesignRepository
+from schemii.schemii.migrations.repository import InMemoryMigrationRepository
+from schemii.schemii.migrations.service import MigrationService
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
 
@@ -34,16 +36,26 @@ def application_services(
     designs = InMemoryDesignRepository()
     workspaces = InMemoryWorkspaceRepository(designs=designs)
     selected_metadata = metadata or MetadataRepositories(connections=connections)
-    return ApplicationServices(
-        metadata=selected_metadata,
-        connections=ConnectionService(
-            selected_metadata.connections,
-            (workspaces,),
-            target_policy=target_policy or selected_metadata.target_policy,
-        ),
-        postgres=UnusedPostgresGateway(),
+    connection_service = ConnectionService(
+        selected_metadata.connections,
+        (workspaces,),
+        target_policy=target_policy or selected_metadata.target_policy,
+    )
+    postgres = UnusedPostgresGateway()
+    migrations = MigrationService(
+        repository=InMemoryMigrationRepository(designs),
+        connections=connection_service,
+        postgres=postgres,
         workspaces=workspaces,
         designs=designs,
+    )
+    return ApplicationServices(
+        metadata=selected_metadata,
+        connections=connection_service,
+        postgres=postgres,
+        workspaces=workspaces,
+        designs=designs,
+        migrations=migrations,
     )
 
 

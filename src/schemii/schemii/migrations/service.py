@@ -4,19 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.postgres import PostgresGateway
-from schemii.common.postgres.errors import (
-    PostgresCommitUncertainError,
-    PostgresGatewayError,
-    PostgresMigrationExecutionError,
-    PostgresMigrationStaleError,
-)
+from schemii.common.postgres.errors import PostgresGatewayError
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.importer import ImportedDesign
 from schemii.schemii.designs.history import design_change_summary
@@ -48,12 +42,13 @@ from schemii.schemii.workspaces.store import (
 )
 from schemii.schemii.workspaces.models import SchemiiWorkspace, SchemiiWorkspaceCreate
 
+from .errors import MigrationServiceError, migration_storage_error
+from .execution import MigrationExecutionCoordinator
 from .models import (
     MigrationDriftResolution,
     MigrationDriftResolutionRequest,
     MigrationExecution,
     MigrationExecutionCreate,
-    MigrationExecutionStatus,
     MigrationPlan,
     MigrationPlanCreate,
     MigrationReconciliationRequest,
@@ -77,55 +72,17 @@ from .repository import (
 )
 
 
-class MigrationServiceError(RuntimeError):
-    def __init__(
-        self,
-        status: int,
-        code: str,
-        message: str,
-        *,
-        details: dict[str, Any] | None = None,
-        retryable: bool = False,
-    ) -> None:
-        self.status = status
-        self.code = code
-        self.details = details or {}
-        self.retryable = retryable
-        super().__init__(message)
-
-
 def _install_workspace_execution_guards(
     workspaces: WorkspaceRepository,
     repository: MigrationRepository,
 ) -> None:
     workspace_guard = getattr(workspaces, "set_mutation_guard", None)
     if callable(workspace_guard):
-        workspace_guard(repository.has_active_execution)
+        workspace_guard(repository.blocks_workspace_lifecycle)
     claim_guard = getattr(workspaces, "execution_claim_guard", None)
     install_claim_guard = getattr(repository, "set_workspace_claim_guard", None)
     if callable(claim_guard) and callable(install_claim_guard):
         install_claim_guard(claim_guard)
-
-
-def _migration_storage_error(
-    error: MigrationStorageUnavailableError,
-) -> MigrationServiceError:
-    details = {
-        key: value
-        for key, value in {
-            "sqlstate": error.sqlstate,
-            "constraint": error.constraint,
-            "errorType": error.error_type,
-        }.items()
-        if value is not None
-    }
-    return MigrationServiceError(
-        503,
-        "migration_metadata_unavailable",
-        "Migration metadata is temporarily unavailable",
-        details=details,
-        retryable=True,
-    )
 
 
 def _create_import_workspace(
@@ -177,7 +134,7 @@ def _create_import_workspace(
             },
         ) from error
     except MigrationStorageUnavailableError as error:
-        raise _migration_storage_error(error) from error
+        raise migration_storage_error(error) from error
 
 
 class MigrationService:
@@ -192,7 +149,7 @@ class MigrationService:
         workspaces: WorkspaceRepository,
         designs: DesignRepository,
         plan_ttl: timedelta = timedelta(minutes=15),
-        execution_lease_ttl: timedelta = timedelta(minutes=30),
+        execution_lease_ttl: timedelta = timedelta(minutes=2),
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if plan_ttl <= timedelta(0):
@@ -205,9 +162,25 @@ class MigrationService:
         self._workspaces = workspaces
         self._designs = designs
         self._plan_ttl = plan_ttl
-        self._execution_lease_ttl = execution_lease_ttl
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._execution_waker: Callable[[], None] | None = None
+        self._execution_coordinator = MigrationExecutionCoordinator(
+            repository=repository,
+            connections=connections,
+            postgres=postgres,
+            workspaces=workspaces,
+            designs=designs,
+            lease_ttl=execution_lease_ttl,
+            clock=self._clock,
+        )
         _install_workspace_execution_guards(self._workspaces, self._repository)
+
+    @property
+    def execution_coordinator(self) -> MigrationExecutionCoordinator:
+        return self._execution_coordinator
+
+    def set_execution_waker(self, waker: Callable[[], None] | None) -> None:
+        self._execution_waker = waker
 
     def create_import_workspace(
         self,
@@ -335,41 +308,6 @@ class MigrationService:
             code = "baseline_changed" if error.details.get("reason") == "baseline_changed" else "invalid_design"
             raise MigrationServiceError(409, code, str(error), details=error.details) from error
         return self._history_mutation(owner_id, workspace_id, design)
-
-    def record_import_baseline(
-        self,
-        owner_id: str,
-        workspace_id: str,
-        connection_revision: int,
-        catalog: Any,
-    ) -> None:
-        """Persist the import snapshot immediately so later drift is observable."""
-
-        if self._repository.current_baseline(owner_id, workspace_id) is not None:
-            return
-        workspace = self._workspace(owner_id, workspace_id)
-        design = self._design(owner_id, workspace_id)
-        if workspace.connection_id is None or workspace.database is None or workspace.namespace is None:
-            raise MigrationServiceError(409, "workspace_target_required", "Imported workspaces require a PostgreSQL target")
-        content, warnings, complete = new_baseline_content(catalog, design.content)
-        try:
-            self._repository.create_baseline(
-                owner_id=owner_id,
-                workspace_id=workspace_id,
-                connection_id=workspace.connection_id,
-                connection_revision=connection_revision,
-                database=workspace.database,
-                namespace=workspace.namespace,
-                design_revision=design.revision,
-                content=content,
-                catalog=catalog,
-                complete=complete,
-                issues=[item.model_dump(mode="json", by_alias=True) for item in warnings],
-                source="import",
-                expected_predecessor_id=None,
-            )
-        except MigrationStorageUnavailableError as error:
-            raise self._storage_error(error) from error
 
     def create_plan(
         self,
@@ -717,46 +655,12 @@ class MigrationService:
         plan_id: str,
         request: MigrationExecutionCreate,
     ) -> MigrationExecution:
-        """Reserve and execute one immutable server-derived plan."""
-
+        """Durably reserve one immutable plan and wake the execution worker."""
         record = self._plan(owner_id, plan_id)
-        lease_owner = f"mls_{secrets.token_hex(16)}"
-        try:
-            claim = self._repository.claim_execution(
-                owner_id,
-                plan_id,
-                request.review_digest,
-                request.confirm_destructive,
-                request.confirm_external_changes,
-                claimed_at=self._clock(),
-                lease_owner=lease_owner,
-                lease_expires_at=self._lease_deadline(),
-            )
-        except MigrationConflictError as error:
-            raise self._repository_conflict(error) from error
-        except MigrationStorageUnavailableError as error:
-            raise self._storage_error(error) from error
-        if not claim.claimed_now:
-            return claim.record.execution
-        execution_record = claim.record
-        # The reservation is durable before target I/O. Execution support is
-        # deliberately capability-checked so a read-only fake gateway cannot
-        # accidentally appear to have applied a plan.
-        executor = getattr(self._postgres, "execute_migration", None)
-        if not callable(executor):
-            self._transition_execution(
-                execution_record,
-                status="failed",
-                commit_outcome="rolled_back",
-                error_code="postgres_migration_execution_unavailable",
-                error_detail={"beforeTargetMutation": True},
-            )
-            raise MigrationServiceError(
-                503,
-                "postgres_migration_execution_unavailable",
-                "The configured PostgreSQL gateway does not support migrations",
-            )
-        return self._execute_claimed(owner_id, record, execution_record, executor)
+        reservation = self._execution_coordinator.reserve(owner_id, record, request)
+        if self._execution_waker is not None:
+            self._execution_waker()
+        return reservation.record.execution
 
     def get_execution(self, owner_id: str, execution_id: str) -> MigrationExecution:
         try:
@@ -769,174 +673,9 @@ class MigrationService:
         return self._repository.list_executions(owner_id, workspace_id, limit)
 
     def list_recoverable_executions(self, limit: int = 100) -> list[ExecutionRecord]:
-        """Return abandoned active attempts for a future recovery dispatcher."""
+        """Return queued or abandoned target attempts visible to recovery."""
 
-        if not 1 <= limit <= 250:
-            raise ValueError("recoverable execution limit must be between 1 and 250")
-        return self._repository.list_recoverable_executions(self._clock(), limit)
-
-    def _execute_claimed(
-        self,
-        owner_id: str,
-        record: PlanRecord,
-        execution_record: ExecutionRecord,
-        executor: Any,
-    ) -> MigrationExecution:
-        plan = record.plan
-        workspace = self._workspace(owner_id, plan.workspace_id)
-        design = self._design(owner_id, plan.workspace_id)
-        if (
-            workspace.revision != plan.workspace_revision
-            or workspace.connection_id != record.authority.connection_id
-            or workspace.database != record.authority.database
-            or workspace.namespace != record.authority.namespace
-        ):
-            return self._fail_before_apply(
-                execution_record,
-                "workspace_changed",
-                "The workspace target changed after the migration review",
-            )
-        if design.revision != plan.design_revision or design.fingerprint != plan.design_fingerprint:
-            return self._fail_before_apply(
-                execution_record,
-                "design_changed",
-                "The desired design changed after the migration review",
-            )
-
-        intended: dict[str, Any] = {}
-
-        def on_started(transaction_id: str, target_identity: dict[str, Any]) -> None:
-            # This callback runs after the target advisory lock and the final
-            # live-catalog comparison, but before the first DDL statement.
-            nonlocal execution_record
-            execution_record = self._transition_execution(
-                execution_record,
-                status="applying",
-                transaction_id=transaction_id,
-                target_identity=target_identity,
-            )
-
-        def on_intended(catalog: Any) -> None:
-            nonlocal execution_record
-            candidate, issues, complete = new_baseline_content(
-                catalog,
-                record.authority.merged_content,
-            )
-            remaining, blockers = compile_migration_steps(
-                record.authority.namespace,
-                candidate,
-                record.authority.merged_content,
-            )
-            if not complete or issues or remaining or blockers:
-                raise MigrationServiceError(
-                    409,
-                    "migration_result_mismatch",
-                    "PostgreSQL did not produce the complete reviewed schema; the transaction was rolled back",
-                    details={
-                        "remainingStepCount": len(remaining),
-                        "issues": [item.model_dump(mode="json", by_alias=True) for item in issues],
-                        "blockers": [item.model_dump(mode="json", by_alias=True) for item in blockers],
-                    },
-                )
-            intended.update(
-                {
-                    "catalog": catalog.model_dump(mode="json"),
-                    "content": candidate.model_dump(mode="json"),
-                    "catalogFingerprint": catalog.fingerprint,
-                    "designFingerprint": content_fingerprint(candidate),
-                }
-            )
-            execution_record = self._transition_execution(
-                execution_record,
-                status="applying",
-                completed_step_count=len(plan.steps),
-                intended_result=intended,
-            )
-
-        try:
-            with self._connections.use(owner_id, record.authority.connection_id) as connection:
-                if connection.revision != record.authority.connection_revision:
-                    return self._fail_before_apply(
-                        execution_record,
-                        "connection_changed",
-                        "The PostgreSQL connection changed after the migration review",
-                    )
-                result = executor(
-                    connection,
-                    record.authority.namespace,
-                    record.authority.live_catalog.fingerprint,
-                    [step.sql for step in plan.steps],
-                    on_started=on_started,
-                    on_intended=on_intended,
-                )
-        except PostgresMigrationStaleError as error:
-            execution_record = self._transition_execution(
-                execution_record,
-                status="failed",
-                commit_outcome="rolled_back",
-                error_code=error.code,
-                error_detail={"currentCatalogFingerprint": error.current_fingerprint},
-            )
-            raise MigrationServiceError(
-                409,
-                error.code,
-                str(error),
-                details={"currentCatalogFingerprint": error.current_fingerprint},
-            ) from error
-        except PostgresCommitUncertainError as error:
-            uncertain = self._transition_execution(
-                execution_record,
-                status="uncertain",
-                commit_outcome="uncertain",
-                error_code=error.code,
-                error_detail={"reconciliationRequired": True},
-            )
-            return uncertain.execution
-        except MigrationServiceError:
-            raise
-        except PostgresMigrationExecutionError as error:
-            callback_error = error.__cause__
-            if isinstance(callback_error, MigrationServiceError):
-                if callback_error.code == "migration_result_mismatch":
-                    self._transition_execution(
-                        execution_record,
-                        status="failed",
-                        commit_outcome="rolled_back",
-                        error_code=callback_error.code,
-                        error_detail=callback_error.details,
-                    )
-                raise callback_error from error
-            execution_record = self._transition_execution(
-                execution_record,
-                status="failed",
-                completed_step_count=error.completed_step_count,
-                commit_outcome="rolled_back",
-                error_code=error.code,
-            )
-            raise MigrationServiceError(409, error.code, str(error)) from error
-        except (ConnectionNotFoundError, PostgresGatewayError) as error:
-            code = getattr(error, "code", "connection_not_found")
-            self._transition_execution(
-                execution_record,
-                status="failed",
-                commit_outcome="rolled_back",
-                error_code=code,
-            )
-            raise MigrationServiceError(502, code, str(error), retryable=True) from error
-
-        committed = self._transition_execution(
-            execution_record,
-            status="succeeded",
-            completed_step_count=result.completed_step_count,
-            transaction_id=result.transaction_id,
-            target_identity=result.target_identity,
-            intended_result=intended,
-            commit_outcome="committed",
-            sync_status="pending",
-            error_code=None,
-            error_detail=None,
-        )
-        return self._sync_committed(owner_id, record, committed)
+        return self._execution_coordinator.list_recoverable(limit)
 
     def reconcile_execution(
         self,
@@ -944,171 +683,11 @@ class MigrationService:
         execution_id: str,
         request: MigrationReconciliationRequest,
     ) -> MigrationExecution:
-        execution_record = self._execution(owner_id, execution_id)
-        execution = execution_record.execution
-        if execution.revision != request.expected_execution_revision:
-            raise MigrationServiceError(
-                409,
-                "migration_execution_changed",
-                "The migration execution changed after it was opened",
-                details={"currentExecutionRevision": execution.revision},
-            )
-        recovery_time = execution_record.lease_expires_at
-        now = self._clock()
-        if (
-            execution.status in {"reserved", "applying"}
-            and recovery_time is not None
-            and recovery_time > now
-        ):
-            raise MigrationServiceError(
-                409,
-                "migration_execution_lease_active",
-                "The migration execution is still owned by an active worker",
-                details={"recoveryAvailableAt": recovery_time},
-                retryable=True,
-            )
-        if execution.commit_outcome == "committed":
-            return self._sync_committed(
-                owner_id,
-                self._plan(owner_id, execution.plan_id),
-                execution_record,
-            )
-        if execution.status not in {
-            "reserved",
-            "applying",
-            "uncertain",
-            "reconciliation_required",
-        }:
-            return execution
-        if not execution.transaction_id:
-            return self._transition_execution(
-                execution_record,
-                status="failed",
-                commit_outcome="rolled_back",
-                error_code="migration_never_started",
-                recover_expired=True,
-            ).execution
-        plan = self._plan(owner_id, execution.plan_id)
-        status_reader = getattr(self._postgres, "transaction_status", None)
-        if not callable(status_reader):
-            raise MigrationServiceError(
-                503,
-                "postgres_transaction_status_unavailable",
-                "The configured PostgreSQL gateway cannot reconcile transactions",
-            )
-        try:
-            with self._connections.use(owner_id, plan.authority.connection_id) as connection:
-                status = status_reader(connection, execution.transaction_id)
-        except (ConnectionNotFoundError, PostgresGatewayError) as error:
-            raise MigrationServiceError(502, getattr(error, "code", "postgres_reconciliation_failed"), str(error), retryable=True) from error
-        if status == "aborted":
-            return self._transition_execution(
-                execution_record,
-                status="failed",
-                commit_outcome="rolled_back",
-                error_code="migration_transaction_aborted",
-                recover_expired=True,
-            ).execution
-        if status == "in progress":
-            return self._transition_execution(
-                execution_record,
-                status="reconciliation_required",
-                commit_outcome="uncertain",
-                error_code="migration_transaction_in_progress",
-                recover_expired=True,
-            ).execution
-        committed = self._transition_execution(
-            execution_record,
-            status="succeeded",
-            commit_outcome="committed",
-            sync_status="pending",
-            error_code=None,
-            error_detail=None,
-            recover_expired=True,
+        return self._execution_coordinator.reconcile(
+            owner_id,
+            execution_id,
+            request,
         )
-        return self._sync_committed(owner_id, plan, committed)
-
-    def _sync_committed(
-        self,
-        owner_id: str,
-        record: PlanRecord,
-        execution_record: Any,
-    ) -> MigrationExecution:
-        execution = execution_record.execution
-        intended = execution_record.intended_result
-        if not intended:
-            return self._transition_execution(
-                execution_record,
-                status="reconciliation_required",
-                commit_outcome="committed",
-                sync_status="failed",
-                error_code="migration_result_evidence_missing",
-            ).execution
-        merged = SchemiiDesignContent.model_validate(intended["content"])
-        catalog = record.authority.live_catalog.model_validate(intended["catalog"])
-        design = self._design(owner_id, record.plan.workspace_id)
-        if design.fingerprint != content_fingerprint(merged):
-            if design.revision != record.plan.design_revision or design.fingerprint != record.plan.design_fingerprint:
-                return self._transition_execution(
-                    execution_record,
-                    status="succeeded",
-                    commit_outcome="committed",
-                    sync_status="conflict",
-                    error_code="post_commit_design_changed",
-                ).execution
-            try:
-                design = self._designs.replace(
-                    owner_id,
-                    record.plan.workspace_id,
-                    SchemiiDesignReplace(
-                        expected_design_revision=design.revision,
-                        content=merged,
-                    ),
-                    operation_kind="checkpoint",
-                )
-            except DesignConflictError:
-                return self._transition_execution(
-                    execution_record,
-                    status="succeeded",
-                    commit_outcome="committed",
-                    sync_status="conflict",
-                    error_code="post_commit_design_changed",
-                ).execution
-        baseline = self._repository.current_baseline(owner_id, record.plan.workspace_id)
-        if baseline is None or baseline.catalog.fingerprint != catalog.fingerprint:
-            try:
-                self._repository.create_baseline(
-                    owner_id=owner_id,
-                    workspace_id=record.plan.workspace_id,
-                    connection_id=record.authority.connection_id,
-                    connection_revision=record.authority.connection_revision,
-                    database=record.authority.database,
-                    namespace=record.authority.namespace,
-                    design_revision=design.revision,
-                    content=merged,
-                    catalog=catalog,
-                    complete=True,
-                    issues=[],
-                    source="migration",
-                    expected_predecessor_id=baseline.id if baseline else None,
-                    source_execution_id=execution.id,
-                )
-            except MigrationConflictError:
-                return self._transition_execution(
-                    execution_record,
-                    status="succeeded",
-                    commit_outcome="committed",
-                    sync_status="conflict",
-                    error_code="post_commit_baseline_changed",
-                ).execution
-        return self._transition_execution(
-            execution_record,
-            status="succeeded",
-            commit_outcome="committed",
-            sync_status="succeeded",
-            error_code=None,
-            error_detail=None,
-        ).execution
 
     def _move_design_history(
         self,
@@ -1197,59 +776,6 @@ class MigrationService:
             json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-    def _execution(self, owner_id: str, execution_id: str):
-        try:
-            return self._repository.get_execution(owner_id, execution_id)
-        except MigrationNotFoundError as error:
-            raise MigrationServiceError(404, "migration_execution_not_found", str(error)) from error
-
-    def _lease_deadline(self) -> datetime:
-        return self._clock() + self._execution_lease_ttl
-
-    def _transition_execution(
-        self,
-        record: ExecutionRecord,
-        *,
-        status: MigrationExecutionStatus,
-        recover_expired: bool = False,
-        **changes: Any,
-    ) -> ExecutionRecord:
-        try:
-            return self._repository.transition_execution(
-                record.owner_id,
-                record.execution.id,
-                expected_revision=record.execution.revision,
-                allowed_from={record.execution.status},
-                status=status,
-                lease_owner=record.lease_owner,
-                lease_expires_at=(
-                    self._lease_deadline()
-                    if status in {"reserved", "applying"}
-                    else None
-                ),
-                recover_expired_before=self._clock() if recover_expired else None,
-                **changes,
-            )
-        except MigrationConflictError as error:
-            raise self._repository_conflict(error) from error
-        except MigrationStorageUnavailableError as error:
-            raise self._storage_error(error) from error
-
-    def _fail_before_apply(
-        self,
-        execution_record: ExecutionRecord,
-        code: str,
-        message: str,
-    ) -> MigrationExecution:
-        self._transition_execution(
-            execution_record,
-            status="failed",
-            commit_outcome="rolled_back",
-            error_code=code,
-            error_detail={"beforeTargetMutation": True},
-        )
-        raise MigrationServiceError(409, code, message)
-
     def _workspace(self, owner_id: str, workspace_id: str):
         try:
             return self._workspaces.get(owner_id, workspace_id)
@@ -1294,4 +820,4 @@ class MigrationService:
 
     @staticmethod
     def _storage_error(error: MigrationStorageUnavailableError) -> MigrationServiceError:
-        return _migration_storage_error(error)
+        return migration_storage_error(error)

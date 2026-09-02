@@ -1,6 +1,8 @@
 """Assemble the Schemii API application."""
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from typing import AsyncIterator
 
 from fastapi import APIRouter, FastAPI
 
@@ -29,6 +31,7 @@ from schemii.schemii.migrations.repository import (
     PostgresMigrationRepository,
 )
 from schemii.schemii.migrations.service import MigrationService
+from schemii.schemii.migrations.worker import MigrationExecutionWorker
 from schemii.schemii.metadata import (
     MIGRATION_PACKAGE as SCHEMII_METADATA_MIGRATION_PACKAGE,
 )
@@ -119,22 +122,12 @@ def create_app(
     developer_inspection: bool = False,
 ) -> FastAPI:
     """Create the API and connect each product router."""
-    application = FastAPI(
-        title="Schemii",
-        version="0.1.0",
-        description="Unified API for Schemii, Schemoo, and Schemer",
-        responses={
-            400: {"model": ApiErrorResponse, "description": "Invalid request"},
-            404: {"model": ApiErrorResponse, "description": "Resource not found"},
-            409: {"model": ApiErrorResponse, "description": "State conflict"},
-            422: {"model": ApiErrorResponse, "description": "Contract validation failed"},
-            500: {"model": ApiErrorResponse, "description": "Internal server error"},
-            502: {"model": ApiErrorResponse, "description": "PostgreSQL operation failed"},
-            503: {"model": ApiErrorResponse, "description": "Required service unavailable"},
-        },
-    )
     active_services = services or create_services()
     if active_services.migrations is None:
+        if active_services.metadata.durable:
+            raise RuntimeError(
+                "Durable application services require an explicit durable migration repository"
+            )
         migration_repository = InMemoryMigrationRepository(active_services.designs)
         mutation_guard = getattr(active_services.designs, "set_mutation_guard", None)
         if callable(mutation_guard):
@@ -149,7 +142,38 @@ def create_app(
                 designs=active_services.designs,
             ),
         )
+    assert active_services.migrations is not None
+    migration_worker = MigrationExecutionWorker(
+        active_services.migrations.execution_coordinator
+    )
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        active_services.migrations.set_execution_waker(migration_worker.notify)
+        await migration_worker.start()
+        try:
+            yield
+        finally:
+            active_services.migrations.set_execution_waker(None)
+            await migration_worker.stop()
+
+    application = FastAPI(
+        title="Schemii",
+        version="0.1.0",
+        description="Unified API for Schemii, Schemoo, and Schemer",
+        lifespan=lifespan,
+        responses={
+            400: {"model": ApiErrorResponse, "description": "Invalid request"},
+            404: {"model": ApiErrorResponse, "description": "Resource not found"},
+            409: {"model": ApiErrorResponse, "description": "State conflict"},
+            422: {"model": ApiErrorResponse, "description": "Contract validation failed"},
+            500: {"model": ApiErrorResponse, "description": "Internal server error"},
+            502: {"model": ApiErrorResponse, "description": "PostgreSQL operation failed"},
+            503: {"model": ApiErrorResponse, "description": "Required service unavailable"},
+        },
+    )
     application.state.services = active_services
+    application.state.migration_worker = migration_worker
     install_api_middleware(application)
     install_api_error_handlers(application)
 

@@ -14,6 +14,7 @@ from typing import (
     Collection,
     ContextManager,
     Iterator,
+    Literal,
     Protocol,
     runtime_checkable,
 )
@@ -128,11 +129,22 @@ class ExecutionRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionClaim:
-    """Atomic claim result distinguishing a new attempt from an idempotent read."""
+class ExecutionReservation:
+    """Atomic reservation result distinguishing new work from an idempotent read."""
 
     record: ExecutionRecord
-    claimed_now: bool
+    reserved_now: bool
+
+
+ExecutionWorkKind = Literal["execute", "reconcile", "sync"]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionWork:
+    """One durably leased unit of migration work."""
+
+    kind: ExecutionWorkKind
+    record: ExecutionRecord
 
 
 class _Unset:
@@ -157,6 +169,32 @@ _LEGAL_EXECUTION_TRANSITIONS: dict[
     "succeeded": frozenset({"succeeded", "reconciliation_required"}),
     "failed": frozenset(),
 }
+
+_ACTIVE_EXECUTION_STATUSES: frozenset[MigrationExecutionStatus] = frozenset(
+    {"reserved", "applying", "uncertain", "reconciliation_required"}
+)
+
+
+def _blocks_workspace_lifecycle(record: ExecutionRecord) -> bool:
+    """Return whether removing/retargeting this workspace could lose authority."""
+
+    execution = record.execution
+    return execution.status in _ACTIVE_EXECUTION_STATUSES or (
+        execution.status == "succeeded"
+        and execution.commit_outcome == "committed"
+        and execution.sync_status in {"pending", "failed"}
+    )
+
+
+def _holds_execution_lease(
+    status: MigrationExecutionStatus,
+    sync_status: str | None,
+) -> bool:
+    """Keep committed work fenced until its metadata synchronization is settled."""
+
+    return status in {"reserved", "applying"} or (
+        status == "succeeded" and sync_status in {"pending", "failed"}
+    )
 
 
 def _validate_execution_transition(
@@ -213,6 +251,8 @@ class MigrationRepository(Protocol):
 
     def has_active_execution(self, owner_id: str, workspace_id: str) -> bool: ...
 
+    def blocks_workspace_lifecycle(self, owner_id: str, workspace_id: str) -> bool: ...
+
     def create_baseline(
         self,
         *,
@@ -246,7 +286,7 @@ class MigrationRepository(Protocol):
 
     def create_plan(self, record: PlanRecord) -> MigrationPlan: ...
     def get_plan(self, owner_id: str, plan_id: str) -> PlanRecord: ...
-    def claim_execution(
+    def reserve_execution(
         self,
         owner_id: str,
         plan_id: str,
@@ -254,10 +294,23 @@ class MigrationRepository(Protocol):
         confirm_destructive: bool,
         confirm_external_changes: bool,
         *,
+        reserved_at: datetime,
+    ) -> ExecutionReservation: ...
+    def claim_next_execution(
+        self,
+        *,
         claimed_at: datetime,
         lease_owner: str,
         lease_expires_at: datetime,
-    ) -> ExecutionClaim: ...
+    ) -> ExecutionWork | None: ...
+    def renew_execution_lease(
+        self,
+        owner_id: str,
+        execution_id: str,
+        *,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> bool: ...
     def get_execution(self, owner_id: str, execution_id: str) -> ExecutionRecord: ...
     def list_executions(self, owner_id: str, workspace_id: str, limit: int) -> list[MigrationExecution]: ...
     def list_recoverable_executions(
@@ -330,8 +383,16 @@ class InMemoryMigrationRepository:
             return any(
                 candidate_owner == owner_id
                 and record.execution.workspace_id == workspace_id
-                and record.execution.status
-                in {"reserved", "applying", "uncertain", "reconciliation_required"}
+                and record.execution.status in _ACTIVE_EXECUTION_STATUSES
+                for (candidate_owner, _), record in self._executions.items()
+            )
+
+    def blocks_workspace_lifecycle(self, owner_id: str, workspace_id: str) -> bool:
+        with self._lock:
+            return any(
+                candidate_owner == owner_id
+                and record.execution.workspace_id == workspace_id
+                and _blocks_workspace_lifecycle(record)
                 for (candidate_owner, _), record in self._executions.items()
             )
 
@@ -410,7 +471,7 @@ class InMemoryMigrationRepository:
             except KeyError as error:
                 raise MigrationNotFoundError("Migration plan was not found") from error
 
-    def claim_execution(
+    def reserve_execution(
         self,
         owner_id: str,
         plan_id: str,
@@ -418,37 +479,31 @@ class InMemoryMigrationRepository:
         confirm_destructive: bool,
         confirm_external_changes: bool,
         *,
-        claimed_at: datetime,
-        lease_owner: str,
-        lease_expires_at: datetime,
-    ) -> ExecutionClaim:
+        reserved_at: datetime,
+    ) -> ExecutionReservation:
         with self._lock:
             record = self.get_plan(owner_id, plan_id)
             workspace_id = record.plan.workspace_id
         if self._workspace_claim_guard is None:
-            return self._claim_execution_locked(
+            return self._reserve_execution_locked(
                 owner_id,
                 plan_id,
                 review_digest,
                 confirm_destructive,
                 confirm_external_changes,
-                claimed_at=claimed_at,
-                lease_owner=lease_owner,
-                lease_expires_at=lease_expires_at,
+                reserved_at=reserved_at,
             )
         with self._workspace_claim_guard(owner_id, workspace_id):
-            return self._claim_execution_locked(
+            return self._reserve_execution_locked(
                 owner_id,
                 plan_id,
                 review_digest,
                 confirm_destructive,
                 confirm_external_changes,
-                claimed_at=claimed_at,
-                lease_owner=lease_owner,
-                lease_expires_at=lease_expires_at,
+                reserved_at=reserved_at,
             )
 
-    def _claim_execution_locked(
+    def _reserve_execution_locked(
         self,
         owner_id: str,
         plan_id: str,
@@ -456,10 +511,8 @@ class InMemoryMigrationRepository:
         confirm_destructive: bool,
         confirm_external_changes: bool,
         *,
-        claimed_at: datetime,
-        lease_owner: str,
-        lease_expires_at: datetime,
-    ) -> ExecutionClaim:
+        reserved_at: datetime,
+    ) -> ExecutionReservation:
         with self._lock:
             record = self.get_plan(owner_id, plan_id)
             plan = record.plan
@@ -471,18 +524,27 @@ class InMemoryMigrationRepository:
             )
             existing_id = self._execution_by_plan.get((owner_id, plan_id))
             if existing_id:
-                return ExecutionClaim(
+                return ExecutionReservation(
                     record=self._executions[(owner_id, existing_id)],
-                    claimed_now=False,
+                    reserved_now=False,
                 )
-            if plan.expires_at <= claimed_at:
+            if any(
+                candidate_owner == owner_id
+                and candidate.execution.workspace_id == plan.workspace_id
+                and _blocks_workspace_lifecycle(candidate)
+                for (candidate_owner, _), candidate in self._executions.items()
+            ):
+                raise MigrationConflictError(
+                    "migration_execution_active",
+                    "Finish or reconcile the current migration execution before starting another",
+                )
+            if plan.expires_at <= reserved_at:
                 raise MigrationConflictError(
                     "migration_plan_expired",
                     "Refresh the migration review",
                 )
             if plan.status != "reviewable" or not plan.apply_capable:
                 raise MigrationConflictError("migration_plan_not_executable", "Migration plan cannot be executed")
-            now = _now()
             execution = MigrationExecution(
                 id=f"mex_{secrets.token_hex(16)}",
                 plan_id=plan_id,
@@ -490,9 +552,8 @@ class InMemoryMigrationRepository:
                 revision=1,
                 status="reserved",
                 completed_step_count=0,
-                recovery_available_at=lease_expires_at,
-                created_at=now,
-                updated_at=now,
+                created_at=reserved_at,
+                updated_at=reserved_at,
             )
             execution_record = ExecutionRecord(
                 owner_id=owner_id,
@@ -500,8 +561,6 @@ class InMemoryMigrationRepository:
                 confirmed_review_digest=review_digest,
                 destructive_confirmed=confirm_destructive,
                 external_changes_confirmed=confirm_external_changes,
-                lease_owner=lease_owner,
-                lease_expires_at=lease_expires_at,
             )
             self._execution_by_plan[(owner_id, plan_id)] = execution.id
             self._executions[(owner_id, execution.id)] = execution_record
@@ -511,7 +570,100 @@ class InMemoryMigrationRepository:
                 plan=record.plan.model_copy(update={"status": "claimed"}),
                 authority=record.authority,
             )
-            return ExecutionClaim(record=execution_record, claimed_now=True)
+            return ExecutionReservation(record=execution_record, reserved_now=True)
+
+    def claim_next_execution(
+        self,
+        *,
+        claimed_at: datetime,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> ExecutionWork | None:
+        with self._lock:
+            eligible: list[tuple[int, datetime, str, ExecutionRecord, ExecutionWorkKind]] = []
+            for record in self._executions.values():
+                execution = record.execution
+                lease_available = (
+                    record.lease_owner is None
+                    or (
+                        record.lease_expires_at is not None
+                        and record.lease_expires_at <= claimed_at
+                    )
+                )
+                if not lease_available:
+                    continue
+                kind: ExecutionWorkKind | None = None
+                priority = 0
+                if execution.status == "applying":
+                    kind = "reconcile"
+                elif execution.status == "reserved":
+                    kind = "execute"
+                    priority = 1
+                elif (
+                    execution.status == "succeeded"
+                    and execution.commit_outcome == "committed"
+                    and execution.sync_status in {"pending", "failed"}
+                ):
+                    kind = "sync"
+                    priority = 2
+                if kind is not None:
+                    eligible.append(
+                        (priority, execution.created_at, execution.id, record, kind)
+                    )
+            if not eligible:
+                return None
+            _, _, execution_id, current, kind = min(eligible)
+            execution = current.execution.model_copy(
+                update={
+                    "revision": current.execution.revision + 1,
+                    "recovery_available_at": lease_expires_at,
+                    "updated_at": claimed_at,
+                }
+            )
+            claimed = ExecutionRecord(
+                owner_id=current.owner_id,
+                execution=execution,
+                confirmed_review_digest=current.confirmed_review_digest,
+                destructive_confirmed=current.destructive_confirmed,
+                external_changes_confirmed=current.external_changes_confirmed,
+                target_identity=current.target_identity,
+                intended_result=current.intended_result,
+                error_detail=current.error_detail,
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
+            )
+            self._executions[(current.owner_id, execution_id)] = claimed
+            return ExecutionWork(kind=kind, record=claimed)
+
+    def renew_execution_lease(
+        self,
+        owner_id: str,
+        execution_id: str,
+        *,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        with self._lock:
+            current = self._executions.get((owner_id, execution_id))
+            if current is None or current.lease_owner != lease_owner:
+                return False
+            if current.execution.status not in {"reserved", "applying", "succeeded"}:
+                return False
+            self._executions[(owner_id, execution_id)] = ExecutionRecord(
+                owner_id=current.owner_id,
+                execution=current.execution.model_copy(
+                    update={"recovery_available_at": lease_expires_at}
+                ),
+                confirmed_review_digest=current.confirmed_review_digest,
+                destructive_confirmed=current.destructive_confirmed,
+                external_changes_confirmed=current.external_changes_confirmed,
+                target_identity=current.target_identity,
+                intended_result=current.intended_result,
+                error_detail=current.error_detail,
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
+            )
+            return True
 
     def get_execution(self, owner_id: str, execution_id: str) -> ExecutionRecord:
         with self._lock:
@@ -538,13 +690,34 @@ class InMemoryMigrationRepository:
             values = [
                 record
                 for record in self._executions.values()
-                if record.execution.status in {"reserved", "applying"}
-                and record.lease_expires_at is not None
-                and record.lease_expires_at <= stale_at
+                if (
+                    record.execution.status == "reserved"
+                    and record.lease_owner is None
+                )
+                or (
+                    record.execution.status in {"reserved", "applying"}
+                    and record.lease_expires_at is not None
+                    and record.lease_expires_at <= stale_at
+                )
+                or (
+                    record.execution.status == "succeeded"
+                    and record.execution.commit_outcome == "committed"
+                    and record.execution.sync_status in {"pending", "failed"}
+                    and (
+                        record.lease_owner is None
+                        or (
+                            record.lease_expires_at is not None
+                            and record.lease_expires_at <= stale_at
+                        )
+                    )
+                )
             ]
         return sorted(
             values,
-            key=lambda item: (item.lease_expires_at, item.execution.id),
+            key=lambda item: (
+                item.lease_expires_at or datetime.min.replace(tzinfo=timezone.utc),
+                item.execution.id,
+            ),
         )[:limit]
 
     def transition_execution(
@@ -575,7 +748,7 @@ class InMemoryMigrationRepository:
                 allowed_from=allowed_from,
                 status=status,
             )
-            if current.execution.status in {"reserved", "applying"}:
+            if current.lease_owner is not None:
                 lease_matches = lease_owner is not None and lease_owner == current.lease_owner
                 lease_is_stale = (
                     recover_expired_before is not None
@@ -588,14 +761,20 @@ class InMemoryMigrationRepository:
                         "The migration execution is owned by an active worker lease",
                         {"recoveryAvailableAt": current.lease_expires_at},
                     )
-            if status in {"reserved", "applying"} and (
+            effective_sync_status = (
+                current.execution.sync_status
+                if sync_status is UNSET
+                else sync_status
+            )
+            holds_lease = _holds_execution_lease(status, effective_sync_status)
+            if holds_lease and (
                 lease_owner is None or lease_expires_at is None
             ):
                 raise ValueError(
-                    "active migration execution transitions require a lease owner and expiry"
+                    "leased migration execution transitions require an owner and expiry"
                 )
-            next_lease_owner = lease_owner if status in {"reserved", "applying"} else None
-            next_lease_expires_at = lease_expires_at if status in {"reserved", "applying"} else None
+            next_lease_owner = lease_owner if holds_lease else None
+            next_lease_expires_at = lease_expires_at if holds_lease else None
             update = {
                 "revision": current.execution.revision + 1,
                 "status": status,
@@ -729,6 +908,35 @@ class PostgresMigrationRepository:
                 )
                 return bool(cursor.fetchone()["active"])
 
+    def blocks_workspace_lifecycle(self, owner_id: str, workspace_id: str) -> bool:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM schemii.migration_executions AS execution
+                        LEFT JOIN schemii.migration_syncs AS sync
+                          ON sync.execution_id = execution.id
+                        WHERE execution.owner_id = %s
+                          AND execution.workspace_id = %s
+                          AND (
+                              execution.status IN (
+                                  'reserved', 'applying', 'uncertain',
+                                  'reconciliation_required'
+                              )
+                              OR (
+                                  execution.status = 'succeeded'
+                                  AND execution.commit_outcome = 'committed'
+                                  AND sync.status IN ('pending', 'failed')
+                              )
+                          )
+                    ) AS active
+                    """,
+                    (owner_id, workspace_id),
+                )
+                return bool(cursor.fetchone()["active"])
+
     def create_baseline(self, **values: Any) -> BaselineRecord:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
@@ -825,7 +1033,7 @@ class PostgresMigrationRepository:
                     raise MigrationNotFoundError("Migration plan was not found")
                 return self._plan(row)
 
-    def claim_execution(
+    def reserve_execution(
         self,
         owner_id: str,
         plan_id: str,
@@ -833,10 +1041,8 @@ class PostgresMigrationRepository:
         confirm_destructive: bool,
         confirm_external_changes: bool,
         *,
-        claimed_at: datetime,
-        lease_owner: str,
-        lease_expires_at: datetime,
-    ) -> ExecutionClaim:
+        reserved_at: datetime,
+    ) -> ExecutionReservation:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -881,11 +1087,40 @@ class PostgresMigrationRepository:
                 )
                 existing = cursor.fetchone()
                 if existing:
-                    return ExecutionClaim(
+                    return ExecutionReservation(
                         record=self._execution(cursor, existing),
-                        claimed_now=False,
+                        reserved_now=False,
                     )
-                if plan.expires_at <= claimed_at:
+                cursor.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM schemii.migration_executions AS execution
+                        LEFT JOIN schemii.migration_syncs AS sync
+                          ON sync.execution_id = execution.id
+                        WHERE execution.owner_id = %s
+                          AND execution.workspace_id = %s
+                          AND (
+                              execution.status IN (
+                                  'reserved', 'applying', 'uncertain',
+                                  'reconciliation_required'
+                              )
+                              OR (
+                                  execution.status = 'succeeded'
+                                  AND execution.commit_outcome = 'committed'
+                                  AND sync.status IN ('pending', 'failed')
+                              )
+                          )
+                    ) AS active
+                    """,
+                    (owner_id, plan.workspace_id),
+                )
+                if cursor.fetchone()["active"]:
+                    raise MigrationConflictError(
+                        "migration_execution_active",
+                        "Finish or reconcile the current migration execution before starting another",
+                    )
+                if plan.expires_at <= reserved_at:
                     raise MigrationConflictError(
                         "migration_plan_expired",
                         "Refresh the migration review",
@@ -898,7 +1133,7 @@ class PostgresMigrationRepository:
                     INSERT INTO schemii.migration_executions (
                         id, plan_id, workspace_id, owner_id, status,
                         confirmed_review_digest, destructive_confirmed,
-                        external_changes_confirmed, lease_owner, lease_expires_at
+                        external_changes_confirmed, created_at, updated_at
                     ) VALUES (%s, %s, %s, %s, 'reserved', %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
@@ -910,8 +1145,8 @@ class PostgresMigrationRepository:
                         review_digest,
                         confirm_destructive,
                         confirm_external_changes,
-                        lease_owner,
-                        lease_expires_at,
+                        reserved_at,
+                        reserved_at,
                     ),
                 )
                 execution_row = cursor.fetchone()
@@ -924,10 +1159,118 @@ class PostgresMigrationRepository:
                     """,
                     (execution_id,),
                 )
-                return ExecutionClaim(
+                return ExecutionReservation(
                     record=self._execution(cursor, execution_row),
-                    claimed_now=True,
+                    reserved_now=True,
                 )
+
+    def claim_next_execution(
+        self,
+        *,
+        claimed_at: datetime,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> ExecutionWork | None:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT execution.*,
+                           sync.status AS sync_status,
+                           CASE
+                               WHEN execution.status = 'applying' THEN 'reconcile'
+                               WHEN execution.status = 'reserved' THEN 'execute'
+                               ELSE 'sync'
+                           END AS work_kind
+                    FROM schemii.migration_executions AS execution
+                    LEFT JOIN schemii.migration_syncs AS sync
+                      ON sync.execution_id = execution.id
+                    WHERE (
+                            execution.status = 'applying'
+                            AND execution.lease_expires_at <= %s
+                          )
+                       OR (
+                            execution.status = 'reserved'
+                            AND (
+                                execution.lease_owner IS NULL
+                                OR execution.lease_expires_at <= %s
+                            )
+                          )
+                       OR (
+                            execution.status = 'succeeded'
+                            AND execution.commit_outcome = 'committed'
+                            AND sync.status IN ('pending', 'failed')
+                            AND (
+                                execution.lease_owner IS NULL
+                                OR execution.lease_expires_at <= %s
+                            )
+                          )
+                    ORDER BY
+                        CASE execution.status
+                            WHEN 'applying' THEN 0
+                            WHEN 'reserved' THEN 1
+                            ELSE 2
+                        END,
+                        execution.created_at,
+                        execution.id
+                    FOR UPDATE OF execution SKIP LOCKED
+                    LIMIT 1
+                    """,
+                    (claimed_at, claimed_at, claimed_at),
+                )
+                candidate = cursor.fetchone()
+                if candidate is None:
+                    return None
+                work_kind: ExecutionWorkKind = candidate.pop("work_kind")
+                candidate.pop("sync_status", None)
+                cursor.execute(
+                    """
+                    UPDATE schemii.migration_executions
+                    SET revision = revision + 1,
+                        lease_owner = %s,
+                        lease_expires_at = %s,
+                        updated_at = %s
+                    WHERE id = %s AND revision = %s
+                    RETURNING *
+                    """,
+                    (
+                        lease_owner,
+                        lease_expires_at,
+                        claimed_at,
+                        candidate["id"],
+                        candidate["revision"],
+                    ),
+                )
+                claimed = cursor.fetchone()
+                if claimed is None:
+                    return None
+                return ExecutionWork(
+                    kind=work_kind,
+                    record=self._execution(cursor, claimed),
+                )
+
+    def renew_execution_lease(
+        self,
+        owner_id: str,
+        execution_id: str,
+        *,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE schemii.migration_executions
+                    SET lease_expires_at = %s
+                    WHERE owner_id = %s
+                      AND id = %s
+                      AND lease_owner = %s
+                      AND status IN ('reserved', 'applying', 'succeeded')
+                    """,
+                    (lease_expires_at, owner_id, execution_id, lease_owner),
+                )
+                return cursor.rowcount == 1
 
     def get_execution(self, owner_id: str, execution_id: str) -> ExecutionRecord:
         with self._transaction() as connection:
@@ -966,14 +1309,31 @@ class PostgresMigrationRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT *
-                    FROM schemii.migration_executions
-                    WHERE status IN ('reserved', 'applying')
-                      AND lease_expires_at <= %s
-                    ORDER BY lease_expires_at, id
+                    SELECT execution.*
+                    FROM schemii.migration_executions AS execution
+                    LEFT JOIN schemii.migration_syncs AS sync
+                      ON sync.execution_id = execution.id
+                    WHERE (
+                            execution.status = 'reserved'
+                            AND execution.lease_owner IS NULL
+                          )
+                       OR (
+                            execution.status IN ('reserved', 'applying')
+                            AND execution.lease_expires_at <= %s
+                          )
+                       OR (
+                            execution.status = 'succeeded'
+                            AND execution.commit_outcome = 'committed'
+                            AND sync.status IN ('pending', 'failed')
+                            AND (
+                                execution.lease_owner IS NULL
+                                OR execution.lease_expires_at <= %s
+                            )
+                          )
+                    ORDER BY execution.lease_expires_at NULLS FIRST, execution.id
                     LIMIT %s
                     """,
-                    (stale_at, limit),
+                    (stale_at, stale_at, limit),
                 )
                 return [self._execution(cursor, row) for row in cursor.fetchall()]
 
@@ -1013,7 +1373,7 @@ class PostgresMigrationRepository:
                     allowed_from=allowed_from,
                     status=status,
                 )
-                if current_record.execution.status in {"reserved", "applying"}:
+                if current_record.lease_owner is not None:
                     lease_matches = (
                         lease_owner is not None
                         and lease_owner == current_record.lease_owner
@@ -1029,18 +1389,20 @@ class PostgresMigrationRepository:
                             "The migration execution is owned by an active worker lease",
                             {"recoveryAvailableAt": current_record.lease_expires_at},
                         )
-                if status in {"reserved", "applying"} and (
+                effective_sync_status = (
+                    current_record.execution.sync_status
+                    if sync_status is UNSET
+                    else sync_status
+                )
+                holds_lease = _holds_execution_lease(status, effective_sync_status)
+                if holds_lease and (
                     lease_owner is None or lease_expires_at is None
                 ):
                     raise ValueError(
-                        "active migration execution transitions require a lease owner and expiry"
+                        "leased migration execution transitions require an owner and expiry"
                     )
-                next_lease_owner = (
-                    lease_owner if status in {"reserved", "applying"} else None
-                )
-                next_lease_expires_at = (
-                    lease_expires_at if status in {"reserved", "applying"} else None
-                )
+                next_lease_owner = lease_owner if holds_lease else None
+                next_lease_expires_at = lease_expires_at if holds_lease else None
                 assignments = [
                     "revision = revision + 1",
                     "status = %s",
@@ -1511,6 +1873,10 @@ class PostgresMigrationRepository:
             recovery_available_at=(
                 row.get("lease_expires_at")
                 if row["status"] in {"reserved", "applying"}
+                or (
+                    row["status"] == "succeeded"
+                    and row.get("sync_status") in {"pending", "failed"}
+                )
                 else None
             ),
             created_at=row["created_at"], updated_at=row["updated_at"],

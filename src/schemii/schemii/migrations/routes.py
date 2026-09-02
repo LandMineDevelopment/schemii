@@ -94,7 +94,7 @@ def resolve_migration_drift(
 @router.post(
     "/migration-plans/{plan_id}/executions",
     response_model=MigrationExecution,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def execute_migration_plan(
     plan_id: str,
@@ -102,7 +102,7 @@ def execute_migration_plan(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> MigrationExecution:
-    """Execute exactly one claimed server-owned reviewed plan."""
+    """Durably queue exactly one server-owned reviewed plan for execution."""
 
     try:
         return _service(request).create_execution(principal.user_id, plan_id, body)

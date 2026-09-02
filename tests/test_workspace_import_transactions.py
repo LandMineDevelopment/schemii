@@ -136,7 +136,7 @@ def test_migration_service_installs_workspace_lifecycle_guard() -> None:
     class ExecutionAuthority:
         active = True
 
-        def has_active_execution(self, owner_id: str, workspace_id: str) -> bool:
+        def blocks_workspace_lifecycle(self, owner_id: str, workspace_id: str) -> bool:
             assert owner_id == OWNER_ID
             assert workspace_id.startswith("ws_")
             return self.active
