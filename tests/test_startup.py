@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 from pathlib import Path
 import stat
@@ -18,10 +19,12 @@ def test_startup_script_owns_the_compose_launch_contract() -> None:
     assert 'SCHEMII_TEST_POSTGRES_DB="${SCHEMII_TEST_POSTGRES_DB-schemii_test}"' in source
     assert 'SCHEMII_TEST_POSTGRES_USER="${SCHEMII_TEST_POSTGRES_USER-schemii}"' in source
     assert 'SCHEMII_TEST_POSTGRES_PASSWORD="${SCHEMII_TEST_POSTGRES_PASSWORD-schemii-local-test}"' in source
+    assert 'SCHEMII_METADATA_APP_USER="${SCHEMII_METADATA_APP_USER-schemii_metadata_app}"' in source
     assert 'SCHEMII_STARTUP_TIMEOUT="${SCHEMII_STARTUP_TIMEOUT-120}"' in source
     assert 'SCHEMII_TLS_DIRECTORY="${SCHEMII_TLS_DIRECTORY-${ROOT_DIR}/.schemii/tls}"' in source
     assert 'SCHEMII_TLS_CERTIFICATE_DAYS="${SCHEMII_TLS_CERTIFICATE_DAYS-365}"' in source
     assert 'SCHEMII_SECRET_DIRECTORY="${SCHEMII_SECRET_DIRECTORY-${ROOT_DIR}/.schemii/secrets}"' in source
+    assert 'SCHEMII_LAUNCH_LOCK_FILE="${SCHEMII_LAUNCH_LOCK_FILE-${ROOT_DIR}/.schemii/start.lock}"' in source
     assert "openssl req -x509" in source
     assert "subjectAltName=DNS:localhost,IP:127.0.0.1" in source
     assert "basicConstraints=critical,CA:FALSE" in source
@@ -29,15 +32,25 @@ def test_startup_script_owns_the_compose_launch_contract() -> None:
     assert "docker compose version" in source
     assert "docker info" in source
     assert 'exec newgrp docker -c "$restart_command"' in source
-    assert 'docker "${compose_args[@]}" up --build --detach --wait --wait-timeout' in source
+    assert 'docker "${compose_args[@]}" build schemii' in source
+    assert 'docker "${compose_args[@]}" up --detach --wait --wait-timeout' in source
     assert 'docker "${compose_args[@]}" logs --no-color --tail 200 schemii' in source
+    assert 'docker "${compose_args[@]}" logs --no-color --tail 200 metadata-bootstrap' in source
+    assert 'docker "${compose_args[@]}" logs --no-color --tail 200 postgres-seed' in source
     assert 'fail "the application service did not become healthy"' in source
     assert "sudo" not in source
     assert "uvicorn" not in source
     assert "docker.sock" not in source
-    assert "SCHEMII_METADATA_PASSWORD_SECRET_FILE" in source
+    assert "label=com.docker.compose.project=schemii-test" in source
+    assert "label=com.docker.compose.service=postgres" in source
+    assert "SCHEMII_METADATA_BOOTSTRAP_PASSWORD_SECRET_FILE" in source
+    assert "SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE" in source
+    assert "SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE" in source
+    assert "SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE" in source
     assert "SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" in source
     assert "openssl rand -base64 32" in source
+    assert "openssl rand -hex 32" in source
+    assert "flock --nonblock" in source
 
 
 def test_startup_script_rejects_invalid_configuration_before_requesting_privilege() -> None:
@@ -98,6 +111,7 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
         "SCHEMII_STARTUP_TIMEOUT": "7",
         "SCHEMII_TLS_DIRECTORY": str(tls_directory),
         "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
+        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
     }
 
     result = subprocess.run(
@@ -116,14 +130,18 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert "docker:compose version" in commands
     assert "docker:info" in commands
     assert (
-        f"compose --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
-        "rm --stop --force ingress schemii"
+        f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
+        "build schemii"
     ) in commands
     assert (
-        f"compose --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
-        "up --build --detach --wait --wait-timeout 7"
+        f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
+        "rm --stop --force ingress schemii metadata-bootstrap"
     ) in commands
-    assert f"compose --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} ps" in commands
+    assert (
+        f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
+        "up --detach --wait --wait-timeout 7"
+    ) in commands
+    assert f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} ps" in commands
     assert "port=8123|db=startup_db|user=startup_user" in commands
     certificate = tls_directory / "localhost.crt"
     private_key = tls_directory / "localhost.key"
@@ -131,9 +149,16 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert stat.S_IMODE(certificate.stat().st_mode) == 0o644
     assert stat.S_IMODE(private_key.stat().st_mode) == 0o640
     metadata_password = tmp_path / "secrets" / "metadata_password"
+    metadata_app_password = tmp_path / "secrets" / "metadata_app_password"
+    demo_admin_password = tmp_path / "secrets" / "demo_admin_password"
+    demo_target_password = tmp_path / "secrets" / "demo_target_password"
     metadata_key = tmp_path / "secrets" / "metadata_encryption_key"
-    assert metadata_password.read_text(encoding="utf-8") == "local-test-password\n"
+    assert metadata_password.read_text(encoding="utf-8").strip()
+    assert demo_target_password.read_text(encoding="utf-8") == "local-test-password\n"
     assert stat.S_IMODE(metadata_password.stat().st_mode) == 0o640
+    assert stat.S_IMODE(metadata_app_password.stat().st_mode) == 0o640
+    assert stat.S_IMODE(demo_admin_password.stat().st_mode) == 0o640
+    assert stat.S_IMODE(demo_target_password.stat().st_mode) == 0o640
     assert stat.S_IMODE(metadata_key.stat().st_mode) == 0o640
     certificate_details = subprocess.run(
         ["openssl", "x509", "-in", str(certificate), "-noout", "-ext", "subjectAltName"],
@@ -162,7 +187,10 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert "SSL server : Yes" in purposes
 
     certificate_bytes = certificate.read_bytes()
+    metadata_password_bytes = metadata_password.read_bytes()
     encryption_key_bytes = metadata_key.read_bytes()
+    metadata_app_password_bytes = metadata_app_password.read_bytes()
+    demo_admin_password_bytes = demo_admin_password.read_bytes()
     command_log.write_text("", encoding="utf-8")
     second_result = subprocess.run(
         [str(START)],
@@ -177,6 +205,92 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert second_result.returncode == 0, second_result.stderr
     assert "Creating a persistent local HTTPS certificate" not in second_result.stdout
     assert certificate.read_bytes() == certificate_bytes
+    assert metadata_password.read_bytes() == metadata_password_bytes
     assert metadata_key.read_bytes() == encryption_key_bytes
+    assert metadata_app_password.read_bytes() == metadata_app_password_bytes
+    assert demo_admin_password.read_bytes() == demo_admin_password_bytes
     second_commands = command_log.read_text(encoding="utf-8")
-    assert "rm --stop --force ingress schemii" in second_commands
+    assert "rm --stop --force ingress schemii metadata-bootstrap" in second_commands
+
+
+def test_startup_rejects_a_password_change_that_would_desynchronize_persisted_roles(
+    tmp_path: Path,
+) -> None:
+    command_log = tmp_path / "commands.log"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "printf 'docker:%s\\n' \"$*\" >> \"$COMMAND_LOG\"\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "COMMAND_LOG": str(command_log),
+        "SCHEMII_TEST_POSTGRES_PASSWORD": "replacement-password",
+        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
+        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
+        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
+    }
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "demo_target_password").write_text(
+        "original-password\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(START)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "does not match the persisted demo-target-password secret" in result.stderr
+    assert "build schemii" not in command_log.read_text(encoding="utf-8")
+    assert "rm --stop" not in command_log.read_text(encoding="utf-8")
+
+
+def test_startup_rejects_a_concurrent_lifecycle_before_mutating_state(
+    tmp_path: Path,
+) -> None:
+    command_log = tmp_path / "commands.log"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "printf 'docker:%s\\n' \"$*\" >> \"$COMMAND_LOG\"\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    lock_file = tmp_path / "start.lock"
+    lock_file.touch()
+    environment = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "COMMAND_LOG": str(command_log),
+        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
+        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
+        "SCHEMII_LAUNCH_LOCK_FILE": str(lock_file),
+    }
+
+    with lock_file.open("w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            [str(START)],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "another ./start.sh lifecycle operation is already running" in result.stderr
+    commands = command_log.read_text(encoding="utf-8")
+    assert "build schemii" not in commands
+    assert "rm --stop" not in commands

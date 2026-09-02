@@ -6,14 +6,17 @@ COMPOSE_FILE="${ROOT_DIR}/compose.test.yaml"
 ORIGINAL_ARGUMENTS=("$@")
 
 # Local Compose deployment configuration. Environment values may override these defaults.
+SCHEMII_TEST_POSTGRES_PASSWORD_WAS_SET="${SCHEMII_TEST_POSTGRES_PASSWORD+x}"
 SCHEMII_TEST_APP_PORT="${SCHEMII_TEST_APP_PORT-8001}"
 SCHEMII_TEST_POSTGRES_DB="${SCHEMII_TEST_POSTGRES_DB-schemii_test}"
 SCHEMII_TEST_POSTGRES_USER="${SCHEMII_TEST_POSTGRES_USER-schemii}"
 SCHEMII_TEST_POSTGRES_PASSWORD="${SCHEMII_TEST_POSTGRES_PASSWORD-schemii-local-test}"
+SCHEMII_METADATA_APP_USER="${SCHEMII_METADATA_APP_USER-schemii_metadata_app}"
 SCHEMII_STARTUP_TIMEOUT="${SCHEMII_STARTUP_TIMEOUT-120}"
 SCHEMII_TLS_DIRECTORY="${SCHEMII_TLS_DIRECTORY-${ROOT_DIR}/.schemii/tls}"
 SCHEMII_TLS_CERTIFICATE_DAYS="${SCHEMII_TLS_CERTIFICATE_DAYS-365}"
 SCHEMII_SECRET_DIRECTORY="${SCHEMII_SECRET_DIRECTORY-${ROOT_DIR}/.schemii/secrets}"
+SCHEMII_LAUNCH_LOCK_FILE="${SCHEMII_LAUNCH_LOCK_FILE-${ROOT_DIR}/.schemii/start.lock}"
 SCHEMII_RESET_MIGRATION_DEMO="${SCHEMII_RESET_MIGRATION_DEMO-0}"
 SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
@@ -79,7 +82,14 @@ fi
 [[ -n "$SCHEMII_TEST_POSTGRES_DB" ]] || fail "SCHEMII_TEST_POSTGRES_DB must not be empty"
 [[ -n "$SCHEMII_TEST_POSTGRES_USER" ]] || fail "SCHEMII_TEST_POSTGRES_USER must not be empty"
 [[ -n "$SCHEMII_TEST_POSTGRES_PASSWORD" ]] || fail "SCHEMII_TEST_POSTGRES_PASSWORD must not be empty"
+[[ "$SCHEMII_TEST_POSTGRES_DB" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || fail "SCHEMII_TEST_POSTGRES_DB must be a lowercase PostgreSQL identifier"
+[[ "$SCHEMII_TEST_POSTGRES_USER" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || fail "SCHEMII_TEST_POSTGRES_USER must be a lowercase PostgreSQL identifier"
+[[ "$SCHEMII_METADATA_APP_USER" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || fail "SCHEMII_METADATA_APP_USER must be a lowercase PostgreSQL identifier"
+[[ "$SCHEMII_METADATA_APP_USER" != "$SCHEMII_TEST_POSTGRES_USER" ]] || fail "SCHEMII_METADATA_APP_USER must differ from the metadata bootstrap user"
+[[ "$SCHEMII_TEST_POSTGRES_USER" != "schemii_demo_admin" ]] || fail "SCHEMII_TEST_POSTGRES_USER must differ from the demo bootstrap user"
+[[ "$SCHEMII_TEST_POSTGRES_PASSWORD" != *$'\n'* ]] || fail "SCHEMII_TEST_POSTGRES_PASSWORD must be a single line"
 [[ -n "$SCHEMII_SECRET_DIRECTORY" ]] || fail "SCHEMII_SECRET_DIRECTORY must not be empty"
+[[ "$SCHEMII_LAUNCH_LOCK_FILE" == /* ]] || fail "SCHEMII_LAUNCH_LOCK_FILE must be an absolute path"
 [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "0" || "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]] || fail "SCHEMII_RESET_MIGRATION_DEMO must be 0 or 1"
 [[ "$SCHEMII_DEMO_SCENARIO" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "demo scenario must be a kebab-case identifier"
 [[ -f "${ROOT_DIR}/dev/postgres/demo-scenarios/${SCHEMII_DEMO_SCENARIO}/manifest.json" ]] || fail "unknown demo scenario: ${SCHEMII_DEMO_SCENARIO}"
@@ -87,10 +97,14 @@ fi
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed or is not on PATH"
 docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is unavailable"
 command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required to create the local HTTPS certificate"
+command -v flock >/dev/null 2>&1 || fail "flock is required to serialize local application lifecycle changes"
 
 SCHEMII_TEST_TLS_CERTIFICATE="${SCHEMII_TLS_DIRECTORY}/localhost.crt"
 SCHEMII_TEST_TLS_PRIVATE_KEY="${SCHEMII_TLS_DIRECTORY}/localhost.key"
-SCHEMII_METADATA_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_password"
+SCHEMII_METADATA_BOOTSTRAP_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_password"
+SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_app_password"
+SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/demo_admin_password"
+SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/demo_target_password"
 SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_encryption_key"
 
 certificate_is_current() {
@@ -146,22 +160,68 @@ if ! docker info >/dev/null 2>&1; then
   fail "Docker is unavailable; confirm that the daemon is running and the current account belongs to the docker group"
 fi
 
+mkdir -p -m 700 -- "$(dirname -- "$SCHEMII_LAUNCH_LOCK_FILE")"
+[[ ! -L "$SCHEMII_LAUNCH_LOCK_FILE" ]] || fail "SCHEMII_LAUNCH_LOCK_FILE must not be a symbolic link"
+exec {SCHEMII_LAUNCH_LOCK_FD}>"$SCHEMII_LAUNCH_LOCK_FILE"
+chmod 600 "$SCHEMII_LAUNCH_LOCK_FILE"
+if ! flock --nonblock "$SCHEMII_LAUNCH_LOCK_FD"; then
+  fail "another ./start.sh lifecycle operation is already running"
+fi
+
 if ! certificate_is_current; then
   printf 'Creating a persistent local HTTPS certificate for localhost and 127.0.0.1...\n'
   create_local_certificate
 fi
 SCHEMII_TLS_READER_GID="$(stat -c '%g' "$SCHEMII_TEST_TLS_PRIVATE_KEY")"
 
-write_metadata_password() {
+write_secret() {
+  local destination="$1"
+  local value="$2"
+  local temporary_stem="$3"
   mkdir -p -- "$SCHEMII_SECRET_DIRECTORY"
   chmod 750 "$SCHEMII_SECRET_DIRECTORY"
   local temporary_file
-  temporary_file="$(mktemp "${SCHEMII_SECRET_DIRECTORY}/.metadata-password.XXXXXX")"
+  temporary_file="$(mktemp "${SCHEMII_SECRET_DIRECTORY}/.${temporary_stem}.XXXXXX")"
   trap 'rm -f -- "$temporary_file"' RETURN
-  printf '%s\n' "$SCHEMII_TEST_POSTGRES_PASSWORD" > "$temporary_file"
+  printf '%s\n' "$value" > "$temporary_file"
   chmod 640 "$temporary_file"
-  mv -- "$temporary_file" "$SCHEMII_METADATA_PASSWORD_SECRET_FILE"
+  mv -- "$temporary_file" "$destination"
   trap - RETURN
+}
+
+secret_is_valid() {
+  local secret_file="$1"
+  [[ -f "$secret_file" ]] || return 1
+  [[ "$(wc -l < "$secret_file")" == "1" ]] || return 1
+  [[ -n "$(sed -n '1p' "$secret_file")" ]]
+}
+
+ensure_configured_secret() {
+  local secret_file="$1"
+  local configured_value="$2"
+  local explicitly_configured="$3"
+  local label="$4"
+  if [[ -e "$secret_file" ]]; then
+    secret_is_valid "$secret_file" || fail "the existing ${label} secret is invalid"
+    chmod 640 "$secret_file"
+    if [[ "$explicitly_configured" == "x" ]] \
+        && [[ "$(sed -n '1p' "$secret_file")" != "$configured_value" ]]; then
+      fail "SCHEMII_TEST_POSTGRES_PASSWORD does not match the persisted ${label} secret; restore the prior value before starting"
+    fi
+    return
+  fi
+  write_secret "$secret_file" "$configured_value" "$label"
+}
+
+ensure_random_secret() {
+  local secret_file="$1"
+  local label="$2"
+  if [[ -e "$secret_file" ]]; then
+    secret_is_valid "$secret_file" || fail "the existing ${label} secret is invalid"
+    chmod 640 "$secret_file"
+    return
+  fi
+  write_secret "$secret_file" "$(openssl rand -hex 32)" "$label"
 }
 
 metadata_encryption_key_is_valid() {
@@ -190,7 +250,18 @@ create_metadata_encryption_key() {
   trap - RETURN
 }
 
-write_metadata_password
+mkdir -p -- "$SCHEMII_SECRET_DIRECTORY"
+chmod 750 "$SCHEMII_SECRET_DIRECTORY"
+ensure_random_secret \
+  "$SCHEMII_METADATA_BOOTSTRAP_PASSWORD_SECRET_FILE" \
+  "metadata-bootstrap-password"
+ensure_configured_secret \
+  "$SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE" \
+  "$SCHEMII_TEST_POSTGRES_PASSWORD" \
+  "$SCHEMII_TEST_POSTGRES_PASSWORD_WAS_SET" \
+  "demo-target-password"
+ensure_random_secret "$SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE" "metadata-app-password"
+ensure_random_secret "$SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE" "demo-admin-password"
 if ! metadata_encryption_key_is_valid; then
   if [[ -e "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" ]]; then
     fail "the existing metadata encryption key is invalid; restore the original 256-bit base64 key"
@@ -204,10 +275,14 @@ export SCHEMII_TEST_APP_PORT
 export SCHEMII_TEST_POSTGRES_DB
 export SCHEMII_TEST_POSTGRES_USER
 export SCHEMII_TEST_POSTGRES_PASSWORD
+export SCHEMII_METADATA_APP_USER
 export SCHEMII_TEST_TLS_CERTIFICATE
 export SCHEMII_TEST_TLS_PRIVATE_KEY
 export SCHEMII_TLS_READER_GID
-export SCHEMII_METADATA_PASSWORD_SECRET_FILE
+export SCHEMII_METADATA_BOOTSTRAP_PASSWORD_SECRET_FILE
+export SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE
+export SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE
+export SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE
 export SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE
 export SCHEMII_SECRET_READER_GID
 export SCHEMII_RESET_MIGRATION_DEMO
@@ -226,23 +301,50 @@ export SCHEMII_DEMO_SOURCE_REVISION
 
 compose_args=(
   compose
+  --project-name schemii-test
   --project-directory "$ROOT_DIR"
   --file "$COMPOSE_FILE"
 )
 
-# The launcher is also the restart boundary: replace both stateless HTTP
-# processes even when their image digest and mounted files are unchanged.
-docker "${compose_args[@]}" rm --stop --force ingress schemii
+printf 'Building the current Schemii application image...\n'
+if ! docker "${compose_args[@]}" build schemii; then
+  fail "the application image could not be built; the running deployment was left unchanged"
+fi
+
+# The launcher is also the restart boundary. Build first so a compilation
+# failure does not interrupt the last known-good HTTP processes.
+docker "${compose_args[@]}" rm --stop --force ingress schemii metadata-bootstrap
+
+# The former single PostgreSQL service used the control-plane volume now owned
+# by metadata-postgres. Remove only that exact legacy container before mounting
+# its retained volume under the split topology.
+if ! legacy_postgres_container="$(docker ps --all --quiet \
+    --filter label=com.docker.compose.project=schemii-test \
+    --filter label=com.docker.compose.service=postgres)"; then
+  fail "the legacy PostgreSQL container check failed"
+fi
+if [[ "$legacy_postgres_container" == *$'\n'* ]]; then
+  fail "multiple legacy PostgreSQL containers matched the exact deployment labels"
+fi
+if [[ -n "$legacy_postgres_container" ]]; then
+  [[ "$legacy_postgres_container" =~ ^[0-9a-f]+$ ]] || fail "the legacy PostgreSQL container ID was malformed"
+  printf 'Stopping the legacy combined PostgreSQL container; its volume is retained...\n'
+  docker rm --force "$legacy_postgres_container"
+fi
 if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
   docker "${compose_args[@]}" --profile demo-fixture rm --stop --force postgres-seed demo-fixture
 fi
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
-if ! docker "${compose_args[@]}" up --build --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
+if ! docker "${compose_args[@]}" up --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
   printf 'Schemii did not become healthy. Current service state:\n' >&2
   docker "${compose_args[@]}" --profile demo-fixture ps --all >&2 || true
   printf 'Schemii service logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 schemii >&2 || true
+  printf 'Metadata bootstrap logs:\n' >&2
+  docker "${compose_args[@]}" logs --no-color --tail 200 metadata-bootstrap >&2 || true
+  printf 'Demo seed logs:\n' >&2
+  docker "${compose_args[@]}" logs --no-color --tail 200 postgres-seed >&2 || true
   if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
     printf 'Demo fixture logs:\n' >&2
     docker "${compose_args[@]}" --profile demo-fixture logs --no-color --tail 200 demo-fixture >&2 || true

@@ -1,6 +1,8 @@
 """Runtime routes shared by all product APIs."""
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response, status
+
+from schemii.common.errors import MetadataStorageUnavailableError
 
 from schemii.common.metadata.models import Principal, get_current_principal
 
@@ -40,12 +42,27 @@ def session(
     )
 
 
-@router.get("/readiness", response_model=ReadinessResponse)
-def readiness(request: Request) -> ReadinessResponse:
+@router.get(
+    "/readiness",
+    response_model=ReadinessResponse,
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ReadinessResponse,
+            "description": "Metadata dependency is unavailable",
+        }
+    },
+)
+def readiness(request: Request, response: Response) -> ReadinessResponse:
     """Report whether this process can currently serve API requests."""
 
+    ready = True
+    try:
+        request.app.state.services.metadata.check_readiness()
+    except MetadataStorageUnavailableError:
+        ready = False
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return ReadinessResponse(
-        ready=True,
+        ready=ready,
         metadata=request.app.state.services.metadata.storage,
         persistence=(
             "durable"

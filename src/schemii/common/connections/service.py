@@ -8,10 +8,12 @@ from typing import Iterator, Protocol
 
 from .models import (
     PostgresConnectionCreate,
+    PostgresConnectionMetadata,
     PostgresConnectionProfile,
     PostgresConnectionUpdate,
     ResolvedPostgresConnection,
 )
+from .policy import AllowAllConnectionTargetPolicy, ConnectionTargetPolicy
 from .store import ConnectionRepository
 
 
@@ -40,9 +42,12 @@ class ConnectionService:
         self,
         repository: ConnectionRepository,
         dependency_providers: tuple[ConnectionDependencyProvider, ...],
+        *,
+        target_policy: ConnectionTargetPolicy | None = None,
     ) -> None:
         self._repository = repository
         self._dependency_providers = dependency_providers
+        self._target_policy = target_policy or AllowAllConnectionTargetPolicy()
         self._locks = tuple(threading.RLock() for _ in range(64))
 
     def _lock_for(self, owner_id: str, connection_id: str) -> threading.RLock:
@@ -59,6 +64,7 @@ class ConnectionService:
         owner_id: str,
         request: PostgresConnectionCreate,
     ) -> PostgresConnectionProfile:
+        self._target_policy.validate(request)
         return self._repository.create(owner_id, request)
 
     def update(
@@ -68,6 +74,28 @@ class ConnectionService:
         request: PostgresConnectionUpdate,
     ) -> PostgresConnectionProfile:
         with self._lock_for(owner_id, connection_id):
+            current = self._repository.get(owner_id, connection_id)
+            changes = request.model_dump(
+                exclude_unset=True,
+                exclude={"expected_revision", "password"},
+            )
+            target = PostgresConnectionMetadata.model_validate(
+                {
+                    **current.model_dump(
+                        include={
+                            "name",
+                            "host",
+                            "port",
+                            "database",
+                            "username",
+                            "ssl_mode",
+                            "connect_timeout",
+                        }
+                    ),
+                    **changes,
+                }
+            )
+            self._target_policy.validate(target)
             return self._repository.update(owner_id, connection_id, request)
 
     @contextmanager
@@ -78,7 +106,9 @@ class ConnectionService:
     ) -> Iterator[ResolvedPostgresConnection]:
         """Prevent mutation or deletion while one product binds live work."""
         with self._lock_for(owner_id, connection_id):
-            yield self._repository.resolve(owner_id, connection_id)
+            resolved = self._repository.resolve(owner_id, connection_id)
+            self._target_policy.validate(resolved)
+            yield resolved
 
     def delete(self, owner_id: str, connection_id: str, expected_revision: int) -> None:
         with self._lock_for(owner_id, connection_id):

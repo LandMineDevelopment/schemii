@@ -21,6 +21,7 @@ from .models import (
     PostgresConnectionProfile,
     PostgresConnectionUpdate,
 )
+from .policy import ConnectionTargetForbiddenError
 from .service import ConnectionInUseError, ConnectionService
 from .store import (
     ConnectionConflictError,
@@ -78,6 +79,10 @@ def _not_found(error: ConnectionNotFoundError) -> ApiProblem:
     return ApiProblem(404, "connection_not_found", str(error))
 
 
+def _forbidden_target(error: ConnectionTargetForbiddenError) -> ApiProblem:
+    return ApiProblem(403, "metadata_control_plane_target_forbidden", str(error))
+
+
 @router.get("", response_model=ConnectionListResponse)
 def list_connections(
     request: Request,
@@ -100,6 +105,8 @@ def create_connection(
 
     try:
         return _service(request).create(principal.user_id, body)
+    except ConnectionTargetForbiddenError as error:
+        raise _forbidden_target(error) from error
     except ConnectionLimitError as error:
         raise ApiProblem(
             409,
@@ -134,6 +141,8 @@ def update_connection(
 
     try:
         return _service(request).update(principal.user_id, connection_id, body)
+    except ConnectionTargetForbiddenError as error:
+        raise _forbidden_target(error) from error
     except ConnectionNotFoundError as error:
         raise _not_found(error) from error
     except ConnectionConflictError as error:
@@ -156,6 +165,8 @@ def test_connection(
     try:
         with _service(request).use(principal.user_id, connection_id) as resolved:
             result = request.app.state.services.postgres.test_connection(resolved)
+    except ConnectionTargetForbiddenError as error:
+        raise _forbidden_target(error) from error
     except ConnectionNotFoundError as error:
         raise _not_found(error) from error
     except PostgresGatewayError as error:

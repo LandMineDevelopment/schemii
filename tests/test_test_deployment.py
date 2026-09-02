@@ -23,12 +23,15 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     compose = (ROOT / "compose.test.yaml").read_text(encoding="utf-8")
     schemii = _service(compose, "schemii")
     ingress = _service(compose, "ingress")
-    postgres = _service(compose, "postgres")
+    metadata_postgres = _service(compose, "metadata-postgres")
+    demo_postgres = _service(compose, "demo-postgres")
+    metadata_bootstrap = _service(compose, "metadata-bootstrap")
     networks = compose.split("\nnetworks:\n", 1)[1]
 
     assert "/docker.sock" not in compose
     assert "ports:" not in schemii
-    assert "ports:" not in postgres
+    assert "ports:" not in metadata_postgres
+    assert "ports:" not in demo_postgres
     assert '"127.0.0.1:${SCHEMII_TEST_APP_PORT:-8001}:8443"' in ingress
     assert "/etc/nginx/tls/localhost.crt:ro" in ingress
     assert "/etc/nginx/tls/localhost.key:ro" in ingress
@@ -38,17 +41,28 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     assert "  app-ingress:\n    internal: true" in networks
     assert "postgres:17-alpine@sha256:" in compose
     assert 'SCHEMII_DEVELOPER_INSPECTION: "1"' in schemii
+    assert "SCHEMII_DEPLOYMENT_MODE: local-development" in schemii
+    assert "SCHEMII_TARGET_EGRESS_MODE: internal-only" in schemii
+    assert "SCHEMII_STORAGE_MODE: postgresql" in schemii
     assert "SCHEMII_METADATA_DSN:" in schemii
-    assert "SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_password" in schemii
+    assert "host=metadata-postgres" in schemii
+    assert "SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password" in schemii
     assert "SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key" in schemii
-    assert "/run/secrets/metadata_password:ro" in schemii
+    assert "/run/secrets/metadata_app_password:ro" in schemii
     assert "/run/secrets/metadata_encryption_key:ro" in schemii
+    assert "SCHEMII_METADATA_TARGET_HOST_ALIASES: metadata-postgres" in schemii
     assert '"${SCHEMII_SECRET_READER_GID:-10001}"' in schemii
     assert compose.count("ports:") == 1
     assert "condition: service_completed_successfully" in compose
     assert "condition: service_healthy\n        restart: true" in ingress
     assert "      - database\n      - app-ingress" in schemii
     assert "      - app-ingress\n      - loopback" in ingress
+    assert "POSTGRES_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}" in metadata_postgres
+    assert "POSTGRES_USER: schemii_demo_admin" in demo_postgres
+    assert "SCHEMII_METADATA_APP_USER:" in metadata_bootstrap
+    assert "metadata_app_password" in metadata_bootstrap
+    assert "schemii-test-postgres:/var/lib/postgresql/data" in metadata_postgres
+    assert "schemii-test-demo-postgres:/var/lib/postgresql/data" in demo_postgres
 
 
 def test_containerized_application_is_non_root_and_read_only() -> None:
@@ -57,6 +71,7 @@ def test_containerized_application_is_non_root_and_read_only() -> None:
     schemii = _service(compose, "schemii")
     ingress = _service(compose, "ingress")
     seed = _service(compose, "postgres-seed")
+    metadata_bootstrap = _service(compose, "metadata-bootstrap")
 
     assert "USER 10001:10001" in dockerfile
     assert "schemii.main:app" in dockerfile
@@ -65,9 +80,29 @@ def test_containerized_application_is_non_root_and_read_only() -> None:
     assert 'user: "101:101"' in ingress
     assert "read_only: true" in ingress
     assert "user: postgres" in seed
+    assert "user: postgres" in metadata_bootstrap
     assert "no-new-privileges:true" in schemii
     assert "no-new-privileges:true" in ingress
     assert "no-new-privileges:true" in seed
+    assert "no-new-privileges:true" in metadata_bootstrap
+
+
+def test_database_roles_are_split_by_control_plane_and_demo_responsibility() -> None:
+    compose = (ROOT / "compose.test.yaml").read_text(encoding="utf-8")
+    metadata_bootstrap = (ROOT / "dev" / "postgres" / "metadata-bootstrap.sh").read_text(
+        encoding="utf-8"
+    )
+    demo_init = (ROOT / "dev" / "postgres" / "demo-init.sh").read_text(
+        encoding="utf-8"
+    )
+    seed = (ROOT / "dev" / "postgres" / "seed.sh").read_text(encoding="utf-8")
+
+    assert "metadata-postgres:" in compose
+    assert "demo-postgres:" in compose
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in metadata_bootstrap
+    assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in demo_init
+    assert 'dropdb --username "$SCHEMII_DEMO_ADMIN_USER"' in seed
+    assert 'createdb --username "$SCHEMII_DEMO_ADMIN_USER" --owner "$PGUSER"' in seed
 
 
 def test_ingress_terminates_local_https_and_private_keys_never_enter_the_image() -> None:
@@ -108,7 +143,7 @@ def test_launcher_seeds_an_isolated_migration_demo_database() -> None:
     demo = (ROOT / "dev" / "postgres" / "migration-demo.sql").read_text(encoding="utf-8")
 
     assert 'demo_database="schemii_migration_demo"' in script
-    assert 'dropdb --if-exists --force "$demo_database"' in script
+    assert '--if-exists --force "$demo_database"' in script
     assert "--reset-migration-demo" in launcher
     assert "SCHEMII_RESET_MIGRATION_DEMO" in compose
     assert "CREATE TABLE public.tasks" in demo
@@ -127,7 +162,7 @@ def test_demo_reset_rebuilds_only_the_reserved_target_and_its_metadata() -> None
     assert "--reset-demo [SCENARIO]" in launcher
     assert "--list-demo-scenarios" in launcher
     assert "SCHEMII_DEMO_SOURCE_REVISION" in launcher
-    assert 'dropdb --if-exists --force "$demo_database"' in seed
+    assert '--if-exists --force "$demo_database"' in seed
     assert 'profiles: ["demo-fixture"]' in compose
     assert "python /fixture/demo-fixture.py" in compose
     assert "LOCAL_PROTOTYPE_USER_ID" in fixture
@@ -174,3 +209,15 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
     assert undo_redo["designAlterations"][-1] == "design-03.json"
     assert view_change["changes"][0]["operation"] == "addView"
     assert view_change["changes"][0]["name"] == "project_workload"
+
+
+def test_ci_executes_unit_browser_and_real_postgres_behavior() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python -m pytest -q" in workflow
+    assert "npm test" in workflow
+    assert "postgres:17-alpine@sha256:" in workflow
+    assert "tests/integration/test_metadata_postgres.py" in workflow
+    assert "SCHEMII_TEST_METADATA_DSN:" in workflow

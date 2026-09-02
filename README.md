@@ -45,7 +45,7 @@ The current API deliberately uses one local application user while product workf
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
 - Interactive OpenAPI documentation is available at `/docs`.
 
-This phase has no application authentication and the Compose ingress remains bound to loopback. Remote ingress is a deployment concern. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures.
+This phase has no application authentication, so the packaged local deployment is explicitly `local-development` and its Compose ingress remains bound to loopback. The configured Tailscale Serve route exposes that loopback listener only to the tailnet and must be protected by tailnet ACLs. It is a preview route, not a public deployment boundary. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures. The server currently rejects an authenticated/public deployment mode instead of silently starting without its future identity adapter.
 
 Connection profiles, workspaces, desired designs, import provenance, optional target bindings, and presentation preferences survive application rebuilds and restarts in the deployment's private PostgreSQL volume. Passwords are accepted only by write models, represented as `SecretStr`, authenticated-encrypted before entering metadata PostgreSQL, omitted from profiles and errors, and decrypted only while opening the selected target. The persistent encryption key lives outside PostgreSQL under `.schemii/secrets`; losing that key makes stored passwords unrecoverable.
 
@@ -63,7 +63,7 @@ Promote a frontend implementation into the shared UI layer when multiple real pa
 
 Live catalog inspection remains read-only. Desired designs support durable schema authoring independently of a backing database; migration execution, general SQL execution, and AI workflows remain separate planned or evolving contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
-`common/metadata/factory.py` selects the durable PostgreSQL connection boundary when metadata deployment settings are present; Schemii composes its workspace repository over that same boundary. In-memory adapters remain available for isolated unit tests. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
+`common/metadata/factory.py` selects its storage boundary from the required `SCHEMII_STORAGE_MODE`. The launcher always selects durable PostgreSQL; in-memory storage must be explicitly selected and remains available for isolated unit tests. Missing or incomplete durable configuration fails startup rather than falling back to process memory. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
 
 Start the local application stack with the repository launcher:
 
@@ -73,7 +73,7 @@ Start the local application stack with the repository launcher:
 
 Then open <https://localhost:8001/>. [`start.sh`](start.sh) is the single Docker Compose startup boundary and runs Docker directly without `sudo`. If Docker group membership was added after the current shell started, the launcher refreshes only its own process through `newgrp docker`; otherwise it uses the current session unchanged. The application containers never receive the Docker socket. The script builds the current source, waits for all services to become healthy, and reports the resulting service state.
 
-The launcher creates a persistent self-signed server certificate for `localhost` and `127.0.0.1` under ignored local state at `.schemii/tls`, plus a persistent credential-encryption key under `.schemii/secrets`. Both private keys are excluded from Git and the Docker build context. Back up the metadata database and `.schemii/secrets/metadata_encryption_key` together. HTTPS protects transport but does not add application authentication.
+The launcher creates a persistent self-signed server certificate for `localhost` and `127.0.0.1` under ignored local state at `.schemii/tls`, plus database role secrets and a persistent credential-encryption key under `.schemii/secrets`. All are excluded from Git and the Docker build context. Back up the metadata database and `.schemii/secrets/metadata_encryption_key` together. Do not print or share any file in `.schemii/secrets`. HTTPS protects transport but does not add application authentication.
 
 Chromium-family browsers on Linux can trust only this exact certificate, without granting it certificate-authority privileges, through the user's NSS database:
 
@@ -84,11 +84,11 @@ certutil -A -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"
 
 Restart the browser or T3Code after changing trust. Remove the exception with `certutil -D -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"`. Other clients can either trust `.schemii/tls/localhost.crt` through their own certificate store or retain their normal self-signed-certificate warning.
 
-Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
+Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. Database identity and password overrides are initialization inputs and must continue to match retained local state. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
 
 ## Seeded Docker test deployment
 
-[`compose.test.yaml`](compose.test.yaml) runs the packaged Schemii application with a private PostgreSQL 17 service and a health-gated, one-shot seed job. `start.sh` is the supported startup command:
+[`compose.test.yaml`](compose.test.yaml) runs the packaged Schemii application with two private PostgreSQL 17 services: a durable metadata control plane and an isolated demo target. The application authenticates to metadata with a dedicated non-superuser runtime role. The demo target uses a separate non-superuser role, while one-shot bootstrap jobs alone hold database initialization authority. `start.sh` is the supported startup command:
 
 ```bash
 ./start.sh
@@ -133,21 +133,10 @@ The former command remains a baseline alias:
 ./start.sh --reset-migration-demo
 ```
 
-PostgreSQL has no published host port and is reachable only by the application and one-shot seed job on the private database network. A minimal, non-root Nginx sidecar publishes the loopback HTTP port while the application remains on internal application and database networks. The application, ingress, and seed job run as non-root users; no service mounts or accesses the Docker socket; and both HTTP containers use read-only filesystems. The default credentials are intentionally limited to this local test deployment and must not be used in production.
+Neither PostgreSQL service has a published host port; both are reachable only on the private database network. Saved connection admission rejects the normalized metadata server identity, including its configured network aliases and every database on that server, so a target profile cannot point Schemii back at its control plane. A minimal, non-root Nginx sidecar publishes the loopback HTTPS port while the application remains on internal application and database networks. The application, ingress, and one-shot jobs run as non-root users; no service mounts or accesses the Docker socket; and both HTTP containers use read-only filesystems. The seeded target password is intentionally limited to this local test deployment and must not be used in production.
 
-Stop the deployment while retaining its database volume with:
+`./start.sh` is the only supported lifecycle boundary. It builds the candidate image before replacing the running HTTP services, then waits on dependency-aware readiness. `./start.sh --reset-demo` resets only the reserved demo target and its associated metadata; it does not erase general saved workspaces or the metadata volume. Full-volume deletion is intentionally not exposed as a routine launcher operation because it destroys saved designs, connection profiles, encrypted credentials, and history.
 
-```bash
-docker compose -f compose.test.yaml down
-```
-
-Reset all seeded database state by removing the test volume and starting again:
-
-```bash
-docker compose -f compose.test.yaml down --volumes
-./start.sh
-```
-
-The seed records a fixture version and refuses to use a retained volume with an older catalog shape. Run the reset commands after pulling seed changes. PostgreSQL initialization variables also apply only when its data volume is first created, so changing database, username, or password overrides requires the same reset.
+The seed records a fixture version and refuses to use a retained target volume with an older catalog shape. PostgreSQL initialization variables apply only when their data volume is first created. Keep the original database, username, and password values for retained state; the launcher rejects a conflicting explicit password instead of desynchronizing a mounted secret from the database role.
 
 Set `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, or `SCHEMII_TEST_POSTGRES_PASSWORD` before running `start.sh` to override the development defaults.

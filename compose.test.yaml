@@ -7,13 +7,17 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
+      SCHEMII_DEPLOYMENT_MODE: local-development
       SCHEMII_DEVELOPER_INSPECTION: "1"
-      SCHEMII_METADATA_DSN: "host=postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_TEST_POSTGRES_USER:-schemii}"
-      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_password
+      SCHEMII_TARGET_EGRESS_MODE: internal-only
+      SCHEMII_STORAGE_MODE: postgresql
+      SCHEMII_METADATA_DSN: "host=metadata-postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_METADATA_APP_USER:-schemii_metadata_app}"
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password
       SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key
+      SCHEMII_METADATA_TARGET_HOST_ALIASES: metadata-postgres
     depends_on:
-      postgres:
-        condition: service_healthy
+      metadata-bootstrap:
+        condition: service_completed_successfully
       postgres-seed:
         condition: service_completed_successfully
     init: true
@@ -21,7 +25,7 @@ services:
       - database
       - app-ingress
     volumes:
-      - "${SCHEMII_METADATA_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_password}:/run/secrets/metadata_password:ro"
+      - "${SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_app_password}:/run/secrets/metadata_app_password:ro"
       - "${SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE:-./.schemii/secrets/metadata_encryption_key}:/run/secrets/metadata_encryption_key:ro"
     group_add:
       - "${SCHEMII_SECRET_READER_GID:-10001}"
@@ -68,14 +72,17 @@ services:
       retries: 12
     restart: unless-stopped
 
-  postgres:
+  metadata-postgres:
     image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     environment:
       POSTGRES_DB: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
       POSTGRES_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
-      POSTGRES_PASSWORD: ${SCHEMII_TEST_POSTGRES_PASSWORD:-schemii-local-test}
+      POSTGRES_PASSWORD_FILE: /run/secrets/metadata_bootstrap_password
     volumes:
       - schemii-test-postgres:/var/lib/postgresql/data
+      - "${SCHEMII_METADATA_BOOTSTRAP_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_password}:/run/secrets/metadata_bootstrap_password:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-999}"
     networks:
       - database
     healthcheck:
@@ -87,17 +94,80 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  metadata-bootstrap:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    depends_on:
+      metadata-postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: metadata-postgres
+      PGPORT: 5432
+      PGDATABASE: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
+      PGUSER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
+      SCHEMII_METADATA_APP_USER: ${SCHEMII_METADATA_APP_USER:-schemii_metadata_app}
+      SCHEMII_METADATA_BOOTSTRAP_PASSWORD_FILE: /run/secrets/metadata_bootstrap_password
+      SCHEMII_METADATA_APP_PASSWORD_FILE: /run/secrets/metadata_app_password
+    command: ["/bin/sh", "/bootstrap/metadata-bootstrap.sh"]
+    user: postgres
+    volumes:
+      - ./dev/postgres/metadata-bootstrap.sh:/bootstrap/metadata-bootstrap.sh:ro
+      - "${SCHEMII_METADATA_BOOTSTRAP_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_password}:/run/secrets/metadata_bootstrap_password:ro"
+      - "${SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_app_password}:/run/secrets/metadata_app_password:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-999}"
+    networks:
+      - database
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  demo-postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: schemii_demo_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/demo_admin_password
+      SCHEMII_DEMO_TARGET_DATABASE: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
+      SCHEMII_DEMO_TARGET_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
+      SCHEMII_DEMO_TARGET_PASSWORD_FILE: /run/secrets/demo_target_password
+    volumes:
+      - schemii-test-demo-postgres:/var/lib/postgresql/data
+      - ./dev/postgres/demo-init.sh:/docker-entrypoint-initdb.d/010-demo-role.sh:ro
+      - "${SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_admin_password}:/run/secrets/demo_admin_password:ro"
+      - "${SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_target_password}:/run/secrets/demo_target_password:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-999}"
+    networks:
+      database:
+        aliases:
+          - postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U schemii_demo_admin -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   postgres-seed:
     image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     depends_on:
-      postgres:
+      demo-postgres:
         condition: service_healthy
     environment:
       PGHOST: postgres
       PGPORT: 5432
       PGDATABASE: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
       PGUSER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
-      SCHEMII_TEST_POSTGRES_PASSWORD: ${SCHEMII_TEST_POSTGRES_PASSWORD:-schemii-local-test}
+      SCHEMII_DEMO_ADMIN_USER: schemii_demo_admin
+      SCHEMII_TEST_POSTGRES_PASSWORD_FILE: /run/secrets/demo_target_password
+      SCHEMII_DEMO_ADMIN_PASSWORD_FILE: /run/secrets/demo_admin_password
       SCHEMII_RESET_MIGRATION_DEMO: ${SCHEMII_RESET_MIGRATION_DEMO:-0}
     command: ["/bin/sh", "/seed/seed.sh"]
     user: postgres
@@ -105,6 +175,10 @@ services:
       - ./dev/postgres/seed.sh:/seed/seed.sh:ro
       - ./dev/postgres/seed.sql:/seed/seed.sql:ro
       - ./dev/postgres/migration-demo.sql:/seed/migration-demo.sql:ro
+      - "${SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_target_password}:/run/secrets/demo_target_password:ro"
+      - "${SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_admin_password}:/run/secrets/demo_admin_password:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-999}"
     networks:
       - database
     read_only: true
@@ -123,16 +197,20 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      SCHEMII_METADATA_DSN: "host=postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_TEST_POSTGRES_USER:-schemii}"
-      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_password
+      SCHEMII_DEPLOYMENT_MODE: local-development
+      SCHEMII_TARGET_EGRESS_MODE: internal-only
+      SCHEMII_STORAGE_MODE: postgresql
+      SCHEMII_METADATA_DSN: "host=metadata-postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_METADATA_APP_USER:-schemii_metadata_app}"
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password
       SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key
+      SCHEMII_METADATA_TARGET_HOST_ALIASES: metadata-postgres
       SCHEMII_DEMO_SCENARIO: ${SCHEMII_DEMO_SCENARIO:-baseline}
       SCHEMII_DEMO_SOURCE_REVISION: ${SCHEMII_DEMO_SOURCE_REVISION:-unknown+dirty}
       SCHEMII_DEMO_POSTGRES_HOST: postgres
       SCHEMII_DEMO_POSTGRES_PORT: 5432
       SCHEMII_DEMO_POSTGRES_DATABASE: schemii_migration_demo
       SCHEMII_DEMO_POSTGRES_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
-      SCHEMII_DEMO_POSTGRES_PASSWORD_FILE: /run/secrets/metadata_password
+      SCHEMII_DEMO_POSTGRES_PASSWORD_FILE: /run/secrets/demo_target_password
       SCHEMII_DEMO_FIXTURE_ROOT: /fixture
     command:
       - /bin/sh
@@ -142,8 +220,9 @@ services:
         python /fixture/demo-fixture.py
     volumes:
       - ./dev/postgres:/fixture:ro
-      - "${SCHEMII_METADATA_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_password}:/run/secrets/metadata_password:ro"
+      - "${SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_app_password}:/run/secrets/metadata_app_password:ro"
       - "${SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE:-./.schemii/secrets/metadata_encryption_key}:/run/secrets/metadata_encryption_key:ro"
+      - "${SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_target_password}:/run/secrets/demo_target_password:ro"
     group_add:
       - "${SCHEMII_SECRET_READER_GID:-10001}"
     networks:
@@ -159,6 +238,7 @@ services:
 
 volumes:
   schemii-test-postgres:
+  schemii-test-demo-postgres:
 
 networks:
   database:

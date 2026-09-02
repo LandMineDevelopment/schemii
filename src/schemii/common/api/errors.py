@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -14,6 +15,11 @@ from schemii.common.connections.store import (
     ConnectionStorageUnavailableError,
 )
 from schemii.common.errors import MetadataStorageUnavailableError
+
+from .observability import log_safe_exception
+
+
+LOGGER = logging.getLogger("schemii.http")
 
 
 class ApiProblem(RuntimeError):
@@ -67,6 +73,14 @@ def _response(
 def install_api_error_handlers(application: FastAPI) -> None:
     @application.exception_handler(ApiProblem)
     async def handle_api_problem(request: Request, error: ApiProblem) -> JSONResponse:
+        if error.status_code >= 500:
+            log_safe_exception(
+                LOGGER,
+                request,
+                error,
+                status_code=error.status_code,
+                error_code=error.code,
+            )
         return _response(request, error)
 
     @application.exception_handler(RequestValidationError)
@@ -121,6 +135,13 @@ def install_api_error_handlers(application: FastAPI) -> None:
         request: Request,
         error: ConnectionStorageUnavailableError,
     ) -> JSONResponse:
+        log_safe_exception(
+            LOGGER,
+            request,
+            error,
+            status_code=503,
+            error_code="connection_storage_unavailable",
+        )
         return _response(
             request,
             ApiProblem(
@@ -136,6 +157,13 @@ def install_api_error_handlers(application: FastAPI) -> None:
         request: Request,
         error: MetadataStorageUnavailableError,
     ) -> JSONResponse:
+        log_safe_exception(
+            LOGGER,
+            request,
+            error,
+            status_code=503,
+            error_code="metadata_storage_unavailable",
+        )
         return _response(
             request,
             ApiProblem(
@@ -151,6 +179,13 @@ def install_api_error_handlers(application: FastAPI) -> None:
         request: Request,
         error: ConnectionCredentialUnreadableError,
     ) -> JSONResponse:
+        log_safe_exception(
+            LOGGER,
+            request,
+            error,
+            status_code=500,
+            error_code="connection_credential_unreadable",
+        )
         return _response(
             request,
             ApiProblem(
@@ -162,7 +197,13 @@ def install_api_error_handlers(application: FastAPI) -> None:
 
     @application.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, error: Exception) -> JSONResponse:
-        del error
+        log_safe_exception(
+            LOGGER,
+            request,
+            error,
+            status_code=500,
+            error_code="internal_error",
+        )
         return _response(
             request,
             ApiProblem(

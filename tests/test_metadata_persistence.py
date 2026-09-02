@@ -8,6 +8,7 @@ from cryptography.exceptions import InvalidTag
 from schemii.common.metadata.config import MetadataConfig
 from schemii.common.metadata.crypto import CredentialCipher
 from schemii.common.metadata.database import (
+    MetadataReadinessProbe,
     MetadataMigrationError,
     MetadataMigrator,
     packaged_migrations,
@@ -16,11 +17,26 @@ from schemii.common.metadata.factory import create_metadata_repositories
 from schemii.common.metadata.secrets import read_encryption_key, read_secret_file
 
 
-def test_unconfigured_metadata_keeps_isolated_tests_in_memory() -> None:
-    repositories = create_metadata_repositories({})
+def test_metadata_storage_mode_is_explicit_and_memory_is_test_selectable() -> None:
+    with pytest.raises(ValueError, match="SCHEMII_STORAGE_MODE must be explicitly set"):
+        create_metadata_repositories({})
+
+    repositories = create_metadata_repositories({"SCHEMII_STORAGE_MODE": "memory"})
 
     assert repositories.storage == "memory"
     assert repositories.durable is False
+    repositories.check_readiness()
+
+    with pytest.raises(ValueError, match="must not be set"):
+        create_metadata_repositories(
+            {
+                "SCHEMII_STORAGE_MODE": "memory",
+                "SCHEMII_METADATA_DSN": "host=metadata dbname=schemii",
+            }
+        )
+
+    with pytest.raises(ValueError, match="SCHEMII_METADATA_DSN is required"):
+        create_metadata_repositories({"SCHEMII_STORAGE_MODE": "postgresql"})
 
 
 def test_metadata_configuration_requires_absolute_secret_files() -> None:
@@ -70,10 +86,51 @@ def test_credentials_are_authenticated_to_owner_and_connection() -> None:
         cipher.decrypt("owner-a", "pg_" + "b" * 32, encrypted)
 
 
+def test_metadata_readiness_probe_executes_and_closes_or_wraps_failure() -> None:
+    class Cursor:
+        def __init__(self, row):
+            self.row = row
+            self.executed = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, query):
+            self.executed.append(query)
+
+        def fetchone(self):
+            return self.row
+
+    class Connection:
+        def __init__(self, row):
+            self.cursor_instance = Cursor(row)
+            self.closed = False
+
+        def cursor(self):
+            return self.cursor_instance
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection({"ready": 1})
+    MetadataReadinessProbe(lambda: connection)()
+
+    assert connection.cursor_instance.executed == ["SELECT 1 AS ready"]
+    assert connection.closed is True
+
+    broken = Connection(None)
+    with pytest.raises(RuntimeError, match="Durable metadata is temporarily unavailable"):
+        MetadataReadinessProbe(lambda: broken)()
+    assert broken.closed is True
+
+
 def test_packaged_metadata_migrations_are_contiguous_and_checksum_guarded() -> None:
     migrations = packaged_migrations()
 
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert migrations[0].name == "0001_connections.sql"
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
@@ -89,6 +146,8 @@ def test_packaged_metadata_migrations_are_contiguous_and_checksum_guarded() -> N
     assert "PostgreSQL attnum remains authoritative" in migrations[3].sql
     assert "CREATE TABLE schemii.workspace_design_history_entries" in migrations[6].sql
     assert "CREATE TABLE schemii.workspace_design_position_memory" in migrations[6].sql
+    assert migrations[7].name == "0008_migration_execution_leases.sql"
+    assert "lease_expires_at" in migrations[7].sql
     migrator = MetadataMigrator(lambda: None, migrations)
     assert migrator._validate_applied(
         [

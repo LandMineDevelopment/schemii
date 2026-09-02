@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 from psycopg.rows import dict_row
 
+from schemii.common.errors import MetadataStorageUnavailableError
+
 from .config import MetadataConfig
 from .secrets import read_secret_file
 
@@ -57,24 +59,61 @@ class MetadataConnectionFactory:
         self,
         config: MetadataConfig,
         connect: Callable[..., Any] | None = None,
+        *,
+        statement_timeout_ms: int | None = None,
+        application_name: str | None = None,
     ) -> None:
         self._config = config
         self._connect = connect
+        self._statement_timeout_ms = statement_timeout_ms
+        self._application_name = application_name or config.application_name
 
     def __call__(self) -> Any:
         import psycopg
 
         connect = self._connect or psycopg.connect
-        return connect(
-            self._config.dsn,
-            password=read_secret_file(
+        parameters: dict[str, Any] = {
+            "password": read_secret_file(
                 self._config.password_file,
                 "SCHEMII_METADATA_PASSWORD_FILE",
             ),
-            connect_timeout=self._config.connect_timeout,
-            application_name=self._config.application_name,
-            row_factory=dict_row,
+            "connect_timeout": self._config.connect_timeout,
+            "application_name": self._application_name,
+            "row_factory": dict_row,
+        }
+        if self._statement_timeout_ms is not None:
+            parameters["options"] = (
+                f"-c statement_timeout={self._statement_timeout_ms} "
+                f"-c lock_timeout={self._statement_timeout_ms}"
+            )
+        return connect(
+            self._config.dsn,
+            **parameters,
         )
+
+
+class MetadataReadinessProbe:
+    """Perform one bounded, side-effect-free metadata dependency check."""
+
+    def __init__(self, connection_factory: Callable[[], Any]) -> None:
+        self._connection_factory = connection_factory
+
+    def __call__(self) -> None:
+        connection: Any | None = None
+        try:
+            connection = self._connection_factory()
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1 AS ready")
+                row = cursor.fetchone()
+                if row is None or int(row["ready"]) != 1:
+                    raise RuntimeError("metadata readiness query returned no row")
+        except Exception as error:
+            raise MetadataStorageUnavailableError(
+                "Durable metadata is temporarily unavailable"
+            ) from error
+        finally:
+            if connection is not None:
+                connection.close()
 
 
 class MetadataMigrator:

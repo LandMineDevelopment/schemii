@@ -1,6 +1,5 @@
 """Assemble the Schemii API application."""
 
-import os
 from dataclasses import dataclass, replace
 
 from fastapi import APIRouter, FastAPI
@@ -12,6 +11,7 @@ from schemii.common.api import (
 from schemii.common.api.models import ApiErrorResponse
 from schemii.common.api.inspection import install_developer_route_inspection
 from schemii.common.api.routes import router as runtime_router
+from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.ai.routes import router as ai_provider_router
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.service import ConnectionService
@@ -59,7 +59,11 @@ def create_services() -> ApplicationServices:
         if metadata.connection_factory is not None
         else InMemoryWorkspaceRepository(designs=designs)
     )
-    connections = ConnectionService(metadata.connections, (workspaces,))
+    connections = ConnectionService(
+        metadata.connections,
+        (workspaces,),
+        target_policy=metadata.target_policy,
+    )
     migration_repository = (
         PostgresMigrationRepository(metadata.connection_factory)
         if metadata.connection_factory is not None
@@ -155,4 +159,5 @@ def create_app(
     return application
 
 
-app = create_app(developer_inspection=os.environ.get("SCHEMII_DEVELOPER_INSPECTION") == "1")
+runtime_config = RuntimeConfig.from_env()
+app = create_app(developer_inspection=runtime_config.developer_inspection)
