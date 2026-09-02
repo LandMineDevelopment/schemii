@@ -63,3 +63,20 @@ jobs:
           SCHEMII_TEST_METADATA_DSN: host=127.0.0.1 port=5432 dbname=schemii_ci user=postgres
           SCHEMII_TEST_METADATA_PASSWORD: postgres-ci-password
         run: python -m pytest -q tests/integration/test_metadata_postgres.py
+
+  browser-smoke:
+    name: Assembled browser smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Start the canonical application stack
+        run: ./start.sh
+      - name: Exercise desktop and Android-sized browser flows
+        run: npm run test:e2e
