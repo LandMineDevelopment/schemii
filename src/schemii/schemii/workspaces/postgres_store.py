@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
 from schemii.common.metadata.users import ensure_local_metadata_user
+from schemii.schemii.designs.store import (
+    authored_content_document,
+    design_fingerprint,
+    design_object_ids,
+    validate_design_content,
+)
 
 from .models import (
     SchemiiWorkspace,
     SchemiiWorkspaceCreate,
     SchemiiWorkspaceLayoutUpdate,
+    TableColumnDisplayOrder,
     TablePosition,
+    WorkspaceImportIssue,
+    WorkspaceImportSummary,
 )
 from .store import (
+    MAX_COLUMN_DISPLAY_ORDER_ENTRIES_PER_OWNER,
     MAX_TABLE_POSITIONS_PER_OWNER,
     MAX_WORKSPACES_PER_OWNER,
     WorkspaceConflictError,
@@ -23,6 +34,7 @@ from .store import (
     WorkspaceNotFoundError,
     WorkspaceRepositoryError,
     WorkspaceStorageUnavailableError,
+    WorkspaceDesignBootstrap,
 )
 
 
@@ -37,12 +49,22 @@ class PostgresWorkspaceRepository:
         *,
         max_workspaces_per_owner: int = MAX_WORKSPACES_PER_OWNER,
         max_table_positions_per_owner: int = MAX_TABLE_POSITIONS_PER_OWNER,
+        max_column_display_order_entries_per_owner: int = (
+            MAX_COLUMN_DISPLAY_ORDER_ENTRIES_PER_OWNER
+        ),
     ) -> None:
-        if max_workspaces_per_owner < 1 or max_table_positions_per_owner < 1:
+        if (
+            max_workspaces_per_owner < 1
+            or max_table_positions_per_owner < 1
+            or max_column_display_order_entries_per_owner < 1
+        ):
             raise ValueError("workspace limits must be positive")
         self._connection_factory = connection_factory
         self._max_workspaces_per_owner = max_workspaces_per_owner
         self._max_table_positions_per_owner = max_table_positions_per_owner
+        self._max_column_display_order_entries_per_owner = (
+            max_column_display_order_entries_per_owner
+        )
 
     def list(self, owner_id: str) -> list[SchemiiWorkspace]:
         with self._transaction() as connection:
@@ -66,8 +88,15 @@ class PostgresWorkspaceRepository:
                 if not rows:
                     return []
                 positions = self._owner_positions(cursor, owner_id)
+                column_orders = self._owner_column_orders(cursor, owner_id)
+                imports = self._owner_import_summaries(cursor, owner_id)
                 return [
-                    self._workspace(row, positions.get(row["id"], []))
+                    self._workspace(
+                        row,
+                        positions.get(row["id"], []),
+                        column_orders.get(row["id"], []),
+                        imports.get(row["id"]),
+                    )
                     for row in rows
                 ]
 
@@ -80,13 +109,27 @@ class PostgresWorkspaceRepository:
                 return self._workspace(
                     row,
                     self._workspace_positions(cursor, owner_id, workspace_id),
+                    self._workspace_column_orders(cursor, owner_id, workspace_id),
+                    self._workspace_import_summary(cursor, owner_id, workspace_id),
                 )
 
     def create(
         self,
         owner_id: str,
         request: SchemiiWorkspaceCreate,
+        *,
+        bootstrap: WorkspaceDesignBootstrap | None = None,
     ) -> SchemiiWorkspace:
+        if bootstrap is not None:
+            validate_design_content(bootstrap.content)
+            allowed = design_object_ids(bootstrap.content)
+            if any(
+                allowed.get(position.object_id) != position.layer
+                for position in bootstrap.layout.objects
+            ):
+                raise WorkspaceStorageUnavailableError(
+                    "Imported workspace layout contains an invalid object reference"
+                )
         workspace_id = f"ws_{secrets.token_hex(16)}"
         with self._transaction() as connection:
             with connection.cursor() as cursor:
@@ -106,11 +149,20 @@ class PostgresWorkspaceRepository:
                     )
                 cursor.execute(
                     """
-                    INSERT INTO schemii.workspaces (id, owner_id, name)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO schemii.workspaces (id, owner_id, name, mode)
+                    VALUES (%s, %s, %s, %s)
                     RETURNING *
                     """,
-                    (workspace_id, owner_id, request.name),
+                    (
+                        workspace_id,
+                        owner_id,
+                        request.name,
+                        (
+                            "design"
+                            if bootstrap is not None or request.connection_id is None
+                            else "live"
+                        ),
+                    ),
                 )
                 row = cursor.fetchone()
                 if request.connection_id is not None:
@@ -130,26 +182,97 @@ class PostgresWorkspaceRepository:
                             request.namespace,
                         ),
                     )
-                cursor.execute(
-                    """
-                    INSERT INTO schemii.workspace_designs (workspace_id, owner_id)
-                    VALUES (%s, %s)
-                    """,
-                    (workspace_id, owner_id),
-                )
-                cursor.execute(
-                    """
-                    INSERT INTO schemii.workspace_design_layouts (workspace_id, owner_id)
-                    VALUES (%s, %s)
-                    """,
-                    (workspace_id, owner_id),
-                )
+                if bootstrap is None:
+                    cursor.execute(
+                        """
+                        INSERT INTO schemii.workspace_designs (workspace_id, owner_id)
+                        VALUES (%s, %s)
+                        """,
+                        (workspace_id, owner_id),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO schemii.workspace_design_layouts (workspace_id, owner_id)
+                        VALUES (%s, %s)
+                        """,
+                        (workspace_id, owner_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO schemii.workspace_designs (
+                            workspace_id, owner_id, revision, content, fingerprint
+                        )
+                        VALUES (%s, %s, 1, %s::jsonb, %s)
+                        """,
+                        (
+                            workspace_id,
+                            owner_id,
+                            json.dumps(
+                                authored_content_document(bootstrap.content),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                            design_fingerprint(bootstrap.content),
+                        ),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO schemii.workspace_design_layouts (
+                            workspace_id, owner_id, revision, design_revision, objects
+                        )
+                        VALUES (%s, %s, 1, 1, %s::jsonb)
+                        """,
+                        (
+                            workspace_id,
+                            owner_id,
+                            json.dumps(
+                                bootstrap.layout.model_dump(mode="json")["objects"],
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                        ),
+                    )
+                    summary = bootstrap.import_summary
+                    cursor.execute(
+                        """
+                        INSERT INTO schemii.workspace_design_imports (
+                            workspace_id, owner_id, catalog_fingerprint,
+                            catalog_captured_at, complete, imported_objects, issues
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                        """,
+                        (
+                            workspace_id,
+                            owner_id,
+                            summary.catalog_fingerprint,
+                            summary.catalog_captured_at,
+                            summary.complete,
+                            json.dumps(
+                                summary.imported_objects,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                            json.dumps(
+                                [issue.model_dump(mode="json") for issue in summary.issues],
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                        ),
+                    )
                 row.update(
                     connection_id=request.connection_id,
                     database_name=request.database,
                     namespace=request.namespace,
                 )
-                return self._workspace(row, [])
+                return self._workspace(
+                    row,
+                    [],
+                    [],
+                    bootstrap.import_summary if bootstrap is not None else None,
+                )
 
     def update_layout(
         self,
@@ -191,6 +314,27 @@ class PostgresWorkspaceRepository:
                         "table position",
                         self._max_table_positions_per_owner,
                     )
+                if request.column_orders is not None:
+                    cursor.execute(
+                        """
+                        SELECT count(*) AS entry_count
+                        FROM schemii.workspace_table_column_orders
+                        WHERE owner_id = %s AND workspace_id <> %s
+                        """,
+                        (owner_id, workspace_id),
+                    )
+                    other_order_entries = int(cursor.fetchone()["entry_count"])
+                    requested_order_entries = sum(
+                        len(order.columns) for order in request.column_orders
+                    )
+                    if (
+                        other_order_entries + requested_order_entries
+                        > self._max_column_display_order_entries_per_owner
+                    ):
+                        raise WorkspaceLimitError(
+                            "column display order entry",
+                            self._max_column_display_order_entries_per_owner,
+                        )
                 cursor.execute(
                     """
                     DELETE FROM schemii.workspace_table_positions
@@ -218,6 +362,36 @@ class PostgresWorkspaceRepository:
                             for ordinal, table in enumerate(request.tables)
                         ],
                     )
+                if request.column_orders is not None:
+                    cursor.execute(
+                        """
+                        DELETE FROM schemii.workspace_table_column_orders
+                        WHERE owner_id = %s AND workspace_id = %s
+                        """,
+                        (owner_id, workspace_id),
+                    )
+                    order_rows = [
+                        (
+                            owner_id,
+                            workspace_id,
+                            order.name,
+                            column_name,
+                            ordinal,
+                        )
+                        for order in request.column_orders
+                        for ordinal, column_name in enumerate(order.columns)
+                    ]
+                    if order_rows:
+                        cursor.executemany(
+                            """
+                            INSERT INTO schemii.workspace_table_column_orders (
+                                owner_id, workspace_id, table_name,
+                                column_name, ordinal
+                            )
+                            VALUES (%s, %s, %s, %s, %s)
+                            """,
+                            order_rows,
+                        )
                 cursor.execute(
                     """
                     UPDATE schemii.workspaces
@@ -246,6 +420,8 @@ class PostgresWorkspaceRepository:
                 return self._workspace(
                     row,
                     [table.model_copy(deep=True) for table in request.tables],
+                    self._workspace_column_orders(cursor, owner_id, workspace_id),
+                    self._workspace_import_summary(cursor, owner_id, workspace_id),
                 )
 
     def delete(self, owner_id: str, workspace_id: str, expected_revision: int) -> None:
@@ -344,6 +520,96 @@ class PostgresWorkspaceRepository:
         )
         return [self._position(row) for row in cursor.fetchall()]
 
+    def _owner_column_orders(
+        self,
+        cursor: Any,
+        owner_id: str,
+    ) -> dict[str, list[TableColumnDisplayOrder]]:
+        cursor.execute(
+            """
+            SELECT workspace_id, table_name, column_name, ordinal
+            FROM schemii.workspace_table_column_orders
+            WHERE owner_id = %s
+            ORDER BY workspace_id, table_name, ordinal
+            """,
+            (owner_id,),
+        )
+        grouped: dict[str, dict[str, list[str]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        for row in cursor.fetchall():
+            grouped[row["workspace_id"]][row["table_name"]].append(
+                row["column_name"]
+            )
+        return {
+            workspace_id: [
+                TableColumnDisplayOrder(name=table_name, columns=columns)
+                for table_name, columns in tables.items()
+            ]
+            for workspace_id, tables in grouped.items()
+        }
+
+    def _workspace_column_orders(
+        self,
+        cursor: Any,
+        owner_id: str,
+        workspace_id: str,
+    ) -> list[TableColumnDisplayOrder]:
+        cursor.execute(
+            """
+            SELECT table_name, column_name, ordinal
+            FROM schemii.workspace_table_column_orders
+            WHERE owner_id = %s AND workspace_id = %s
+            ORDER BY table_name, ordinal
+            """,
+            (owner_id, workspace_id),
+        )
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for row in cursor.fetchall():
+            grouped[row["table_name"]].append(row["column_name"])
+        return [
+            TableColumnDisplayOrder(name=table_name, columns=columns)
+            for table_name, columns in grouped.items()
+        ]
+
+    def _owner_import_summaries(
+        self,
+        cursor: Any,
+        owner_id: str,
+    ) -> dict[str, WorkspaceImportSummary]:
+        cursor.execute(
+            """
+            SELECT workspace_id, catalog_fingerprint, catalog_captured_at,
+                   complete, imported_objects, issues
+            FROM schemii.workspace_design_imports
+            WHERE owner_id = %s
+            ORDER BY workspace_id
+            """,
+            (owner_id,),
+        )
+        return {
+            row["workspace_id"]: self._import_summary(row)
+            for row in cursor.fetchall()
+        }
+
+    def _workspace_import_summary(
+        self,
+        cursor: Any,
+        owner_id: str,
+        workspace_id: str,
+    ) -> WorkspaceImportSummary | None:
+        cursor.execute(
+            """
+            SELECT catalog_fingerprint, catalog_captured_at,
+                   complete, imported_objects, issues
+            FROM schemii.workspace_design_imports
+            WHERE owner_id = %s AND workspace_id = %s
+            """,
+            (owner_id, workspace_id),
+        )
+        row = cursor.fetchone()
+        return self._import_summary(row) if row is not None else None
+
     @contextmanager
     def _transaction(self) -> Iterator[Any]:
         try:
@@ -378,15 +644,36 @@ class PostgresWorkspaceRepository:
     def _workspace(
         row: dict[str, Any],
         positions: list[TablePosition],
+        column_orders: list[TableColumnDisplayOrder],
+        import_summary: WorkspaceImportSummary | None,
     ) -> SchemiiWorkspace:
         return SchemiiWorkspace(
             id=row["id"],
             revision=row["revision"],
             name=row["name"],
+            mode=row["mode"],
             connection_id=row["connection_id"],
             database=row["database_name"],
             namespace=row["namespace"],
             tables=positions,
+            column_orders=column_orders,
+            import_summary=import_summary,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _import_summary(row: dict[str, Any]) -> WorkspaceImportSummary:
+        imported_objects = row["imported_objects"]
+        issues = row["issues"]
+        if isinstance(imported_objects, str):
+            imported_objects = json.loads(imported_objects)
+        if isinstance(issues, str):
+            issues = json.loads(issues)
+        return WorkspaceImportSummary(
+            catalog_fingerprint=row["catalog_fingerprint"],
+            catalog_captured_at=row["catalog_captured_at"],
+            complete=row["complete"],
+            imported_objects=imported_objects,
+            issues=[WorkspaceImportIssue.model_validate(issue) for issue in issues],
         )

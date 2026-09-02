@@ -52,7 +52,13 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
     )
 
     operations = {item["name"]: item for item in document["operations"]}
-    assert list(operations) == ["test_connection", "namespace_exists", "introspect"]
+    assert list(operations) == [
+        "test_connection",
+        "namespace_exists",
+        "introspect",
+        "execute_migration",
+        "transaction_status",
+    ]
     assert operations["test_connection"]["returnAnnotation"] == (
         "PostgresConnectionTestResult"
     )
@@ -69,7 +75,7 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
     introspect = callables[operations["introspect"]["implementationObjectId"]]
     call_names = [objects[item["objectId"]]["name"] for item in introspect["calls"]]
     assert call_names[:3] == ["_validated_namespace", "_connect", "_begin_read_only"]
-    assert "_bounded_rows" in call_names
+    assert "_introspect_connection" in call_names
     assert call_names[-1] == "_cleanup"
 
     query_names = {item["name"] for item in document["queries"]}
@@ -81,13 +87,25 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         "INDEXES_QUERY",
         "METADATA_QUERY",
         "NAMESPACE_EXISTS_QUERY",
-        "TABLES_QUERY",
-        "TRIGGERS_QUERY",
-        "VIEWS_QUERY",
-    }
+            "TABLES_QUERY",
+            "TRIGGERS_QUERY",
+            "TYPES_QUERY",
+            "VIEWS_QUERY",
+        }
+    introspection_callables = [
+        introspect,
+        callables[
+            next(
+                item["objectId"]
+                for item in introspect["calls"]
+                if objects[item["objectId"]]["name"] == "_introspect_connection"
+            )
+        ],
+    ]
     introspection_query_ids = {
         query_id
-        for call in introspect["calls"]
+        for callable_item in introspection_callables
+        for call in callable_item["calls"]
         for query_id in call["queryIds"]
     }
     assert {
@@ -149,6 +167,7 @@ def test_database_inspection_is_static_bounded_and_contains_no_runtime_values() 
     ]["totalQuerySourceLimit"]
     assert {item["statement"] for item in document["inlineStatements"]} == {
         "BEGIN",
+        "SELECT",
         "SET",
     }
     assert all(item["readOnly"] for item in document["inlineStatements"])

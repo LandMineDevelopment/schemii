@@ -11,6 +11,7 @@ from schemii.common.postgres.models import (
     PostgresTable,
     build_postgres_catalog,
 )
+from schemii.common.postgres.errors import PostgresNamespaceNotFoundError
 from schemii.main import ApplicationServices, create_app
 from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
@@ -20,6 +21,20 @@ class FakePostgresGateway:
     def __init__(self) -> None:
         self.connections = []
         self.namespace_available = True
+        self.columns = (
+            PostgresColumn(
+                name="id",
+                ordinal=1,
+                data_type="bigint",
+                nullable=False,
+            ),
+            PostgresColumn(
+                name="email",
+                ordinal=2,
+                data_type="text",
+                nullable=False,
+            ),
+        )
 
     def test_connection(self, connection):
         self.connections.append(connection)
@@ -34,6 +49,8 @@ class FakePostgresGateway:
 
     def introspect(self, connection, namespace):
         self.connections.append(connection)
+        if not self.namespace_available or namespace != "public":
+            raise PostgresNamespaceNotFoundError()
         return build_postgres_catalog(
             database=connection.database,
             namespace=namespace,
@@ -46,14 +63,7 @@ class FakePostgresGateway:
                     name="customers",
                     kind="table",
                     is_partition=False,
-                    columns=(
-                        PostgresColumn(
-                            name="id",
-                            ordinal=1,
-                            data_type="bigint",
-                            nullable=False,
-                        ),
-                    ),
+                    columns=self.columns,
                 ),
             ),
             relationships=(),
@@ -66,14 +76,15 @@ class FakePostgresGateway:
 
 def client() -> tuple[TestClient, FakePostgresGateway]:
     connections = InMemoryConnectionRepository()
-    workspaces = InMemoryWorkspaceRepository()
+    designs = InMemoryDesignRepository()
+    workspaces = InMemoryWorkspaceRepository(designs=designs)
     postgres = FakePostgresGateway()
     services = ApplicationServices(
         metadata=MetadataRepositories(connections=connections),
         connections=ConnectionService(connections, (workspaces,)),
         postgres=postgres,
         workspaces=workspaces,
-        designs=InMemoryDesignRepository(),
+        designs=designs,
     )
     return TestClient(create_app(services), base_url="http://localhost"), postgres
 
@@ -135,13 +146,14 @@ def test_runtime_and_error_envelopes_are_ready_for_ui_consumers() -> None:
 
 def test_unexpected_errors_keep_safe_runtime_headers() -> None:
     connections = InMemoryConnectionRepository()
-    workspaces = InMemoryWorkspaceRepository()
+    designs = InMemoryDesignRepository()
+    workspaces = InMemoryWorkspaceRepository(designs=designs)
     services = ApplicationServices(
         metadata=MetadataRepositories(connections=connections),
         connections=ConnectionService(connections, (workspaces,)),
         postgres=FakePostgresGateway(),
         workspaces=workspaces,
-        designs=InMemoryDesignRepository(),
+        designs=designs,
     )
     application = create_app(services)
 
@@ -201,19 +213,24 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
     workspace = create_workspace(api, connection["id"])
 
     assert workspace["revision"] == 1
+    assert workspace["mode"] == "live"
+    assert workspace["importSummary"] is None
     assert workspace["tables"] == []
+    assert workspace["columnOrders"] == []
     assert set(workspace) == {
         "id",
         "revision",
         "name",
+        "mode",
         "connectionId",
         "database",
         "namespace",
         "tables",
+        "columnOrders",
+        "importSummary",
         "createdAt",
         "updatedAt",
     }
-
     revised_connection = api.patch(
         f"/api/v1/connections/{connection['id']}",
         json={"expectedRevision": 1, "name": "Reporting revised"},
@@ -249,17 +266,44 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
     assert unknown.status_code == 422
     assert unknown.json()["error"]["code"] == "table_not_found"
 
+    incomplete_order = api.put(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/layout",
+        json={
+            "expectedRevision": 1,
+            "expectedConnectionRevision": 2,
+            "tables": [],
+            "columnOrders": [{"name": "customers", "columns": ["email"]}],
+        },
+    )
+    assert incomplete_order.status_code == 422
+    assert incomplete_order.json()["error"]["code"] == "column_order_mismatch"
+    assert incomplete_order.json()["error"]["details"] == {
+        "tables": [
+            {
+                "table": "customers",
+                "missingColumns": ["id"],
+                "unknownColumns": [],
+            }
+        ]
+    }
+
     saved = api.put(
         f"/api/v1/schemii/workspaces/{workspace['id']}/layout",
         json={
             "expectedRevision": 1,
             "expectedConnectionRevision": 2,
             "tables": [{"name": "customers", "x": 10.5, "y": 20}],
+            "columnOrders": [
+                {"name": "customers", "columns": ["email", "id"]}
+            ],
         },
     )
     assert saved.status_code == 200
     assert saved.json()["revision"] == 2
     assert saved.json()["tables"] == [{"name": "customers", "x": 10.5, "y": 20.0}]
+    assert saved.json()["columnOrders"] == [
+        {"name": "customers", "columns": ["email", "id"]}
+    ]
 
     calls_before_stale_write = len(postgres.connections)
     stale = api.put(
@@ -274,10 +318,22 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
     assert stale.json()["error"]["details"] == {"currentRevision": 2}
     assert len(postgres.connections) == calls_before_stale_write
 
+    postgres.columns = (
+        *postgres.columns,
+        PostgresColumn(
+            name="created_at",
+            ordinal=3,
+            data_type="timestamp with time zone",
+            nullable=False,
+        ),
+    )
     catalog = api.get(f"/api/v1/schemii/workspaces/{workspace['id']}/catalog")
     assert catalog.status_code == 200
     document = catalog.json()
     assert document["positions"] == [{"name": "customers", "x": 10.5, "y": 20.0}]
+    assert document["workspace"]["columnOrders"] == [
+        {"name": "customers", "columns": ["email", "id", "created_at"]}
+    ]
     assert document["catalog"]["tables"][0]["columns"][0]["dataType"] == "bigint"
     assert len(document["catalog"]["fingerprint"]) == 64
 
@@ -286,6 +342,79 @@ def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
     )
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "connection_in_use"
+
+
+def test_postgres_import_creates_a_new_targeted_design_without_an_overwrite_route() -> None:
+    api, postgres = client()
+    connection = create_connection(api)
+
+    response = api.post(
+        "/api/v1/schemii/workspaces/imports",
+        json={
+            "name": "Imported customers",
+            "connectionId": connection["id"],
+            "database": "analytics",
+            "namespace": "public",
+        },
+    )
+
+    assert response.status_code == 201
+    document = response.json()
+    workspace = document["workspace"]
+    assert workspace["name"] == "Imported customers"
+    assert workspace["mode"] == "design"
+    assert workspace["connectionId"] == connection["id"]
+    assert workspace["importSummary"]["catalogFingerprint"]
+    assert workspace["importSummary"]["complete"] is True
+    assert workspace["importSummary"]["importedObjects"] == {
+        "checks": 0,
+        "columns": 2,
+        "functions": 0,
+        "indexes": 0,
+        "keys": 0,
+        "relationships": 0,
+        "tables": 1,
+        "triggers": 0,
+        "types": 0,
+        "views": 0,
+    }
+    assert document["design"]["revision"] == 1
+    assert document["design"]["content"]["tables"][0]["name"] == "customers"
+    assert document["layout"]["revision"] == 1
+    assert document["layout"]["designRevision"] == 1
+    assert postgres.connections[-1].password.get_secret_value() == "database secret"
+
+    saved = api.get(f"/api/v1/schemii/workspaces/{workspace['id']}")
+    assert saved.status_code == 200
+    assert saved.json()["importSummary"] == workspace["importSummary"]
+    design = api.get(f"/api/v1/schemii/workspaces/{workspace['id']}/design")
+    assert design.json() == document["design"]
+
+    overwrite = api.post(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/imports",
+        json={},
+    )
+    assert overwrite.status_code == 404
+
+
+def test_failed_postgres_import_does_not_create_a_workspace() -> None:
+    api, postgres = client()
+    connection = create_connection(api)
+    postgres.namespace_available = False
+
+    response = api.post(
+        "/api/v1/schemii/workspaces/imports",
+        json={
+            "name": "Must not survive",
+            "connectionId": connection["id"],
+            "database": "analytics",
+            "namespace": "missing",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "postgres_namespace_not_found"
+    assert api.get("/api/v1/schemii/workspaces").json()["workspaces"] == []
 
 
 def test_workspace_creation_requires_a_live_namespace() -> None:
@@ -386,6 +515,16 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     assert saved.status_code == 200
     assert saved.json()["revision"] == 1
     assert len(saved.json()["fingerprint"]) == 64
+
+    impact = api.get(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/deletion-impact/{table_id}"
+    )
+    assert impact.status_code == 200
+    assert impact.json()["designRevision"] == 1
+    assert impact.json()["blocked"] is True
+    assert [(item["kind"], item["objectId"]) for item in impact.json()["dependents"]] == [
+        ("key", key_id)
+    ]
 
     analyzed = api.post(
         f"/api/v1/schemii/workspaces/{workspace['id']}/design/view-analysis",
@@ -548,6 +687,105 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
     assert "CREATE FUNCTION display_label" in exported.json()["content"]
     assert "CREATE TRIGGER inventory_name_changed" in exported.json()["content"]
     assert postgres.connections == []
+
+
+def test_design_history_and_baseline_reset_are_server_authoritative() -> None:
+    api, _ = client()
+    workspace = api.post(
+        "/api/v1/schemii/workspaces",
+        json={"name": "History test"},
+    ).json()
+    path = f"/api/v1/schemii/workspaces/{workspace['id']}/design"
+    table_id = "table_" + "1" * 32
+    column_id = "column_" + "2" * 32
+
+    initial = api.get(f"{path}/history")
+    assert initial.status_code == 200
+    assert initial.json()["canUndo"] is False
+    assert initial.json()["baseline"]["kind"] == "workspace_start"
+
+    saved = api.put(
+        path,
+        json={
+            "expectedDesignRevision": 0,
+            "content": {
+                "tables": [
+                    {
+                        "id": table_id,
+                        "name": "orders",
+                        "columns": [
+                            {
+                                "id": column_id,
+                                "name": "id",
+                                "dataType": "bigint",
+                                "nullable": False,
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+    assert saved.status_code == 200
+    history = api.get(f"{path}/history").json()
+    assert history["undo"]["delta"] == [
+        {"operation": "remove", "path": ["tables", 0], "value": None}
+    ]
+    layout = api.get(f"{path}/layout").json()
+    positioned = api.put(
+        f"{path}/layout",
+        json={
+            "expectedLayoutRevision": layout["revision"],
+            "expectedDesignRevision": 1,
+            "content": {
+                "objects": [
+                    {
+                        "objectId": table_id,
+                        "layer": "tables",
+                        "x": 320.0,
+                        "y": 200.0,
+                    }
+                ]
+            },
+        },
+    )
+    assert positioned.status_code == 200
+
+    preview = api.get(f"{path}/baseline-reset")
+    assert preview.status_code == 200
+    review = preview.json()
+    assert review["summary"]["changeCount"] == 2
+    reset = api.post(
+        f"{path}/baseline-reset",
+        json={
+            "expectedDesignRevision": review["designRevision"],
+            "baselineId": review["baseline"]["id"],
+            "baselineRevision": review["baseline"]["revision"],
+            "reviewDigest": review["reviewDigest"],
+        },
+    )
+    assert reset.status_code == 200
+    assert reset.json()["design"]["content"]["tables"] == []
+
+    undone = api.post(
+        f"{path}/undo",
+        json={"expectedDesignRevision": reset.json()["design"]["revision"]},
+    )
+    assert undone.status_code == 200
+    assert undone.json()["design"]["content"]["tables"][0]["name"] == "orders"
+    assert undone.json()["layout"]["content"]["objects"][0] == {
+        "objectId": table_id,
+        "layer": "tables",
+        "x": 320.0,
+        "y": 200.0,
+    }
+
+    redone = api.post(
+        f"{path}/redo",
+        json={"expectedDesignRevision": undone.json()["design"]["revision"]},
+    )
+    assert redone.status_code == 200
+    assert redone.json()["design"]["content"]["tables"] == []
 
 
 def test_workspace_rejects_an_incomplete_optional_target() -> None:

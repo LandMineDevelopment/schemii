@@ -12,11 +12,17 @@ from schemii.common.connections.store import (
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.errors import PostgresGatewayError
 from schemii.common.postgres.models import PostgresCatalog
+from schemii.schemii.designs.importer import import_postgres_catalog
+from schemii.schemii.designs.models import SchemiiDesign, SchemiiDesignLayout
+from schemii.schemii.designs.store import DesignRepository
+from schemii.schemii.migrations.service import MigrationServiceError
 
 from .models import (
     SchemiiWorkspace,
     SchemiiWorkspaceCreate,
+    SchemiiWorkspaceImportCreate,
     SchemiiWorkspaceLayoutUpdate,
+    TableColumnDisplayOrder,
     TablePosition,
 )
 from .store import (
@@ -24,6 +30,7 @@ from .store import (
     WorkspaceLimitError,
     WorkspaceNotFoundError,
     WorkspaceRepository,
+    WorkspaceDesignBootstrap,
 )
 
 
@@ -52,12 +59,24 @@ class WorkspaceCatalogResponse(ApiModel):
     positions: list[TablePosition]
 
 
+class SchemiiWorkspaceImportResponse(ApiModel):
+    """A newly created targeted design and its source-derived initial state."""
+
+    workspace: SchemiiWorkspace
+    design: SchemiiDesign
+    layout: SchemiiDesignLayout
+
+
 def _workspaces(request: Request) -> WorkspaceRepository:
     return request.app.state.services.workspaces
 
 
 def _connections(request: Request) -> ConnectionService:
     return request.app.state.services.connections
+
+
+def _designs(request: Request) -> DesignRepository:
+    return request.app.state.services.designs
 
 
 def _workspace_not_found(error: WorkspaceNotFoundError) -> ApiProblem:
@@ -84,6 +103,30 @@ def _workspace_conflict(error: WorkspaceConflictError) -> ApiProblem:
         str(error),
         details={"currentRevision": error.current_revision},
     )
+
+
+def _reconcile_column_orders(
+    workspace: SchemiiWorkspace,
+    catalog: PostgresCatalog,
+) -> list[TableColumnDisplayOrder]:
+    """Keep saved live names in preference order and append new columns by attnum."""
+
+    saved = {order.name: order.columns for order in workspace.column_orders}
+    reconciled: list[TableColumnDisplayOrder] = []
+    for table in catalog.tables:
+        preferred = saved.get(table.name)
+        if preferred is None:
+            continue
+        physical = [
+            column.name
+            for column in sorted(table.columns, key=lambda item: item.ordinal)
+        ]
+        live = set(physical)
+        ordered = [column for column in preferred if column in live]
+        included = set(ordered)
+        ordered.extend(column for column in physical if column not in included)
+        reconciled.append(TableColumnDisplayOrder(name=table.name, columns=ordered))
+    return reconciled
 
 
 @router.get("", response_model=WorkspaceListResponse)
@@ -136,6 +179,74 @@ def create_workspace(
         raise postgres_api_problem(error) from error
     except WorkspaceLimitError as error:
         raise _workspace_limit(error) from error
+
+
+@router.post(
+    "/imports",
+    response_model=SchemiiWorkspaceImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_workspace_from_postgres(
+    body: SchemiiWorkspaceImportCreate,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> SchemiiWorkspaceImportResponse:
+    """Create a new targeted design from one repeatable-read catalog snapshot."""
+
+    try:
+        with _connections(request).use(
+            principal.user_id,
+            body.connection_id,
+        ) as connection:
+            if connection.database != body.database:
+                raise ApiProblem(
+                    409,
+                    "workspace_database_mismatch",
+                    "The connection does not target the requested workspace database",
+                )
+            catalog = request.app.state.services.postgres.introspect(
+                connection,
+                body.namespace,
+            )
+        imported = import_postgres_catalog(catalog)
+        workspace = _workspaces(request).create(
+            principal.user_id,
+            body.workspace_create(),
+            bootstrap=WorkspaceDesignBootstrap(
+                content=imported.content,
+                layout=imported.layout,
+                import_summary=imported.summary,
+            ),
+        )
+        migrations = request.app.state.services.migrations
+        assert migrations is not None
+        migrations.record_import_baseline(
+            principal.user_id,
+            workspace.id,
+            connection.revision,
+            catalog,
+        )
+        design = _designs(request).get(principal.user_id, workspace.id)
+        layout = _designs(request).get_layout(principal.user_id, workspace.id)
+        return SchemiiWorkspaceImportResponse(
+            workspace=workspace,
+            design=design,
+            layout=layout,
+        )
+    except ConnectionNotFoundError as error:
+        raise _connection_not_found(error) from error
+    except PostgresGatewayError as error:
+        raise postgres_api_problem(error) from error
+    except WorkspaceLimitError as error:
+        raise _workspace_limit(error) from error
+    except MigrationServiceError as error:
+        raise ApiProblem(
+            error.status,
+            error.code,
+            str(error),
+            details=error.details,
+            retryable=error.retryable,
+        ) from error
 
 
 @router.get("/{workspace_id}", response_model=SchemiiWorkspace)
@@ -213,6 +324,41 @@ def update_workspace_layout(
                     "Layout positions may reference only live PostgreSQL tables",
                     details={"tables": unknown_tables},
                 )
+            if body.column_orders is not None:
+                live_columns = {
+                    table.name: {column.name for column in table.columns}
+                    for table in catalog.tables
+                }
+                mismatches = []
+                for order in body.column_orders:
+                    expected = live_columns.get(order.name)
+                    if expected is None:
+                        mismatches.append(
+                            {
+                                "table": order.name,
+                                "missingColumns": [],
+                                "unknownColumns": order.columns,
+                            }
+                        )
+                        continue
+                    supplied = set(order.columns)
+                    missing = sorted(expected - supplied)
+                    unknown = sorted(supplied - expected)
+                    if missing or unknown:
+                        mismatches.append(
+                            {
+                                "table": order.name,
+                                "missingColumns": missing,
+                                "unknownColumns": unknown,
+                            }
+                        )
+                if mismatches:
+                    raise ApiProblem(
+                        422,
+                        "column_order_mismatch",
+                        "Custom display order must contain every live table column exactly once",
+                        details={"tables": mismatches},
+                    )
             return _workspaces(request).update_layout(
                 principal.user_id,
                 workspace_id,
@@ -298,6 +444,10 @@ def get_workspace_catalog(
         for position in workspace.tables
         if position.name in live_tables
     ]
+    workspace = workspace.model_copy(
+        update={"column_orders": _reconcile_column_orders(workspace, catalog)},
+        deep=True,
+    )
     return WorkspaceCatalogResponse(
         workspace=workspace,
         catalog=catalog,

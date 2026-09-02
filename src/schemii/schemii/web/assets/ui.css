@@ -142,7 +142,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .ui-dialog__actions > .ui-button { min-height: 32px; font-size: 8px; }
 .ui-dialog__actions > .ui-button:first-child[hidden] + .ui-button { margin-left: auto; }
 
-.ui-toast { position: fixed; z-index: 200; right: 18px; bottom: 18px; max-width: min(380px, calc(100vw - 36px)); padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 7px; color: #d2d9e1; background: #171d25; box-shadow: 0 14px 38px rgba(0, 0, 0, .5); font-size: 9px; line-height: 1.45; }
+.ui-toast { position: fixed; z-index: 200; right: 18px; bottom: 18px; max-width: min(380px, calc(100vw - 36px)); padding: 10px 12px; pointer-events: none; border: 1px solid var(--line-strong); border-radius: 7px; color: #d2d9e1; background: #171d25; box-shadow: 0 14px 38px rgba(0, 0, 0, .5); font-size: 9px; line-height: 1.45; }
 .ui-toast.error { color: #efb5ba; border-color: #71333a; background: #29171b; }
 
 @keyframes ui-spin { to { transform: rotate(360deg); } }

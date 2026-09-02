@@ -3,8 +3,12 @@
 from .models import (
     SchemiiWorkspace,
     SchemiiWorkspaceCreate,
+    SchemiiWorkspaceImportCreate,
     SchemiiWorkspaceLayoutUpdate,
+    TableColumnDisplayOrder,
     TablePosition,
+    WorkspaceImportIssue,
+    WorkspaceImportSummary,
 )
 from .store import InMemoryWorkspaceRepository, WorkspaceRepository
 
@@ -12,7 +16,11 @@ __all__ = [
     "InMemoryWorkspaceRepository",
     "SchemiiWorkspace",
     "SchemiiWorkspaceCreate",
+    "SchemiiWorkspaceImportCreate",
     "SchemiiWorkspaceLayoutUpdate",
+    "TableColumnDisplayOrder",
     "TablePosition",
+    "WorkspaceImportIssue",
+    "WorkspaceImportSummary",
     "WorkspaceRepository",
 ]

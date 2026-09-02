@@ -2,6 +2,7 @@ name: schemii-test
 
 services:
   schemii:
+    image: schemii-test-application
     build:
       context: .
       dockerfile: Dockerfile
@@ -97,11 +98,54 @@ services:
       PGDATABASE: ${SCHEMII_TEST_POSTGRES_DB:-schemii_test}
       PGUSER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
       SCHEMII_TEST_POSTGRES_PASSWORD: ${SCHEMII_TEST_POSTGRES_PASSWORD:-schemii-local-test}
+      SCHEMII_RESET_MIGRATION_DEMO: ${SCHEMII_RESET_MIGRATION_DEMO:-0}
     command: ["/bin/sh", "/seed/seed.sh"]
     user: postgres
     volumes:
       - ./dev/postgres/seed.sh:/seed/seed.sh:ro
       - ./dev/postgres/seed.sql:/seed/seed.sql:ro
+      - ./dev/postgres/migration-demo.sql:/seed/migration-demo.sql:ro
+    networks:
+      - database
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  demo-fixture:
+    profiles: ["demo-fixture"]
+    image: schemii-test-application
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SCHEMII_METADATA_DSN: "host=postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_TEST_POSTGRES_USER:-schemii}"
+      SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_password
+      SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key
+      SCHEMII_DEMO_SCENARIO: ${SCHEMII_DEMO_SCENARIO:-baseline}
+      SCHEMII_DEMO_SOURCE_REVISION: ${SCHEMII_DEMO_SOURCE_REVISION:-unknown+dirty}
+      SCHEMII_DEMO_POSTGRES_HOST: postgres
+      SCHEMII_DEMO_POSTGRES_PORT: 5432
+      SCHEMII_DEMO_POSTGRES_DATABASE: schemii_migration_demo
+      SCHEMII_DEMO_POSTGRES_USER: ${SCHEMII_TEST_POSTGRES_USER:-schemii}
+      SCHEMII_DEMO_POSTGRES_PASSWORD_FILE: /run/secrets/metadata_password
+      SCHEMII_DEMO_FIXTURE_ROOT: /fixture
+    command:
+      - /bin/sh
+      - -c
+      - |
+        printf 'Starting Schemii demo metadata fixture...\n'
+        python /fixture/demo-fixture.py
+    volumes:
+      - ./dev/postgres:/fixture:ro
+      - "${SCHEMII_METADATA_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_password}:/run/secrets/metadata_password:ro"
+      - "${SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE:-./.schemii/secrets/metadata_encryption_key}:/run/secrets/metadata_encryption_key:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-10001}"
     networks:
       - database
     read_only: true

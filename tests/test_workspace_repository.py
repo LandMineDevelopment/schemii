@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from schemii.schemii.workspaces.models import (
     SchemiiWorkspaceCreate,
     SchemiiWorkspaceLayoutUpdate,
+    TableColumnDisplayOrder,
     TablePosition,
 )
 from schemii.schemii.workspaces.store import (
@@ -29,6 +30,9 @@ def test_workspace_targets_preserve_exact_postgres_identifiers() -> None:
 
     with pytest.raises(ValidationError):
         TablePosition(name="orders", x=True, y=0)
+
+    with pytest.raises(ValidationError, match="unique names"):
+        TableColumnDisplayOrder(name="orders", columns=["id", "id"])
 
 
 def test_workspace_request_accepts_only_complete_or_absent_targets() -> None:
@@ -75,3 +79,69 @@ def test_workspace_and_aggregate_position_counts_are_bounded() -> None:
 
     assert position_error.value.category == "table position"
     assert position_error.value.limit == 1
+
+    order_limited = InMemoryWorkspaceRepository(
+        max_column_display_order_entries_per_owner=1
+    )
+    ordered = order_limited.create("owner", workspace_request())
+    with pytest.raises(WorkspaceLimitError) as order_error:
+        order_limited.update_layout(
+            "owner",
+            ordered.id,
+            SchemiiWorkspaceLayoutUpdate(
+                expected_revision=1,
+                expected_connection_revision=1,
+                tables=[],
+                column_orders=[
+                    TableColumnDisplayOrder(
+                        name="orders",
+                        columns=["id", "created_at"],
+                    )
+                ],
+            ),
+        )
+    assert order_error.value.category == "column display order entry"
+    assert order_error.value.limit == 1
+
+
+def test_column_display_orders_are_optional_and_replaced_as_one_layout_revision() -> None:
+    repository = InMemoryWorkspaceRepository()
+    workspace = repository.create("owner", workspace_request())
+    custom = TableColumnDisplayOrder(
+        name="orders",
+        columns=["created_at", "id"],
+    )
+
+    saved = repository.update_layout(
+        "owner",
+        workspace.id,
+        SchemiiWorkspaceLayoutUpdate(
+            expected_revision=1,
+            expected_connection_revision=1,
+            tables=[],
+            column_orders=[custom],
+        ),
+    )
+    preserved = repository.update_layout(
+        "owner",
+        workspace.id,
+        SchemiiWorkspaceLayoutUpdate(
+            expected_revision=2,
+            expected_connection_revision=1,
+            tables=[],
+        ),
+    )
+    cleared = repository.update_layout(
+        "owner",
+        workspace.id,
+        SchemiiWorkspaceLayoutUpdate(
+            expected_revision=3,
+            expected_connection_revision=1,
+            tables=[],
+            column_orders=[],
+        ),
+    )
+
+    assert saved.column_orders == [custom]
+    assert preserved.column_orders == [custom]
+    assert cleared.column_orders == []

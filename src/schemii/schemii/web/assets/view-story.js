@@ -20,6 +20,16 @@ function viewEyebrow(view) {
 
 export function renderDesignViewStory(container, options = {}) {
   const { view, analysis = null, ...rest } = options;
+  container.classList.toggle("is-empty", !view);
+  if (view?.designId) {
+    container.dataset.changeObjectId = view.designId;
+    container.dataset.changeRoot = "";
+    container.dataset.changeField = "name kind definition populateOnCreate";
+  } else {
+    delete container.dataset.changeObjectId;
+    delete container.dataset.changeRoot;
+    delete container.dataset.changeField;
+  }
   return renderQueryStory(container, {
     ...rest,
     subject: view ? {

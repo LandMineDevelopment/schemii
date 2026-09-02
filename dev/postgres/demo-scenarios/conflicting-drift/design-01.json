@@ -1,0 +1,11 @@
+{
+  "changes": [
+    {
+      "operation": "addColumn",
+      "table": "projects",
+      "column": "migration_note",
+      "dataType": "character varying(200)",
+      "nullable": true
+    }
+  ]
+}

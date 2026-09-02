@@ -22,6 +22,7 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert '<script type="module" src="assets/app.js"></script>' in response.text
     assert 'href="assets/ui.css"' in response.text
     assert 'href="/assets/common/query-story.css"' in response.text
+    assert 'href="/assets/common/transient-cue.css"' in response.text
     assert 'data-ui-icon="database"' in response.text
     assert 'id="table-inspector-toggle"' in response.text
     assert 'href="/api-map"' in response.text
@@ -55,6 +56,25 @@ def test_index_access_method_uses_the_complete_styled_selector() -> None:
         ("brin", "BRIN"),
     ]
     assert "postgres-index-methods" not in index
+
+
+def test_designed_tables_are_edited_directly_in_the_table_inspector() -> None:
+    web = files("schemii.schemii").joinpath("web")
+    index = web.joinpath("index.html").read_text(encoding="utf-8")
+    source = web.joinpath("assets", "app.js").read_text(encoding="utf-8")
+    styles = web.joinpath("assets", "app.css").read_text(encoding="utf-8")
+
+    inspector = index[index.index('<aside class="inspector'):index.index("</aside>", index.index('<aside class="inspector'))]
+    assert 'id="inspector-table-form"' in inspector
+    assert 'id="inspector-table-name"' in inspector
+    assert 'id="inspector-design-columns"' in inspector
+    assert 'id="save-inspector-table-button"' in inspector
+    assert 'id="edit-table-button"' not in index
+    assert "submitInspectorTable" in source
+    assert "designColumnValues(elements.inspectorDesignColumns)" in source
+    assert "showTableDetails: !desired" in source
+    assert ".inspector-table-savebar { position: sticky" in styles
+    assert ".inspector.is-editable" in styles
 
 
 def test_api_route_opens_the_unified_system_map_with_its_api_lens() -> None:
@@ -190,6 +210,93 @@ def test_every_packaged_frontend_asset_is_available_and_revalidated() -> None:
     revalidated = api.get("/assets/app.js", headers={"If-None-Match": first.headers["etag"]})
     assert revalidated.status_code == 304
     assert revalidated.headers["cache-control"] == "public, max-age=0, must-revalidate"
+
+
+def test_column_type_editor_uses_the_shared_searchable_selector() -> None:
+    web = files("schemii.schemii").joinpath("web")
+    index = web.joinpath("index.html").read_text(encoding="utf-8")
+    app = web.joinpath("assets", "app.js").read_text(encoding="utf-8")
+
+    assert 'href="/assets/common/searchable-select.css"' in index
+    assert 'from "/assets/common/searchable-select.js"' in app
+    assert 'dataset: { designColumnType: "" }' in app
+    assert 'placeholder: "Search types"' in app
+    assert 'className: "design-type-modifiers"' in app
+    assert "composePostgresTypeModifier" in app
+
+
+def test_source_derived_change_cues_follow_workspace_section_colors() -> None:
+    web = files("schemii.schemii").joinpath("web")
+    common = files("schemii.common").joinpath("web", "assets")
+    index = web.joinpath("index.html").read_text(encoding="utf-8")
+    app = web.joinpath("assets", "app.js").read_text(encoding="utf-8")
+    styles = common.joinpath("transient-cue.css").read_text(encoding="utf-8")
+
+    assert 'data-change-scope="schema"' in index
+    assert 'data-change-scope="views"' in index
+    assert 'data-change-scope="sql"' in index
+    assert 'from "/assets/common/transient-cue.js"' in app
+    assert 'from "/assets/common/change-transition.js"' in app
+    assert 'from "./design-change.js"' in app
+    assert 'tone: "blue"' in app
+    assert '[data-change-cue-tone="amber"]' in styles
+    assert '[data-change-cue-tone="purple"]' in styles
+    assert '[data-change-cue-tone="blue"]' in styles
+    assert "animation: change-cue-pulse .85s ease-out forwards" in styles
+    assert "border-radius: var(--change-cue-radius, 5px)" in styles
+    assert "0 0 0 2px rgba(var(--change-cue-rgb), 1)" in styles
+    assert index.index('href="assets/app.css"') < index.index(
+        'href="/assets/common/transient-cue.css"'
+    )
+
+
+def test_mobile_status_toasts_never_cover_or_capture_workspace_tools() -> None:
+    web = files("schemii.schemii").joinpath("web", "assets")
+    shared_styles = web.joinpath("ui.css").read_text(encoding="utf-8")
+    app_styles = web.joinpath("app.css").read_text(encoding="utf-8")
+
+    assert ".ui-toast" in shared_styles
+    assert "pointer-events: none" in shared_styles
+    assert ".ui-toast { top: 108px;" in app_styles
+
+
+def test_matching_history_confirmation_does_not_repaint_the_optimistic_catalog() -> None:
+    app = (
+        files("schemii.schemii")
+        .joinpath("web", "assets", "app.js")
+        .read_text(encoding="utf-8")
+    )
+
+    assert "return { presentation, targets };" in app
+    assert "applyDesignHistoryMutation(mutation, { cue: !previewMatches, render: !previewMatches });" in app
+    assert "state.viewAnalysisCache.clear();\n  if (!state.catalog.tables" not in app
+
+
+def test_views_use_compact_context_specific_empty_states() -> None:
+    assets = files("schemii.schemii").joinpath("web", "assets")
+    catalog = assets.joinpath("catalog.js").read_text(encoding="utf-8")
+    styles = assets.joinpath("app.css").read_text(encoding="utf-8")
+
+    assert 'className: "view-list-empty"' in catalog
+    assert 'emptyPanel("0", "No matching views"' not in catalog
+    assert ".view-detail.is-empty { display: grid; place-items: center; }" in styles
+
+
+def test_postgres_import_is_exposed_only_as_new_workspace_creation() -> None:
+    web = files("schemii.schemii").joinpath("web")
+    index = web.joinpath("index.html").read_text(encoding="utf-8")
+    app = web.joinpath("assets", "app.js").read_text(encoding="utf-8")
+    api = web.joinpath("assets", "api.js").read_text(encoding="utf-8")
+
+    assert '<option value="detached">Design workspace · no database</option>' in index
+    assert '<option value="import">Database workspace · read/write (planned)</option>' in index
+    assert '<option value="attached">Live database · read only</option>' in index
+    assert "Create database workspace" in app
+    assert "writing approved changes back to PostgreSQL is planned." in app
+    assert "editing is disabled." in app
+    assert "createWorkspaceImport" in app
+    assert "schemii/workspaces/imports" in api
+    assert "design/imports" not in api
 
 
 def test_frontend_does_not_replace_unknown_routes_with_the_app_shell() -> None:

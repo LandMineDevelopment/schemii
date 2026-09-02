@@ -137,6 +137,13 @@ def catalog_responses() -> dict[str, list[dict[str, Any]]]:
     responses = metadata_responses()
     responses.update(
         {
+            "schemii_catalog_types": [
+                {
+                    "type_name": "order_state",
+                    "type_kind": "enum",
+                    "definition": "CREATE TYPE order_state AS ENUM ('open', 'paid')",
+                }
+            ],
             "schemii_catalog_tables": [
                 {
                     "table_name": "orders",
@@ -429,6 +436,8 @@ def test_introspection_maps_all_domains_in_one_read_only_snapshot() -> None:
 
     assert catalog.captured_at == captured_at
     assert catalog.fingerprint == compute_catalog_fingerprint(catalog)
+    assert catalog.types[0].name == "order_state"
+    assert catalog.types[0].kind == "enum"
     assert [table.name for table in catalog.tables] == ["orders", "users"]
     orders = catalog.tables[0]
     assert orders.primary_key is not None
@@ -456,7 +465,7 @@ def test_introspection_maps_all_domains_in_one_read_only_snapshot() -> None:
     for query, parameters in connection.executed:
         if "schemii_catalog_" in query and "metadata" not in query:
             assert parameters[-2] == "public"
-    assert sum(name is not None for name in connection.cursor_names) == 7
+    assert sum(name is not None for name in connection.cursor_names) == 8
     assert connection.rollbacks == 1
     assert connection.closed is True
 

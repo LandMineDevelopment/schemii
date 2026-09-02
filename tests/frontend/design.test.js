@@ -5,6 +5,7 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignObject,
   deleteDesignRoutine,
   deleteDesignTrigger,
   deleteDesignType,
@@ -625,6 +626,35 @@ test("table editing blocks removal of columns used by relationships", () => {
   ]), /targets this key/);
 });
 
+test("generic design deletion removes exactly one preflighted object without cascading dependents", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const table = createDesignTable("accounts", [
+    { name: "id", dataType: "uuid", nullable: false, primary: true },
+    { name: "email", dataType: "text", nullable: false, primary: false },
+  ], nextUuid);
+  const view = saveDesignView({ tables: [table], relationships: [], functions: [], views: [], triggers: [] }, {
+    name: "account_ids",
+    kind: "view",
+    definition: "SELECT id FROM accounts",
+  }, nextUuid).view;
+  const trigger = {
+    id: `trigger_${"f".repeat(32)}`,
+    name: "account_ids_refresh",
+    relationName: view.name,
+  };
+  const content = { tables: [table], relationships: [], functions: [], views: [view], triggers: [trigger] };
+
+  const deletedView = deleteDesignObject(content, view.id);
+  assert.deepEqual(deletedView.content.views, []);
+  assert.deepEqual(deletedView.content.triggers, [trigger]);
+  assert.deepEqual(content.views, [view]);
+
+  const deletedColumn = deleteDesignObject(content, table.columns[1].id);
+  assert.deepEqual(deletedColumn.content.tables[0].columns.map(column => column.name), ["id"]);
+  assert.equal(deletedColumn.kind, "column");
+});
+
 test("relationship authoring maps source columns to a composite target key", () => {
   let value = 1;
   const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
@@ -655,6 +685,52 @@ test("relationship authoring maps source columns to a composite target key", () 
   assert.deepEqual(relationship.sourceColumnIds, [child.columns[1].id, child.columns[2].id]);
   assert.equal(relationship.onUpdate, "CASCADE");
   assert.equal(relationship.initiallyDeferred, true);
+});
+
+test("relationship names are scoped to their PostgreSQL source table", () => {
+  let value = 1;
+  const nextUuid = () => `${String(value++).padStart(8, "0")}-0000-0000-0000-000000000000`;
+  const parent = createDesignTable("parents", [
+    { name: "id", dataType: "bigint", nullable: false, primary: true },
+  ], nextUuid);
+  const firstChild = createDesignTable("first_children", [
+    { name: "parent_id", dataType: "bigint", nullable: false, primary: false },
+  ], nextUuid);
+  const secondChild = createDesignTable("second_children", [
+    { name: "parent_id", dataType: "bigint", nullable: false, primary: false },
+  ], nextUuid);
+  const base = { tables: [parent, firstChild, secondChild], relationships: [], functions: [], views: [] };
+  const first = createDesignRelationship(base, {
+    name: "parent_fkey",
+    sourceTableId: firstChild.id,
+    sourceColumnIds: [firstChild.columns[0].id],
+    targetTableId: parent.id,
+    targetKeyId: parent.keys[0].id,
+    onUpdate: "NO ACTION",
+    onDelete: "NO ACTION",
+    deferrable: false,
+    initiallyDeferred: false,
+  }, nextUuid);
+  const withFirst = { ...base, relationships: [first] };
+
+  const second = createDesignRelationship(withFirst, {
+    name: "parent_fkey",
+    sourceTableId: secondChild.id,
+    sourceColumnIds: [secondChild.columns[0].id],
+    targetTableId: parent.id,
+    targetKeyId: parent.keys[0].id,
+    onUpdate: "NO ACTION",
+    onDelete: "NO ACTION",
+    deferrable: false,
+    initiallyDeferred: false,
+  }, nextUuid);
+
+  assert.equal(second.name, first.name);
+  assert.notEqual(second.sourceTableId, first.sourceTableId);
+  assert.throws(() => createDesignRelationship(withFirst, {
+    ...first,
+    targetKeyId: parent.keys[0].id,
+  }, nextUuid), /already exists on the source table/);
 });
 
 test("graphical column selection seeds the exact composite target key", () => {

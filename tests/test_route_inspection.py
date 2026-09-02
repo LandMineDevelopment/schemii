@@ -44,7 +44,7 @@ def test_developer_route_inspection_derives_flow_objects_and_bounded_source() ->
     assert document["analysis"]["callGraph"] == "direct-first-party-calls"
     assert document["analysis"]["truncated"]["routes"] is False
     assert document["analysis"]["truncated"]["objects"] is False
-    assert len(document["routes"]) == 72
+    assert len(document["routes"]) == 79
     objects = {item["id"]: item for item in document["objects"]}
     layout = next(
         route
@@ -89,10 +89,20 @@ def test_developer_route_inspection_derives_flow_objects_and_bounded_source() ->
     )
     assert {
         objects[item]["qualname"] for item in layout["requestObjectIds"]
-    } == {"SchemiiWorkspaceLayoutUpdate", "TablePosition"}
+    } == {
+        "SchemiiWorkspaceLayoutUpdate",
+        "TableColumnDisplayOrder",
+        "TablePosition",
+    }
     assert {
         objects[item]["qualname"] for item in layout["responseObjectIds"]
-    } == {"SchemiiWorkspace", "TablePosition"}
+    } == {
+        "SchemiiWorkspace",
+        "TableColumnDisplayOrder",
+        "TablePosition",
+        "WorkspaceImportIssue",
+        "WorkspaceImportSummary",
+    }
 
     serialized = json.dumps(document)
     assert '"/home/' not in serialized

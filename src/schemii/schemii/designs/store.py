@@ -6,13 +6,21 @@ import hashlib
 import json
 import threading
 from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol, runtime_checkable
 
 from schemii.common.errors import MetadataStorageUnavailableError
+from schemii.common.json_delta import json_delta
 from schemii.common.postgres.query_analysis import QueryDefinitionError, parse_query_definition
 from schemii.common.postgres.type_analysis import analyze_type_definition
 
+from .deletion_impact import validate_design_transition
+from .history import design_change_summary
 from .models import (
+    DesignHistoryAction,
+    DesignHistoryBaseline,
+    DesignHistoryState,
     DesignType,
     SchemiiDesign,
     SchemiiDesignContent,
@@ -57,6 +65,21 @@ class DesignValidationError(DesignRepositoryError):
     def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
         self.details = details or {}
         super().__init__(message)
+
+
+class DesignHistoryBoundaryError(DesignRepositoryError):
+    """The requested undo or redo direction has no retained action."""
+
+    def __init__(self, action: str) -> None:
+        self.action = action
+        super().__init__(f"There is nothing to {action} in this design")
+
+
+class DesignMutationBlockedError(DesignRepositoryError):
+    """A target migration currently owns the workspace mutation boundary."""
+
+    def __init__(self) -> None:
+        super().__init__("Finish or reconcile the active migration before changing this design")
 
 
 class DesignStorageUnavailableError(
@@ -355,7 +378,7 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                 )
             all_ids.append(index.id)
 
-    _unique([relationship.name for relationship in content.relationships], category="relationship names")
+    relationship_names: set[tuple[str, str]] = set()
     for relationship in content.relationships:
         source = table_by_id.get(relationship.source_table_id)
         target = table_by_id.get(relationship.target_table_id)
@@ -364,6 +387,17 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                 "Relationships must reference tables in this design",
                 details={"relationship": relationship.name},
             )
+        relationship_identity = (source.id, relationship.name)
+        if relationship_identity in relationship_names:
+            raise DesignValidationError(
+                "Relationship names must be unique on their source table",
+                details={
+                    "category": "relationship names",
+                    "table": source.name,
+                    "name": relationship.name,
+                },
+            )
+        relationship_names.add(relationship_identity)
         source_ids = {column.id for column in source.columns}
         target_ids = {column.id for column in target.columns}
         if (
@@ -491,6 +525,14 @@ def design_object_ids(content: SchemiiDesignContent) -> dict[str, str]:
 
 @runtime_checkable
 class DesignRepository(Protocol):
+    def initialize(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        content: SchemiiDesignContent,
+        layout: SchemiiDesignLayoutContent,
+    ) -> tuple[SchemiiDesign, SchemiiDesignLayout]: ...
+
     def get(self, owner_id: str, workspace_id: str) -> SchemiiDesign: ...
 
     def replace(
@@ -498,7 +540,33 @@ class DesignRepository(Protocol):
         owner_id: str,
         workspace_id: str,
         request: SchemiiDesignReplace,
+        *,
+        operation_kind: str = "edit",
+        expected_baseline_id: str | None = None,
     ) -> SchemiiDesign: ...
+
+    def history_state(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        baseline: DesignHistoryBaseline,
+    ) -> DesignHistoryState: ...
+
+    def undo(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        expected_design_revision: int,
+    ) -> SchemiiDesign: ...
+
+    def redo(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        expected_design_revision: int,
+    ) -> SchemiiDesign: ...
+
+    def initial_content(self, owner_id: str, workspace_id: str) -> tuple[int, SchemiiDesignContent]: ...
 
     def get_layout(self, owner_id: str, workspace_id: str) -> SchemiiDesignLayout: ...
 
@@ -516,7 +584,66 @@ class InMemoryDesignRepository:
     def __init__(self) -> None:
         self._designs: dict[tuple[str, str], SchemiiDesign] = {}
         self._layouts: dict[tuple[str, str], SchemiiDesignLayout] = {}
+        self._history: dict[tuple[str, str], dict[int, _MemoryHistoryEntry]] = {}
+        self._history_state: dict[tuple[str, str], tuple[int, int]] = {}
+        self._position_memory: dict[tuple[str, str], dict[str, Any]] = {}
+        self._next_history_id = 1
+        self._mutation_guard: Any = None
         self._lock = threading.RLock()
+
+    def set_mutation_guard(self, guard: Any) -> None:
+        self._mutation_guard = guard
+
+    def initialize(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        content: SchemiiDesignContent,
+        layout: SchemiiDesignLayoutContent,
+    ) -> tuple[SchemiiDesign, SchemiiDesignLayout]:
+        """Create the first design revision; an existing design is never replaced."""
+
+        validate_design_content(content)
+        allowed = design_object_ids(content)
+        for position in layout.objects:
+            if allowed.get(position.object_id) != position.layer:
+                raise DesignValidationError(
+                    "Initial layout positions must reference imported design objects",
+                    details={"objectId": position.object_id, "layer": position.layer},
+                )
+        key = (owner_id, workspace_id)
+        with self._lock:
+            current = self._designs.get(key)
+            if current is not None:
+                raise DesignConflictError(current.revision)
+            design = SchemiiDesign(
+                workspace_id=workspace_id,
+                revision=1,
+                content=content.model_copy(deep=True),
+                fingerprint=design_fingerprint(content),
+            )
+            saved_layout = SchemiiDesignLayout(
+                workspace_id=workspace_id,
+                revision=1,
+                design_revision=1,
+                content=layout.model_copy(deep=True),
+            )
+            self._designs[key] = design
+            self._layouts[key] = saved_layout
+            entry = self._new_history_entry(
+                key,
+                parent_id=None,
+                source_design_revision=design.revision,
+                operation_kind="initial",
+                operation_group_id=None,
+                content=design.content,
+            )
+            self._history_state[key] = (entry.id, entry.id)
+            self._position_memory[key] = {
+                position.object_id: position.model_copy(deep=True)
+                for position in saved_layout.content.objects
+            }
+            return design.model_copy(deep=True), saved_layout.model_copy(deep=True)
 
     def get(self, owner_id: str, workspace_id: str) -> SchemiiDesign:
         with self._lock:
@@ -527,12 +654,27 @@ class InMemoryDesignRepository:
         owner_id: str,
         workspace_id: str,
         request: SchemiiDesignReplace,
+        *,
+        operation_kind: str = "edit",
+        expected_baseline_id: str | None = None,
     ) -> SchemiiDesign:
+        del expected_baseline_id
         validate_design_content(request.content)
         with self._lock:
+            self._guard_mutation(owner_id, workspace_id, operation_kind)
             current = self._design(owner_id, workspace_id)
+            self._ensure_history(owner_id, workspace_id, current)
             if current.revision != request.expected_design_revision:
                 raise DesignConflictError(current.revision)
+            if operation_kind == "edit" and current.fingerprint == design_fingerprint(request.content):
+                return current.model_copy(deep=True)
+            try:
+                validate_design_transition(current.content, request.content)
+            except ValueError as error:
+                raise DesignValidationError(
+                    str(error),
+                    details={"reason": "dependent_object"},
+                ) from error
             revised = SchemiiDesign(
                 workspace_id=workspace_id,
                 revision=current.revision + 1,
@@ -540,8 +682,45 @@ class InMemoryDesignRepository:
                 fingerprint=design_fingerprint(request.content),
             )
             self._designs[(owner_id, workspace_id)] = revised
+            key = (owner_id, workspace_id)
+            cursor_id, _ = self._history_state[key]
+            entry = self._new_history_entry(
+                key,
+                parent_id=cursor_id,
+                source_design_revision=revised.revision,
+                operation_kind=operation_kind,
+                operation_group_id=request.history_group_id,
+                content=revised.content,
+            )
+            self._history_state[key] = (entry.id, entry.id)
             self._advance_layout(owner_id, workspace_id, revised)
             return revised.model_copy(deep=True)
+
+    def history_state(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        baseline: DesignHistoryBaseline,
+    ) -> DesignHistoryState:
+        with self._lock:
+            design = self._design(owner_id, workspace_id)
+            self._ensure_history(owner_id, workspace_id, design)
+            entries, cursor_index = self._active_chain(owner_id, workspace_id)
+            return _history_state(design, entries, cursor_index, baseline)
+
+    def undo(self, owner_id: str, workspace_id: str, expected_design_revision: int) -> SchemiiDesign:
+        return self._move_history(owner_id, workspace_id, expected_design_revision, "undo")
+
+    def redo(self, owner_id: str, workspace_id: str, expected_design_revision: int) -> SchemiiDesign:
+        return self._move_history(owner_id, workspace_id, expected_design_revision, "redo")
+
+    def initial_content(self, owner_id: str, workspace_id: str) -> tuple[int, SchemiiDesignContent]:
+        with self._lock:
+            design = self._design(owner_id, workspace_id)
+            self._ensure_history(owner_id, workspace_id, design)
+            entries, _ = self._active_chain(owner_id, workspace_id)
+            root = entries[0]
+            return root.source_design_revision, root.content.model_copy(deep=True)
 
     def get_layout(self, owner_id: str, workspace_id: str) -> SchemiiDesignLayout:
         with self._lock:
@@ -576,6 +755,9 @@ class InMemoryDesignRepository:
                 content=request.content.model_copy(deep=True),
             )
             self._layouts[(owner_id, workspace_id)] = revised
+            memory = self._position_memory.setdefault((owner_id, workspace_id), {})
+            for position in revised.content.objects:
+                memory[position.object_id] = position.model_copy(deep=True)
             return revised.model_copy(deep=True)
 
     def _design(self, owner_id: str, workspace_id: str) -> SchemiiDesign:
@@ -612,9 +794,201 @@ class InMemoryDesignRepository:
             for position in current.content.objects
             if allowed.get(position.object_id) == position.layer
         ]
+        retained_ids = {position.object_id for position in objects}
+        for object_id, position in self._position_memory.get((owner_id, workspace_id), {}).items():
+            if object_id not in retained_ids and allowed.get(object_id) == position.layer:
+                objects.append(position.model_copy(deep=True))
         self._layouts[(owner_id, workspace_id)] = SchemiiDesignLayout(
             workspace_id=workspace_id,
             revision=current.revision + 1,
             design_revision=design.revision,
             content=SchemiiDesignLayoutContent(objects=objects),
         )
+
+    def _guard_mutation(self, owner_id: str, workspace_id: str, operation_kind: str) -> None:
+        if operation_kind != "checkpoint" and self._mutation_guard and self._mutation_guard(owner_id, workspace_id):
+            raise DesignMutationBlockedError()
+
+    def _ensure_history(self, owner_id: str, workspace_id: str, design: SchemiiDesign) -> None:
+        key = (owner_id, workspace_id)
+        if key in self._history_state:
+            return
+        entry = self._new_history_entry(
+            key,
+            parent_id=None,
+            source_design_revision=design.revision,
+            operation_kind="initial",
+            operation_group_id=None,
+            content=design.content,
+        )
+        self._history_state[key] = (entry.id, entry.id)
+        self._position_memory.setdefault(key, {})
+
+    def _new_history_entry(
+        self,
+        key: tuple[str, str],
+        *,
+        parent_id: int | None,
+        source_design_revision: int,
+        operation_kind: str,
+        operation_group_id: str | None,
+        content: SchemiiDesignContent,
+    ) -> "_MemoryHistoryEntry":
+        entry = _MemoryHistoryEntry(
+            id=self._next_history_id,
+            parent_id=parent_id,
+            source_design_revision=source_design_revision,
+            operation_kind=operation_kind,
+            operation_group_id=operation_group_id,
+            content=content.model_copy(deep=True),
+            created_at=datetime.now(timezone.utc),
+        )
+        self._next_history_id += 1
+        self._history.setdefault(key, {})[entry.id] = entry
+        return entry
+
+    def _active_chain(self, owner_id: str, workspace_id: str) -> tuple[list["_MemoryHistoryEntry"], int]:
+        key = (owner_id, workspace_id)
+        cursor_id, tip_id = self._history_state[key]
+        by_id = self._history[key]
+        chain: list[_MemoryHistoryEntry] = []
+        current: int | None = tip_id
+        while current is not None:
+            entry = by_id[current]
+            chain.append(entry)
+            current = entry.parent_id
+        chain.reverse()
+        return chain, next(index for index, entry in enumerate(chain) if entry.id == cursor_id)
+
+    def _move_history(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        expected_design_revision: int,
+        action: str,
+    ) -> SchemiiDesign:
+        with self._lock:
+            self._guard_mutation(owner_id, workspace_id, "edit")
+            current = self._design(owner_id, workspace_id)
+            if current.revision != expected_design_revision:
+                raise DesignConflictError(current.revision)
+            self._ensure_history(owner_id, workspace_id, current)
+            entries, cursor_index = self._active_chain(owner_id, workspace_id)
+            target_index = _history_target_index(entries, cursor_index, action)
+            if target_index is None:
+                raise DesignHistoryBoundaryError(action)
+            target = entries[target_index]
+            validate_design_content(target.content)
+            revised = SchemiiDesign(
+                workspace_id=workspace_id,
+                revision=current.revision + 1,
+                content=target.content.model_copy(deep=True),
+                fingerprint=design_fingerprint(target.content),
+            )
+            self._designs[(owner_id, workspace_id)] = revised
+            _, tip_id = self._history_state[(owner_id, workspace_id)]
+            self._history_state[(owner_id, workspace_id)] = (target.id, tip_id)
+            self._advance_layout(owner_id, workspace_id, revised)
+            return revised.model_copy(deep=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryHistoryEntry:
+    id: int
+    parent_id: int | None
+    source_design_revision: int
+    operation_kind: str
+    operation_group_id: str | None
+    content: SchemiiDesignContent
+    created_at: datetime
+
+
+def _history_group(entry: Any) -> str:
+    return entry.operation_group_id or f"entry:{entry.id}"
+
+
+def _history_boundary_index(entries: list[Any], retained_limit: int = 100) -> int:
+    index = len(entries) - 1
+    actions = 0
+    while index > 0 and actions < retained_limit:
+        group = _history_group(entries[index])
+        while index > 0 and _history_group(entries[index]) == group:
+            index -= 1
+        actions += 1
+    return index
+
+
+def _history_target_index(entries: list[Any], cursor_index: int, action: str) -> int | None:
+    if action == "undo":
+        if cursor_index == 0:
+            return None
+        group = _history_group(entries[cursor_index])
+        target = cursor_index - 1
+        while target > 0 and _history_group(entries[target]) == group:
+            target -= 1
+        return target if target >= _history_boundary_index(entries) else None
+    if cursor_index >= len(entries) - 1:
+        return None
+    group = _history_group(entries[cursor_index + 1])
+    target = cursor_index + 1
+    while target + 1 < len(entries) and _history_group(entries[target + 1]) == group:
+        target += 1
+    return target
+
+
+def _history_state(
+    design: SchemiiDesign,
+    entries: list[Any],
+    cursor_index: int,
+    baseline: DesignHistoryBaseline,
+) -> DesignHistoryState:
+    undo_index = _history_target_index(entries, cursor_index, "undo")
+    redo_index = _history_target_index(entries, cursor_index, "redo")
+    baseline_index = next(
+        (
+            index
+            for index, entry in enumerate(entries)
+            if entry.source_design_revision == baseline.design_revision
+        ),
+        None,
+    )
+
+    def action(target_index: int | None, direction: str) -> DesignHistoryAction | None:
+        if target_index is None:
+            return None
+        before_index, after_index = (
+            (target_index, cursor_index) if direction == "undo" else (cursor_index, target_index)
+        )
+        summary = design_change_summary(entries[before_index].content, entries[after_index].content)
+        crosses = bool(
+            baseline_index is not None
+            and (
+                target_index < baseline_index <= cursor_index
+                if direction == "undo"
+                else cursor_index < baseline_index <= target_index
+            )
+        )
+        return DesignHistoryAction(
+            title=summary.title,
+            change_count=max(1, summary.change_count),
+            crosses_baseline=crosses,
+            delta=json_delta(
+                entries[cursor_index].content.model_dump(mode="json", by_alias=True),
+                entries[target_index].content.model_dump(mode="json", by_alias=True),
+            ),
+        )
+
+    blocked_reason = None
+    if not baseline.complete:
+        blocked_reason = "The current PostgreSQL baseline is incomplete and cannot be restored losslessly."
+    can_reset = baseline.complete and design.fingerprint != baseline.fingerprint
+    return DesignHistoryState(
+        design_revision=design.revision,
+        can_undo=undo_index is not None,
+        can_redo=redo_index is not None,
+        undo=action(undo_index, "undo"),
+        redo=action(redo_index, "redo"),
+        baseline=baseline,
+        can_reset_to_baseline=can_reset,
+        reset_blocked_reason=blocked_reason,
+    )

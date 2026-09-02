@@ -265,7 +265,7 @@ export class CatalogCanvas {
           "aria-pressed": table.name === this.selectedName ? "true" : "false",
           "aria-disabled": this.interactive ? "false" : "true",
         },
-        dataset: { tableName: table.name },
+        dataset: { tableName: table.name, changeObjectId: table.designId || "", changeRoot: "" },
       });
       const position = this.positions.get(table.name);
       card.style.left = `${position.x}px`;
@@ -274,7 +274,10 @@ export class CatalogCanvas {
       const head = element("header", { className: "table-head" });
       head.append(
         element("span", { className: "table-accent", attrs: { "aria-hidden": "true" } }),
-        element("strong", { text: table.name }),
+        element("strong", {
+          text: table.name,
+          dataset: { changeObjectId: table.designId || "", changeField: "name" },
+        }),
         element("small", { text: `${table.columns.length} ${table.columns.length === 1 ? "column" : "columns"}` }),
       );
       head.addEventListener("pointerdown", event => this.startDrag(event, table.name, card));
@@ -283,12 +286,27 @@ export class CatalogCanvas {
       for (const column of table.columns.slice(0, MAX_CARD_COLUMNS)) {
         const row = element("div", {
           className: "table-column",
-          dataset: { tableName: table.name, columnName: column.name },
+          dataset: {
+            tableName: table.name,
+            columnName: column.name,
+            changeObjectId: column.designId || "",
+            changeRoot: "",
+            changeField: "order nullable defaultExpression identity generatedExpression check index",
+          },
         });
+        const badges = columnBadges(table, foreignKeys.get(`${table.name}\u0000${column.name}`), column.name);
+        badges.dataset.changeObjectId = column.designId || "";
+        badges.dataset.changeField = "primary unique relationship";
         row.append(
-          columnBadges(table, foreignKeys.get(`${table.name}\u0000${column.name}`), column.name),
-          element("span", { text: column.name }),
-          element("code", { text: column.dataType }),
+          badges,
+          element("span", {
+            text: column.name,
+            dataset: { changeObjectId: column.designId || "", changeField: "name" },
+          }),
+          element("code", {
+            text: column.dataType,
+            dataset: { changeObjectId: column.designId || "", changeField: "dataType" },
+          }),
         );
         row.addEventListener("click", event => {
           if (!this.relationshipMode.enabled && !this.keyMode.enabled && !this.indexMode.enabled) return;
@@ -633,6 +651,10 @@ export class CatalogCanvas {
       let entry = this.relationshipElements.get(key);
       if (!entry) {
         const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        if (relationship.designId) {
+          group.setAttribute("data-change-object-id", relationship.designId);
+          group.setAttribute("data-change-root", "");
+        }
         const shadow = document.createElementNS("http://www.w3.org/2000/svg", "path");
         shadow.setAttribute("class", "relationship-shadow");
         const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -647,6 +669,13 @@ export class CatalogCanvas {
         this.lines.append(group);
         entry = { group, shadow, line, sourceEnd, targetEnd };
         this.relationshipElements.set(key, entry);
+      }
+      if (relationship.designId) {
+        entry.group.setAttribute("data-change-object-id", relationship.designId);
+        entry.group.setAttribute("data-change-root", "");
+      } else {
+        entry.group.removeAttribute?.("data-change-object-id");
+        entry.group.removeAttribute?.("data-change-root");
       }
       const { shadow, line, sourceEnd, targetEnd } = entry;
       shadow.setAttribute("d", data);

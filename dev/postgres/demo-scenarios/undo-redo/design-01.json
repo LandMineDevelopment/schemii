@@ -1,0 +1,10 @@
+{
+  "changes": [
+    {
+      "operation": "setColumnType",
+      "table": "projects",
+      "column": "name",
+      "dataType": "character varying(200)"
+    }
+  ]
+}

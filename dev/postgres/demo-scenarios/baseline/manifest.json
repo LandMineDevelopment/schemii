@@ -1,0 +1,8 @@
+{
+  "id": "baseline",
+  "title": "Clean imported baseline",
+  "description": "Imports the canonical demo schema without desired or external changes.",
+  "sourceRevision": "runtime",
+  "designAlterations": [],
+  "targetAlteration": "target.sql"
+}

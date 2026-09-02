@@ -175,6 +175,13 @@ class PostgresFunction(_PostgresModel):
     definition: CatalogText
 
 
+class PostgresType(_PostgresModel):
+    namespace: PostgresIdentifier
+    name: PostgresIdentifier
+    kind: Literal["enum", "domain"]
+    definition: CatalogText
+
+
 class PostgresView(_PostgresModel):
     namespace: PostgresIdentifier
     name: PostgresIdentifier
@@ -212,6 +219,7 @@ class _PostgresCatalogContent(_PostgresModel):
     server_version: CatalogText
     server_version_num: Annotated[int, Field(ge=0)]
     server_timezone: CatalogText
+    types: tuple[PostgresType, ...] = ()
     tables: tuple[PostgresTable, ...]
     relationships: tuple[PostgresForeignKeyRelationship, ...]
     functions: tuple[PostgresFunction, ...]
@@ -265,6 +273,7 @@ def build_postgres_catalog(
     server_version: str,
     server_version_num: int,
     server_timezone: str,
+    types: tuple[PostgresType, ...] = (),
     tables: tuple[PostgresTable, ...],
     relationships: tuple[PostgresForeignKeyRelationship, ...],
     functions: tuple[PostgresFunction, ...],
@@ -280,6 +289,7 @@ def build_postgres_catalog(
         server_version=server_version,
         server_version_num=server_version_num,
         server_timezone=server_timezone,
+        types=types,
         tables=tables,
         relationships=relationships,
         functions=functions,

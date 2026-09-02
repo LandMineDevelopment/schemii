@@ -23,6 +23,87 @@ NAMESPACE_EXISTS_QUERY = """
     ) AS namespace_exists
 """
 
+TYPES_QUERY = """
+    /* schemii_catalog_types */
+    SELECT type_definition.type_name,
+           type_definition.type_kind,
+           CASE WHEN pg_catalog.octet_length(type_definition.definition) <= %s
+                THEN type_definition.definition
+                ELSE NULL
+           END AS definition,
+           pg_catalog.octet_length(type_definition.definition) AS definition_bytes
+    FROM (
+        SELECT t.typname AS type_name,
+               CASE t.typtype WHEN 'e' THEN 'enum' ELSE 'domain' END AS type_kind,
+               CASE t.typtype
+                   WHEN 'e' THEN pg_catalog.format(
+                       'CREATE TYPE %%I AS ENUM (%%s)',
+                       t.typname,
+                       (
+                           SELECT pg_catalog.string_agg(
+                               pg_catalog.quote_literal(enum.enumlabel),
+                               ', ' ORDER BY enum.enumsortorder
+                           )
+                           FROM pg_catalog.pg_enum AS enum
+                           WHERE enum.enumtypid = t.oid
+                       )
+                   )
+                   ELSE pg_catalog.format(
+                       'CREATE DOMAIN %%I AS %%s%%s%%s%%s%%s',
+                       t.typname,
+                       pg_catalog.format_type(t.typbasetype, t.typtypmod),
+                       CASE
+                           WHEN t.typcollation <> 0
+                            AND t.typcollation <> base_type.typcollation
+                           THEN pg_catalog.format(
+                               ' COLLATE %%I.%%I',
+                               collation_namespace.nspname,
+                               coll.collname
+                           )
+                           ELSE ''
+                       END,
+                       CASE
+                           WHEN t.typdefault IS NOT NULL
+                           THEN ' DEFAULT ' || t.typdefault
+                           ELSE ''
+                       END,
+                       CASE WHEN t.typnotnull THEN ' NOT NULL' ELSE '' END,
+                       COALESCE(
+                           (
+                               SELECT pg_catalog.string_agg(
+                                   pg_catalog.format(
+                                       ' CONSTRAINT %%I %%s',
+                                       con.conname,
+                                       pg_catalog.pg_get_constraintdef(
+                                           con.oid,
+                                           true
+                                       )
+                                   ),
+                                   '' ORDER BY con.conname
+                               )
+                               FROM pg_catalog.pg_constraint AS con
+                               WHERE con.contypid = t.oid
+                           ),
+                           ''
+                       )
+                   )
+               END AS definition
+        FROM pg_catalog.pg_type AS t
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = t.typnamespace
+        LEFT JOIN pg_catalog.pg_type AS base_type
+          ON base_type.oid = t.typbasetype
+        LEFT JOIN pg_catalog.pg_collation AS coll
+          ON coll.oid = t.typcollation
+        LEFT JOIN pg_catalog.pg_namespace AS collation_namespace
+          ON collation_namespace.oid = coll.collnamespace
+        WHERE namespace.nspname = %s
+          AND t.typtype IN ('e', 'd')
+    ) AS type_definition
+    ORDER BY type_definition.type_name, type_definition.type_kind
+    LIMIT %s
+"""
+
 TABLES_QUERY = """
     /* schemii_catalog_tables */
     SELECT c.relname AS table_name,

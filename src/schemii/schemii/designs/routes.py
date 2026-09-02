@@ -1,13 +1,8 @@
 """Database-independent desired-schema routes."""
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request
 
 from schemii.common.api.errors import ApiProblem
-from schemii.common.api.planned import (
-    PLANNED_OPENAPI,
-    PLANNED_RESPONSES,
-    planned_capability,
-)
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.query_analysis import QueryDefinitionError
 from schemii.common.postgres.routine_analysis import (
@@ -23,13 +18,20 @@ from schemii.common.postgres.type_analysis import (
     analyze_type_definition,
 )
 from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
+from schemii.schemii.migrations.service import MigrationService, MigrationServiceError
 
 from .export import export_design
+from .deletion_impact import DesignObjectNotFoundError, design_deletion_impact
 from .models import (
+    DesignDeletionImpact,
+    DesignBaselineResetPreview,
+    DesignBaselineResetRequest,
+    DesignHistoryMutation,
+    DesignHistoryState,
+    DesignHistoryTransitionRequest,
     SchemiiDesign,
     SchemiiDesignExport,
     SchemiiDesignExportRequest,
-    SchemiiDesignImportRequest,
     SchemiiDesignLayout,
     SchemiiDesignLayoutReplace,
     SchemiiDesignReplace,
@@ -45,6 +47,7 @@ from .models import (
 from .store import (
     DesignConflictError,
     DesignLayoutConflictError,
+    DesignMutationBlockedError,
     DesignRepository,
     DesignValidationError,
     DesignWorkspaceNotFoundError,
@@ -64,6 +67,10 @@ def _designs(request: Request) -> DesignRepository:
 
 def _workspaces(request: Request) -> WorkspaceRepository:
     return request.app.state.services.workspaces
+
+
+def _migrations(request: Request) -> MigrationService:
+    return request.app.state.services.migrations
 
 
 def _require_workspace(request: Request, owner_id: str, workspace_id: str) -> None:
@@ -102,6 +109,16 @@ def _invalid_design(error: DesignValidationError) -> ApiProblem:
     return ApiProblem(422, "invalid_design", str(error), details=error.details)
 
 
+def _migration_problem(error: MigrationServiceError) -> ApiProblem:
+    return ApiProblem(
+        error.status,
+        error.code,
+        str(error),
+        details=error.details,
+        retryable=error.retryable,
+    )
+
+
 @router.get("/design", response_model=SchemiiDesign)
 def get_workspace_design(
     workspace_id: str,
@@ -115,6 +132,105 @@ def get_workspace_design(
         return _designs(request).get(principal.user_id, workspace_id)
     except DesignWorkspaceNotFoundError as error:
         raise _design_not_found(error) from error
+
+
+@router.get("/design/deletion-impact/{object_id}", response_model=DesignDeletionImpact)
+def get_design_deletion_impact(
+    workspace_id: str,
+    object_id: str,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignDeletionImpact:
+    """Derive every current-design object affected by one explicit deletion."""
+
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        design = _designs(request).get(principal.user_id, workspace_id)
+        return design_deletion_impact(design.content, design.revision, object_id)
+    except DesignWorkspaceNotFoundError as error:
+        raise _design_not_found(error) from error
+    except DesignObjectNotFoundError as error:
+        raise ApiProblem(
+            404,
+            "design_object_not_found",
+            "The selected object is no longer in this design",
+            details={"objectId": str(error)},
+        ) from error
+
+
+@router.get("/design/history", response_model=DesignHistoryState)
+def get_design_history(
+    workspace_id: str,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignHistoryState:
+    """Return the server-owned semantic cursor and current reset destination."""
+
+    try:
+        return _migrations(request).design_history_state(principal.user_id, workspace_id)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
+
+
+@router.post("/design/undo", response_model=DesignHistoryMutation)
+def undo_design_history(
+    workspace_id: str,
+    body: DesignHistoryTransitionRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignHistoryMutation:
+    """Move one durable semantic action backward without contacting PostgreSQL."""
+
+    try:
+        return _migrations(request).undo_design(principal.user_id, workspace_id, body)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
+
+
+@router.post("/design/redo", response_model=DesignHistoryMutation)
+def redo_design_history(
+    workspace_id: str,
+    body: DesignHistoryTransitionRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignHistoryMutation:
+    """Move one durable semantic action forward without contacting PostgreSQL."""
+
+    try:
+        return _migrations(request).redo_design(principal.user_id, workspace_id, body)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
+
+
+@router.get("/design/baseline-reset", response_model=DesignBaselineResetPreview)
+def preview_design_baseline_reset(
+    workspace_id: str,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignBaselineResetPreview:
+    """Derive the exact metadata-only reset for explicit review."""
+
+    try:
+        return _migrations(request).preview_baseline_reset(principal.user_id, workspace_id)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
+
+
+@router.post("/design/baseline-reset", response_model=DesignHistoryMutation)
+def reset_design_to_baseline(
+    workspace_id: str,
+    body: DesignBaselineResetRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignHistoryMutation:
+    """Restore desired metadata to its reviewed baseline without applying DDL."""
+
+    try:
+        return _migrations(request).reset_design_to_baseline(
+            principal.user_id, workspace_id, body
+        )
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
 
 
 @router.put("/design", response_model=SchemiiDesign)
@@ -133,6 +249,8 @@ def replace_workspace_design(
         raise _design_not_found(error) from error
     except DesignConflictError as error:
         raise _design_conflict(error) from error
+    except DesignMutationBlockedError as error:
+        raise ApiProblem(409, "design_mutation_blocked", str(error)) from error
     except DesignValidationError as error:
         raise _invalid_design(error) from error
 
@@ -301,26 +419,6 @@ def replace_workspace_design_layout(
         raise _layout_conflict(error) from error
     except DesignValidationError as error:
         raise _invalid_design(error) from error
-
-
-@router.post(
-    "/design/imports",
-    response_model=SchemiiDesign,
-    status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def import_attached_catalog(
-    workspace_id: str,
-    body: SchemiiDesignImportRequest,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiDesign:
-    """Transform one fingerprint-bound live catalog into editable desired state."""
-
-    # TODO(schemii-design-import): Reinspect the exact attached target, reject a
-    # stale fingerprint, translate supported objects, and report omissions.
-    del workspace_id, body, principal
-    planned_capability("schemii.design.import")
 
 
 @router.post("/design/exports", response_model=SchemiiDesignExport)

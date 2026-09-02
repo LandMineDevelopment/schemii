@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/compose.test.yaml"
+ORIGINAL_ARGUMENTS=("$@")
 
 # Local Compose deployment configuration. Environment values may override these defaults.
 SCHEMII_TEST_APP_PORT="${SCHEMII_TEST_APP_PORT-8001}"
@@ -13,6 +14,53 @@ SCHEMII_STARTUP_TIMEOUT="${SCHEMII_STARTUP_TIMEOUT-120}"
 SCHEMII_TLS_DIRECTORY="${SCHEMII_TLS_DIRECTORY-${ROOT_DIR}/.schemii/tls}"
 SCHEMII_TLS_CERTIFICATE_DAYS="${SCHEMII_TLS_CERTIFICATE_DAYS-365}"
 SCHEMII_SECRET_DIRECTORY="${SCHEMII_SECRET_DIRECTORY-${ROOT_DIR}/.schemii/secrets}"
+SCHEMII_RESET_MIGRATION_DEMO="${SCHEMII_RESET_MIGRATION_DEMO-0}"
+SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
+SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
+
+usage() {
+  printf 'Usage: %s [--reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios]\n' "$0"
+}
+
+list_demo_scenarios() {
+  local manifest scenario title
+  for manifest in "${ROOT_DIR}"/dev/postgres/demo-scenarios/*/manifest.json; do
+    [[ -f "$manifest" ]] || continue
+    scenario="$(basename -- "$(dirname -- "$manifest")")"
+    title="$(sed -n 's/^[[:space:]]*"title":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest")"
+    printf '%-24s %s\n' "$scenario" "$title"
+  done
+}
+
+if (( $# > 0 )); then
+  case "$1" in
+    --reset-demo)
+      SCHEMII_RESET_MIGRATION_DEMO=1
+      if (( $# == 2 )); then
+        SCHEMII_DEMO_SCENARIO="$2"
+      elif (( $# > 2 )); then
+        usage >&2
+        exit 2
+      fi
+      ;;
+    --reset-migration-demo)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_RESET_MIGRATION_DEMO=1
+      SCHEMII_DEMO_SCENARIO=baseline
+      ;;
+    --list-demo-scenarios)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      list_demo_scenarios
+      exit 0
+      ;;
+    -h|--help)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      usage
+      exit 0
+      ;;
+    *) usage >&2; exit 2 ;;
+  esac
+fi
 
 fail() {
   printf 'Schemii startup error: %s\n' "$1" >&2
@@ -32,6 +80,9 @@ fi
 [[ -n "$SCHEMII_TEST_POSTGRES_USER" ]] || fail "SCHEMII_TEST_POSTGRES_USER must not be empty"
 [[ -n "$SCHEMII_TEST_POSTGRES_PASSWORD" ]] || fail "SCHEMII_TEST_POSTGRES_PASSWORD must not be empty"
 [[ -n "$SCHEMII_SECRET_DIRECTORY" ]] || fail "SCHEMII_SECRET_DIRECTORY must not be empty"
+[[ "$SCHEMII_RESET_MIGRATION_DEMO" == "0" || "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]] || fail "SCHEMII_RESET_MIGRATION_DEMO must be 0 or 1"
+[[ "$SCHEMII_DEMO_SCENARIO" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "demo scenario must be a kebab-case identifier"
+[[ -f "${ROOT_DIR}/dev/postgres/demo-scenarios/${SCHEMII_DEMO_SCENARIO}/manifest.json" ]] || fail "unknown demo scenario: ${SCHEMII_DEMO_SCENARIO}"
 [[ -f "$COMPOSE_FILE" ]] || fail "Compose definition is missing at ${COMPOSE_FILE}"
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed or is not on PATH"
 docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is unavailable"
@@ -86,6 +137,10 @@ if ! docker info >/dev/null 2>&1; then
     command -v newgrp >/dev/null 2>&1 || fail "the account has Docker access, but this session is stale and newgrp is unavailable; start a new login session"
     printf "Refreshing this process with the account's Docker group membership...\n"
     printf -v restart_command 'exec %q' "${ROOT_DIR}/start.sh"
+    for restart_argument in "${ORIGINAL_ARGUMENTS[@]}"; do
+      printf -v escaped_restart_argument ' %q' "$restart_argument"
+      restart_command+="$escaped_restart_argument"
+    done
     exec newgrp docker -c "$restart_command"
   fi
   fail "Docker is unavailable; confirm that the daemon is running and the current account belongs to the docker group"
@@ -155,6 +210,19 @@ export SCHEMII_TLS_READER_GID
 export SCHEMII_METADATA_PASSWORD_SECRET_FILE
 export SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE
 export SCHEMII_SECRET_READER_GID
+export SCHEMII_RESET_MIGRATION_DEMO
+if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
+  if command -v git >/dev/null 2>&1 \
+      && SCHEMII_DEMO_SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null)"; then
+    if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]]; then
+      SCHEMII_DEMO_SOURCE_REVISION+="+dirty"
+    fi
+  else
+    SCHEMII_DEMO_SOURCE_REVISION="unknown+dirty"
+  fi
+fi
+export SCHEMII_DEMO_SCENARIO
+export SCHEMII_DEMO_SOURCE_REVISION
 
 compose_args=(
   compose
@@ -165,16 +233,34 @@ compose_args=(
 # The launcher is also the restart boundary: replace both stateless HTTP
 # processes even when their image digest and mounted files are unchanged.
 docker "${compose_args[@]}" rm --stop --force ingress schemii
+if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
+  docker "${compose_args[@]}" --profile demo-fixture rm --stop --force postgres-seed demo-fixture
+fi
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
 if ! docker "${compose_args[@]}" up --build --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
   printf 'Schemii did not become healthy. Current service state:\n' >&2
-  docker "${compose_args[@]}" ps >&2 || true
+  docker "${compose_args[@]}" --profile demo-fixture ps --all >&2 || true
   printf 'Schemii service logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 schemii >&2 || true
+  if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
+    printf 'Demo fixture logs:\n' >&2
+    docker "${compose_args[@]}" --profile demo-fixture logs --no-color --tail 200 demo-fixture >&2 || true
+  fi
   fail "the application service did not become healthy"
 fi
 docker "${compose_args[@]}" ps
+if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
+  if ! fixture_output="$(docker "${compose_args[@]}" --profile demo-fixture run --rm --no-deps demo-fixture 2>&1)"; then
+    printf '%s\n' "$fixture_output" >&2
+    fail "demo metadata fixture failed"
+  fi
+  printf '%s\n' "$fixture_output"
+  demo_workspace_id="$(printf '%s\n' "$fixture_output" | sed -n 's/^SCHEMII_DEMO_WORKSPACE_ID=//p' | tail -n 1)"
+  [[ "$demo_workspace_id" =~ ^ws_[0-9a-f]{32}$ ]] || fail "demo metadata fixture did not report a workspace ID"
+  printf 'Demo workspace: https://localhost:%s/?workspace=%s\n' "$SCHEMII_TEST_APP_PORT" "$demo_workspace_id"
+  printf 'Remote demo workspace: https://omarchy.taile4f57f.ts.net/?workspace=%s\n' "$demo_workspace_id"
+fi
 printf 'Schemii is ready at https://localhost:%s/\n' "$SCHEMII_TEST_APP_PORT"
 printf 'API map: https://localhost:%s/api-map\n' "$SCHEMII_TEST_APP_PORT"
 printf 'DB call map: https://localhost:%s/db-map\n' "$SCHEMII_TEST_APP_PORT"

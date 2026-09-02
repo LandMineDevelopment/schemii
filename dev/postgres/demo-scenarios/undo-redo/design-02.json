@@ -1,0 +1,10 @@
+{
+  "changes": [
+    {
+      "operation": "setColumnType",
+      "table": "tasks",
+      "column": "title",
+      "dataType": "character varying(320)"
+    }
+  ]
+}

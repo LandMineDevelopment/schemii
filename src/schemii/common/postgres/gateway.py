@@ -18,13 +18,17 @@ from schemii.common.connections.models import (
 from .errors import (
     PostgresCatalogLimitError,
     PostgresCatalogValidationError,
+    PostgresCommitUncertainError,
     PostgresConnectionError,
     PostgresDatabaseMismatchError,
     PostgresDriverUnavailableError,
     PostgresGatewayError,
     PostgresInvalidNamespaceError,
+    PostgresMigrationExecutionError,
+    PostgresMigrationStaleError,
     PostgresNamespaceNotFoundError,
     PostgresQueryError,
+    PostgresTransactionStatusError,
 )
 from .models import (
     PostgresCatalog,
@@ -40,6 +44,7 @@ from .models import (
     PostgresPrimaryKey,
     PostgresTable,
     PostgresTrigger,
+    PostgresType,
     PostgresUniqueConstraint,
     PostgresView,
     build_postgres_catalog,
@@ -54,6 +59,7 @@ from .queries import (
     NAMESPACE_EXISTS_QUERY,
     TABLES_QUERY,
     TRIGGERS_QUERY,
+    TYPES_QUERY,
     VIEWS_QUERY,
 )
 
@@ -74,6 +80,7 @@ class PostgresCatalogLimits:
     max_triggers: int = 10_000
     max_functions: int = 5_000
     max_views: int = 5_000
+    max_types: int = 5_000
     max_total_objects: int = 60_000
     max_definition_bytes: int = 256 * 1024
     max_total_text_bytes: int = 16 * 1024 * 1024
@@ -87,6 +94,7 @@ class PostgresCatalogLimits:
             "max_triggers": 100_000,
             "max_functions": 50_000,
             "max_views": 50_000,
+            "max_types": 50_000,
             "max_total_objects": 250_000,
             "max_definition_bytes": 1024 * 1024,
             "max_total_text_bytes": 128 * 1024 * 1024,
@@ -97,6 +105,16 @@ class PostgresCatalogLimits:
                 raise TypeError(f"{item.name} must be an integer")
             if value < 1 or value > hard_limits[item.name]:
                 raise ValueError(f"{item.name} is outside its supported range")
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresMigrationResult:
+    """Commit evidence returned only after PostgreSQL confirms commit."""
+
+    catalog: PostgresCatalog
+    transaction_id: str
+    target_identity: dict[str, Any]
+    completed_step_count: int
 
 
 @runtime_checkable
@@ -117,6 +135,23 @@ class PostgresGateway(Protocol):
         connection: ResolvedPostgresConnection,
         namespace: str,
     ) -> PostgresCatalog: ...
+
+    def execute_migration(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        expected_catalog_fingerprint: str,
+        statements: Sequence[str],
+        *,
+        on_started: Callable[[str, dict[str, Any]], None],
+        on_intended: Callable[[PostgresCatalog], None],
+    ) -> PostgresMigrationResult: ...
+
+    def transaction_status(
+        self,
+        connection: ResolvedPostgresConnection,
+        transaction_id: str,
+    ) -> str: ...
 
 
 def _portable_dict_row(cursor: Any) -> Callable[[Sequence[Any]], dict[str, Any]]:
@@ -196,114 +231,124 @@ class PsycopgPostgresGateway:
         try:
             database_connection = self._connect(connection)
             self._begin_read_only(database_connection, repeatable_read=True)
-            metadata = self._one(self._execute_rows(database_connection, METADATA_QUERY))
-            self._require_database(metadata, connection.database)
-            namespace_row = self._one(
-                self._execute_rows(
-                    database_connection,
-                    NAMESPACE_EXISTS_QUERY,
-                    (namespace,),
-                )
-            )
-            if namespace_row.get("namespace_exists") is not True:
-                if namespace_row.get("namespace_exists") is False:
-                    raise PostgresNamespaceNotFoundError()
-                raise PostgresCatalogValidationError()
-
-            text_budget = [0]
-            table_rows = self._bounded_rows(
-                database_connection,
-                "tables",
-                TABLES_QUERY,
-                namespace,
-                self._limits.max_tables,
-                text_budget,
-                ("partition_key",),
-            )
-            column_rows = self._bounded_rows(
-                database_connection,
-                "columns",
-                COLUMNS_QUERY,
-                namespace,
-                self._limits.max_columns,
-                text_budget,
-                ("default_expression",),
-            )
-            constraint_rows = self._bounded_rows(
-                database_connection,
-                "constraints",
-                CONSTRAINTS_QUERY,
-                namespace,
-                self._limits.max_constraints,
-                text_budget,
-                ("definition",),
-            )
-            index_rows = self._bounded_rows(
-                database_connection,
-                "indexes",
-                INDEXES_QUERY,
-                namespace,
-                self._limits.max_indexes,
-                text_budget,
-                ("definition", "predicate"),
-            )
-            trigger_rows = self._bounded_rows(
-                database_connection,
-                "triggers",
-                TRIGGERS_QUERY,
-                namespace,
-                self._limits.max_triggers,
-                text_budget,
-                ("definition",),
-            )
-            function_rows = self._bounded_rows(
-                database_connection,
-                "functions",
-                FUNCTIONS_QUERY,
-                namespace,
-                self._limits.max_functions,
-                text_budget,
-                ("identity_arguments", "arguments", "return_type", "definition"),
-            )
-            view_rows = self._bounded_rows(
-                database_connection,
-                "views",
-                VIEWS_QUERY,
-                namespace,
-                self._limits.max_views,
-                text_budget,
-                ("query_definition",),
-            )
-            row_groups = (
-                table_rows,
-                column_rows,
-                constraint_rows,
-                index_rows,
-                trigger_rows,
-                function_rows,
-                view_rows,
-            )
-            total_objects = sum(len(rows) for rows in row_groups)
-            if total_objects > self._limits.max_total_objects:
-                raise PostgresCatalogLimitError(
-                    "total_objects",
-                    self._limits.max_total_objects,
-                )
-            return self._build_catalog(
-                namespace=namespace,
-                metadata=metadata,
-                table_rows=table_rows,
-                column_rows=column_rows,
-                constraint_rows=constraint_rows,
-                index_rows=index_rows,
-                trigger_rows=trigger_rows,
-                function_rows=function_rows,
-                view_rows=view_rows,
-            )
+            return self._introspect_connection(database_connection, connection, namespace)
         except PostgresGatewayError:
             raise
         except (KeyError, TypeError, ValueError, ValidationError):
             raise PostgresCatalogValidationError() from None
+        finally:
+            self._cleanup(database_connection)
+
+    def execute_migration(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        expected_catalog_fingerprint: str,
+        statements: Sequence[str],
+        *,
+        on_started: Callable[[str, dict[str, Any]], None],
+        on_intended: Callable[[PostgresCatalog], None],
+    ) -> PostgresMigrationResult:
+        """Validate and apply one immutable server plan in one target transaction."""
+
+        namespace = self._validated_namespace(namespace)
+        database_connection: Any | None = None
+        completed = 0
+        commit_attempted = False
+        try:
+            database_connection = self._connect(connection)
+            self._begin_write(database_connection)
+            self._execute_rows(
+                database_connection,
+                "SELECT pg_advisory_xact_lock(hashtext(current_database()), hashtext(%s))",
+                (namespace,),
+            )
+            live = self._introspect_connection(database_connection, connection, namespace)
+            if live.fingerprint != expected_catalog_fingerprint:
+                raise PostgresMigrationStaleError(live.fingerprint)
+            identity = self._one(
+                self._execute_rows(
+                    database_connection,
+                    """
+                    SELECT current_database() AS database,
+                           (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS database_oid,
+                           current_setting('server_version_num') AS server_version_num,
+                           COALESCE(inet_server_addr()::text, 'local') AS server_address,
+                           COALESCE(inet_server_port(), 0) AS server_port
+                    """,
+                )
+            )
+            xid_row = self._one(
+                self._execute_rows(
+                    database_connection,
+                    "SELECT pg_current_xact_id()::text AS transaction_id",
+                )
+            )
+            transaction_id = xid_row.get("transaction_id")
+            if not isinstance(transaction_id, str) or not transaction_id:
+                raise PostgresCatalogValidationError()
+            on_started(transaction_id, identity)
+            for statement in statements:
+                if not isinstance(statement, str) or not statement.strip():
+                    raise PostgresCatalogValidationError()
+                self._execute_statement(database_connection, statement)
+                completed += 1
+            result_catalog = self._introspect_connection(
+                database_connection,
+                connection,
+                namespace,
+            )
+            on_intended(result_catalog)
+            commit_attempted = True
+            try:
+                database_connection.commit()
+            except Exception:
+                raise PostgresCommitUncertainError() from None
+            return PostgresMigrationResult(
+                catalog=result_catalog,
+                transaction_id=transaction_id,
+                target_identity=identity,
+                completed_step_count=completed,
+            )
+        except (PostgresMigrationStaleError, PostgresCommitUncertainError):
+            raise
+        except PostgresGatewayError as error:
+            if completed or commit_attempted:
+                raise PostgresMigrationExecutionError(completed) from error
+            raise
+        except Exception as error:
+            if commit_attempted:
+                raise PostgresCommitUncertainError() from None
+            raise PostgresMigrationExecutionError(completed) from error
+        finally:
+            self._cleanup(database_connection)
+
+    def transaction_status(
+        self,
+        connection: ResolvedPostgresConnection,
+        transaction_id: str,
+    ) -> str:
+        if not isinstance(transaction_id, str) or not transaction_id.isdigit():
+            raise PostgresTransactionStatusError()
+        database_connection: Any | None = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection)
+            row = self._one(
+                self._execute_rows(
+                    database_connection,
+                    "SELECT pg_xact_status(%s::xid8) AS status",
+                    (transaction_id,),
+                )
+            )
+            status = row.get("status")
+            if status not in {"committed", "aborted", "in progress"}:
+                raise PostgresTransactionStatusError()
+            return status
+        except PostgresGatewayError:
+            raise
+        except Exception:
+            raise PostgresTransactionStatusError() from None
         finally:
             self._cleanup(database_connection)
 
@@ -376,6 +421,98 @@ class PsycopgPostgresGateway:
         cls._execute_statement(
             database_connection,
             f"SET LOCAL idle_in_transaction_session_timeout = {IDLE_TRANSACTION_TIMEOUT_MS}",
+        )
+
+    @classmethod
+    def _begin_write(cls, database_connection: Any) -> None:
+        cls._execute_statement(database_connection, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        cls._execute_statement(
+            database_connection,
+            f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}",
+        )
+        cls._execute_statement(
+            database_connection,
+            f"SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}",
+        )
+        cls._execute_statement(
+            database_connection,
+            f"SET LOCAL idle_in_transaction_session_timeout = {IDLE_TRANSACTION_TIMEOUT_MS}",
+        )
+
+    def _introspect_connection(
+        self,
+        database_connection: Any,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+    ) -> PostgresCatalog:
+        """Inspect using the caller's transaction snapshot and locks."""
+
+        metadata = self._one(self._execute_rows(database_connection, METADATA_QUERY))
+        self._require_database(metadata, connection.database)
+        namespace_row = self._one(
+            self._execute_rows(
+                database_connection,
+                NAMESPACE_EXISTS_QUERY,
+                (namespace,),
+            )
+        )
+        if namespace_row.get("namespace_exists") is not True:
+            if namespace_row.get("namespace_exists") is False:
+                raise PostgresNamespaceNotFoundError()
+            raise PostgresCatalogValidationError()
+
+        text_budget = [0]
+        groups = [
+            self._bounded_rows(
+                database_connection, "types", TYPES_QUERY, namespace,
+                self._limits.max_types, text_budget, ("definition",),
+            ),
+            self._bounded_rows(
+                database_connection, "tables", TABLES_QUERY, namespace,
+                self._limits.max_tables, text_budget, ("partition_key",),
+            ),
+            self._bounded_rows(
+                database_connection, "columns", COLUMNS_QUERY, namespace,
+                self._limits.max_columns, text_budget, ("default_expression",),
+            ),
+            self._bounded_rows(
+                database_connection, "constraints", CONSTRAINTS_QUERY, namespace,
+                self._limits.max_constraints, text_budget, ("definition",),
+            ),
+            self._bounded_rows(
+                database_connection, "indexes", INDEXES_QUERY, namespace,
+                self._limits.max_indexes, text_budget, ("definition", "predicate"),
+            ),
+            self._bounded_rows(
+                database_connection, "triggers", TRIGGERS_QUERY, namespace,
+                self._limits.max_triggers, text_budget, ("definition",),
+            ),
+            self._bounded_rows(
+                database_connection, "functions", FUNCTIONS_QUERY, namespace,
+                self._limits.max_functions, text_budget,
+                ("identity_arguments", "arguments", "return_type", "definition"),
+            ),
+            self._bounded_rows(
+                database_connection, "views", VIEWS_QUERY, namespace,
+                self._limits.max_views, text_budget, ("query_definition",),
+            ),
+        ]
+        if sum(len(rows) for rows in groups) > self._limits.max_total_objects:
+            raise PostgresCatalogLimitError(
+                "total_objects",
+                self._limits.max_total_objects,
+            )
+        return self._build_catalog(
+            namespace=namespace,
+            metadata=metadata,
+            type_rows=groups[0],
+            table_rows=groups[1],
+            column_rows=groups[2],
+            constraint_rows=groups[3],
+            index_rows=groups[4],
+            trigger_rows=groups[5],
+            function_rows=groups[6],
+            view_rows=groups[7],
         )
 
     @staticmethod
@@ -528,6 +665,7 @@ class PsycopgPostgresGateway:
         *,
         namespace: str,
         metadata: Mapping[str, Any],
+        type_rows: list[dict[str, Any]],
         table_rows: list[dict[str, Any]],
         column_rows: list[dict[str, Any]],
         constraint_rows: list[dict[str, Any]],
@@ -536,6 +674,19 @@ class PsycopgPostgresGateway:
         function_rows: list[dict[str, Any]],
         view_rows: list[dict[str, Any]],
     ) -> PostgresCatalog:
+        types = tuple(
+            PostgresType(
+                namespace=namespace,
+                name=row["type_name"],
+                kind=row["type_kind"],
+                definition=row["definition"],
+            )
+            for row in sorted(
+                type_rows,
+                key=lambda item: (item["type_name"], item["type_kind"]),
+            )
+        )
+
         relation_columns: dict[tuple[str, str], list[PostgresColumn]] = {}
         for row in sorted(
             column_rows,
@@ -765,6 +916,7 @@ class PsycopgPostgresGateway:
             server_version=metadata["server_version"],
             server_version_num=metadata["server_version_num"],
             server_timezone=metadata["server_timezone"],
+            types=types,
             tables=tables,
             relationships=tuple(
                 sorted(

@@ -4,19 +4,37 @@ from __future__ import annotations
 
 import secrets
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from schemii.common.errors import MetadataStorageUnavailableError
+from schemii.schemii.designs.models import (
+    SchemiiDesignContent,
+    SchemiiDesignLayoutContent,
+)
+from schemii.schemii.designs.store import DesignRepository
 
 from .models import (
     SchemiiWorkspace,
     SchemiiWorkspaceCreate,
     SchemiiWorkspaceLayoutUpdate,
+    TableColumnDisplayOrder,
+    WorkspaceImportSummary,
 )
 
 MAX_WORKSPACES_PER_OWNER = 1_000
 MAX_TABLE_POSITIONS_PER_OWNER = 100_000
+MAX_COLUMN_DISPLAY_ORDER_ENTRIES_PER_OWNER = 100_000
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceDesignBootstrap:
+    """Validated initial design state written with a brand-new workspace."""
+
+    content: SchemiiDesignContent
+    layout: SchemiiDesignLayoutContent
+    import_summary: WorkspaceImportSummary
 
 
 class WorkspaceRepositoryError(RuntimeError):
@@ -60,7 +78,11 @@ class WorkspaceRepository(Protocol):
     def get(self, owner_id: str, workspace_id: str) -> SchemiiWorkspace: ...
 
     def create(
-        self, owner_id: str, request: SchemiiWorkspaceCreate
+        self,
+        owner_id: str,
+        request: SchemiiWorkspaceCreate,
+        *,
+        bootstrap: WorkspaceDesignBootstrap | None = None,
     ) -> SchemiiWorkspace: ...
 
     def update_layout(
@@ -85,13 +107,25 @@ class InMemoryWorkspaceRepository:
         *,
         max_workspaces_per_owner: int = MAX_WORKSPACES_PER_OWNER,
         max_table_positions_per_owner: int = MAX_TABLE_POSITIONS_PER_OWNER,
+        max_column_display_order_entries_per_owner: int = (
+            MAX_COLUMN_DISPLAY_ORDER_ENTRIES_PER_OWNER
+        ),
+        designs: DesignRepository | None = None,
     ) -> None:
-        if max_workspaces_per_owner < 1 or max_table_positions_per_owner < 1:
+        if (
+            max_workspaces_per_owner < 1
+            or max_table_positions_per_owner < 1
+            or max_column_display_order_entries_per_owner < 1
+        ):
             raise ValueError("workspace limits must be positive")
         self._records: dict[str, dict[str, SchemiiWorkspace]] = {}
         self._lock = threading.RLock()
         self._max_workspaces_per_owner = max_workspaces_per_owner
         self._max_table_positions_per_owner = max_table_positions_per_owner
+        self._max_column_display_order_entries_per_owner = (
+            max_column_display_order_entries_per_owner
+        )
+        self._designs = designs
 
     def list(self, owner_id: str) -> list[SchemiiWorkspace]:
         with self._lock:
@@ -106,7 +140,11 @@ class InMemoryWorkspaceRepository:
             return self._record(owner_id, workspace_id).model_copy(deep=True)
 
     def create(
-        self, owner_id: str, request: SchemiiWorkspaceCreate
+        self,
+        owner_id: str,
+        request: SchemiiWorkspaceCreate,
+        *,
+        bootstrap: WorkspaceDesignBootstrap | None = None,
     ) -> SchemiiWorkspace:
         with self._lock:
             owner_records = self._records.setdefault(owner_id, {})
@@ -117,13 +155,35 @@ class InMemoryWorkspaceRepository:
                 id=f"ws_{secrets.token_hex(16)}",
                 revision=1,
                 name=request.name,
+                mode=(
+                    "design"
+                    if bootstrap is not None or request.connection_id is None
+                    else "live"
+                ),
                 connection_id=request.connection_id,
                 database=request.database,
                 namespace=request.namespace,
                 tables=[],
+                column_orders=[],
+                import_summary=(
+                    bootstrap.import_summary.model_copy(deep=True)
+                    if bootstrap is not None
+                    else None
+                ),
                 created_at=now,
                 updated_at=now,
             )
+            if bootstrap is not None:
+                if self._designs is None:
+                    raise WorkspaceStorageUnavailableError(
+                        "Imported workspace persistence is not configured"
+                    )
+                self._designs.initialize(
+                    owner_id,
+                    workspace.id,
+                    bootstrap.content,
+                    bootstrap.layout,
+                )
             owner_records[workspace.id] = workspace
             return workspace.model_copy(deep=True)
 
@@ -147,10 +207,33 @@ class InMemoryWorkspaceRepository:
                     "table position",
                     self._max_table_positions_per_owner,
                 )
+            column_orders = current.column_orders
+            if request.column_orders is not None:
+                other_order_entries = sum(
+                    sum(len(order.columns) for order in workspace.column_orders)
+                    for candidate_id, workspace in self._records[owner_id].items()
+                    if candidate_id != workspace_id
+                )
+                requested_entries = sum(
+                    len(order.columns) for order in request.column_orders
+                )
+                if (
+                    other_order_entries + requested_entries
+                    > self._max_column_display_order_entries_per_owner
+                ):
+                    raise WorkspaceLimitError(
+                        "column display order entry",
+                        self._max_column_display_order_entries_per_owner,
+                    )
+                column_orders = [
+                    TableColumnDisplayOrder.model_validate(order).model_copy(deep=True)
+                    for order in request.column_orders
+                ]
             updated = current.model_copy(
                 update={
                     "revision": current.revision + 1,
                     "tables": [table.model_copy(deep=True) for table in request.tables],
+                    "column_orders": column_orders,
                     "updated_at": datetime.now(timezone.utc),
                 },
                 deep=True,

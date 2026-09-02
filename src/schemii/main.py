@@ -1,7 +1,7 @@
 """Assemble the Schemii API application."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from fastapi import APIRouter, FastAPI
 
@@ -23,6 +23,11 @@ from schemii.schemer.routes import router as schemer_router
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
 from schemii.schemii.designs.store import DesignRepository, InMemoryDesignRepository
 from schemii.schemii.frontend import install_schemii_frontend
+from schemii.schemii.migrations.repository import (
+    InMemoryMigrationRepository,
+    PostgresMigrationRepository,
+)
+from schemii.schemii.migrations.service import MigrationService
 from schemii.schemii.routes import router as schemii_router
 from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
@@ -39,27 +44,45 @@ class ApplicationServices:
     postgres: PostgresGateway
     workspaces: WorkspaceRepository
     designs: DesignRepository
+    migrations: MigrationService | None = None
 
 
 def create_services() -> ApplicationServices:
     metadata = create_metadata_repositories()
-    workspaces: WorkspaceRepository = (
-        PostgresWorkspaceRepository(metadata.connection_factory)
-        if metadata.connection_factory is not None
-        else InMemoryWorkspaceRepository()
-    )
     designs: DesignRepository = (
         PostgresDesignRepository(metadata.connection_factory)
         if metadata.connection_factory is not None
         else InMemoryDesignRepository()
     )
+    workspaces: WorkspaceRepository = (
+        PostgresWorkspaceRepository(metadata.connection_factory)
+        if metadata.connection_factory is not None
+        else InMemoryWorkspaceRepository(designs=designs)
+    )
     connections = ConnectionService(metadata.connections, (workspaces,))
+    migration_repository = (
+        PostgresMigrationRepository(metadata.connection_factory)
+        if metadata.connection_factory is not None
+        else InMemoryMigrationRepository(designs)
+    )
+    mutation_guard = getattr(designs, "set_mutation_guard", None)
+    if callable(mutation_guard):
+        mutation_guard(migration_repository.has_active_execution)
+    postgres = PsycopgPostgresGateway()
+    migrations = MigrationService(
+        repository=migration_repository,
+        connections=connections,
+        postgres=postgres,
+        workspaces=workspaces,
+        designs=designs,
+    )
     return ApplicationServices(
         metadata=metadata,
         connections=connections,
-        postgres=PsycopgPostgresGateway(),
+        postgres=postgres,
         workspaces=workspaces,
         designs=designs,
+        migrations=migrations,
     )
 
 
@@ -97,7 +120,23 @@ def create_app(
             503: {"model": ApiErrorResponse, "description": "Required service unavailable"},
         },
     )
-    application.state.services = services or create_services()
+    active_services = services or create_services()
+    if active_services.migrations is None:
+        migration_repository = InMemoryMigrationRepository(active_services.designs)
+        mutation_guard = getattr(active_services.designs, "set_mutation_guard", None)
+        if callable(mutation_guard):
+            mutation_guard(migration_repository.has_active_execution)
+        active_services = replace(
+            active_services,
+            migrations=MigrationService(
+                repository=migration_repository,
+                connections=active_services.connections,
+                postgres=active_services.postgres,
+                workspaces=active_services.workspaces,
+                designs=active_services.designs,
+            ),
+        )
+    application.state.services = active_services
     install_api_middleware(application)
     install_api_error_handlers(application)
 

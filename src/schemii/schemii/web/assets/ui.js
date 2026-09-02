@@ -287,10 +287,14 @@ function createTooltipController(documentRef) {
       if (activeTarget === target) tooltip.classList.add("visible");
     });
   };
-  const hide = () => {
+  const hide = ({ immediate = false } = {}) => {
     activeTarget = null;
     tooltip.classList.remove("visible");
     clearTimeout(hideTimer);
+    if (immediate) {
+      tooltip.hidden = true;
+      return;
+    }
     hideTimer = setTimeout(() => { tooltip.hidden = true; }, 150);
   };
   return { tooltip, show, hide, get activeTarget() { return activeTarget; } };
@@ -413,9 +417,12 @@ export function initializeUi(root = document) {
   const viewportSizing = installVisualViewportSizing(documentRef);
   const tooltip = createTooltipController(documentRef);
   let touchHideTimer = null;
+  let activationSuppressedTarget = null;
+  const candidateTarget = target => target?.closest?.("[data-ui-tooltip], [data-ui-tooltip-overflow]") || null;
   const resolveTarget = (target, { touch = false } = {}) => {
-    const candidate = target?.closest?.("[data-ui-tooltip], [data-ui-tooltip-overflow]");
+    const candidate = candidateTarget(target);
     if (!candidate) return null;
+    if (candidate === activationSuppressedTarget) return null;
     if (touch && candidate.dataset.uiTooltipTouch === undefined) return null;
     const content = candidate.dataset.uiTooltip
       || (isOverflowingText(candidate) ? candidate.dataset.uiTooltipOverflow : null);
@@ -426,6 +433,10 @@ export function initializeUi(root = document) {
     if (resolved && resolved.target !== tooltip.activeTarget) tooltip.show(resolved.target, resolved.content);
   };
   const onPointerOut = event => {
+    if (
+      activationSuppressedTarget?.contains(event.target)
+      && !activationSuppressedTarget.contains(event.relatedTarget)
+    ) activationSuppressedTarget = null;
     if (tooltip.activeTarget && !tooltip.activeTarget.contains(event.relatedTarget)) tooltip.hide();
   };
   const onFocusIn = event => {
@@ -433,12 +444,22 @@ export function initializeUi(root = document) {
     if (resolved) tooltip.show(resolved.target, resolved.content);
   };
   const onFocusOut = event => {
+    if (
+      activationSuppressedTarget?.contains(event.target)
+      && !activationSuppressedTarget.contains(event.relatedTarget)
+    ) activationSuppressedTarget = null;
     if (tooltip.activeTarget && !tooltip.activeTarget.contains(event.relatedTarget)) tooltip.hide();
   };
   const hideTooltip = () => {
     clearTimeout(touchHideTimer);
     touchHideTimer = null;
     tooltip.hide();
+  };
+  const dismissTooltipForActivation = event => {
+    clearTimeout(touchHideTimer);
+    touchHideTimer = null;
+    activationSuppressedTarget = candidateTarget(event.target);
+    tooltip.hide({ immediate: true });
   };
   const onPointerUp = event => {
     if (event.pointerType === "mouse") return;
@@ -449,14 +470,15 @@ export function initializeUi(root = document) {
     touchHideTimer = setTimeout(hideTooltip, 2_500);
   };
   const hideTooltipOnActivation = event => {
-    if (event.key === "Enter" || event.key === " ") tooltip.hide();
+    if (event.key === "Enter" || event.key === " ") dismissTooltipForActivation(event);
   };
   documentRef.addEventListener("pointerover", onPointerOver);
   documentRef.addEventListener("pointerout", onPointerOut);
   documentRef.addEventListener("focusin", onFocusIn);
   documentRef.addEventListener("focusout", onFocusOut);
-  documentRef.addEventListener("pointerdown", hideTooltip);
+  documentRef.addEventListener("pointerdown", dismissTooltipForActivation);
   documentRef.addEventListener("pointerup", onPointerUp);
+  documentRef.addEventListener("click", dismissTooltipForActivation, true);
   documentRef.addEventListener("keydown", hideTooltipOnActivation);
   documentRef.addEventListener("scroll", hideTooltip, true);
   const menus = [...root.querySelectorAll(".ui-menu")].map(installDetailsMenu);
@@ -468,8 +490,9 @@ export function initializeUi(root = document) {
       documentRef.removeEventListener("pointerout", onPointerOut);
       documentRef.removeEventListener("focusin", onFocusIn);
       documentRef.removeEventListener("focusout", onFocusOut);
-      documentRef.removeEventListener("pointerdown", hideTooltip);
+      documentRef.removeEventListener("pointerdown", dismissTooltipForActivation);
       documentRef.removeEventListener("pointerup", onPointerUp);
+      documentRef.removeEventListener("click", dismissTooltipForActivation, true);
       documentRef.removeEventListener("keydown", hideTooltipOnActivation);
       documentRef.removeEventListener("scroll", hideTooltip, true);
       clearTimeout(touchHideTimer);

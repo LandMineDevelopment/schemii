@@ -1,6 +1,8 @@
 """Source-of-truth contracts for database-independent Schemii designs."""
 
-from typing import Annotated, Literal
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -15,6 +17,21 @@ DesignIdentifier = Annotated[str, Field(min_length=1, max_length=63)]
 DesignObjectId = Annotated[str, Field(pattern=r"^[a-z]+_[0-9a-f]{32}$")]
 DesignExpression = Annotated[str, Field(max_length=262_144)]
 DesignRevision = Annotated[int, Field(strict=True, ge=0)]
+
+DesignObjectKind = Literal[
+    "type",
+    "table",
+    "column",
+    "key",
+    "check",
+    "index",
+    "relationship",
+    "routine",
+    "view",
+    "trigger",
+]
+DesignDeletionSeverity = Literal["behavior", "performance", "integrity", "data_loss"]
+DesignHistoryGroupId = Annotated[str, Field(pattern=r"^dgrp_[0-9a-f]{32}$")]
 
 
 class DesignDomainCheck(ApiModel):
@@ -392,6 +409,29 @@ class DesignViewAnalysis(QueryAnalysis):
     consumers: list[ViewAnalysisConsumer] = Field(default_factory=list)
 
 
+class DesignDeletionImpactNode(ApiModel):
+    """One source-derived object affected by deleting another design object."""
+
+    object_id: DesignObjectId
+    kind: DesignObjectKind
+    name: Annotated[str, Field(min_length=1, max_length=512)]
+    context: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+    consequence: Annotated[str, Field(min_length=1, max_length=1024)]
+    severity: DesignDeletionSeverity
+    table_id: DesignObjectId | None = None
+    table_name: DesignIdentifier | None = None
+    children: list[DesignDeletionImpactNode] = Field(default_factory=list, max_length=20_000)
+
+
+class DesignDeletionImpact(ApiModel):
+    """Current-revision preflight for one explicit desired-object deletion."""
+
+    design_revision: DesignRevision
+    target: DesignDeletionImpactNode
+    blocked: bool
+    dependents: list[DesignDeletionImpactNode] = Field(default_factory=list, max_length=20_000)
+
+
 class SchemiiDesignContent(ApiModel):
     """Database-independent desired schema authored by the user."""
 
@@ -417,6 +457,102 @@ class SchemiiDesignReplace(ApiModel):
 
     expected_design_revision: DesignRevision
     content: SchemiiDesignContent
+    history_group_id: DesignHistoryGroupId | None = None
+
+
+class DesignChangeItem(ApiModel):
+    """One source-derived semantic difference between complete designs."""
+
+    operation: Literal["added", "removed", "changed", "renamed"]
+    kind: DesignObjectKind
+    name: Annotated[str, Field(min_length=1, max_length=512)]
+    previous_name: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+
+
+class DesignChangeSummary(ApiModel):
+    """Compact server-derived description of one semantic design action."""
+
+    title: Annotated[str, Field(min_length=1, max_length=1024)]
+    change_count: Annotated[int, Field(strict=True, ge=0)]
+    changes: list[DesignChangeItem] = Field(default_factory=list, max_length=20_000)
+
+
+class DesignHistoryDeltaOperation(ApiModel):
+    """One server-derived operation for an immediate optimistic history preview."""
+
+    operation: Literal["add", "remove", "replace"]
+    path: list[str | int] = Field(default_factory=list, max_length=128)
+    value: Any = None
+
+
+class DesignHistoryAction(ApiModel):
+    """The exact next undo or redo action available at the current cursor."""
+
+    title: Annotated[str, Field(min_length=1, max_length=1024)]
+    change_count: Annotated[int, Field(strict=True, ge=1)]
+    crosses_baseline: bool = False
+    delta: list[DesignHistoryDeltaOperation] = Field(
+        default_factory=list,
+        max_length=50_000,
+    )
+
+
+class DesignHistoryBaseline(ApiModel):
+    """The server-owned destination used by reset-to-baseline."""
+
+    kind: Literal["workspace_start", "postgresql"]
+    id: Annotated[str, Field(min_length=1, max_length=64)]
+    revision: Annotated[int, Field(strict=True, ge=0)]
+    design_revision: DesignRevision
+    label: Annotated[str, Field(min_length=1, max_length=256)]
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    complete: bool = True
+
+
+class DesignHistoryState(ApiModel):
+    """Durable undo/redo cursor and current reset destination."""
+
+    design_revision: DesignRevision
+    can_undo: bool
+    can_redo: bool
+    undo: DesignHistoryAction | None = None
+    redo: DesignHistoryAction | None = None
+    baseline: DesignHistoryBaseline
+    can_reset_to_baseline: bool
+    reset_blocked_reason: Annotated[str, Field(min_length=1, max_length=2048)] | None = None
+    retained_action_limit: Annotated[int, Field(strict=True, ge=1)] = 100
+
+
+class DesignHistoryTransitionRequest(ApiModel):
+    """Optimistic authorization for one server-selected history transition."""
+
+    expected_design_revision: DesignRevision
+
+
+class DesignHistoryMutation(ApiModel):
+    """Atomic semantic transition with its refreshed design, layout, and cursor."""
+
+    design: SchemiiDesign
+    layout: SchemiiDesignLayout
+    history: DesignHistoryState
+
+
+class DesignBaselineResetPreview(ApiModel):
+    """Immutable review of replacing desired state with its synchronization point."""
+
+    design_revision: DesignRevision
+    baseline: DesignHistoryBaseline
+    summary: DesignChangeSummary
+    review_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DesignBaselineResetRequest(ApiModel):
+    """Apply exactly one previously reviewed metadata-only baseline reset."""
+
+    expected_design_revision: DesignRevision
+    baseline_id: Annotated[str, Field(min_length=1, max_length=64)]
+    baseline_revision: Annotated[int, Field(strict=True, ge=0)]
+    review_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class DesignObjectPosition(ApiModel):
@@ -456,15 +592,6 @@ class SchemiiDesignLayoutReplace(ApiModel):
     expected_layout_revision: Annotated[int, Field(strict=True, ge=0)]
     expected_design_revision: DesignRevision
     content: SchemiiDesignLayoutContent
-
-
-class SchemiiDesignImportRequest(ApiModel):
-    """Import an attached live catalog into desired state under an explicit strategy."""
-
-    expected_workspace_revision: Annotated[int, Field(strict=True, ge=1)]
-    expected_design_revision: DesignRevision
-    expected_catalog_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    strategy: Literal["require_empty", "replace", "merge"] = "require_empty"
 
 
 class SchemiiDesignExportRequest(ApiModel):

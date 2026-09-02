@@ -73,7 +73,7 @@ def test_credentials_are_authenticated_to_owner_and_connection() -> None:
 def test_packaged_metadata_migrations_are_contiguous_and_checksum_guarded() -> None:
     migrations = packaged_migrations()
 
-    assert [migration.version for migration in migrations] == [1, 2, 3]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7]
     assert migrations[0].name == "0001_connections.sql"
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
@@ -84,6 +84,11 @@ def test_packaged_metadata_migrations_are_contiguous_and_checksum_guarded() -> N
     assert "CREATE TABLE schemii.workspace_designs" in migrations[2].sql
     assert "CREATE TABLE schemii.workspace_design_layouts" in migrations[2].sql
     assert "camera and inspector state remain browser-owned" in migrations[2].sql
+    assert migrations[3].name == "0004_workspace_column_display_orders.sql"
+    assert "CREATE TABLE schemii.workspace_table_column_orders" in migrations[3].sql
+    assert "PostgreSQL attnum remains authoritative" in migrations[3].sql
+    assert "CREATE TABLE schemii.workspace_design_history_entries" in migrations[6].sql
+    assert "CREATE TABLE schemii.workspace_design_position_memory" in migrations[6].sql
     migrator = MetadataMigrator(lambda: None, migrations)
     assert migrator._validate_applied(
         [

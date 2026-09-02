@@ -65,3 +65,33 @@ class PostgresCatalogValidationError(PostgresGatewayError):
 
     def __init__(self) -> None:
         super().__init__("PostgreSQL returned invalid catalog metadata")
+
+
+class PostgresMigrationStaleError(PostgresGatewayError):
+    code = "postgres_migration_stale"
+
+    def __init__(self, current_fingerprint: str) -> None:
+        self.current_fingerprint = current_fingerprint
+        super().__init__("PostgreSQL changed after the migration was reviewed")
+
+
+class PostgresMigrationExecutionError(PostgresGatewayError):
+    code = "postgres_migration_failed"
+
+    def __init__(self, completed_step_count: int) -> None:
+        self.completed_step_count = completed_step_count
+        super().__init__("PostgreSQL rejected the migration; all migration statements were rolled back")
+
+
+class PostgresCommitUncertainError(PostgresGatewayError):
+    code = "postgres_migration_commit_uncertain"
+
+    def __init__(self) -> None:
+        super().__init__("The PostgreSQL connection ended while the migration commit outcome was unknown")
+
+
+class PostgresTransactionStatusError(PostgresGatewayError):
+    code = "postgres_transaction_status_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("PostgreSQL could not determine the migration transaction status")

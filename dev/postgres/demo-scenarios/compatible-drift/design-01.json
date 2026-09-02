@@ -1,0 +1,11 @@
+{
+  "changes": [
+    {
+      "operation": "addColumn",
+      "table": "projects",
+      "column": "planned_label",
+      "dataType": "character varying(120)",
+      "nullable": true
+    }
+  ]
+}

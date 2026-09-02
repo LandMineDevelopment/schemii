@@ -1,17 +1,15 @@
-"""Planned migration resource routes."""
+"""Server-authoritative migration planning and execution routes."""
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 
-from schemii.common.api.planned import (
-    PLANNED_OPENAPI,
-    PLANNED_RESPONSES,
-    planned_capability,
-)
+from schemii.common.api.errors import ApiProblem
 from schemii.common.metadata.models import Principal, get_current_principal
 
 from .models import (
+    MigrationDriftResolution,
+    MigrationDriftResolutionRequest,
     MigrationExecution,
     MigrationExecutionCreate,
     MigrationExecutionListResponse,
@@ -19,120 +17,157 @@ from .models import (
     MigrationPlanCreate,
     MigrationReconciliationRequest,
 )
+from .service import MigrationService, MigrationServiceError
 
 
-router = APIRouter(tags=["schemii-migrations-planned"])
+router = APIRouter(tags=["schemii-migrations"])
+
+
+def _service(request: Request) -> MigrationService:
+    service = request.app.state.services.migrations
+    assert service is not None
+    return service
+
+
+def _problem(error: MigrationServiceError) -> ApiProblem:
+    return ApiProblem(
+        error.status,
+        error.code,
+        str(error),
+        details=error.details,
+        retryable=error.retryable,
+    )
 
 
 @router.post(
     "/workspaces/{workspace_id}/migration-plans",
     response_model=MigrationPlan,
     status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def create_migration_plan(
     workspace_id: str,
     body: MigrationPlanCreate,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> MigrationPlan:
-    """Compare saved desired state with one repeatable-read live catalog snapshot."""
+    """Derive and retain a three-way review from server-owned state."""
 
-    # TODO(schemii-migration-plan): Require an attached target, derive complete
-    # differences, persist private proofs, and mark incomplete reviews non-executable.
-    del workspace_id, body, principal
-    planned_capability("schemii.migrations.plan")
+    try:
+        return _service(request).create_plan(principal.user_id, workspace_id, body)
+    except MigrationServiceError as error:
+        raise _problem(error) from error
 
 
-@router.get(
-    "/migration-plans/{plan_id}",
-    response_model=MigrationPlan,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
+@router.get("/migration-plans/{plan_id}", response_model=MigrationPlan)
 def get_migration_plan(
     plan_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> MigrationPlan:
-    """Return the immutable public review document for one owner-scoped plan."""
+    """Return one immutable owner-scoped migration review."""
 
-    # TODO(schemii-migration-plan): Read durable metadata, enforce ownership and
-    # expiry, and never disclose private authority or reconstruction evidence.
-    del plan_id, principal
-    planned_capability("schemii.migrations.plan-status")
+    try:
+        return _service(request).get_plan(principal.user_id, plan_id)
+    except MigrationServiceError as error:
+        raise _problem(error) from error
+
+
+@router.post(
+    "/migration-plans/{plan_id}/drift-resolutions",
+    response_model=MigrationDriftResolution,
+    status_code=status.HTTP_201_CREATED,
+)
+def resolve_migration_drift(
+    plan_id: str,
+    body: MigrationDriftResolutionRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> MigrationDriftResolution:
+    """Pull or acknowledge every server-derived external-change conflict."""
+
+    try:
+        return _service(request).resolve_drift(principal.user_id, plan_id, body)
+    except MigrationServiceError as error:
+        raise _problem(error) from error
 
 
 @router.post(
     "/migration-plans/{plan_id}/executions",
     response_model=MigrationExecution,
     status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def execute_migration_plan(
     plan_id: str,
     body: MigrationExecutionCreate,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> MigrationExecution:
-    """Claim one reviewed plan and create its sole durable execution attempt."""
+    """Execute exactly one claimed server-owned reviewed plan."""
 
-    # TODO(schemii-migration-execution): Persist confirmation before target I/O,
-    # revalidate all bindings under a namespace lock, and execute without CASCADE.
-    del plan_id, body, principal
-    planned_capability("schemii.migrations.execute")
+    try:
+        return _service(request).create_execution(principal.user_id, plan_id, body)
+    except MigrationServiceError as error:
+        raise _problem(error) from error
 
 
 @router.get(
     "/migration-executions/{execution_id}",
     response_model=MigrationExecution,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def get_migration_execution(
     execution_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> MigrationExecution:
-    """Read durable progress and terminal commit state without replaying work."""
+    """Read durable progress and terminal commit state without replay."""
 
-    # TODO(schemii-migration-execution): Return the authoritative metadata state
-    # and explicit reconciliation requirement for interrupted applying attempts.
-    del execution_id, principal
-    planned_capability("schemii.migrations.execution-status")
+    try:
+        return _service(request).get_execution(principal.user_id, execution_id)
+    except MigrationServiceError as error:
+        raise _problem(error) from error
 
 
 @router.post(
     "/migration-executions/{execution_id}/reconciliation",
     response_model=MigrationExecution,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def reconcile_migration_execution(
     execution_id: str,
     body: MigrationReconciliationRequest,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> MigrationExecution:
-    """Resolve an uncertain attempt from persisted PostgreSQL transaction evidence."""
+    """Resolve an uncertain target transaction without replaying its SQL."""
 
-    # TODO(schemii-migration-reconcile): Query pg_xact_status for the recorded XID,
-    # synchronize saved design only after proven commit, and never execute SQL again.
-    del execution_id, body, principal
-    planned_capability("schemii.migrations.reconcile")
+    try:
+        return _service(request).reconcile_execution(
+            principal.user_id,
+            execution_id,
+            body,
+        )
+    except MigrationServiceError as error:
+        raise _problem(error) from error
 
 
 @router.get(
     "/workspaces/{workspace_id}/migration-executions",
     response_model=MigrationExecutionListResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def list_workspace_migration_executions(
     workspace_id: str,
+    request: Request,
     limit: Annotated[int, Query(ge=1, le=250)] = 100,
     principal: Principal = Depends(get_current_principal),
 ) -> MigrationExecutionListResponse:
-    """List recent migration attempts belonging to one workspace."""
+    """List recent owner-scoped migration attempts for one workspace."""
 
-    # TODO(schemii-migration-history): Page durable owner/workspace execution
-    # summaries without loading private plan payloads or redacted terminal details.
-    del workspace_id, limit, principal
-    planned_capability("schemii.migrations.history")
+    try:
+        return MigrationExecutionListResponse(
+            executions=_service(request).list_executions(
+                principal.user_id,
+                workspace_id,
+                limit,
+            )
+        )
+    except MigrationServiceError as error:
+        raise _problem(error) from error

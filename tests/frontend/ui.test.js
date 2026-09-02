@@ -9,6 +9,7 @@ import {
   installDetailsMenu,
   installOverflowDisclosure,
   installVisualViewportSizing,
+  initializeUi,
   isOverflowingText,
   renderStatePanel,
   setControlLoading,
@@ -52,6 +53,7 @@ class Target {
   getAttribute(name) { return this.attributes.get(name) ?? null; }
   removeAttribute(name) { this.attributes.delete(name); }
   contains(target) { return target === this || this.children.has(target); }
+  closest() { return null; }
   focus() { this.focused = true; this.ownerDocument.activeElement = this; }
   blur() { this.ownerDocument.activeElement = null; }
   click() { for (const callback of this.listeners.get("click") || []) callback({ target: this }); }
@@ -63,10 +65,13 @@ class ElementTarget extends Target {
     this.tagName = tagName.toUpperCase();
     this.childNodes = [];
     this.textContent = "";
+    this.style = {};
   }
 
   append(...children) { this.childNodes.push(...children); }
   replaceChildren(...children) { this.childNodes = [...children]; }
+  getBoundingClientRect() { return { left: 0, right: 80, top: 0, bottom: 24, width: 80, height: 24 }; }
+  remove() { this.removed = true; }
 }
 
 function uiDocument() {
@@ -345,4 +350,38 @@ test("loading controls restore their prior disabled and accessible state", () =>
   assert.equal(control.getAttribute("aria-label"), "Refresh");
   assert.equal(control.dataset.uiTooltip, "Refresh contract");
   assert.equal(control.classList.contains("ui-control-loading"), false);
+});
+
+test("activating an icon control immediately dismisses and suppresses its tooltip", () => {
+  const documentRef = uiDocument();
+  documentRef.body = documentRef.createElement("body");
+  documentRef.documentElement = {
+    style: { setProperty() {}, removeProperty() {} },
+  };
+  documentRef.querySelectorAll = () => [];
+  documentRef.defaultView = {
+    innerWidth: 400,
+    innerHeight: 800,
+    requestAnimationFrame: callback => callback(),
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const undo = new Target(documentRef);
+  undo.dataset.uiTooltip = "Undo: change column type";
+  undo.getBoundingClientRect = () => ({ left: 100, right: 140, top: 700, bottom: 740, width: 40, height: 40 });
+  undo.closest = selector => selector.includes("data-ui-tooltip") ? undo : null;
+  const ui = initializeUi(documentRef);
+  const tooltip = documentRef.body.childNodes[0];
+
+  for (const callback of documentRef.listeners.get("pointerover")) callback({ target: undo });
+  assert.equal(tooltip.hidden, false);
+  for (const callback of documentRef.listeners.get("pointerdown")) callback({ target: undo });
+  assert.equal(tooltip.hidden, true);
+  for (const callback of documentRef.listeners.get("focusin")) callback({ target: undo });
+  assert.equal(tooltip.hidden, true);
+
+  for (const callback of documentRef.listeners.get("pointerout")) callback({ target: undo, relatedTarget: null });
+  for (const callback of documentRef.listeners.get("pointerover")) callback({ target: undo });
+  assert.equal(tooltip.hidden, false);
+  ui.destroy();
 });

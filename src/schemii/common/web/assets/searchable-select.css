@@ -1,0 +1,18 @@
+.ui-searchable-select { position: relative; width: 100%; min-width: 0; }
+.ui-searchable-select > input { padding-right: 31px !important; }
+.ui-searchable-select__toggle { position: absolute; top: 1px; right: 1px; display: grid; width: 29px; height: 34px; place-items: center; padding: 0; border: 0; border-left: 1px solid #29333f; border-radius: 0 4px 4px 0; color: #7f8c9b; background: #111820; cursor: pointer; }
+.ui-searchable-select__toggle:hover, .ui-searchable-select__toggle[aria-expanded="true"] { color: var(--text); background: #18212b; }
+.ui-searchable-select__list { position: fixed; z-index: 1200; inset: auto; margin: 0; padding: 5px; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--text); background: #151a22; box-shadow: var(--shadow-popup); }
+.ui-searchable-select__list:popover-open { display: block; }
+.ui-searchable-select__group { display: block; padding: 7px 8px 5px; color: #647182; font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .1em; }
+.ui-searchable-select__option { display: grid; width: 100%; min-height: 38px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 8px; border: 0; border-radius: 4px; color: #cbd3dd; text-align: left; background: transparent; cursor: pointer; }
+.ui-searchable-select__option > span { display: grid; min-width: 0; gap: 2px; }
+.ui-searchable-select__option strong { overflow: hidden; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.ui-searchable-select__option small { overflow: hidden; color: #697686; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.ui-searchable-select__option > b { color: var(--accent); font-size: 9px; }
+.ui-searchable-select__option:hover, .ui-searchable-select__option.active { outline: 0; color: var(--accent); background: #211b0f; }
+.ui-searchable-select__empty { margin: 0; padding: 13px 10px; color: #788595; font-size: 8px; text-align: center; }
+
+@media (max-width: 680px) {
+  .ui-searchable-select__option { min-height: 44px; }
+}

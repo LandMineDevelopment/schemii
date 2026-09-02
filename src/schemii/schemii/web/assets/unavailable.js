@@ -7,8 +7,6 @@ export const UNAVAILABLE_CAPABILITIES = Object.freeze({
   "relationship-create": { title: "Create relationship", description: "The active API can inspect foreign keys but cannot create relationships." },
   "relationship-edit": { title: "Edit relationship", description: "The active API has no contract for altering foreign-key relationships." },
   "relationship-delete": { title: "Delete relationship", description: "The active API has no contract for dropping foreign-key relationships." },
-  "semantic-undo": { title: "Semantic undo", description: "Server-authoritative schema operations and their inverse operations are not available." },
-  "semantic-redo": { title: "Semantic redo", description: "Server-authoritative schema operation history is not available." },
   "sql-upload": { title: "Upload SQL", description: "The active API has no contract for parsing or importing an uploaded SQL document." },
   "sql-export": { title: "Export SQL", description: "The active API returns catalog JSON but does not generate an authoritative SQL export." },
   "table-rows": { title: "Browse table rows", description: "The active API exposes catalog metadata only and has no table-row read contract." },

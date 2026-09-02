@@ -7,8 +7,10 @@
     <title>Schemii</title>
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="assets/ui.css" />
+    <link rel="stylesheet" href="/assets/common/searchable-select.css" />
     <link rel="stylesheet" href="/assets/common/query-story.css" />
     <link rel="stylesheet" href="assets/app.css" />
+    <link rel="stylesheet" href="/assets/common/transient-cue.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -70,8 +72,9 @@
           <button id="create-key-button" type="button" data-ui-icon="key" title="Create key" aria-label="Create primary or unique key" aria-pressed="false" disabled></button>
           <button id="create-index-button" type="button" data-ui-icon="index" title="Create index" aria-label="Create index" aria-pressed="false" disabled></button>
           <span class="rail-divider" aria-hidden="true"></span>
-          <button type="button" data-ui-icon="undo" data-unavailable="semantic-undo" title="Semantic undo" aria-label="Semantic undo"></button>
-          <button type="button" data-ui-icon="redo" data-unavailable="semantic-redo" title="Semantic redo" aria-label="Semantic redo"></button>
+          <button id="undo-design-button" type="button" data-ui-icon="undo" title="Undo design change" aria-label="Undo design change" disabled></button>
+          <button id="redo-design-button" type="button" data-ui-icon="redo" title="Redo design change" aria-label="Redo design change" disabled></button>
+          <button id="reset-design-button" type="button" data-ui-icon="refresh" title="Reset design to baseline" aria-label="Reset design to baseline" disabled></button>
           <span class="rail-divider" aria-hidden="true"></span>
           <button id="fit-button" type="button" data-ui-icon="fit" title="Fit tables" aria-label="Fit tables"></button>
           <button id="zoom-in-button" type="button" data-ui-icon="zoom-in" title="Zoom in" aria-label="Zoom in"></button>
@@ -84,7 +87,7 @@
           <button type="button" data-ui-icon="assistant" data-unavailable="ai-assistant" title="AI schema assistant" aria-label="AI schema assistant"></button>
         </aside>
 
-        <section class="tables-workspace layer-panel" id="tables-workspace" data-layer-panel="tables" aria-label="Table diagram">
+        <section class="tables-workspace layer-panel" id="tables-workspace" data-layer-panel="tables" data-change-scope="schema" aria-label="Table diagram">
           <div class="canvas" id="canvas" tabindex="0" aria-label="Live table diagram canvas">
             <div class="canvas-grid" aria-hidden="true"></div>
             <div class="catalog-state" id="catalog-state" role="status" aria-live="polite"></div>
@@ -116,7 +119,6 @@
               </button>
               <div class="ui-dock-pane__actions">
                 <button class="ui-icon-button compact" type="button" data-ui-icon="tables" data-unavailable="table-rows" aria-label="Browse table rows"></button>
-                <button class="ui-icon-button compact" id="edit-table-button" type="button" data-ui-icon="edit" aria-label="Edit designed table" disabled></button>
                 <button class="ui-icon-button compact danger" id="delete-table-button" type="button" data-ui-icon="delete" aria-label="Delete designed table" disabled></button>
                 <button class="ui-icon-button compact" id="table-inspector-close" type="button" data-ui-icon="close" aria-label="Close table inspector"></button>
               </div>
@@ -130,12 +132,33 @@
                 <p id="inspector-empty-copy">Select a live table to inspect columns, constraints, indexes, triggers, and relationships.</p>
                 <dl class="catalog-stats ui-stat-grid" id="catalog-stats"></dl>
               </div>
+              <form class="inspector-table-editor" id="inspector-table-form" hidden>
+                <section class="inspector-section inspector-table-general">
+                  <header class="section-title"><h3>Table</h3><span>Direct edit</span></header>
+                  <label class="inspector-table-name"><span>Table name</span><input id="inspector-table-name" required maxlength="63" autocomplete="off" /></label>
+                </section>
+                <section class="inspector-section inspector-table-columns">
+                  <header class="section-title">
+                    <span><h3>Columns</h3><small id="inspector-column-count">0</small></span>
+                    <button class="ui-button compact" id="add-inspector-column-button" type="button">Add column</button>
+                  </header>
+                  <p class="inspector-editor-copy">Edit values in place. Drag the six-dot handle to change column order.</p>
+                  <div class="design-columns" id="inspector-design-columns"></div>
+                </section>
+                <div class="inspector-table-savebar">
+                  <div class="form-status" id="inspector-table-status" aria-live="polite"></div>
+                  <span>
+                    <button class="ui-button compact" id="discard-inspector-table-button" type="button" disabled>Discard</button>
+                    <button class="ui-button compact primary" id="save-inspector-table-button" type="submit" disabled>Save changes</button>
+                  </span>
+                </div>
+              </form>
               <div id="inspector-content" hidden></div>
             </div>
           </aside>
         </section>
 
-        <section class="views-workspace layer-panel" id="views-workspace" data-layer-panel="views" aria-label="Views browser" hidden>
+        <section class="views-workspace layer-panel" id="views-workspace" data-layer-panel="views" data-change-scope="views" aria-label="Views browser" hidden>
           <aside class="views-sidebar">
             <header><span><small id="views-source-label">Relation browser</small><strong>Views</strong></span><span class="views-header-actions"><button class="ui-icon-button compact" id="refresh-views-button" type="button" data-ui-icon="refresh" title="Refresh views" aria-label="Refresh views"></button><button class="ui-button compact primary" id="create-view-button" type="button" disabled>Create</button></span></header>
             <label class="search-field"><span>Search views</span><input id="views-search" type="search" autocomplete="off" /></label>
@@ -151,7 +174,7 @@
           </article>
         </section>
 
-        <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" aria-label="SQL workspace" hidden>
+        <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" data-change-scope="sql" aria-label="SQL workspace" hidden>
           <header class="sql-head">
             <div><small>Backend capability required</small><h1>SQL workspace</h1></div>
             <dl aria-label="Current PostgreSQL target">
@@ -163,7 +186,7 @@
           <div class="sql-body">
             <section class="sql-editor-panel">
               <header><span><small>Unsaved draft</small><strong>Editor</strong></span><button class="ui-button compact" id="new-sql-draft-button" type="button">Clear draft</button></header>
-              <textarea id="sql-draft" aria-label="Unsaved SQL draft" spellcheck="false"></textarea>
+              <textarea id="sql-draft" data-change-object-id="sql-draft" data-change-root data-change-field="value" aria-label="Unsaved SQL draft" spellcheck="false"></textarea>
               <footer><span>Draft text is not sent or saved.</span><button class="ui-button compact" type="button" data-unavailable="sql-upload">Upload</button><button class="ui-button compact" type="button" data-unavailable="sql-save">Save</button><button class="ui-button compact primary" type="button" data-unavailable="sql-run">Run</button></footer>
             </section>
             <aside class="sql-capabilities">
@@ -216,7 +239,7 @@
         <form class="workspace-form" id="workspace-form">
           <header><strong>Create workspace</strong><small id="workspace-form-copy">Start a database-independent schema design.</small></header>
           <label><span>Name</span><input id="workspace-name" required maxlength="128" autocomplete="off" placeholder="Inventory design" /></label>
-          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Design only</option><option value="attached">Live PostgreSQL</option></select></label>
+          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Design workspace · no database</option><option value="import">Database workspace · read/write (planned)</option><option value="attached">Live database · read only</option></select></label>
           <label class="workspace-target-field" hidden><span>Connection</span><select id="workspace-connection"><option value="">Select a live connection</option></select></label>
           <label class="workspace-target-field" hidden><span>Database</span><output id="workspace-database">Select a connection</output></label>
           <label class="workspace-target-field" hidden><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" autocomplete="off" /><button class="ui-button compact" type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
@@ -459,6 +482,17 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <p id="confirm-message"></p>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-confirm-cancel>Cancel</button><button class="ui-button compact danger" id="confirm-action" type="button">Delete</button></footer>
       </div>
+    </dialog>
+
+    <dialog class="ui-dialog dependency-impact-dialog" id="dependency-impact-dialog" aria-labelledby="dependency-impact-title">
+      <article class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Deletion blocked</small><h2 id="dependency-impact-title">Resolve affected objects</h2><p id="dependency-impact-copy"></p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close dependency impact"></button></header>
+        <div class="dependency-impact-body">
+          <div class="form-status" id="dependency-impact-status" aria-live="polite"></div>
+          <div class="dependency-impact-tree" id="dependency-impact-tree"></div>
+        </div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-close-dialog>Done</button></footer>
+      </article>
     </dialog>
 
     <div class="ui-toast" id="toast" role="status" aria-live="polite" hidden></div>

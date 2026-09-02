@@ -30,11 +30,11 @@ from schemii.common.source_inspection import (
 
 DEVELOPER_SYSTEM_PATH = "/_developer/system"
 _MAX_ROUTES = 200
-_MAX_CALLABLES = 240
+_MAX_CALLABLES = 360
 _MAX_CALL_DEPTH = 10
-_MAX_CALLS_PER_CALLABLE = 64
+_MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96
-_MAX_OBJECTS = 400
+_MAX_OBJECTS = 640
 _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 480
@@ -676,6 +676,7 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
     registry = SourceRegistry(
         SourceInspectionLimits(
             object_limit=_MAX_OBJECTS,
+            source_limit=48_000,
             total_source_limit=1_024_000,
         )
     )

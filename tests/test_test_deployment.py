@@ -99,3 +99,78 @@ def test_seed_contains_archived_tutorial_and_catalog_coverage_namespaces() -> No
         "fixture=v1",
     ):
         assert expected in seed
+
+
+def test_launcher_seeds_an_isolated_migration_demo_database() -> None:
+    script = (ROOT / "dev" / "postgres" / "seed.sh").read_text(encoding="utf-8")
+    launcher = (ROOT / "start.sh").read_text(encoding="utf-8")
+    compose = (ROOT / "compose.test.yaml").read_text(encoding="utf-8")
+    demo = (ROOT / "dev" / "postgres" / "migration-demo.sql").read_text(encoding="utf-8")
+
+    assert 'demo_database="schemii_migration_demo"' in script
+    assert 'dropdb --if-exists --force "$demo_database"' in script
+    assert "--reset-migration-demo" in launcher
+    assert "SCHEMII_RESET_MIGRATION_DEMO" in compose
+    assert "CREATE TABLE public.tasks" in demo
+    assert "CREATE TABLE public.task_comments" in demo
+    assert "CREATE INDEX tasks_assignee_due_idx" in demo
+
+
+def test_demo_reset_rebuilds_only_the_reserved_target_and_its_metadata() -> None:
+    launcher = (ROOT / "start.sh").read_text(encoding="utf-8")
+    compose = (ROOT / "compose.test.yaml").read_text(encoding="utf-8")
+    seed = (ROOT / "dev" / "postgres" / "seed.sh").read_text(encoding="utf-8")
+    fixture = (ROOT / "dev" / "postgres" / "demo-fixture.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--reset-demo [SCENARIO]" in launcher
+    assert "--list-demo-scenarios" in launcher
+    assert "SCHEMII_DEMO_SOURCE_REVISION" in launcher
+    assert 'dropdb --if-exists --force "$demo_database"' in seed
+    assert 'profiles: ["demo-fixture"]' in compose
+    assert "python /fixture/demo-fixture.py" in compose
+    assert "LOCAL_PROTOTYPE_USER_ID" in fixture
+    assert "schemii.workspace_targets" in fixture
+    assert "metadata.postgres_connections" in fixture
+    assert "TRUNCATE" not in fixture.upper()
+    assert "DROP SCHEMA" not in fixture.upper()
+
+
+def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
+    scenarios = ROOT / "dev" / "postgres" / "demo-scenarios"
+    expected = {
+        "baseline",
+        "compatible-drift",
+        "conflicting-drift",
+        "undo-redo",
+    }
+    assert {path.parent.name for path in scenarios.glob("*/manifest.json")} == expected
+    for scenario in expected:
+        manifest = __import__("json").loads(
+            (scenarios / scenario / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["id"] == scenario
+        assert manifest["sourceRevision"] == "runtime"
+        assert (scenarios / scenario / manifest["targetAlteration"]).is_file()
+        for alteration in manifest["designAlterations"]:
+            assert (scenarios / scenario / alteration).is_file()
+
+    compatible = (scenarios / "compatible-drift" / "target.sql").read_text(
+        encoding="utf-8"
+    )
+    conflicting = (scenarios / "conflicting-drift" / "target.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "ADD COLUMN external_reference" in compatible
+    assert "ADD COLUMN migration_note" in conflicting
+
+    undo_redo = __import__("json").loads(
+        (scenarios / "undo-redo" / "manifest.json").read_text(encoding="utf-8")
+    )
+    view_change = __import__("json").loads(
+        (scenarios / "undo-redo" / "design-03.json").read_text(encoding="utf-8")
+    )
+    assert undo_redo["designAlterations"][-1] == "design-03.json"
+    assert view_change["changes"][0]["operation"] == "addView"
+    assert view_change["changes"][0]["name"] == "project_workload"

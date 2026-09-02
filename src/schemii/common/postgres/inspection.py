@@ -471,7 +471,13 @@ def build_developer_database_document(application: FastAPI) -> dict[str, Any]:
 
     service_name, gateway = _gateway_service(application.state.services)
     gateway_type = type(gateway)
-    registry = SourceRegistry(SourceInspectionLimits())
+    registry = SourceRegistry(
+        SourceInspectionLimits(
+            object_limit=240,
+            source_limit=48_000,
+            total_source_limit=1_024_000,
+        )
+    )
     query_registry = _QueryRegistry()
     contract_id = registry.register(PostgresGateway, kind="gateway-contract")
     implementation_id = registry.register(gateway_type, kind="gateway-implementation")

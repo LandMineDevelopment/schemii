@@ -804,12 +804,14 @@ export function deleteDesignIndex(content, tableId, indexId) {
 
 function designRelationshipFromValues(content, values, relationshipId, randomUUID) {
   const relationshipName = validatedName(values.name, "relationship name");
-  if (content.relationships.some(item => item.id !== relationshipId && item.name === relationshipName)) {
-    throw new Error("A relationship with this name already exists in the design.");
-  }
   const source = content.tables.find(table => table.id === values.sourceTableId);
   const target = content.tables.find(table => table.id === values.targetTableId);
   if (!source || !target) throw new Error("Choose source and target tables from this design.");
+  if (content.relationships.some(item => item.id !== relationshipId
+    && item.sourceTableId === source.id
+    && item.name === relationshipName)) {
+    throw new Error("A relationship with this name already exists on the source table.");
+  }
   const targetKey = target.keys.find(key => key.id === values.targetKeyId && ["primary", "unique"].includes(key.kind));
   if (!targetKey) throw new Error("Choose a primary or unique key on the target table.");
   const sourceColumnIds = [...values.sourceColumnIds];
@@ -985,7 +987,6 @@ export function deleteDesignView(content, viewId) {
   if (!view) throw new Error("The selected view is no longer in this design.");
   const revised = structuredClone(content);
   revised.views = revised.views.filter(view => view.id !== viewId);
-  revised.triggers = (revised.triggers || []).filter(trigger => trigger.relationName !== view.name);
   return { content: revised };
 }
 
@@ -1055,4 +1056,49 @@ export function deleteDesignType(content, typeId) {
   }
   next.types = next.types.filter(designType => designType.id !== typeId);
   return next;
+}
+
+export function deleteDesignObject(content, objectId) {
+  const table = content.tables.find(item => item.id === objectId);
+  if (table) {
+    const next = structuredClone(content);
+    next.tables = next.tables.filter(item => item.id !== objectId);
+    return { content: next, object: table, kind: "table" };
+  }
+  for (const owner of content.tables) {
+    const column = owner.columns.find(item => item.id === objectId);
+    if (column) {
+      if (owner.columns.length === 1) throw new Error(`Delete table “${owner.name}” instead of its only column.`);
+      const next = structuredClone(content);
+      next.tables.find(item => item.id === owner.id).columns = owner.columns.filter(item => item.id !== objectId);
+      return { content: next, object: column, kind: "column" };
+    }
+    if (owner.keys.some(item => item.id === objectId)) {
+      const result = deleteDesignKey(content, owner.id, objectId);
+      return { ...result, object: result.key, kind: "key" };
+    }
+    if (owner.checks.some(item => item.id === objectId)) {
+      const result = deleteDesignCheck(content, owner.id, objectId);
+      return { ...result, object: result.check, kind: "check" };
+    }
+    if (owner.indexes.some(item => item.id === objectId)) {
+      const result = deleteDesignIndex(content, owner.id, objectId);
+      return { ...result, object: result.index, kind: "index" };
+    }
+  }
+  const relationship = content.relationships.find(item => item.id === objectId);
+  if (relationship) {
+    const next = structuredClone(content);
+    next.relationships = next.relationships.filter(item => item.id !== objectId);
+    return { content: next, object: relationship, kind: "relationship" };
+  }
+  const view = content.views.find(item => item.id === objectId);
+  if (view) return { ...deleteDesignView(content, objectId), object: view, kind: "view" };
+  const routine = content.functions.find(item => item.id === objectId);
+  if (routine) return { content: deleteDesignRoutine(content, objectId), object: routine, kind: "routine" };
+  const trigger = (content.triggers || []).find(item => item.id === objectId);
+  if (trigger) return { content: deleteDesignTrigger(content, objectId), object: trigger, kind: "trigger" };
+  const designType = (content.types || []).find(item => item.id === objectId);
+  if (designType) return { content: deleteDesignType(content, objectId), object: designType, kind: "type" };
+  throw new Error("The selected object is no longer in this design.");
 }

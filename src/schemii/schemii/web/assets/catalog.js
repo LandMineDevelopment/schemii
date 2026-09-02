@@ -1,5 +1,7 @@
 import { element, emptyPanel, normalizedSearch, replace } from "./dom.js";
 import { unavailableButton } from "./unavailable.js";
+import { installSortableList } from "/assets/common/sortable.js";
+import { createIconButton } from "./ui.js";
 
 const MAX_BROWSER_ITEMS = 250;
 const MAX_INSPECTOR_ITEMS = 250;
@@ -41,8 +43,11 @@ function actionButton(label, onClick, { danger = false } = {}) {
   return button;
 }
 
-function itemCard(title, kind, entries = [], definition = null, actions = []) {
-  const card = element("article", { className: "inspector-item" });
+function itemCard(title, kind, entries = [], definition = null, actions = [], designId = null) {
+  const card = element("article", {
+    className: "inspector-item",
+    dataset: designId ? { changeObjectId: designId, changeRoot: "" } : {},
+  });
   const head = element("header", { className: "inspector-item-head" });
   head.append(element("strong", { text: title }), element("span", { text: kind }));
   card.append(head);
@@ -112,6 +117,12 @@ export function renderInspector({
   onAddRelationship = null,
   onEditRelationship = null,
   onDeleteRelationship = null,
+  showTableDetails = true,
+  columnOrderMode = "database",
+  hasCustomColumnOrder = false,
+  onColumnOrderModeChange = null,
+  onColumnOrderChange = null,
+  onResetColumnOrder = null,
 }) {
   inspector.classList.toggle("is-empty", !table);
   empty.hidden = Boolean(table);
@@ -121,14 +132,16 @@ export function renderInspector({
   if (!table || !catalog) return;
   const desired = catalog.source === "design";
 
-  const identity = section("Table identity", 0);
-  identity.append(metadataGrid([
-    ["Namespace", table.namespace],
-    ["Kind", table.kind],
-    ["Partition", table.isPartition],
-    ["Partition key", table.partitionKey],
-  ]));
-  content.append(identity);
+  if (showTableDetails) {
+    const identity = section("Table identity", 0);
+    identity.append(metadataGrid([
+      ["Namespace", table.namespace],
+      ["Kind", table.kind],
+      ["Partition", table.isPartition],
+      ["Partition key", table.partitionKey],
+    ]));
+    content.append(identity);
+  }
 
   const relationshipValues = catalog.relationships.filter(relationship =>
     (relationship.sourceNamespace === table.namespace && relationship.sourceTable === table.name)
@@ -143,29 +156,100 @@ export function renderInspector({
     }
   }
 
-  const columns = section(
-    "Columns",
-    table.columns.length,
-    desired && onEditTable ? actionButton("Edit table", onEditTable) : unavailableButton("column-create", "Add column"),
-  );
-  boundedInspectorList(columns, table.columns, column => {
-    const primary = table.primaryKey?.columns?.includes(column.name) || false;
-    const collation = column.collationSchema && column.collationName ? `${column.collationSchema}.${column.collationName}` : null;
-    return itemCard(column.name, `Column ${column.ordinal}`, [
-      ["Data type", column.dataType],
-      ["Nullable", column.nullable],
-      ["Primary key", primary],
-      ["Foreign keys", foreignKeysByColumn.get(column.name) || []],
-      ["Default", column.defaultExpression],
-      ["Identity", column.identity],
-      ["Generated", column.generated],
-      ["Collation", collation],
-    ], null, desired ? [] : [
-      unavailableButton("column-edit", "Edit"),
-      unavailableButton("column-delete", "Delete"),
-    ]);
-  }, "columns", desired);
-  content.append(columns);
+  if (showTableDetails) {
+    const orderControls = !desired && onColumnOrderModeChange
+      ? element("div", { className: "column-order-controls", attrs: { "aria-label": "Column display order" } }, [
+        ...["database", "custom"].map(mode => {
+          const button = element("button", {
+            className: `ui-button compact${columnOrderMode === mode ? " active" : ""}`,
+            type: "button",
+            text: mode === "database" ? "Database" : "Custom",
+            attrs: { "aria-pressed": columnOrderMode === mode ? "true" : "false" },
+          });
+          button.addEventListener("click", () => onColumnOrderModeChange(mode));
+          return button;
+        }),
+        ...(hasCustomColumnOrder && onResetColumnOrder
+          ? [actionButton("Reset", onResetColumnOrder)]
+          : []),
+      ])
+      : null;
+    const columns = section(
+      "Columns",
+      table.columns.length,
+      desired && onEditTable
+        ? actionButton("Edit table", onEditTable)
+        : orderControls || unavailableButton("column-create", "Add column"),
+    );
+    if (!desired && onColumnOrderModeChange) {
+      columns.append(element("p", {
+        className: "column-order-copy",
+        text: columnOrderMode === "custom"
+          ? hasCustomColumnOrder
+            ? "Custom order is saved by Schemii. DB numbers remain the physical PostgreSQL order."
+            : "Drag columns into a display order. PostgreSQL will not be changed."
+          : "Physical order reported by PostgreSQL. Choose Custom to arrange this display.",
+      }));
+    }
+    const visibleColumns = !desired && columnOrderMode === "custom"
+      ? table.columns
+      : table.columns.slice(0, MAX_INSPECTOR_ITEMS);
+    const columnCards = visibleColumns.map(column => {
+      const primary = table.primaryKey?.columns?.includes(column.name) || false;
+      const collation = column.collationSchema && column.collationName ? `${column.collationSchema}.${column.collationName}` : null;
+      const card = itemCard(column.name, `DB #${column.ordinal}`, [
+        ["Data type", column.dataType],
+        ["Nullable", column.nullable],
+        ["Primary key", primary],
+        ["Foreign keys", foreignKeysByColumn.get(column.name) || []],
+        ["Default", column.defaultExpression],
+        ["Identity", column.identity],
+        ["Generated", column.generated],
+        ["Collation", collation],
+      ], null, desired ? [] : [
+        unavailableButton("column-edit", "Edit"),
+        unavailableButton("column-delete", "Delete"),
+      ], column.designId);
+      if (!desired && columnOrderMode === "custom" && onColumnOrderChange) {
+        card.classList.add("live-column-order-row");
+        card.dataset.sortKey = column.name;
+        const handle = createIconButton({
+          icon: "drag",
+          label: `Reorder ${column.name}`,
+          tooltip: `Drag to reorder ${column.name}`,
+          className: "compact live-column-sort-handle",
+        });
+        handle.dataset.sortHandle = "";
+        card.querySelector(".inspector-item-head")?.prepend(handle);
+      }
+      return card;
+    });
+    if (!columnCards.length) {
+      columns.append(element("p", { className: "none-reported", text: desired ? "None in this design." : "None reported by the live catalog." }));
+    } else {
+      const list = element("div", {
+        className: `inspector-list${!desired && columnOrderMode === "custom" ? " live-column-order-list" : ""}`,
+      }, columnCards);
+      columns.append(list);
+      if (!desired && columnOrderMode === "custom" && onColumnOrderChange) {
+        installSortableList(list, {
+          itemSelector: ".live-column-order-row",
+          itemLabel: item => item.dataset.sortKey,
+          onReorder: (_fromIndex, _toIndex, details) => onColumnOrderChange(
+            [...list.children].map(item => item.dataset.sortKey),
+            details,
+          ),
+        });
+      }
+    }
+    if (table.columns.length > columnCards.length) {
+      columns.append(element("p", {
+        className: "none-reported",
+        text: `Showing the first ${columnCards.length} of ${table.columns.length} columns. Use the downloaded live catalog JSON for the complete set.`,
+      }));
+    }
+    content.append(columns);
+  }
 
   const constraintValues = [
     ...(table.primaryKey ? [{ ...table.primaryKey, displayKind: "Primary key" }] : []),
@@ -197,7 +281,7 @@ export function renderInspector({
     ] : editableCheck ? [
       ...(onEditCheck ? [actionButton("Edit", () => onEditCheck(constraint))] : []),
       ...(onDeleteCheck ? [actionButton("Delete", () => onDeleteCheck(constraint), { danger: true })] : []),
-    ] : []);
+    ] : [], constraint.designId);
   }, "constraints", desired);
   content.append(constraints);
 
@@ -215,7 +299,7 @@ export function renderInspector({
   ], index.definition, desired && index.designId ? [
     ...(onEditIndex ? [actionButton("Edit", () => onEditIndex(index))] : []),
     ...(onDeleteIndex ? [actionButton("Delete", () => onDeleteIndex(index), { danger: true })] : []),
-  ] : []), "indexes", desired);
+  ] : [], index.designId), "indexes", desired);
   content.append(indexes);
 
   const triggers = section(
@@ -233,7 +317,7 @@ export function renderInspector({
   ], trigger.definition, desired && trigger.designId ? [
     ...(onEditTrigger ? [actionButton("Edit", () => onEditTrigger(trigger))] : []),
     ...(onDeleteTrigger ? [actionButton("Delete", () => onDeleteTrigger(trigger), { danger: true })] : []),
-  ] : []), "triggers", desired);
+  ] : [], trigger.designId), "triggers", desired);
   content.append(triggers);
 
   const relationships = section(
@@ -258,7 +342,7 @@ export function renderInspector({
     ] : [
       unavailableButton("relationship-edit", "Edit"),
       unavailableButton("relationship-delete", "Delete"),
-    ]);
+    ], relationship.designId);
   }, "relationships", desired);
   content.append(relationships);
 }
@@ -271,17 +355,31 @@ export function allViews(catalog) {
   ].sort((left, right) => left.name.localeCompare(right.name));
 }
 
+function viewListEmpty(title, copy) {
+  return element("div", { className: "view-list-empty", attrs: { role: "status" } }, [
+    element("strong", { text: title }),
+    element("span", { text: copy }),
+  ]);
+}
+
 export function renderViewsList(container, { catalog, query = "", filter = "all", selectedName, onSelect }) {
   replace(container);
   if (!catalog) {
-    container.append(emptyPanel("VIEW", "No workspace loaded", "Open a workspace to browse its views."));
+    container.append(viewListEmpty("No workspace loaded", "Open a workspace to browse its views."));
     return [];
   }
   const desired = catalog.source === "design";
   const needle = normalizedSearch(query);
   const views = allViews(catalog).filter(view => (filter === "all" || view.catalogKind === filter) && (!needle || `${view.namespace}.${view.name}`.toLocaleLowerCase().includes(needle)));
   if (!views.length) {
-    container.append(emptyPanel("0", "No matching views", query || filter !== "all" ? "No views match this filter." : desired ? "This design has no ordinary or materialized views yet." : "The live catalog reported no ordinary or materialized views."));
+    container.append(viewListEmpty(
+      query || filter !== "all" ? "No matching views" : "No views yet",
+      query || filter !== "all"
+        ? "Try a different search or filter."
+        : desired
+          ? "Create an ordinary or materialized view."
+          : "The live catalog reported no views.",
+    ));
     return views;
   }
   for (const view of views.slice(0, MAX_BROWSER_ITEMS)) {
@@ -289,6 +387,11 @@ export function renderViewsList(container, { catalog, query = "", filter = "all"
       className: `view-list-button${view.name === selectedName ? " active" : ""}`,
       type: "button",
       attrs: { "aria-pressed": view.name === selectedName ? "true" : "false" },
+      dataset: view.designId ? {
+        changeObjectId: view.designId,
+        changeRoot: "",
+        changeField: "name kind definition populateOnCreate order",
+      } : {},
     });
     const detail = desired
       ? `${view.catalogKind === "view" ? "Ordinary view" : "Materialized view"} · designed query`
@@ -303,9 +406,18 @@ export function renderViewsList(container, { catalog, query = "", filter = "all"
 
 export function renderViewDetail(container, view) {
   replace(container);
+  container.classList.toggle("is-empty", !view);
+  delete container.dataset.changeObjectId;
+  delete container.dataset.changeRoot;
+  delete container.dataset.changeField;
   if (!view) {
     container.append(emptyPanel("VIEW", "No view selected", "Select an ordinary or materialized view from the live catalog."));
     return;
+  }
+  if (view.designId) {
+    container.dataset.changeObjectId = view.designId;
+    container.dataset.changeRoot = "";
+    container.dataset.changeField = "name kind definition populateOnCreate";
   }
   const head = element("header", { className: "view-detail-head" });
   const title = element("div");
@@ -350,7 +462,10 @@ export function renderFunctions(container, catalog, query = "", { onEdit = null,
   }
   const visible = routines.slice(0, MAX_BROWSER_ITEMS);
   for (const routine of visible) {
-    const wrapper = element("details", { className: "catalog-object" });
+    const wrapper = element("details", {
+      className: "catalog-object",
+      dataset: routine.designId ? { changeObjectId: routine.designId, changeRoot: "" } : {},
+    });
     const summary = element("summary");
     const identity = element("span");
     identity.append(element("strong", { text: `${routine.namespace}.${routine.name}(${routine.identityArguments})` }), element("small", { text: `${routine.kind} · ${routine.language}` }));
@@ -411,7 +526,10 @@ export function renderTypes(container, catalog, query = "", filter = "all", { on
     const section = element("section", { className: "catalog-object-group" });
     section.append(element("h3", { text: `${kind === "enum" ? "Enums" : "Domains"} · ${group.length}` }));
     for (const designType of group) {
-      const wrapper = element("details", { className: "catalog-object type-object" });
+      const wrapper = element("details", {
+        className: "catalog-object type-object",
+        dataset: designType.designId ? { changeObjectId: designType.designId, changeRoot: "" } : {},
+      });
       const summary = element("summary");
       const identity = element("span");
       const summaryDetail = kind === "enum"
@@ -471,17 +589,18 @@ function objectDescriptors(catalog) {
   const objects = [];
   const hasTopLevelTriggers = Array.isArray(catalog.triggers);
   for (const table of catalog.tables) {
-    objects.push({ kind: table.kind, name: `${table.namespace}.${table.name}`, meta: `${table.columns.length} columns`, target: "table", table: table.name });
-    if (table.primaryKey) objects.push({ kind: "primary key", name: table.primaryKey.name, meta: table.primaryKey.definition, target: "table", table: table.name });
-    for (const constraint of [...table.uniqueConstraints, ...table.checks, ...table.notNullConstraints, ...table.exclusionConstraints]) objects.push({ kind: "constraint", name: constraint.name, meta: constraint.definition, target: "table", table: table.name });
-    for (const index of table.indexes) objects.push({ kind: "index", name: index.name, meta: index.definition, target: "table", table: table.name });
+    objects.push({ designId: table.designId, kind: table.kind, name: `${table.namespace}.${table.name}`, meta: `${table.columns.length} columns`, target: "table", table: table.name });
+    if (table.primaryKey) objects.push({ designId: table.primaryKey.designId, kind: "primary key", name: table.primaryKey.name, meta: table.primaryKey.definition, target: "table", table: table.name });
+    for (const constraint of [...table.uniqueConstraints, ...table.checks, ...table.notNullConstraints, ...table.exclusionConstraints]) objects.push({ designId: constraint.designId, kind: "constraint", name: constraint.name, meta: constraint.definition, target: "table", table: table.name });
+    for (const index of table.indexes) objects.push({ designId: index.designId, kind: "index", name: index.name, meta: index.definition, target: "table", table: table.name });
     if (!hasTopLevelTriggers) {
-      for (const trigger of table.triggers) objects.push({ kind: "trigger", name: trigger.name, meta: trigger.definition, target: "table", table: table.name });
+      for (const trigger of table.triggers) objects.push({ designId: trigger.designId, kind: "trigger", name: trigger.name, meta: trigger.definition, target: "table", table: table.name });
     }
   }
-  for (const view of allViews(catalog)) objects.push({ kind: view.catalogKind, name: `${view.namespace}.${view.name}`, meta: `${view.columns.length} columns`, target: "view", view });
-  for (const routine of catalog.functions) objects.push({ kind: routine.kind, name: `${routine.namespace}.${routine.name}(${routine.identityArguments})`, meta: routine.language, target: "routine" });
+  for (const view of allViews(catalog)) objects.push({ designId: view.designId, kind: view.catalogKind, name: `${view.namespace}.${view.name}`, meta: `${view.columns.length} columns`, target: "view", view });
+  for (const routine of catalog.functions) objects.push({ designId: routine.designId, kind: routine.kind, name: `${routine.namespace}.${routine.name}(${routine.identityArguments})`, meta: routine.language, target: "routine" });
   for (const trigger of catalog.triggers || []) objects.push({
+    designId: trigger.designId,
     kind: "trigger",
     name: `${trigger.relationName}.${trigger.name}`,
     meta: `${trigger.timing.replaceAll("_", " ")} ${trigger.events.join(" or ")} · ${trigger.orientation}`,
@@ -489,6 +608,7 @@ function objectDescriptors(catalog) {
     trigger,
   });
   for (const designType of catalog.types || []) objects.push({
+    designId: designType.designId,
     kind: designType.kind,
     name: designType.name,
     meta: designType.kind === "enum" ? designType.enumValues.join(", ") : designType.baseType,
@@ -512,7 +632,10 @@ export function renderObjects(container, catalog, query = "", onOpen) {
   }
   const visible = objects.slice(0, MAX_BROWSER_ITEMS);
   for (const object of visible) {
-    const wrapper = element("details", { className: "catalog-object" });
+    const wrapper = element("details", {
+      className: "catalog-object",
+      dataset: object.designId ? { changeObjectId: object.designId, changeRoot: "" } : {},
+    });
     const summary = element("summary");
     const identity = element("span");
     identity.append(element("strong", { text: object.name }), element("small", { text: object.meta }));

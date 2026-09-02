@@ -1,0 +1,11 @@
+{
+  "changes": [
+    {
+      "operation": "addView",
+      "name": "project_workload",
+      "kind": "view",
+      "definition": "SELECT\n    p.id AS project_id,\n    p.name AS project_name,\n    count(t.id) AS task_count,\n    count(*) FILTER (WHERE t.status <> 'done') AS open_task_count\nFROM projects AS p\nLEFT JOIN tasks AS t ON t.project_id = p.id\nGROUP BY p.id, p.name",
+      "populateOnCreate": null
+    }
+  ]
+}

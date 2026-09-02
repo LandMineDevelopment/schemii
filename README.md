@@ -40,27 +40,28 @@ The current API deliberately uses one local application user while product workf
 
 - `GET /api/v1/session` returns the valid local prototype principal.
 - `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
-- `/api/v1/schemii/workspaces` manages database-independent design workspaces, optional Schemii target bindings, and table positions.
+- `/api/v1/schemii/workspaces` manages durable design and live-inspection workspaces, optional PostgreSQL target bindings, and presentation preferences.
+- `POST /api/v1/schemii/workspaces/imports` creates a new editable design from one bounded PostgreSQL catalog snapshot. It cannot target or replace an existing workspace.
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
 - Interactive OpenAPI documentation is available at `/docs`.
 
 This phase has no application authentication and the Compose ingress remains bound to loopback. Remote ingress is a deployment concern. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures.
 
-Connection profiles, workspaces, optional target bindings, and table positions survive application rebuilds and restarts in the deployment's private PostgreSQL volume. Passwords are accepted only by write models, represented as `SecretStr`, authenticated-encrypted before entering metadata PostgreSQL, omitted from profiles and errors, and decrypted only while opening the selected target. The persistent encryption key lives outside PostgreSQL under `.schemii/secrets`; losing that key makes stored passwords unrecoverable.
+Connection profiles, workspaces, desired designs, import provenance, optional target bindings, and presentation preferences survive application rebuilds and restarts in the deployment's private PostgreSQL volume. Passwords are accepted only by write models, represented as `SecretStr`, authenticated-encrypted before entering metadata PostgreSQL, omitted from profiles and errors, and decrypted only while opening the selected target. The persistent encryption key lives outside PostgreSQL under `.schemii/secrets`; losing that key makes stored passwords unrecoverable.
 
 Each profile targets exactly one PostgreSQL host. TLS certificate and hostname verification (`verify-full`) is the default; weaker libpq SSL modes must be selected explicitly for environments that require them.
 
-The implemented prototype persists no schema copies. A workspace may be detached or contain an exact connection/database/namespace binding, and currently stores only its name and table `{name, x, y}` positions. Attached workspaces read columns, constraints, relationships, indexes, triggers, functions, views, and materialized views from one bounded, read-only PostgreSQL introspection snapshot. Typed desired-design, import, export, migration, Console, and AI route stubs are registered for review in the API map; each carries `x-schemii-status: planned` and returns an explicit `501 planned_capability` until its TODO-owned implementation exists.
+A workspace is explicitly either an editable design or a live PostgreSQL inspection. Designs may remain detached, or retain a connection/database/namespace target without becoming live views. A PostgreSQL import always creates a new targeted design; the catalog, design revision, layout, and lossiness report are written atomically, so existing detached work cannot be overwritten. Live workspaces read columns, constraints, relationships, indexes, triggers, functions, views, materialized views, enums, and domains from one bounded, repeatable-read PostgreSQL snapshot. Capabilities that remain planned are registered for review in the API map and return an explicit `501 planned_capability`.
 
 ## Schemii frontend
 
-The frontend manages real prototype connections and workspaces, renders live catalog data, and saves table positions through `/api/v1`. It does not create sample schemas, fabricate rows, or emulate unavailable server operations. Controls inherited from earlier product workflows remain discoverable, but unsupported actions open a capability-specific notice rather than pretending to succeed.
+The frontend manages real connection profiles and workspaces, authors durable desired-schema objects, renders live catalog data, and saves presentation state through `/api/v1`. PostgreSQL catalogs can be copied into a newly created editable workspace from the workspace creation dialog. It does not fabricate rows or emulate unavailable server operations; unsupported actions open a capability-specific notice.
 
-Shared frontend primitives live in `src/schemii/schemii/web/assets/ui.js` and `ui.css`. That layer owns cross-page interaction and presentation contracts such as buttons, icons, action groups, menus, tooltips, state panels, dialog chrome, and dock panes. Page modules own workflow-specific dialog lifecycles and product composition such as the schema canvas, catalog cards, API route stages, and response-contract rails. `src/schemii/common` is the shared Python backend package; frontend code does not belong there.
+Shared frontend primitives used across product surfaces live in `src/schemii/common/web/assets`; Schemii-specific composition remains in `src/schemii/schemii/web/assets`. The shared layer owns reusable interaction and presentation contracts such as searchable selectors, sortable rows, query stories, buttons, icons, menus, tooltips, state panels, dialog chrome, and dock panes. Page modules own workflow-specific dialog lifecycles and product composition such as the schema canvas, catalog cards, API route stages, and response-contract rails.
 
 Promote a frontend implementation into the shared UI layer when multiple real page consumers need the same contract or when one central implementation is required for accessibility or interaction correctness. Keep page-specific code local rather than adding speculative variants. If a future Schemoo or Schemer frontend becomes a second package-level consumer, establish a frontend package boundary at that point instead of coupling it to Schemii's asset directory prematurely.
 
-The current catalog experience is read-only. Schema mutation, SQL execution, migration, and AI workflows remain planned contracts rather than implemented capabilities. Example restoration and application shutdown are deliberately excluded from the rewrite API.
+Live catalog inspection remains read-only. Desired designs support durable schema authoring independently of a backing database; migration execution, general SQL execution, and AI workflows remain separate planned or evolving contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
 `common/metadata/factory.py` selects the durable PostgreSQL connection boundary when metadata deployment settings are present; Schemii composes its workspace repository over that same boundary. In-memory adapters remain available for isolated unit tests. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
 
@@ -106,6 +107,31 @@ Open <https://localhost:8001/> and create a connection with:
 | SSL mode | `disable` |
 
 Use namespace `bookstore` for the populated Mercury Books tutorial data. It includes nine tables, 500 orders, relationships, checks, JSONB, generated columns, indexes, a trigger, functions, four views, and a populated materialized view. Use `catalog_lab` to test partitioned tables, enum and domain-backed columns, a composite foreign key, a partial index, an exclusion constraint, a procedure, and populated and unpopulated materialized views.
+
+List the saved demo test scenarios with:
+
+```bash
+./start.sh --list-demo-scenarios
+```
+
+Reset the isolated target database and only its launcher-owned connection,
+workspace, design, baseline, layout, and history metadata with:
+
+```bash
+./start.sh --reset-demo baseline
+```
+
+The saved scenarios are `baseline`, `compatible-drift`, `conflicting-drift`, and
+`undo-redo`. The reset output prints the new workspace URL. Each run records the
+current Git commit (with `+dirty` when applicable) and a digest of its base and
+alteration files in `schemii_fixture.fixture_state` inside the demo database.
+This makes a reproduced state traceable to both code and fixture content.
+
+The former command remains a baseline alias:
+
+```bash
+./start.sh --reset-migration-demo
+```
 
 PostgreSQL has no published host port and is reachable only by the application and one-shot seed job on the private database network. A minimal, non-root Nginx sidecar publishes the loopback HTTP port while the application remains on internal application and database networks. The application, ingress, and seed job run as non-root users; no service mounts or accesses the Docker socket; and both HTTP containers use read-only filesystems. The default credentials are intentionally limited to this local test deployment and must not be used in production.
 
