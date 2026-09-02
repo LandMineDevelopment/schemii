@@ -5,6 +5,7 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignRoutine,
   deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
@@ -18,6 +19,7 @@ import {
   saveDesignCheck,
   saveDesignIndex,
   saveDesignKey,
+  saveDesignRoutine,
   saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
@@ -99,6 +101,50 @@ test("view authoring stores only durable source inputs and retains stable identi
   assert.equal(edited.view.id, created.view.id);
   assert.equal(edited.view.populateOnCreate, null);
   assert.equal(deleteDesignView(edited.content, edited.view.id).content.views.length, 0);
+});
+
+test("routine authoring stores source only and retains stable identity on edit", () => {
+  const base = { tables: [], relationships: [], functions: [], views: [] };
+  const definition = "CREATE FUNCTION total(amount numeric) RETURNS numeric LANGUAGE sql AS $$ SELECT amount $$";
+  const created = saveDesignRoutine(base, { definition }, () => uuids[0]);
+
+  assert.deepEqual(created.routine, {
+    id: `function_${"1".repeat(32)}`,
+    definition,
+  });
+
+  const revisedDefinition = definition.replace("SELECT amount", "SELECT amount * 2");
+  const edited = saveDesignRoutine(created.content, {
+    routineId: created.routine.id,
+    definition: revisedDefinition,
+  });
+  assert.equal(edited.content.functions[0].id, created.routine.id);
+  assert.equal(edited.content.functions[0].definition, revisedDefinition);
+
+  assert.deepEqual(deleteDesignRoutine(edited.content, created.routine.id).functions, []);
+});
+
+test("desired routine catalog entries expose the server-derived identity signature", () => {
+  const routine = {
+    id: `function_${"1".repeat(32)}`,
+    name: "calculate_total",
+    kind: "function",
+    arguments: "amount DECIMAL, tax DECIMAL DEFAULT 0",
+    identityArguments: "DECIMAL, DECIMAL",
+    returnType: "DECIMAL",
+    language: "sql",
+    definition: "CREATE FUNCTION calculate_total(amount numeric, tax numeric DEFAULT 0) RETURNS numeric LANGUAGE sql AS $$ SELECT amount * (1 + tax) $$",
+  };
+  const design = {
+    revision: 1,
+    fingerprint: "a".repeat(64),
+    content: { tables: [], relationships: [], functions: [routine], views: [] },
+  };
+
+  const catalogRoutine = designToCatalog({ name: "Design" }, design).functions[0];
+
+  assert.equal(catalogRoutine.designId, routine.id);
+  assert.equal(catalogRoutine.identityArguments, "DECIMAL, DECIMAL");
 });
 
 test("view authoring rejects generated CREATE wrappers and relation-name collisions", () => {

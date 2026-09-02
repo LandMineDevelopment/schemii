@@ -12,6 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "cryptography>=46,<51",
     "fastapi>=0.141,<1",
+    "pglast>=7.18,<8",
     "psycopg[binary]>=3.3,<4",
     "pydantic>=2.11,<3",
     "sqlglot>=28.10.1,<29",

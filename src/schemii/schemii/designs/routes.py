@@ -10,6 +10,10 @@ from schemii.common.api.planned import (
 )
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.query_analysis import QueryDefinitionError
+from schemii.common.postgres.routine_analysis import (
+    RoutineDefinitionError,
+    analyze_routine_definition,
+)
 from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
 
 from .export import export_design
@@ -21,6 +25,8 @@ from .models import (
     SchemiiDesignLayout,
     SchemiiDesignLayoutReplace,
     SchemiiDesignReplace,
+    DesignRoutineAnalysis,
+    DesignRoutineAnalysisRequest,
     DesignViewAnalysis,
     DesignViewAnalysisRequest,
 )
@@ -142,6 +148,37 @@ def analyze_workspace_view(
             str(error),
             details={"reason": error.code},
         ) from error
+
+
+@router.post("/design/routine-analysis", response_model=DesignRoutineAnalysis)
+def analyze_workspace_routine(
+    workspace_id: str,
+    body: DesignRoutineAnalysisRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignRoutineAnalysis:
+    """Derive a routine signature from SQL without saving or contacting PostgreSQL."""
+
+    _require_workspace(request, principal.user_id, workspace_id)
+    try:
+        contract = analyze_routine_definition(body.definition)
+    except RoutineDefinitionError as error:
+        raise ApiProblem(
+            422,
+            "invalid_routine_definition",
+            str(error),
+            details={"reason": error.code},
+        ) from error
+    return DesignRoutineAnalysis.model_validate(
+        {
+            "name": contract.name,
+            "kind": contract.kind,
+            "arguments": contract.arguments,
+            "identityArguments": contract.identity_arguments,
+            "returnType": contract.return_type,
+            "language": contract.language,
+        }
+    )
 
 
 @router.get("/design/layout", response_model=SchemiiDesignLayout)

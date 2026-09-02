@@ -106,6 +106,7 @@ export const api = Object.freeze({
   getCatalog: id => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/catalog`),
   getDesign: id => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design`),
   replaceDesign: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design`, { method: "PUT", body }),
+  analyzeDesignRoutine: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/routine-analysis`, { method: "POST", body }),
   analyzeDesignView: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/view-analysis`, { method: "POST", body }),
   getDesignLayout: id => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`),
   replaceDesignLayout: (id, body) => request(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, { method: "PUT", body }),

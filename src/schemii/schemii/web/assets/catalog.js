@@ -316,16 +316,17 @@ export function renderViewDetail(container, view) {
   container.append(definition);
 }
 
-export function renderFunctions(container, catalog, query = "") {
+export function renderFunctions(container, catalog, query = "", { onEdit = null, onDelete = null } = {}) {
   replace(container);
   if (!catalog) {
-    container.append(emptyPanel("FN", "No catalog loaded", "Open a workspace to browse live functions and procedures."));
+    container.append(emptyPanel("FN", "No catalog loaded", "Open a workspace to browse functions and procedures."));
     return { shown: 0, matching: 0 };
   }
   const needle = normalizedSearch(query);
-  const routines = catalog.functions.filter(routine => !needle || `${routine.namespace}.${routine.name} ${routine.language} ${routine.kind}`.toLocaleLowerCase().includes(needle));
+  const routines = catalog.functions.filter(routine => !needle || `${routine.namespace}.${routine.name} ${routine.language} ${routine.kind} ${routine.arguments} ${routine.returnType || ""} ${routine.definition}`.toLocaleLowerCase().includes(needle));
   if (!routines.length) {
-    container.append(emptyPanel("0", "No matching routines", query ? "No live routine matches this search." : "The live catalog reported no functions or procedures."));
+    const source = catalog.source === "design" ? "design contains" : "live catalog reported";
+    container.append(emptyPanel("0", "No matching routines", query ? "No routine matches this search." : `The ${source} no functions or procedures.`));
     return { shown: 0, matching: 0 };
   }
   const visible = routines.slice(0, MAX_BROWSER_ITEMS);
@@ -339,10 +340,24 @@ export function renderFunctions(container, catalog, query = "") {
     const metadata = element("dl");
     for (const [label, value] of [["Arguments", routine.arguments], ["Returns", routine.returnType], ["Language", routine.language]]) metadata.append(element("dt", { text: label }), element("dd", { text: valueText(value) }));
     body.append(metadata, element("pre", { className: "routine-definition", text: routine.definition }));
+    if (routine.designId && (onEdit || onDelete)) {
+      const actions = element("div", { className: "catalog-object-actions" });
+      if (onEdit) {
+        const edit = element("button", { className: "ui-button compact", type: "button", text: "Edit source" });
+        edit.addEventListener("click", () => onEdit(routine));
+        actions.append(edit);
+      }
+      if (onDelete) {
+        const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
+        remove.addEventListener("click", () => onDelete(routine));
+        actions.append(remove);
+      }
+      body.append(actions);
+    }
     wrapper.append(summary, body);
     container.append(wrapper);
   }
-  if (routines.length > visible.length) container.append(element("p", { className: "none-reported", text: `Showing the first ${visible.length} of ${routines.length} matching live routines. Refine the search to narrow the list.` }));
+  if (routines.length > visible.length) container.append(element("p", { className: "none-reported", text: `Showing the first ${visible.length} of ${routines.length} matching routines. Refine the search to narrow the list.` }));
   return { shown: visible.length, matching: routines.length };
 }
 

@@ -358,10 +358,25 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
 
     <dialog class="ui-dialog catalog-dialog" id="functions-dialog" aria-labelledby="functions-title">
       <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small>Live PostgreSQL catalog</small><h2 id="functions-title">Functions and procedures</h2><p>Definitions are read-only and come from the open workspace catalog.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close functions"></button></header>
-        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="functions-search" type="search" autocomplete="off" /></label><span id="functions-count">No catalog loaded</span><button class="ui-button compact" type="button" data-unavailable="function-mutation">Create or edit</button></div>
+        <header class="ui-dialog__head"><div><small id="functions-source">Workspace routines</small><h2 id="functions-title">Functions and procedures</h2><p id="functions-copy">Browse routine signatures and source definitions from the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close functions"></button></header>
+        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="functions-search" type="search" autocomplete="off" /></label><span id="functions-count">No catalog loaded</span><button class="ui-button compact primary" id="create-function-button" type="button" hidden>Create routine</button></div>
         <div class="catalog-browser-list" id="functions-list"></div>
       </div>
+    </dialog>
+
+    <dialog class="ui-dialog editor-dialog design-routine-dialog" id="design-routine-dialog" aria-labelledby="design-routine-title">
+      <form class="ui-dialog__shell" id="design-routine-form">
+        <header class="ui-dialog__head"><div><small>Source-first routine</small><h2 id="design-routine-title">Create function or procedure</h2><p>Write one target-independent PostgreSQL statement. Schemii derives the signature, argument identity, return contract, and language from it.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close routine editor"></button></header>
+        <div class="design-routine-body">
+          <label class="design-field design-routine-source"><span>CREATE FUNCTION or CREATE PROCEDURE</span><textarea id="design-routine-definition" required spellcheck="false" placeholder="CREATE FUNCTION calculate_total(amount numeric, tax_rate numeric)&#10;RETURNS numeric&#10;LANGUAGE sql&#10;IMMUTABLE&#10;AS $routine$&#10;    SELECT amount * (1 + tax_rate)&#10;$routine$;"></textarea><small>Leave the schema off the routine name. The workspace target supplies it when the design is applied.</small></label>
+          <section class="design-routine-preview" aria-labelledby="design-routine-preview-title">
+            <header><small>Derived at request time</small><strong id="design-routine-preview-title">Routine contract</strong></header>
+            <div id="design-routine-preview" aria-live="polite"></div>
+          </section>
+        </div>
+        <div class="form-status" id="design-routine-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact primary" id="save-design-routine-button" type="submit">Create routine</button></footer>
+      </form>
     </dialog>
 
     <dialog class="ui-dialog catalog-dialog" id="objects-dialog" aria-labelledby="objects-title">

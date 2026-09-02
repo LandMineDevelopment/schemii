@@ -93,7 +93,7 @@ def test_system_inspection_joins_routes_services_repositories_and_gateway_calls(
         "objects": False,
         "source": False,
     }
-    assert len(document["routes"]) == 69
+    assert len(document["routes"]) == 70
 
     objects = {item["id"]: item for item in document["objects"]}
     callables = {item["objectId"]: item for item in document["callables"]}

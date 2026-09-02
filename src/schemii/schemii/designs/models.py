@@ -6,6 +6,7 @@ from pydantic import Field, model_validator
 
 from schemii.common.api.models import ApiModel
 from schemii.common.postgres.query_models import QueryAnalysis
+from schemii.common.postgres.routine_analysis import analyze_routine_definition
 
 
 DesignIdentifier = Annotated[str, Field(min_length=1, max_length=63)]
@@ -95,15 +96,64 @@ class DesignRelationship(ApiModel):
 
 
 class DesignFunction(ApiModel):
-    """Desired function or procedure definition exportable without a live database."""
+    """Desired routine whose presentation contract is always derived from SQL."""
 
     id: DesignObjectId
     name: DesignIdentifier
     kind: Literal["function", "procedure"]
     arguments: DesignExpression
-    return_type: Annotated[str, Field(max_length=512)] | None = None
+    identity_arguments: DesignExpression
+    return_type: DesignExpression | None = None
     language: DesignIdentifier
     definition: DesignExpression
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_contract_from_definition(cls, value: object) -> object:
+        """Never trust separately submitted routine metadata over its source."""
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        definition = normalized.get("definition")
+        if not isinstance(definition, str):
+            return normalized
+        contract = analyze_routine_definition(definition)
+        for key in (
+            "name",
+            "kind",
+            "arguments",
+            "identityArguments",
+            "identity_arguments",
+            "returnType",
+            "return_type",
+            "language",
+        ):
+            normalized.pop(key, None)
+        normalized.update(
+            {
+                "name": contract.name,
+                "kind": contract.kind,
+                "arguments": contract.arguments,
+                "identity_arguments": contract.identity_arguments,
+                "return_type": contract.return_type,
+                "language": contract.language,
+            }
+        )
+        return normalized
+
+
+class DesignRoutineAnalysisRequest(ApiModel):
+    definition: DesignExpression
+
+
+class DesignRoutineAnalysis(ApiModel):
+    name: DesignIdentifier
+    kind: Literal["function", "procedure"]
+    arguments: DesignExpression
+    identity_arguments: DesignExpression
+    return_type: DesignExpression | None = None
+    language: DesignIdentifier
 
 
 class DesignView(ApiModel):

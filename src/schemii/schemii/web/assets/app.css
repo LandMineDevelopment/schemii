@@ -251,6 +251,26 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .design-view-preview > header strong { font-size: 10px; }
 #design-view-preview { min-width: 0; min-height: 0; overflow-y: auto; }
 
+.design-routine-dialog { width: min(980px, calc(100vw - 28px)); }
+.design-routine-dialog > .ui-dialog__shell { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.design-routine-body { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); overflow: hidden; }
+.design-routine-source { min-height: 0; padding: 14px; border-right: 1px solid var(--line); }
+.design-routine-source textarea { width: 100%; min-height: 330px; resize: none; padding: 14px; border: 1px solid #303a46; border-radius: 6px; color: #d7e0ea; background: #090d12; font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; }
+.design-routine-source > small { color: #626e7d; font-size: 7px; line-height: 1.45; }
+.design-routine-preview { display: grid; min-width: 0; align-content: start; grid-template-rows: auto minmax(0, 1fr); background: #0d1218; }
+.design-routine-preview > header { display: grid; gap: 2px; padding: 11px 12px; border-bottom: 1px solid var(--line); background: #151a22; }
+.design-routine-preview > header small { color: #70668f; font-size: 7px; text-transform: uppercase; letter-spacing: .12em; }
+.design-routine-preview > header strong { font-size: 10px; }
+#design-routine-preview { min-width: 0; overflow-y: auto; padding: 12px; }
+.routine-contract { display: grid; gap: 10px; }
+.routine-contract-signature { display: grid; gap: 5px; padding: 11px; border: 1px solid #584779; border-radius: 7px; background: #181425; }
+.routine-contract-signature small { color: #9577c9; font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .1em; }
+.routine-contract-signature code { overflow-wrap: anywhere; color: #d9c7f5; font: 10px/1.5 ui-monospace, monospace; }
+.routine-contract dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 10px; margin: 0; padding: 11px; border: 1px solid #29333f; border-radius: 7px; background: #11171e; }
+.routine-contract dt { color: #647182; font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
+.routine-contract dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #b9c4d0; font: 8px/1.45 ui-monospace, monospace; }
+.design-routine-dialog .form-status { min-height: 16px; padding-bottom: 5px; }
+
 .sql-workspace { --accent: var(--blue); display: grid; grid-template-rows: auto minmax(0, 1fr) minmax(130px, 28%); gap: 10px; padding: 58px 12px 12px 68px; background-color: #0b1016; background-image: linear-gradient(rgba(91, 106, 124, .05) 1px, transparent 1px), linear-gradient(90deg, rgba(91, 106, 124, .05) 1px, transparent 1px); background-size: 22px 22px; }
 .sql-head, .sql-editor-panel, .sql-capabilities, .sql-results { min-width: 0; overflow: hidden; border: 1px solid #303a46; border-radius: 8px; background: #10151c; box-shadow: 0 12px 30px rgba(0, 0, 0, .25); }
 .sql-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 18px; padding: 9px 13px; }
@@ -437,6 +457,8 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .catalog-object-body dt { color: #5f6c7b; font-size: 7px; }
 .catalog-object-body dd { margin: 0; overflow-wrap: anywhere; color: #aeb9c5; font: 8px/1.45 ui-monospace, monospace; }
 .catalog-object-body .ui-button { justify-self: start; color: #9ca8b5; font-size: 7px; }
+.catalog-object-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.catalog-object-actions .ui-button.danger-text { color: #d8969d; }
 .intro-dialog { width: min(720px, calc(100vw - 28px)); }
 .intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow-y: auto; background: var(--line); }
 .intro-grid article { position: relative; min-height: 145px; padding: 22px; background: #10151c; }
@@ -563,6 +585,12 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .design-view-query textarea { min-height: 250px; }
   .design-view-preview { min-height: 470px; overflow: visible; }
   #design-view-preview { overflow: visible; }
+  .design-routine-dialog { width: calc(100vw - 14px); }
+  .design-routine-body { grid-template-columns: 1fr; overflow-y: auto; }
+  .design-routine-source { min-height: 390px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .design-routine-source textarea { min-height: 290px; }
+  .design-routine-preview { min-height: 220px; }
+  .catalog-object-actions .ui-button { min-height: 40px; flex: 1; }
   .relationship-mapping-row { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
   .span-2 { grid-column: span 1; }
   .compact-search { min-width: 100%; }

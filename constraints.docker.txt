@@ -8,6 +8,7 @@ cryptography==50.0.1
 fastapi==0.141.1
 h11==0.16.0
 idna==3.19
+pglast==7.18
 psycopg==3.3.4
 psycopg-binary==3.3.4
 pycparser==3.0

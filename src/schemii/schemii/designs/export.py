@@ -6,6 +6,7 @@ import hashlib
 import json
 
 from .models import SchemiiDesign, SchemiiDesignExport, SchemiiDesignExportRequest
+from .store import authored_content_document
 
 
 def _quote(identifier: str) -> str:
@@ -32,7 +33,7 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
         for routine in reversed(content.functions):
             kind = "PROCEDURE" if routine.kind == "procedure" else "FUNCTION"
             lines.append(
-                f"DROP {kind} IF EXISTS {_quote(routine.name)}({routine.arguments.strip()}) CASCADE;"
+                f"DROP {kind} IF EXISTS {_quote(routine.name)}({routine.identity_arguments.strip()}) CASCADE;"
             )
         for table in reversed(content.tables):
             lines.append(f"DROP TABLE IF EXISTS {_quote(table.name)} CASCADE;")
@@ -135,7 +136,7 @@ def export_design(
             "workspaceId": design.workspace_id,
             "designRevision": design.revision,
             "fingerprint": design.fingerprint,
-            "content": design.content.model_dump(mode="json", by_alias=True),
+            "content": authored_content_document(design.content, by_alias=True),
         }
         content = json.dumps(
             document,

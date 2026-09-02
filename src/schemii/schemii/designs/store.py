@@ -64,11 +64,26 @@ class DesignStorageUnavailableError(
     """Durable desired-design metadata cannot currently be used."""
 
 
+def authored_content_document(
+    content: SchemiiDesignContent,
+    *,
+    by_alias: bool = False,
+) -> dict[str, Any]:
+    """Serialize only authored inputs; routine metadata is always re-derived."""
+
+    document = content.model_dump(mode="json", by_alias=by_alias)
+    document["functions"] = [
+        {"id": routine.id, "definition": routine.definition}
+        for routine in content.functions
+    ]
+    return document
+
+
 def canonical_content(content: SchemiiDesignContent) -> str:
     """Return the one stable representation used for storage fingerprints."""
 
     return json.dumps(
-        content.model_dump(mode="json"),
+        authored_content_document(content),
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -322,6 +337,13 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
         _valid_identifier(relationship.name, category="relationship name")
         all_ids.append(relationship.id)
 
+    _unique(
+        [
+            f"{routine.name}({routine.identity_arguments})"
+            for routine in content.functions
+        ],
+        category="routine signatures",
+    )
     for routine in content.functions:
         _valid_identifier(routine.name, category="routine name")
         _valid_identifier(routine.language, category="routine language")

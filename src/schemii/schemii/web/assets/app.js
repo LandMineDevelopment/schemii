@@ -4,6 +4,7 @@ import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
   createDesignTable,
+  deleteDesignRoutine,
   deleteDesignView,
   deleteDesignCheck,
   deleteDesignIndex,
@@ -17,6 +18,7 @@ import {
   saveDesignCheck,
   saveDesignIndex,
   saveDesignKey,
+  saveDesignRoutine,
   saveDesignView,
   suggestDesignCheckName,
   suggestDesignIndexName,
@@ -216,9 +218,19 @@ const elements = {
   saveDesignRelationshipButton: byId("save-design-relationship-button"),
   functionsButton: byId("functions-button"),
   functionsDialog: byId("functions-dialog"),
+  functionsSource: byId("functions-source"),
+  functionsCopy: byId("functions-copy"),
   functionsSearch: byId("functions-search"),
   functionsCount: byId("functions-count"),
   functionsList: byId("functions-list"),
+  createFunctionButton: byId("create-function-button"),
+  designRoutineDialog: byId("design-routine-dialog"),
+  designRoutineForm: byId("design-routine-form"),
+  designRoutineTitle: byId("design-routine-title"),
+  designRoutineDefinition: byId("design-routine-definition"),
+  designRoutinePreview: byId("design-routine-preview"),
+  designRoutineStatus: byId("design-routine-status"),
+  saveDesignRoutineButton: byId("save-design-routine-button"),
   objectsButton: byId("objects-button"),
   objectsDialog: byId("objects-dialog"),
   objectsSearch: byId("objects-search"),
@@ -319,6 +331,13 @@ const state = {
   designViewPreviewOutputOrdinal: null,
   designViewPreviewTimer: null,
   designViewPreviewGeneration: 0,
+  designRoutineEditorId: null,
+  designRoutineAnalysis: null,
+  designRoutineAnalysisDefinition: null,
+  designRoutineAnalysisError: null,
+  designRoutineAnalysisLoading: false,
+  designRoutineAnalysisTimer: null,
+  designRoutineAnalysisGeneration: 0,
   activeLayer: "tables",
   viewFilter: "all",
   connectionEditorId: null,
@@ -436,6 +455,7 @@ function updateDesignControls() {
   elements.editTableButton.disabled = !selected || busy;
   elements.deleteTableButton.disabled = !selected || busy;
   elements.createViewButton.disabled = !detached || busy;
+  elements.createFunctionButton.disabled = !detached || busy;
 }
 
 function workspaceStorage() {
@@ -1548,7 +1568,8 @@ function renderCatalogSurfaces() {
   if (elements.functionsDialog.open) renderFunctionsBrowser();
   else {
     replace(elements.functionsList);
-    elements.functionsCount.textContent = state.catalog ? `${state.catalog.functions.length} live · open to browse` : "No catalog loaded";
+    const source = state.catalog?.source === "design" ? "designed" : "live";
+    elements.functionsCount.textContent = state.catalog ? `${state.catalog.functions.length} ${source} · open to browse` : "No catalog loaded";
   }
   if (elements.objectsDialog.open) renderObjectsBrowser();
   else {
@@ -1841,9 +1862,190 @@ function confirmDeleteDesignView(viewId) {
 }
 
 function renderFunctionsBrowser() {
-  const result = renderFunctions(elements.functionsList, state.catalog, elements.functionsSearch.value);
-  const source = state.catalog?.source === "design" ? "designed" : "live";
+  const desired = state.catalog?.source === "design";
+  elements.functionsSource.textContent = desired ? "Desired schema" : "Live PostgreSQL catalog";
+  elements.functionsCopy.textContent = desired
+    ? "Create and inspect source-first routines. Every displayed contract is derived from its saved PostgreSQL statement."
+    : "Definitions are read-only and come from the open workspace catalog.";
+  elements.createFunctionButton.hidden = !desired;
+  const result = renderFunctions(elements.functionsList, state.catalog, elements.functionsSearch.value, {
+    onEdit: desired ? routine => {
+      elements.functionsDialog.close();
+      openDesignRoutineEditor(routine.designId);
+    } : null,
+    onDelete: desired ? routine => {
+      elements.functionsDialog.close();
+      confirmDeleteDesignRoutine(routine.designId);
+    } : null,
+  });
+  const source = desired ? "designed" : "live";
   elements.functionsCount.textContent = state.catalog ? `${result.shown} shown · ${result.matching} matching · ${state.catalog.functions.length} ${source}` : "No catalog loaded";
+}
+
+function routineSignature(contract) {
+  return `${contract.name}(${contract.identityArguments})`;
+}
+
+function renderDesignRoutinePreview() {
+  replace(elements.designRoutinePreview);
+  const definition = elements.designRoutineDefinition.value.trim();
+  if (!definition) {
+    elements.designRoutinePreview.append(emptyPanel("FN", "Write the routine source", "Its callable signature and PostgreSQL contract will appear here."));
+    return;
+  }
+  if (state.designRoutineAnalysisLoading) {
+    elements.designRoutinePreview.append(createStatePanel({ mark: "…", title: "Deriving contract", message: "Parsing the PostgreSQL statement without contacting a database.", surface: true }));
+    return;
+  }
+  if (state.designRoutineAnalysisError) {
+    elements.designRoutinePreview.append(errorPanel(state.designRoutineAnalysisError));
+    return;
+  }
+  const contract = state.designRoutineAnalysis;
+  if (!contract || state.designRoutineAnalysisDefinition !== definition) {
+    elements.designRoutinePreview.append(createStatePanel({ mark: "SQL", title: "Waiting for valid source", message: "The preview updates after the statement can be parsed.", surface: true }));
+    return;
+  }
+  const preview = element("article", { className: "routine-contract" });
+  const signature = element("div", { className: "routine-contract-signature" });
+  signature.append(
+    element("small", { text: contract.kind }),
+    element("code", { text: routineSignature(contract) }),
+  );
+  const details = element("dl");
+  for (const [label, value] of [
+    ["Arguments", contract.arguments || "None"],
+    ["Returns", contract.returnType || "No return value"],
+    ["Language", contract.language],
+  ]) {
+    details.append(element("dt", { text: label }), element("dd", { text: value }));
+  }
+  preview.append(signature, details);
+  elements.designRoutinePreview.append(preview);
+}
+
+async function analyzeDesignRoutineDraft() {
+  window.clearTimeout(state.designRoutineAnalysisTimer);
+  const definition = elements.designRoutineDefinition.value.trim();
+  if (!elements.designRoutineDialog.open || !definition || !state.activeWorkspace) {
+    state.designRoutineAnalysis = null;
+    state.designRoutineAnalysisDefinition = null;
+    state.designRoutineAnalysisError = null;
+    state.designRoutineAnalysisLoading = false;
+    renderDesignRoutinePreview();
+    return null;
+  }
+  const generation = ++state.designRoutineAnalysisGeneration;
+  const workspaceId = state.activeWorkspace.id;
+  state.designRoutineAnalysisLoading = true;
+  state.designRoutineAnalysisError = null;
+  renderDesignRoutinePreview();
+  try {
+    const analysis = await api.analyzeDesignRoutine(workspaceId, { definition });
+    if (generation !== state.designRoutineAnalysisGeneration || !elements.designRoutineDialog.open) return null;
+    state.designRoutineAnalysis = analysis;
+    state.designRoutineAnalysisDefinition = definition;
+    return analysis;
+  } catch (error) {
+    if (generation !== state.designRoutineAnalysisGeneration || !elements.designRoutineDialog.open) return null;
+    state.designRoutineAnalysis = null;
+    state.designRoutineAnalysisDefinition = null;
+    state.designRoutineAnalysisError = error;
+    return null;
+  } finally {
+    if (generation === state.designRoutineAnalysisGeneration) {
+      state.designRoutineAnalysisLoading = false;
+      renderDesignRoutinePreview();
+    }
+  }
+}
+
+function scheduleDesignRoutineAnalysis(delay = 280) {
+  window.clearTimeout(state.designRoutineAnalysisTimer);
+  state.designRoutineAnalysisTimer = window.setTimeout(analyzeDesignRoutineDraft, delay);
+}
+
+function openDesignRoutineEditor(routineId = null) {
+  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  const routine = routineId ? state.design.content.functions.find(item => item.id === routineId) : null;
+  if (routineId && !routine) {
+    showToast("The selected routine is no longer in this design.", { error: true });
+    return;
+  }
+  state.designRoutineEditorId = routine?.id || null;
+  state.designRoutineAnalysisGeneration += 1;
+  state.designRoutineAnalysis = null;
+  state.designRoutineAnalysisDefinition = null;
+  state.designRoutineAnalysisError = null;
+  state.designRoutineAnalysisLoading = false;
+  elements.designRoutineForm.reset();
+  replace(elements.designRoutineStatus);
+  elements.designRoutineTitle.textContent = routine ? `Edit ${routine.name}` : "Create function or procedure";
+  elements.saveDesignRoutineButton.textContent = routine ? "Save routine" : "Create routine";
+  elements.designRoutineDefinition.value = routine?.definition || "";
+  openDialog(elements.designRoutineDialog);
+  renderDesignRoutinePreview();
+  if (routine) scheduleDesignRoutineAnalysis(0);
+  elements.designRoutineDefinition.focus();
+}
+
+async function submitDesignRoutine(event) {
+  event.preventDefault();
+  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  const editing = Boolean(state.designRoutineEditorId);
+  const definition = elements.designRoutineDefinition.value.trim();
+  state.designSubmitting = true;
+  elements.saveDesignRoutineButton.disabled = true;
+  updateDesignControls();
+  replace(elements.designRoutineStatus, element("span", { text: "Deriving the contract and saving the routine…" }));
+  try {
+    const analysis = await api.analyzeDesignRoutine(state.activeWorkspace.id, { definition });
+    const result = saveDesignRoutine(state.design.content, {
+      routineId: state.designRoutineEditorId,
+      definition,
+    });
+    if (!await flushLayoutBeforeTransition()) return;
+    const design = await replaceActiveDesign(result.content);
+    if (!design) return;
+    elements.designRoutineDialog.close();
+    renderFunctionsBrowser();
+    openDialog(elements.functionsDialog);
+    showToast(`${editing ? "Updated" : "Created"} ${routineSignature(analysis)} in design revision ${design.revision}.`);
+  } catch (error) {
+    replace(elements.designRoutineStatus, conflictPanel(error));
+  } finally {
+    state.designSubmitting = false;
+    elements.saveDesignRoutineButton.disabled = false;
+    updateHeader();
+  }
+}
+
+function confirmDeleteDesignRoutine(routineId) {
+  const routine = state.design?.content.functions.find(item => item.id === routineId);
+  if (!routine || state.designSubmitting) return;
+  askConfirmation({
+    title: "Delete designed routine",
+    message: `Delete ${routine.kind} “${routine.name}(${routine.identityArguments})” from the desired schema?`,
+    label: "Delete routine",
+    callback: async () => {
+      if (!await flushLayoutBeforeTransition()) return;
+      state.designSubmitting = true;
+      updateDesignControls();
+      try {
+        const content = deleteDesignRoutine(state.design.content, routine.id);
+        const design = await replaceActiveDesign(content);
+        if (!design) return;
+        renderFunctionsBrowser();
+        openDialog(elements.functionsDialog);
+        showToast(`Deleted ${routine.name} from design revision ${design.revision}.`);
+      } catch (error) {
+        errorToast(error);
+      } finally {
+        state.designSubmitting = false;
+        updateHeader();
+      }
+    },
+  });
 }
 
 function renderObjectsBrowser() {
@@ -3467,6 +3669,21 @@ function bindEvents() {
     openDialog(elements.functionsDialog);
   });
   elements.functionsSearch.addEventListener("input", renderFunctionsBrowser);
+  elements.createFunctionButton.addEventListener("click", () => {
+    elements.functionsDialog.close();
+    openDesignRoutineEditor();
+  });
+  elements.designRoutineForm.addEventListener("submit", submitDesignRoutine);
+  elements.designRoutineDefinition.addEventListener("input", () => scheduleDesignRoutineAnalysis());
+  elements.designRoutineDialog.addEventListener("close", () => {
+    window.clearTimeout(state.designRoutineAnalysisTimer);
+    state.designRoutineAnalysisGeneration += 1;
+    state.designRoutineEditorId = null;
+    state.designRoutineAnalysis = null;
+    state.designRoutineAnalysisDefinition = null;
+    state.designRoutineAnalysisError = null;
+    state.designRoutineAnalysisLoading = false;
+  });
   elements.objectsButton.addEventListener("click", () => {
     renderObjectsBrowser();
     openDialog(elements.objectsDialog);

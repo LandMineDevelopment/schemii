@@ -17,6 +17,7 @@ from schemii.schemii.designs.store import (
     DesignLayoutConflictError,
     DesignValidationError,
     InMemoryDesignRepository,
+    authored_content_document,
     design_fingerprint,
 )
 
@@ -31,6 +32,7 @@ KEY = "key_" + "d" * 32
 CHECK = "check_" + "f" * 32
 INDEX = "index_" + "7" * 32
 VIEW = "view_" + "8" * 32
+ROUTINE = "function_" + "9" * 32
 
 
 def content() -> SchemiiDesignContent:
@@ -251,6 +253,77 @@ def test_new_dependency_fields_are_backward_compatible_with_saved_design_json() 
     assert parsed.tables[0].checks[0].column_ids == []
     assert parsed.tables[0].indexes[0].expression_source_column_ids == []
     assert parsed.tables[0].indexes[0].predicate_column_ids == []
+
+
+def test_routine_metadata_is_rederived_from_its_definition() -> None:
+    parsed = SchemiiDesignContent.model_validate(
+        {
+            "functions": [
+                {
+                    "id": ROUTINE,
+                    "name": "stale_name",
+                    "kind": "procedure",
+                    "arguments": "stale text",
+                    "returnType": None,
+                    "language": "plpgsql",
+                    "definition": """
+                        CREATE FUNCTION calculate_total(amount numeric, tax numeric)
+                        RETURNS numeric
+                        LANGUAGE sql
+                        AS $$ SELECT amount * (1 + tax) $$
+                    """,
+                }
+            ]
+        }
+    )
+
+    routine = parsed.functions[0]
+    assert routine.name == "calculate_total"
+    assert routine.kind == "function"
+    assert routine.arguments == "amount numeric, tax numeric"
+    assert routine.identity_arguments == "numeric, numeric"
+    assert routine.return_type == "numeric"
+    assert routine.language == "sql"
+    assert authored_content_document(parsed)["functions"] == [
+        {"id": ROUTINE, "definition": routine.definition}
+    ]
+
+
+def test_routine_export_uses_derived_identity_signature() -> None:
+    parsed = SchemiiDesignContent.model_validate(
+        {
+            "functions": [
+                {
+                    "id": ROUTINE,
+                    "definition": """
+                        CREATE FUNCTION format_name(
+                            first_name text,
+                            last_name text DEFAULT ''
+                        )
+                        RETURNS text
+                        LANGUAGE sql
+                        AS $$ SELECT first_name || ' ' || last_name $$
+                    """,
+                }
+            ]
+        }
+    )
+    repository = InMemoryDesignRepository()
+    design = repository.replace(
+        OWNER,
+        WORKSPACE,
+        SchemiiDesignReplace(expected_design_revision=0, content=parsed),
+    )
+    exported = export_design(
+        design,
+        SchemiiDesignExportRequest(
+            expected_design_revision=1,
+            format="postgresql_sql",
+            include_drop_statements=True,
+        ),
+    )
+
+    assert 'DROP FUNCTION IF EXISTS "format_name"(text, text) CASCADE;' in exported.content
 
 
 def test_legacy_materialized_population_intent_migrates_and_exports_explicitly() -> None:

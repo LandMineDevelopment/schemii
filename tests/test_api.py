@@ -403,6 +403,42 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
         "bigint",
         "text",
     ]
+
+    routine_definition = """
+        CREATE FUNCTION display_label(value text, fallback text DEFAULT 'Unknown')
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT coalesce(value, fallback) $$
+    """
+    routine_analysis = api.post(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design/routine-analysis",
+        json={"definition": routine_definition},
+    )
+    assert routine_analysis.status_code == 200
+    assert routine_analysis.json() == {
+        "name": "display_label",
+        "kind": "function",
+        "arguments": "value text, fallback text DEFAULT 'Unknown'",
+        "identityArguments": "text, text",
+        "returnType": "text",
+        "language": "sql",
+    }
+
+    content_with_routine = saved.json()["content"]
+    content_with_routine["functions"] = [
+        {
+            "id": "function_" + "e" * 32,
+            "definition": routine_definition,
+        }
+    ]
+    saved_routine = api.put(
+        f"/api/v1/schemii/workspaces/{workspace['id']}/design",
+        json={"expectedDesignRevision": 1, "content": content_with_routine},
+    )
+    assert saved_routine.status_code == 200
+    assert saved_routine.json()["content"]["functions"][0]["name"] == "display_label"
+    assert saved_routine.json()["content"]["functions"][0]["identityArguments"] == "text, text"
     assert postgres.connections == []
 
     stale = api.put(
@@ -410,18 +446,18 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
         json={"expectedDesignRevision": 0, "content": saved.json()["content"]},
     )
     assert stale.status_code == 409
-    assert stale.json()["error"]["details"] == {"currentRevision": 1}
+    assert stale.json()["error"]["details"] == {"currentRevision": 2}
 
     layout = api.get(
         f"/api/v1/schemii/workspaces/{workspace['id']}/design/layout"
     )
     assert layout.status_code == 200
-    assert layout.json()["revision"] == 1
+    assert layout.json()["revision"] == 2
     positioned = api.put(
         f"/api/v1/schemii/workspaces/{workspace['id']}/design/layout",
         json={
-            "expectedLayoutRevision": 1,
-            "expectedDesignRevision": 1,
+            "expectedLayoutRevision": 2,
+            "expectedDesignRevision": 2,
             "content": {
                 "objects": [
                     {
@@ -435,15 +471,16 @@ def test_workspace_can_start_detached_for_database_independent_design() -> None:
         },
     )
     assert positioned.status_code == 200
-    assert positioned.json()["revision"] == 2
+    assert positioned.json()["revision"] == 3
 
     exported = api.post(
         f"/api/v1/schemii/workspaces/{workspace['id']}/design/exports",
-        json={"expectedDesignRevision": 1, "format": "postgresql_sql"},
+        json={"expectedDesignRevision": 2, "format": "postgresql_sql"},
     )
     assert exported.status_code == 200
     assert 'CREATE TABLE "inventory item"' in exported.json()["content"]
     assert '"display name" text NOT NULL' in exported.json()["content"]
+    assert "CREATE FUNCTION display_label" in exported.json()["content"]
     assert postgres.connections == []
 
 

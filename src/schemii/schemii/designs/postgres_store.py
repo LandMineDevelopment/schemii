@@ -21,6 +21,7 @@ from .store import (
     DesignStorageUnavailableError,
     DesignValidationError,
     DesignWorkspaceNotFoundError,
+    authored_content_document,
     design_fingerprint,
     design_object_ids,
     validate_design_content,
@@ -47,7 +48,7 @@ class PostgresDesignRepository:
     ) -> SchemiiDesign:
         validate_design_content(request.content)
         serialized = json.dumps(
-            request.content.model_dump(mode="json"),
+            authored_content_document(request.content),
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -264,11 +265,12 @@ class PostgresDesignRepository:
             (owner_id, workspace_id),
         )
         row = cursor.fetchone()
+        content = SchemiiDesignContent.model_validate(self._json(row["content"]))
         return SchemiiDesign(
             workspace_id=workspace_id,
             revision=row["revision"],
-            content=SchemiiDesignContent.model_validate(self._json(row["content"])),
-            fingerprint=row["fingerprint"],
+            content=content,
+            fingerprint=design_fingerprint(content),
         )
 
     @staticmethod

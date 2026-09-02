@@ -117,10 +117,11 @@ export function designToCatalog(workspace, design) {
       };
     }),
     functions: design.content.functions.map(routine => ({
+      designId: routine.id,
       namespace: "desired",
       name: routine.name,
       kind: routine.kind,
-      identityArguments: routine.arguments,
+      identityArguments: routine.identityArguments,
       arguments: routine.arguments,
       returnType: routine.returnType,
       language: routine.language,
@@ -911,4 +912,26 @@ export function deleteDesignView(content, viewId) {
   const revised = structuredClone(content);
   revised.views = revised.views.filter(view => view.id !== viewId);
   return { content: revised };
+}
+
+export function saveDesignRoutine(content, values, randomUUID = crypto.randomUUID.bind(crypto)) {
+  const definition = String(values.definition || "").trim();
+  if (!definition) throw new Error("Enter one CREATE FUNCTION or CREATE PROCEDURE statement.");
+  const next = structuredClone(content);
+  const routineId = values.routineId || id("function", randomUUID);
+  const routine = { id: routineId, definition };
+  const existingIndex = next.functions.findIndex(item => item.id === routineId);
+  if (values.routineId && existingIndex < 0) throw new Error("The selected routine is no longer in this design.");
+  if (existingIndex >= 0) next.functions[existingIndex] = routine;
+  else next.functions.push(routine);
+  return { content: next, routine };
+}
+
+export function deleteDesignRoutine(content, routineId) {
+  const next = structuredClone(content);
+  if (!next.functions.some(routine => routine.id === routineId)) {
+    throw new Error("The selected routine is no longer in this design.");
+  }
+  next.functions = next.functions.filter(routine => routine.id !== routineId);
+  return next;
 }
