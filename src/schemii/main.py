@@ -12,9 +12,13 @@ from schemii.common.api import (
 )
 from schemii.common.api.models import ApiErrorResponse
 from schemii.common.api.routes import router as runtime_router
-from schemii.common.api.runtime import RuntimeConfig
+from schemii.common.api.runtime import RuntimeConfig, TargetEgressMode
 from schemii.common.ai.routes import router as ai_provider_router
 from schemii.common.connections.routes import router as connections_router
+from schemii.common.connections.policy import (
+    CompositeConnectionTargetPolicy,
+    InternalOnlyConnectionTargetPolicy,
+)
 from schemii.common.connections.service import ConnectionService
 from schemii.common.developer_inspection import install_developer_inspection
 from schemii.common.metadata import MetadataRepositories, create_metadata_repositories
@@ -54,7 +58,10 @@ class ApplicationServices:
     migrations: MigrationService | None = None
 
 
-def create_services() -> ApplicationServices:
+def create_services(
+    runtime_config: RuntimeConfig | None = None,
+) -> ApplicationServices:
+    selected_runtime = runtime_config or RuntimeConfig.from_env()
     metadata = create_metadata_repositories(
         migration_packages=(
             COMMON_METADATA_MIGRATION_PACKAGE,
@@ -71,10 +78,20 @@ def create_services() -> ApplicationServices:
         if metadata.connection_factory is not None
         else InMemoryWorkspaceRepository(designs=designs)
     )
+    target_policy = metadata.target_policy
+    if selected_runtime.target_egress_mode is TargetEgressMode.INTERNAL_ONLY:
+        target_policy = CompositeConnectionTargetPolicy(
+            (
+                target_policy,
+                InternalOnlyConnectionTargetPolicy.from_hosts(
+                    selected_runtime.allowed_target_hosts
+                ),
+            )
+        )
     connections = ConnectionService(
         metadata.connections,
         (workspaces,),
-        target_policy=metadata.target_policy,
+        target_policy=target_policy,
     )
     migration_repository = (
         PostgresMigrationRepository(metadata.connection_factory)
@@ -119,10 +136,11 @@ PRODUCT_ROUTERS: tuple[APIRouter, ...] = (
 def create_app(
     services: ApplicationServices | None = None,
     *,
+    runtime_config: RuntimeConfig | None = None,
     developer_inspection: bool = False,
 ) -> FastAPI:
     """Create the API and connect each product router."""
-    active_services = services or create_services()
+    active_services = services or create_services(runtime_config)
     if active_services.migrations is None:
         if active_services.metadata.durable:
             raise RuntimeError(
@@ -191,4 +209,7 @@ def create_app(
 
 
 runtime_config = RuntimeConfig.from_env()
-app = create_app(developer_inspection=runtime_config.developer_inspection)
+app = create_app(
+    runtime_config=runtime_config,
+    developer_inspection=runtime_config.developer_inspection,
+)

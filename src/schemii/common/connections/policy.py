@@ -14,6 +14,15 @@ from .models import PostgresConnectionMetadata, ResolvedPostgresConnection
 class ConnectionTargetForbiddenError(RuntimeError):
     """A requested target crosses a deployment control-plane boundary."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "connection_target_forbidden",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class ConnectionTargetPolicy(Protocol):
     def validate(
@@ -31,6 +40,58 @@ class AllowAllConnectionTargetPolicy:
         target: PostgresConnectionMetadata | ResolvedPostgresConnection,
     ) -> None:
         del target
+
+
+@dataclass(frozen=True)
+class CompositeConnectionTargetPolicy:
+    """Apply each deployment policy to the same connection target."""
+
+    policies: tuple[ConnectionTargetPolicy, ...]
+
+    def validate(
+        self,
+        target: PostgresConnectionMetadata | ResolvedPostgresConnection,
+    ) -> None:
+        for policy in self.policies:
+            policy.validate(target)
+
+
+@dataclass(frozen=True)
+class InternalOnlyConnectionTargetPolicy:
+    """Admit only PostgreSQL host identities selected by the operator.
+
+    Internal network ranges are not an authorization boundary: their meaning
+    differs by deployment, and resolving arbitrary user-supplied names before
+    admission would still permit DNS rebinding. Instead, an internal-only
+    deployment names the exact host aliases that its private network exposes.
+    The deployment remains responsible for controlling DNS for those aliases.
+    """
+
+    allowed_hosts: frozenset[str]
+
+    @classmethod
+    def from_hosts(
+        cls,
+        hosts: tuple[str, ...],
+    ) -> "InternalOnlyConnectionTargetPolicy":
+        allowed_hosts = frozenset(
+            _normalize_configured_host(host) for host in hosts
+        )
+        if not allowed_hosts:
+            raise ValueError(
+                "internal-only target egress requires at least one allowed host"
+            )
+        return cls(allowed_hosts=allowed_hosts)
+
+    def validate(
+        self,
+        target: PostgresConnectionMetadata | ResolvedPostgresConnection,
+    ) -> None:
+        if _normalize_host(target.host) not in self.allowed_hosts:
+            raise ConnectionTargetForbiddenError(
+                "This PostgreSQL host is not allowed by the deployment's internal target policy",
+                code="connection_target_not_allowed",
+            )
 
 
 @dataclass(frozen=True)
@@ -89,7 +150,8 @@ class MetadataControlPlaneTargetPolicy:
             and target.port in self.ports
         ):
             raise ConnectionTargetForbiddenError(
-                "The application metadata server cannot be used as a PostgreSQL target"
+                "The application metadata server cannot be used as a PostgreSQL target",
+                code="metadata_control_plane_target_forbidden",
             )
 
 
@@ -101,3 +163,15 @@ def _normalize_host(value: str) -> str:
         return ipaddress.ip_address(host).compressed
     except ValueError:
         return host.rstrip(".").casefold()
+
+
+def _normalize_configured_host(value: str) -> str:
+    host = value.strip()
+    if not host or "," in host or any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in host
+    ):
+        raise ValueError(
+            "allowed target hosts must identify one server and contain no whitespace or control characters"
+        )
+    return _normalize_host(host)

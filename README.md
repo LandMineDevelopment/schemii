@@ -51,6 +51,8 @@ Connection profiles, workspaces, desired designs, import provenance, optional ta
 
 Each profile targets exactly one PostgreSQL host. TLS certificate and hostname verification (`verify-full`) is the default; weaker libpq SSL modes must be selected explicitly for environments that require them.
 
+The local deployment's `internal-only` egress mode admits connection profiles only when their normalized host is listed in the operator-owned `SCHEMII_ALLOWED_TARGET_HOSTS` setting. The list contains private network identities, not user-entered patterns or inferred address ranges, and is checked when a profile is created, updated, and every time its credential is resolved for use. The metadata PostgreSQL identity is denied independently. Deployments must therefore control DNS for each allowed alias; an alternate alias or literal address is rejected unless the operator explicitly adds it.
+
 A workspace is explicitly either an editable design or a live PostgreSQL inspection. Designs may remain detached, or retain a connection/database/namespace target without becoming live views. A PostgreSQL import always creates a new targeted design; the catalog, design revision, layout, and lossiness report are written atomically, so existing detached work cannot be overwritten. Live workspaces read columns, constraints, relationships, indexes, triggers, functions, views, materialized views, enums, and domains from one bounded, repeatable-read PostgreSQL snapshot. Capabilities that remain planned are registered for review in the API map and return an explicit `501 planned_capability`.
 
 ## Schemii frontend
@@ -84,7 +86,7 @@ certutil -A -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"
 
 Restart the browser or T3Code after changing trust. Remove the exception with `certutil -D -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"`. Other clients can either trust `.schemii/tls/localhost.crt` through their own certificate store or retain their normal self-signed-certificate warning.
 
-Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. Database identity and password overrides are initialization inputs and must continue to match retained local state. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
+Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. `SCHEMII_ALLOWED_TARGET_HOSTS` is deployment-owned and must contain only PostgreSQL aliases reachable on the intended private target network. Database identity and password overrides are initialization inputs and must continue to match retained local state. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
 
 ## Development checks
 

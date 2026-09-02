@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHttpException
 
+from schemii.common.connections.policy import ConnectionTargetForbiddenError
 from schemii.common.connections.store import (
     ConnectionCredentialUnreadableError,
     ConnectionStorageUnavailableError,
@@ -150,6 +151,16 @@ def install_api_error_handlers(application: FastAPI) -> None:
                 str(error),
                 retryable=True,
             ),
+        )
+
+    @application.exception_handler(ConnectionTargetForbiddenError)
+    async def handle_connection_target_forbidden(
+        request: Request,
+        error: ConnectionTargetForbiddenError,
+    ) -> JSONResponse:
+        return _response(
+            request,
+            ApiProblem(403, error.code, str(error)),
         )
 
     @application.exception_handler(MetadataStorageUnavailableError)

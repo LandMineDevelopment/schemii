@@ -22,6 +22,7 @@ class TargetEgressMode(str, Enum):
 class RuntimeConfig:
     deployment_mode: DeploymentMode
     target_egress_mode: TargetEgressMode
+    allowed_target_hosts: tuple[str, ...]
     developer_inspection: bool
 
     @classmethod
@@ -54,8 +55,21 @@ class RuntimeConfig:
             raise ValueError(
                 "external target egress requires authenticated deployment mode"
             )
+        allowed_target_hosts = tuple(
+            host.strip()
+            for host in values.get("SCHEMII_ALLOWED_TARGET_HOSTS", "").split(",")
+            if host.strip()
+        )
+        if (
+            target_egress_mode is TargetEgressMode.INTERNAL_ONLY
+            and not allowed_target_hosts
+        ):
+            raise ValueError(
+                "SCHEMII_ALLOWED_TARGET_HOSTS must name at least one host for internal-only target egress"
+            )
         return cls(
             deployment_mode=deployment_mode,
             target_egress_mode=target_egress_mode,
+            allowed_target_hosts=allowed_target_hosts,
             developer_inspection=inspection_value == "1",
         )

@@ -44,6 +44,10 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     assert 'SCHEMII_DEVELOPER_INSPECTION: "1"' in schemii
     assert "SCHEMII_DEPLOYMENT_MODE: local-development" in schemii
     assert "SCHEMII_TARGET_EGRESS_MODE: internal-only" in schemii
+    assert "SCHEMII_ALLOWED_TARGET_HOSTS: demo-postgres,postgres" in schemii
+    assert "metadata-postgres" not in next(
+        line for line in schemii.splitlines() if "SCHEMII_ALLOWED_TARGET_HOSTS" in line
+    )
     assert "SCHEMII_STORAGE_MODE: postgresql" in schemii
     assert "SCHEMII_METADATA_DSN:" in schemii
     assert "host=metadata-postgres" in schemii
@@ -66,6 +70,9 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     assert "demo_target_password" in demo_bootstrap
     assert "schemii-test-postgres:/var/lib/postgresql/data" in metadata_postgres
     assert "schemii-test-demo-postgres:/var/lib/postgresql/data" in demo_postgres
+
+    demo_fixture = _service(compose, "demo-fixture")
+    assert "SCHEMII_ALLOWED_TARGET_HOSTS: demo-postgres,postgres" in demo_fixture
 
 
 def test_containerized_application_is_non_root_and_read_only() -> None:

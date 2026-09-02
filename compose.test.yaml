@@ -10,6 +10,7 @@ services:
       SCHEMII_DEPLOYMENT_MODE: local-development
       SCHEMII_DEVELOPER_INSPECTION: "1"
       SCHEMII_TARGET_EGRESS_MODE: internal-only
+      SCHEMII_ALLOWED_TARGET_HOSTS: demo-postgres,postgres
       SCHEMII_STORAGE_MODE: postgresql
       SCHEMII_METADATA_DSN: "host=metadata-postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_METADATA_APP_USER:-schemii_metadata_app}"
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password
@@ -226,6 +227,7 @@ services:
     environment:
       SCHEMII_DEPLOYMENT_MODE: local-development
       SCHEMII_TARGET_EGRESS_MODE: internal-only
+      SCHEMII_ALLOWED_TARGET_HOSTS: demo-postgres,postgres
       SCHEMII_STORAGE_MODE: postgresql
       SCHEMII_METADATA_DSN: "host=metadata-postgres port=5432 dbname=${SCHEMII_TEST_POSTGRES_DB:-schemii_test} user=${SCHEMII_METADATA_APP_USER:-schemii_metadata_app}"
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password

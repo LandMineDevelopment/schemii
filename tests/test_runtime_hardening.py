@@ -9,7 +9,9 @@ from fastapi.testclient import TestClient
 from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.connections.models import PostgresConnectionCreate
 from schemii.common.connections.policy import (
+    CompositeConnectionTargetPolicy,
     ConnectionTargetForbiddenError,
+    InternalOnlyConnectionTargetPolicy,
     MetadataControlPlaneTargetPolicy,
 )
 from schemii.common.connections.service import ConnectionService
@@ -81,10 +83,20 @@ def test_runtime_config_rejects_implicit_or_unauthenticated_external_deployment(
         {
             "SCHEMII_DEPLOYMENT_MODE": "local-development",
             "SCHEMII_TARGET_EGRESS_MODE": "internal-only",
+            "SCHEMII_ALLOWED_TARGET_HOSTS": " demo-postgres,postgres ",
             "SCHEMII_DEVELOPER_INSPECTION": "1",
         }
     )
     assert configured.developer_inspection is True
+    assert configured.allowed_target_hosts == ("demo-postgres", "postgres")
+
+    with pytest.raises(ValueError, match="SCHEMII_ALLOWED_TARGET_HOSTS"):
+        RuntimeConfig.from_env(
+            {
+                "SCHEMII_DEPLOYMENT_MODE": "local-development",
+                "SCHEMII_TARGET_EGRESS_MODE": "internal-only",
+            }
+        )
 
 
 def test_metadata_target_policy_normalizes_host_and_blocks_create_and_use() -> None:
@@ -142,6 +154,99 @@ def test_metadata_target_policy_normalizes_host_and_blocks_create_and_use() -> N
     with pytest.raises(ConnectionTargetForbiddenError):
         with guarded_service.use("owner", bypassed.id):
             pytest.fail("a legacy metadata-server target must never be resolved")
+
+
+def test_internal_allowlist_blocks_unlisted_aliases_on_create_update_and_use() -> None:
+    policy = CompositeConnectionTargetPolicy(
+        (
+            MetadataControlPlaneTargetPolicy.from_dsn(
+                "host=metadata-postgres port=5432 dbname=control user=runtime",
+            ),
+            InternalOnlyConnectionTargetPolicy.from_hosts(("DEMO-POSTGRES.",)),
+        )
+    )
+    services = application_services(target_policy=policy)
+    api = TestClient(create_app(services), base_url="http://localhost")
+
+    allowed = api.post(
+        "/api/v1/connections",
+        json={
+            "name": "Application data",
+            "host": "demo-postgres",
+            "database": "application_data",
+            "username": "runtime",
+        },
+    )
+    assert allowed.status_code == 201
+
+    for host in ("metadata-alias", "10.20.30.40"):
+        rejected = api.post(
+            "/api/v1/connections",
+            json={
+                "name": "Unlisted destination",
+                "host": host,
+                "database": "control",
+                "username": "runtime",
+            },
+        )
+        assert rejected.status_code == 403
+        assert rejected.json()["error"]["code"] == "connection_target_not_allowed"
+
+    update = api.patch(
+        f"/api/v1/connections/{allowed.json()['id']}",
+        json={
+            "expectedRevision": allowed.json()["revision"],
+            "host": "metadata-alias",
+        },
+    )
+    assert update.status_code == 403
+    assert update.json()["error"]["code"] == "connection_target_not_allowed"
+    assert services.connections.get(
+        "user_local_prototype", allowed.json()["id"]
+    ).host == "demo-postgres"
+
+    bypassed_repository = InMemoryConnectionRepository()
+    bypassed = bypassed_repository.create(
+        "owner",
+        PostgresConnectionCreate(
+            name="Legacy unlisted target",
+            host="10.20.30.40",
+            database="control",
+            username="runtime",
+        ),
+    )
+    guarded_service = ConnectionService(
+        bypassed_repository,
+        (),
+        target_policy=policy,
+    )
+    with pytest.raises(
+        ConnectionTargetForbiddenError,
+        match="not allowed",
+    ) as forbidden:
+        with guarded_service.use("owner", bypassed.id):
+            pytest.fail("an unlisted stored target must never be resolved")
+    assert forbidden.value.code == "connection_target_not_allowed"
+
+
+def test_forbidden_target_errors_are_safe_when_raised_outside_connection_routes() -> None:
+    application = create_app(application_services())
+
+    @application.get("/test-only-forbidden-target")
+    def forbidden_target():
+        raise ConnectionTargetForbiddenError(
+            "This PostgreSQL host is not allowed by the deployment's internal target policy",
+            code="connection_target_not_allowed",
+        )
+
+    response = TestClient(
+        application,
+        base_url="http://localhost",
+        raise_server_exceptions=False,
+    ).get("/test-only-forbidden-target")
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "connection_target_not_allowed"
 
 
 def test_readiness_returns_503_when_metadata_probe_fails() -> None:

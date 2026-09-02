@@ -80,7 +80,7 @@ def _not_found(error: ConnectionNotFoundError) -> ApiProblem:
 
 
 def _forbidden_target(error: ConnectionTargetForbiddenError) -> ApiProblem:
-    return ApiProblem(403, "metadata_control_plane_target_forbidden", str(error))
+    return ApiProblem(403, error.code, str(error))
 
 
 @router.get("", response_model=ConnectionListResponse)
