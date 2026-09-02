@@ -86,6 +86,44 @@ Restart the browser or T3Code after changing trust. Remove the exception with `c
 
 Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. Database identity and password overrides are initialization inputs and must continue to match retained local state. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
 
+## Development checks
+
+The test suite is split by the boundary it verifies. Run the fast Python behavior
+suite and buildless frontend module suite during development:
+
+```bash
+.venv/bin/python -m pytest -q
+npm test
+```
+
+Python tests use explicitly selected in-memory repositories unless a test is in
+`tests/integration`. They should assert public behavior, transaction outcomes,
+and durable state transitions rather than source layout or fixed route counts.
+Frontend module tests cover state and rendering contracts without requiring a
+running server.
+
+Real PostgreSQL integration tests require a disposable, externally reachable
+database and are enabled explicitly. The CI workflow provisions that database;
+the local launcher intentionally keeps its databases private.
+
+```bash
+SCHEMII_TEST_METADATA_DSN='host=127.0.0.1 port=5432 dbname=schemii_test user=postgres' \
+SCHEMII_TEST_METADATA_PASSWORD='replace-with-test-password' \
+  .venv/bin/python -m pytest -q tests/integration
+```
+
+Assembled browser tests exercise both desktop Chromium and an Android-sized
+viewport against the canonical application stack:
+
+```bash
+./start.sh
+npm run test:e2e
+```
+
+Playwright keeps screenshots and traces only for failures under `artifacts/`.
+The browser suite owns and removes uniquely named test workspaces, so repeated
+runs do not depend on prior application state.
+
 ## Seeded Docker test deployment
 
 [`compose.test.yaml`](compose.test.yaml) runs the packaged Schemii application with two private PostgreSQL 17 services: a durable metadata control plane and an isolated demo target. The application authenticates to metadata with a dedicated non-superuser runtime role. The demo target uses a separate non-superuser role, while one-shot bootstrap jobs alone hold database initialization authority. `start.sh` is the supported startup command:
