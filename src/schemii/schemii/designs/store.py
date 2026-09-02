@@ -22,6 +22,7 @@ from .models import (
     DesignHistoryAction,
     DesignHistoryBaseline,
     DesignHistoryState,
+    DesignWorkspaceSnapshot,
     DesignType,
     SchemiiDesign,
     SchemiiDesignContent,
@@ -553,6 +554,13 @@ class DesignRepository(Protocol):
         baseline: DesignHistoryBaseline,
     ) -> DesignHistoryState: ...
 
+    def snapshot(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        baseline: DesignHistoryBaseline,
+    ) -> DesignWorkspaceSnapshot: ...
+
     def undo(
         self,
         owner_id: str,
@@ -720,6 +728,25 @@ class InMemoryDesignRepository:
             self._ensure_history(owner_id, workspace_id, design)
             entries, cursor_index = self._active_chain(owner_id, workspace_id)
             return _history_state(design, entries, cursor_index, baseline)
+
+    def snapshot(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        baseline: DesignHistoryBaseline,
+    ) -> DesignWorkspaceSnapshot:
+        """Read every canonical design surface under one repository lock."""
+
+        with self._lock:
+            design = self._design(owner_id, workspace_id)
+            self._ensure_history(owner_id, workspace_id, design)
+            entries, cursor_index = self._active_chain(owner_id, workspace_id)
+            layout = self._layout(owner_id, workspace_id, design.revision)
+            return DesignWorkspaceSnapshot(
+                design=design.model_copy(deep=True),
+                layout=layout.model_copy(deep=True),
+                history=_history_state(design, entries, cursor_index, baseline),
+            )
 
     def undo(self, owner_id: str, workspace_id: str, expected_design_revision: int) -> SchemiiDesign:
         return self._move_history(owner_id, workspace_id, expected_design_revision, "undo")

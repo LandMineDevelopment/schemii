@@ -29,6 +29,7 @@ from .models import (
     DesignHistoryMutation,
     DesignHistoryState,
     DesignHistoryTransitionRequest,
+    DesignWorkspaceSnapshot,
     SchemiiDesign,
     SchemiiDesignExport,
     SchemiiDesignExportRequest,
@@ -168,6 +169,20 @@ def get_design_history(
 
     try:
         return _migrations(request).design_history_state(principal.user_id, workspace_id)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
+
+
+@router.get("/design/snapshot", response_model=DesignWorkspaceSnapshot)
+def get_workspace_design_snapshot(
+    workspace_id: str,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> DesignWorkspaceSnapshot:
+    """Return design, layout, and history from one canonical metadata snapshot."""
+
+    try:
+        return _migrations(request).design_snapshot(principal.user_id, workspace_id)
     except MigrationServiceError as error:
         raise _migration_problem(error) from error
 

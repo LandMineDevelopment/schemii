@@ -21,6 +21,7 @@ from schemii.schemii.designs.models import (
     DesignHistoryMutation,
     DesignHistoryState,
     DesignHistoryTransitionRequest,
+    DesignWorkspaceSnapshot,
     SchemiiDesignContent,
     SchemiiDesignReplace,
 )
@@ -209,6 +210,17 @@ class MigrationService:
         baseline, _ = self._design_baseline(owner_id, workspace_id)
         return self._designs.history_state(owner_id, workspace_id, baseline)
 
+    def design_snapshot(
+        self,
+        owner_id: str,
+        workspace_id: str,
+    ) -> DesignWorkspaceSnapshot:
+        """Return all detached-design client state from one repository snapshot."""
+
+        self._workspace(owner_id, workspace_id)
+        baseline, _ = self._design_baseline(owner_id, workspace_id)
+        return self._designs.snapshot(owner_id, workspace_id, baseline)
+
     def undo_design(
         self,
         owner_id: str,
@@ -283,7 +295,7 @@ class MigrationService:
             )
         _, target = self._design_baseline(owner_id, workspace_id)
         try:
-            design = self._designs.replace(
+            self._designs.replace(
                 owner_id,
                 workspace_id,
                 SchemiiDesignReplace(
@@ -307,7 +319,7 @@ class MigrationService:
         except DesignValidationError as error:
             code = "baseline_changed" if error.details.get("reason") == "baseline_changed" else "invalid_design"
             raise MigrationServiceError(409, code, str(error), details=error.details) from error
-        return self._history_mutation(owner_id, workspace_id, design)
+        return self._history_mutation(owner_id, workspace_id)
 
     def create_plan(
         self,
@@ -717,7 +729,7 @@ class MigrationService:
         self._workspace(owner_id, workspace_id)
         try:
             mover = self._designs.undo if action == "undo" else self._designs.redo
-            design = mover(owner_id, workspace_id, request.expected_design_revision)
+            mover(owner_id, workspace_id, request.expected_design_revision)
         except DesignConflictError as error:
             raise MigrationServiceError(
                 409,
@@ -729,16 +741,16 @@ class MigrationService:
             raise MigrationServiceError(409, f"nothing_to_{action}", str(error)) from error
         except DesignMutationBlockedError as error:
             raise MigrationServiceError(409, "design_mutation_blocked", str(error)) from error
-        return self._history_mutation(owner_id, workspace_id, design)
+        return self._history_mutation(owner_id, workspace_id)
 
     def _history_mutation(
-        self, owner_id: str, workspace_id: str, design: Any
+        self,
+        owner_id: str,
+        workspace_id: str,
     ) -> DesignHistoryMutation:
-        baseline, _ = self._design_baseline(owner_id, workspace_id)
-        return DesignHistoryMutation(
-            design=design,
-            layout=self._designs.get_layout(owner_id, workspace_id),
-            history=self._designs.history_state(owner_id, workspace_id, baseline),
+        snapshot = self.design_snapshot(owner_id, workspace_id)
+        return DesignHistoryMutation.model_validate(
+            snapshot.model_dump(mode="python")
         )
 
     def _design_baseline(

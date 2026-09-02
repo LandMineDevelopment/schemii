@@ -13,6 +13,7 @@ from .history_retention import history_target_index, prune_postgres_history
 from .models import (
     DesignHistoryBaseline,
     DesignHistoryState,
+    DesignWorkspaceSnapshot,
     DesignObjectPosition,
     SchemiiDesign,
     SchemiiDesignContent,
@@ -236,6 +237,53 @@ class PostgresDesignRepository:
                 )
                 entries, cursor_index = self._active_chain(cursor, owner_id, workspace_id)
                 return _history_state(design, entries, cursor_index, baseline)
+
+    def snapshot(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        baseline: DesignHistoryBaseline,
+    ) -> DesignWorkspaceSnapshot:
+        """Read design, layout, and history while their design row is locked."""
+
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                self._ensure_rows(cursor, owner_id, workspace_id)
+                design_row = self._locked_design_row(cursor, owner_id, workspace_id)
+                content = SchemiiDesignContent.model_validate(
+                    self._json(design_row["content"])
+                )
+                design = SchemiiDesign(
+                    workspace_id=workspace_id,
+                    revision=int(design_row["revision"]),
+                    content=content,
+                    fingerprint=design_fingerprint(content),
+                )
+                self._ensure_history(cursor, owner_id, workspace_id, design_row)
+                cursor.execute(
+                    """
+                    SELECT revision, design_revision, objects
+                    FROM schemii.workspace_design_layouts
+                    WHERE owner_id = %s AND workspace_id = %s
+                    """,
+                    (owner_id, workspace_id),
+                )
+                layout = self._layout(workspace_id, cursor.fetchone())
+                entries, cursor_index = self._active_chain(
+                    cursor,
+                    owner_id,
+                    workspace_id,
+                )
+                return DesignWorkspaceSnapshot(
+                    design=design,
+                    layout=layout,
+                    history=_history_state(
+                        design,
+                        entries,
+                        cursor_index,
+                        baseline,
+                    ),
+                )
 
     def undo(
         self, owner_id: str, workspace_id: str, expected_design_revision: int

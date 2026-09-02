@@ -529,12 +529,29 @@ class DesignHistoryTransitionRequest(ApiModel):
     expected_design_revision: DesignRevision
 
 
-class DesignHistoryMutation(ApiModel):
-    """Atomic semantic transition with its refreshed design, layout, and cursor."""
+class DesignWorkspaceSnapshot(ApiModel):
+    """One revision-consistent design, layout, and server-owned history cursor."""
 
     design: SchemiiDesign
     layout: SchemiiDesignLayout
     history: DesignHistoryState
+
+    @model_validator(mode="after")
+    def one_design_revision(self) -> "DesignWorkspaceSnapshot":
+        revisions = {
+            self.design.revision,
+            self.layout.design_revision,
+            self.history.design_revision,
+        }
+        if len(revisions) != 1:
+            raise ValueError(
+                "design snapshots must use one semantic design revision"
+            )
+        return self
+
+
+class DesignHistoryMutation(DesignWorkspaceSnapshot):
+    """Atomic semantic transition with its refreshed canonical snapshot."""
 
 
 class DesignBaselineResetPreview(ApiModel):

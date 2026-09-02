@@ -750,6 +750,13 @@ def test_design_history_and_baseline_reset_are_server_authoritative() -> None:
         },
     )
     assert positioned.status_code == 200
+    snapshot = api.get(f"{path}/snapshot")
+    assert snapshot.status_code == 200
+    snapshot_body = snapshot.json()
+    assert snapshot_body["design"]["revision"] == 1
+    assert snapshot_body["layout"]["designRevision"] == 1
+    assert snapshot_body["history"]["designRevision"] == 1
+    assert snapshot_body["layout"]["content"]["objects"][0]["objectId"] == table_id
 
     preview = api.get(f"{path}/baseline-reset")
     assert preview.status_code == 200
@@ -786,6 +793,11 @@ def test_design_history_and_baseline_reset_are_server_authoritative() -> None:
     )
     assert redone.status_code == 200
     assert redone.json()["design"]["content"]["tables"] == []
+    assert {
+        redone.json()["design"]["revision"],
+        redone.json()["layout"]["designRevision"],
+        redone.json()["history"]["designRevision"],
+    } == {redone.json()["design"]["revision"]}
 
 
 def test_workspace_rejects_an_incomplete_optional_target() -> None:

@@ -144,6 +144,30 @@ def test_history_restores_last_canvas_position_and_keeps_revisions_monotonic() -
     assert repository.get_layout("owner", WORKSPACE_ID).revision > positioned.revision
 
 
+def test_snapshot_returns_design_layout_and_history_from_one_revision() -> None:
+    repository = InMemoryDesignRepository()
+    initial = content()
+    saved = repository.replace(
+        "owner",
+        WORKSPACE_ID,
+        SchemiiDesignReplace(
+            expected_design_revision=0,
+            content=content("orders"),
+        ),
+    )
+
+    snapshot = repository.snapshot(
+        "owner",
+        WORKSPACE_ID,
+        baseline(initial),
+    )
+
+    assert snapshot.design == saved
+    assert snapshot.layout.design_revision == saved.revision
+    assert snapshot.history.design_revision == saved.revision
+    assert snapshot.history.can_undo is True
+
+
 def test_history_physically_retains_only_the_latest_one_hundred_actions() -> None:
     repository = InMemoryDesignRepository()
     revision = 0
