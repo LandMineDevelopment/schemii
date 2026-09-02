@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from schemii.common.postgres.view_analysis import (
-    ViewDefinitionError,
-    analyze_view_definition,
+from schemii.common.postgres.query_analysis import (
+    QueryDefinitionError,
+    analyze_query_definition,
     referenced_relations,
 )
 
@@ -43,7 +43,7 @@ def analyze_design_view(
         for view in content.views
         if view.id != request.view_id
     )
-    analysis = analyze_view_definition(
+    analysis = analyze_query_definition(
         request.definition,
         relations,
         current_namespace="desired",
@@ -57,7 +57,7 @@ def analyze_design_view(
                 view.definition,
                 current_namespace="desired",
             )
-        except ViewDefinitionError:
+        except QueryDefinitionError:
             continue
         if ("desired", request.name) in references:
             consumers.append({"id": view.id, "name": view.name, "kind": view.kind})

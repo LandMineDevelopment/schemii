@@ -9,7 +9,7 @@ from schemii.common.api.planned import (
     planned_capability,
 )
 from schemii.common.metadata.models import Principal, get_current_principal
-from schemii.common.postgres.view_analysis import ViewDefinitionError
+from schemii.common.postgres.query_analysis import QueryDefinitionError
 from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
 
 from .export import export_design
@@ -135,7 +135,7 @@ def analyze_workspace_view(
         raise _design_not_found(error) from error
     try:
         return analyze_design_view(design.content, body)
-    except ViewDefinitionError as error:
+    except QueryDefinitionError as error:
         raise ApiProblem(
             422,
             "invalid_view_definition",

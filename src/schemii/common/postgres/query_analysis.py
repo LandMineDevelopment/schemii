@@ -1,4 +1,4 @@
-"""Bounded, database-independent analysis of PostgreSQL view query bodies."""
+"""Bounded, database-independent analysis of read-only PostgreSQL queries."""
 
 from __future__ import annotations
 
@@ -11,32 +11,32 @@ from sqlglot.optimizer.annotate_types import annotate_types
 from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
 
 
-MAX_VIEW_DEFINITION_BYTES = 256 * 1024
+MAX_QUERY_BYTES = 256 * 1024
 MAX_ANALYSIS_ITEMS = 512
 MAX_FRAGMENT_BYTES = 8 * 1024
 
 
-class ViewDefinitionError(ValueError):
-    """The supplied text is not one supported PostgreSQL query body."""
+class QueryDefinitionError(ValueError):
+    """The supplied text is not one supported read-only PostgreSQL query."""
 
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
 
 
-def parse_view_definition(definition: str) -> exp.Expression:
-    """Parse exactly one SELECT-shaped PostgreSQL view query body."""
+def parse_query_definition(definition: str) -> exp.Expression:
+    """Parse exactly one SELECT-shaped PostgreSQL query."""
 
     text = definition.strip().rstrip(";").strip()
     if not text:
-        raise ViewDefinitionError(
+        raise QueryDefinitionError(
             "empty_definition",
-            "Enter the SELECT query that defines this view",
+            "Enter a PostgreSQL SELECT query to analyze",
         )
-    if len(text.encode("utf-8")) > MAX_VIEW_DEFINITION_BYTES:
-        raise ViewDefinitionError(
+    if len(text.encode("utf-8")) > MAX_QUERY_BYTES:
+        raise QueryDefinitionError(
             "definition_too_large",
-            "The view definition is too large to analyze",
+            "The query is too large to analyze",
         )
     try:
         statements = [
@@ -45,12 +45,12 @@ def parse_view_definition(definition: str) -> exp.Expression:
             if statement is not None
         ]
     except SqlglotError as error:
-        raise ViewDefinitionError(
+        raise QueryDefinitionError(
             "invalid_sql",
             f"PostgreSQL query could not be parsed: {error}",
         ) from error
     if len(statements) != 1:
-        raise ViewDefinitionError(
+        raise QueryDefinitionError(
             "multiple_statements",
             "Enter one SELECT query without additional statements",
         )
@@ -58,9 +58,9 @@ def parse_view_definition(definition: str) -> exp.Expression:
     if isinstance(statement, exp.Subquery):
         statement = statement.this
     if not isinstance(statement, (exp.Select, exp.SetOperation)):
-        raise ViewDefinitionError(
+        raise QueryDefinitionError(
             "unsupported_statement",
-            "Enter only the SELECT query body; Schemii generates CREATE VIEW and the view identity",
+            "Enter one read-only SELECT query",
         )
     forbidden = (
         exp.Insert,
@@ -72,14 +72,14 @@ def parse_view_definition(definition: str) -> exp.Expression:
         exp.Command,
     )
     if any(statement.find(kind) is not None for kind in forbidden):
-        raise ViewDefinitionError(
+        raise QueryDefinitionError(
             "mutating_query",
-            "View queries cannot contain data-changing or schema-changing operations",
+            "Query analysis does not allow data-changing or schema-changing operations",
         )
     if statement.find(exp.Into) is not None:
-        raise ViewDefinitionError(
+        raise QueryDefinitionError(
             "select_into",
-            "View queries cannot use SELECT INTO",
+            "Query analysis does not allow SELECT INTO",
         )
     return statement
 
@@ -215,7 +215,7 @@ def _scope_result_name(scope: Scope, counters: dict[str, int]) -> str:
         if parent is not None and parent.alias_or_name:
             return parent.alias_or_name
     if scope.scope_type is ScopeType.ROOT:
-        return "view result"
+        return "query result"
     kind = _scope_kind(scope)
     counters[kind] = counters.get(kind, 0) + 1
     return f"{kind.replace('_', ' ')} {counters[kind]}"
@@ -259,7 +259,7 @@ def referenced_relations(
 ) -> list[tuple[str, str]]:
     """Return physical relation names, excluding query-local CTE references."""
 
-    statement = parse_view_definition(definition)
+    statement = parse_query_definition(definition)
     cte_names = {cte.alias_or_name for cte in statement.find_all(exp.CTE)}
     references: list[tuple[str, str]] = []
     for table in statement.find_all(exp.Table):
@@ -281,7 +281,7 @@ def _query_steps(
     by_name: dict[str, list[dict[str, Any]]],
     warnings: set[str],
 ) -> list[dict[str, Any]]:
-    """Build dependency-ordered query scopes for the chronological view story."""
+    """Build dependency-ordered query scopes for a chronological query story."""
 
     steps: list[dict[str, Any]] = []
     steps_by_scope: dict[int, dict[str, Any]] = {}
@@ -585,15 +585,15 @@ def _query_steps(
     return steps
 
 
-def analyze_view_definition(
+def analyze_query_definition(
     definition: str,
     relations: Iterable[dict[str, Any]] = (),
     *,
     current_namespace: str = "desired",
 ) -> dict[str, Any]:
-    """Derive the compact view story from one query body without database I/O."""
+    """Derive a chronological query story without database I/O."""
 
-    statement = parse_view_definition(definition)
+    statement = parse_query_definition(definition)
     relation_list = list(relations)
     exact, by_name = _relation_index(relation_list)
     _annotate_source_types(
@@ -988,23 +988,23 @@ def analyze_view_definition(
             "sql": None,
         })
 
-    order_items = [
+    ordering_items = [
         item
         for order in statement.find_all(exp.Order)
         for item in order.expressions
     ]
     ordering = [
         detail
-        for item in order_items[:MAX_ANALYSIS_ITEMS]
+        for item in ordering_items[:MAX_ANALYSIS_ITEMS]
         if (detail := expression_detail(item, role="sort")) is not None
     ]
-    if order_items:
+    if ordering_items:
         transformations.append({
             "kind": "sorts",
-            "count": len(order_items),
+            "count": len(ordering_items),
             "items": [
                 _sql(item)
-                for item in order_items[:MAX_ANALYSIS_ITEMS]
+                for item in ordering_items[:MAX_ANALYSIS_ITEMS]
                 if _sql(item)
             ],
             "sql": None,

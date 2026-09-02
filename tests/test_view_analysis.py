@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from schemii.common.postgres.view_analysis import (
-    ViewDefinitionError,
-    analyze_view_definition,
+from schemii.common.postgres.query_analysis import (
+    QueryDefinitionError,
+    analyze_query_definition,
 )
+from schemii.common.postgres.query_models import QueryAnalysis
 from schemii.schemii.designs.models import (
     DesignViewAnalysisRequest,
     SchemiiDesignContent,
@@ -185,7 +186,7 @@ LIMIT 50
 
 
 def test_analysis_derives_inputs_transformations_and_output_lineage() -> None:
-    analysis = analyze_view_definition(
+    analysis = analyze_query_definition(
         """
         WITH paid AS (
           SELECT customer_id, total FROM orders WHERE state = 'paid'
@@ -198,6 +199,7 @@ def test_analysis_derives_inputs_transformations_and_output_lineage() -> None:
         relations(),
     )
 
+    assert QueryAnalysis.model_validate(analysis).query_steps
     assert analysis["status"] == "available"
     assert {source["name"] for source in analysis["sources"]} == {"orders", "customers"}
     assert [item["kind"] for item in analysis["transformations"]] == [
@@ -270,13 +272,13 @@ def test_analysis_derives_inputs_transformations_and_output_lineage() -> None:
     ],
 )
 def test_analysis_accepts_only_one_select_query_body(definition: str, code: str) -> None:
-    with pytest.raises(ViewDefinitionError) as invalid:
-        analyze_view_definition(definition)
+    with pytest.raises(QueryDefinitionError) as invalid:
+        analyze_query_definition(definition)
     assert invalid.value.code == code
 
 
 def test_analysis_reports_each_set_operation_once_and_preserves_all() -> None:
-    analysis = analyze_view_definition(
+    analysis = analyze_query_definition(
         "SELECT 1 AS value UNION ALL SELECT 2 INTERSECT SELECT 3"
     )
 
@@ -293,7 +295,7 @@ def test_analysis_reports_each_set_operation_once_and_preserves_all() -> None:
 
 
 def test_analysis_keeps_cte_grain_and_aggregate_filters_in_their_query_scope() -> None:
-    analysis = analyze_view_definition(
+    analysis = analyze_query_definition(
         """
         WITH paid_orders AS (
           SELECT o.customer_id,
@@ -332,7 +334,7 @@ def test_analysis_keeps_cte_grain_and_aggregate_filters_in_their_query_scope() -
 
 
 def test_analysis_builds_dependency_ordered_query_steps_and_column_roles() -> None:
-    analysis = analyze_view_definition(
+    analysis = analyze_query_definition(
         """
         WITH order_totals AS (
           SELECT o.customer_id, SUM(o.total) AS revenue
@@ -354,7 +356,7 @@ def test_analysis_builds_dependency_ordered_query_steps_and_column_roles() -> No
     steps = analysis["query_steps"]
     assert [(step["kind"], step["result_name"]) for step in steps] == [
         ("cte", "order_totals"),
-        ("final", "view result"),
+        ("final", "query result"),
     ]
     cte = steps[0]
     assert [(item["name"], item["reference"]) for item in cte["participants"]] == [
@@ -389,7 +391,7 @@ def test_analysis_builds_dependency_ordered_query_steps_and_column_roles() -> No
 
 
 def test_analysis_places_derived_subquery_before_its_outer_query() -> None:
-    analysis = analyze_view_definition(
+    analysis = analyze_query_definition(
         """
         SELECT summary.customer_id, c.name
         FROM (
@@ -402,12 +404,12 @@ def test_analysis_places_derived_subquery_before_its_outer_query() -> None:
 
     assert [(step["kind"], step["result_name"]) for step in analysis["query_steps"]] == [
         ("derived_table", "summary"),
-        ("final", "view result"),
+        ("final", "query result"),
     ]
 
 
 def test_analysis_propagates_complex_subquery_types_and_cross_source_lineage() -> None:
-    analysis = analyze_view_definition(COMPLEX_VIEW_SQL, commerce_relations())
+    analysis = analyze_query_definition(COMPLEX_VIEW_SQL, commerce_relations())
 
     assert analysis["status"] == "available"
     assert analysis["warnings"] == []
@@ -415,7 +417,7 @@ def test_analysis_propagates_complex_subquery_types_and_cross_source_lineage() -
         ("derived_table", "item_rollup"),
         ("derived_table", "payment_rollup"),
         ("cte", "order_profitability"),
-        ("final", "view result"),
+        ("final", "query result"),
     ]
 
     item_rollup, payment_rollup, profitability, final = analysis["query_steps"]

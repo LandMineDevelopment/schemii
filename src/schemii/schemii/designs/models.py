@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from schemii.common.api.models import ApiModel
+from schemii.common.postgres.query_models import QueryAnalysis
 
 
 DesignIdentifier = Annotated[str, Field(min_length=1, max_length=63)]
@@ -137,110 +138,6 @@ class DesignView(ApiModel):
         return self
 
 
-class ViewAnalysisSourceColumn(ApiModel):
-    name: str
-    data_type: str
-    uses: list[str] = Field(default_factory=list)
-
-
-class ViewAnalysisSource(ApiModel):
-    namespace: str
-    name: str
-    kind: str
-    resolved: bool
-    aliases: list[str] = Field(default_factory=list)
-    column_count: int = 0
-    columns: list[ViewAnalysisSourceColumn] = Field(default_factory=list)
-
-
-class ViewAnalysisInput(ApiModel):
-    source: str | None = None
-    column: str
-    resolved: bool
-
-
-class ViewAnalysisExpression(ApiModel):
-    expression: str
-    inputs: list[ViewAnalysisInput] = Field(default_factory=list)
-    scope: str | None = None
-
-
-class ViewAnalysisJoin(ApiModel):
-    join_type: str
-    target: str
-    alias: str | None = None
-    expression: str | None = None
-    inputs: list[ViewAnalysisInput] = Field(default_factory=list)
-    scope: str | None = None
-
-
-class ViewAnalysisOutput(ApiModel):
-    ordinal: int
-    name: str | None = None
-    data_type: str | None = None
-    derivation: Literal["direct", "expression", "aggregate", "window", "constant"]
-    expression: str | None = None
-    inputs: list[ViewAnalysisInput] = Field(default_factory=list)
-
-
-class ViewAnalysisQueryParticipantColumn(ApiModel):
-    name: str
-    data_type: str | None = None
-    roles: list[str] = Field(default_factory=list)
-    filter_only: bool = False
-
-
-class ViewAnalysisQueryParticipant(ApiModel):
-    reference: str
-    namespace: str | None = None
-    name: str
-    kind: str
-    resolved: bool
-    columns: list[ViewAnalysisQueryParticipantColumn] = Field(default_factory=list)
-
-
-class ViewAnalysisQueryStep(ApiModel):
-    ordinal: int
-    kind: Literal[
-        "cte",
-        "derived_table",
-        "subquery",
-        "set_branch",
-        "table_function",
-        "final",
-    ]
-    result_name: str
-    participants: list[ViewAnalysisQueryParticipant] = Field(default_factory=list)
-    joins: list[ViewAnalysisJoin] = Field(default_factory=list)
-    row_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
-    aggregate_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
-    grouping: list[ViewAnalysisExpression] = Field(default_factory=list)
-    group_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
-    ordering: list[ViewAnalysisExpression] = Field(default_factory=list)
-    distinct: bool = False
-    limit: str | None = None
-    outputs: list[ViewAnalysisOutput] = Field(default_factory=list)
-
-
-class ViewAnalysisTransformation(ApiModel):
-    kind: Literal[
-        "stages",
-        "joins",
-        "filters",
-        "groups",
-        "aggregates",
-        "windows",
-        "having",
-        "distinct",
-        "sets",
-        "sorts",
-        "limits",
-    ]
-    count: int
-    items: list[str] = Field(default_factory=list)
-    sql: str | None = None
-
-
 class ViewAnalysisConsumer(ApiModel):
     id: DesignObjectId
     name: DesignIdentifier
@@ -253,31 +150,8 @@ class DesignViewAnalysisRequest(ApiModel):
     definition: DesignExpression
 
 
-class DesignViewAnalysis(ApiModel):
-    status: Literal["available", "partial"]
-    sources: list[ViewAnalysisSource] = Field(default_factory=list)
-    transformations: list[ViewAnalysisTransformation] = Field(default_factory=list)
-    outputs: list[ViewAnalysisOutput] = Field(default_factory=list)
+class DesignViewAnalysis(QueryAnalysis):
     consumers: list[ViewAnalysisConsumer] = Field(default_factory=list)
-    formatted_sql: str
-    stages: list[str] = Field(default_factory=list)
-    joins: list[ViewAnalysisJoin] = Field(default_factory=list)
-    row_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
-    aggregate_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
-    grouping: list[ViewAnalysisExpression] = Field(default_factory=list)
-    group_filters: list[ViewAnalysisExpression] = Field(default_factory=list)
-    ordering: list[ViewAnalysisExpression] = Field(default_factory=list)
-    distinct: bool = False
-    limit: str | None = None
-    set_operations: list[str] = Field(default_factory=list)
-    query_steps: list[ViewAnalysisQueryStep] = Field(default_factory=list)
-    stage_count: int = 0
-    join_count: int = 0
-    filter_count: int = 0
-    grouping_count: int = 0
-    aggregate_count: int = 0
-    window_count: int = 0
-    warnings: list[str] = Field(default_factory=list)
 
 
 class SchemiiDesignContent(ApiModel):

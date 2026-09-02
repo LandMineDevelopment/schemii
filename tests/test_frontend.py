@@ -21,6 +21,7 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert "connect-src 'self'" in response.headers["content-security-policy"]
     assert '<script type="module" src="assets/app.js"></script>' in response.text
     assert 'href="assets/ui.css"' in response.text
+    assert 'href="/assets/common/query-story.css"' in response.text
     assert 'data-ui-icon="database"' in response.text
     assert 'id="table-inspector-toggle"' in response.text
     assert 'href="/api-map"' in response.text

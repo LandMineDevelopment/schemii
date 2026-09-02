@@ -9,7 +9,7 @@ from collections import Counter
 from typing import Any, Protocol, runtime_checkable
 
 from schemii.common.errors import MetadataStorageUnavailableError
-from schemii.common.postgres.view_analysis import ViewDefinitionError, parse_view_definition
+from schemii.common.postgres.query_analysis import QueryDefinitionError, parse_query_definition
 
 from .models import (
     SchemiiDesign,
@@ -329,8 +329,8 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
     for view in content.views:
         _valid_identifier(view.name, category="view name")
         try:
-            parse_view_definition(view.definition)
-        except ViewDefinitionError as error:
+            parse_query_definition(view.definition)
+        except QueryDefinitionError as error:
             raise DesignValidationError(
                 str(error),
                 details={"view": view.name, "reason": error.code},

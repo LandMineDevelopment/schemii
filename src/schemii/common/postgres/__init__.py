@@ -35,6 +35,13 @@ from .models import (
     PostgresView,
     compute_catalog_fingerprint,
 )
+from .query_analysis import (
+    QueryDefinitionError,
+    analyze_query_definition,
+    parse_query_definition,
+    referenced_relations,
+)
+from .query_models import QueryAnalysis
 
 __all__ = [
     "MAX_CONNECT_TIMEOUT_SECONDS",
@@ -65,5 +72,10 @@ __all__ = [
     "PostgresUniqueConstraint",
     "PostgresView",
     "PsycopgPostgresGateway",
+    "QueryAnalysis",
+    "QueryDefinitionError",
+    "analyze_query_definition",
     "compute_catalog_fingerprint",
+    "parse_query_definition",
+    "referenced_relations",
 ]
