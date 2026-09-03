@@ -343,6 +343,12 @@ class RuntimeBindingIndex:
                 method = getattr(global_owner, node.attr, None)
                 if method is not None:
                     return ResolvedCall(method, "module")
+            local_annotation = _type_hints(subject).get(node.value.id)
+            if local_annotation is not None and not self.matching_types(local_annotation):
+                # A typed scalar/container receiver is not an installed runtime
+                # component merely because one component exposes a method with
+                # the same common name (for example ``str.replace``).
+                return ResolvedCall(None, "typed-local")
             candidates = self.method_candidates(node.attr)
             if len(candidates) == 1:
                 return ResolvedCall(candidates[0], "unique-runtime-method")

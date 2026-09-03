@@ -56,6 +56,7 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         "test_connection",
         "namespace_exists",
         "introspect",
+        "table_emptiness",
         "execute_migration",
         "transaction_status",
     ]

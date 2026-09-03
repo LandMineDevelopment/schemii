@@ -61,6 +61,7 @@ from .planner import (
     new_baseline_content,
     random_plan_id,
     reconcile_designs,
+    tables_requiring_empty_for_required_columns,
 )
 from .repository import (
     ExecutionRecord,
@@ -427,10 +428,42 @@ class MigrationService:
             catalog,
         )
         merged = reconciliation.merged or design.content
+        required_empty_tables = tables_requiring_empty_for_required_columns(
+            reconciliation.live,
+            merged,
+        )
+        empty_tables: frozenset[str] = frozenset()
+        if required_empty_tables:
+            try:
+                with self._connections.use(owner_id, workspace.connection_id) as connection:
+                    if connection.revision != connection_revision:
+                        raise MigrationServiceError(
+                            409,
+                            "connection_changed",
+                            "The PostgreSQL connection changed during migration review",
+                        )
+                    emptiness = self._postgres.table_emptiness(
+                        connection,
+                        workspace.namespace,
+                        tuple(required_empty_tables),
+                    )
+                    empty_tables = frozenset(
+                        name for name, is_empty in emptiness.items() if is_empty
+                    )
+            except ConnectionNotFoundError as error:
+                raise MigrationServiceError(404, "connection_not_found", str(error)) from error
+            except PostgresGatewayError as error:
+                raise MigrationServiceError(
+                    502,
+                    "postgres_emptiness_check_failed",
+                    str(error),
+                    retryable=True,
+                ) from error
         steps, compiler_blockers = compile_migration_steps(
             workspace.namespace,
             reconciliation.live,
             merged,
+            empty_tables=empty_tables,
         )
         warnings = list(reconciliation.warnings)
         if reconciliation.external_changes:
@@ -494,6 +527,7 @@ class MigrationService:
             "database": workspace.database,
             "namespace": workspace.namespace,
             "allowDestructive": request.allow_destructive,
+            "requiredEmptyTables": sorted(empty_tables),
             "steps": [step.model_dump(mode="json", by_alias=True) for step in steps],
             "externalChanges": [
                 item.model_dump(mode="json", by_alias=True)
@@ -558,6 +592,7 @@ class MigrationService:
                         connection_revision=connection_revision,
                         database=workspace.database,
                         namespace=workspace.namespace,
+                        required_empty_tables=tuple(sorted(empty_tables)),
                     ),
                 )
             )

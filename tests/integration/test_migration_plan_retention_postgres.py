@@ -50,6 +50,7 @@ def _plan_record(
     baseline_id: str,
     status: MigrationPlanStatus = "reviewable",
     expired: bool = True,
+    required_empty_tables: tuple[str, ...] = (),
 ) -> PlanRecord:
     content = SchemiiDesignContent()
     fingerprint = design_fingerprint(content)
@@ -96,6 +97,7 @@ def _plan_record(
             connection_revision=1,
             database="application_data",
             namespace="public",
+            required_empty_tables=required_empty_tables,
         ),
     )
 
@@ -154,6 +156,7 @@ def test_postgres_plan_retention_preserves_execution_and_reconciliation_records(
         workspace_id=workspace.id,
         connection_id=target.id,
         baseline_id=baseline.id,
+        required_empty_tables=("events",),
     )
     reconciliation_record = _plan_record(
         "3",
@@ -165,6 +168,11 @@ def test_postgres_plan_retention_preserves_execution_and_reconciliation_records(
     )
     for record in (abandoned, execution_record, reconciliation_record):
         repository.create_plan(record)
+
+    assert repository.get_plan(
+        owner_id,
+        execution_record.plan.id,
+    ).authority.required_empty_tables == ("events",)
 
     # Reads are side-effect free: retention runs only when a replacement review
     # is created, never while resolving the current baseline.

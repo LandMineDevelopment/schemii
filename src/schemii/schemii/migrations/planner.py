@@ -8,9 +8,10 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal
+from typing import AbstractSet, Any, Iterable, Literal
 
 from schemii.common.postgres.models import PostgresCatalog
+from schemii.common.postgres.query_analysis import referenced_relations
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
     DesignColumn,
@@ -31,6 +32,7 @@ from .models import (
     MigrationStep,
     MigrationWarning,
 )
+from .type_changes import TypeChangeDecision, classify_type_change
 
 
 _MISSING = object()
@@ -600,10 +602,71 @@ def _same_index(left: DesignIndex, right: DesignIndex) -> bool:
     )
 
 
+def _column_type_changes(
+    live_tables: dict[str, DesignTable],
+    desired_tables: dict[str, DesignTable],
+) -> dict[str, TypeChangeDecision]:
+    changes: dict[str, TypeChangeDecision] = {}
+    for table_id in set(live_tables) & set(desired_tables):
+        before_columns = _by_id(live_tables[table_id].columns)
+        after_columns = _by_id(desired_tables[table_id].columns)
+        for column_id in set(before_columns) & set(after_columns):
+            decision = classify_type_change(
+                before_columns[column_id].data_type,
+                after_columns[column_id].data_type,
+            )
+            if decision.disposition != "equivalent":
+                changes[column_id] = decision
+    return changes
+
+
+def _dependent_view_names(
+    namespace: str,
+    table_name: str,
+    live: SchemiiDesignContent,
+    desired: SchemiiDesignContent,
+) -> list[str]:
+    names: set[str] = set()
+    for view in [*live.views, *desired.views]:
+        references = referenced_relations(
+            view.definition,
+            current_namespace=namespace,
+        )
+        if (namespace, table_name) in references:
+            names.add(view.name)
+    return sorted(names)
+
+
+def tables_requiring_empty_for_required_columns(
+    live: SchemiiDesignContent,
+    desired: SchemiiDesignContent,
+) -> frozenset[str]:
+    """Return physical tables whose new required columns cannot populate rows."""
+
+    live_tables = _by_id(live.tables)
+    desired_tables = _by_id(desired.tables)
+    required: set[str] = set()
+    for table_id in set(live_tables) & set(desired_tables):
+        before = live_tables[table_id]
+        old_column_ids = {column.id for column in before.columns}
+        for column in desired_tables[table_id].columns:
+            if (
+                column.id not in old_column_ids
+                and not column.nullable
+                and column.default_expression is None
+                and column.identity is None
+                and column.generated_expression is None
+            ):
+                required.add(before.name)
+    return frozenset(required)
+
+
 def compile_migration_steps(
     namespace: str,
     live: SchemiiDesignContent,
     desired: SchemiiDesignContent,
+    *,
+    empty_tables: AbstractSet[str] = frozenset(),
 ) -> tuple[list[MigrationStep], list[MigrationWarning]]:
     """Compile a conservative exact delta from reviewed live to merged desired."""
 
@@ -611,13 +674,30 @@ def compile_migration_steps(
     blocking: list[MigrationWarning] = []
     live_tables, live_columns = _table_maps(live)
     desired_tables, desired_columns = _table_maps(desired)
+    type_changes = _column_type_changes(live_tables, desired_tables)
+    safe_type_change_ids = {
+        column_id
+        for column_id, decision in type_changes.items()
+        if decision.disposition == "safe"
+    }
 
     live_relationships = _by_id(live.relationships)
     desired_relationships = _by_id(desired.relationships)
     for identifier in sorted(set(live_relationships) | set(desired_relationships)):
         before = live_relationships.get(identifier)
         after = desired_relationships.get(identifier)
-        if before == after:
+        changed_relationship_column = bool(
+            safe_type_change_ids
+            & set(
+                [
+                    *(before.source_column_ids if before is not None else ()),
+                    *(before.target_column_ids if before is not None else ()),
+                    *(after.source_column_ids if after is not None else ()),
+                    *(after.target_column_ids if after is not None else ()),
+                ]
+            )
+        )
+        if before == after and not changed_relationship_column:
             continue
         if before is not None:
             table = live_tables[before.source_table_id]
@@ -665,15 +745,40 @@ def compile_migration_steps(
 
         before_columns = _by_id(before.columns)
         after_columns = _by_id(after.columns)
+        # TODO(schemii-physical-column-reorder): Existing-table column order is
+        # intentionally presentation-only. Physical reordering must be an
+        # explicit reviewed table reconstruction that inventories and restores
+        # every dependent object and warns about locks and data movement.
         for column_id in sorted(set(before_columns) | set(after_columns)):
             old = before_columns.get(column_id)
             new = after_columns.get(column_id)
             path_name = new.name if new is not None else old.name
             path = f"tables.{after.name}.columns.{path_name}"
             if old is None and new is not None:
+                cannot_populate = (
+                    not new.nullable
+                    and new.default_expression is None
+                    and new.identity is None
+                    and new.generated_expression is None
+                )
+                if cannot_populate and before.name not in empty_tables:
+                    blocking.append(MigrationWarning(
+                        code="required_column_population_required",
+                        message=(
+                            f"Adding required column {after.name}.{new.name} needs a default, "
+                            "identity, generated expression, or an empty live table"
+                        ),
+                        object_path=path,
+                    ))
+                    continue
                 pending.append(_PendingStep(
                     45, "column", path, "add",
                     f"ALTER TABLE {_qualified(namespace, active_name)} ADD COLUMN {_column_definition(new)};",
+                    data_movement=bool(
+                        new.default_expression is not None
+                        or new.identity is not None
+                        or new.generated_expression is not None
+                    ),
                 ))
                 continue
             if old is not None and new is None:
@@ -692,12 +797,51 @@ def compile_migration_steps(
                     f"ALTER TABLE {_qualified(namespace, active_name)} RENAME COLUMN {_quote(old.name)} TO {_quote(new.name)};",
                 ))
                 current_column_name = new.name
-            if old.data_type != new.data_type:
+            type_change = classify_type_change(old.data_type, new.data_type)
+            if type_change.disposition == "safe":
+                dependent_generated = sorted(
+                    column.name
+                    for column in after.columns
+                    if column_id in column.generated_source_column_ids
+                )
+                dependent_views = _dependent_view_names(
+                    namespace,
+                    after.name,
+                    live,
+                    desired,
+                )
+                if dependent_generated or dependent_views:
+                    dependencies = [
+                        *(f"generated column {after.name}.{name}" for name in dependent_generated),
+                        *(f"view {name}" for name in dependent_views),
+                    ]
+                    blocking.append(MigrationWarning(
+                        code="column_type_dependency_requires_review",
+                        message=(
+                            f"Changing {after.name}.{new.name} requires rebuilding "
+                            + ", ".join(dependencies)
+                        ),
+                        object_path=path,
+                    ))
+                else:
+                    pending.append(_PendingStep(
+                        48,
+                        "column",
+                        path,
+                        "alter_type",
+                        (
+                            f"ALTER TABLE {_qualified(namespace, active_name)} ALTER COLUMN "
+                            f"{_quote(current_column_name)} TYPE {new.data_type.strip()};"
+                        ),
+                        data_movement=True,
+                    ))
+            elif type_change.disposition == "blocked":
                 blocking.append(MigrationWarning(
                     code="column_type_conversion_required",
                     message=(
                         f"Changing {after.name}.{new.name} from {old.data_type} to "
-                        f"{new.data_type} requires a reviewed conversion expression"
+                        f"{new.data_type} requires a reviewed USING expression: "
+                        f"{type_change.reason}"
                     ),
                     object_path=path,
                 ))

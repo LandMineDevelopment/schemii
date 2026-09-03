@@ -25,6 +25,7 @@ from .errors import (
     PostgresGatewayError,
     PostgresInvalidNamespaceError,
     PostgresMigrationExecutionError,
+    PostgresMigrationPreconditionError,
     PostgresMigrationStaleError,
     PostgresNamespaceNotFoundError,
     PostgresQueryError,
@@ -144,6 +145,13 @@ class PostgresGateway(Protocol):
         namespace: str,
     ) -> PostgresCatalog: ...
 
+    def table_emptiness(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        table_names: Sequence[str],
+    ) -> dict[str, bool]: ...
+
     def execute_migration(
         self,
         connection: ResolvedPostgresConnection,
@@ -153,6 +161,7 @@ class PostgresGateway(Protocol):
         *,
         on_started: Callable[[str, dict[str, Any]], None],
         on_intended: Callable[[PostgresCatalog], None],
+        required_empty_tables: Sequence[str] = (),
     ) -> PostgresMigrationResult: ...
 
     def transaction_status(
@@ -247,6 +256,32 @@ class PsycopgPostgresGateway:
         finally:
             self._cleanup(database_connection)
 
+    def table_emptiness(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        table_names: Sequence[str],
+    ) -> dict[str, bool]:
+        """Read exact table emptiness without copying or counting application rows."""
+
+        namespace = self._validated_namespace(namespace)
+        names = self._validated_table_names(table_names)
+        database_connection: Any | None = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection, repeatable_read=True)
+            return self._table_emptiness_connection(
+                database_connection,
+                namespace,
+                names,
+            )
+        except PostgresGatewayError:
+            raise
+        except (KeyError, TypeError, ValueError):
+            raise PostgresCatalogValidationError() from None
+        finally:
+            self._cleanup(database_connection)
+
     def execute_migration(
         self,
         connection: ResolvedPostgresConnection,
@@ -256,16 +291,23 @@ class PsycopgPostgresGateway:
         *,
         on_started: Callable[[str, dict[str, Any]], None],
         on_intended: Callable[[PostgresCatalog], None],
+        required_empty_tables: Sequence[str] = (),
     ) -> PostgresMigrationResult:
         """Validate and apply one immutable server plan in one target transaction."""
 
         namespace = self._validated_namespace(namespace)
+        empty_preconditions = self._validated_table_names(required_empty_tables)
         database_connection: Any | None = None
         completed = 0
         commit_attempted = False
         try:
             database_connection = self._connect(connection)
             self._begin_write(database_connection)
+            for table_name in empty_preconditions:
+                self._execute_statement(
+                    database_connection,
+                    f"LOCK TABLE {self._qualified(namespace, table_name)} IN ACCESS EXCLUSIVE MODE",
+                )
             self._execute_rows(
                 database_connection,
                 "SELECT pg_advisory_xact_lock(hashtext(current_database()), hashtext(%s))",
@@ -274,6 +316,14 @@ class PsycopgPostgresGateway:
             live = self._introspect_connection(database_connection, connection, namespace)
             if live.fingerprint != expected_catalog_fingerprint:
                 raise PostgresMigrationStaleError(live.fingerprint)
+            emptiness = self._table_emptiness_connection(
+                database_connection,
+                namespace,
+                empty_preconditions,
+            )
+            nonempty = tuple(name for name, is_empty in emptiness.items() if not is_empty)
+            if nonempty:
+                raise PostgresMigrationPreconditionError(nonempty)
             identity = self._target_identity(database_connection, connection)
             xid_row = self._one(
                 self._execute_rows(
@@ -307,7 +357,11 @@ class PsycopgPostgresGateway:
                 target_identity=identity,
                 completed_step_count=completed,
             )
-        except (PostgresMigrationStaleError, PostgresCommitUncertainError):
+        except (
+            PostgresMigrationStaleError,
+            PostgresMigrationPreconditionError,
+            PostgresCommitUncertainError,
+        ):
             raise
         except PostgresGatewayError as error:
             if completed or commit_attempted:
@@ -625,6 +679,51 @@ class PsycopgPostgresGateway:
         ):
             raise PostgresInvalidNamespaceError()
         return namespace
+
+    @classmethod
+    def _validated_table_names(cls, table_names: Sequence[str]) -> tuple[str, ...]:
+        names = tuple(sorted(set(table_names)))
+        for name in names:
+            if (
+                not isinstance(name, str)
+                or not name
+                or "\x00" in name
+                or len(name.encode("utf-8")) > 63
+            ):
+                raise PostgresCatalogValidationError()
+        return names
+
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+    @classmethod
+    def _qualified(cls, namespace: str, table_name: str) -> str:
+        return f"{cls._quote_identifier(namespace)}.{cls._quote_identifier(table_name)}"
+
+    @classmethod
+    def _table_emptiness_connection(
+        cls,
+        database_connection: Any,
+        namespace: str,
+        table_names: Sequence[str],
+    ) -> dict[str, bool]:
+        result: dict[str, bool] = {}
+        for table_name in table_names:
+            row = cls._one(
+                cls._execute_rows(
+                    database_connection,
+                    (
+                        "/* schemii_table_emptiness */ "
+                        f"SELECT NOT EXISTS (SELECT 1 FROM {cls._qualified(namespace, table_name)} "
+                        "LIMIT 1) AS is_empty"
+                    ),
+                )
+            )
+            if type(row.get("is_empty")) is not bool:
+                raise PostgresCatalogValidationError()
+            result[table_name] = row["is_empty"]
+        return result
 
     def _bounded_rows(
         self,

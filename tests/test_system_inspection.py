@@ -228,6 +228,17 @@ def test_every_route_journey_is_derived_from_live_source_relationships() -> None
             assert source_object["location"]["path"].startswith("schemii/")
             assert source_object["location"]["definitionLine"] is not None
 
+    migration_review = next(
+        route
+        for route in document["routes"]
+        if route["id"]
+        == "post:/api/v1/schemii/workspaces/{workspace_id}/migration-plans"
+    )
+    assert "InMemoryDesignRepository.replace" not in {
+        objects[node["objectId"]]["qualname"]
+        for node in migration_review["journey"]["nodes"]
+    }
+
     create = next(
         route
         for route in document["routes"]

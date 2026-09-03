@@ -17,6 +17,7 @@ from schemii.common.connections.models import (
 from schemii.common.postgres import PsycopgPostgresGateway
 from schemii.common.postgres.errors import (
     PostgresMigrationExecutionError,
+    PostgresMigrationPreconditionError,
     PostgresMigrationStaleError,
 )
 from schemii.common.postgres.models import PostgresCatalog
@@ -189,3 +190,53 @@ def test_failed_multi_step_migration_rolls_back_every_target_statement(
     visible = gateway.introspect(connection, namespace)
     assert visible.fingerprint == baseline.fingerprint
     assert _table(visible, "partial_table") is None
+
+
+def test_required_column_empty_table_precondition_is_rechecked_under_lock(
+    gateway_target: GatewayTarget,
+    postgres_metadata: PostgresMetadataHarness,
+) -> None:
+    gateway = PsycopgPostgresGateway()
+    namespace = gateway_target.namespace
+    connection = gateway_target.connection
+    initial = gateway.introspect(connection, namespace)
+    created = gateway.execute_migration(
+        connection,
+        namespace,
+        initial.fingerprint,
+        [f"CREATE TABLE {namespace}.guarded_events (id bigint PRIMARY KEY)"],
+        on_started=lambda _transaction_id, _identity: None,
+        on_intended=lambda _catalog: None,
+    )
+    assert gateway.table_emptiness(connection, namespace, ["guarded_events"]) == {
+        "guarded_events": True
+    }
+
+    with postgres_metadata.connection_factory() as direct:
+        with direct.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("INSERT INTO {}.guarded_events (id) VALUES (1)").format(
+                    sql.Identifier(namespace)
+                )
+            )
+        direct.commit()
+
+    with pytest.raises(PostgresMigrationPreconditionError) as caught:
+        gateway.execute_migration(
+            connection,
+            namespace,
+            created.catalog.fingerprint,
+            [
+                f"ALTER TABLE {namespace}.guarded_events "
+                "ADD COLUMN tenant_id bigint NOT NULL"
+            ],
+            on_started=lambda _transaction_id, _identity: None,
+            on_intended=lambda _catalog: None,
+            required_empty_tables=["guarded_events"],
+        )
+
+    assert caught.value.tables == ("guarded_events",)
+    visible = gateway.introspect(connection, namespace)
+    table = _table(visible, "guarded_events")
+    assert table is not None
+    assert [column.name for column in table.columns] == ["id"]

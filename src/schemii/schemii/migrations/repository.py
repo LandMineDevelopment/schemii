@@ -105,6 +105,7 @@ class PlanAuthority:
     connection_revision: int
     database: str
     namespace: str
+    required_empty_tables: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1954,6 +1955,7 @@ class PostgresMigrationRepository:
             "connectionRevision": authority.connection_revision,
             "database": authority.database,
             "namespace": authority.namespace,
+            "requiredEmptyTables": list(authority.required_empty_tables),
         }
 
     def _baseline(self, row: dict[str, Any]) -> BaselineRecord:
@@ -1990,6 +1992,7 @@ class PostgresMigrationRepository:
                 connection_id=authority["connectionId"],
                 connection_revision=authority["connectionRevision"],
                 database=authority["database"], namespace=authority["namespace"],
+                required_empty_tables=tuple(authority.get("requiredEmptyTables", ())),
             ),
         )
 

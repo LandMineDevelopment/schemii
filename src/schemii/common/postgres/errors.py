@@ -75,6 +75,16 @@ class PostgresMigrationStaleError(PostgresGatewayError):
         super().__init__("PostgreSQL changed after the migration was reviewed")
 
 
+class PostgresMigrationPreconditionError(PostgresGatewayError):
+    code = "postgres_migration_precondition_changed"
+
+    def __init__(self, tables: tuple[str, ...]) -> None:
+        self.tables = tables
+        super().__init__(
+            "A table that had to remain empty received rows after the migration was reviewed"
+        )
+
+
 class PostgresMigrationExecutionError(PostgresGatewayError):
     code = "postgres_migration_failed"
 

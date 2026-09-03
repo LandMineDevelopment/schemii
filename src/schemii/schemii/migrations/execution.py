@@ -15,6 +15,7 @@ from schemii.common.postgres.errors import (
     PostgresCommitUncertainError,
     PostgresGatewayError,
     PostgresMigrationExecutionError,
+    PostgresMigrationPreconditionError,
     PostgresMigrationStaleError,
 )
 from schemii.common.postgres.models import PostgresCatalog
@@ -340,13 +341,20 @@ class MigrationExecutionCoordinator:
                         "connection_changed",
                         "The PostgreSQL connection changed after the migration review",
                     )
+                execution_arguments: dict[str, Any] = {
+                    "on_started": on_started,
+                    "on_intended": on_intended,
+                }
+                if record.authority.required_empty_tables:
+                    execution_arguments["required_empty_tables"] = (
+                        record.authority.required_empty_tables
+                    )
                 result = executor(
                     connection,
                     record.authority.namespace,
                     record.authority.live_catalog.fingerprint,
                     [step.sql for step in plan.steps],
-                    on_started=on_started,
-                    on_intended=on_intended,
+                    **execution_arguments,
                 )
         except PostgresMigrationStaleError as error:
             self._transition_execution(
@@ -361,6 +369,21 @@ class MigrationExecutionCoordinator:
                 error.code,
                 str(error),
                 details={"currentCatalogFingerprint": error.current_fingerprint},
+            ) from error
+        except PostgresMigrationPreconditionError as error:
+            details = {"tables": list(error.tables)}
+            self._transition_execution(
+                execution_record,
+                status="failed",
+                commit_outcome="rolled_back",
+                error_code=error.code,
+                error_detail=details,
+            )
+            raise MigrationServiceError(
+                409,
+                error.code,
+                str(error),
+                details=details,
             ) from error
         except PostgresCommitUncertainError as error:
             return self._transition_execution(

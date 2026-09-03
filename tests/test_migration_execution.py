@@ -14,14 +14,22 @@ from fastapi.testclient import TestClient
 from schemii.common.connections.store import InMemoryConnectionRepository
 from schemii.common.metadata.factory import MetadataRepositories
 from schemii.common.metadata.models import Principal, get_current_principal
-from schemii.common.postgres.errors import PostgresCommitUncertainError
+from schemii.common.postgres.errors import (
+    PostgresCommitUncertainError,
+    PostgresMigrationPreconditionError,
+)
 from schemii.common.postgres.gateway import (
     PostgresMigrationResult,
     PostgresTransactionRecovery,
 )
-from schemii.common.postgres.models import build_postgres_catalog
+from schemii.common.postgres.models import (
+    PostgresColumn,
+    PostgresTable,
+    build_postgres_catalog,
+)
 from schemii.main import ApplicationServices, create_app
-from schemii.schemii.designs.models import SchemiiDesignContent
+from schemii.schemii.designs.importer import import_postgres_catalog
+from schemii.schemii.designs.models import DesignColumn, SchemiiDesignContent
 from schemii.schemii.designs.store import design_fingerprint
 from schemii.schemii.migrations.models import (
     MigrationExecutionCreate,
@@ -81,6 +89,37 @@ def _catalog(*, server_version: str = "17.2", server_version_num: int = 170002) 
     )
 
 
+def _single_table_catalog() -> Any:
+    return build_postgres_catalog(
+        database="analytics",
+        namespace="public",
+        server_version="17.2",
+        server_version_num=170002,
+        server_timezone="UTC",
+        tables=(
+            PostgresTable(
+                namespace="public",
+                name="events",
+                kind="table",
+                is_partition=False,
+                columns=(
+                    PostgresColumn(
+                        name="id",
+                        ordinal=1,
+                        data_type="bigint",
+                        nullable=False,
+                    ),
+                ),
+            ),
+        ),
+        relationships=(),
+        functions=(),
+        views=(),
+        materialized_views=(),
+        captured_at=NOW,
+    )
+
+
 def _plan_record(
     *,
     destructive: bool = False,
@@ -91,6 +130,7 @@ def _plan_record(
     baseline_revision: int = 1,
     workspace_revision: int = 1,
     catalog: Any | None = None,
+    required_empty_tables: tuple[str, ...] = (),
 ) -> PlanRecord:
     content = SchemiiDesignContent()
     fingerprint = design_fingerprint(content)
@@ -134,6 +174,7 @@ def _plan_record(
             connection_revision=1,
             database="analytics",
             namespace="public",
+            required_empty_tables=required_empty_tables,
         ),
     )
 
@@ -291,6 +332,36 @@ class _SuccessfulGateway:
             status="committed",
             target_identity=TARGET_IDENTITY,
         )
+
+
+class _PreconditionGateway(_SuccessfulGateway):
+    def execute_migration(self, *args: Any, **kwargs: Any) -> PostgresMigrationResult:
+        self.execution_calls += 1
+        assert kwargs["required_empty_tables"] == ("events",)
+        raise PostgresMigrationPreconditionError(("events",))
+
+
+class _PlanningEmptinessGateway:
+    def __init__(self, catalog: Any, *, is_empty: bool) -> None:
+        self.catalog = catalog
+        self.is_empty = is_empty
+        self.emptiness_calls: list[tuple[str, ...]] = []
+
+    def introspect(self, connection: Any, namespace: str) -> Any:
+        del connection
+        assert namespace == "public"
+        return self.catalog
+
+    def table_emptiness(
+        self,
+        connection: Any,
+        namespace: str,
+        table_names: tuple[str, ...],
+    ) -> dict[str, bool]:
+        del connection
+        assert namespace == "public"
+        self.emptiness_calls.append(table_names)
+        return {name: self.is_empty for name in table_names}
 
 
 class _BlockingGateway(_SuccessfulGateway):
@@ -543,6 +614,36 @@ def test_worker_service_error_before_target_start_is_durably_terminal() -> None:
     assert terminal.error_code == "workspace_not_found"
     assert gateway.execution_calls == 0
     assert service.list_recoverable_executions() == []
+
+
+def test_required_empty_table_is_rechecked_and_reported_before_ddl() -> None:
+    plan = _plan_record(required_empty_tables=("events",))
+    designs = _DesignRepository(plan.plan.design_fingerprint)
+    repository = InMemoryMigrationRepository(designs)
+    _store_plan(repository, required_empty_tables=("events",))
+    gateway = _PreconditionGateway()
+    service = MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=gateway,
+        workspaces=_WorkspaceRepository(),
+        designs=designs,
+        clock=lambda: NOW,
+    )
+    receipt = service.create_execution(OWNER_ID, PLAN_ID, _request())
+    work = service.execution_coordinator.claim_next(WORKER_ID)
+    assert work is not None
+
+    terminal = service.execution_coordinator.process(work)
+
+    assert terminal.id == receipt.id
+    assert terminal.status == "failed"
+    assert terminal.commit_outcome == "rolled_back"
+    assert terminal.error_code == "postgres_migration_precondition_changed"
+    assert repository.get_execution(OWNER_ID, terminal.id).error_detail == {
+        "tables": ["events"]
+    }
+    assert gateway.execution_calls == 1
 
 
 def test_execution_transition_is_revision_cas_and_rejects_illegal_edges() -> None:
@@ -1097,6 +1198,61 @@ def test_plan_creation_ignores_presentation_only_workspace_revision() -> None:
     assert plan.workspace_revision == 4
     assert plan.apply_capable is True
     assert gateway.introspection_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("is_empty", "apply_capable", "blocker_codes", "expected_preconditions"),
+    [
+        (True, True, [], ("events",)),
+        (False, False, ["required_column_population_required"], ()),
+    ],
+)
+def test_plan_creation_uses_exact_table_emptiness_for_required_columns(
+    is_empty: bool,
+    apply_capable: bool,
+    blocker_codes: list[str],
+    expected_preconditions: tuple[str, ...],
+) -> None:
+    catalog = _single_table_catalog()
+    desired = import_postgres_catalog(catalog).content
+    desired.tables[0].columns.append(
+        DesignColumn(
+            id="column_" + "7" * 32,
+            name="tenant_id",
+            data_type="bigint",
+            nullable=False,
+        )
+    )
+    designs = _DesignRepository(
+        design_fingerprint(desired),
+        content=desired,
+    )
+    repository = InMemoryMigrationRepository(designs)
+    gateway = _PlanningEmptinessGateway(catalog, is_empty=is_empty)
+    service = MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=gateway,
+        workspaces=_WorkspaceRepository(),
+        designs=designs,
+        clock=lambda: NOW,
+    )
+
+    plan = service.create_plan(
+        OWNER_ID,
+        WORKSPACE_ID,
+        MigrationPlanCreate(
+            expected_workspace_revision=1,
+            expected_design_revision=1,
+        ),
+    )
+
+    assert plan.apply_capable is apply_capable
+    assert [item.code for item in plan.blocking_differences] == blocker_codes
+    assert gateway.emptiness_calls == [("events",)]
+    stored = repository.get_plan(OWNER_ID, plan.id)
+    assert stored.authority.required_empty_tables == expected_preconditions
+    assert [step.operation for step in plan.steps] == (["add"] if is_empty else [])
 
 
 @pytest.mark.parametrize("execution_status", ["reserved", "applying"])

@@ -515,6 +515,28 @@ def test_fingerprint_excludes_capture_time() -> None:
     assert first.fingerprint == second.fingerprint
 
 
+def test_table_emptiness_uses_an_exact_bounded_probe() -> None:
+    responses = metadata_responses()
+    responses["schemii_table_emptiness"] = [{"is_empty": True}]
+    factory = FakeConnectFactory(responses)
+
+    result = PsycopgPostgresGateway(connect_factory=factory).table_emptiness(
+        resolved_connection(),
+        "public",
+        ["empty_table"],
+    )
+
+    assert result == {"empty_table": True}
+    query, parameters = next(
+        item
+        for item in factory.connections[0].executed
+        if "schemii_table_emptiness" in item[0]
+    )
+    assert 'FROM "public"."empty_table" LIMIT 1' in query
+    assert parameters == ()
+    assert "count" not in query.lower()
+
+
 def test_missing_namespace_has_no_fallback() -> None:
     responses = catalog_responses()
     responses["schemii_namespace_exists"] = [{"namespace_exists": False}]
