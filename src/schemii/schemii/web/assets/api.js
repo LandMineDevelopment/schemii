@@ -160,4 +160,13 @@ export const api = Object.freeze({
     const response = await requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/migration-executions?limit=${encodeURIComponent(limit)}`, options);
     return response.executions;
   },
+  getConsoleSettings: options => requestJson(`${API_ROOT}/schemii/console/settings`, options),
+  createConsoleExecution: (workspaceId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions`, { ...options, method: "POST", body }),
+  getConsoleExecution: (workspaceId, executionId, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, options),
+  cancelConsoleExecution: (workspaceId, executionId, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, { ...options, method: "DELETE" }),
+  getConsoleResultPage(workspaceId, executionId, resultId, { cursor = null, ...options } = {}) {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}/results/${encodeURIComponent(resultId)}${query}`, options);
+  },
+  closeConsoleResult: (workspaceId, executionId, resultId, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}/results/${encodeURIComponent(resultId)}`, { ...options, method: "DELETE" }),
 });

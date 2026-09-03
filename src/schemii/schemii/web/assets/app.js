@@ -92,6 +92,7 @@ import {
   createWorkspaceOperationController,
 } from "./request-coordinator.js";
 import { createMigrationReviewController } from "./migration-review.js";
+import { createSqlConsole } from "./sql-console.js";
 
 const byId = id => document.getElementById(id);
 const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
@@ -159,6 +160,10 @@ const elements = {
   viewsSourceLabel: byId("views-source-label"),
   sqlDraft: byId("sql-draft"),
   newSqlDraftButton: byId("new-sql-draft-button"),
+  runSqlButton: byId("run-sql-button"),
+  cancelSqlButton: byId("cancel-sql-button"),
+  sqlEditorStatus: byId("sql-editor-status"),
+  sqlResults: byId("sql-results"),
   sqlTargetConnection: byId("sql-target-connection"),
   sqlTargetDatabase: byId("sql-target-database"),
   sqlTargetNamespace: byId("sql-target-namespace"),
@@ -497,6 +502,17 @@ const migrationReview = createMigrationReviewController({
   confirm: askConfirmation,
   notify: showToast,
   notifyError: errorToast,
+});
+const sqlConsole = createSqlConsole({
+  api,
+  draft: elements.sqlDraft,
+  runButton: elements.runSqlButton,
+  cancelButton: elements.cancelSqlButton,
+  editorStatus: elements.sqlEditorStatus,
+  results: elements.sqlResults,
+  getWorkspace: () => state.activeWorkspace,
+  showToast,
+  onError: errorToast,
 });
 
 function showDesignChangeTargets(targets) {
@@ -3238,7 +3254,8 @@ function renderObjectsBrowser() {
 
 function renderSqlTarget() {
   const workspace = state.activeWorkspace;
-  if (isDetachedWorkspace(workspace)) {
+  sqlConsole.syncWorkspace(workspace);
+  if (workspace && !workspace.connectionId) {
     elements.sqlTargetConnection.textContent = "Detached design";
     elements.sqlTargetDatabase.textContent = workspace.name;
     elements.sqlTargetNamespace.textContent = "Desired schema";
@@ -5361,8 +5378,7 @@ function bindEvents() {
     renderViews();
   }));
   elements.newSqlDraftButton.addEventListener("click", () => {
-    if (elements.sqlDraft.value) {
-      elements.sqlDraft.value = "";
+    if (sqlConsole.clearDraft()) {
       changeCues.show([{
         objectId: "sql-draft",
         scope: "sql",

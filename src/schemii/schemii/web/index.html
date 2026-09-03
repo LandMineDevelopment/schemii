@@ -176,7 +176,7 @@
 
         <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" data-change-scope="sql" aria-label="SQL workspace" hidden>
           <header class="sql-head">
-            <div><small>Backend capability required</small><h1>SQL workspace</h1></div>
+            <div><small>Bounded PostgreSQL access</small><h1>Read-only SQL Console</h1></div>
             <dl aria-label="Current PostgreSQL target">
               <div><dt>Connection</dt><dd id="sql-target-connection">No workspace open</dd></div>
               <div><dt>Database</dt><dd id="sql-target-database">No workspace open</dd></div>
@@ -187,18 +187,18 @@
             <section class="sql-editor-panel">
               <header><span><small>Unsaved draft</small><strong>Editor</strong></span><button class="ui-button compact" id="new-sql-draft-button" type="button">Clear draft</button></header>
               <textarea id="sql-draft" data-change-object-id="sql-draft" data-change-root data-change-field="value" aria-label="Unsaved SQL draft" spellcheck="false"></textarea>
-              <footer><span>Draft text is not sent or saved.</span><button class="ui-button compact" type="button" data-unavailable="sql-upload">Upload</button><button class="ui-button compact" type="button" data-unavailable="sql-save">Save</button><button class="ui-button compact primary" type="button" data-unavailable="sql-run">Run</button></footer>
+              <footer><span id="sql-editor-status">Draft text is not sent or saved.</span><button class="ui-button compact" type="button" data-unavailable="sql-upload">Upload</button><button class="ui-button compact" type="button" data-unavailable="sql-save">Save</button><button class="ui-button compact" id="cancel-sql-button" type="button" hidden>Cancel</button><button class="ui-button compact primary" id="run-sql-button" type="button">Run query</button></footer>
             </section>
             <aside class="sql-capabilities">
               <header><small>Active boundary</small><strong>Execution controls</strong></header>
-              <button type="button" data-unavailable="sql-console"><span>Console</span><small>Connect this editor to the active backend</small></button>
+              <div class="sql-capability-active"><span>Managed read</span><small>One read-only transaction · retained bounded results</small></div>
               <button type="button" data-unavailable="sql-write"><span>Write mode</span><small>Server-authorized mutation execution</small></button>
               <button type="button" data-unavailable="sql-transactions"><span>Transactions</span><small>Commit, rollback, and transaction ownership</small></button>
               <button type="button" data-unavailable="sql-export"><span>Export SQL</span><small>Generate SQL from live catalog state</small></button>
             </aside>
           </div>
-          <section class="sql-results" aria-label="SQL results">
-            <span>RESULTS</span><strong>No execution backend</strong><p>No rows, history, statuses, or results are fabricated in this workspace.</p>
+          <section class="sql-results" id="sql-results" aria-label="SQL results" aria-live="polite">
+            <div class="sql-results-state"><span>RESULTS</span><strong>Ready for a query</strong><p>Open a database-backed workspace and run read-only PostgreSQL.</p></div>
           </section>
         </section>
       </main>

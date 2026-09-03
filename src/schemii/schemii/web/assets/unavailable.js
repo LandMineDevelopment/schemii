@@ -10,8 +10,6 @@ export const UNAVAILABLE_CAPABILITIES = Object.freeze({
   "sql-upload": { title: "Upload SQL", description: "The active API has no contract for parsing or importing an uploaded SQL document." },
   "sql-export": { title: "Export SQL", description: "The active API returns catalog JSON but does not generate an authoritative SQL export." },
   "table-rows": { title: "Browse table rows", description: "The active API exposes catalog metadata only and has no table-row read contract." },
-  "sql-console": { title: "SQL console", description: "The active API has no SQL console or statement execution endpoint." },
-  "sql-run": { title: "Run SQL", description: "The active API cannot execute SQL statements or scripts." },
   "sql-save": { title: "Save SQL", description: "The active API has no saved-query contract." },
   "sql-write": { title: "SQL write mode", description: "The active API has no authorization or execution contract for SQL writes." },
   "sql-transactions": { title: "SQL transactions", description: "The active API has no server-owned transaction lifecycle contract." },

@@ -101,3 +101,33 @@ test("migration API methods retain the reviewed server contract", async () => {
     },
   ]);
 });
+
+test("console API methods bind executions and result cursors to a workspace", async () => {
+  const requests = [];
+  const fetcher = async (path, options) => {
+    requests.push({ path, method: options.method, body: options.body });
+    return {
+      ok: options.method === "DELETE" && path.includes("/results/") ? true : true,
+      status: options.method === "DELETE" && path.includes("/results/") ? 204 : 200,
+      headers: new Headers(),
+      json: async () => ({ id: "result" }),
+    };
+  };
+  const options = { fetcher, timeoutMs: 0 };
+
+  await api.getConsoleSettings(options);
+  await api.createConsoleExecution("ws_demo", { statements: ["SELECT 1"] }, options);
+  await api.getConsoleExecution("ws_demo", "cex_demo", options);
+  await api.cancelConsoleExecution("ws_demo", "cex_demo", options);
+  await api.getConsoleResultPage("ws_demo", "cex_demo", "res_demo", { ...options, cursor: "crc_demo" });
+  await api.closeConsoleResult("ws_demo", "cex_demo", "res_demo", options);
+
+  assert.deepEqual(requests.map(request => [request.method, request.path]), [
+    ["GET", "/api/v1/schemii/console/settings"],
+    ["POST", "/api/v1/schemii/workspaces/ws_demo/console/executions"],
+    ["GET", "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo"],
+    ["DELETE", "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo"],
+    ["GET", "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo/results/res_demo?cursor=crc_demo"],
+    ["DELETE", "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo/results/res_demo"],
+  ]);
+});
