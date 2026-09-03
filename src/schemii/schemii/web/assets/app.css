@@ -516,7 +516,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .compact-search { display: flex; min-width: 180px; align-items: center; gap: 7px; color: #687585; font-size: 8px; }
 .compact-search input { min-width: 0; height: 32px; flex: 1; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: #0d1218; }
 .catalog-dialog { width: min(880px, calc(100vw - 28px)); }
-.catalog-browser-list { display: grid; align-content: start; gap: 8px; min-height: min(540px, 62vh); }
+.catalog-browser-list { display: grid; min-height: min(540px, 62vh); grid-auto-rows: max-content; align-content: start; gap: 8px; }
 .catalog-object { min-width: 0; overflow: hidden; border: 1px solid #29333f; border-radius: 7px; background: #141a21; }
 .catalog-object summary { display: grid; min-height: 50px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 8px 11px; cursor: pointer; list-style: none; }
 .catalog-object summary::-webkit-details-marker { display: none; }

@@ -282,6 +282,17 @@ def test_views_use_compact_context_specific_empty_states() -> None:
     assert ".view-detail.is-empty { display: grid; place-items: center; }" in styles
 
 
+def test_catalog_browser_rows_keep_their_content_height_when_scrolling() -> None:
+    styles = (
+        files("schemii.schemii")
+        .joinpath("web", "assets", "app.css")
+        .read_text(encoding="utf-8")
+    )
+
+    assert ".catalog-browser-list { display: grid;" in styles
+    assert "grid-auto-rows: max-content" in styles
+
+
 def test_postgres_import_is_exposed_only_as_new_workspace_creation() -> None:
     web = files("schemii.schemii").joinpath("web")
     index = web.joinpath("index.html").read_text(encoding="utf-8")
