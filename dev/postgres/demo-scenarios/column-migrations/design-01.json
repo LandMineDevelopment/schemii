@@ -1,0 +1,17 @@
+{
+  "changes": [
+    {
+      "operation": "addColumn",
+      "table": "empty_migration_lab",
+      "column": "required_code",
+      "dataType": "text",
+      "nullable": false
+    },
+    {
+      "operation": "setColumnType",
+      "table": "teams",
+      "column": "slug",
+      "dataType": "character varying(160)"
+    }
+  ]
+}

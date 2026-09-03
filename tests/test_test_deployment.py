@@ -168,6 +168,7 @@ def test_launcher_seeds_an_isolated_migration_demo_database() -> None:
     assert "SCHEMII_RESET_MIGRATION_DEMO" in compose
     assert "CREATE TABLE public.tasks" in demo
     assert "CREATE TABLE public.task_comments" in demo
+    assert "CREATE TABLE public.empty_migration_lab" in demo
     assert "CREATE INDEX tasks_assignee_due_idx" in demo
 
 
@@ -196,6 +197,7 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
     scenarios = ROOT / "dev" / "postgres" / "demo-scenarios"
     expected = {
         "baseline",
+        "column-migrations",
         "compatible-drift",
         "conflicting-drift",
         "undo-redo",
@@ -219,6 +221,27 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
     )
     assert "ADD COLUMN external_reference" in compatible
     assert "ADD COLUMN migration_note" in conflicting
+
+    column_migrations = __import__("json").loads(
+        (scenarios / "column-migrations" / "design-01.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert column_migrations["changes"] == [
+        {
+            "operation": "addColumn",
+            "table": "empty_migration_lab",
+            "column": "required_code",
+            "dataType": "text",
+            "nullable": False,
+        },
+        {
+            "operation": "setColumnType",
+            "table": "teams",
+            "column": "slug",
+            "dataType": "character varying(160)",
+        },
+    ]
 
     undo_redo = __import__("json").loads(
         (scenarios / "undo-redo" / "manifest.json").read_text(encoding="utf-8")

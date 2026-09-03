@@ -161,8 +161,10 @@ workspace, design, baseline, layout, and history metadata with:
 ./start.sh --reset-demo baseline
 ```
 
-The saved scenarios are `baseline`, `compatible-drift`, `conflicting-drift`, and
-`undo-redo`. The reset output prints the new workspace URL. Each run records the
+The saved scenarios are `baseline`, `column-migrations`, `compatible-drift`,
+`conflicting-drift`, and `undo-redo`. `column-migrations` demonstrates a new
+required column on an empty table alongside a safe widening on a populated
+table. The reset output prints the new workspace URL. Each run records the
 current Git commit (with `+dirty` when applicable) and a digest of its base and
 alteration files in `schemii_fixture.fixture_state` inside the demo database.
 This makes a reproduced state traceable to both code and fixture content.
