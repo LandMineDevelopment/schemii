@@ -612,7 +612,7 @@ class SchemiiDesignLayoutReplace(ApiModel):
 
 
 class SchemiiDesignExportRequest(ApiModel):
-    """Render a design without requiring an attached PostgreSQL target."""
+    """Render an editable design without requiring a PostgreSQL target."""
 
     expected_design_revision: DesignRevision
     format: Literal["postgresql_sql", "schemii_json"] = "postgresql_sql"

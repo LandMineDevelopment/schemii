@@ -216,7 +216,7 @@ class MigrationService:
         owner_id: str,
         workspace_id: str,
     ) -> DesignWorkspaceSnapshot:
-        """Return all detached-design client state from one repository snapshot."""
+        """Return all editable-design client state from one repository snapshot."""
 
         self._workspace(owner_id, workspace_id)
         baseline, _ = self._design_baseline(owner_id, workspace_id)
@@ -333,13 +333,17 @@ class MigrationService:
             raise MigrationServiceError(
                 409,
                 "editable_design_required",
-                "Migration planning requires an editable targeted design workspace",
+                "Migration planning requires a database-derived design workspace",
             )
-        if workspace.connection_id is None or workspace.database is None or workspace.namespace is None:
+        if (
+            workspace.connection_id is None
+            or workspace.database is None
+            or workspace.namespace is None
+        ):
             raise MigrationServiceError(
                 409,
-                "workspace_target_required",
-                "Attach a PostgreSQL target before planning a migration",
+                "database_design_required",
+                "Migrations are available only in editable designs created from PostgreSQL",
             )
         try:
             execution_unsettled = self._repository.blocks_workspace_lifecycle(
@@ -361,6 +365,26 @@ class MigrationService:
                 "The desired design changed after it was opened",
                 details={"currentDesignRevision": design.revision},
             )
+
+        try:
+            baseline = self._repository.current_baseline(owner_id, workspace_id)
+        except MigrationStorageUnavailableError as error:
+            raise self._storage_error(error) from error
+        if baseline is None:
+            raise MigrationServiceError(
+                409,
+                "migration_baseline_missing",
+                "The database-derived workspace is missing its original PostgreSQL baseline",
+                details={"workspaceId": workspace_id},
+            )
+        self._validate_baseline_target(
+            baseline.connection_id,
+            baseline.database,
+            baseline.namespace,
+            workspace.connection_id,
+            workspace.database,
+            workspace.namespace,
+        )
 
         try:
             with self._connections.use(owner_id, workspace.connection_id) as connection:
@@ -386,40 +410,6 @@ class MigrationService:
                 "catalog_changed",
                 "PostgreSQL changed after the catalog shown in the browser",
                 details={"currentCatalogFingerprint": catalog.fingerprint},
-            )
-
-        baseline = self._repository.current_baseline(owner_id, workspace_id)
-        if baseline is None:
-            baseline_content, baseline_warnings, baseline_complete = new_baseline_content(
-                catalog,
-                design.content,
-            )
-            try:
-                baseline = self._repository.create_baseline(
-                    owner_id=owner_id,
-                    workspace_id=workspace_id,
-                    connection_id=workspace.connection_id,
-                    connection_revision=connection_revision,
-                    database=workspace.database,
-                    namespace=workspace.namespace,
-                    design_revision=design.revision,
-                    content=baseline_content,
-                    catalog=catalog,
-                    complete=baseline_complete,
-                    issues=[warning.model_dump(mode="json") for warning in baseline_warnings],
-                    source="import" if workspace.import_summary is not None else "target_attach",
-                    expected_predecessor_id=None,
-                )
-            except MigrationStorageUnavailableError as error:
-                raise self._storage_error(error) from error
-        else:
-            self._validate_baseline_target(
-                baseline.connection_id,
-                baseline.database,
-                baseline.namespace,
-                workspace.connection_id,
-                workspace.database,
-                workspace.namespace,
             )
 
         reconciliation = reconcile_designs(

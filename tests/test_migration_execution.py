@@ -201,7 +201,7 @@ class _WorkspaceRepository:
             connection_id=self.connection_id,
             database=self.database,
             namespace=self.namespace,
-            import_summary=None,
+            import_summary=SimpleNamespace(complete=True),
         )
 
 
@@ -408,6 +408,7 @@ def _seed_baseline(
     *,
     workspace_id: str = WORKSPACE_ID,
     catalog: Any | None = None,
+    content: SchemiiDesignContent | None = None,
 ) -> Any:
     current = repository.current_baseline(OWNER_ID, workspace_id)
     if current is not None:
@@ -420,11 +421,11 @@ def _seed_baseline(
         database="analytics",
         namespace="public",
         design_revision=1,
-        content=SchemiiDesignContent(),
+        content=content or SchemiiDesignContent(),
         catalog=catalog or _catalog(),
         complete=True,
         issues=[],
-        source="target_attach",
+        source="import",
         expected_predecessor_id=None,
     )
 
@@ -1177,6 +1178,7 @@ def test_plan_creation_ignores_presentation_only_workspace_revision() -> None:
     design = SchemiiDesignContent()
     designs = _DesignRepository(design_fingerprint(design), content=design)
     repository = InMemoryMigrationRepository(designs)
+    _seed_baseline(repository)
     service = MigrationService(
         repository=repository,
         connections=_Connections(),
@@ -1200,6 +1202,33 @@ def test_plan_creation_ignores_presentation_only_workspace_revision() -> None:
     assert gateway.introspection_calls == 1
 
 
+def test_plan_creation_rejects_an_imported_workspace_without_its_atomic_baseline() -> None:
+    gateway = _SuccessfulGateway()
+    design = SchemiiDesignContent()
+    designs = _DesignRepository(design_fingerprint(design), content=design)
+    service = MigrationService(
+        repository=InMemoryMigrationRepository(designs),
+        connections=_Connections(),
+        postgres=gateway,
+        workspaces=_WorkspaceRepository(),
+        designs=designs,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(MigrationServiceError) as missing:
+        service.create_plan(
+            OWNER_ID,
+            WORKSPACE_ID,
+            MigrationPlanCreate(
+                expected_workspace_revision=1,
+                expected_design_revision=1,
+            ),
+        )
+
+    assert missing.value.code == "migration_baseline_missing"
+    assert gateway.introspection_calls == 0
+
+
 @pytest.mark.parametrize(
     ("is_empty", "apply_capable", "blocker_codes", "expected_preconditions"),
     [
@@ -1215,6 +1244,7 @@ def test_plan_creation_uses_exact_table_emptiness_for_required_columns(
 ) -> None:
     catalog = _single_table_catalog()
     desired = import_postgres_catalog(catalog).content
+    baseline_content = desired.model_copy(deep=True)
     desired.tables[0].columns.append(
         DesignColumn(
             id="column_" + "7" * 32,
@@ -1228,6 +1258,7 @@ def test_plan_creation_uses_exact_table_emptiness_for_required_columns(
         content=desired,
     )
     repository = InMemoryMigrationRepository(designs)
+    _seed_baseline(repository, catalog=catalog, content=baseline_content)
     gateway = _PlanningEmptinessGateway(catalog, is_empty=is_empty)
     service = MigrationService(
         repository=repository,

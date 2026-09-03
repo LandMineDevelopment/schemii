@@ -56,7 +56,7 @@ def list_workspace_relations(
     search: str | None = Query(default=None, max_length=256),
     principal: Principal = Depends(get_current_principal),
 ) -> RelationListResponse:
-    """Page live relation summaries for an attached workspace target."""
+    """Page relation summaries from a workspace's creation-time target."""
 
     try:
         return _service(request).list(principal.user_id, workspace_id, cursor=cursor, page_size=page_size, search=search)

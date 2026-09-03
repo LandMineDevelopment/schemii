@@ -140,7 +140,7 @@ class ConsoleService:
             raise ConsoleServiceError(
                 409,
                 "console_target_required",
-                "Attach this workspace to PostgreSQL before running SQL",
+                "SQL requires a workspace created from or for a PostgreSQL database",
             )
         try:
             profile = self._connections.get(owner_id, workspace.connection_id)

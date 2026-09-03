@@ -499,7 +499,7 @@ export function renderFunctions(container, catalog, query = "", { onEdit = null,
 export function renderTypes(container, catalog, query = "", filter = "all", { onEdit = null, onDelete = null } = {}) {
   replace(container);
   if (!catalog) {
-    container.append(emptyPanel("TYPE", "No catalog loaded", "Open a detached design to browse its custom types."));
+    container.append(emptyPanel("TYPE", "No catalog loaded", "Open a local or imported design to browse its custom types."));
     return { shown: 0, matching: 0, total: 0 };
   }
   const available = catalog.types || [];

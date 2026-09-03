@@ -75,7 +75,7 @@ export function createSqlConsole({
     if (!workspace()) {
       replace(results, statePanel("SQL", "No workspace open", "Open a database-backed workspace to query PostgreSQL."));
     } else if (!available()) {
-      replace(results, statePanel("SQL", "No PostgreSQL target", "Detached designs do not have a database to query."));
+      replace(results, statePanel("SQL", "No PostgreSQL target", "Local designs do not have a database to query."));
     } else {
       replace(results, statePanel("RESULTS", "Ready for a query", "Run SELECT, WITH, VALUES, SHOW, or a read-only EXPLAIN statement."));
     }

@@ -140,7 +140,7 @@ def test_postgres_plan_retention_preserves_execution_and_reconciliation_records(
         catalog=_catalog(),
         complete=True,
         issues=[],
-        source="target_attach",
+        source="import",
         expected_predecessor_id=None,
     )
     abandoned = _plan_record(

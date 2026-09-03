@@ -774,7 +774,7 @@ const canvas = new CatalogCanvas({
 });
 
 function selectedViewAnalysisContext(view = currentCatalogView()) {
-  if (!isDetachedWorkspace() || !state.activeWorkspace || !state.design || !view?.designId) return null;
+  if (!isDesignWorkspace() || !state.activeWorkspace || !state.design || !view?.designId) return null;
   return {
     key: [
       state.activeWorkspace.id,
@@ -880,14 +880,14 @@ function workspaceLabel(workspace) {
 }
 
 function workspaceTargetLabel(workspace) {
-  if (!workspace.connectionId) return "Detached design";
+  if (!workspace.connectionId) return "Local design · no database";
   const connection = connectionById(workspace.connectionId)?.name || workspace.connectionId;
   return workspace.mode === "design"
     ? `Imported design · ${connection} · ${workspace.database}.${workspace.namespace}`
     : connection;
 }
 
-function isDetachedWorkspace(workspace = state.activeWorkspace) {
+function isDesignWorkspace(workspace = state.activeWorkspace) {
   return Boolean(workspace && (
     workspace.mode === "design"
     || (!workspace.mode && !workspace.connectionId)
@@ -903,41 +903,41 @@ function currentCatalogView() {
 }
 
 function selectedDesignTable() {
-  if (!isDetachedWorkspace() || !state.design || !state.selectedTableId) return null;
+  if (!isDesignWorkspace() || !state.design || !state.selectedTableId) return null;
   return state.design.content.tables.find(table => table.id === state.selectedTableId) || null;
 }
 
 function updateDesignControls() {
-  const detached = isDetachedWorkspace();
+  const designWorkspace = isDesignWorkspace();
   const busy = state.catalogLoading || state.designSubmitting || state.historySubmitting || state.layoutConflict || state.inspectorTableEditorDirty;
   const selected = selectedDesignTable();
   const hasTargetKey = state.design?.content.tables.some(table => (
     table.keys.some(key => key.kind === "primary" || key.kind === "unique")
   ));
-  elements.createTableButton.disabled = !detached || busy;
-  elements.createRelationshipButton.disabled = !detached || busy || !hasTargetKey;
+  elements.createTableButton.disabled = !designWorkspace || busy;
+  elements.createRelationshipButton.disabled = !designWorkspace || busy || !hasTargetKey;
   elements.createRelationshipButton.classList.toggle("active", state.relationshipAuthoring);
   elements.createRelationshipButton.setAttribute("aria-pressed", state.relationshipAuthoring ? "true" : "false");
   elements.createRelationshipButton.title = state.relationshipAuthoring ? "Cancel relationship selection" : "Create relationship";
-  elements.createKeyButton.disabled = !detached || busy || !state.design?.content.tables.length;
+  elements.createKeyButton.disabled = !designWorkspace || busy || !state.design?.content.tables.length;
   elements.createKeyButton.classList.toggle("active", state.keyAuthoring);
   elements.createKeyButton.setAttribute("aria-pressed", state.keyAuthoring ? "true" : "false");
   elements.createKeyButton.title = state.keyAuthoring ? "Cancel key selection" : "Create primary or unique key";
-  elements.createIndexButton.disabled = !detached || busy || !state.design?.content.tables.length;
+  elements.createIndexButton.disabled = !designWorkspace || busy || !state.design?.content.tables.length;
   elements.createIndexButton.classList.toggle("active", state.indexAuthoring);
   elements.createIndexButton.setAttribute("aria-pressed", state.indexAuthoring ? "true" : "false");
   elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index";
   elements.deleteTableButton.disabled = !selected || busy;
-  elements.createViewButton.disabled = !detached || busy;
-  elements.createFunctionButton.disabled = !detached || busy;
-  elements.typesButton.disabled = !detached || busy;
-  elements.createTypeButton.disabled = !detached || busy;
-  elements.createTriggerButton.disabled = !detached || busy || !(
+  elements.createViewButton.disabled = !designWorkspace || busy;
+  elements.createFunctionButton.disabled = !designWorkspace || busy;
+  elements.typesButton.disabled = !designWorkspace || busy;
+  elements.createTypeButton.disabled = !designWorkspace || busy;
+  elements.createTriggerButton.disabled = !designWorkspace || busy || !(
     state.design?.content.tables.length || state.design?.content.views.length
   );
-  elements.undoDesignButton.disabled = !detached || busy || !state.designHistory?.canUndo;
-  elements.redoDesignButton.disabled = !detached || busy || !state.designHistory?.canRedo;
-  elements.resetDesignButton.disabled = !detached || busy || !state.designHistory?.canResetToBaseline;
+  elements.undoDesignButton.disabled = !designWorkspace || busy || !state.designHistory?.canUndo;
+  elements.redoDesignButton.disabled = !designWorkspace || busy || !state.designHistory?.canRedo;
+  elements.resetDesignButton.disabled = !designWorkspace || busy || !state.designHistory?.canResetToBaseline;
   elements.undoDesignButton.title = state.designHistory?.undo
     ? `Undo: ${state.designHistory.undo.title}${state.designHistory.undo.crossesBaseline ? " · crosses the PostgreSQL baseline" : ""}`
     : "Nothing to undo";
@@ -1074,7 +1074,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } =
 }
 
 function updateHeader() {
-  const detached = isDetachedWorkspace();
+  const designWorkspace = isDesignWorkspace();
   elements.workspaceTitle.textContent = state.activeWorkspace ? workspaceLabel(state.activeWorkspace) : "No workspace open";
   elements.runtimeDot.className = "status-dot";
   if (state.runtimeError) {
@@ -1090,7 +1090,7 @@ function updateHeader() {
     elements.runtimeDot.classList.add("ready");
     if (state.layoutConflict) elements.runtimeStatus.textContent = "Layout saving stopped · conflict";
     else if (state.layoutSaving) elements.runtimeStatus.textContent = "Saving layout";
-    else if (state.catalogLoading) elements.runtimeStatus.textContent = detached ? "Loading saved design" : "Loading live catalog";
+    else if (state.catalogLoading) elements.runtimeStatus.textContent = designWorkspace ? "Loading saved design" : "Loading live catalog";
     else elements.runtimeStatus.textContent = `Ready · ${state.readiness.persistence}`;
   }
   elements.saveLayoutButton.disabled = !state.catalog || state.catalogLoading || state.layoutSaving || state.layoutConflict;
@@ -1098,16 +1098,16 @@ function updateHeader() {
     || state.designSubmitting
     || state.historySubmitting
     || workspaceOperations.isMutating();
-  elements.refreshCatalogButton.title = detached ? "Refresh saved design" : "Refresh live catalog";
+  elements.refreshCatalogButton.title = designWorkspace ? "Refresh saved design" : "Refresh live catalog";
   elements.refreshCatalogButton.setAttribute("aria-label", elements.refreshCatalogButton.title);
   elements.refreshViewsButton.disabled = state.catalogLoading;
-  elements.createViewButton.disabled = !detached || state.catalogLoading || state.designSubmitting || state.layoutConflict;
+  elements.createViewButton.disabled = !designWorkspace || state.catalogLoading || state.designSubmitting || state.layoutConflict;
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
   updateInspectorTableActions();
-  elements.downloadCatalogButton.textContent = detached ? "Download desired design JSON" : "Download live catalog JSON";
-  elements.exportDesignSqlButton.disabled = !detached || !state.design || state.catalogLoading;
+  elements.downloadCatalogButton.textContent = designWorkspace ? "Download desired design JSON" : "Download live catalog JSON";
+  elements.exportDesignSqlButton.disabled = !designWorkspace || !state.design || state.catalogLoading;
   elements.reviewMigrationButton.disabled = !migrationReview.available()
     || state.catalogLoading
     || state.designSubmitting
@@ -1116,11 +1116,11 @@ function updateHeader() {
   elements.reviewMigrationButton.title = migrationReview.available()
     ? "Compare this saved design with its live PostgreSQL target"
     : "Migration review requires a database-backed design workspace";
-  elements.inspectorEyebrow.textContent = detached ? "Edit designed table" : "Read-only table inspector";
-  elements.inspectorEmptyCopy.textContent = detached
+  elements.inspectorEyebrow.textContent = designWorkspace ? "Edit designed table" : "Read-only table inspector";
+  elements.inspectorEmptyCopy.textContent = designWorkspace
     ? "Select a designed table to inspect its columns, constraints, indexes, and relationships."
     : "Select a live table to inspect columns, constraints, indexes, triggers, and relationships.";
-  elements.canvas.setAttribute("aria-label", detached ? "Desired schema table diagram canvas" : "Live table diagram canvas");
+  elements.canvas.setAttribute("aria-label", designWorkspace ? "Desired schema table diagram canvas" : "Live table diagram canvas");
   renderSqlTarget();
 }
 
@@ -1152,7 +1152,7 @@ function renderCatalogState() {
     return;
   }
   if (!state.activeWorkspace) {
-    const card = stateCard("WS", "Open a schema workspace", "Create a database-independent design or open a workspace attached to live PostgreSQL.", "Open workspaces", openWorkspaces);
+    const card = stateCard("WS", "Open a schema workspace", "Create a local design, import a new editable design from PostgreSQL, or inspect a live database.", "Open workspaces", openWorkspaces);
     const connectionAction = element("button", { className: "ui-button compact", type: "button", text: "Manage connections" });
     connectionAction.addEventListener("click", openConnections);
     card.append(connectionAction);
@@ -1160,7 +1160,7 @@ function renderCatalogState() {
     return;
   }
   if (state.catalogLoading) {
-    elements.catalogState.append(stateCard("…", isDetachedWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
+    elements.catalogState.append(stateCard("…", isDesignWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
     return;
   }
   if (state.catalogError) {
@@ -1173,14 +1173,14 @@ function renderCatalogState() {
   }
   if (state.layoutError && !state.layoutConflict) {
     const panel = errorPanel(state.layoutError, { retryLabel: "Retry layout save", onRetry: saveLayout });
-    const reload = element("button", { className: "ui-button compact", type: "button", text: isDetachedWorkspace() ? "Reload saved design and layout" : "Reload live catalog and server layout" });
+    const reload = element("button", { className: "ui-button compact", type: "button", text: isDesignWorkspace() ? "Reload saved design and layout" : "Reload live catalog and server layout" });
     reload.addEventListener("click", () => loadActiveWorkspace());
     panel.append(reload);
     elements.catalogState.append(panel);
     return;
   }
   if (state.catalog && !state.catalog.tables.length) {
-    if (isDetachedWorkspace()) {
+    if (isDesignWorkspace()) {
       elements.catalogState.append(stateCard("+", "Start with a table", "This design is empty. Add a table and its initial columns; Schemii will save the desired schema independently of PostgreSQL.", "Create table", () => openDesignTableEditor()));
     } else {
       elements.catalogState.append(stateCard("0", "No live tables", `PostgreSQL reported no tables in ${state.catalog.namespace}.`, "Refresh catalog", refreshCatalog));
@@ -1806,18 +1806,18 @@ function updateWorkspaceDatabase() {
 
 function updateWorkspaceMode() {
   const mode = elements.workspaceMode.value;
-  const targeted = mode === "attached" || mode === "import";
+  const targeted = mode === "live" || mode === "import";
   for (const field of elements.workspaceTargetFields) field.hidden = !targeted;
   elements.workspaceConnection.required = targeted;
   elements.workspaceNamespace.required = targeted;
   elements.workspaceFormCopy.textContent = mode === "import"
     ? "Import the selected PostgreSQL namespace into a new editable workspace, review server-derived changes, and apply approved migrations back to PostgreSQL."
-    : mode === "attached"
+    : mode === "live"
       ? "Inspect the selected PostgreSQL namespace directly. Refresh follows the database; editing is disabled."
       : "Create an editable workspace that exists only in Schemii. It does not read from or write to PostgreSQL.";
   elements.createWorkspaceButton.textContent = mode === "import"
-    ? "Create database workspace"
-    : mode === "attached"
+    ? "Import as editable workspace"
+    : mode === "live"
       ? "Open read-only database"
       : "Create empty design";
 }
@@ -1888,7 +1888,7 @@ async function submitWorkspace(event) {
   event.preventDefault();
   if (state.workspaceSubmitting) return;
   const mode = elements.workspaceMode.value;
-  const targeted = mode === "attached" || mode === "import";
+  const targeted = mode === "live" || mode === "import";
   const connection = connectionById(elements.workspaceConnection.value);
   const name = elements.workspaceName.value.trim();
   const namespace = elements.workspaceNamespace.value;
@@ -1908,7 +1908,7 @@ async function submitWorkspace(event) {
       ? "Inspecting PostgreSQL and creating a new editable design…"
       : targeted
         ? "Creating and validating the workspace target…"
-        : "Creating the detached schema design…",
+        : "Creating the local schema design…",
   }));
   try {
     if (!await flushLayoutBeforeTransition()) {
@@ -2068,12 +2068,12 @@ async function openWorkspace(workspace, { historyMode = "push" } = {}) {
 }
 
 async function loadActiveWorkspace(options = {}) {
-  if (isDetachedWorkspace()) return loadActiveDesign(options);
+  if (isDesignWorkspace()) return loadActiveDesign(options);
   return loadActiveCatalog(options);
 }
 
 async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
-  if (!isDetachedWorkspace()) return;
+  if (!isDesignWorkspace()) return;
   const workspaceId = state.activeWorkspace.id;
   const request = workspaceOperations.beginRead();
   state.catalogLoading = true;
@@ -2636,14 +2636,14 @@ async function saveLayout() {
   window.clearTimeout(state.layoutTimer);
   if (!state.layoutDirty || state.layoutSaving || state.layoutConflict || !state.activeWorkspace || !state.catalog) return;
   const workspaceId = state.activeWorkspace.id;
-  const detached = isDetachedWorkspace();
-  const connection = detached ? null : connectionById(state.activeWorkspace.connectionId);
-  if (!detached && !connection) {
+  const designWorkspace = isDesignWorkspace();
+  const connection = designWorkspace ? null : connectionById(state.activeWorkspace.connectionId);
+  if (!designWorkspace && !connection) {
     state.layoutError = new Error("The workspace connection is unavailable. Reload connections before saving this layout");
     renderCatalogState();
     return;
   }
-  if (detached && (!state.design || !state.designLayout)) {
+  if (designWorkspace && (!state.design || !state.designLayout)) {
     state.layoutError = new Error("The saved design layout is unavailable. Refresh the design before saving positions");
     renderCatalogState();
     return;
@@ -2655,7 +2655,7 @@ async function saveLayout() {
   state.layoutError = null;
   renderCatalogState();
   updateHeader();
-  const savePromise = detached
+  const savePromise = designWorkspace
     ? api.replaceDesignLayout(workspaceId, {
       expectedLayoutRevision: state.designLayout.revision,
       expectedDesignRevision: state.design.revision,
@@ -2671,7 +2671,7 @@ async function saveLayout() {
   try {
     const result = await savePromise;
     if (saveGeneration !== state.layoutSaveGeneration || state.activeWorkspace?.id !== workspaceId) return;
-    if (detached) {
+    if (designWorkspace) {
       commitWorkspaceState({ designLayout: result }, { render: false, canvas: false });
     } else {
       commitWorkspaceState({ activeWorkspace: result }, { render: false, canvas: false });
@@ -2775,7 +2775,7 @@ function renderCatalogSurfaces() {
     replace(elements.typesList);
     elements.typesCount.textContent = state.catalog?.source === "design"
       ? `${state.catalog.types.length} designed · open to browse`
-      : "Open a detached design";
+      : "Open a local or imported design";
   }
   if (elements.objectsDialog.open) renderObjectsBrowser();
   else {
@@ -2880,7 +2880,7 @@ function renderSelectedViewDetail() {
 }
 
 function selectedDesignView() {
-  if (!isDetachedWorkspace() || !state.design || !state.selectedViewId) return null;
+  if (!isDesignWorkspace() || !state.design || !state.selectedViewId) return null;
   return state.design.content.views.find(view => view.id === state.selectedViewId) || null;
 }
 
@@ -2987,7 +2987,7 @@ function updateDesignViewPopulation() {
 }
 
 function openDesignViewEditor(viewId = null) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const view = viewId ? state.design.content.views.find(item => item.id === viewId) : null;
   if (viewId && !view) {
     showToast("The selected view is no longer in this design.", { error: true });
@@ -3022,7 +3022,7 @@ function openDesignViewEditor(viewId = null) {
 
 async function submitDesignView(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   const editing = Boolean(state.designViewEditorId);
   let result;
   try {
@@ -3185,7 +3185,7 @@ function scheduleDesignTypeAnalysis(delay = 280) {
 }
 
 function openDesignTypeEditor(typeId = null) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const designType = typeId ? (state.design.content.types || []).find(item => item.id === typeId) : null;
   if (typeId && !designType) {
     showToast("The selected type is no longer in this design.", { error: true });
@@ -3210,7 +3210,7 @@ function openDesignTypeEditor(typeId = null) {
 
 async function submitDesignType(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   const editing = Boolean(state.designTypeEditorId);
   const definition = elements.designTypeDefinition.value.trim();
   state.designSubmitting = true;
@@ -3348,7 +3348,7 @@ function scheduleDesignRoutineAnalysis(delay = 280) {
 }
 
 function openDesignRoutineEditor(routineId = null) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const routine = routineId ? state.design.content.functions.find(item => item.id === routineId) : null;
   if (routineId && !routine) {
     showToast("The selected routine is no longer in this design.", { error: true });
@@ -3373,7 +3373,7 @@ function openDesignRoutineEditor(routineId = null) {
 
 async function submitDesignRoutine(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   const editing = Boolean(state.designRoutineEditorId);
   const definition = elements.designRoutineDefinition.value.trim();
   state.designSubmitting = true;
@@ -3519,7 +3519,7 @@ function defaultTriggerDefinition(relationName) {
 }
 
 function openDesignTriggerEditor(triggerId = null, relationName = null) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const trigger = triggerId ? (state.design.content.triggers || []).find(item => item.id === triggerId) : null;
   if (triggerId && !trigger) {
     showToast("The selected trigger is no longer in this design.", { error: true });
@@ -3550,7 +3550,7 @@ function openDesignTriggerEditor(triggerId = null, relationName = null) {
 
 async function submitDesignTrigger(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   const editing = Boolean(state.designTriggerEditorId);
   const definition = elements.designTriggerDefinition.value.trim();
   state.designSubmitting = true;
@@ -3717,7 +3717,7 @@ function renderSqlTarget() {
   sqlConsole.syncWorkspace(workspace);
   inspectorSqlConsole.syncWorkspace(workspace);
   if (workspace && !workspace.connectionId) {
-    elements.sqlTargetConnection.textContent = "Detached design";
+    elements.sqlTargetConnection.textContent = "Local design · no database";
     elements.sqlTargetDatabase.textContent = workspace.name;
     elements.sqlTargetNamespace.textContent = "Desired schema";
     return;
@@ -4007,7 +4007,7 @@ function clearDesignColumns(container) {
 }
 
 function openDesignTableEditor(tableId = null) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   cancelColumnAuthoring();
   const table = tableId ? state.design.content.tables.find(item => item.id === tableId) : null;
   if (tableId && !table) {
@@ -4149,7 +4149,7 @@ async function submitInspectorTable(event) {
   if (
     state.designSubmitting
     || !state.inspectorTableEditorDirty
-    || !isDetachedWorkspace()
+    || !isDesignWorkspace()
     || !state.design
   ) return;
   const editingId = state.inspectorTableEditorId;
@@ -4456,7 +4456,7 @@ async function executeDesignBaselineReset(preview) {
 
 async function submitDesignTable(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   let table;
   try {
     table = createDesignTable(elements.designTableName.value, designColumnValues());
@@ -4538,7 +4538,7 @@ function updateKeyAuthoringPresentation() {
 }
 
 function setKeyAuthoring(enabled, { tableId = null, keyId = null, columnIds = null } = {}) {
-  const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
+  const active = Boolean(enabled && isDesignWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
   if (active && state.relationshipAuthoring) setRelationshipAuthoring(false);
   if (active && state.indexAuthoring) setIndexAuthoring(false);
   state.keyAuthoring = active;
@@ -4649,7 +4649,7 @@ function setIndexAuthoring(enabled, {
   indexId = null,
   columnIds = null,
 } = {}) {
-  const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
+  const active = Boolean(enabled && isDesignWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
   if (active && state.relationshipAuthoring) setRelationshipAuthoring(false);
   if (active && state.keyAuthoring) setKeyAuthoring(false);
   state.indexAuthoring = active;
@@ -4806,7 +4806,7 @@ function renderDesignKeyColumns() {
 }
 
 function openDesignKeyEditor({ tableId, keyId = null, columnIds }) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const table = designTableById(tableId);
   const key = keyId ? designKeyById(tableId, keyId) : null;
   if (!table || (keyId && !key)) {
@@ -4834,7 +4834,7 @@ function openDesignKeyEditor({ tableId, keyId = null, columnIds }) {
 
 async function submitDesignKey(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   let result;
   try {
     result = saveDesignKey(state.design.content, {
@@ -4919,7 +4919,7 @@ function updateDesignCheckDraft() {
 }
 
 function openDesignCheckEditor({ tableId, checkId = null }) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const table = designTableById(tableId);
   const check = checkId ? designCheckById(tableId, checkId) : null;
   if (!table || (checkId && !check)) {
@@ -4944,7 +4944,7 @@ function openDesignCheckEditor({ tableId, checkId = null }) {
 
 async function submitDesignCheck(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   let result;
   try {
     result = saveDesignCheck(state.design.content, {
@@ -5058,7 +5058,7 @@ function renderDesignIndexColumns() {
 }
 
 function openDesignIndexEditor({ tableId, indexId = null, columnIds = [] }) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const table = designTableById(tableId);
   const index = indexId ? designIndexById(tableId, indexId) : null;
   if (!table || (indexId && !index)) {
@@ -5088,7 +5088,7 @@ function openDesignIndexEditor({ tableId, indexId = null, columnIds = [] }) {
 
 async function submitDesignIndex(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   let result;
   try {
     result = saveDesignIndex(state.design.content, {
@@ -5265,7 +5265,7 @@ function updateRelationshipTargetKeys(draft) {
 }
 
 function openDesignRelationshipEditor(draft, { relationshipId = null, defaults = null } = {}) {
-  if (!isDetachedWorkspace() || !state.design || state.catalogLoading) return;
+  if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   const existing = relationshipId ? designRelationshipById(relationshipId) : null;
   if (relationshipId && !existing) {
     showToast("The selected relationship is no longer in this design.", { error: true });
@@ -5322,7 +5322,7 @@ function editDesignRelationship(relationship) {
 }
 
 function setRelationshipAuthoring(enabled, { relationshipId = null, defaults = null } = {}) {
-  const active = Boolean(enabled && isDetachedWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
+  const active = Boolean(enabled && isDesignWorkspace() && state.design && !state.catalogLoading && !state.designSubmitting);
   if (active && state.keyAuthoring) setKeyAuthoring(false);
   if (active && state.indexAuthoring) setIndexAuthoring(false);
   state.relationshipAuthoring = active;
@@ -5462,7 +5462,7 @@ function designRelationshipValues() {
 
 async function submitDesignRelationship(event) {
   event.preventDefault();
-  if (state.designSubmitting || !isDetachedWorkspace() || !state.design) return;
+  if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   let relationship;
   let aligned;
   const relationshipId = state.designRelationshipEditorId;
@@ -5533,7 +5533,7 @@ async function downloadCatalog() {
     showToast("No schema workspace is loaded. Open a workspace first.");
     return;
   }
-  if (isDetachedWorkspace()) {
+  if (isDesignWorkspace()) {
     try {
       const exported = await api.exportDesign(state.activeWorkspace.id, {
         expectedDesignRevision: state.design.revision,
@@ -5554,7 +5554,7 @@ async function downloadCatalog() {
 
 async function exportDesignSql() {
   closeDetailsMenus();
-  if (!isDetachedWorkspace() || !state.design) return;
+  if (!isDesignWorkspace() || !state.design) return;
   try {
     const exported = await api.exportDesign(state.activeWorkspace.id, {
       expectedDesignRevision: state.design.revision,

@@ -1,17 +1,17 @@
 import { expect, test } from "@playwright/test";
 
-async function attachedDesignWorkspace(request) {
+async function databaseDesignWorkspace(request) {
   const response = await request.get("/api/v1/schemii/workspaces");
   expect(response.ok()).toBe(true);
   const body = await response.json();
   const workspace = body.workspaces.find(item => item.mode === "design" && item.connectionId);
-  expect(workspace, "the demo should provide an attached design workspace").toBeTruthy();
+  expect(workspace, "the demo should provide a database-derived design workspace").toBeTruthy();
   return workspace;
 }
 
-test("inspector ports the attached rows and console workflow while migration stays separate", async ({ page, request }, testInfo) => {
+test("inspector ports database rows and the console workflow while migration stays separate", async ({ page, request }, testInfo) => {
   const desktop = testInfo.project.name === "desktop-chromium";
-  const workspace = await attachedDesignWorkspace(request);
+  const workspace = await databaseDesignWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=tables`);
 
   await page.locator(".table-card").filter({ hasText: "tasks" }).first().click({ force: true });

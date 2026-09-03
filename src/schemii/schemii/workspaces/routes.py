@@ -61,7 +61,7 @@ class WorkspaceCatalogResponse(ApiModel):
 
 
 class SchemiiWorkspaceImportResponse(ApiModel):
-    """A newly created targeted design and its source-derived initial state."""
+    """A new database-derived design and its source-derived initial state."""
 
     workspace: SchemiiWorkspace
     design: SchemiiDesign
@@ -148,7 +148,7 @@ def create_workspace(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiWorkspace:
-    """Create a detached design or verify and attach its initial PostgreSQL target."""
+    """Create either a local design or a live inspection with its fixed target."""
 
     try:
         if body.connection_id is None:
@@ -206,7 +206,7 @@ def create_workspace_from_postgres(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiWorkspaceImportResponse:
-    """Create a new targeted design from one repeatable-read catalog snapshot."""
+    """Create a new database-derived design from one repeatable-read snapshot."""
 
     try:
         with _connections(request).use(
@@ -262,7 +262,7 @@ def get_workspace(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiWorkspace:
-    """Return one owner-scoped workspace and its optional target binding."""
+    """Return one workspace and the target identity fixed when it was created."""
 
     try:
         return _workspaces(request).get(principal.user_id, workspace_id)
@@ -290,13 +290,13 @@ def update_workspace_layout(
     if workspace.revision != body.expected_revision:
         raise _workspace_conflict(WorkspaceConflictError(workspace.revision))
     if workspace.connection_id is None:
-        # TODO(schemii-detached-layout): Validate positions against persisted
+        # TODO(schemii-local-layout): Validate positions against persisted
         # desired-design object IDs once the design repository is implemented.
         raise ApiProblem(
             501,
             "planned_capability",
-            "Detached workspace layout requires the planned design repository",
-            details={"capability": "schemii.detached-layout", "status": "planned"},
+            "Local workspace layout requires the planned design repository",
+            details={"capability": "schemii.local-layout", "status": "planned"},
         )
     try:
         with _connections(request).use(
@@ -431,7 +431,7 @@ def get_workspace_catalog(
         raise ApiProblem(
             409,
             "workspace_target_required",
-            "Attach a PostgreSQL target before reading a live catalog",
+            "Live catalogs are available only in database-derived or live workspaces",
         )
     try:
         with _connections(request).use(

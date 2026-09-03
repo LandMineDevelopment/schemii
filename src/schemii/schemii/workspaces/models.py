@@ -38,7 +38,7 @@ class TablePosition(ApiModel):
 
 
 class TableColumnDisplayOrder(ApiModel):
-    """Presentation-only column order for one attached PostgreSQL table."""
+    """Presentation-only column order for one database-backed table."""
 
     name: TableName
     columns: list[ColumnName] = Field(min_length=1, max_length=1600)
@@ -83,7 +83,7 @@ class WorkspaceImportSummary(ApiModel):
 
 
 class SchemiiWorkspaceCreate(ApiModel):
-    """Create a design workspace, optionally attached to one exact PostgreSQL target."""
+    """Create a local design or a live inspection with a fixed initial target."""
 
     name: WorkspaceName = "Untitled schema"
     connection_id: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
@@ -162,7 +162,7 @@ class SchemiiWorkspaceLayoutUpdate(ApiModel):
 
 
 class SchemiiWorkspace(ApiModel):
-    """Owner-scoped design workspace with an optional PostgreSQL target."""
+    """Owner-scoped workspace with a fixed creation-time database identity, if any."""
 
     id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
     revision: Annotated[int, Field(strict=True, ge=1)]

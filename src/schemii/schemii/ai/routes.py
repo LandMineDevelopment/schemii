@@ -119,7 +119,7 @@ def get_schemii_chat(
     """Return one owner-scoped conversation and its current context status."""
 
     # TODO(schemii-ai-chats): Resolve durable chat metadata and report stale design
-    # or detached-target context without silently rebinding authority.
+    # or unavailable fixed-target context without silently rebinding authority.
     del chat_id, principal
     planned_capability("schemii.ai.chats.read")
 

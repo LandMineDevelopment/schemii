@@ -44,7 +44,7 @@ from .store import (
 
 
 class PostgresWorkspaceRepository:
-    """Persist detached or targeted workspaces without copying live catalogs."""
+    """Persist local, database-derived, and live-inspection workspaces."""
 
     dependency_name = "schemiiWorkspaces"
 

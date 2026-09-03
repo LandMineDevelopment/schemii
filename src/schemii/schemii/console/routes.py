@@ -85,7 +85,7 @@ def create_console_execution(
     background_tasks: BackgroundTasks,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleExecution:
-    """Reserve and run a reviewed script against the attached workspace target."""
+    """Reserve and run a reviewed script against the workspace's fixed target."""
     try:
         execution = _service(request).reserve(principal.user_id, workspace_id, body)
     except ConsoleServiceError as error:
