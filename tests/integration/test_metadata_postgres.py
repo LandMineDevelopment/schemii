@@ -25,7 +25,7 @@ from schemii.common.postgres.models import (
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
 from schemii.schemii.migrations.repository import PostgresMigrationRepository
-from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
 from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepository
 from schemii.schemii.workspaces.store import (
     WorkspaceDesignBootstrap,
@@ -164,7 +164,7 @@ def test_workspace_import_commits_every_record_in_one_postgres_transaction(
 
     workspace = workspaces.create_import(
         postgres_metadata.owner_id,
-        SchemiiWorkspaceCreate(
+        WorkspaceCreateRecord(
             name="Atomic import",
             connection_id=target.id,
             database=target.database,
@@ -237,7 +237,7 @@ def test_workspace_import_rolls_back_all_postgres_records_when_baseline_fails(
     with pytest.raises(WorkspaceStorageUnavailableError):
         PostgresWorkspaceRepository(factory).create_import(
             postgres_metadata.owner_id,
-            SchemiiWorkspaceCreate(
+            WorkspaceCreateRecord(
                 name="Must roll back",
                 connection_id=target.id,
                 database=target.database,
@@ -286,7 +286,7 @@ def test_postgres_connection_delete_guard_preserves_referenced_target(
     workspaces = PostgresWorkspaceRepository(postgres_metadata.connection_factory)
     workspace = workspaces.create(
         postgres_metadata.owner_id,
-        SchemiiWorkspaceCreate(
+        WorkspaceCreateRecord(
             name="Connection guard",
             connection_id=target.id,
             database=target.database,
@@ -324,7 +324,7 @@ def test_targeted_workspace_creation_rechecks_the_inspected_connection_revision(
     postgres_metadata: PostgresMetadataHarness,
 ) -> None:
     target = _target(postgres_metadata)
-    request = SchemiiWorkspaceCreate(
+    request = WorkspaceCreateRecord(
         name="Stale inspected target",
         connection_id=target.id,
         database=target.database,

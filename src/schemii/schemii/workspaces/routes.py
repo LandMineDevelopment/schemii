@@ -24,6 +24,7 @@ from .models import (
     SchemiiWorkspaceLayoutUpdate,
     TableColumnDisplayOrder,
     TablePosition,
+    WorkspaceCreateRecord,
 )
 from .store import (
     WorkspaceConflictError,
@@ -148,50 +149,13 @@ def create_workspace(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> SchemiiWorkspace:
-    """Create either a local design or a live inspection with its fixed target."""
+    """Create a database-independent editable design."""
 
     try:
-        if body.connection_id is None:
-            return _workspaces(request).create(principal.user_id, body)
-        with _connections(request).use(
+        return _workspaces(request).create(
             principal.user_id,
-            body.connection_id,
-        ) as connection:
-            if connection.database != body.database:
-                raise ApiProblem(
-                    409,
-                    "workspace_database_mismatch",
-                    "The connection does not target the requested workspace database",
-                )
-            namespace_exists = request.app.state.services.postgres.namespace_exists(
-                connection,
-                body.namespace,
-            )
-            if not namespace_exists:
-                raise ApiProblem(
-                    404,
-                    "postgres_namespace_not_found",
-                    "The requested PostgreSQL namespace was not found",
-                )
-            return _workspaces(request).create(
-                principal.user_id,
-                body,
-                expected_connection_revision=connection.revision,
-            )
-    except ConnectionNotFoundError as error:
-        raise _connection_not_found(error) from error
-    except PostgresGatewayError as error:
-        raise postgres_api_problem(error) from error
-    except WorkspaceImportTargetChangedError as error:
-        raise ApiProblem(
-            409,
-            "workspace_target_changed",
-            str(error),
-            details={
-                "expectedConnectionRevision": error.expected_revision,
-                "currentConnectionRevision": error.current_revision,
-            },
-        ) from error
+            WorkspaceCreateRecord(name=body.name),
+        )
     except WorkspaceLimitError as error:
         raise _workspace_limit(error) from error
 
@@ -228,7 +192,7 @@ def create_workspace_from_postgres(
             assert migrations is not None
             workspace = migrations.create_import_workspace(
                 principal.user_id,
-                body.workspace_create(),
+                body.workspace_record(),
                 imported,
                 connection.revision,
                 catalog,
@@ -431,7 +395,7 @@ def get_workspace_catalog(
         raise ApiProblem(
             409,
             "workspace_target_required",
-            "Live catalogs are available only in database-derived or live workspaces",
+            "Database catalogs are available only in PostgreSQL-backed workspaces",
         )
     try:
         with _connections(request).use(

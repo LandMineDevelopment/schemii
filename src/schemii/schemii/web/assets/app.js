@@ -874,24 +874,17 @@ function connectionById(id) {
 }
 
 function workspaceLabel(workspace) {
-  return workspace.mode === "live"
-    ? `${workspace.database} · ${workspace.namespace}`
-    : workspace.name;
+  return workspace.name;
 }
 
 function workspaceTargetLabel(workspace) {
   if (!workspace.connectionId) return "Local design · no database";
   const connection = connectionById(workspace.connectionId)?.name || workspace.connectionId;
-  return workspace.mode === "design"
-    ? `Imported design · ${connection} · ${workspace.database}.${workspace.namespace}`
-    : connection;
+  return `PostgreSQL · ${connection} · ${workspace.database}.${workspace.namespace}`;
 }
 
 function isDesignWorkspace(workspace = state.activeWorkspace) {
-  return Boolean(workspace && (
-    workspace.mode === "design"
-    || (!workspace.mode && !workspace.connectionId)
-  ));
+  return Boolean(workspace);
 }
 
 function currentCatalogTable() {
@@ -1152,7 +1145,7 @@ function renderCatalogState() {
     return;
   }
   if (!state.activeWorkspace) {
-    const card = stateCard("WS", "Open a schema workspace", "Create a local design, import a new editable design from PostgreSQL, or inspect a live database.", "Open workspaces", openWorkspaces);
+    const card = stateCard("WS", "Open a schema workspace", "Create a local design or create an editable workspace from PostgreSQL.", "Open workspaces", openWorkspaces);
     const connectionAction = element("button", { className: "ui-button compact", type: "button", text: "Manage connections" });
     connectionAction.addEventListener("click", openConnections);
     card.append(connectionAction);
@@ -1267,7 +1260,7 @@ async function loadConnections() {
         preservePendingLayout: true,
         expectedConnectionRevision: previousActiveConnection.revision,
       });
-      await loadActiveCatalog();
+      await loadActiveWorkspace();
     }
     if (!request.isCurrent()) return;
     state.connectionsLoaded = true;
@@ -1322,7 +1315,7 @@ function renderConnections() {
       element("small", { text: `${connection.sslMode} · credential ${connection.credentialStored ? "stored" : "not stored"} · revision ${connection.revision}` }),
     );
     const testState = state.connectionTests.get(connection.id);
-    if (testState?.loading) copy.append(element("p", { className: "connection-test", text: "Testing this live connection…" }));
+    if (testState?.loading) copy.append(element("p", { className: "connection-test", text: "Testing this PostgreSQL connection…" }));
     else if (testState?.result) copy.append(element("p", { className: "connection-test", text: `Connected to ${testState.result.database} · PostgreSQL ${testState.result.serverVersion}` }));
     else if (testState?.error) copy.append(errorPanel(testState.error));
     const actions = element("div", { className: "manager-actions ui-action-group end wrap" });
@@ -1430,7 +1423,7 @@ async function submitConnection(event) {
     if (editorGeneration === state.connectionEditorGeneration && elements.connectionEditorDialog.open) elements.connectionEditorDialog.close();
     if (authorityChanged && state.activeWorkspace?.connectionId === saved.id) {
       invalidateActiveCatalog();
-      await loadActiveCatalog();
+      await loadActiveWorkspace();
     }
     showToast(editing ? "Connection updated by the active server." : "Connection created by the active server.");
   } catch (error) {
@@ -1462,7 +1455,7 @@ async function reloadEditorConnection() {
         preservePendingLayout: true,
         expectedConnectionRevision: previous.revision,
       });
-      await loadActiveCatalog();
+      await loadActiveWorkspace();
     }
   } catch (error) {
     if (editorGeneration === state.connectionEditorGeneration && state.connectionEditorId === connectionId) {
@@ -1793,7 +1786,7 @@ function openWorkspaces() {
 
 function renderWorkspaceConnectionOptions() {
   const selected = elements.workspaceConnection.value;
-  replace(elements.workspaceConnection, element("option", { text: "Select a live connection", attrs: { value: "" } }));
+  replace(elements.workspaceConnection, element("option", { text: "Select a PostgreSQL connection", attrs: { value: "" } }));
   for (const connection of state.connections) elements.workspaceConnection.append(element("option", { text: `${connection.name} · ${connection.database}`, attrs: { value: connection.id } }));
   if (state.connections.some(connection => connection.id === selected)) elements.workspaceConnection.value = selected;
   updateWorkspaceDatabase();
@@ -1806,20 +1799,16 @@ function updateWorkspaceDatabase() {
 
 function updateWorkspaceMode() {
   const mode = elements.workspaceMode.value;
-  const targeted = mode === "live" || mode === "import";
+  const targeted = mode === "import";
   for (const field of elements.workspaceTargetFields) field.hidden = !targeted;
   elements.workspaceConnection.required = targeted;
   elements.workspaceNamespace.required = targeted;
-  elements.workspaceFormCopy.textContent = mode === "import"
-    ? "Import the selected PostgreSQL namespace into a new editable workspace, review server-derived changes, and apply approved migrations back to PostgreSQL."
-    : mode === "live"
-      ? "Inspect the selected PostgreSQL namespace directly. Refresh follows the database; editing is disabled."
-      : "Create an editable workspace that exists only in Schemii. It does not read from or write to PostgreSQL.";
+  elements.workspaceFormCopy.textContent = targeted
+    ? "Create an editable workspace from the selected PostgreSQL namespace. Reads and migrations use the permissions granted to this connection."
+    : "Create an editable workspace that exists only in Schemii. It does not read from or write to PostgreSQL.";
   elements.createWorkspaceButton.textContent = mode === "import"
-    ? "Import as editable workspace"
-    : mode === "live"
-      ? "Open read-only database"
-      : "Create empty design";
+    ? "Create database workspace"
+    : "Create empty design";
 }
 
 function renderWorkspaces() {
@@ -1888,7 +1877,7 @@ async function submitWorkspace(event) {
   event.preventDefault();
   if (state.workspaceSubmitting) return;
   const mode = elements.workspaceMode.value;
-  const targeted = mode === "live" || mode === "import";
+  const targeted = mode === "import";
   const connection = connectionById(elements.workspaceConnection.value);
   const name = elements.workspaceName.value.trim();
   const namespace = elements.workspaceNamespace.value;
@@ -2068,8 +2057,7 @@ async function openWorkspace(workspace, { historyMode = "push" } = {}) {
 }
 
 async function loadActiveWorkspace(options = {}) {
-  if (isDesignWorkspace()) return loadActiveDesign(options);
-  return loadActiveCatalog(options);
+  return loadActiveDesign(options);
 }
 
 async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {

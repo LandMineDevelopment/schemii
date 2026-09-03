@@ -3,7 +3,6 @@
   "title": "Live relation browser",
   "description": "Provides populated tables, joined views, a multi-stage aggregate, and a materialized view for relation discovery, row previews, and source-derived lineage.",
   "sourceRevision": "runtime",
-  "workspaceMode": "live",
   "designAlterations": [],
   "targetAlteration": "target.sql"
 }

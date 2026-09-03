@@ -29,6 +29,9 @@ def test_openapi_contains_current_prototype_routes() -> None:
     assert "/api/v1/connections/{connection_id}/test" in paths
     assert "/api/v1/schemii/workspaces/{workspace_id}/catalog" in paths
     assert "/api/v1/schemii/workspaces/{workspace_id}/target" not in paths
+    workspace_create = schema["components"]["schemas"]["SchemiiWorkspaceCreate"]
+    assert set(workspace_create["properties"]) == {"name"}
+    assert "mode" not in schema["components"]["schemas"]["SchemiiWorkspace"]["properties"]
     assert not any("password" in path.lower() for path in paths)
     assert (
         paths["/api/v1/connections"]["post"]["responses"]["422"]["content"]

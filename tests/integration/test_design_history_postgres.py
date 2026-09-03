@@ -6,7 +6,7 @@ from schemii.schemii.designs.history_retention import (
 )
 from schemii.schemii.designs.models import SchemiiDesignContent, SchemiiDesignReplace
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
-from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
 from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepository
 from tests.integration.postgres_fixture import PostgresMetadataHarness
 
@@ -97,7 +97,7 @@ def test_postgres_history_is_physically_bounded_and_discards_redo_branches(
     designs = PostgresDesignRepository(postgres_metadata.connection_factory)
     workspace = workspaces.create(
         postgres_metadata.owner_id,
-        SchemiiWorkspaceCreate(name="History retention integration"),
+        WorkspaceCreateRecord(name="History retention integration"),
     )
 
     revision = 0

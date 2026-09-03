@@ -12,7 +12,7 @@ from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.migrations.repository import InMemoryMigrationRepository
 from schemii.schemii.migrations.service import MigrationService
-from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
 from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepository
 from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
@@ -65,8 +65,8 @@ def _import_records() -> tuple[WorkspaceDesignBootstrap, WorkspaceImportBaseline
     )
 
 
-def _request() -> SchemiiWorkspaceCreate:
-    return SchemiiWorkspaceCreate(
+def _request() -> WorkspaceCreateRecord:
+    return WorkspaceCreateRecord(
         name="Imported",
         connection_id=CONNECTION_ID,
         database="analytics",
@@ -214,13 +214,12 @@ class _MetadataCursor:
         elif "FROM schemii.migration_executions" in statement:
             self._row = {"active": self.connection.state.active_execution}
         elif statement.startswith("INSERT INTO schemii.workspaces"):
-            workspace_id, _, name, mode = parameters
+            workspace_id, _, name = parameters
             self.connection.state.pending.append("workspace")
             self._row = {
                 "id": workspace_id,
                 "revision": 1,
                 "name": name,
-                "mode": mode,
                 "created_at": NOW,
                 "updated_at": NOW,
             }

@@ -19,7 +19,7 @@ from schemii.schemii.designs.store import (
 
 from .models import (
     SchemiiWorkspace,
-    SchemiiWorkspaceCreate,
+    WorkspaceCreateRecord,
     SchemiiWorkspaceLayoutUpdate,
     TableColumnDisplayOrder,
     TablePosition,
@@ -44,7 +44,7 @@ from .store import (
 
 
 class PostgresWorkspaceRepository:
-    """Persist local, database-derived, and live-inspection workspaces."""
+    """Persist local and PostgreSQL-backed editable workspaces."""
 
     dependency_name = "schemiiWorkspaces"
 
@@ -121,7 +121,7 @@ class PostgresWorkspaceRepository:
     def create(
         self,
         owner_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         *,
         bootstrap: WorkspaceDesignBootstrap | None = None,
         expected_connection_revision: int | None = None,
@@ -155,7 +155,7 @@ class PostgresWorkspaceRepository:
     def create_import(
         self,
         owner_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         *,
         bootstrap: WorkspaceDesignBootstrap,
         baseline: WorkspaceImportBaseline,
@@ -203,7 +203,7 @@ class PostgresWorkspaceRepository:
         cursor: Any,
         owner_id: str,
         workspace_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         *,
         bootstrap: WorkspaceDesignBootstrap | None,
     ) -> SchemiiWorkspace:
@@ -220,19 +220,14 @@ class PostgresWorkspaceRepository:
             raise WorkspaceLimitError("workspace", self._max_workspaces_per_owner)
         cursor.execute(
             """
-            INSERT INTO schemii.workspaces (id, owner_id, name, mode)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO schemii.workspaces (id, owner_id, name)
+            VALUES (%s, %s, %s)
             RETURNING *
             """,
             (
                 workspace_id,
                 owner_id,
                 request.name,
-                (
-                    "design"
-                    if bootstrap is not None or request.connection_id is None
-                    else "live"
-                ),
             ),
         )
         row = cursor.fetchone()
@@ -870,7 +865,6 @@ class PostgresWorkspaceRepository:
             id=row["id"],
             revision=row["revision"],
             name=row["name"],
-            mode=row["mode"],
             connection_id=row["connection_id"],
             database=row["database_name"],
             namespace=row["namespace"],

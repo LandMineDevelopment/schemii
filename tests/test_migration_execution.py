@@ -47,7 +47,7 @@ from schemii.schemii.migrations.repository import (
 from schemii.schemii.migrations.service import MigrationService, MigrationServiceError
 from schemii.schemii.migrations.worker import MigrationExecutionWorker
 from schemii.schemii.workspaces.models import (
-    SchemiiWorkspaceCreate,
+    WorkspaceCreateRecord,
     SchemiiWorkspaceLayoutUpdate,
 )
 from schemii.schemii.workspaces.store import (
@@ -197,7 +197,6 @@ class _WorkspaceRepository:
         assert (owner_id, workspace_id) == (OWNER_ID, WORKSPACE_ID)
         return SimpleNamespace(
             revision=self.revision,
-            mode="design",
             connection_id=self.connection_id,
             database=self.database,
             namespace=self.namespace,
@@ -940,7 +939,7 @@ def test_workspace_lifecycle_stays_blocked_until_committed_sync_is_resolved() ->
     workspaces = InMemoryWorkspaceRepository()
     workspace = workspaces.create(
         OWNER_ID,
-        SchemiiWorkspaceCreate(name="Lifecycle guard"),
+        WorkspaceCreateRecord(name="Lifecycle guard"),
     )
     designs = _DesignRepository(
         _plan_record().plan.design_fingerprint,
@@ -1103,7 +1102,7 @@ def test_layout_save_after_reservation_does_not_invalidate_target_authority() ->
     workspaces = InMemoryWorkspaceRepository()
     workspace = workspaces.create(
         OWNER_ID,
-        SchemiiWorkspaceCreate(
+        WorkspaceCreateRecord(
             name="Layout-safe execution",
             connection_id=CONNECTION_ID,
             database="analytics",
@@ -1291,7 +1290,7 @@ def test_drift_reconciliation_is_blocked_by_unsettled_execution(
     execution_status: str,
 ) -> None:
     workspaces = InMemoryWorkspaceRepository()
-    workspace = workspaces.create(OWNER_ID, SchemiiWorkspaceCreate(name="Drift guard"))
+    workspace = workspaces.create(OWNER_ID, WorkspaceCreateRecord(name="Drift guard"))
     designs = _DesignRepository(
         design_fingerprint(SchemiiDesignContent()),
         workspace_id=workspace.id,

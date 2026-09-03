@@ -12,7 +12,6 @@ import {
 
 const workspace = {
   id: "ws_demo",
-  mode: "design",
   connectionId: "pg_demo",
   database: "demo",
   namespace: "public",
@@ -22,7 +21,6 @@ const design = { revision: 4 };
 test("migration review is available only for database-backed designs", () => {
   assert.equal(migrationWorkspaceEligible(workspace, design), true);
   assert.equal(migrationWorkspaceEligible({ ...workspace, connectionId: null }, design), false);
-  assert.equal(migrationWorkspaceEligible({ ...workspace, mode: "live" }, design), false);
   assert.equal(migrationWorkspaceEligible(workspace, null), false);
 });
 

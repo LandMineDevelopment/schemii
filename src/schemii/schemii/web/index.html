@@ -136,7 +136,7 @@
             </section>
             <section class="inspector-console-pane">
               <button class="inspector-console-bar" id="show-inspector-console" type="button" aria-expanded="false">
-                <span><small>Read-only workspace</small><strong>SQL console</strong></span>
+                <span><small>PostgreSQL access</small><strong>SQL console</strong></span>
                 <span id="inspector-sql-status">Draft text is not sent or saved.</span>
               </button>
               <div class="inspector-console-content" id="inspector-console-content" hidden>
@@ -270,14 +270,14 @@
 
     <dialog class="ui-dialog manager-dialog" id="workspaces-dialog" aria-labelledby="workspaces-title">
       <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small>Saved schema work</small><h2 id="workspaces-title">Workspaces</h2><p>Choose a local design, a new design imported from PostgreSQL, or a read-only live database. That choice stays fixed for the workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>
+        <header class="ui-dialog__head"><div><small>Saved schema work</small><h2 id="workspaces-title">Workspaces</h2><p>Choose a local design or create a database-backed design from PostgreSQL. Database permissions determine which operations are allowed.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>
         <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button class="ui-button compact" id="reload-workspaces-button" type="button">Reload</button></div>
         <div class="manager-list" id="workspaces-list" aria-live="polite"></div>
         <form class="workspace-form" id="workspace-form">
           <header><strong>Create workspace</strong><small id="workspace-form-copy">Start a database-independent schema design.</small></header>
           <label><span>Name</span><input id="workspace-name" required maxlength="128" autocomplete="off" placeholder="Inventory design" /></label>
-          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Local design · no database</option><option value="import">Imported design · read/write</option><option value="live">Live database · read only</option></select></label>
-          <label class="workspace-target-field" hidden><span>Connection</span><select id="workspace-connection"><option value="">Select a live connection</option></select></label>
+          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Local design · no database</option><option value="import">PostgreSQL-backed design</option></select></label>
+          <label class="workspace-target-field" hidden><span>Connection</span><select id="workspace-connection"><option value="">Select a PostgreSQL connection</option></select></label>
           <label class="workspace-target-field" hidden><span>Database</span><output id="workspace-database">Select a connection</output></label>
           <label class="workspace-target-field" hidden><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" autocomplete="off" /><button class="ui-button compact" type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
           <div class="form-status span-all" id="workspace-form-status" aria-live="polite"></div>

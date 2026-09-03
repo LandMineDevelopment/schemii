@@ -159,6 +159,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         9,
         10,
         11,
+        12,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -172,6 +173,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0009_async_migration_execution.sql": "d752bbef98a6d639f90d9a25c6423c41aea28801d3e4a1c12c86fcff9f706adc",
         "0010_metadata_retention_indexes.sql": "2f5a939e2a0f2f199db11f81a330908551d07c926019983a686b7defea76af52",
         "0011_console_executions.sql": "6f98a2f29b676f3bfb1e69a6d3c3d5e507bdf30a2f885a3ae769c982ca5c939c",
+        "0012_remove_workspace_modes.sql": "e8c7428bfa7e3143bbfe49df044520c06ddaba4926b9df2a51c9be4879876bcf",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql

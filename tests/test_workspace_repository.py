@@ -2,10 +2,10 @@ import pytest
 from pydantic import ValidationError
 
 from schemii.schemii.workspaces.models import (
-    SchemiiWorkspaceCreate,
     SchemiiWorkspaceLayoutUpdate,
     TableColumnDisplayOrder,
     TablePosition,
+    WorkspaceCreateRecord,
 )
 from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
@@ -13,8 +13,8 @@ from schemii.schemii.workspaces.store import (
 )
 
 
-def workspace_request(namespace: str = "public") -> SchemiiWorkspaceCreate:
-    return SchemiiWorkspaceCreate(
+def workspace_request(namespace: str = "public") -> WorkspaceCreateRecord:
+    return WorkspaceCreateRecord(
         connection_id="pg_0123456789abcdef0123456789abcdef",
         database="analytics",
         namespace=namespace,
@@ -36,25 +36,23 @@ def test_workspace_targets_preserve_exact_postgres_identifiers() -> None:
 
 
 def test_workspace_request_accepts_only_complete_or_absent_targets() -> None:
-    detached = SchemiiWorkspaceCreate(name="Detached")
+    local = WorkspaceCreateRecord(name="Local")
 
-    assert detached.connection_id is None
-    assert detached.database is None
-    assert detached.namespace is None
+    assert local.connection_id is None
+    assert local.database is None
+    assert local.namespace is None
 
     with pytest.raises(ValidationError):
-        SchemiiWorkspaceCreate(name="Partial", database="analytics")
+        WorkspaceCreateRecord(name="Partial", database="analytics")
 
 
 def test_workspace_kind_and_database_identity_are_fixed_at_creation() -> None:
     repository = InMemoryWorkspaceRepository()
-    local = repository.create("owner", SchemiiWorkspaceCreate(name="Local"))
-    live = repository.create("owner", workspace_request())
+    local = repository.create("owner", WorkspaceCreateRecord(name="Local"))
+    database = repository.create("owner", workspace_request())
 
-    assert local.mode == "design"
     assert local.connection_id is None
-    assert live.mode == "live"
-    assert live.connection_id is not None
+    assert database.connection_id is not None
 
 def test_workspace_and_aggregate_position_counts_are_bounded() -> None:
     workspace_limited = InMemoryWorkspaceRepository(max_workspaces_per_owner=1)

@@ -7,7 +7,6 @@ export function migrationWorkspaceEligible(workspace, design) {
   return Boolean(
     workspace
       && design
-      && workspace.mode === "design"
       && workspace.connectionId
       && workspace.database
       && workspace.namespace,

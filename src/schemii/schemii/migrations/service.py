@@ -41,7 +41,7 @@ from schemii.schemii.workspaces.store import (
     WorkspaceNotFoundError,
     WorkspaceRepository,
 )
-from schemii.schemii.workspaces.models import SchemiiWorkspace, SchemiiWorkspaceCreate
+from schemii.schemii.workspaces.models import SchemiiWorkspace, WorkspaceCreateRecord
 
 from .errors import MigrationServiceError, migration_storage_error
 from .execution import MigrationExecutionCoordinator
@@ -91,7 +91,7 @@ def _create_import_workspace(
     workspaces: WorkspaceRepository,
     baselines: MigrationRepository,
     owner_id: str,
-    request: SchemiiWorkspaceCreate,
+    request: WorkspaceCreateRecord,
     imported: ImportedDesign,
     connection_revision: int,
     catalog: PostgresCatalog,
@@ -140,7 +140,7 @@ def _create_import_workspace(
 
 
 class MigrationService:
-    """Own every validation decision from live inspection through reconciliation."""
+    """Own every validation decision from target inspection through reconciliation."""
 
     def __init__(
         self,
@@ -187,7 +187,7 @@ class MigrationService:
     def create_import_workspace(
         self,
         owner_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         imported: ImportedDesign,
         connection_revision: int,
         catalog: PostgresCatalog,
@@ -329,12 +329,6 @@ class MigrationService:
         request: MigrationPlanCreate,
     ) -> MigrationPlan:
         workspace = self._workspace(owner_id, workspace_id)
-        if workspace.mode != "design":
-            raise MigrationServiceError(
-                409,
-                "editable_design_required",
-                "Migration planning requires a database-derived design workspace",
-            )
         if (
             workspace.connection_id is None
             or workspace.database is None

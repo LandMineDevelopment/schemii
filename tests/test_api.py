@@ -107,7 +107,7 @@ def create_connection(api: TestClient, password="database secret") -> dict:
 
 def create_workspace(api: TestClient, connection_id: str) -> dict:
     response = api.post(
-        "/api/v1/schemii/workspaces",
+        "/api/v1/schemii/workspaces/imports",
         json={
             "connectionId": connection_id,
             "database": "analytics",
@@ -115,7 +115,7 @@ def create_workspace(api: TestClient, connection_id: str) -> dict:
         },
     )
     assert response.status_code == 201
-    return response.json()
+    return response.json()["workspace"]
 
 
 def test_runtime_and_error_envelopes_are_ready_for_ui_consumers() -> None:
@@ -207,21 +207,19 @@ def test_connection_api_redacts_credentials_and_tests_internal_resolution() -> N
     assert stale.json()["error"]["details"] == {"currentRevision": 2}
 
 
-def test_workspace_api_stores_only_target_and_live_table_positions() -> None:
+def test_database_workspace_stores_its_import_target_and_table_positions() -> None:
     api, postgres = client()
     connection = create_connection(api)
     workspace = create_workspace(api, connection["id"])
 
     assert workspace["revision"] == 1
-    assert workspace["mode"] == "live"
-    assert workspace["importSummary"] is None
+    assert workspace["importSummary"] is not None
     assert workspace["tables"] == []
     assert workspace["columnOrders"] == []
     assert set(workspace) == {
         "id",
         "revision",
         "name",
-        "mode",
         "connectionId",
         "database",
         "namespace",
@@ -362,7 +360,6 @@ def test_postgres_import_creates_a_new_targeted_design_without_an_overwrite_rout
     document = response.json()
     workspace = document["workspace"]
     assert workspace["name"] == "Imported customers"
-    assert workspace["mode"] == "design"
     assert workspace["connectionId"] == connection["id"]
     assert workspace["importSummary"]["catalogFingerprint"]
     assert workspace["importSummary"]["complete"] is True
@@ -417,13 +414,13 @@ def test_failed_postgres_import_does_not_create_a_workspace() -> None:
     assert api.get("/api/v1/schemii/workspaces").json()["workspaces"] == []
 
 
-def test_workspace_creation_requires_a_live_namespace() -> None:
+def test_database_workspace_creation_requires_an_existing_namespace() -> None:
     api, postgres = client()
     connection = create_connection(api)
     postgres.namespace_available = False
 
     response = api.post(
-        "/api/v1/schemii/workspaces",
+        "/api/v1/schemii/workspaces/imports",
         json={
             "connectionId": connection["id"],
             "database": "analytics",

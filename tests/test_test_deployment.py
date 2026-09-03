@@ -260,7 +260,7 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
     live_browser_sql = (scenarios / "live-browser" / "target.sql").read_text(
         encoding="utf-8"
     )
-    assert live_browser["workspaceMode"] == "live"
+    assert "workspaceMode" not in live_browser
     assert "CREATE VIEW public.team_delivery_health" in live_browser_sql
     assert "CREATE MATERIALIZED VIEW public.priority_queue" in live_browser_sql
 

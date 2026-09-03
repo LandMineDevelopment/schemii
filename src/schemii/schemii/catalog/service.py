@@ -111,7 +111,7 @@ class RelationBrowserService:
     def _catalog(self, owner_id: str, workspace_id: str) -> tuple[SchemiiWorkspace, PostgresCatalog]:
         workspace = self._workspaces.get(owner_id, workspace_id)
         if workspace.connection_id is None or workspace.database is None or workspace.namespace is None:
-            raise RelationBrowserError(409, "workspace_target_required", "Live relation browsing is available only in database-derived or live workspaces")
+            raise RelationBrowserError(409, "workspace_target_required", "Relation browsing requires a PostgreSQL-backed workspace")
         with self._connections.use(owner_id, workspace.connection_id) as connection:
             if connection.database != workspace.database:
                 raise RelationBrowserError(409, "workspace_target_changed", "The workspace connection no longer targets its saved database")

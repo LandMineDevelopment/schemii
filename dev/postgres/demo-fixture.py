@@ -20,7 +20,7 @@ from schemii.common.metadata.users import ensure_local_metadata_user
 from schemii.main import create_services
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import SchemiiDesignContent, SchemiiDesignReplace
-from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
 
 
 FIXTURE_CONNECTION_ID = "pg_" + hashlib.sha256(
@@ -62,11 +62,10 @@ def _scenario() -> tuple[Path, dict[str, Any]]:
         "designAlterations",
         "targetAlteration",
     }
-    allowed_keys = expected_keys | {"workspaceMode"}
     if (
         not isinstance(manifest, dict)
         or not expected_keys <= set(manifest)
-        or not set(manifest) <= allowed_keys
+        or set(manifest) != expected_keys
     ):
         raise FixtureError(f"{manifest_path} has an invalid contract")
     if manifest["id"] != scenario_id or manifest["sourceRevision"] != "runtime":
@@ -85,11 +84,6 @@ def _scenario() -> tuple[Path, dict[str, Any]]:
     target_name = manifest["targetAlteration"]
     if Path(target_name).name != target_name or not target_name.endswith(".sql"):
         raise FixtureError(f"{manifest_path} lists an invalid target alteration")
-    workspace_mode = manifest.get("workspaceMode", "design")
-    if workspace_mode not in {"design", "live"}:
-        raise FixtureError(f"{manifest_path} has an invalid workspace mode")
-    if workspace_mode == "live" and alterations:
-        raise FixtureError(f"{manifest_path} cannot apply design alterations to a live workspace")
     return directory, manifest
 
 
@@ -414,28 +408,21 @@ def main() -> None:
         LOCAL_PROTOTYPE_USER_ID, FIXTURE_CONNECTION_ID
     ) as target:
         catalog = services.postgres.introspect(target, "public")
-        workspace_request = SchemiiWorkspaceCreate(
+        workspace_request = WorkspaceCreateRecord(
             name=f"Demo · {manifest['title']}",
             connection_id=FIXTURE_CONNECTION_ID,
             database=database,
             namespace="public",
         )
-        if manifest.get("workspaceMode", "design") == "live":
-            workspace = services.workspaces.create(
-                LOCAL_PROTOTYPE_USER_ID,
-                workspace_request,
-                expected_connection_revision=target.revision,
-            )
-        else:
-            imported = import_postgres_catalog(catalog)
-            assert services.migrations is not None
-            workspace = services.migrations.create_import_workspace(
-                LOCAL_PROTOTYPE_USER_ID,
-                workspace_request,
-                imported,
-                target.revision,
-                catalog,
-            )
+        imported = import_postgres_catalog(catalog)
+        assert services.migrations is not None
+        workspace = services.migrations.create_import_workspace(
+            LOCAL_PROTOTYPE_USER_ID,
+            workspace_request,
+            imported,
+            target.revision,
+            catalog,
+        )
     for alteration in manifest["designAlterations"]:
         _apply_design_alteration(services, workspace.id, directory / alteration)
 

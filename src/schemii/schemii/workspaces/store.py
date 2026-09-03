@@ -19,7 +19,7 @@ from schemii.schemii.designs.store import DesignRepository
 
 from .models import (
     SchemiiWorkspace,
-    SchemiiWorkspaceCreate,
+    WorkspaceCreateRecord,
     SchemiiWorkspaceLayoutUpdate,
     TableColumnDisplayOrder,
     WorkspaceImportSummary,
@@ -139,7 +139,7 @@ class WorkspaceRepository(Protocol):
     def create(
         self,
         owner_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         *,
         bootstrap: WorkspaceDesignBootstrap | None = None,
         expected_connection_revision: int | None = None,
@@ -148,7 +148,7 @@ class WorkspaceRepository(Protocol):
     def create_import(
         self,
         owner_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         *,
         bootstrap: WorkspaceDesignBootstrap,
         baseline: WorkspaceImportBaseline,
@@ -230,7 +230,7 @@ class InMemoryWorkspaceRepository:
     def create(
         self,
         owner_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         *,
         bootstrap: WorkspaceDesignBootstrap | None = None,
         expected_connection_revision: int | None = None,
@@ -245,11 +245,6 @@ class InMemoryWorkspaceRepository:
                 id=f"ws_{secrets.token_hex(16)}",
                 revision=1,
                 name=request.name,
-                mode=(
-                    "design"
-                    if bootstrap is not None or request.connection_id is None
-                    else "live"
-                ),
                 connection_id=request.connection_id,
                 database=request.database,
                 namespace=request.namespace,
@@ -280,7 +275,7 @@ class InMemoryWorkspaceRepository:
     def create_import(
         self,
         owner_id: str,
-        request: SchemiiWorkspaceCreate,
+        request: WorkspaceCreateRecord,
         *,
         bootstrap: WorkspaceDesignBootstrap,
         baseline: WorkspaceImportBaseline,
@@ -307,7 +302,6 @@ class InMemoryWorkspaceRepository:
                 id=f"ws_{secrets.token_hex(16)}",
                 revision=1,
                 name=request.name,
-                mode="design",
                 connection_id=request.connection_id,
                 database=request.database,
                 namespace=request.namespace,

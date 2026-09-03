@@ -40,7 +40,7 @@ The current API deliberately uses one local application user while product workf
 
 - `GET /api/v1/session` returns the valid local prototype principal.
 - `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
-- `/api/v1/schemii/workspaces` manages durable local designs, database-derived designs, live inspections, and presentation preferences.
+- `/api/v1/schemii/workspaces` manages durable local and PostgreSQL-backed designs plus presentation preferences.
 - `POST /api/v1/schemii/workspaces/imports` creates a new editable design from one bounded PostgreSQL catalog snapshot. It cannot target or replace an existing workspace.
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
 - Interactive OpenAPI documentation is available at `/docs`.
@@ -53,7 +53,7 @@ Each profile targets exactly one PostgreSQL host. TLS certificate and hostname v
 
 The local deployment's `internal-only` egress mode admits connection profiles only when their normalized host is listed in the operator-owned `SCHEMII_ALLOWED_TARGET_HOSTS` setting. The list contains private network identities, not user-entered patterns or inferred address ranges, and is checked when a profile is created, updated, and every time its credential is resolved for use. The metadata PostgreSQL identity is denied independently. Deployments must therefore control DNS for each allowed alias; an alternate alias or literal address is rejected unless the operator explicitly adds it.
 
-A workspace is created as one of three fixed kinds: a database-independent editable design, a new editable design imported from PostgreSQL, or a read-only live PostgreSQL inspection. Targets cannot be attached, replaced, or detached after creation. A PostgreSQL import atomically records the catalog baseline, design revision, layout, provenance, and lossiness report, so existing local work cannot be overwritten. Local designs can be exported as SQL for use outside Schemii. Live workspaces read columns, constraints, relationships, indexes, triggers, functions, views, materialized views, enums, and domains from one bounded, repeatable-read PostgreSQL snapshot. Capabilities that remain planned are registered for review in the API map and return an explicit `501 planned_capability`.
+A workspace is either a database-independent editable design or a new editable design imported from PostgreSQL. Targets cannot be attached, replaced, or detached after creation. A PostgreSQL import atomically records the catalog baseline, design revision, layout, provenance, and lossiness report, so existing local work cannot be overwritten. The saved connection's PostgreSQL grants—not a Schemii workspace mode—determine which database operations are permitted. Local designs can be exported as SQL for use outside Schemii. Database-backed workspaces inspect columns, constraints, relationships, indexes, triggers, functions, views, materialized views, enums, and domains from bounded PostgreSQL snapshots. Capabilities that remain planned are registered for review in the API map and return an explicit `501 planned_capability`.
 
 ## Schemii frontend
 
@@ -63,7 +63,7 @@ Shared frontend primitives used across product surfaces live in `src/schemii/com
 
 Promote a frontend implementation into the shared UI layer when multiple real page consumers need the same contract or when one central implementation is required for accessibility or interaction correctness. Keep page-specific code local rather than adding speculative variants. If a future Schemoo or Schemer frontend becomes a second package-level consumer, establish a frontend package boundary at that point instead of coupling it to Schemii's asset directory prematurely.
 
-Live catalog inspection remains read-only. Desired designs support durable schema authoring independently of a backing database. Targeted designs can be reviewed and applied through server-authoritative migration plans with drift detection, explicit conflict resolution, and durable execution recovery. General SQL execution and AI workflows remain separate planned or evolving contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
+Desired designs support durable schema authoring independently of a backing database. Database-backed designs can be reviewed and applied through server-authoritative migration plans with drift detection, explicit conflict resolution, durable execution recovery, and PostgreSQL-enforced permissions. General SQL execution and AI workflows remain separate planned or evolving contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
 `common/metadata/factory.py` selects its storage boundary from the required `SCHEMII_STORAGE_MODE`. The launcher always selects durable PostgreSQL; in-memory storage must be explicitly selected and remains available for isolated unit tests. Missing or incomplete durable configuration fails startup rather than falling back to process memory. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
 
@@ -163,7 +163,7 @@ workspace, design, baseline, layout, and history metadata with:
 
 The saved scenarios are `baseline`, `column-migrations`, `compatible-drift`,
 `conflicting-drift`, `live-browser`, and `undo-redo`. `live-browser` creates a
-true live workspace with populated tables, joined views, and a materialized
+database-backed workspace with populated tables, joined views, and a materialized
 view for testing search, row previews, and source-derived lineage.
 `column-migrations` demonstrates a new
 required column on an empty table alongside a safe widening on a populated

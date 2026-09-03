@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import Field, field_validator, model_validator
 
@@ -83,9 +83,19 @@ class WorkspaceImportSummary(ApiModel):
 
 
 class SchemiiWorkspaceCreate(ApiModel):
-    """Create a local design or a live inspection with a fixed initial target."""
+    """Create a database-independent editable design."""
 
     name: WorkspaceName = "Untitled schema"
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class WorkspaceCreateRecord(SchemiiWorkspaceCreate):
+    """Internal creation record with an optional fixed PostgreSQL identity."""
+
     connection_id: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
     database: DatabaseName | None = None
     namespace: NamespaceName | None = None
@@ -95,13 +105,8 @@ class SchemiiWorkspaceCreate(ApiModel):
     def normalize_target(cls, value: str | None) -> str | None:
         return _identifier(value) if value is not None else None
 
-    @field_validator("name", mode="before")
-    @classmethod
-    def normalize_name(cls, value: object) -> object:
-        return value.strip() if isinstance(value, str) else value
-
     @model_validator(mode="after")
-    def complete_optional_target(self) -> "SchemiiWorkspaceCreate":
+    def complete_optional_target(self) -> "WorkspaceCreateRecord":
         target = (self.connection_id, self.database, self.namespace)
         if any(value is not None for value in target) and not all(
             value is not None for value in target
@@ -130,8 +135,8 @@ class SchemiiWorkspaceImportCreate(ApiModel):
     def normalize_name(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
 
-    def workspace_create(self) -> SchemiiWorkspaceCreate:
-        return SchemiiWorkspaceCreate(
+    def workspace_record(self) -> WorkspaceCreateRecord:
+        return WorkspaceCreateRecord(
             name=self.name,
             connection_id=self.connection_id,
             database=self.database,
@@ -167,7 +172,6 @@ class SchemiiWorkspace(ApiModel):
     id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
     revision: Annotated[int, Field(strict=True, ge=1)]
     name: WorkspaceName
-    mode: Literal["design", "live"] = "design"
     connection_id: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
     database: DatabaseName | None = None
     namespace: NamespaceName | None = None
@@ -199,10 +203,6 @@ class SchemiiWorkspace(ApiModel):
             value is not None for value in target
         ):
             raise ValueError("workspace PostgreSQL target must be complete or absent")
-        if self.mode == "live" and self.connection_id is None:
-            raise ValueError("live workspaces require a PostgreSQL target")
-        if self.import_summary is not None and (
-            self.mode != "design" or self.connection_id is None
-        ):
+        if self.import_summary is not None and self.connection_id is None:
             raise ValueError("import provenance requires a targeted design workspace")
         return self

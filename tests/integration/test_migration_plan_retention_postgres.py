@@ -17,7 +17,7 @@ from schemii.schemii.migrations.repository import (
     PlanRecord,
     PostgresMigrationRepository,
 )
-from schemii.schemii.workspaces.models import SchemiiWorkspaceCreate
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
 from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepository
 from tests.integration.postgres_fixture import PostgresMetadataHarness
 
@@ -120,7 +120,7 @@ def test_postgres_plan_retention_preserves_execution_and_reconciliation_records(
         postgres_metadata.connection_factory
     ).create(
         owner_id,
-        SchemiiWorkspaceCreate(
+        WorkspaceCreateRecord(
             name="Migration plan retention",
             connection_id=target.id,
             database=target.database,

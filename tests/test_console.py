@@ -121,7 +121,7 @@ def target_workspace(api: TestClient) -> dict:
         },
     ).json()
     response = api.post(
-        "/api/v1/schemii/workspaces",
+        "/api/v1/schemii/workspaces/imports",
         json={
             "connectionId": connection["id"],
             "database": "analytics",
@@ -129,7 +129,7 @@ def target_workspace(api: TestClient) -> dict:
         },
     )
     assert response.status_code == 201
-    return response.json()
+    return response.json()["workspace"]
 
 
 def execution_body(workspace: dict, sql: str) -> dict:

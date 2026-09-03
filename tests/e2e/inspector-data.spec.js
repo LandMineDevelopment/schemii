@@ -4,7 +4,7 @@ async function databaseDesignWorkspace(request) {
   const response = await request.get("/api/v1/schemii/workspaces");
   expect(response.ok()).toBe(true);
   const body = await response.json();
-  const workspace = body.workspaces.find(item => item.mode === "design" && item.connectionId);
+  const workspace = body.workspaces.find(item => item.connectionId);
   expect(workspace, "the demo should provide a database-derived design workspace").toBeTruthy();
   return workspace;
 }
