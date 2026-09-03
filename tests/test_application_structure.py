@@ -65,7 +65,10 @@ def test_openapi_exposes_typed_planned_routes_without_marking_them_implemented()
     ]["tags"] == ["schemii", "schemii-schema-design"]
     assert schema["paths"][
         "/api/v1/schemii/workspaces/{workspace_id}/relations"
-    ]["get"]["tags"] == ["schemii", "schemii-database-browser-planned"]
+    ]["get"]["tags"] == ["schemii", "schemii-database-browser"]
+    assert schema["paths"][
+        "/api/v1/schemii/workspaces/{workspace_id}/relations"
+    ]["get"].get("x-schemii-status") is None
     assert schema["paths"]["/api/v1/schemii/console/settings"]["get"]["tags"] == [
         "schemii",
         "schemii-sql-console",

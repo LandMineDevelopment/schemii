@@ -131,3 +131,22 @@ test("console API methods bind executions and result cursors to a workspace", as
     ["DELETE", "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo/results/res_demo"],
   ]);
 });
+
+test("relation browser API binds discovery, lineage, and rows to a workspace", async () => {
+  const requests = [];
+  const fetcher = async (path, options) => {
+    requests.push([path, options.method || "GET"]);
+    return new Response(JSON.stringify({ relations: [], rows: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  await api.listRelations("ws_1", { search: "orders", pageSize: 25, fetcher });
+  await api.getRelationLineage("ws_1", "rel_1", { fetcher });
+  await api.getRelationRows("ws_1", "rel_1", { cursor: "next", pageSize: 20, fetcher });
+  assert.deepEqual(requests, [
+    ["/api/v1/schemii/workspaces/ws_1/relations?pageSize=25&search=orders", "GET"],
+    ["/api/v1/schemii/workspaces/ws_1/relations/rel_1/lineage", "GET"],
+    ["/api/v1/schemii/workspaces/ws_1/relations/rel_1/rows?pageSize=20&cursor=next", "GET"],
+  ]);
+});

@@ -134,6 +134,19 @@ export const api = Object.freeze({
   updateLayout: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/layout`, { ...options, method: "PUT", body }),
   deleteWorkspace: (id, expectedRevision, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
   getCatalog: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/catalog`, options),
+  listRelations(workspaceId, { cursor = null, pageSize = 100, search = "", ...options } = {}) {
+    const query = new URLSearchParams({ pageSize: String(pageSize) });
+    if (cursor) query.set("cursor", cursor);
+    if (search) query.set("search", search);
+    return requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/relations?${query}`, options);
+  },
+  getRelation: (workspaceId, relationRef, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/relations/${encodeURIComponent(relationRef)}`, options),
+  getRelationLineage: (workspaceId, relationRef, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/relations/${encodeURIComponent(relationRef)}/lineage`, options),
+  getRelationRows(workspaceId, relationRef, { cursor = null, pageSize = 100, ...options } = {}) {
+    const query = new URLSearchParams({ pageSize: String(pageSize) });
+    if (cursor) query.set("cursor", cursor);
+    return requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/relations/${encodeURIComponent(relationRef)}/rows?${query}`, options);
+  },
   getDesign: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design`, options),
   getDesignSnapshot: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/snapshot`, options),
   getDesignHistory: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/history`, options),

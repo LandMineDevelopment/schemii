@@ -200,6 +200,7 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
         "column-migrations",
         "compatible-drift",
         "conflicting-drift",
+        "live-browser",
         "undo-redo",
     }
     assert {path.parent.name for path in scenarios.glob("*/manifest.json")} == expected
@@ -252,6 +253,16 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
     assert undo_redo["designAlterations"][-1] == "design-03.json"
     assert view_change["changes"][0]["operation"] == "addView"
     assert view_change["changes"][0]["name"] == "project_workload"
+
+    live_browser = __import__("json").loads(
+        (scenarios / "live-browser" / "manifest.json").read_text(encoding="utf-8")
+    )
+    live_browser_sql = (scenarios / "live-browser" / "target.sql").read_text(
+        encoding="utf-8"
+    )
+    assert live_browser["workspaceMode"] == "live"
+    assert "CREATE VIEW public.team_delivery_health" in live_browser_sql
+    assert "CREATE MATERIALIZED VIEW public.priority_queue" in live_browser_sql
 
 
 def test_ci_executes_unit_browser_and_real_postgres_behavior() -> None:

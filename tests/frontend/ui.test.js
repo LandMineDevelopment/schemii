@@ -106,7 +106,7 @@ function dockFixture() {
 }
 
 test("shared icon registry preserves the legacy visual vocabulary", () => {
-  for (const name of ["close", "sql", "database", "edit", "earlier", "later", "copy", "link", "check", "duplicate", "delete", "add", "refresh", "calendar", "schemas", "search", "more", "assistant", "history", "settings", "new-chat", "key"]) {
+  for (const name of ["close", "sql", "database", "edit", "earlier", "later", "copy", "link", "check", "duplicate", "delete", "add", "refresh", "calendar", "schemas", "search", "more", "assistant", "history", "settings", "new-chat", "key", "rows", "migration"]) {
     assert.match(ICONS[name], /^<svg viewBox="0 0 20 20" aria-hidden="true">/);
   }
   assert.equal(Object.isFrozen(ICONS), true);
@@ -285,6 +285,32 @@ test("dock panes expose expanded and minimized state without discarding content"
   assert.equal(body.inert, true);
 
   toggle.click();
+  assert.equal(dock.state, "expanded");
+  assert.equal(body.inert, false);
+});
+
+test("dock panes can delegate header gestures without duplicating dock state", () => {
+  const documentRef = { activeElement: null };
+  const container = new Target(documentRef);
+  const pane = new Target(documentRef);
+  const body = new Target(documentRef);
+  const toggle = new Target(documentRef);
+  pane.children.add(body);
+  let requested = 0;
+  const dock = new DockPane({
+    container,
+    pane,
+    body,
+    toggle,
+    onToggleRequest: controller => {
+      requested += 1;
+      assert.equal(controller.state, "expanded");
+    },
+  });
+
+  toggle.click();
+
+  assert.equal(requested, 1);
   assert.equal(dock.state, "expanded");
   assert.equal(body.inert, false);
 });

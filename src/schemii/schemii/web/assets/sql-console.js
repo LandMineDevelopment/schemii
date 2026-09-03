@@ -1,14 +1,12 @@
 import { ApiError } from "./api.js";
 import { element, replace } from "./dom.js";
+import { createDataGrid, formatDataCell } from "./data-grid.js";
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 const POLL_INTERVAL_MS = 350;
 
 export function formatConsoleCell(value) {
-  if (value === null) return "NULL";
-  if (typeof value === "string") return value;
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
+  return formatDataCell(value);
 }
 
 function consoleId() {
@@ -25,32 +23,6 @@ function statePanel(mark, title, message, { error = false } = {}) {
   ]);
 }
 
-function resultTable(page) {
-  const table = element("table", { className: "sql-result-table" });
-  const head = element("thead");
-  const headRow = element("tr");
-  headRow.append(element("th", { text: "#", attrs: { scope: "col" } }));
-  for (const column of page.columns) {
-    headRow.append(element("th", { attrs: { scope: "col" } }, [
-      element("strong", { text: column.name, title: column.name }),
-      element("small", { text: column.dataType, title: column.dataType }),
-    ]));
-  }
-  head.append(headRow);
-  const body = element("tbody");
-  page.rows.forEach((row, rowIndex) => {
-    const tableRow = element("tr");
-    tableRow.append(element("th", { text: rowIndex + 1, attrs: { scope: "row" } }));
-    row.forEach(value => {
-      const text = formatConsoleCell(value);
-      tableRow.append(element("td", { text, title: text, className: value === null ? "is-null" : "" }));
-    });
-    body.append(tableRow);
-  });
-  table.append(head, body);
-  return table;
-}
-
 export function createSqlConsole({
   api,
   draft,
@@ -61,6 +33,7 @@ export function createSqlConsole({
   getWorkspace,
   showToast,
   onError,
+  onRunStart = null,
 }) {
   let settings = null;
   let workspaceId = null;
@@ -151,8 +124,7 @@ export function createSqlConsole({
       } else if (!page.rows.length) {
         card.append(statePanel("0", "No rows returned", "PostgreSQL returned the column shape without any records."));
       } else {
-        const viewport = element("div", { className: "sql-result-viewport" }, resultTable(page));
-        card.append(viewport);
+        card.append(createDataGrid({ columns: page.columns, rows: page.rows, className: "sql-result-viewport" }));
         if (page.nextCursor || page.truncated) {
           const footer = element("footer");
           const note = page.truncated
@@ -220,6 +192,7 @@ export function createSqlConsole({
   async function run() {
     const current = workspace();
     if (!available(current) || busy || !draft.value.trim()) return;
+    if (typeof onRunStart === "function") onRunStart();
     stopPolling();
     const previousExecution = execution;
     const runGeneration = ++generation;
@@ -331,6 +304,24 @@ export function createSqlConsole({
     return true;
   }
 
+  function setDraft(value) {
+    draft.value = value;
+    updateControls();
+  }
+
+  function reset(value = "") {
+    const previousExecution = execution;
+    generation += 1;
+    stopPolling();
+    execution = null;
+    resultPages = new Map();
+    busy = false;
+    draft.value = value;
+    void release(workspaceId, previousExecution);
+    renderIdle();
+    updateControls();
+  }
+
   runButton.addEventListener("click", run);
   cancelButton.addEventListener("click", cancel);
   draft.addEventListener("input", updateControls);
@@ -341,5 +332,5 @@ export function createSqlConsole({
   });
   updateControls();
 
-  return Object.freeze({ syncWorkspace, clearDraft, run, cancel });
+  return Object.freeze({ syncWorkspace, clearDraft, setDraft, reset, run, cancel });
 }

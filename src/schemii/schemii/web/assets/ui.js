@@ -28,6 +28,7 @@ const ICON_PATHS = Object.freeze({
   info: '<circle cx="10" cy="10" r="7"/><path d="M10 9v5M10 6h.01"/>',
   drag: '<circle cx="7" cy="5" r="1.25" fill="currentColor" stroke="none"/><circle cx="13" cy="5" r="1.25" fill="currentColor" stroke="none"/><circle cx="7" cy="10" r="1.25" fill="currentColor" stroke="none"/><circle cx="13" cy="10" r="1.25" fill="currentColor" stroke="none"/><circle cx="7" cy="15" r="1.25" fill="currentColor" stroke="none"/><circle cx="13" cy="15" r="1.25" fill="currentColor" stroke="none"/>',
   tables: '<rect x="3.5" y="4" width="13" height="12" rx="1.5"/><path d="M3.5 8h13M8 8v8M12.5 8v8"/>',
+  rows: '<rect x="3.5" y="4" width="13" height="12" rx="1.5"/><path d="M3.5 8h13M3.5 12h13"/>',
   views: '<path d="M5 3.5h7l3 3v10H5zM12 3.5v3h3M8 10h4M8 13h4"/>',
   relationship: '<circle cx="5.5" cy="6" r="2"/><circle cx="14.5" cy="14" r="2"/><path d="M7.5 6h2.2a3 3 0 0 1 3 3v2a3 3 0 0 0 1.8 3"/>',
   key: '<circle cx="6.5" cy="8" r="3"/><path d="m9 10 6 6M12 13l1.8-1.8M14 15l1.8-1.8"/>',
@@ -39,6 +40,7 @@ const ICON_PATHS = Object.freeze({
   "zoom-out": '<circle cx="8.5" cy="8.5" r="5"/><path d="m12.5 12.5 4 4M6 8.5h5"/>',
   routines: '<path d="M4 3.5h12v4H4zM4 12.5h12v4H4zM10 7.5v5"/>',
   objects: '<path d="M3.5 3.5h5v5h-5zM11.5 3.5h5v5h-5zM3.5 11.5h5v5h-5zM11.5 11.5h5v5h-5z"/>',
+  migration: '<path d="M4 5h9M10 2l3 3-3 3M16 15H7M10 12l-3 3 3 3"/>',
   collapse: '<path d="m12.5 5-5 5 5 5"/>',
   expand: '<path d="m7.5 5 5 5-5 5"/>',
   minimize: '<path d="M5 10h10"/>',
@@ -515,6 +517,7 @@ export class DockPane {
     expandedLabel = "Minimize panel",
     minimizedLabel = "Expand panel",
     getRestoreFocusTarget = () => null,
+    onToggleRequest = null,
     onStateChange = null,
   }) {
     if (!container || !pane || !body || !toggle) throw new TypeError("DockPane requires a container, pane, body, and toggle");
@@ -530,8 +533,12 @@ export class DockPane {
     this.expandedLabel = expandedLabel;
     this.minimizedLabel = minimizedLabel;
     this.getRestoreFocusTarget = getRestoreFocusTarget;
+    this.onToggleRequest = onToggleRequest;
     this.onStateChange = onStateChange;
-    this.onToggle = () => this.toggleState();
+    this.onToggle = event => {
+      if (typeof this.onToggleRequest === "function") this.onToggleRequest(this, event);
+      else this.toggleState();
+    };
     this.onDismiss = () => this.dismiss();
     toggle.addEventListener("click", this.onToggle);
     dismiss?.addEventListener("click", this.onDismiss);

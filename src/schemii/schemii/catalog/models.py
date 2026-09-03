@@ -10,6 +10,8 @@ from schemii.common.postgres.models import (
     PostgresTable,
     PostgresView,
 )
+from schemii.common.postgres.console.models import ConsoleResultColumn
+from schemii.common.postgres.query_models import QueryAnalysis
 
 
 RelationRef = Annotated[str, Field(pattern=r"^rel_[A-Za-z0-9_-]{16,256}$")]
@@ -71,6 +73,7 @@ class RelationLineageResponse(ApiModel):
     warnings: list[str] = Field(default_factory=list, max_length=100)
     nodes: list[RelationLineageNode] = Field(max_length=10_000)
     edges: list[RelationLineageEdge] = Field(max_length=20_000)
+    analysis: QueryAnalysis | None = None
 
 
 class RelationRowPage(ApiModel):
@@ -79,7 +82,7 @@ class RelationRowPage(ApiModel):
     workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
     relation_ref: RelationRef
     relation_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    columns: list[str] = Field(max_length=1600)
-    rows: list[dict[str, Any]] = Field(max_length=1000)
+    columns: list[ConsoleResultColumn] = Field(max_length=1600)
+    rows: list[list[Any]] = Field(max_length=1000)
     next_cursor: str | None = Field(default=None, max_length=512)
     truncated: bool

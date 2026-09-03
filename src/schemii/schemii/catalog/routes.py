@@ -1,15 +1,15 @@
-"""Planned, workspace-bound live database browser routes."""
+"""Workspace-bound live database browser routes."""
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
-from schemii.common.api.planned import (
-    PLANNED_OPENAPI,
-    PLANNED_RESPONSES,
-    planned_capability,
-)
+from schemii.common.api.errors import ApiProblem
+from schemii.common.api.postgres import postgres_api_problem
+from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.common.postgres.errors import PostgresGatewayError
+from schemii.schemii.workspaces.store import WorkspaceNotFoundError
 
 from .models import (
     RelationDetailResponse,
@@ -18,22 +18,39 @@ from .models import (
     RelationRef,
     RelationRowPage,
 )
+from .service import RelationBrowserError, RelationBrowserService
 
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/relations",
-    tags=["schemii-database-browser-planned"],
+    tags=["schemii-database-browser"],
 )
+
+
+def _service(request: Request) -> RelationBrowserService:
+    services = request.app.state.services
+    return RelationBrowserService(workspaces=services.workspaces, connections=services.connections, postgres=services.postgres)
+
+
+def _problem(error: Exception) -> ApiProblem:
+    if isinstance(error, WorkspaceNotFoundError):
+        return ApiProblem(404, "workspace_not_found", str(error))
+    if isinstance(error, ConnectionNotFoundError):
+        return ApiProblem(404, "connection_not_found", str(error))
+    if isinstance(error, RelationBrowserError):
+        return ApiProblem(error.status, error.code, str(error))
+    if isinstance(error, PostgresGatewayError):
+        return postgres_api_problem(error)
+    raise error
 
 
 @router.get(
     "",
     response_model=RelationListResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def list_workspace_relations(
     workspace_id: str,
+    request: Request,
     cursor: str | None = Query(default=None, max_length=512),
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=250)] = 100,
     search: str | None = Query(default=None, max_length=256),
@@ -41,66 +58,63 @@ def list_workspace_relations(
 ) -> RelationListResponse:
     """Page live relation summaries for an attached workspace target."""
 
-    # TODO(postgres-relation-browser): Add one repeatable-read, bounded gateway
-    # query and bind opaque continuation tokens to owner, target, and fingerprint.
-    del workspace_id, cursor, page_size, search, principal
-    planned_capability("schemii.catalog.relations")
+    try:
+        return _service(request).list(principal.user_id, workspace_id, cursor=cursor, page_size=page_size, search=search)
+    except Exception as error:
+        raise _problem(error) from error
 
 
 @router.get(
     "/{relation_ref}",
     response_model=RelationDetailResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def get_workspace_relation(
     workspace_id: str,
     relation_ref: RelationRef,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> RelationDetailResponse:
     """Resolve an opaque relation reference into a fresh detailed descriptor."""
 
-    # TODO(postgres-relation-detail): Decode and authorize the reference, then
-    # inspect exactly one relation without materializing the full namespace.
-    del workspace_id, relation_ref, principal
-    planned_capability("schemii.catalog.relation-detail")
+    try:
+        return _service(request).detail(principal.user_id, workspace_id, relation_ref)
+    except Exception as error:
+        raise _problem(error) from error
 
 
 @router.get(
     "/{relation_ref}/lineage",
     response_model=RelationLineageResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def get_workspace_relation_lineage(
     workspace_id: str,
     relation_ref: RelationRef,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> RelationLineageResponse:
     """Return verified dependency and column-lineage evidence for one live relation."""
 
-    # TODO(postgres-lineage): Read dependencies in the same catalog snapshot,
-    # analyze bounded view SQL, and label every unsupported path as incomplete.
-    del workspace_id, relation_ref, principal
-    planned_capability("schemii.catalog.lineage")
+    try:
+        return _service(request).lineage(principal.user_id, workspace_id, relation_ref)
+    except Exception as error:
+        raise _problem(error) from error
 
 
 @router.get(
     "/{relation_ref}/rows",
     response_model=RelationRowPage,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def preview_workspace_relation_rows(
     workspace_id: str,
     relation_ref: RelationRef,
+    request: Request,
     cursor: str | None = Query(default=None, max_length=512),
     page_size: Annotated[int, Query(alias="pageSize", ge=1, le=250)] = 100,
     principal: Principal = Depends(get_current_principal),
 ) -> RelationRowPage:
     """Read a bounded page without rerunning or broadening the selected relation."""
 
-    # TODO(postgres-row-preview): Execute identifier-safe SELECT in a managed
-    # read-only snapshot and make truncation, expiry, and cursor ownership explicit.
-    del workspace_id, relation_ref, cursor, page_size, principal
-    planned_capability("schemii.catalog.rows")
+    try:
+        return _service(request).rows(principal.user_id, workspace_id, relation_ref, cursor=cursor, page_size=page_size)
+    except Exception as error:
+        raise _problem(error) from error

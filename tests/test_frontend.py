@@ -25,6 +25,12 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert 'href="/assets/common/transient-cue.css"' in response.text
     assert 'data-ui-icon="database"' in response.text
     assert 'id="table-inspector-toggle"' in response.text
+    assert 'id="table-data-tools-button"' in response.text
+    assert 'id="inspector-data-workspace"' in response.text
+    assert 'id="show-inspector-rows"' in response.text
+    assert 'id="show-inspector-console"' in response.text
+    assert 'id="maximize-inspector-data"' in response.text
+    assert 'id="review-migration-button"' in response.text
     assert 'href="/api-map"' in response.text
     assert 'href="/db-map"' in response.text
     assert "<script>" not in response.text

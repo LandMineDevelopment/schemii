@@ -123,6 +123,7 @@ export function renderInspector({
   onColumnOrderModeChange = null,
   onColumnOrderChange = null,
   onResetColumnOrder = null,
+  onPreviewRows = null,
 }) {
   inspector.classList.toggle("is-empty", !table);
   empty.hidden = Boolean(table);
@@ -133,7 +134,7 @@ export function renderInspector({
   const desired = catalog.source === "design";
 
   if (showTableDetails) {
-    const identity = section("Table identity", 0);
+    const identity = section("Table identity", 0, onPreviewRows ? actionButton("Preview rows", onPreviewRows) : null);
     identity.append(metadataGrid([
       ["Namespace", table.namespace],
       ["Kind", table.kind],

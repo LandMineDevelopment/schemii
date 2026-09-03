@@ -83,6 +83,8 @@
           <button id="functions-button" type="button" data-ui-icon="routines" title="Functions and procedures" aria-label="Functions and procedures"></button>
           <button id="types-button" type="button" data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
           <button id="objects-button" type="button" data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
+          <span class="rail-divider" aria-hidden="true"></span>
+          <button id="review-migration-button" type="button" data-ui-icon="migration" title="Review migration" aria-label="Review migration" disabled></button>
           <button id="postgres-button" type="button" data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
           <button type="button" data-ui-icon="assistant" data-unavailable="ai-assistant" title="AI schema assistant" aria-label="AI schema assistant"></button>
         </aside>
@@ -111,6 +113,39 @@
             <output class="zoom-output" id="zoom-output" aria-label="Canvas zoom">100%</output>
           </div>
 
+          <section class="inspector-data-workspace" id="inspector-data-workspace" data-active-pane="rows" aria-label="Table rows and read-only SQL console" hidden>
+            <section class="inspector-rows-pane">
+              <header class="inspector-data-header" id="inspector-rows-header">
+                <button class="inspector-pane-heading" id="show-inspector-rows" type="button" aria-expanded="true">
+                  <small>Bounded live snapshot</small>
+                  <strong id="inspector-rows-title">Table rows</strong>
+                </button>
+                <div class="inspector-data-actions" id="inspector-data-actions">
+                  <span id="inspector-rows-status">Up to 100 rows</span>
+                  <button class="ui-icon-button compact" id="refresh-inspector-rows" type="button" data-ui-icon="refresh" aria-label="Refresh table rows"></button>
+                  <button class="ui-icon-button compact" id="open-full-row-preview" type="button" data-ui-icon="rows" aria-label="Open full row preview"></button>
+                  <button class="ui-icon-button compact" id="maximize-inspector-data" type="button" data-ui-icon="fit" aria-label="Maximize data tools" aria-pressed="false"></button>
+                  <button class="ui-icon-button compact" id="minimize-inspector-data" type="button" data-ui-icon="minimize" aria-label="Minimize data tools"></button>
+                </div>
+              </header>
+              <div class="inspector-rows-content" id="inspector-rows-content">
+                <div class="inspector-rows-body" id="inspector-rows-body" aria-live="polite"></div>
+                <div class="inspector-sql-results" id="inspector-sql-results" aria-live="polite" hidden></div>
+                <footer><span>Rows are read directly from the selected PostgreSQL relation.</span><button class="ui-button compact" id="inspector-rows-more" type="button" hidden>Next page</button></footer>
+              </div>
+            </section>
+            <section class="inspector-console-pane">
+              <button class="inspector-console-bar" id="show-inspector-console" type="button" aria-expanded="false">
+                <span><small>Read-only workspace</small><strong>SQL console</strong></span>
+                <span id="inspector-sql-status">Draft text is not sent or saved.</span>
+              </button>
+              <div class="inspector-console-content" id="inspector-console-content" hidden>
+                <textarea id="inspector-sql-draft" rows="8" spellcheck="false" aria-label="Table-scoped read-only SQL query"></textarea>
+                <footer><span>Run the table-scoped draft with <kbd>Ctrl</kbd> + <kbd>Enter</kbd>.</span><button class="ui-button compact" id="clear-inspector-sql" type="button">Clear</button><button class="ui-button compact" id="cancel-inspector-sql" type="button" hidden>Cancel</button><button class="ui-button compact primary" id="run-inspector-sql" type="button">Run query</button></footer>
+              </div>
+            </section>
+          </section>
+
           <aside class="inspector ui-dock-pane" id="inspector" aria-labelledby="table-inspector-title">
             <header class="ui-dock-pane__header">
               <button class="ui-dock-pane__toggle" id="table-inspector-toggle" type="button" aria-controls="table-inspector-body" aria-expanded="true">
@@ -118,42 +153,44 @@
                 <strong id="table-inspector-title">Table inspector</strong>
               </button>
               <div class="ui-dock-pane__actions">
-                <button class="ui-icon-button compact" type="button" data-ui-icon="tables" data-unavailable="table-rows" aria-label="Browse table rows"></button>
+                <button class="ui-icon-button compact" id="table-data-tools-button" type="button" data-ui-icon="rows" aria-label="Open table rows and console" aria-controls="inspector-data-workspace" aria-pressed="false" disabled></button>
                 <button class="ui-icon-button compact danger" id="delete-table-button" type="button" data-ui-icon="delete" aria-label="Delete designed table" disabled></button>
                 <button class="ui-icon-button compact" id="table-inspector-close" type="button" data-ui-icon="close" aria-label="Close table inspector"></button>
               </div>
             </header>
             <div class="ui-dock-pane__body" id="table-inspector-body">
-              <div class="inspector-empty" id="inspector-empty">
-                <span class="empty-glyph" aria-hidden="true">
-                  <svg viewBox="0 0 48 48"><rect x="7" y="8" width="34" height="31" rx="4"/><path d="M7 18h34M17 18v21M30 18v21"/></svg>
-                </span>
-                <h2>Nothing selected</h2>
-                <p id="inspector-empty-copy">Select a live table to inspect columns, constraints, indexes, triggers, and relationships.</p>
-                <dl class="catalog-stats ui-stat-grid" id="catalog-stats"></dl>
-              </div>
-              <form class="inspector-table-editor" id="inspector-table-form" hidden>
-                <section class="inspector-section inspector-table-general">
-                  <header class="section-title"><h3>Table</h3><span>Direct edit</span></header>
-                  <label class="inspector-table-name"><span>Table name</span><input id="inspector-table-name" required maxlength="63" autocomplete="off" /></label>
-                </section>
-                <section class="inspector-section inspector-table-columns">
-                  <header class="section-title">
-                    <span><h3>Columns</h3><small id="inspector-column-count">0</small></span>
-                    <button class="ui-button compact" id="add-inspector-column-button" type="button">Add column</button>
-                  </header>
-                  <p class="inspector-editor-copy">Edit values in place. Drag the six-dot handle to change column order.</p>
-                  <div class="design-columns" id="inspector-design-columns"></div>
-                </section>
-                <div class="inspector-table-savebar">
-                  <div class="form-status" id="inspector-table-status" aria-live="polite"></div>
-                  <span>
-                    <button class="ui-button compact" id="discard-inspector-table-button" type="button" disabled>Discard</button>
-                    <button class="ui-button compact primary" id="save-inspector-table-button" type="submit" disabled>Save changes</button>
+              <div id="inspector-structure-panel">
+                <div class="inspector-empty" id="inspector-empty">
+                  <span class="empty-glyph" aria-hidden="true">
+                    <svg viewBox="0 0 48 48"><rect x="7" y="8" width="34" height="31" rx="4"/><path d="M7 18h34M17 18v21M30 18v21"/></svg>
                   </span>
+                  <h2>Nothing selected</h2>
+                  <p id="inspector-empty-copy">Select a live table to inspect columns, constraints, indexes, triggers, and relationships.</p>
+                  <dl class="catalog-stats ui-stat-grid" id="catalog-stats"></dl>
                 </div>
-              </form>
-              <div id="inspector-content" hidden></div>
+                <form class="inspector-table-editor" id="inspector-table-form" hidden>
+                  <section class="inspector-section inspector-table-general">
+                    <header class="section-title"><h3>Table</h3><span>Direct edit</span></header>
+                    <label class="inspector-table-name"><span>Table name</span><input id="inspector-table-name" required maxlength="63" autocomplete="off" /></label>
+                  </section>
+                  <section class="inspector-section inspector-table-columns">
+                    <header class="section-title">
+                      <span><h3>Columns</h3><small id="inspector-column-count">0</small></span>
+                      <button class="ui-button compact" id="add-inspector-column-button" type="button">Add column</button>
+                    </header>
+                    <p class="inspector-editor-copy">Edit values in place. Drag the six-dot handle to change column order.</p>
+                    <div class="design-columns" id="inspector-design-columns"></div>
+                  </section>
+                  <div class="inspector-table-savebar">
+                    <div class="form-status" id="inspector-table-status" aria-live="polite"></div>
+                    <span>
+                      <button class="ui-button compact" id="discard-inspector-table-button" type="button" disabled>Discard</button>
+                      <button class="ui-button compact primary" id="save-inspector-table-button" type="submit" disabled>Save changes</button>
+                    </span>
+                  </div>
+                </form>
+                <div id="inspector-content" hidden></div>
+              </div>
             </div>
           </aside>
         </section>
@@ -450,7 +487,14 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <header class="ui-dialog__head"><div><small id="objects-source">Workspace catalog</small><h2 id="objects-title">Database objects</h2><p id="objects-copy">Browse types, tables, views, constraints, indexes, triggers, functions, and procedures in the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
         <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-button compact primary" id="create-trigger-button" type="button" hidden>Create trigger</button></div>
         <div class="catalog-browser-list" id="objects-list"></div>
-        <footer class="ui-dialog__actions"><button class="ui-button compact primary" id="review-migration-button" type="button">Review migration</button></footer>
+      </div>
+    </dialog>
+
+    <dialog class="ui-dialog relation-preview-dialog" id="relation-preview-dialog" aria-labelledby="relation-preview-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Bounded live PostgreSQL snapshot</small><h2 id="relation-preview-title">Preview rows</h2><p id="relation-preview-copy">Read-only data preview. Values may change between pages as PostgreSQL changes.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close row preview"></button></header>
+        <div class="relation-preview-body" id="relation-preview-body" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><span id="relation-preview-status">Up to 100 rows</span><button class="ui-button compact" id="relation-preview-more" type="button" hidden>Next page</button><button class="ui-button compact primary" type="button" data-close-dialog>Close</button></footer>
       </div>
     </dialog>
 

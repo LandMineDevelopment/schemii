@@ -162,7 +162,10 @@ workspace, design, baseline, layout, and history metadata with:
 ```
 
 The saved scenarios are `baseline`, `column-migrations`, `compatible-drift`,
-`conflicting-drift`, and `undo-redo`. `column-migrations` demonstrates a new
+`conflicting-drift`, `live-browser`, and `undo-redo`. `live-browser` creates a
+true live workspace with populated tables, joined views, and a materialized
+view for testing search, row previews, and source-derived lineage.
+`column-migrations` demonstrates a new
 required column on an empty table alongside a safe widening on a populated
 table. The reset output prints the new workspace URL. Each run records the
 current Git commit (with `+dirty` when applicable) and a digest of its base and

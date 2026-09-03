@@ -64,7 +64,7 @@ import {
 import { createSearchableSelect } from "/assets/common/searchable-select.js";
 import { installSortableList, reorderedValues } from "/assets/common/sortable.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
-import { closeDetailsMenus, createIconButton, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
+import { closeDetailsMenus, createIconButton, createIconElement, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
 import {
   readWorkspaceNavigation,
   readWorkspacePreferences,
@@ -72,6 +72,8 @@ import {
   workspaceNavigationHref,
 } from "./workspace-navigation.js";
 import { renderDesignViewStory } from "./view-story.js";
+import { renderRelationBrowser, renderRelationRows } from "./relation-browser.js";
+import { createRelationDataSource } from "./relation-data-source.js";
 import { createViewAnalysisController } from "./view-analysis.js";
 import {
   catalogTableId,
@@ -137,6 +139,29 @@ const elements = {
   inspectorBody: byId("table-inspector-body"),
   inspectorToggle: byId("table-inspector-toggle"),
   inspectorClose: byId("table-inspector-close"),
+  inspectorDataToolsButton: byId("table-data-tools-button"),
+  inspectorStructurePanel: byId("inspector-structure-panel"),
+  inspectorDataWorkspace: byId("inspector-data-workspace"),
+  inspectorRowsHeader: byId("inspector-rows-header"),
+  inspectorDataActions: byId("inspector-data-actions"),
+  showInspectorRows: byId("show-inspector-rows"),
+  showInspectorConsole: byId("show-inspector-console"),
+  inspectorRowsContent: byId("inspector-rows-content"),
+  inspectorConsoleContent: byId("inspector-console-content"),
+  maximizeInspectorData: byId("maximize-inspector-data"),
+  minimizeInspectorData: byId("minimize-inspector-data"),
+  inspectorRowsTitle: byId("inspector-rows-title"),
+  inspectorRowsBody: byId("inspector-rows-body"),
+  inspectorRowsStatus: byId("inspector-rows-status"),
+  inspectorRowsMore: byId("inspector-rows-more"),
+  refreshInspectorRows: byId("refresh-inspector-rows"),
+  openFullRowPreview: byId("open-full-row-preview"),
+  inspectorSqlDraft: byId("inspector-sql-draft"),
+  clearInspectorSql: byId("clear-inspector-sql"),
+  runInspectorSql: byId("run-inspector-sql"),
+  cancelInspectorSql: byId("cancel-inspector-sql"),
+  inspectorSqlStatus: byId("inspector-sql-status"),
+  inspectorSqlResults: byId("inspector-sql-results"),
   inspectorTitle: byId("table-inspector-title"),
   inspectorEyebrow: byId("table-inspector-eyebrow"),
   inspectorEmptyCopy: byId("inspector-empty-copy"),
@@ -317,6 +342,12 @@ const elements = {
   objectsSearch: byId("objects-search"),
   objectsCount: byId("objects-count"),
   objectsList: byId("objects-list"),
+  relationPreviewDialog: byId("relation-preview-dialog"),
+  relationPreviewTitle: byId("relation-preview-title"),
+  relationPreviewCopy: byId("relation-preview-copy"),
+  relationPreviewBody: byId("relation-preview-body"),
+  relationPreviewStatus: byId("relation-preview-status"),
+  relationPreviewMore: byId("relation-preview-more"),
   createTriggerButton: byId("create-trigger-button"),
   reviewMigrationButton: byId("review-migration-button"),
   migrationDialog: byId("migration-dialog"),
@@ -361,7 +392,11 @@ const inspectorPane = new DockPane({
   expandedLabel: "Minimize table inspector",
   minimizedLabel: "Expand table inspector",
   getRestoreFocusTarget: () => document.querySelector(`.table-card[data-table-id="${CSS.escape(state.selectedTableId || "")}"]`) || elements.canvas,
-  onStateChange: persistInspectorState,
+  onToggleRequest: () => handleInspectorHeaderGesture("left"),
+  onStateChange: paneState => {
+    persistInspectorState(paneState);
+    if (inspectorPreferenceReady && paneState === "dismissed") closeInspectorDataWorkspace();
+  },
 });
 inspectorPane.setAvailable(false);
 
@@ -417,6 +452,28 @@ const state = {
   columnOrderModes: new Map(),
   catalogLoading: false,
   catalogError: null,
+  liveRelations: null,
+  liveRelationsLoading: false,
+  liveRelationsError: null,
+  liveRelationsGeneration: 0,
+  liveRelationsSearchTimer: null,
+  relationPreview: null,
+  relationPreviewLoading: false,
+  relationPreviewError: null,
+  relationPreviewGeneration: 0,
+  inspectorMode: "structure",
+  inspectorDataMaximized: false,
+  inspectorRowsView: "table",
+  inspectorDataKey: null,
+  inspectorRelation: null,
+  inspectorRows: null,
+  inspectorRowsLoading: false,
+  inspectorRowsError: null,
+  inspectorRowsGeneration: 0,
+  liveViewLineage: null,
+  liveViewLineageKey: null,
+  liveViewLineageLoading: false,
+  liveViewLineageError: null,
   selectedTableId: null,
   selectedViewId: null,
   selectedViewOutputOrdinal: null,
@@ -479,6 +536,8 @@ const state = {
   navigationGeneration: 0,
   restoringNavigation: false,
 };
+let inspectorDataVisibilityTimer = null;
+let inspectorDataPaneTransitionTimer = null;
 inspectorPreferenceReady = true;
 
 const workspaceOperations = createWorkspaceOperationController();
@@ -503,6 +562,10 @@ const migrationReview = createMigrationReviewController({
   notify: showToast,
   notifyError: errorToast,
 });
+const relationDataSource = createRelationDataSource({
+  api,
+  getWorkspace: () => state.activeWorkspace,
+});
 const sqlConsole = createSqlConsole({
   api,
   draft: elements.sqlDraft,
@@ -513,6 +576,18 @@ const sqlConsole = createSqlConsole({
   getWorkspace: () => state.activeWorkspace,
   showToast,
   onError: errorToast,
+});
+const inspectorSqlConsole = createSqlConsole({
+  api,
+  draft: elements.inspectorSqlDraft,
+  runButton: elements.runInspectorSql,
+  cancelButton: elements.cancelInspectorSql,
+  editorStatus: elements.inspectorSqlStatus,
+  results: elements.inspectorSqlResults,
+  getWorkspace: () => state.activeWorkspace,
+  showToast,
+  onError: errorToast,
+  onRunStart: showInspectorSqlResults,
 });
 
 function showDesignChangeTargets(targets) {
@@ -2232,6 +2307,252 @@ function resetLiveColumnOrder(tableName) {
   showToast(`${tableName} now follows PostgreSQL database order.`);
 }
 
+function inspectorDataAvailable(table = currentCatalogTable()) {
+  return Boolean(table && state.activeWorkspace?.connectionId && state.activeWorkspace?.namespace);
+}
+
+function inspectorDataKey(table) {
+  if (!inspectorDataAvailable(table)) return null;
+  return `${state.activeWorkspace.id}:${table.namespace || state.activeWorkspace.namespace}:${table.name}:${table.kind || "table"}`;
+}
+
+function renderInspectorRows() {
+  const showingResults = state.inspectorRowsView === "results";
+  elements.inspectorRowsBody.hidden = showingResults;
+  elements.inspectorSqlResults.hidden = !showingResults;
+  if (!showingResults) renderRelationRows(elements.inspectorRowsBody, {
+    page: state.inspectorRows,
+    loading: state.inspectorRowsLoading,
+    error: state.inspectorRowsError,
+  });
+  const page = state.inspectorRows;
+  elements.inspectorRowsTitle.textContent = showingResults
+    ? "Query results"
+    : `${currentCatalogTable()?.name || "Table"} rows`;
+  elements.inspectorRowsStatus.textContent = showingResults
+    ? "Read-only result"
+    : page
+      ? `${page.rows.length} rows · ${page.columns.length} columns${page.truncated ? " · more available" : ""}`
+      : "Up to 100 rows";
+  elements.inspectorRowsMore.hidden = showingResults || !page?.nextCursor;
+  elements.inspectorRowsMore.disabled = state.inspectorRowsLoading;
+  elements.refreshInspectorRows.disabled = state.inspectorRowsLoading;
+  elements.openFullRowPreview.disabled = !showingResults && (state.inspectorRowsLoading || !state.inspectorRelation);
+  elements.openFullRowPreview.setAttribute("aria-label", showingResults ? "Return to table rows" : "Open full row preview");
+  elements.openFullRowPreview.dataset.uiTooltip = showingResults ? "Return to table rows" : "Open full row preview";
+  elements.refreshInspectorRows.setAttribute("aria-label", showingResults ? "Run query again" : "Refresh table rows");
+  elements.refreshInspectorRows.dataset.uiTooltip = showingResults ? "Run query again" : "Refresh table rows";
+}
+
+function showInspectorSqlResults() {
+  state.inspectorRowsView = "results";
+  state.inspectorMode = "rows";
+  renderInspectorMode();
+}
+
+function inspectorTransitionDelay(duration) {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
+}
+
+function settleInspectorDataPane(activePane) {
+  const rowsActive = activePane === "rows";
+  elements.inspectorRowsContent.hidden = !rowsActive;
+  elements.inspectorConsoleContent.hidden = rowsActive;
+}
+
+function setInspectorDataWorkspaceVisible(visible) {
+  if (visible) {
+    window.clearTimeout(inspectorDataVisibilityTimer);
+    inspectorDataVisibilityTimer = null;
+    const opening = elements.inspectorDataWorkspace.hidden;
+    elements.inspectorDataWorkspace.hidden = false;
+    elements.inspectorDataWorkspace.inert = false;
+    elements.mainLayout.classList.add("inspector-data-open");
+    if (opening) void elements.inspectorDataWorkspace.offsetWidth;
+    elements.inspectorDataWorkspace.classList.add("open");
+    return;
+  }
+  if (elements.inspectorDataWorkspace.hidden) {
+    elements.mainLayout.classList.remove("inspector-data-open");
+    return;
+  }
+  if (!elements.inspectorDataWorkspace.classList.contains("open") && inspectorDataVisibilityTimer !== null) return;
+  window.clearTimeout(inspectorDataVisibilityTimer);
+  elements.inspectorDataWorkspace.inert = true;
+  elements.inspectorDataWorkspace.classList.remove("open");
+  inspectorDataVisibilityTimer = window.setTimeout(() => {
+    inspectorDataVisibilityTimer = null;
+    if (elements.inspectorDataWorkspace.classList.contains("open")) return;
+    elements.inspectorDataWorkspace.hidden = true;
+    elements.mainLayout.classList.remove("inspector-data-open");
+    window.clearTimeout(inspectorDataPaneTransitionTimer);
+    inspectorDataPaneTransitionTimer = null;
+    elements.inspectorDataWorkspace.dataset.activePane = "rows";
+    settleInspectorDataPane("rows");
+  }, inspectorTransitionDelay(240));
+}
+
+function setInspectorDataActivePane(pane) {
+  const activePane = pane === "console" ? "console" : "rows";
+  const previousPane = elements.inspectorDataWorkspace.dataset.activePane;
+  const transitionInProgress = inspectorDataPaneTransitionTimer !== null && previousPane === activePane;
+  const transitioning = elements.inspectorDataWorkspace.classList.contains("open")
+    && Boolean(previousPane && previousPane !== activePane);
+  if (!transitionInProgress) {
+    window.clearTimeout(inspectorDataPaneTransitionTimer);
+    inspectorDataPaneTransitionTimer = null;
+    if (transitioning) {
+      elements.inspectorRowsContent.hidden = false;
+      elements.inspectorConsoleContent.hidden = false;
+      void elements.inspectorDataWorkspace.offsetHeight;
+    }
+    elements.inspectorDataWorkspace.dataset.activePane = activePane;
+    if (transitioning) {
+      inspectorDataPaneTransitionTimer = window.setTimeout(() => {
+        inspectorDataPaneTransitionTimer = null;
+        if (elements.inspectorDataWorkspace.dataset.activePane === activePane) settleInspectorDataPane(activePane);
+      }, inspectorTransitionDelay(380));
+    } else settleInspectorDataPane(activePane);
+  }
+  elements.showInspectorRows.setAttribute("aria-expanded", String(activePane === "rows"));
+  elements.showInspectorConsole.setAttribute("aria-expanded", String(activePane === "console"));
+}
+
+function renderInspectorMode(table = currentCatalogTable()) {
+  const available = inspectorDataAvailable(table);
+  if (!available) {
+    state.inspectorMode = "structure";
+    state.inspectorDataMaximized = false;
+  }
+  elements.inspectorDataToolsButton.disabled = !available;
+  const open = available && state.inspectorMode !== "structure";
+  elements.inspectorDataToolsButton.title = available
+    ? `${open ? "Close" : "Open"} table rows and read-only console`
+    : "Rows and console require a PostgreSQL-backed table";
+  elements.inspectorDataToolsButton.dataset.uiTooltip = elements.inspectorDataToolsButton.title;
+  elements.inspectorDataToolsButton.setAttribute("aria-label", available
+    ? `${open ? "Close" : "Open"} table rows and console`
+    : "Table rows and console unavailable");
+  elements.inspectorDataToolsButton.classList.toggle("active", open);
+  elements.inspectorDataToolsButton.setAttribute("aria-pressed", open ? "true" : "false");
+  const inspectorHeaderLabel = open
+    ? "Close data tools"
+    : inspectorPane.state === "expanded"
+      ? "Minimize table inspector"
+      : "Expand table inspector";
+  elements.inspectorToggle.setAttribute("aria-label", inspectorHeaderLabel);
+  elements.inspectorToggle.dataset.uiTooltip = `${inspectorHeaderLabel} · right-click ${open ? "maximizes data tools" : "opens data tools"}`;
+  setInspectorDataWorkspaceVisible(open);
+  if (open) setInspectorDataActivePane(state.inspectorMode);
+  elements.showInspectorRows.title = "Switch between table rows and SQL console · right-click to maximize";
+  elements.showInspectorConsole.title = "Switch between SQL console and table rows · right-click to maximize";
+  elements.maximizeInspectorData.classList.toggle("active", state.inspectorDataMaximized);
+  elements.maximizeInspectorData.setAttribute("aria-pressed", String(state.inspectorDataMaximized));
+  elements.maximizeInspectorData.setAttribute("aria-label", state.inspectorDataMaximized ? "Restore split view" : "Maximize data tools");
+  elements.minimizeInspectorData.setAttribute("aria-label", state.inspectorDataMaximized ? "Restore table inspector" : "Minimize data tools");
+  elements.maximizeInspectorData.dataset.uiTooltip = state.inspectorDataMaximized ? "Restore split view" : "Maximize data tools";
+  elements.minimizeInspectorData.dataset.uiTooltip = state.inspectorDataMaximized ? "Restore table inspector" : "Minimize data tools";
+  elements.minimizeInspectorData.replaceChildren(createIconElement(state.inspectorDataMaximized ? "collapse" : "minimize"));
+  elements.mainLayout.classList.toggle("inspector-data-maximized", open && state.inspectorDataMaximized);
+  if (open && state.inspectorMode === "rows") {
+    renderInspectorRows();
+    if (!state.inspectorRowsLoading && !state.inspectorRows && !state.inspectorRowsError) void loadInspectorRows();
+  }
+}
+
+function syncInspectorDataContext(table) {
+  const key = inspectorDataKey(table);
+  if (key === state.inspectorDataKey) {
+    renderInspectorMode(table);
+    return;
+  }
+  state.inspectorRowsGeneration += 1;
+  state.inspectorDataKey = key;
+  state.inspectorRelation = null;
+  state.inspectorRows = null;
+  state.inspectorRowsLoading = false;
+  state.inspectorRowsError = null;
+  state.inspectorRowsView = "table";
+  inspectorSqlConsole.reset(key ? relationDataSource.statement(table.name) : "");
+  if (table) elements.inspectorRowsTitle.textContent = `${table.name} rows`;
+  renderInspectorMode(table);
+}
+
+function setInspectorMode(mode) {
+  const table = currentCatalogTable();
+  if (mode !== "structure" && !inspectorDataAvailable(table)) {
+    showToast("Rows and the console require a PostgreSQL-backed table.", { error: true });
+    return;
+  }
+  state.inspectorMode = mode;
+  if (mode === "structure") state.inspectorDataMaximized = false;
+  renderInspectorMode(table);
+  if (mode === "console") window.requestAnimationFrame(() => elements.inspectorSqlDraft.focus());
+}
+
+function closeInspectorDataWorkspace() {
+  if (state.inspectorMode === "structure" && !state.inspectorDataMaximized) return;
+  state.inspectorMode = "structure";
+  state.inspectorDataMaximized = false;
+  renderInspectorMode();
+}
+
+function toggleInspectorDataPane(pane) {
+  if (pane !== "rows" && pane !== "console") return;
+  setInspectorMode(state.inspectorMode === pane ? (pane === "rows" ? "console" : "rows") : pane);
+}
+
+function setInspectorDataMaximized(maximized) {
+  state.inspectorDataMaximized = Boolean(maximized && state.inspectorMode !== "structure");
+  renderInspectorMode();
+}
+
+function handleInspectorHeaderGesture(button) {
+  const dataOpen = state.inspectorMode !== "structure";
+  if (button === "left") {
+    if (dataOpen) closeInspectorDataWorkspace();
+    else inspectorPane.toggleState();
+    return;
+  }
+  if (!inspectorDataAvailable()) {
+    showToast("Rows and the console require a PostgreSQL-backed table.", { error: true });
+    return;
+  }
+  if (inspectorPane.state === "minimized") {
+    inspectorPane.expand();
+    setInspectorMode("rows");
+  } else if (dataOpen) setInspectorDataMaximized(true);
+  else setInspectorMode("rows");
+}
+
+async function loadInspectorRows({ cursor = null } = {}) {
+  const table = currentCatalogTable();
+  const key = inspectorDataKey(table);
+  if (!key || state.inspectorRowsLoading) return;
+  const generation = ++state.inspectorRowsGeneration;
+  state.inspectorRowsLoading = true;
+  state.inspectorRowsError = null;
+  renderInspectorRows();
+  try {
+    const relation = cursor && state.inspectorRelation
+      ? state.inspectorRelation
+      : await relationDataSource.resolve(table.name, state.catalog?.source === "design" ? null : table.kind);
+    if (generation !== state.inspectorRowsGeneration || key !== state.inspectorDataKey) return;
+    if (!relation) throw new Error(`${table.name} is not present in the current PostgreSQL target.`);
+    const page = await relationDataSource.page(relation, { cursor, pageSize: 100 });
+    if (generation !== state.inspectorRowsGeneration || key !== state.inspectorDataKey) return;
+    state.inspectorRelation = relation;
+    state.inspectorRows = page;
+  } catch (error) {
+    if (generation === state.inspectorRowsGeneration && key === state.inspectorDataKey) state.inspectorRowsError = error;
+  } finally {
+    if (generation === state.inspectorRowsGeneration && key === state.inspectorDataKey) {
+      state.inspectorRowsLoading = false;
+      renderInspectorRows();
+    }
+  }
+}
+
 function renderActiveInspector(table) {
   const desired = state.catalog?.source === "design";
   renderInspector({
@@ -2270,8 +2591,10 @@ function renderActiveInspector(table) {
     onResetColumnOrder: !desired && table
       ? () => resetLiveColumnOrder(table.name)
       : null,
+    onPreviewRows: !desired && table ? () => openTableRowPreview(table) : null,
   });
   renderInspectorTableEditor(desired ? table : null);
+  syncInspectorDataContext(table);
 }
 
 function selectTable(value, { historyMode = "push" } = {}) {
@@ -2289,6 +2612,7 @@ function selectTable(value, { historyMode = "push" } = {}) {
     elements.inspectorTableName.focus();
     return;
   }
+  if (tableId !== state.selectedTableId) closeInspectorDataWorkspace();
   commitWorkspaceState({ selectedTableId: tableId }, { render: false, canvas: false });
   renderActiveInspector(table);
   if (table) inspectorPane.reveal();
@@ -2488,7 +2812,27 @@ function renderSelectedViewDetail() {
   const view = currentCatalogView();
   if (!desired) {
     delete elements.viewDetail.dataset.analysisKey;
-    renderViewDetail(elements.viewDetail, view);
+    if (!view) {
+      renderDesignViewStory(elements.viewDetail, { view: null, live: true });
+      return;
+    }
+    const key = `${state.activeWorkspace?.id || ""}:${state.catalog?.fingerprint || ""}:${view.catalogKind}:${view.name}`;
+    if (state.liveViewLineageKey !== key && !state.liveViewLineageLoading) {
+      queueMicrotask(() => loadLiveViewLineage(view, key));
+    }
+    renderDesignViewStory(elements.viewDetail, {
+      view,
+      live: true,
+      analysis: state.liveViewLineageKey === key ? state.liveViewLineage?.analysis : null,
+      loading: state.liveViewLineageLoading,
+      error: state.liveViewLineageKey === key ? state.liveViewLineageError : null,
+      selectedOutputOrdinal: state.selectedViewOutputOrdinal,
+      onSelectOutput: output => {
+        state.selectedViewOutputOrdinal = output.ordinal;
+        renderSelectedViewDetail();
+      },
+      onRetry: () => loadLiveViewLineage(view, key, { force: true }),
+    });
     return;
   }
   if (!view) {
@@ -2538,6 +2882,31 @@ function renderSelectedViewDetail() {
 function selectedDesignView() {
   if (!isDetachedWorkspace() || !state.design || !state.selectedViewId) return null;
   return state.design.content.views.find(view => view.id === state.selectedViewId) || null;
+}
+
+async function findLiveRelation(name, kind = null) {
+  return relationDataSource.resolve(name, kind);
+}
+
+async function loadLiveViewLineage(view, key, { force = false } = {}) {
+  if (!state.activeWorkspace?.connectionId || (!force && state.liveViewLineageLoading)) return;
+  state.liveViewLineageLoading = true;
+  state.liveViewLineageKey = key;
+  state.liveViewLineageError = null;
+  renderSelectedViewDetail();
+  try {
+    const relation = await findLiveRelation(view.name, view.catalogKind);
+    if (!relation) throw new Error("The selected view is no longer present in PostgreSQL.");
+    const lineage = await api.getRelationLineage(state.activeWorkspace.id, relation.ref);
+    if (state.liveViewLineageKey === key) state.liveViewLineage = lineage;
+  } catch (error) {
+    if (state.liveViewLineageKey === key) state.liveViewLineageError = error;
+  } finally {
+    if (state.liveViewLineageKey === key) {
+      state.liveViewLineageLoading = false;
+      renderSelectedViewDetail();
+    }
+  }
 }
 
 function quotedSqlIdentifier(value) {
@@ -3221,13 +3590,24 @@ function renderObjectsBrowser() {
   elements.objectsSource.textContent = desired ? "Desired schema" : "Live PostgreSQL catalog";
   elements.objectsCopy.textContent = desired
     ? "Search types, relations, constraints, routines, and source-derived triggers from the same desired schema used by the canvas."
-    : "Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.";
+    : "Search live tables and views, open their existing inspector or query story, or preview a bounded page of rows.";
   elements.createTriggerButton.hidden = !desired;
   elements.reviewMigrationButton.disabled = !migrationReview.available()
     || state.catalogLoading
     || state.designSubmitting
     || state.historySubmitting
     || state.inspectorTableEditorDirty;
+  if (!desired) {
+    const result = renderRelationBrowser(elements.objectsList, {
+      response: state.liveRelations,
+      loading: state.liveRelationsLoading,
+      error: state.liveRelationsError,
+      onOpen: openLiveRelation,
+      onPreview: openRelationPreview,
+    });
+    elements.objectsCount.textContent = state.catalog ? `${result.shown} live relations` : "No catalog loaded";
+    return;
+  }
   const result = renderObjects(elements.objectsList, state.catalog, elements.objectsSearch.value, object => {
     if (object.target === "table") {
       elements.objectsDialog.close();
@@ -3252,9 +3632,90 @@ function renderObjectsBrowser() {
   elements.objectsCount.textContent = state.catalog ? `${result.shown} shown · ${result.matching} matching` : "No catalog loaded";
 }
 
+async function loadLiveRelations({ force = false } = {}) {
+  if (!state.activeWorkspace?.connectionId || state.catalog?.source === "design") return;
+  if (state.liveRelationsLoading && !force) return;
+  const generation = ++state.liveRelationsGeneration;
+  state.liveRelationsLoading = true;
+  state.liveRelationsError = null;
+  renderObjectsBrowser();
+  try {
+    const response = await api.listRelations(state.activeWorkspace.id, {
+      search: elements.objectsSearch.value.trim(),
+      pageSize: 250,
+    });
+    if (generation === state.liveRelationsGeneration) state.liveRelations = response;
+  } catch (error) {
+    if (generation === state.liveRelationsGeneration) state.liveRelationsError = error;
+  } finally {
+    if (generation === state.liveRelationsGeneration) {
+      state.liveRelationsLoading = false;
+      renderObjectsBrowser();
+    }
+  }
+}
+
+function openLiveRelation(relation) {
+  elements.objectsDialog.close();
+  if (relation.kind === "view" || relation.kind === "materialized_view") {
+    const view = allViews(state.catalog).find(item => item.name === relation.name && item.catalogKind === relation.kind);
+    if (view) {
+      setLayer("views", { historyMode: null });
+      selectView(view);
+    }
+    return;
+  }
+  setLayer("tables", { historyMode: null });
+  canvas.focusTable(relation.name);
+}
+
+async function openRelationPreview(relation, { page: initialPage = null } = {}) {
+  if (!state.activeWorkspace?.connectionId) return;
+  if (elements.objectsDialog.open) elements.objectsDialog.close();
+  const generation = ++state.relationPreviewGeneration;
+  state.relationPreview = { relation, page: initialPage };
+  state.relationPreviewLoading = !initialPage;
+  state.relationPreviewError = null;
+  elements.relationPreviewTitle.textContent = `${relation.name} rows`;
+  elements.relationPreviewCopy.textContent = "Read-only, bounded live PostgreSQL data. Values can change between pages.";
+  elements.relationPreviewMore.hidden = true;
+  renderRelationRows(elements.relationPreviewBody, initialPage ? { page: initialPage } : { loading: true });
+  openDialog(elements.relationPreviewDialog);
+  if (initialPage) {
+    elements.relationPreviewStatus.textContent = `${initialPage.rows.length} rows · ${initialPage.columns.length} columns${initialPage.truncated ? " · more available" : ""}`;
+    elements.relationPreviewMore.hidden = !initialPage.nextCursor;
+    return;
+  }
+  try {
+    const page = await relationDataSource.page(relation, { pageSize: 100 });
+    if (generation !== state.relationPreviewGeneration) return;
+    state.relationPreview.page = page;
+    elements.relationPreviewStatus.textContent = `${page.rows.length} rows · ${page.columns.length} columns${page.truncated ? " · more available" : ""}`;
+    elements.relationPreviewMore.hidden = !page.nextCursor;
+  } catch (error) {
+    if (generation === state.relationPreviewGeneration) state.relationPreviewError = error;
+  } finally {
+    if (generation === state.relationPreviewGeneration) {
+      state.relationPreviewLoading = false;
+      renderRelationRows(elements.relationPreviewBody, { page: state.relationPreview?.page, error: state.relationPreviewError });
+    }
+  }
+}
+
+async function openTableRowPreview(table) {
+  try {
+    const relation = await findLiveRelation(table.name, table.kind);
+    if (!relation) throw new Error("The selected table is no longer present in PostgreSQL.");
+    await openRelationPreview(relation);
+  } catch (error) {
+    showToast(error.message || "The row preview could not be opened.", { error: true });
+  }
+}
+
 function renderSqlTarget() {
   const workspace = state.activeWorkspace;
   sqlConsole.syncWorkspace(workspace);
+  inspectorSqlConsole.syncWorkspace(workspace);
   if (workspace && !workspace.connectionId) {
     elements.sqlTargetConnection.textContent = "Detached design";
     elements.sqlTargetDatabase.textContent = workspace.name;
@@ -5049,6 +5510,7 @@ function confirmDeleteDesignRelationship(relationship) {
 
 function setLayerState(layer) {
   if (layer !== "tables" && (state.relationshipAuthoring || state.keyAuthoring || state.indexAuthoring)) cancelColumnAuthoring();
+  if (layer !== "tables") closeInspectorDataWorkspace();
   state.activeLayer = layer;
   for (const button of document.querySelectorAll("[data-layer]")) {
     const active = button.dataset.layer === layer;
@@ -5178,6 +5640,60 @@ function bindEvents() {
   elements.cancelRelationshipAuthoring.addEventListener("click", cancelColumnAuthoring);
   elements.reviewKeyAuthoring.addEventListener("click", reviewColumnAuthoring);
   elements.deleteTableButton.addEventListener("click", confirmDeleteDesignTable);
+  elements.inspectorDataToolsButton.addEventListener("click", () => {
+    setInspectorMode(state.inspectorMode === "structure" ? "rows" : "structure");
+  });
+  elements.inspectorToggle.addEventListener("contextmenu", event => {
+    event.preventDefault();
+    handleInspectorHeaderGesture("right");
+  });
+  elements.inspectorRowsHeader.addEventListener("click", event => {
+    if (event.composedPath().includes(elements.inspectorDataActions)) return;
+    toggleInspectorDataPane("rows");
+  });
+  elements.showInspectorConsole.addEventListener("click", () => toggleInspectorDataPane("console"));
+  for (const header of [elements.inspectorRowsHeader, elements.showInspectorConsole]) {
+    header.addEventListener("contextmenu", event => {
+      if (event.composedPath().includes(elements.inspectorDataActions)) return;
+      event.preventDefault();
+      setInspectorDataMaximized(!state.inspectorDataMaximized);
+    });
+  }
+  elements.maximizeInspectorData.addEventListener("click", () => {
+    setInspectorDataMaximized(!state.inspectorDataMaximized);
+  });
+  elements.minimizeInspectorData.addEventListener("click", () => {
+    if (state.inspectorDataMaximized) {
+      setInspectorDataMaximized(false);
+      inspectorPane.expand();
+    } else closeInspectorDataWorkspace();
+  });
+  elements.refreshInspectorRows.addEventListener("click", () => {
+    if (state.inspectorRowsView === "results") {
+      void inspectorSqlConsole.run();
+      return;
+    }
+    state.inspectorRows = null;
+    state.inspectorRowsError = null;
+    state.inspectorRelation = null;
+    void loadInspectorRows();
+  });
+  elements.inspectorRowsMore.addEventListener("click", () => {
+    if (state.inspectorRows?.nextCursor) void loadInspectorRows({ cursor: state.inspectorRows.nextCursor });
+  });
+  elements.openFullRowPreview.addEventListener("click", () => {
+    if (state.inspectorRowsView === "results") {
+      state.inspectorRowsView = "table";
+      renderInspectorRows();
+      return;
+    }
+    if (state.inspectorRelation && state.inspectorRows) {
+      void openRelationPreview(state.inspectorRelation, { page: state.inspectorRows });
+    }
+  });
+  elements.clearInspectorSql.addEventListener("click", () => {
+    if (!inspectorSqlConsole.clearDraft()) showToast("The inspector query is already empty.");
+  });
   elements.undoDesignButton.addEventListener("click", () => executeDesignHistoryMove("undo"));
   elements.redoDesignButton.addEventListener("click", () => executeDesignHistoryMove("redo"));
   elements.resetDesignButton.addEventListener("click", requestDesignBaselineReset);
@@ -5361,10 +5877,45 @@ function bindEvents() {
     state.designTriggerAnalysisLoading = false;
   });
   elements.objectsButton.addEventListener("click", () => {
+    if (state.catalog?.source !== "design") loadLiveRelations({ force: true });
     renderObjectsBrowser();
     openDialog(elements.objectsDialog);
   });
-  elements.objectsSearch.addEventListener("input", renderObjectsBrowser);
+  elements.objectsSearch.addEventListener("input", () => {
+    if (state.catalog?.source === "design") {
+      renderObjectsBrowser();
+      return;
+    }
+    window.clearTimeout(state.liveRelationsSearchTimer);
+    state.liveRelationsSearchTimer = window.setTimeout(() => loadLiveRelations({ force: true }), 180);
+  });
+  elements.relationPreviewMore.addEventListener("click", async () => {
+    const current = state.relationPreview;
+    if (!current?.page?.nextCursor || state.relationPreviewLoading) return;
+    const generation = ++state.relationPreviewGeneration;
+    state.relationPreviewLoading = true;
+    elements.relationPreviewMore.disabled = true;
+    try {
+      const page = await relationDataSource.page(current.relation, { cursor: current.page.nextCursor, pageSize: 100 });
+      if (generation !== state.relationPreviewGeneration) return;
+      state.relationPreview.page = page;
+      elements.relationPreviewStatus.textContent = `${page.rows.length} rows · ${page.columns.length} columns${page.truncated ? " · more available" : ""}`;
+      elements.relationPreviewMore.hidden = !page.nextCursor;
+      renderRelationRows(elements.relationPreviewBody, { page });
+    } catch (error) {
+      if (generation === state.relationPreviewGeneration) renderRelationRows(elements.relationPreviewBody, { error });
+    } finally {
+      if (generation === state.relationPreviewGeneration) {
+        state.relationPreviewLoading = false;
+        elements.relationPreviewMore.disabled = false;
+      }
+    }
+  });
+  elements.relationPreviewDialog.addEventListener("close", () => {
+    state.relationPreviewGeneration += 1;
+    state.relationPreview = null;
+    state.relationPreviewError = null;
+  });
   elements.reviewMigrationButton.addEventListener("click", async () => {
     elements.objectsDialog.close();
     await migrationReview.open();

@@ -19,7 +19,7 @@ function viewEyebrow(view) {
 }
 
 export function renderDesignViewStory(container, options = {}) {
-  const { view, analysis = null, ...rest } = options;
+  const { view, analysis = null, live = false, ...rest } = options;
   container.classList.toggle("is-empty", !view);
   if (view?.designId) {
     container.dataset.changeObjectId = view.designId;
@@ -41,7 +41,9 @@ export function renderDesignViewStory(container, options = {}) {
     impactItems: analysis?.consumers || [],
     emptyLabel: "VIEW",
     emptyTitle: "No view selected",
-    emptyMessage: "Select a designed view to see its source-derived relational meaning.",
+    emptyMessage: live
+      ? "Select a live view to see its source-derived relational meaning."
+      : "Select a designed view to see its source-derived relational meaning.",
     warningCopy: {
       recursive_reference: "The query refers to the view it is defining.",
     },

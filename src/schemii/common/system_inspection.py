@@ -34,7 +34,9 @@ _MAX_CALLABLES = 512
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96
-_MAX_OBJECTS = 640
+# Keep the whole registered application visible as implemented route families grow.
+# This remains a hard bound; it is not a pagination or runtime discovery setting.
+_MAX_OBJECTS = 800
 _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 480
