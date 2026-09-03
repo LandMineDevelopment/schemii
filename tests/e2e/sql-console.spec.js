@@ -15,6 +15,10 @@ test("read-only Console runs a query and renders PostgreSQL column types", async
 
   await expect(page.getByRole("heading", { name: "Read-only SQL Console" })).toBeVisible();
   const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
+  await expect(editor).toHaveAttribute("rows", "14");
+  await expect(editor).toHaveAttribute("placeholder", /Write a read-only PostgreSQL query/);
+  const editorBox = await editor.boundingBox();
+  expect(editorBox?.height).toBeGreaterThanOrEqual(260);
   await editor.fill("SELECT current_database() AS database, 42::integer AS answer;");
   await page.getByRole("button", { name: "Run query" }).click();
 

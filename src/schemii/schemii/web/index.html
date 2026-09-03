@@ -186,7 +186,7 @@
           <div class="sql-body">
             <section class="sql-editor-panel">
               <header><span><small>Unsaved draft</small><strong>Editor</strong></span><button class="ui-button compact" id="new-sql-draft-button" type="button">Clear draft</button></header>
-              <textarea id="sql-draft" data-change-object-id="sql-draft" data-change-root data-change-field="value" aria-label="Unsaved SQL draft" spellcheck="false"></textarea>
+              <textarea id="sql-draft" data-change-object-id="sql-draft" data-change-root data-change-field="value" aria-label="Unsaved SQL draft" rows="14" placeholder="-- Write a read-only PostgreSQL query here.&#10;SELECT current_database();" spellcheck="false"></textarea>
               <footer><span id="sql-editor-status">Draft text is not sent or saved.</span><button class="ui-button compact" type="button" data-unavailable="sql-upload">Upload</button><button class="ui-button compact" type="button" data-unavailable="sql-save">Save</button><button class="ui-button compact" id="cancel-sql-button" type="button" hidden>Cancel</button><button class="ui-button compact primary" id="run-sql-button" type="button">Run query</button></footer>
             </section>
             <aside class="sql-capabilities">
