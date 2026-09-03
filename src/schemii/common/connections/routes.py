@@ -8,11 +8,6 @@ from pydantic import Field
 from schemii.common.api.errors import ApiProblem
 from schemii.common.api.models import ApiModel
 from schemii.common.api.postgres import postgres_api_problem
-from schemii.common.api.planned import (
-    PLANNED_OPENAPI,
-    PLANNED_RESPONSES,
-    planned_capability,
-)
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.errors import PostgresGatewayError
 
@@ -59,12 +54,26 @@ class ConnectionNamespaceListResponse(ApiModel):
     namespaces: list[PostgresNamespaceSummary] = Field(max_length=10_000)
 
 
+class ConnectionDeletionDependency(ApiModel):
+    """One exact product resource retaining the selected connection."""
+
+    provider: Annotated[str, Field(min_length=1, max_length=128)]
+    kind: Annotated[str, Field(min_length=1, max_length=64)]
+    resource_id: Annotated[str, Field(min_length=1, max_length=128)]
+    resource_revision: Annotated[int, Field(strict=True, ge=1)]
+    name: Annotated[str, Field(min_length=1, max_length=128)]
+    target: str | None = Field(default=None, max_length=255)
+    deletion_blocked: bool
+    blocking_reason: str | None = Field(default=None, max_length=1024)
+
+
 class ConnectionDeletionImpactResponse(ApiModel):
     """Current owner-scoped resources preventing connection deletion."""
 
     connection_id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
     connection_revision: Annotated[int, Field(strict=True, ge=1)]
-    dependencies: dict[str, Annotated[int, Field(strict=True, ge=0)]]
+    can_delete: bool
+    dependencies: list[ConnectionDeletionDependency] = Field(max_length=10_000)
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
@@ -218,19 +227,40 @@ def list_connection_namespaces(
 @router.get(
     "/{connection_id}/deletion-impact",
     response_model=ConnectionDeletionImpactResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def get_connection_deletion_impact(
     connection_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> ConnectionDeletionImpactResponse:
     """Preview exact product dependencies before a revision-checked deletion."""
 
-    # TODO(connection-deletion-impact): Collect owner-scoped workspace, plan,
-    # execution, Console, and AI references in one coherent metadata snapshot.
-    del connection_id, principal
-    planned_capability("connections.deletion-impact")
+    try:
+        impact = _service(request).deletion_impact(
+            principal.user_id,
+            connection_id,
+        )
+    except ConnectionNotFoundError as error:
+        raise _not_found(error) from error
+    return ConnectionDeletionImpactResponse(
+        connection_id=impact.connection_id,
+        connection_revision=impact.connection_revision,
+        can_delete=not impact.dependencies,
+        dependencies=[
+            ConnectionDeletionDependency(
+                provider=item.provider,
+                kind=item.kind,
+                resource_id=item.resource_id,
+                resource_revision=item.revision,
+                name=item.name,
+                target=item.target,
+                deletion_blocked=item.deletion_blocked,
+                blocking_reason=item.blocking_reason,
+            )
+            for item in impact.dependencies
+        ],
+        fingerprint=impact.fingerprint,
+    )
 
 
 @router.delete("/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)

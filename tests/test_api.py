@@ -374,6 +374,54 @@ def test_database_workspace_stores_its_import_target_and_table_positions() -> No
     assert safe_change.json()["name"] == "Renamed profile"
 
 
+def test_connection_deletion_impact_resolves_exact_workspace_before_delete() -> None:
+    api, _ = client()
+    connection = create_connection(api)
+    workspace = create_workspace(api, connection["id"])
+
+    impact = api.get(
+        f"/api/v1/connections/{connection['id']}/deletion-impact"
+    )
+
+    assert impact.status_code == 200
+    document = impact.json()
+    assert document["connectionId"] == connection["id"]
+    assert document["connectionRevision"] == 1
+    assert document["canDelete"] is False
+    assert document["dependencies"] == [
+        {
+            "provider": "schemiiWorkspaces",
+            "kind": "workspace",
+            "resourceId": workspace["id"],
+            "resourceRevision": 1,
+            "name": "analytics.public",
+            "target": "analytics.public",
+            "deletionBlocked": False,
+            "blockingReason": None,
+        }
+    ]
+    assert len(document["fingerprint"]) == 64
+
+    deleted_workspace = api.delete(
+        f"/api/v1/schemii/workspaces/{workspace['id']}?expectedRevision=1"
+    )
+    assert deleted_workspace.status_code == 204
+
+    resolved = api.get(
+        f"/api/v1/connections/{connection['id']}/deletion-impact"
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["canDelete"] is True
+    assert resolved.json()["dependencies"] == []
+    assert resolved.json()["fingerprint"] != document["fingerprint"]
+
+    deleted_connection = api.delete(
+        f"/api/v1/connections/{connection['id']}?expectedRevision=1"
+    )
+    assert deleted_connection.status_code == 204
+    assert api.get(f"/api/v1/connections/{connection['id']}").status_code == 404
+
+
 def test_postgres_open_imports_once_then_returns_the_same_personal_design() -> None:
     api, postgres = client()
     connection = create_connection(api)

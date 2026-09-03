@@ -21,6 +21,8 @@ from schemii.common.connections.store import (
     InMemoryConnectionRepository,
 )
 from schemii.common.metadata.crypto import CredentialCipher
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
+from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
 
 class RecordingCursor:
@@ -384,3 +386,33 @@ def test_in_memory_dependency_check_and_live_use_lock_are_preserved() -> None:
     worker.join(timeout=1)
     assert completed.is_set()
     assert repository.get("owner", profile.id).name == "Renamed"
+
+
+def test_workspace_dependency_snapshot_reports_lifecycle_blocker() -> None:
+    workspaces = InMemoryWorkspaceRepository()
+    workspace = workspaces.create(
+        "owner",
+        WorkspaceCreateRecord(
+            name="analytics.public",
+            connection_id="pg_" + "1" * 32,
+            database="analytics",
+            namespace="public",
+        ),
+        expected_connection_revision=1,
+    )
+    workspaces.set_mutation_guard(
+        lambda owner_id, workspace_id: (
+            owner_id == "owner" and workspace_id == workspace.id
+        )
+    )
+
+    dependencies = workspaces.dependencies_for_connection(
+        "owner",
+        "pg_" + "1" * 32,
+    )
+
+    assert len(dependencies) == 1
+    assert dependencies[0].resource_id == workspace.id
+    assert dependencies[0].target == "analytics.public"
+    assert dependencies[0].deletion_blocked is True
+    assert dependencies[0].blocking_reason is not None

@@ -124,6 +124,7 @@ export const api = Object.freeze({
   },
   testConnection: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/test`, { ...options, method: "POST" }),
   listConnectionNamespaces: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/namespaces`, options),
+  getConnectionDeletionImpact: (id, options) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/deletion-impact`, options),
   deleteConnection: (id, expectedRevision, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
   async listWorkspaces(options) {
     const response = await requestJson(`${API_ROOT}/schemii/workspaces`, options);

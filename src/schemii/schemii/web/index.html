@@ -268,6 +268,17 @@
       </form>
     </dialog>
 
+    <dialog class="ui-dialog connection-impact-dialog" id="connection-impact-dialog" aria-labelledby="connection-impact-title">
+      <article class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Connection lifecycle</small><h2 id="connection-impact-title">Review connection deletion</h2><p id="connection-impact-copy"></p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connection deletion review"></button></header>
+        <div class="connection-impact-body">
+          <div class="form-status" id="connection-impact-status" aria-live="polite"></div>
+          <div class="connection-impact-list" id="connection-impact-list"></div>
+        </div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" id="refresh-connection-impact" type="button">Refresh</button><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact danger" id="delete-reviewed-connection" type="button" disabled>Delete connection</button></footer>
+      </article>
+    </dialog>
+
     <dialog class="ui-dialog manager-dialog" id="workspaces-dialog" aria-labelledby="workspaces-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Saved schema work</small><h2 id="workspaces-title">Workspaces</h2><p>Choose a local design or create a database-backed design from PostgreSQL. Database permissions determine which operations are allowed.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>

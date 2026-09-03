@@ -214,6 +214,13 @@ const elements = {
   connectionFormStatus: byId("connection-form-status"),
   saveConnectionButton: byId("save-connection-button"),
   reloadEditorConnection: byId("reload-editor-connection"),
+  connectionImpactDialog: byId("connection-impact-dialog"),
+  connectionImpactTitle: byId("connection-impact-title"),
+  connectionImpactCopy: byId("connection-impact-copy"),
+  connectionImpactStatus: byId("connection-impact-status"),
+  connectionImpactList: byId("connection-impact-list"),
+  refreshConnectionImpact: byId("refresh-connection-impact"),
+  deleteReviewedConnection: byId("delete-reviewed-connection"),
   workspacesDialog: byId("workspaces-dialog"),
   workspacesCount: byId("workspaces-count"),
   workspacesList: byId("workspaces-list"),
@@ -523,6 +530,11 @@ const state = {
   connectionEditorSnapshot: null,
   connectionEditorGeneration: 0,
   connectionSubmitting: false,
+  connectionDeletionTarget: null,
+  connectionDeletionImpact: null,
+  connectionDeletionError: null,
+  connectionDeletionGeneration: 0,
+  connectionDeletionLoading: false,
   workspaceSubmitting: false,
   workspaceDialogGeneration: 0,
   workspaceNamespaceGeneration: 0,
@@ -1741,26 +1753,184 @@ async function requestDesignObjectDeletion(objectId, {
   }
 }
 
+function renderConnectionDeletionImpact() {
+  const connection = state.connectionDeletionTarget;
+  const impact = state.connectionDeletionImpact;
+  replace(elements.connectionImpactStatus);
+  replace(elements.connectionImpactList);
+  elements.connectionImpactTitle.textContent = connection
+    ? `Delete ${connection.name}`
+    : "Review connection deletion";
+  elements.connectionImpactCopy.textContent = connection
+    ? "Deleting this profile removes its encrypted credential and Schemii connection metadata. It never changes the PostgreSQL database."
+    : "Review the resources retaining this connection.";
+  elements.refreshConnectionImpact.disabled = state.connectionDeletionLoading || !connection;
+  elements.deleteReviewedConnection.disabled = (
+    state.connectionDeletionLoading
+    || !impact
+    || !impact.canDelete
+    || Boolean(state.connectionDeletionError)
+  );
+
+  if (state.connectionDeletionLoading) {
+    elements.connectionImpactList.append(stateCard("…", "Checking dependencies", "The server is reading the current connection and workspace lifecycle state.", null, null, true));
+    return;
+  }
+  if (state.connectionDeletionError) {
+    elements.connectionImpactStatus.append(errorPanel(state.connectionDeletionError, {
+      retryLabel: "Retry review",
+      onRetry: () => loadConnectionDeletionImpact(connection, { open: false }),
+    }));
+    return;
+  }
+  if (!impact) return;
+  if (!impact.dependencies.length) {
+    const ready = element("section", { className: "connection-impact-ready" });
+    ready.append(
+      element("strong", { text: "No saved resources use this connection" }),
+      element("p", { text: "The profile can be deleted. PostgreSQL schemas and data remain untouched." }),
+    );
+    elements.connectionImpactList.append(ready);
+    return;
+  }
+
+  for (const dependency of impact.dependencies) {
+    const card = element("article", {
+      className: `manager-card connection-impact-resource${dependency.deletionBlocked ? " is-blocked" : ""}`,
+    });
+    const copy = element("div");
+    copy.append(
+      element("strong", { text: dependency.name }),
+      element("p", {
+        text: dependency.target
+          ? `PostgreSQL target · ${dependency.target}`
+          : `${dependency.kind} · revision ${dependency.resourceRevision}`,
+      }),
+      element("small", {
+        className: dependency.deletionBlocked ? "connection-impact-blocker" : "",
+        text: dependency.deletionBlocked
+          ? dependency.blockingReason || "This workspace is temporarily locked by migration activity."
+          : "Delete this saved workspace before deleting the connection.",
+      }),
+    );
+    const actions = element("div", { className: "manager-actions ui-action-group end wrap" });
+    if (dependency.kind === "workspace") {
+      const open = element("button", { className: "ui-button compact", type: "button", text: "Open" });
+      open.addEventListener("click", () => openConnectionDependency(dependency));
+      const remove = element("button", {
+        className: "ui-button compact danger-text",
+        type: "button",
+        text: dependency.deletionBlocked ? "Migration active" : "Delete workspace",
+      });
+      remove.disabled = dependency.deletionBlocked;
+      remove.addEventListener("click", () => confirmDeleteConnectionDependency(dependency));
+      actions.append(open, remove);
+    }
+    card.append(copy, actions);
+    elements.connectionImpactList.append(card);
+  }
+}
+
+async function loadConnectionDeletionImpact(connection = state.connectionDeletionTarget, { open = true } = {}) {
+  if (!connection) return null;
+  const generation = ++state.connectionDeletionGeneration;
+  state.connectionDeletionTarget = connection;
+  state.connectionDeletionImpact = null;
+  state.connectionDeletionError = null;
+  state.connectionDeletionLoading = true;
+  renderConnectionDeletionImpact();
+  if (open && !elements.connectionImpactDialog.open) openDialog(elements.connectionImpactDialog);
+  try {
+    const impact = await api.getConnectionDeletionImpact(connection.id);
+    if (generation !== state.connectionDeletionGeneration) return null;
+    state.connectionDeletionImpact = impact;
+    const current = connectionById(connection.id);
+    if (current && current.revision !== impact.connectionRevision) await loadConnections();
+    return impact;
+  } catch (error) {
+    if (generation !== state.connectionDeletionGeneration) return null;
+    state.connectionDeletionError = error;
+    return null;
+  } finally {
+    if (generation === state.connectionDeletionGeneration) {
+      state.connectionDeletionLoading = false;
+      renderConnectionDeletionImpact();
+    }
+  }
+}
+
 function confirmDeleteConnection(connection) {
+  void loadConnectionDeletionImpact(connection);
+}
+
+async function openConnectionDependency(dependency) {
+  if (dependency.kind !== "workspace") return;
+  replace(elements.connectionImpactStatus, element("span", { text: "Opening the selected workspace…" }));
+  try {
+    const workspace = await api.getWorkspace(dependency.resourceId);
+    const existing = state.workspaces.findIndex(item => item.id === workspace.id);
+    if (existing >= 0) state.workspaces.splice(existing, 1, workspace);
+    else state.workspaces.push(workspace);
+    if (await openWorkspace(workspace)) {
+      elements.connectionImpactDialog.close();
+      if (elements.connectionsDialog.open) elements.connectionsDialog.close();
+    }
+  } catch (error) {
+    replace(elements.connectionImpactStatus, errorPanel(error));
+  }
+}
+
+function confirmDeleteConnectionDependency(dependency) {
+  if (dependency.kind !== "workspace" || dependency.deletionBlocked) return;
+  const existing = state.workspaces.find(item => item.id === dependency.resourceId);
+  const workspace = {
+    ...(existing || {}),
+    id: dependency.resourceId,
+    revision: dependency.resourceRevision,
+    name: dependency.name,
+  };
   askConfirmation({
-    title: "Delete connection",
-    message: `Delete “${connection.name}” from this server? Saved workspaces using it will block this request.`,
-    label: "Delete connection",
+    title: "Delete saved workspace",
+    message: `Delete “${dependency.name}” and its saved design, history, baseline, and layout from Schemii? PostgreSQL schemas and data will not be changed.`,
+    label: "Delete workspace",
     callback: async () => {
       try {
-        await api.deleteConnection(connection.id, connection.revision);
-        state.connections = state.connections.filter(item => item.id !== connection.id);
-        state.connectionActionError = null;
-        renderConnections();
-        renderWorkspaceConnectionOptions();
-        showToast("Connection deleted by the active server.");
+        await deleteWorkspaceRecord(workspace);
+        await loadConnectionDeletionImpact(state.connectionDeletionTarget, { open: false });
       } catch (error) {
-        state.connectionActionError = error;
-        renderConnections();
-        errorToast(error);
+        replace(elements.connectionImpactStatus, errorPanel(error));
       }
     },
   });
+}
+
+async function deleteReviewedConnection() {
+  const connection = state.connectionDeletionTarget;
+  const reviewed = state.connectionDeletionImpact;
+  if (!connection || !reviewed?.canDelete || state.connectionDeletionLoading) return;
+  state.connectionDeletionLoading = true;
+  renderConnectionDeletionImpact();
+  try {
+    const current = await api.getConnectionDeletionImpact(connection.id);
+    if (!current.canDelete || current.fingerprint !== reviewed.fingerprint) {
+      state.connectionDeletionImpact = current;
+      showToast("Connection dependencies changed. Review the current state before deleting.");
+      return;
+    }
+    await api.deleteConnection(connection.id, current.connectionRevision);
+    state.connections = state.connections.filter(item => item.id !== connection.id);
+    state.connectionTests.delete(connection.id);
+    state.connectionActionError = null;
+    renderConnections();
+    renderWorkspaceConnectionOptions();
+    elements.connectionImpactDialog.close();
+    showToast("Connection profile deleted. PostgreSQL was not changed.");
+  } catch (error) {
+    state.connectionDeletionError = error;
+  } finally {
+    state.connectionDeletionLoading = false;
+    renderConnectionDeletionImpact();
+  }
 }
 
 async function loadWorkspaces() {
@@ -1980,19 +2150,23 @@ async function submitWorkspace(event) {
   }
 }
 
+async function deleteWorkspaceRecord(workspace) {
+  await api.deleteWorkspace(workspace.id, workspace.revision);
+  state.workspaces = state.workspaces.filter(item => item.id !== workspace.id);
+  if (state.preservedLayout?.workspaceId === workspace.id) state.preservedLayout = null;
+  state.workspaceActionError = null;
+  if (state.activeWorkspace?.id === workspace.id) clearActiveWorkspace();
+  renderWorkspaces();
+}
+
 function confirmDeleteWorkspace(workspace) {
   askConfirmation({
     title: "Delete workspace",
-    message: `Delete the ${workspaceLabel(workspace)} workspace and its saved layout from this server?`,
+    message: `Delete “${workspaceLabel(workspace)}” and its saved design, history, baseline, and layout from Schemii? PostgreSQL schemas and data will not be changed.`,
     label: "Delete workspace",
     callback: async () => {
       try {
-        await api.deleteWorkspace(workspace.id, workspace.revision);
-        state.workspaces = state.workspaces.filter(item => item.id !== workspace.id);
-        if (state.preservedLayout?.workspaceId === workspace.id) state.preservedLayout = null;
-        state.workspaceActionError = null;
-        if (state.activeWorkspace?.id === workspace.id) clearActiveWorkspace();
-        renderWorkspaces();
+        await deleteWorkspaceRecord(workspace);
         showToast("Workspace deleted by the active server.");
       } catch (error) {
         state.workspaceActionError = error;
@@ -5635,6 +5809,17 @@ function bindEvents() {
     state.pendingDesignDeletion = null;
     state.dependencyHistoryGroupId = null;
   });
+  elements.connectionImpactDialog.addEventListener("close", () => {
+    state.connectionDeletionGeneration += 1;
+    state.connectionDeletionTarget = null;
+    state.connectionDeletionImpact = null;
+    state.connectionDeletionError = null;
+    state.connectionDeletionLoading = false;
+  });
+  elements.refreshConnectionImpact.addEventListener("click", () => {
+    void loadConnectionDeletionImpact(state.connectionDeletionTarget, { open: false });
+  });
+  elements.deleteReviewedConnection.addEventListener("click", deleteReviewedConnection);
   document.querySelectorAll("[data-confirm-cancel]").forEach(button => button.addEventListener("click", () => {
     state.confirmCallback = null;
     elements.confirmDialog.close();

@@ -427,6 +427,19 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .workspace-import-review li strong { color: #d9dee6; overflow-wrap: anywhere; white-space: normal; }
 .workspace-import-review li span { color: #74808f; font-size: 8px; }
 .connection-test { margin-top: 2px; padding-top: 6px; border-top: 1px solid #252d38; color: #8ca0b2 !important; white-space: normal !important; }
+.connection-impact-dialog { width: min(700px, calc(100vw - 24px)); }
+.connection-impact-dialog > .ui-dialog__shell { max-height: min(720px, calc(100dvh - 24px)); grid-template-rows: auto minmax(0, 1fr) auto; }
+.connection-impact-dialog .ui-dialog__head p { max-width: 62ch; }
+.connection-impact-body { min-height: 180px; overflow-y: auto; padding: 14px; background: #0b1016; }
+.connection-impact-body > .form-status:not(:empty) { margin-bottom: 10px; }
+.connection-impact-list { display: grid; gap: 8px; }
+.connection-impact-resource { grid-template-columns: minmax(0, 1fr) auto; }
+.connection-impact-resource.is-blocked { border-color: #6a343d; background: #1a1318; }
+.connection-impact-resource p { white-space: normal; }
+.connection-impact-resource .connection-impact-blocker { color: #dc9299; }
+.connection-impact-ready { padding: 15px; border: 1px solid #315c49; border-radius: 7px; color: #8fd9b2; background: #102019; }
+.connection-impact-ready strong { display: block; margin-bottom: 5px; color: #a8ebc7; font-size: 10px; }
+.connection-impact-ready p { margin: 0; color: #78a991; font-size: 8px; line-height: 1.5; }
 .workspace-form { display: grid; grid-template-columns: 1fr .75fr 1.15fr .75fr 1fr auto; align-items: end; gap: 9px; padding: 13px 14px 15px; border-top: 1px solid var(--line); background: #11171e; }
 .workspace-form header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; }
 .workspace-form header strong { font-size: 10px; }
@@ -748,6 +761,10 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 @keyframes dependency-impact-flash { 0%, 100% { border-color: #2e3946; } 40% { border-color: #d65d69; box-shadow: 0 0 0 2px rgba(214, 93, 105, .14); } }
 
 @media (max-width: 620px) {
+  .connection-impact-dialog { width: calc(100vw - 16px); }
+  .connection-impact-body { padding: 10px; }
+  .connection-impact-resource { grid-template-columns: 1fr; }
+  .connection-impact-resource .manager-actions { justify-content: flex-start; }
   .dependency-impact-dialog { width: calc(100vw - 16px); }
   .dependency-impact-body { padding: 10px; }
   .dependency-impact-children { margin-left: 8px; padding-left: 7px; }

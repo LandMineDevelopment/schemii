@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator, Protocol, runtime_checkable
 
+from schemii.common.connections.dependencies import ConnectionDependentResource
 from schemii.common.errors import MetadataStorageUnavailableError
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.models import (
@@ -181,6 +182,12 @@ class WorkspaceRepository(Protocol):
     def delete(self, owner_id: str, workspace_id: str, expected_revision: int) -> None: ...
 
     def count_for_connection(self, owner_id: str, connection_id: str) -> int: ...
+
+    def dependencies_for_connection(
+        self,
+        owner_id: str,
+        connection_id: str,
+    ) -> tuple[ConnectionDependentResource, ...]: ...
 
 
 class InMemoryWorkspaceRepository:
@@ -458,6 +465,42 @@ class InMemoryWorkspaceRepository:
                 workspace.connection_id == connection_id
                 for workspace in self._records.get(owner_id, {}).values()
             )
+
+    def dependencies_for_connection(
+        self,
+        owner_id: str,
+        connection_id: str,
+    ) -> tuple[ConnectionDependentResource, ...]:
+        with self._lock:
+            resources: list[ConnectionDependentResource] = []
+            for workspace in self._records.get(owner_id, {}).values():
+                if workspace.connection_id != connection_id:
+                    continue
+                blocked = bool(
+                    self._mutation_guard is not None
+                    and self._mutation_guard(owner_id, workspace.id)
+                )
+                resources.append(
+                    ConnectionDependentResource(
+                        provider=self.dependency_name,
+                        kind="workspace",
+                        resource_id=workspace.id,
+                        revision=workspace.revision,
+                        name=workspace.name,
+                        target=(
+                            f"{workspace.database}.{workspace.namespace}"
+                            if workspace.database and workspace.namespace
+                            else None
+                        ),
+                        deletion_blocked=blocked,
+                        blocking_reason=(
+                            "An active or unreconciled migration must finish first."
+                            if blocked
+                            else None
+                        ),
+                    )
+                )
+            return tuple(resources)
 
     def _record(self, owner_id: str, workspace_id: str) -> SchemiiWorkspace:
         try:

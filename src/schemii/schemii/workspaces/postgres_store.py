@@ -8,6 +8,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Literal
 
+from schemii.common.connections.dependencies import ConnectionDependentResource
 from schemii.common.connections.store import ConnectionInUseError
 from schemii.common.metadata.users import ensure_local_metadata_user
 from schemii.schemii.designs.store import (
@@ -681,6 +682,69 @@ class PostgresWorkspaceRepository:
                     (owner_id, connection_id),
                 )
                 return int(cursor.fetchone()["workspace_count"])
+
+    def dependencies_for_connection(
+        self,
+        owner_id: str,
+        connection_id: str,
+    ) -> tuple[ConnectionDependentResource, ...]:
+        """Return exact workspace references and current lifecycle blockers."""
+
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT workspace.id,
+                           workspace.revision,
+                           workspace.name,
+                           target.database_name,
+                           target.namespace,
+                           EXISTS (
+                               SELECT 1
+                               FROM schemii.migration_executions AS execution
+                               LEFT JOIN schemii.migration_syncs AS sync
+                                 ON sync.execution_id = execution.id
+                               WHERE execution.owner_id = workspace.owner_id
+                                 AND execution.workspace_id = workspace.id
+                                 AND (
+                                     execution.status IN (
+                                         'reserved', 'applying', 'uncertain',
+                                         'reconciliation_required'
+                                     )
+                                     OR (
+                                         execution.status = 'succeeded'
+                                         AND execution.commit_outcome = 'committed'
+                                         AND sync.status IN ('pending', 'failed')
+                                     )
+                                 )
+                           ) AS deletion_blocked
+                    FROM schemii.workspace_targets AS target
+                    JOIN schemii.workspaces AS workspace
+                      ON workspace.owner_id = target.owner_id
+                     AND workspace.id = target.workspace_id
+                    WHERE target.owner_id = %s
+                      AND target.connection_id = %s
+                    ORDER BY workspace.created_at, workspace.id
+                    """,
+                    (owner_id, connection_id),
+                )
+                return tuple(
+                    ConnectionDependentResource(
+                        provider=self.dependency_name,
+                        kind="workspace",
+                        resource_id=row["id"],
+                        revision=row["revision"],
+                        name=row["name"],
+                        target=f'{row["database_name"]}.{row["namespace"]}',
+                        deletion_blocked=bool(row["deletion_blocked"]),
+                        blocking_reason=(
+                            "An active or unreconciled migration must finish first."
+                            if row["deletion_blocked"]
+                            else None
+                        ),
+                    )
+                    for row in cursor.fetchall()
+                )
 
     @staticmethod
     def guard_connection_mutation(

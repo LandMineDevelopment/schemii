@@ -31,6 +31,9 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert 'id="show-inspector-console"' in response.text
     assert 'id="maximize-inspector-data"' in response.text
     assert 'id="review-migration-button"' in response.text
+    assert 'id="connection-impact-dialog"' in response.text
+    assert 'id="connection-impact-list"' in response.text
+    assert 'id="delete-reviewed-connection"' in response.text
     assert 'href="/api-map"' in response.text
     assert 'href="/db-map"' in response.text
     assert "<script>" not in response.text

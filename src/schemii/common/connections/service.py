@@ -6,6 +6,7 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Iterator, Protocol, runtime_checkable
 
+from .dependencies import ConnectionDeletionImpact, ConnectionDependentResource
 from .models import (
     PostgresConnectionCreate,
     PostgresConnectionMetadata,
@@ -27,6 +28,12 @@ class ConnectionDependencyProvider(Protocol):
     dependency_name: str
 
     def count_for_connection(self, owner_id: str, connection_id: str) -> int: ...
+
+    def dependencies_for_connection(
+        self,
+        owner_id: str,
+        connection_id: str,
+    ) -> tuple[ConnectionDependentResource, ...]: ...
 
 
 @runtime_checkable
@@ -105,6 +112,29 @@ class ConnectionService:
 
     def get(self, owner_id: str, connection_id: str) -> PostgresConnectionProfile:
         return self._repository.get(owner_id, connection_id)
+
+    def deletion_impact(
+        self,
+        owner_id: str,
+        connection_id: str,
+    ) -> ConnectionDeletionImpact:
+        """Describe the exact owner-scoped resources retaining a connection."""
+
+        with self._lock_for(owner_id, connection_id):
+            connection = self._repository.get(owner_id, connection_id)
+            dependencies = tuple(
+                dependency
+                for provider in self._dependency_providers
+                for dependency in provider.dependencies_for_connection(
+                    owner_id,
+                    connection_id,
+                )
+            )
+            return ConnectionDeletionImpact.build(
+                connection.id,
+                connection.revision,
+                dependencies,
+            )
 
     def create(
         self,

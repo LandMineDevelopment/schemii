@@ -4,8 +4,10 @@ async function databaseDesignWorkspace(request) {
   const response = await request.get("/api/v1/schemii/workspaces");
   expect(response.ok()).toBe(true);
   const body = await response.json();
-  const workspace = body.workspaces.find(item => item.connectionId);
-  expect(workspace, "the demo should provide a database-derived design workspace").toBeTruthy();
+  const workspace = body.workspaces.find(item => (
+    item.database === "schemii_migration_demo" && item.namespace === "public"
+  ));
+  expect(workspace, "the resettable demo workspace should target schemii_migration_demo.public").toBeTruthy();
   return workspace;
 }
 

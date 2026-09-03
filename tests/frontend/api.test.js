@@ -102,6 +102,32 @@ test("migration API methods retain the reviewed server contract", async () => {
   ]);
 });
 
+test("connection deletion impact is reviewed before the revision-checked delete", async () => {
+  const requests = [];
+  const fetcher = async (path, options) => {
+    requests.push([options.method || "GET", path]);
+    return new Response(options.method === "DELETE" ? null : JSON.stringify({
+      connectionId: "pg_demo",
+      connectionRevision: 4,
+      canDelete: true,
+      dependencies: [],
+      fingerprint: "f".repeat(64),
+    }), {
+      status: options.method === "DELETE" ? 204 : 200,
+      headers: options.method === "DELETE" ? {} : { "Content-Type": "application/json" },
+    });
+  };
+  const options = { fetcher, timeoutMs: 0 };
+
+  await api.getConnectionDeletionImpact("pg_demo", options);
+  await api.deleteConnection("pg_demo", 4, options);
+
+  assert.deepEqual(requests, [
+    ["GET", "/api/v1/connections/pg_demo/deletion-impact"],
+    ["DELETE", "/api/v1/connections/pg_demo?expectedRevision=4"],
+  ]);
+});
+
 test("console API methods bind executions and result cursors to a workspace", async () => {
   const requests = [];
   const fetcher = async (path, options) => {
