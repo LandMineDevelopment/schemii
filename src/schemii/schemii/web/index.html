@@ -239,7 +239,7 @@
         <form class="workspace-form" id="workspace-form">
           <header><strong>Create workspace</strong><small id="workspace-form-copy">Start a database-independent schema design.</small></header>
           <label><span>Name</span><input id="workspace-name" required maxlength="128" autocomplete="off" placeholder="Inventory design" /></label>
-          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Design workspace · no database</option><option value="import">Database workspace · read/write (planned)</option><option value="attached">Live database · read only</option></select></label>
+          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Design workspace · no database</option><option value="import">Database workspace · read/write</option><option value="attached">Live database · read only</option></select></label>
           <label class="workspace-target-field" hidden><span>Connection</span><select id="workspace-connection"><option value="">Select a live connection</option></select></label>
           <label class="workspace-target-field" hidden><span>Database</span><output id="workspace-database">Select a connection</output></label>
           <label class="workspace-target-field" hidden><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" autocomplete="off" /><button class="ui-button compact" type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
@@ -450,7 +450,16 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <header class="ui-dialog__head"><div><small id="objects-source">Workspace catalog</small><h2 id="objects-title">Database objects</h2><p id="objects-copy">Browse types, tables, views, constraints, indexes, triggers, functions, and procedures in the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
         <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-button compact primary" id="create-trigger-button" type="button" hidden>Create trigger</button></div>
         <div class="catalog-browser-list" id="objects-list"></div>
-        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-unavailable="migration-preview">Preview migration</button><button class="ui-button compact primary" type="button" data-unavailable="migration-apply">Apply migration</button></footer>
+        <footer class="ui-dialog__actions"><button class="ui-button compact primary" id="review-migration-button" type="button">Review migration</button></footer>
+      </div>
+    </dialog>
+
+    <dialog class="ui-dialog migration-dialog" id="migration-dialog" aria-labelledby="migration-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Server-authoritative PostgreSQL change</small><h2 id="migration-title">Review migration</h2><p id="migration-copy">Compare the saved design with its PostgreSQL baseline and current target before authorizing any SQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close migration review"></button></header>
+        <div class="migration-review-body" id="migration-review-body" aria-live="polite"></div>
+        <div class="form-status migration-status" id="migration-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Close</button><button class="ui-button compact" id="refresh-migration-button" type="button">Refresh review</button><button class="ui-button compact" id="resolve-migration-button" type="button" hidden>Resolve conflicts</button><button class="ui-button compact primary" id="apply-migration-button" type="button" disabled>Apply migration</button></footer>
       </div>
     </dialog>
 

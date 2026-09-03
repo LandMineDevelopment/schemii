@@ -91,6 +91,7 @@ import {
   createLatestRequestController,
   createWorkspaceOperationController,
 } from "./request-coordinator.js";
+import { createMigrationReviewController } from "./migration-review.js";
 
 const byId = id => document.getElementById(id);
 const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
@@ -312,6 +313,13 @@ const elements = {
   objectsCount: byId("objects-count"),
   objectsList: byId("objects-list"),
   createTriggerButton: byId("create-trigger-button"),
+  reviewMigrationButton: byId("review-migration-button"),
+  migrationDialog: byId("migration-dialog"),
+  migrationReviewBody: byId("migration-review-body"),
+  migrationStatus: byId("migration-status"),
+  refreshMigrationButton: byId("refresh-migration-button"),
+  resolveMigrationButton: byId("resolve-migration-button"),
+  applyMigrationButton: byId("apply-migration-button"),
   undoDesignButton: byId("undo-design-button"),
   redoDesignButton: byId("redo-design-button"),
   resetDesignButton: byId("reset-design-button"),
@@ -474,6 +482,22 @@ const connectionRequests = createLatestRequestController();
 const workspaceListRequests = createLatestRequestController();
 const changeCues = createTransientCueManager({ root: document });
 const changeTransitions = createChangeTransitionManager({ root: document });
+const migrationReview = createMigrationReviewController({
+  api,
+  elements: {
+    dialog: elements.migrationDialog,
+    body: elements.migrationReviewBody,
+    status: elements.migrationStatus,
+    refresh: elements.refreshMigrationButton,
+    resolve: elements.resolveMigrationButton,
+    apply: elements.applyMigrationButton,
+  },
+  getContext: () => ({ workspace: state.activeWorkspace, design: state.design }),
+  reloadWorkspace: () => loadActiveWorkspace({ clearConflictOnSuccess: true }),
+  confirm: askConfirmation,
+  notify: showToast,
+  notifyError: errorToast,
+});
 
 function showDesignChangeTargets(targets) {
   changeCues.clear();
@@ -993,6 +1017,14 @@ function updateHeader() {
   updateInspectorTableActions();
   elements.downloadCatalogButton.textContent = detached ? "Download desired design JSON" : "Download live catalog JSON";
   elements.exportDesignSqlButton.disabled = !detached || !state.design || state.catalogLoading;
+  elements.reviewMigrationButton.disabled = !migrationReview.available()
+    || state.catalogLoading
+    || state.designSubmitting
+    || state.historySubmitting
+    || state.inspectorTableEditorDirty;
+  elements.reviewMigrationButton.title = migrationReview.available()
+    ? "Compare this saved design with its live PostgreSQL target"
+    : "Migration review requires a database-backed design workspace";
   elements.inspectorEyebrow.textContent = detached ? "Edit designed table" : "Read-only table inspector";
   elements.inspectorEmptyCopy.textContent = detached
     ? "Select a designed table to inspect its columns, constraints, indexes, and relationships."
@@ -1688,7 +1720,7 @@ function updateWorkspaceMode() {
   elements.workspaceConnection.required = targeted;
   elements.workspaceNamespace.required = targeted;
   elements.workspaceFormCopy.textContent = mode === "import"
-    ? "Import the selected PostgreSQL namespace into a new editable workspace. Workspace editing works now; reviewing and writing approved changes back to PostgreSQL is planned."
+    ? "Import the selected PostgreSQL namespace into a new editable workspace, review server-derived changes, and apply approved migrations back to PostgreSQL."
     : mode === "attached"
       ? "Inspect the selected PostgreSQL namespace directly. Refresh follows the database; editing is disabled."
       : "Create an editable workspace that exists only in Schemii. It does not read from or write to PostgreSQL.";
@@ -3175,6 +3207,11 @@ function renderObjectsBrowser() {
     ? "Search types, relations, constraints, routines, and source-derived triggers from the same desired schema used by the canvas."
     : "Browse tables, views, constraints, indexes, triggers, functions, and procedures reported by PostgreSQL.";
   elements.createTriggerButton.hidden = !desired;
+  elements.reviewMigrationButton.disabled = !migrationReview.available()
+    || state.catalogLoading
+    || state.designSubmitting
+    || state.historySubmitting
+    || state.inspectorTableEditorDirty;
   const result = renderObjects(elements.objectsList, state.catalog, elements.objectsSearch.value, object => {
     if (object.target === "table") {
       elements.objectsDialog.close();
@@ -5311,6 +5348,11 @@ function bindEvents() {
     openDialog(elements.objectsDialog);
   });
   elements.objectsSearch.addEventListener("input", renderObjectsBrowser);
+  elements.reviewMigrationButton.addEventListener("click", async () => {
+    elements.objectsDialog.close();
+    await migrationReview.open();
+  });
+  elements.migrationDialog.addEventListener("close", migrationReview.close);
 
   elements.viewsSearch.addEventListener("input", renderViews);
   elements.refreshViewsButton.addEventListener("click", refreshCatalog);

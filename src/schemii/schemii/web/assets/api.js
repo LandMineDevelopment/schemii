@@ -150,4 +150,14 @@ export const api = Object.freeze({
   getDesignLayout: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, options),
   replaceDesignLayout: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, { ...options, method: "PUT", body }),
   exportDesign: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/exports`, { ...options, method: "POST", body }),
+  createMigrationPlan: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/migration-plans`, { ...options, method: "POST", body }),
+  getMigrationPlan: (id, options) => requestJson(`${API_ROOT}/schemii/migration-plans/${encodeURIComponent(id)}`, options),
+  resolveMigrationDrift: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/migration-plans/${encodeURIComponent(id)}/drift-resolutions`, { ...options, method: "POST", body }),
+  createMigrationExecution: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/migration-plans/${encodeURIComponent(id)}/executions`, { ...options, method: "POST", body }),
+  getMigrationExecution: (id, options) => requestJson(`${API_ROOT}/schemii/migration-executions/${encodeURIComponent(id)}`, options),
+  reconcileMigrationExecution: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/migration-executions/${encodeURIComponent(id)}/reconciliation`, { ...options, method: "POST", body }),
+  async listMigrationExecutions(workspaceId, { limit = 100, ...options } = {}) {
+    const response = await requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/migration-executions?limit=${encodeURIComponent(limit)}`, options);
+    return response.executions;
+  },
 });

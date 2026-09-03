@@ -289,10 +289,10 @@ def test_postgres_import_is_exposed_only_as_new_workspace_creation() -> None:
     api = web.joinpath("assets", "api.js").read_text(encoding="utf-8")
 
     assert '<option value="detached">Design workspace · no database</option>' in index
-    assert '<option value="import">Database workspace · read/write (planned)</option>' in index
+    assert '<option value="import">Database workspace · read/write</option>' in index
     assert '<option value="attached">Live database · read only</option>' in index
     assert "Create database workspace" in app
-    assert "writing approved changes back to PostgreSQL is planned." in app
+    assert "apply approved migrations back to PostgreSQL." in app
     assert "editing is disabled." in app
     assert "createWorkspaceImport" in app
     assert "schemii/workspaces/imports" in api

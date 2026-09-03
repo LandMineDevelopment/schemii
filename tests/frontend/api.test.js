@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ApiError, requestJson } from "../../src/schemii/schemii/web/assets/api.js";
+import { api, ApiError, requestJson } from "../../src/schemii/schemii/web/assets/api.js";
 
 test("requestJson forwards caller cancellation to fetch", async () => {
   const caller = new AbortController();
@@ -65,4 +65,39 @@ test("requestJson retains the server error envelope", async () => {
     && error.requestId === "body-request"
     && error.details.expected === 2
   ));
+});
+
+test("migration API methods retain the reviewed server contract", async () => {
+  const requests = [];
+  const fetcher = async (path, options) => {
+    requests.push({ path, method: options.method, body: options.body });
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => path.includes("migration-executions?") ? { executions: [] } : { id: "result" },
+    };
+  };
+  const body = {
+    expectedWorkspaceRevision: 3,
+    expectedDesignRevision: 7,
+    expectedCatalogFingerprint: null,
+    allowDestructive: false,
+  };
+
+  await api.createMigrationPlan("ws_demo", body, { fetcher, timeoutMs: 0 });
+  await api.listMigrationExecutions("ws_demo", { limit: 25, fetcher, timeoutMs: 0 });
+
+  assert.deepEqual(requests, [
+    {
+      path: "/api/v1/schemii/workspaces/ws_demo/migration-plans",
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+    {
+      path: "/api/v1/schemii/workspaces/ws_demo/migration-executions?limit=25",
+      method: "GET",
+      body: undefined,
+    },
+  ]);
 });
