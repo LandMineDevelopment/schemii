@@ -3,7 +3,7 @@
 from .models import (
     SchemiiWorkspace,
     SchemiiWorkspaceCreate,
-    SchemiiWorkspaceImportCreate,
+    SchemiiPostgresWorkspaceOpen,
     SchemiiWorkspaceLayoutUpdate,
     TableColumnDisplayOrder,
     TablePosition,
@@ -16,7 +16,7 @@ __all__ = [
     "InMemoryWorkspaceRepository",
     "SchemiiWorkspace",
     "SchemiiWorkspaceCreate",
-    "SchemiiWorkspaceImportCreate",
+    "SchemiiPostgresWorkspaceOpen",
     "SchemiiWorkspaceLayoutUpdate",
     "TableColumnDisplayOrder",
     "TablePosition",

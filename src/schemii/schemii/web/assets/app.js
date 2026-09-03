@@ -220,12 +220,13 @@ const elements = {
   reloadWorkspacesButton: byId("reload-workspaces-button"),
   workspaceForm: byId("workspace-form"),
   workspaceName: byId("workspace-name"),
+  workspaceNameField: byId("workspace-name-field"),
   workspaceMode: byId("workspace-mode"),
   workspaceFormCopy: byId("workspace-form-copy"),
   workspaceTargetFields: [...document.querySelectorAll(".workspace-target-field")],
   workspaceConnection: byId("workspace-connection"),
   workspaceDatabase: byId("workspace-database"),
-  workspaceNamespace: byId("workspace-namespace"),
+  workspaceNamespacePicker: byId("workspace-namespace-picker"),
   workspaceFormStatus: byId("workspace-form-status"),
   createWorkspaceButton: byId("create-workspace-button"),
   designTableDialog: byId("design-table-dialog"),
@@ -377,6 +378,16 @@ const elements = {
   toast: byId("toast"),
 };
 
+const workspaceNamespaceSelect = createSearchableSelect({
+  options: [],
+  label: "PostgreSQL namespace",
+  placeholder: "Select a connection first",
+  required: true,
+  noResultsText: "No matching visible namespaces",
+});
+elements.workspaceNamespacePicker.append(workspaceNamespaceSelect.root);
+elements.workspaceNamespace = workspaceNamespaceSelect.input;
+
 let designColumnDraftSequence = 0;
 
 initializeUi();
@@ -514,6 +525,7 @@ const state = {
   connectionSubmitting: false,
   workspaceSubmitting: false,
   workspaceDialogGeneration: 0,
+  workspaceNamespaceGeneration: 0,
   layoutTimer: null,
   layoutSaving: false,
   layoutSavePromise: null,
@@ -1789,26 +1801,59 @@ function renderWorkspaceConnectionOptions() {
   replace(elements.workspaceConnection, element("option", { text: "Select a PostgreSQL connection", attrs: { value: "" } }));
   for (const connection of state.connections) elements.workspaceConnection.append(element("option", { text: `${connection.name} · ${connection.database}`, attrs: { value: connection.id } }));
   if (state.connections.some(connection => connection.id === selected)) elements.workspaceConnection.value = selected;
-  updateWorkspaceDatabase();
+  void updateWorkspaceDatabase();
 }
 
-function updateWorkspaceDatabase() {
+async function updateWorkspaceDatabase() {
+  const generation = ++state.workspaceNamespaceGeneration;
   const connection = connectionById(elements.workspaceConnection.value);
+  const targeted = elements.workspaceMode.value === "postgres";
   elements.workspaceDatabase.textContent = connection ? connection.database : "Select a connection";
+  workspaceNamespaceSelect.setOptions([]);
+  workspaceNamespaceSelect.setValue("");
+  elements.workspaceNamespace.disabled = !targeted || !connection;
+  workspaceNamespaceSelect.root.querySelector("button").disabled = !targeted || !connection;
+  elements.workspaceNamespace.placeholder = connection
+    ? "Loading visible namespaces…"
+    : "Select a connection first";
+  if (!connection || !targeted) return;
+  try {
+    const result = await api.listConnectionNamespaces(connection.id);
+    if (generation !== state.workspaceNamespaceGeneration) return;
+    const options = result.namespaces.map(namespace => ({
+      value: namespace.name,
+      label: namespace.name,
+      group: namespace.system ? "System schemas" : "Available schemas",
+      description: namespace.system ? "PostgreSQL system schema" : "Visible to this saved account",
+    }));
+    workspaceNamespaceSelect.setOptions(options);
+    elements.workspaceNamespace.placeholder = options.length
+      ? "Search visible namespaces"
+      : "No visible namespaces";
+    const preferred = options.find(option => option.value === "public") || options.find(option => option.group === "Available schemas");
+    if (preferred) workspaceNamespaceSelect.setValue(preferred.value);
+  } catch (error) {
+    if (generation !== state.workspaceNamespaceGeneration) return;
+    elements.workspaceNamespace.placeholder = "Namespaces unavailable";
+    replace(elements.workspaceFormStatus, errorPanel(error));
+  }
 }
 
 function updateWorkspaceMode() {
   const mode = elements.workspaceMode.value;
-  const targeted = mode === "import";
+  const targeted = mode === "postgres";
   for (const field of elements.workspaceTargetFields) field.hidden = !targeted;
+  elements.workspaceNameField.hidden = targeted;
+  elements.workspaceName.required = !targeted;
   elements.workspaceConnection.required = targeted;
   elements.workspaceNamespace.required = targeted;
   elements.workspaceFormCopy.textContent = targeted
     ? "Create an editable workspace from the selected PostgreSQL namespace. Reads and migrations use the permissions granted to this connection."
     : "Create an editable workspace that exists only in Schemii. It does not read from or write to PostgreSQL.";
-  elements.createWorkspaceButton.textContent = mode === "import"
-    ? "Create database workspace"
+  elements.createWorkspaceButton.textContent = mode === "postgres"
+    ? "Open database schema"
     : "Create empty design";
+  void updateWorkspaceDatabase();
 }
 
 function renderWorkspaces() {
@@ -1877,11 +1922,11 @@ async function submitWorkspace(event) {
   event.preventDefault();
   if (state.workspaceSubmitting) return;
   const mode = elements.workspaceMode.value;
-  const targeted = mode === "import";
+  const targeted = mode === "postgres";
   const connection = connectionById(elements.workspaceConnection.value);
   const name = elements.workspaceName.value.trim();
   const namespace = elements.workspaceNamespace.value;
-  if (!name) {
+  if (!targeted && !name) {
     replace(elements.workspaceFormStatus, element("span", { text: "Enter a workspace name." }));
     return;
   }
@@ -1893,8 +1938,8 @@ async function submitWorkspace(event) {
   const dialogGeneration = state.workspaceDialogGeneration;
   elements.createWorkspaceButton.disabled = true;
   replace(elements.workspaceFormStatus, element("span", {
-    text: mode === "import"
-      ? "Inspecting PostgreSQL and creating a new editable design…"
+    text: mode === "postgres"
+      ? "Opening your saved design or importing PostgreSQL once…"
       : targeted
         ? "Creating and validating the workspace target…"
         : "Creating the local schema design…",
@@ -1905,29 +1950,26 @@ async function submitWorkspace(event) {
       return;
     }
     if (dialogGeneration !== state.workspaceDialogGeneration) return;
-    const target = targeted ? {
-      name,
-      connectionId: connection.id,
-      database: connection.database,
-      namespace,
-    } : { name };
-    const imported = mode === "import" ? await api.createWorkspaceImport(target) : null;
-    const workspace = imported?.workspace || await api.createWorkspace(target);
-    state.workspaces.push(workspace);
+    const target = targeted ? { connectionId: connection.id, namespace } : { name };
+    const postgresResult = mode === "postgres" ? await api.openPostgresWorkspace(target) : null;
+    const workspace = postgresResult?.workspace || await api.createWorkspace(target);
+    const existingIndex = state.workspaces.findIndex(item => item.id === workspace.id);
+    if (existingIndex >= 0) state.workspaces.splice(existingIndex, 1, workspace);
+    else state.workspaces.push(workspace);
     state.workspaceActionError = null;
     renderWorkspaces();
     if (dialogGeneration === state.workspaceDialogGeneration) {
-      elements.workspaceNamespace.value = "";
+      workspaceNamespaceSelect.setValue("");
       elements.workspaceName.value = "";
       replace(elements.workspaceFormStatus);
       const opened = await openWorkspace(workspace);
       if (opened && dialogGeneration === state.workspaceDialogGeneration && elements.workspacesDialog.open) elements.workspacesDialog.close();
-      if (opened && imported) {
+      if (opened && postgresResult?.created) {
         const summary = workspace.importSummary;
         const tables = summary?.importedObjects?.tables ?? 0;
         const notes = summary?.issues?.length ?? 0;
         showToast(`Imported ${tables} ${tables === 1 ? "table" : "tables"} into a new workspace${notes ? ` · ${notes} ${notes === 1 ? "note" : "notes"}` : ""}.`);
-      }
+      } else if (opened && postgresResult) showToast("Opened your saved design for this PostgreSQL account and schema.");
     } else showToast("Workspace created by the active server.");
   } catch (error) {
     if (dialogGeneration === state.workspaceDialogGeneration) replace(elements.workspaceFormStatus, errorPanel(error));
@@ -5721,7 +5763,7 @@ function bindEvents() {
   });
 
   elements.reloadWorkspacesButton.addEventListener("click", loadWorkspaces);
-  elements.workspaceConnection.addEventListener("change", updateWorkspaceDatabase);
+  elements.workspaceConnection.addEventListener("change", () => void updateWorkspaceDatabase());
   elements.workspaceMode.addEventListener("change", updateWorkspaceMode);
   elements.workspaceForm.addEventListener("submit", submitWorkspace);
   elements.workspacesDialog.addEventListener("close", () => {

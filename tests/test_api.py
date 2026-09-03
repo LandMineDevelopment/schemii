@@ -8,6 +8,7 @@ from schemii.common.metadata.factory import MetadataRepositories
 from schemii.common.postgres.models import (
     PostgresColumn,
     PostgresConnectionTestResult,
+    PostgresNamespace,
     PostgresTable,
     build_postgres_catalog,
 )
@@ -46,6 +47,13 @@ class FakePostgresGateway:
     def namespace_exists(self, connection, namespace):
         self.connections.append(connection)
         return self.namespace_available and namespace == "public"
+
+    def list_namespaces(self, connection):
+        self.connections.append(connection)
+        return (
+            PostgresNamespace(name="public", system=False),
+            PostgresNamespace(name="information_schema", system=True),
+        )
 
     def introspect(self, connection, namespace):
         self.connections.append(connection)
@@ -107,10 +115,9 @@ def create_connection(api: TestClient, password="database secret") -> dict:
 
 def create_workspace(api: TestClient, connection_id: str) -> dict:
     response = api.post(
-        "/api/v1/schemii/workspaces/imports",
+        "/api/v1/schemii/workspaces/postgres",
         json={
             "connectionId": connection_id,
-            "database": "analytics",
             "namespace": "public",
         },
     )
@@ -191,6 +198,17 @@ def test_connection_api_redacts_credentials_and_tests_internal_resolution() -> N
         "serverVersion": "17.2",
     }
     assert postgres.connections[-1].password.get_secret_value() == "database secret"
+
+    namespaces = api.get(f"/api/v1/connections/{created['id']}/namespaces")
+    assert namespaces.status_code == 200
+    assert namespaces.json() == {
+        "connectionId": created["id"],
+        "connectionRevision": 1,
+        "namespaces": [
+            {"name": "public", "system": False},
+            {"name": "information_schema", "system": True},
+        ],
+    }
 
     updated = api.patch(
         f"/api/v1/connections/{created['id']}",
@@ -341,25 +359,38 @@ def test_database_workspace_stores_its_import_target_and_table_positions() -> No
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "connection_in_use"
 
+    identity_change = api.patch(
+        f"/api/v1/connections/{connection['id']}",
+        json={"expectedRevision": 1, "username": "another_role"},
+    )
+    assert identity_change.status_code == 409
+    assert identity_change.json()["error"]["code"] == "connection_target_in_use"
 
-def test_postgres_import_creates_a_new_targeted_design_without_an_overwrite_route() -> None:
+    safe_change = api.patch(
+        f"/api/v1/connections/{connection['id']}",
+        json={"expectedRevision": 2, "name": "Renamed profile"},
+    )
+    assert safe_change.status_code == 200
+    assert safe_change.json()["name"] == "Renamed profile"
+
+
+def test_postgres_open_imports_once_then_returns_the_same_personal_design() -> None:
     api, postgres = client()
     connection = create_connection(api)
 
     response = api.post(
-        "/api/v1/schemii/workspaces/imports",
+        "/api/v1/schemii/workspaces/postgres",
         json={
-            "name": "Imported customers",
             "connectionId": connection["id"],
-            "database": "analytics",
             "namespace": "public",
         },
     )
 
     assert response.status_code == 201
     document = response.json()
+    assert document["created"] is True
     workspace = document["workspace"]
-    assert workspace["name"] == "Imported customers"
+    assert workspace["name"] == "analytics.public"
     assert workspace["connectionId"] == connection["id"]
     assert workspace["importSummary"]["catalogFingerprint"]
     assert workspace["importSummary"]["complete"] is True
@@ -381,6 +412,26 @@ def test_postgres_import_creates_a_new_targeted_design_without_an_overwrite_rout
     assert document["layout"]["designRevision"] == 1
     assert postgres.connections[-1].password.get_secret_value() == "database secret"
 
+    gateway_calls = len(postgres.connections)
+    reopened = api.post(
+        "/api/v1/schemii/workspaces/postgres",
+        json={"connectionId": connection["id"], "namespace": "public"},
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["created"] is False
+    assert reopened.json()["workspace"]["id"] == workspace["id"]
+    assert len(postgres.connections) == gateway_calls
+    assert len(api.get("/api/v1/schemii/workspaces").json()["workspaces"]) == 1
+
+    other_account = create_connection(api, password="other account secret")
+    other = api.post(
+        "/api/v1/schemii/workspaces/postgres",
+        json={"connectionId": other_account["id"], "namespace": "public"},
+    )
+    assert other.status_code == 201
+    assert other.json()["workspace"]["id"] != workspace["id"]
+    assert len(api.get("/api/v1/schemii/workspaces").json()["workspaces"]) == 2
+
     saved = api.get(f"/api/v1/schemii/workspaces/{workspace['id']}")
     assert saved.status_code == 200
     assert saved.json()["importSummary"] == workspace["importSummary"]
@@ -400,11 +451,9 @@ def test_failed_postgres_import_does_not_create_a_workspace() -> None:
     postgres.namespace_available = False
 
     response = api.post(
-        "/api/v1/schemii/workspaces/imports",
+        "/api/v1/schemii/workspaces/postgres",
         json={
-            "name": "Must not survive",
             "connectionId": connection["id"],
-            "database": "analytics",
             "namespace": "missing",
         },
     )
@@ -420,10 +469,9 @@ def test_database_workspace_creation_requires_an_existing_namespace() -> None:
     postgres.namespace_available = False
 
     response = api.post(
-        "/api/v1/schemii/workspaces/imports",
+        "/api/v1/schemii/workspaces/postgres",
         json={
             "connectionId": connection["id"],
-            "database": "analytics",
             "namespace": "missing",
         },
     )

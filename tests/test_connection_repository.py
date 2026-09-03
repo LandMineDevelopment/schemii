@@ -255,11 +255,12 @@ def test_postgres_mutation_guard_runs_after_row_lock_and_before_change(
     repository = postgres_repository(connection)
     callback_cursors: list[RecordingCursor] = []
 
-    def guard(cursor, owner_id, connection_id, guarded_operation) -> None:
+    def guard(cursor, owner_id, connection_id, guarded_operation, changed_fields) -> None:
         assert cursor is connection.cursor_instance
         assert owner_id == "owner"
         assert connection_id == connection.cursor_instance.row["id"]
         assert guarded_operation == operation
+        assert changed_fields == ({"name"} if operation == "update" else set())
         assert cursor.statements[-1].endswith("FOR UPDATE")
         assert not any(
             statement.startswith(("UPDATE", "DELETE"))
@@ -325,9 +326,10 @@ def test_service_registers_durable_product_guard() -> None:
             return 0
 
         def guard_connection_mutation(
-            self, cursor, owner_id, connection_id, operation
+            self, cursor, owner_id, connection_id, operation, changed_fields
         ) -> None:
             del owner_id, connection_id
+            assert changed_fields == frozenset()
             calls.append((cursor, operation))
 
     ConnectionService(repository, (Provider(),))

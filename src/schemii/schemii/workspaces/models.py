@@ -117,31 +117,16 @@ class WorkspaceCreateRecord(SchemiiWorkspaceCreate):
         return self
 
 
-class SchemiiWorkspaceImportCreate(ApiModel):
-    """Create a new editable workspace from one live PostgreSQL snapshot."""
+class SchemiiPostgresWorkspaceOpen(ApiModel):
+    """Open one personal design bound to an exact saved PostgreSQL account."""
 
-    name: WorkspaceName = "Imported schema"
     connection_id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
-    database: DatabaseName
     namespace: NamespaceName
 
-    @field_validator("database", "namespace")
+    @field_validator("namespace")
     @classmethod
     def normalize_target(cls, value: str) -> str:
         return _identifier(value)
-
-    @field_validator("name", mode="before")
-    @classmethod
-    def normalize_name(cls, value: object) -> object:
-        return value.strip() if isinstance(value, str) else value
-
-    def workspace_record(self) -> WorkspaceCreateRecord:
-        return WorkspaceCreateRecord(
-            name=self.name,
-            connection_id=self.connection_id,
-            database=self.database,
-            namespace=self.namespace,
-        )
 
 
 class SchemiiWorkspaceLayoutUpdate(ApiModel):

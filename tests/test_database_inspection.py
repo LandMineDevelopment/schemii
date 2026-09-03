@@ -55,6 +55,7 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
     assert list(operations) == [
         "test_connection",
         "namespace_exists",
+        "list_namespaces",
         "introspect",
         "table_emptiness",
         "execute_console",
@@ -93,11 +94,12 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         "INDEXES_QUERY",
         "METADATA_QUERY",
         "NAMESPACE_EXISTS_QUERY",
-            "TABLES_QUERY",
-            "TRIGGERS_QUERY",
-            "TYPES_QUERY",
-            "VIEWS_QUERY",
-        }
+        "NAMESPACES_QUERY",
+        "TABLES_QUERY",
+        "TRIGGERS_QUERY",
+        "TYPES_QUERY",
+        "VIEWS_QUERY",
+    }
     introspection_callables = [
         introspect,
         callables[
@@ -118,7 +120,7 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         query["name"]
         for query in document["queries"]
         if query["id"] in introspection_query_ids
-    } == query_names - {"CONNECTION_TEST_QUERY"}
+    } == query_names - {"CONNECTION_TEST_QUERY", "NAMESPACES_QUERY"}
 
     for query in document["queries"]:
         assert query["statement"] == "SELECT"

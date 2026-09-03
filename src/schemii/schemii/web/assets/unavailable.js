@@ -16,7 +16,6 @@ export const UNAVAILABLE_CAPABILITIES = Object.freeze({
   "restore-examples": { title: "Restore examples", description: "The active API does not provide example content, and this frontend does not fabricate it." },
   shutdown: { title: "Shut down Schemii", description: "The active API has no authenticated process-shutdown contract." },
   "workspace-naming": { title: "Name workspace", description: "Active workspaces are target bindings and do not have a mutable name field." },
-  "namespace-discovery": { title: "Discover namespaces", description: "The active API validates an entered namespace during workspace creation but cannot list namespaces." },
 });
 
 function capability(id) {

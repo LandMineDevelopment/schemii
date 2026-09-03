@@ -121,10 +121,9 @@ def target_workspace(api: TestClient) -> dict:
         },
     ).json()
     response = api.post(
-        "/api/v1/schemii/workspaces/imports",
+        "/api/v1/schemii/workspaces/postgres",
         json={
             "connectionId": connection["id"],
-            "database": "analytics",
             "namespace": "public",
         },
     )

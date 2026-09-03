@@ -160,6 +160,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         10,
         11,
         12,
+        13,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -174,6 +175,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0010_metadata_retention_indexes.sql": "2f5a939e2a0f2f199db11f81a330908551d07c926019983a686b7defea76af52",
         "0011_console_executions.sql": "6f98a2f29b676f3bfb1e69a6d3c3d5e507bdf30a2f885a3ae769c982ca5c939c",
         "0012_remove_workspace_modes.sql": "e8c7428bfa7e3143bbfe49df044520c06ddaba4926b9df2a51c9be4879876bcf",
+        "0013_unique_workspace_targets.sql": "06c8c323f5f25c3a7f34edcdd636c5d08b975d006238065b60a698d2b2323a4e",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
@@ -197,6 +199,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
     assert "migration_plans_retention_idx" in migrations[9].sql
     assert "workspace_design_history_transitions_retention_idx" in migrations[9].sql
     assert migrations[10].name == "0011_console_executions.sql"
+    assert "UNIQUE (owner_id, connection_id, database_name, namespace)" in migrations[12].sql
     assert "CREATE TABLE schemii.console_executions" in migrations[10].sql
     migrator = MetadataMigrator(lambda: None, migrations)
     assert migrator._validate_applied(

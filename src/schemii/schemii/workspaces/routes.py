@@ -20,7 +20,7 @@ from schemii.schemii.migrations.service import MigrationServiceError
 from .models import (
     SchemiiWorkspace,
     SchemiiWorkspaceCreate,
-    SchemiiWorkspaceImportCreate,
+    SchemiiPostgresWorkspaceOpen,
     SchemiiWorkspaceLayoutUpdate,
     TableColumnDisplayOrder,
     TablePosition,
@@ -32,7 +32,7 @@ from .store import (
     WorkspaceNotFoundError,
     WorkspaceRepository,
     WorkspaceMutationBlockedError,
-    WorkspaceImportTargetChangedError,
+    WorkspaceTargetExistsError,
 )
 
 
@@ -61,9 +61,10 @@ class WorkspaceCatalogResponse(ApiModel):
     positions: list[TablePosition]
 
 
-class SchemiiWorkspaceImportResponse(ApiModel):
-    """A new database-derived design and its source-derived initial state."""
+class SchemiiPostgresWorkspaceResponse(ApiModel):
+    """The one personal design for an exact saved PostgreSQL account and schema."""
 
+    created: bool
     workspace: SchemiiWorkspace
     design: SchemiiDesign
     layout: SchemiiDesignLayout
@@ -161,45 +162,62 @@ def create_workspace(
 
 
 @router.post(
-    "/imports",
-    response_model=SchemiiWorkspaceImportResponse,
-    status_code=status.HTTP_201_CREATED,
+    "/postgres",
+    response_model=SchemiiPostgresWorkspaceResponse,
+    responses={201: {"description": "A new personal target design was imported."}},
 )
-def create_workspace_from_postgres(
-    body: SchemiiWorkspaceImportCreate,
+def open_postgres_workspace(
+    body: SchemiiPostgresWorkspaceOpen,
     request: Request,
+    response: Response,
     principal: Principal = Depends(get_current_principal),
-) -> SchemiiWorkspaceImportResponse:
-    """Create a new database-derived design from one repeatable-read snapshot."""
+) -> SchemiiPostgresWorkspaceResponse:
+    """Open an existing personal target design or import it exactly once."""
 
     try:
         with _connections(request).use(
             principal.user_id,
             body.connection_id,
         ) as connection:
-            if connection.database != body.database:
-                raise ApiProblem(
-                    409,
-                    "workspace_database_mismatch",
-                    "The connection does not target the requested workspace database",
-                )
-            catalog = request.app.state.services.postgres.introspect(
-                connection,
+            existing = _workspaces(request).find_by_target(
+                principal.user_id,
+                connection.id,
+                connection.database,
                 body.namespace,
             )
-            imported = import_postgres_catalog(catalog)
-            migrations = request.app.state.services.migrations
-            assert migrations is not None
-            workspace = migrations.create_import_workspace(
-                principal.user_id,
-                body.workspace_record(),
-                imported,
-                connection.revision,
-                catalog,
-            )
+            if existing is not None:
+                workspace = existing
+                created = False
+            else:
+                catalog = request.app.state.services.postgres.introspect(
+                    connection,
+                    body.namespace,
+                )
+                imported = import_postgres_catalog(catalog)
+                migrations = request.app.state.services.migrations
+                assert migrations is not None
+                try:
+                    workspace = migrations.create_import_workspace(
+                        principal.user_id,
+                        WorkspaceCreateRecord(
+                            name=f"{connection.database}.{body.namespace}",
+                            connection_id=connection.id,
+                            database=connection.database,
+                            namespace=body.namespace,
+                        ),
+                        imported,
+                        connection.revision,
+                        catalog,
+                    )
+                    created = True
+                    response.status_code = status.HTTP_201_CREATED
+                except WorkspaceTargetExistsError as error:
+                    workspace = error.workspace
+                    created = False
         design = _designs(request).get(principal.user_id, workspace.id)
         layout = _designs(request).get_layout(principal.user_id, workspace.id)
-        return SchemiiWorkspaceImportResponse(
+        return SchemiiPostgresWorkspaceResponse(
+            created=created,
             workspace=workspace,
             design=design,
             layout=layout,

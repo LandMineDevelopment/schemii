@@ -39,6 +39,7 @@ from .store import (
     WorkspaceNotFoundError,
     WorkspaceRepositoryError,
     WorkspaceStorageUnavailableError,
+    WorkspaceTargetExistsError,
     WorkspaceDesignBootstrap,
 )
 
@@ -118,6 +119,23 @@ class PostgresWorkspaceRepository:
                     self._workspace_import_summary(cursor, owner_id, workspace_id),
                 )
 
+    def find_by_target(
+        self,
+        owner_id: str,
+        connection_id: str,
+        database: str,
+        namespace: str,
+    ) -> SchemiiWorkspace | None:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                return self._find_by_target(
+                    cursor,
+                    owner_id,
+                    connection_id,
+                    database,
+                    namespace,
+                )
+
     def create(
         self,
         owner_id: str,
@@ -180,6 +198,15 @@ class PostgresWorkspaceRepository:
                     request.database,
                     baseline.connection_revision,
                 )
+                existing = self._find_by_target(
+                    cursor,
+                    owner_id,
+                    request.connection_id,
+                    request.database,
+                    request.namespace,
+                )
+                if existing is not None:
+                    raise WorkspaceTargetExistsError(existing)
                 workspace = self._insert_workspace(
                     cursor,
                     owner_id,
@@ -197,6 +224,42 @@ class PostgresWorkspaceRepository:
                     baseline=baseline,
                 )
                 return workspace
+
+    def _find_by_target(
+        self,
+        cursor: Any,
+        owner_id: str,
+        connection_id: str,
+        database: str,
+        namespace: str,
+    ) -> SchemiiWorkspace | None:
+        cursor.execute(
+            """
+            SELECT workspace.*,
+                   target.connection_id,
+                   target.database_name,
+                   target.namespace
+            FROM schemii.workspace_targets AS target
+            JOIN schemii.workspaces AS workspace
+              ON workspace.owner_id = target.owner_id
+             AND workspace.id = target.workspace_id
+            WHERE target.owner_id = %s
+              AND target.connection_id = %s
+              AND target.database_name = %s
+              AND target.namespace = %s
+            """,
+            (owner_id, connection_id, database, namespace),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        workspace_id = row["id"]
+        return self._workspace(
+            row,
+            self._workspace_positions(cursor, owner_id, workspace_id),
+            self._workspace_column_orders(cursor, owner_id, workspace_id),
+            self._workspace_import_summary(cursor, owner_id, workspace_id),
+        )
 
     def _insert_workspace(
         self,
@@ -625,6 +688,7 @@ class PostgresWorkspaceRepository:
         owner_id: str,
         connection_id: str,
         operation: Literal["update", "delete"],
+        changed_fields: frozenset[str] = frozenset(),
     ) -> None:
         """Join a connection mutation transaction to the execution lifecycle lock."""
 
@@ -642,7 +706,10 @@ class PostgresWorkspaceRepository:
             (owner_id, connection_id),
         )
         workspace_count = len(cursor.fetchall())
-        if operation == "delete" and workspace_count:
+        target_identity_fields = {"host", "port", "database", "username"}
+        if workspace_count and (
+            operation == "delete" or not target_identity_fields.isdisjoint(changed_fields)
+        ):
             raise ConnectionInUseError(
                 {PostgresWorkspaceRepository.dependency_name: workspace_count}
             )

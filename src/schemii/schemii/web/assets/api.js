@@ -123,13 +123,14 @@ export const api = Object.freeze({
     return publicConnection(await requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}`, { ...options, method: "PATCH", body }));
   },
   testConnection: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/test`, { ...options, method: "POST" }),
+  listConnectionNamespaces: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/namespaces`, options),
   deleteConnection: (id, expectedRevision, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
   async listWorkspaces(options) {
     const response = await requestJson(`${API_ROOT}/schemii/workspaces`, options);
     return response.workspaces;
   },
   createWorkspace: (body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces`, { ...options, method: "POST", body }),
-  createWorkspaceImport: (body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/imports`, { ...options, method: "POST", body }),
+  openPostgresWorkspace: (body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/postgres`, { ...options, method: "POST", body }),
   getWorkspace: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}`, options),
   updateLayout: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/layout`, { ...options, method: "PUT", body }),
   deleteWorkspace: (id, expectedRevision, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),

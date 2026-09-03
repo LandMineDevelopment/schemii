@@ -77,6 +77,7 @@ class ConnectionMutationGuard(Protocol):
         owner_id: str,
         connection_id: str,
         operation: ConnectionMutationOperation,
+        changed_fields: frozenset[str],
     ) -> None: ...
 
 

@@ -152,6 +152,13 @@ def update_connection(
             str(error),
             details={"currentRevision": error.current_revision},
         ) from error
+    except ConnectionInUseError as error:
+        raise ApiProblem(
+            409,
+            "connection_target_in_use",
+            "Host, port, database, and username cannot change while this connection has saved database workspaces",
+            details={"dependencies": error.dependencies},
+        ) from error
 
 
 @router.post("/{connection_id}/test", response_model=ConnectionTestResponse)
@@ -181,19 +188,31 @@ def test_connection(
 @router.get(
     "/{connection_id}/namespaces",
     response_model=ConnectionNamespaceListResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def list_connection_namespaces(
     connection_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> ConnectionNamespaceListResponse:
     """List bounded namespaces visible to an owner-scoped connection."""
 
-    # TODO(postgres-namespace-list): Add a bounded read-only gateway operation,
-    # bind its result to the resolved connection revision, and exclude temp schemas.
-    del connection_id, principal
-    planned_capability("connections.namespaces")
+    try:
+        with _service(request).use(principal.user_id, connection_id) as resolved:
+            namespaces = request.app.state.services.postgres.list_namespaces(resolved)
+    except ConnectionTargetForbiddenError as error:
+        raise _forbidden_target(error) from error
+    except ConnectionNotFoundError as error:
+        raise _not_found(error) from error
+    except PostgresGatewayError as error:
+        raise postgres_api_problem(error) from error
+    return ConnectionNamespaceListResponse(
+        connection_id=resolved.id,
+        connection_revision=resolved.revision,
+        namespaces=[
+            PostgresNamespaceSummary(name=item.name, system=item.system)
+            for item in namespaces
+        ],
+    )
 
 
 @router.get(

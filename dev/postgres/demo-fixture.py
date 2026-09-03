@@ -409,7 +409,7 @@ def main() -> None:
     ) as target:
         catalog = services.postgres.introspect(target, "public")
         workspace_request = WorkspaceCreateRecord(
-            name=f"Demo · {manifest['title']}",
+            name=f"{database}.public",
             connection_id=FIXTURE_CONNECTION_ID,
             database=database,
             namespace="public",

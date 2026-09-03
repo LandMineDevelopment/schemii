@@ -39,6 +39,7 @@ class TransactionalConnectionDependencyProvider(Protocol):
         owner_id: str,
         connection_id: str,
         operation: ConnectionMutationOperation,
+        changed_fields: frozenset[str],
     ) -> None: ...
 
 
@@ -83,6 +84,7 @@ class ConnectionService:
             owner_id: str,
             connection_id: str,
             operation: ConnectionMutationOperation,
+            changed_fields: frozenset[str],
         ) -> None:
             for provider in providers:
                 provider.guard_connection_mutation(
@@ -90,6 +92,7 @@ class ConnectionService:
                     owner_id,
                     connection_id,
                     operation,
+                    changed_fields,
                 )
 
         return guard
@@ -140,6 +143,19 @@ class ConnectionService:
                 }
             )
             self._target_policy.validate(target)
+            identity_fields = frozenset(
+                field
+                for field in ("host", "port", "database", "username")
+                if getattr(current, field) != getattr(target, field)
+            )
+            if identity_fields:
+                dependencies = {
+                    provider.dependency_name: count
+                    for provider in self._dependency_providers
+                    if (count := provider.count_for_connection(owner_id, connection_id))
+                }
+                if dependencies:
+                    raise ConnectionInUseError(dependencies)
             return self._repository.update(owner_id, connection_id, request)
 
     @contextmanager

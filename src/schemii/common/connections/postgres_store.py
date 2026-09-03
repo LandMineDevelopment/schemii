@@ -150,8 +150,6 @@ class PostgresConnectionRepository:
                     raise ConnectionNotFoundError("PostgreSQL connection was not found")
                 if current["revision"] != request.expected_revision:
                     raise ConnectionConflictError(current["revision"])
-                if self._mutation_guard is not None:
-                    self._mutation_guard(cursor, owner_id, connection_id, "update")
                 changes = request.model_dump(
                     exclude_unset=True,
                     exclude={"expected_revision", "password"},
@@ -159,6 +157,20 @@ class PostgresConnectionRepository:
                 metadata = PostgresConnectionMetadata.model_validate(
                     {**self._metadata_row(current), **changes}
                 )
+                changed_fields = frozenset(
+                    field
+                    for field in PostgresConnectionMetadata.model_fields
+                    if self._metadata_row(current)[field]
+                    != getattr(metadata, field)
+                )
+                if self._mutation_guard is not None:
+                    self._mutation_guard(
+                        cursor,
+                        owner_id,
+                        connection_id,
+                        "update",
+                        changed_fields,
+                    )
                 cursor.execute(
                     """
                     UPDATE metadata.postgres_connections
@@ -240,7 +252,13 @@ class PostgresConnectionRepository:
                 if current["revision"] != expected_revision:
                     raise ConnectionConflictError(current["revision"])
                 if self._mutation_guard is not None:
-                    self._mutation_guard(cursor, owner_id, connection_id, "delete")
+                    self._mutation_guard(
+                        cursor,
+                        owner_id,
+                        connection_id,
+                        "delete",
+                        frozenset(),
+                    )
                 cursor.execute(
                     """
                     DELETE FROM metadata.postgres_connections

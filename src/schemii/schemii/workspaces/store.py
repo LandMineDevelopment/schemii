@@ -128,6 +128,14 @@ class WorkspaceMutationBlockedError(WorkspaceRepositoryError):
         )
 
 
+class WorkspaceTargetExistsError(WorkspaceRepositoryError):
+    """A concurrent request already created the owner's exact target design."""
+
+    def __init__(self, workspace: SchemiiWorkspace) -> None:
+        self.workspace = workspace
+        super().__init__("The PostgreSQL workspace already exists")
+
+
 @runtime_checkable
 class WorkspaceRepository(Protocol):
     dependency_name: str
@@ -135,6 +143,14 @@ class WorkspaceRepository(Protocol):
     def list(self, owner_id: str) -> list[SchemiiWorkspace]: ...
 
     def get(self, owner_id: str, workspace_id: str) -> SchemiiWorkspace: ...
+
+    def find_by_target(
+        self,
+        owner_id: str,
+        connection_id: str,
+        database: str,
+        namespace: str,
+    ) -> SchemiiWorkspace | None: ...
 
     def create(
         self,
@@ -227,6 +243,23 @@ class InMemoryWorkspaceRepository:
         with self._lock:
             return self._record(owner_id, workspace_id).model_copy(deep=True)
 
+    def find_by_target(
+        self,
+        owner_id: str,
+        connection_id: str,
+        database: str,
+        namespace: str,
+    ) -> SchemiiWorkspace | None:
+        with self._lock:
+            for workspace in self._records.get(owner_id, {}).values():
+                if (
+                    workspace.connection_id == connection_id
+                    and workspace.database == database
+                    and workspace.namespace == namespace
+                ):
+                    return workspace.model_copy(deep=True)
+        return None
+
     def create(
         self,
         owner_id: str,
@@ -295,6 +328,14 @@ class InMemoryWorkspaceRepository:
             )
         with self._lock:
             owner_records = self._records.setdefault(owner_id, {})
+            existing = self.find_by_target(
+                owner_id,
+                request.connection_id,
+                request.database,
+                request.namespace,
+            )
+            if existing is not None:
+                raise WorkspaceTargetExistsError(existing)
             if len(owner_records) >= self._max_workspaces_per_owner:
                 raise WorkspaceLimitError("workspace", self._max_workspaces_per_owner)
             now = datetime.now(timezone.utc)

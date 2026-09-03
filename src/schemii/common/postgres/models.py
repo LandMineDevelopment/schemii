@@ -54,6 +54,13 @@ class PostgresConnectionTestResult(_PostgresModel):
     server_version: CatalogText
 
 
+class PostgresNamespace(_PostgresModel):
+    """One schema visible to the PostgreSQL role behind a saved connection."""
+
+    name: PostgresIdentifier
+    system: bool
+
+
 class PostgresColumn(_PostgresModel):
     name: PostgresIdentifier
     ordinal: Annotated[int, Field(ge=1, le=1600)]

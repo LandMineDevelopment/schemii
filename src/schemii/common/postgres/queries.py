@@ -23,6 +23,24 @@ NAMESPACE_EXISTS_QUERY = """
     ) AS namespace_exists
 """
 
+NAMESPACES_QUERY = r"""
+    /* schemii_namespaces */
+    SELECT n.nspname AS namespace_name,
+           (
+               n.nspname = 'information_schema'
+               OR pg_catalog.left(n.nspname, 3) = 'pg_'
+           ) AS is_system
+    FROM pg_catalog.pg_namespace AS n
+    WHERE n.nspname !~ '^pg_(temp|toast_temp)_[0-9]+$'
+      AND pg_catalog.has_schema_privilege(
+          CURRENT_USER,
+          n.oid,
+          'USAGE'
+      )
+    ORDER BY is_system, n.nspname
+    LIMIT %s
+"""
+
 TYPES_QUERY = """
     /* schemii_catalog_types */
     SELECT type_definition.type_name,

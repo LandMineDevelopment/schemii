@@ -414,6 +414,7 @@ def test_connection_update_is_blocked_only_while_target_execution_is_active() ->
             OWNER_ID,
             CONNECTION_ID,
             "update",
+            frozenset(),
         )
 
     assert blocked.value.dependencies == {"schemiiWorkspaces": 1}
@@ -425,7 +426,19 @@ def test_connection_update_is_blocked_only_while_target_execution_is_active() ->
         OWNER_ID,
         CONNECTION_ID,
         "update",
+        frozenset(),
     )
+
+    identity_change = _ConnectionGuardCursor(workspace_count=2, active_count=0)
+    with pytest.raises(ConnectionInUseError) as blocked_identity:
+        PostgresWorkspaceRepository.guard_connection_mutation(
+            identity_change,
+            OWNER_ID,
+            CONNECTION_ID,
+            "update",
+            frozenset({"database"}),
+        )
+    assert blocked_identity.value.dependencies == {"schemiiWorkspaces": 2}
 
 
 def test_connection_delete_is_blocked_by_any_locked_workspace_reference() -> None:
@@ -437,6 +450,7 @@ def test_connection_delete_is_blocked_by_any_locked_workspace_reference() -> Non
             OWNER_ID,
             CONNECTION_ID,
             "delete",
+            frozenset(),
         )
 
     assert blocked.value.dependencies == {"schemiiWorkspaces": 2}

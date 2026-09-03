@@ -299,20 +299,21 @@ def test_catalog_browser_rows_keep_their_content_height_when_scrolling() -> None
     assert "grid-auto-rows: max-content" in styles
 
 
-def test_postgres_import_is_exposed_only_as_new_workspace_creation() -> None:
+def test_postgres_workspace_open_is_idempotent_and_source_derived() -> None:
     web = files("schemii.schemii").joinpath("web")
     index = web.joinpath("index.html").read_text(encoding="utf-8")
     app = web.joinpath("assets", "app.js").read_text(encoding="utf-8")
     api = web.joinpath("assets", "api.js").read_text(encoding="utf-8")
 
     assert '<option value="detached">Local design · no database</option>' in index
-    assert '<option value="import">PostgreSQL-backed design</option>' in index
+    assert '<option value="postgres">PostgreSQL-backed design</option>' in index
     assert 'option value="live"' not in index
     assert "Database permissions determine which operations are allowed." in index
-    assert "Create database workspace" in app
+    assert "Open database schema" in app
     assert "Reads and migrations use the permissions granted" in app
-    assert "createWorkspaceImport" in app
-    assert "schemii/workspaces/imports" in api
+    assert "openPostgresWorkspace" in app
+    assert "schemii/workspaces/postgres" in api
+    assert "listConnectionNamespaces" in api
     assert "design/imports" not in api
 
 

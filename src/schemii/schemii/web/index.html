@@ -275,11 +275,11 @@
         <div class="manager-list" id="workspaces-list" aria-live="polite"></div>
         <form class="workspace-form" id="workspace-form">
           <header><strong>Create workspace</strong><small id="workspace-form-copy">Start a database-independent schema design.</small></header>
-          <label><span>Name</span><input id="workspace-name" required maxlength="128" autocomplete="off" placeholder="Inventory design" /></label>
-          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Local design · no database</option><option value="import">PostgreSQL-backed design</option></select></label>
+          <label id="workspace-name-field"><span>Name</span><input id="workspace-name" required maxlength="128" autocomplete="off" placeholder="Inventory design" /></label>
+          <label><span>Workspace type</span><select id="workspace-mode"><option value="detached">Local design · no database</option><option value="postgres">PostgreSQL-backed design</option></select></label>
           <label class="workspace-target-field" hidden><span>Connection</span><select id="workspace-connection"><option value="">Select a PostgreSQL connection</option></select></label>
           <label class="workspace-target-field" hidden><span>Database</span><output id="workspace-database">Select a connection</output></label>
-          <label class="workspace-target-field" hidden><span>Namespace</span><span class="joined-control"><input id="workspace-namespace" autocomplete="off" /><button class="ui-button compact" type="button" data-unavailable="namespace-discovery">Discover</button></span></label>
+          <label class="workspace-target-field" hidden><span>Namespace</span><span id="workspace-namespace-picker"></span><small>Only schemas visible to this connection's PostgreSQL role are listed.</small></label>
           <div class="form-status span-all" id="workspace-form-status" aria-live="polite"></div>
           <button class="ui-button primary" id="create-workspace-button" type="submit">Create and open</button>
         </form>

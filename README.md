@@ -40,8 +40,8 @@ The current API deliberately uses one local application user while product workf
 
 - `GET /api/v1/session` returns the valid local prototype principal.
 - `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
-- `/api/v1/schemii/workspaces` manages durable local and PostgreSQL-backed designs plus presentation preferences.
-- `POST /api/v1/schemii/workspaces/imports` creates a new editable design from one bounded PostgreSQL catalog snapshot. It cannot target or replace an existing workspace.
+- `/api/v1/schemii/workspaces` manages each user's durable local and PostgreSQL-backed designs plus presentation preferences.
+- `POST /api/v1/schemii/workspaces/postgres` opens the user's existing design for one exact saved connection and namespace, or imports it once from a bounded PostgreSQL catalog snapshot when none exists.
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
 - Interactive OpenAPI documentation is available at `/docs`.
 

@@ -54,6 +54,7 @@ from .models import (
     PostgresFunction,
     PostgresIndex,
     PostgresMaterializedView,
+    PostgresNamespace,
     PostgresNotNullConstraint,
     PostgresPrimaryKey,
     PostgresTable,
@@ -70,6 +71,7 @@ from .queries import (
     FUNCTIONS_QUERY,
     INDEXES_QUERY,
     METADATA_QUERY,
+    NAMESPACES_QUERY,
     NAMESPACE_EXISTS_QUERY,
     TABLES_QUERY,
     TRIGGERS_QUERY,
@@ -151,6 +153,11 @@ class PostgresGateway(Protocol):
         connection: ResolvedPostgresConnection,
         namespace: str,
     ) -> bool: ...
+
+    def list_namespaces(
+        self,
+        connection: ResolvedPostgresConnection,
+    ) -> tuple[PostgresNamespace, ...]: ...
 
     def introspect(
         self,
@@ -262,6 +269,40 @@ class PsycopgPostgresGateway:
             if type(row.get("namespace_exists")) is not bool:
                 raise PostgresQueryError()
             return row["namespace_exists"]
+        finally:
+            self._cleanup(database_connection)
+
+    def list_namespaces(
+        self,
+        connection: ResolvedPostgresConnection,
+    ) -> tuple[PostgresNamespace, ...]:
+        """Return visible non-temporary schemas through a bounded read-only query."""
+
+        database_connection: Any | None = None
+        limit = 10_000
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection)
+            metadata = self._one(self._execute_rows(database_connection, METADATA_QUERY))
+            self._require_database(metadata, connection.database)
+            rows = self._execute_rows(
+                database_connection,
+                NAMESPACES_QUERY,
+                (limit + 1,),
+            )
+            if len(rows) > limit:
+                raise PostgresCatalogLimitError("namespaces", limit)
+            return tuple(
+                PostgresNamespace(
+                    name=row["namespace_name"],
+                    system=row["is_system"],
+                )
+                for row in rows
+            )
+        except PostgresGatewayError:
+            raise
+        except (KeyError, TypeError, ValidationError):
+            raise PostgresQueryError() from None
         finally:
             self._cleanup(database_connection)
 

@@ -130,6 +130,10 @@ def metadata_responses() -> dict[str, list[dict[str, Any]]]:
             {"database": "analytics", "server_version": "17.2"}
         ],
         "schemii_namespace_exists": [{"namespace_exists": True}],
+        "schemii_namespaces": [
+            {"namespace_name": "public", "is_system": False},
+            {"namespace_name": "information_schema", "is_system": True},
+        ],
     }
 
 
@@ -453,6 +457,23 @@ def test_namespace_check_is_parameterized_and_rejects_database_drift() -> None:
     connection = factory.connections[0]
     assert connection.rollbacks == 1
     assert connection.closed is True
+
+
+def test_namespace_listing_is_bounded_and_preserves_system_classification() -> None:
+    factory = FakeConnectFactory(metadata_responses())
+    gateway = PsycopgPostgresGateway(connect_factory=factory)
+
+    namespaces = gateway.list_namespaces(resolved_connection())
+
+    assert [(item.name, item.system) for item in namespaces] == [
+        ("public", False),
+        ("information_schema", True),
+    ]
+    executed = factory.connections[0].executed
+    assert any(
+        "schemii_namespaces" in query and parameters == (10_001,)
+        for query, parameters in executed
+    )
 
 
 def test_introspection_maps_all_domains_in_one_read_only_snapshot() -> None:
