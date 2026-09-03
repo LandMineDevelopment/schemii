@@ -66,7 +66,9 @@ test("apply remains gated by plan authority and required acknowledgements", () =
   assert.equal(migrationCanApply(candidate), false);
   assert.equal(migrationCanApply({ ...candidate, allowDestructive: true }), false);
   assert.equal(migrationCanApply({ ...candidate, allowDestructive: true, confirmExternalChanges: true }), true);
-  assert.equal(migrationCanApply({ ...candidate, allowDestructive: true, confirmExternalChanges: true, execution: { status: "failed" } }), false);
+  assert.equal(migrationCanApply({ ...candidate, allowDestructive: true, confirmExternalChanges: true, execution: { status: "failed" } }), true);
+  assert.equal(migrationCanApply({ ...candidate, allowDestructive: true, confirmExternalChanges: true, execution: { status: "applying" } }), false);
+  assert.equal(migrationCanApply({ ...candidate, allowDestructive: true, confirmExternalChanges: true, execution: { status: "reconciliation_required" } }), false);
 });
 
 test("execution state distinguishes polling from explicit reconciliation", () => {

@@ -47,7 +47,8 @@ export function migrationCanApply({
       && plan.status === "reviewable"
       && plan.applyCapable
       && plan.steps.length
-      && !execution
+      && !migrationExecutionNeedsPolling(execution)
+      && !migrationExecutionNeedsReconciliation(execution)
       && !busy
       && (!plan.destructive || allowDestructive)
       && (!plan.requiresExternalChangeAcknowledgement || confirmExternalChanges),
@@ -208,6 +209,11 @@ function renderExecution(execution) {
   );
   if (execution.errorCode) summary.append(element("code", { text: execution.errorCode }));
   if (execution.commitOutcome) summary.append(element("span", { text: `Transaction: ${sentence(execution.commitOutcome)}` }));
+  if (execution.errorCode === "migration_result_mismatch") {
+    summary.append(element("p", {
+      text: "PostgreSQL was rolled back because its inspected result did not match the reviewed design. A fresh review is shown below.",
+    }));
+  }
   section.append(summary);
   return section;
 }
@@ -372,12 +378,16 @@ export function createMigrationReviewController({
 
   async function finishExecution(version, workspaceId) {
     if (!current(version, workspaceId) || state.handledExecutionId === state.execution?.id) return;
-    if (state.execution?.status !== "succeeded") return;
+    if (!state.execution || !["succeeded", "failed"].includes(state.execution.status)) return;
     state.handledExecutionId = state.execution.id;
     try {
-      await reloadWorkspace();
-      if (!current(version, workspaceId)) return;
-      notify("Migration committed and the workspace baseline was refreshed.");
+      if (state.execution.status === "succeeded") {
+        await reloadWorkspace();
+        if (!current(version, workspaceId)) return;
+        notify("Migration committed and the workspace baseline was refreshed.");
+      } else {
+        notify("Migration rolled back. A fresh review is ready to retry.");
+      }
       await refresh({ preserveExecution: true });
       return;
     } catch (error) {

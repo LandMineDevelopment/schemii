@@ -15,6 +15,11 @@ from schemii.common.postgres.models import (
     build_postgres_catalog,
 )
 from schemii.schemii.designs.importer import import_postgres_catalog
+from schemii.schemii.migrations.planner import (
+    compile_migration_steps,
+    new_baseline_content,
+    reconcile_designs,
+)
 
 
 def catalog():
@@ -222,6 +227,60 @@ def test_catalog_import_derives_a_editable_design_and_stable_layout() -> None:
     repeated = import_postgres_catalog(source)
     assert repeated.content == imported.content
     assert repeated.layout == imported.layout
+
+
+def test_expression_dependencies_use_table_order_for_migration_verification() -> None:
+    source = catalog()
+    customers = source.tables[0]
+    reverse_order_check = PostgresCheckConstraint(
+        name="customers_order_check",
+        table="customers",
+        columns=("id", "name"),
+        definition="CHECK (name <> '' OR id > 0)",
+        validated=True,
+    )
+    source = build_postgres_catalog(
+        **source.model_dump(exclude={"fingerprint", "captured_at", "tables"}),
+        tables=(
+            customers.model_copy(update={
+                "checks": (*customers.checks, reverse_order_check),
+            }),
+            source.tables[1],
+        ),
+        captured_at=source.captured_at,
+    )
+
+    desired = import_postgres_catalog(source).content
+    table = desired.tables[0]
+    columns = {column.name: column.id for column in table.columns}
+    check = next(item for item in table.checks if item.name == reverse_order_check.name)
+
+    assert check.column_ids == [columns["id"], columns["name"]]
+
+    desired = desired.model_copy(deep=True)
+    desired_check = next(
+        item
+        for item in desired.tables[0].checks
+        if item.name == reverse_order_check.name
+    )
+    desired_check.column_ids.reverse()
+    refreshed, issues, complete = new_baseline_content(source, desired)
+    remaining, blockers = compile_migration_steps("public", refreshed, desired)
+    reconciled = reconcile_designs(refreshed, desired, source)
+
+    assert complete is True
+    assert issues == []
+    assert remaining == []
+    assert blockers == []
+    assert reconciled.conflicts == []
+    assert reconciled.external_changes == []
+    assert reconciled.merged is not None
+    merged_check = next(
+        item
+        for item in reconciled.merged.tables[0].checks
+        if item.name == reverse_order_check.name
+    )
+    assert merged_check.column_ids == desired_check.column_ids
 
 
 def test_catalog_import_reports_unrepresentable_source_state() -> None:

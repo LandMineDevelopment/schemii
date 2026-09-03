@@ -121,6 +121,34 @@ def _copy(value: Any) -> Any:
     return _MISSING if value is _MISSING else copy.deepcopy(value)
 
 
+_UNORDERED_DEPENDENCY_FIELDS = {
+    "column_ids",
+    "expression_source_column_ids",
+    "generated_source_column_ids",
+    "predicate_column_ids",
+}
+
+
+def _unordered_dependency_path(path: str) -> bool:
+    field = path.rsplit(".", 1)[-1]
+    if field not in _UNORDERED_DEPENDENCY_FIELDS:
+        return False
+    if field == "column_ids":
+        return ".checks[" in path
+    return True
+
+
+def _equivalent_value(path: str, left: Any, right: Any) -> bool:
+    if (
+        _unordered_dependency_path(path)
+        and isinstance(left, list)
+        and isinstance(right, list)
+        and all(isinstance(item, str) for item in (*left, *right))
+    ):
+        return set(left) == set(right)
+    return left == right
+
+
 def _id_list(value: Any) -> bool:
     return isinstance(value, list) and all(
         isinstance(item, dict) and isinstance(item.get("id"), str)
@@ -153,13 +181,13 @@ class _Merger:
     def merge(self, baseline: Any, desired: Any, live: Any, path: str) -> Any:
         if desired is _MISSING and live is _MISSING:
             return _MISSING
-        if desired == live:
+        if _equivalent_value(path, desired, live):
             return _copy(desired)
-        if desired == baseline:
-            if live != baseline:
+        if _equivalent_value(path, desired, baseline):
+            if not _equivalent_value(path, live, baseline):
                 self._external(path, baseline, live)
             return _copy(live)
-        if live == baseline:
+        if _equivalent_value(path, live, baseline):
             return _copy(desired)
 
         if baseline is not _MISSING:
@@ -544,6 +572,34 @@ def _by_id(values: Iterable[Any]) -> dict[str, Any]:
     return {value.id: value for value in values}
 
 
+def _same_dependency_set(left: Iterable[str], right: Iterable[str]) -> bool:
+    return set(left) == set(right)
+
+
+def _same_except_dependency_order(left: Any, right: Any, *fields: str) -> bool:
+    if type(left) is not type(right):
+        return False
+    left_value = left.model_dump(mode="json")
+    right_value = right.model_dump(mode="json")
+    for field in fields:
+        left_value[field] = sorted(left_value[field])
+        right_value[field] = sorted(right_value[field])
+    return left_value == right_value
+
+
+def _same_check(left: Any, right: Any) -> bool:
+    return _same_except_dependency_order(left, right, "column_ids")
+
+
+def _same_index(left: DesignIndex, right: DesignIndex) -> bool:
+    return _same_except_dependency_order(
+        left,
+        right,
+        "expression_source_column_ids",
+        "predicate_column_ids",
+    )
+
+
 def compile_migration_steps(
     namespace: str,
     live: SchemiiDesignContent,
@@ -648,7 +704,10 @@ def compile_migration_steps(
             if (
                 old.identity != new.identity
                 or old.generated_expression != new.generated_expression
-                or old.generated_source_column_ids != new.generated_source_column_ids
+                or not _same_dependency_set(
+                    old.generated_source_column_ids,
+                    new.generated_source_column_ids,
+                )
             ):
                 blocking.append(MigrationWarning(
                     code="column_generation_change_unsupported",
@@ -681,7 +740,12 @@ def compile_migration_steps(
             for item_id in sorted(set(old_map) | set(new_map)):
                 old = old_map.get(item_id)
                 new = new_map.get(item_id)
-                if old == new:
+                if old == new or (
+                    category == "checks"
+                    and old is not None
+                    and new is not None
+                    and _same_check(old, new)
+                ):
                     continue
                 if old is not None:
                     pending.append(_PendingStep(
@@ -700,7 +764,11 @@ def compile_migration_steps(
         for index_id in sorted(set(old_indexes) | set(new_indexes)):
             old = old_indexes.get(index_id)
             new = new_indexes.get(index_id)
-            if old == new:
+            if old == new or (
+                old is not None
+                and new is not None
+                and _same_index(old, new)
+            ):
                 continue
             if old is not None:
                 pending.append(_PendingStep(

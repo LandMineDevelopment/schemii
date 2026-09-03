@@ -6,7 +6,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 
-from schemii.common.postgres.models import PostgresCatalog
+from schemii.common.postgres.models import PostgresCatalog, PostgresColumn
 from schemii.common.postgres.query_analysis import QueryDefinitionError, parse_query_definition
 from schemii.common.postgres.schema_source import (
     SchemaSourceError,
@@ -68,6 +68,28 @@ def _issue(
     )
 
 
+def _ordered_expression_column_names(
+    expression: str,
+    columns: tuple[PostgresColumn, ...],
+) -> tuple[str, ...]:
+    """Return expression dependencies in stable physical-column order.
+
+    Dependency arrays are metadata sets, unlike key and index column arrays where
+    order changes PostgreSQL semantics.  The browser also stores expression
+    dependencies in table order, so imported catalogs must use the same canonical
+    order to keep migration verification stable.
+    """
+
+    referenced = set(
+        expression_column_names(expression, {column.name for column in columns})
+    )
+    return tuple(
+        column.name
+        for column in sorted(columns, key=lambda item: item.ordinal)
+        if column.name in referenced
+    )
+
+
 def _layout(content: SchemiiDesignContent) -> SchemiiDesignLayoutContent:
     tables = content.tables
     table_width = max(1, math.ceil(math.sqrt(len(tables))))
@@ -125,7 +147,6 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
             continue
         table_id = _semantic_id(catalog, "table", source_table.name)
         table_ids[source_table.name] = table_id
-        available = {column.name for column in source_table.columns}
         columns: list[DesignColumn] = []
         for source_column in sorted(source_table.columns, key=lambda item: item.ordinal):
             column_id = _semantic_id(
@@ -145,7 +166,10 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 try:
                     generated_source_ids = [
                         _semantic_id(catalog, "column", source_table.name, name)
-                        for name in expression_column_names(generated_expression, available)
+                        for name in _ordered_expression_column_names(
+                            generated_expression,
+                            source_table.columns,
+                        )
                     ]
                 except SchemaSourceError as error:
                     _issue(
@@ -231,7 +255,10 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 expression = check_expression(source_check.definition)
                 dependencies = [
                     column_ids[(source_table.name, name)]
-                    for name in expression_column_names(expression, available)
+                    for name in _ordered_expression_column_names(
+                        expression,
+                        source_table.columns,
+                    )
                 ]
             except (SchemaSourceError, KeyError) as error:
                 _issue(
@@ -271,11 +298,17 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 ]
                 expression_ids = [
                     column_ids[(source_table.name, name)]
-                    for name in expression_column_names(parsed.expression, available)
+                    for name in _ordered_expression_column_names(
+                        parsed.expression,
+                        source_table.columns,
+                    )
                 ] if parsed.expression else []
                 predicate_ids = [
                     column_ids[(source_table.name, name)]
-                    for name in expression_column_names(parsed.predicate, available)
+                    for name in _ordered_expression_column_names(
+                        parsed.predicate,
+                        source_table.columns,
+                    )
                 ] if parsed.predicate else []
             except (SchemaSourceError, KeyError) as error:
                 _issue(
