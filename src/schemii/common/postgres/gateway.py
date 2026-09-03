@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
+import json
 import secrets
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -20,6 +21,9 @@ from .errors import (
     PostgresCatalogValidationError,
     PostgresCommitUncertainError,
     PostgresConnectionError,
+    PostgresConsoleCancelledError,
+    PostgresConsoleLimitError,
+    PostgresConsoleQueryError,
     PostgresDatabaseMismatchError,
     PostgresDriverUnavailableError,
     PostgresGatewayError,
@@ -31,6 +35,15 @@ from .errors import (
     PostgresQueryError,
     PostgresTransactionStatusError,
 )
+from .console.execution import (
+    MAX_CONSOLE_RESULT_BYTES,
+    MAX_CONSOLE_ROWS,
+    ConsoleQueryResult,
+    ConsoleValueLimitError,
+    json_console_value,
+    validate_read_only_statements,
+)
+from .console.models import ConsoleResultColumn
 from .models import (
     PostgresCatalog,
     PostgresCheckConstraint,
@@ -151,6 +164,20 @@ class PostgresGateway(Protocol):
         namespace: str,
         table_names: Sequence[str],
     ) -> dict[str, bool]: ...
+
+    def execute_console(
+        self,
+        connection: ResolvedPostgresConnection,
+        statements: Sequence[str],
+        *,
+        on_started: Callable[[int], bool],
+    ) -> tuple[ConsoleQueryResult, ...]: ...
+
+    def cancel_console(
+        self,
+        connection: ResolvedPostgresConnection,
+        backend_pid: int,
+    ) -> bool: ...
 
     def execute_migration(
         self,
@@ -279,6 +306,130 @@ class PsycopgPostgresGateway:
             raise
         except (KeyError, TypeError, ValueError):
             raise PostgresCatalogValidationError() from None
+        finally:
+            self._cleanup(database_connection)
+
+    def execute_console(
+        self,
+        connection: ResolvedPostgresConnection,
+        statements: Sequence[str],
+        *,
+        on_started: Callable[[int], bool],
+    ) -> tuple[ConsoleQueryResult, ...]:
+        """Run bounded SELECT-shaped statements in one read-only transaction."""
+
+        validated = validate_read_only_statements(list(statements))
+        database_connection: Any | None = None
+        statement_index = 0
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection, repeatable_read=True)
+            identity = self._one(
+                self._execute_rows(
+                    database_connection,
+                    "SELECT current_database() AS database, pg_backend_pid() AS backend_pid",
+                )
+            )
+            self._require_database(identity, connection.database)
+            backend_pid = identity.get("backend_pid")
+            if isinstance(backend_pid, bool) or not isinstance(backend_pid, int):
+                raise PostgresCatalogValidationError()
+            if not on_started(backend_pid):
+                raise PostgresConsoleCancelledError()
+
+            remaining_rows = MAX_CONSOLE_ROWS
+            result_bytes = 0
+            results: list[ConsoleQueryResult] = []
+            for statement_index, statement in enumerate(validated):
+                cursor: Any | None = None
+                try:
+                    cursor = database_connection.cursor(
+                        row_factory=lambda _cursor: lambda values: tuple(values)
+                    )
+                    cursor.execute(statement)
+                    description = tuple(cursor.description or ())
+                    raw_rows = cursor.fetchmany(remaining_rows + 1) if description else []
+                    truncated = len(raw_rows) > remaining_rows
+                    raw_rows = raw_rows[:remaining_rows]
+                    rows: list[tuple[Any, ...]] = []
+                    for raw_row in raw_rows:
+                        converted = tuple(json_console_value(value) for value in raw_row)
+                        result_bytes += len(
+                            json.dumps(converted, ensure_ascii=False).encode("utf-8")
+                        )
+                        if result_bytes > MAX_CONSOLE_RESULT_BYTES:
+                            raise PostgresConsoleLimitError(
+                                "PostgreSQL results exceed the retained Console size limit",
+                                statement_index=statement_index,
+                            )
+                        rows.append(converted)
+                    remaining_rows -= len(rows)
+                    type_names = self._console_type_names(
+                        database_connection,
+                        tuple(column.type_code for column in description),
+                    )
+                    columns = tuple(
+                        ConsoleResultColumn(
+                            name=column.name,
+                            data_type=type_names.get(column.type_code, f"oid:{column.type_code}"),
+                        )
+                        for column in description
+                    )
+                    command = str(cursor.statusmessage or "SELECT").split(" ", 1)[0]
+                    results.append(
+                        ConsoleQueryResult(
+                            statement_index=statement_index,
+                            command=command,
+                            columns=columns,
+                            rows=tuple(rows),
+                            truncated=truncated,
+                        )
+                    )
+                finally:
+                    self._safe_close(cursor)
+            database_connection.rollback()
+            return tuple(results)
+        except PostgresGatewayError:
+            raise
+        except ConsoleValueLimitError as error:
+            raise PostgresConsoleLimitError(
+                str(error), statement_index=statement_index
+            ) from error
+        except Exception as error:
+            diagnostic = getattr(error, "diag", None)
+            message = getattr(diagnostic, "message_primary", None)
+            sqlstate = getattr(error, "sqlstate", None)
+            raise PostgresConsoleQueryError(
+                message if isinstance(message, str) and message else "PostgreSQL rejected the query",
+                statement_index=statement_index,
+                sqlstate=sqlstate if isinstance(sqlstate, str) else None,
+            ) from None
+        finally:
+            self._cleanup(database_connection)
+
+    def cancel_console(
+        self,
+        connection: ResolvedPostgresConnection,
+        backend_pid: int,
+    ) -> bool:
+        """Request cancellation of one backend on the already-authorized target."""
+
+        if isinstance(backend_pid, bool) or not isinstance(backend_pid, int) or backend_pid < 1:
+            raise PostgresQueryError()
+        database_connection: Any | None = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection)
+            row = self._one(
+                self._execute_rows(
+                    database_connection,
+                    "SELECT pg_cancel_backend(%s) AS cancelled",
+                    (backend_pid,),
+                )
+            )
+            if type(row.get("cancelled")) is not bool:
+                raise PostgresQueryError()
+            return row["cancelled"]
         finally:
             self._cleanup(database_connection)
 
@@ -440,6 +591,26 @@ class PsycopgPostgresGateway:
         ):
             raise PostgresCatalogValidationError()
         return identity
+
+    @classmethod
+    def _console_type_names(
+        cls,
+        database_connection: Any,
+        type_oids: tuple[int, ...],
+    ) -> dict[int, str]:
+        if not type_oids:
+            return {}
+        rows = cls._execute_rows(
+            database_connection,
+            "SELECT oid::integer AS oid, format_type(oid, NULL) AS data_type "
+            "FROM pg_type WHERE oid = ANY(%s::oid[])",
+            (list(set(type_oids)),),
+        )
+        return {
+            int(row["oid"]): str(row["data_type"])
+            for row in rows
+            if row.get("oid") is not None and row.get("data_type") is not None
+        }
 
     def _connect(self, connection: ResolvedPostgresConnection) -> Any:
         factory = self._connect_factory

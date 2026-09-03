@@ -3,6 +3,7 @@
 from .models import (
     ConsoleExecution,
     ConsoleExecutionCreate,
+    ConsoleResultColumn,
     ConsoleResultPage,
     ConsoleSettings,
     ConsoleSettingsUpdate,
@@ -15,6 +16,7 @@ from .models import (
 __all__ = [
     "ConsoleExecution",
     "ConsoleExecutionCreate",
+    "ConsoleResultColumn",
     "ConsoleResultPage",
     "ConsoleSettings",
     "ConsoleSettingsUpdate",

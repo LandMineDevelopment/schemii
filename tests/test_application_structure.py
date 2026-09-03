@@ -68,8 +68,11 @@ def test_openapi_exposes_typed_planned_routes_without_marking_them_implemented()
     ]["get"]["tags"] == ["schemii", "schemii-database-browser-planned"]
     assert schema["paths"]["/api/v1/schemii/console/settings"]["get"]["tags"] == [
         "schemii",
-        "schemii-sql-console-planned",
+        "schemii-sql-console",
     ]
+    assert "x-schemii-status" not in schema["paths"][
+        "/api/v1/schemii/console/settings"
+    ]["get"]
     assert schema["paths"][
         "/api/v1/schemii/workspaces/{workspace_id}/layout"
     ]["put"]["tags"] == ["schemii", "schemii-schema-design"]

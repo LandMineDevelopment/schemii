@@ -1,6 +1,6 @@
-"""Planned Schemii policy layer over the future shared SQL Console engine."""
+"""Schemii policy routes for bounded SQL Console execution."""
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response, status
 
 from schemii.common.api.planned import (
     PLANNED_OPENAPI,
@@ -8,6 +8,7 @@ from schemii.common.api.planned import (
     planned_capability,
 )
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.common.api.errors import ApiProblem
 from schemii.common.postgres.console import (
     ConsoleExecution,
     ConsoleExecutionCreate,
@@ -19,26 +20,38 @@ from schemii.common.postgres.console import (
     ConsoleTransactionCreate,
     ConsoleTransactionExecutionCreate,
 )
+from .service import ConsoleService, ConsoleServiceError
 
 
-router = APIRouter(tags=["schemii-sql-console-planned"])
+router = APIRouter(tags=["schemii-sql-console"])
+
+
+def _service(request: Request) -> ConsoleService:
+    service = request.app.state.services.console
+    assert service is not None
+    return service
+
+
+def _problem(error: ConsoleServiceError) -> ApiProblem:
+    return ApiProblem(
+        error.status,
+        error.code,
+        str(error),
+        details=error.details,
+        retryable=error.retryable,
+    )
 
 
 @router.get(
     "/console/settings",
     response_model=ConsoleSettings,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def get_console_settings(
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleSettings:
     """Read Schemii's human SQL Console defaults and durable write intent."""
-
-    # TODO(console-settings): Store one optimistic settings record per owner and
-    # application without sharing write intent with Schemer or AI policies.
-    del principal
-    planned_capability("schemii.console.settings.read")
+    return _service(request).settings(principal.user_id)
 
 
 @router.put(
@@ -46,6 +59,7 @@ def get_console_settings(
     response_model=ConsoleSettings,
     responses=PLANNED_RESPONSES,
     openapi_extra=PLANNED_OPENAPI,
+    tags=["schemii-sql-console-planned"],
 )
 def update_console_settings(
     body: ConsoleSettingsUpdate,
@@ -63,99 +77,101 @@ def update_console_settings(
     "/workspaces/{workspace_id}/console/executions",
     response_model=ConsoleExecution,
     status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def create_console_execution(
     workspace_id: str,
     body: ConsoleExecutionCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleExecution:
     """Reserve and run a reviewed script against the attached workspace target."""
-
-    # TODO(console-execution): Build the shared admission/execution service,
-    # bind target and settings fingerprints, and persist pre-dispatch reservations.
-    del workspace_id, body, principal
-    planned_capability("schemii.console.execute")
+    try:
+        execution = _service(request).reserve(principal.user_id, workspace_id, body)
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
+    background_tasks.add_task(
+        _service(request).run,
+        principal.user_id,
+        execution.id,
+    )
+    return execution
 
 
 @router.get(
     "/workspaces/{workspace_id}/console/executions/{execution_id}",
     response_model=ConsoleExecution,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def get_console_execution(
     workspace_id: str,
     execution_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleExecution:
     """Read exact execution state without rerunning SQL."""
-
-    # TODO(console-execution): Resolve one owner/workspace receipt and report
-    # explicit partial-commit or uncertain outcomes without optimistic promotion.
-    del workspace_id, execution_id, principal
-    planned_capability("schemii.console.execution-status")
+    try:
+        return _service(request).get(principal.user_id, workspace_id, execution_id)
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
 
 
 @router.delete(
     "/workspaces/{workspace_id}/console/executions/{execution_id}",
     response_model=ConsoleExecution,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def cancel_console_execution(
     workspace_id: str,
     execution_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleExecution:
     """Request cancellation and return the resulting execution receipt."""
-
-    # TODO(console-cancellation): Signal the exact backend PID when safe, retain
-    # the durable receipt, and distinguish cancelled from already committed work.
-    del workspace_id, execution_id, principal
-    planned_capability("schemii.console.cancel")
+    try:
+        return _service(request).cancel(principal.user_id, workspace_id, execution_id)
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
 
 
 @router.get(
     "/workspaces/{workspace_id}/console/executions/{execution_id}/results/{result_id}",
     response_model=ConsoleResultPage,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def get_console_result_page(
     workspace_id: str,
     execution_id: str,
     result_id: str,
-    cursor: str = Query(min_length=1, max_length=512),
+    request: Request,
+    cursor: str | None = Query(default=None, min_length=1, max_length=512),
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleResultPage:
     """Advance one owner-bound result cursor within its original snapshot or spool."""
-
-    # TODO(console-results): Enforce single-advance opaque cursors, resource TTL,
-    # page/byte limits, and no query replay after the retained result is closed.
-    del workspace_id, execution_id, result_id, cursor, principal
-    planned_capability("schemii.console.results.page")
+    try:
+        return _service(request).page(
+            principal.user_id, workspace_id, execution_id, result_id, cursor
+        )
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
 
 
 @router.delete(
     "/workspaces/{workspace_id}/console/executions/{execution_id}/results/{result_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
 )
 def close_console_result(
     workspace_id: str,
     execution_id: str,
     result_id: str,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> Response:
     """Release a retained result snapshot or bounded spool deterministically."""
-
-    # TODO(console-results): Authorize the complete ownership binding, close the
-    # cursor/spool exactly once, and make later reads return a stable gone error.
-    del workspace_id, execution_id, result_id, principal
-    planned_capability("schemii.console.results.close")
+    try:
+        _service(request).close_result(
+            principal.user_id, workspace_id, execution_id, result_id
+        )
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
@@ -164,6 +180,7 @@ def close_console_result(
     status_code=status.HTTP_201_CREATED,
     responses=PLANNED_RESPONSES,
     openapi_extra=PLANNED_OPENAPI,
+    tags=["schemii-sql-console-planned"],
 )
 def create_console_transaction(
     workspace_id: str,
@@ -183,6 +200,7 @@ def create_console_transaction(
     response_model=ConsoleTransaction,
     responses=PLANNED_RESPONSES,
     openapi_extra=PLANNED_OPENAPI,
+    tags=["schemii-sql-console-planned"],
 )
 def get_console_transaction(
     workspace_id: str,
@@ -203,6 +221,7 @@ def get_console_transaction(
     status_code=status.HTTP_201_CREATED,
     responses=PLANNED_RESPONSES,
     openapi_extra=PLANNED_OPENAPI,
+    tags=["schemii-sql-console-planned"],
 )
 def execute_console_transaction_statements(
     workspace_id: str,
@@ -223,6 +242,7 @@ def execute_console_transaction_statements(
     response_model=ConsoleTransaction,
     responses=PLANNED_RESPONSES,
     openapi_extra=PLANNED_OPENAPI,
+    tags=["schemii-sql-console-planned"],
 )
 def commit_console_transaction(
     workspace_id: str,
@@ -243,6 +263,7 @@ def commit_console_transaction(
     response_model=ConsoleTransaction,
     responses=PLANNED_RESPONSES,
     openapi_extra=PLANNED_OPENAPI,
+    tags=["schemii-sql-console-planned"],
 )
 def rollback_console_transaction(
     workspace_id: str,

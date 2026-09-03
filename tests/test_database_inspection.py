@@ -57,6 +57,8 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         "namespace_exists",
         "introspect",
         "table_emptiness",
+        "execute_console",
+        "cancel_console",
         "execute_migration",
         "transaction_status",
     ]
@@ -64,6 +66,9 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         "PostgresConnectionTestResult"
     )
     assert operations["introspect"]["returnAnnotation"] == "PostgresCatalog"
+    assert operations["execute_console"]["returnAnnotation"] == (
+        "tuple[ConsoleQueryResult, Ellipsis]"
+    )
     assert [
         item["name"] for item in operations["introspect"]["parameters"]
     ] == ["connection", "namespace"]

@@ -30,7 +30,7 @@ from schemii.common.source_inspection import (
 
 DEVELOPER_SYSTEM_PATH = "/_developer/system"
 _MAX_ROUTES = 200
-_MAX_CALLABLES = 360
+_MAX_CALLABLES = 512
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96

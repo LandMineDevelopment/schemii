@@ -30,6 +30,36 @@ class PostgresQueryError(PostgresGatewayError):
         super().__init__("PostgreSQL catalog query failed")
 
 
+class PostgresConsoleQueryError(PostgresGatewayError):
+    code = "postgres_console_query_failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        statement_index: int,
+        sqlstate: str | None = None,
+    ) -> None:
+        self.statement_index = statement_index
+        self.sqlstate = sqlstate
+        super().__init__(message[:2048])
+
+
+class PostgresConsoleLimitError(PostgresGatewayError):
+    code = "postgres_console_result_limit"
+
+    def __init__(self, message: str, *, statement_index: int) -> None:
+        self.statement_index = statement_index
+        super().__init__(message)
+
+
+class PostgresConsoleCancelledError(PostgresGatewayError):
+    code = "postgres_console_cancelled"
+
+    def __init__(self) -> None:
+        super().__init__("Console execution was cancelled")
+
+
 class PostgresDatabaseMismatchError(PostgresGatewayError):
     code = "postgres_database_mismatch"
 

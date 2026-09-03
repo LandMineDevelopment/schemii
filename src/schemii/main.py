@@ -30,6 +30,11 @@ from schemii.schemer.routes import router as schemer_router
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
 from schemii.schemii.designs.store import DesignRepository, InMemoryDesignRepository
 from schemii.schemii.frontend import install_schemii_frontend
+from schemii.schemii.console.repository import (
+    InMemoryConsoleRepository,
+    PostgresConsoleRepository,
+)
+from schemii.schemii.console.service import ConsoleService
 from schemii.schemii.migrations.repository import (
     InMemoryMigrationRepository,
     PostgresMigrationRepository,
@@ -56,6 +61,7 @@ class ApplicationServices:
     workspaces: WorkspaceRepository
     designs: DesignRepository
     migrations: MigrationService | None = None
+    console: ConsoleService | None = None
 
 
 def create_services(
@@ -109,6 +115,17 @@ def create_services(
         workspaces=workspaces,
         designs=designs,
     )
+    console_repository = (
+        PostgresConsoleRepository(metadata.connection_factory)
+        if metadata.connection_factory is not None
+        else InMemoryConsoleRepository()
+    )
+    console = ConsoleService(
+        repository=console_repository,
+        connections=connections,
+        postgres=postgres,
+        workspaces=workspaces,
+    )
     return ApplicationServices(
         metadata=metadata,
         connections=connections,
@@ -116,6 +133,7 @@ def create_services(
         workspaces=workspaces,
         designs=designs,
         migrations=migrations,
+        console=console,
     )
 
 
@@ -161,6 +179,16 @@ def create_app(
             ),
         )
     assert active_services.migrations is not None
+    if active_services.console is None:
+        active_services = replace(
+            active_services,
+            console=ConsoleService(
+                repository=InMemoryConsoleRepository(),
+                connections=active_services.connections,
+                postgres=active_services.postgres,
+                workspaces=active_services.workspaces,
+            ),
+        )
     migration_worker = MigrationExecutionWorker(
         active_services.migrations.execution_coordinator
     )

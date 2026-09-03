@@ -53,13 +53,20 @@ class ConsoleExecutionCreate(ApiModel):
     )
 
 
+class ConsoleResultColumn(ApiModel):
+    """One result column derived from PostgreSQL's cursor description."""
+
+    name: Annotated[str, Field(min_length=1, max_length=1024)]
+    data_type: Annotated[str, Field(min_length=1, max_length=256)]
+
+
 class ConsoleResultSummary(ApiModel):
     """Bounded first-page metadata for one statement result."""
 
     id: str = Field(pattern=r"^res_[0-9a-f]{32}$")
     statement_index: Annotated[int, Field(strict=True, ge=0)]
     command: Annotated[str, Field(min_length=1, max_length=128)]
-    columns: list[str] = Field(max_length=1600)
+    columns: list[ConsoleResultColumn] = Field(max_length=1600)
     row_count: Annotated[int, Field(strict=True, ge=0)] | None = None
     has_more: bool
 
@@ -68,6 +75,7 @@ class ConsoleExecution(ApiModel):
     """Exact execution receipt without silently replaying statements."""
 
     id: str = Field(pattern=r"^cex_[0-9a-f]{32}$")
+    revision: Annotated[int, Field(strict=True, ge=1)]
     workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
     console_id: str = Field(pattern=r"^con_[0-9a-f]{32}$")
     transaction_id: str | None = Field(default=None, pattern=r"^ctx_[0-9a-f]{32}$")
@@ -75,6 +83,8 @@ class ConsoleExecution(ApiModel):
     completed_statement_indexes: list[Annotated[int, Field(strict=True, ge=0)]]
     results: list[ConsoleResultSummary] = Field(max_length=1000)
     error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=2048)
+    error_statement_index: Annotated[int, Field(strict=True, ge=0)] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -84,7 +94,7 @@ class ConsoleResultPage(ApiModel):
 
     execution_id: str = Field(pattern=r"^cex_[0-9a-f]{32}$")
     result_id: str = Field(pattern=r"^res_[0-9a-f]{32}$")
-    columns: list[str] = Field(max_length=1600)
+    columns: list[ConsoleResultColumn] = Field(max_length=1600)
     rows: list[list[Any]] = Field(max_length=1000)
     next_cursor: str | None = Field(default=None, max_length=512)
     truncated: bool
