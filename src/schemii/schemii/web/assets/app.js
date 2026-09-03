@@ -1571,8 +1571,12 @@ function navigateToImpactNode(node) {
   if (node.kind === "type") openDesignTypeEditor(node.objectId);
 }
 
-function renderImpactBranch(node) {
-  const branch = element("div", { className: "dependency-impact-branch", dataset: { impactObjectId: node.objectId } });
+function renderDependencyTreeBranch(node) {
+  const childrenNodes = node.children || [];
+  const branch = element("div", {
+    className: `dependency-impact-branch${node.deleteDisabled ? " is-delete-disabled" : ""}`,
+    dataset: { impactObjectId: node.id },
+  });
   const children = element("div", { className: "dependency-impact-children" });
   children.hidden = true;
   const toggle = element("button", {
@@ -1580,10 +1584,10 @@ function renderImpactBranch(node) {
     attrs: {
       type: "button",
       "aria-expanded": "false",
-      "aria-label": node.children.length ? `Show objects affected by ${node.name}` : `${node.name} has no nested dependencies`,
+      "aria-label": childrenNodes.length ? `Show resources under ${node.name}` : `${node.name} has no nested resources`,
     },
-  }, [element("span", { text: node.children.length ? "›" : "·" })]);
-  toggle.disabled = !node.children.length;
+  }, [element("span", { text: childrenNodes.length ? "›" : "·" })]);
+  toggle.disabled = !childrenNodes.length;
   toggle.addEventListener("click", () => {
     const expanded = toggle.getAttribute("aria-expanded") !== "true";
     toggle.setAttribute("aria-expanded", String(expanded));
@@ -1596,36 +1600,61 @@ function renderImpactBranch(node) {
     ]),
     element("code", { text: node.context || node.consequence, attrs: { title: node.consequence } }),
   ]);
-  select.addEventListener("click", () => navigateToImpactNode(node));
+  if (typeof node.onSelect === "function") select.addEventListener("click", node.onSelect);
+  else select.disabled = true;
   const remove = createIconButton({
     icon: "delete",
-    label: `Delete ${node.kind} ${node.name}`,
-    tooltip: `Delete ${node.name}`,
+    label: node.deleteLabel || `Delete ${node.kind} ${node.name}`,
+    tooltip: node.deleteTooltip || `Delete ${node.name}`,
     className: "compact danger dependency-impact-delete",
   });
+  remove.disabled = Boolean(
+    node.deleteDisabled
+    || (!childrenNodes.length && typeof node.onDelete !== "function"),
+  );
   remove.addEventListener("click", () => {
-    if (node.children.length) {
+    if (childrenNodes.length) {
       toggle.setAttribute("aria-expanded", "true");
       children.hidden = false;
       branch.classList.remove("is-blocked");
       void branch.offsetWidth;
       branch.classList.add("is-blocked");
-      replace(elements.dependencyImpactStatus, errorPanel(new Error(`Resolve the nested dependencies under “${node.name}” first.`)));
+      node.onBlockedDelete?.();
       return;
     }
-    requestDesignObjectDeletion(node.objectId, { dependencyLeaf: node });
+    node.onDelete?.();
   });
   const row = element("div", { className: "dependency-impact-row" }, [toggle, select, remove]);
-  for (const child of node.children) children.append(renderImpactBranch(child));
+  for (const child of childrenNodes) children.append(renderDependencyTreeBranch(child));
   branch.append(row, children);
   return branch;
+}
+
+function designDependencyTreeNode(node) {
+  return {
+    id: node.objectId,
+    kind: node.kind,
+    name: node.name,
+    context: node.context,
+    consequence: node.consequence,
+    children: node.children.map(designDependencyTreeNode),
+    onSelect: () => navigateToImpactNode(node),
+    onDelete: () => requestDesignObjectDeletion(node.objectId, { dependencyLeaf: node }),
+    onBlockedDelete: () => replace(
+      elements.dependencyImpactStatus,
+      errorPanel(new Error(`Resolve the nested dependencies under “${node.name}” first.`)),
+    ),
+  };
 }
 
 function renderDependencyImpact(impact) {
   elements.dependencyImpactTitle.textContent = `Resolve dependencies for ${impact.target.name}`;
   elements.dependencyImpactCopy.textContent = impactError(impact).message;
   replace(elements.dependencyImpactStatus);
-  replace(elements.dependencyImpactTree, ...impact.dependents.map(renderImpactBranch));
+  replace(
+    elements.dependencyImpactTree,
+    ...impact.dependents.map(node => renderDependencyTreeBranch(designDependencyTreeNode(node))),
+  );
 }
 
 function newDesignHistoryGroupId() {
@@ -1762,7 +1791,7 @@ function renderConnectionDeletionImpact() {
     ? `Delete ${connection.name}`
     : "Review connection deletion";
   elements.connectionImpactCopy.textContent = connection
-    ? "Deleting this profile removes its encrypted credential and Schemii connection metadata. It never changes the PostgreSQL database."
+    ? `Deleting this profile removes its encrypted credential and Schemii connection metadata. It never changes the PostgreSQL database.${impact?.dependencies.length ? " Select a workspace to open it, or use its trash action to delete it directly." : ""}`
     : "Review the resources retaining this connection.";
   elements.refreshConnectionImpact.disabled = state.connectionDeletionLoading || !connection;
   elements.deleteReviewedConnection.disabled = (
@@ -1795,39 +1824,28 @@ function renderConnectionDeletionImpact() {
   }
 
   for (const dependency of impact.dependencies) {
-    const card = element("article", {
-      className: `manager-card connection-impact-resource${dependency.deletionBlocked ? " is-blocked" : ""}`,
-    });
-    const copy = element("div");
-    copy.append(
-      element("strong", { text: dependency.name }),
-      element("p", {
-        text: dependency.target
+    const blocker = dependency.blockingReason || "This workspace is temporarily locked by migration activity.";
+    elements.connectionImpactList.append(renderDependencyTreeBranch({
+      id: dependency.resourceId,
+      kind: dependency.kind,
+      name: dependency.name,
+      context: dependency.deletionBlocked
+        ? blocker
+        : dependency.target
           ? `PostgreSQL target · ${dependency.target}`
           : `${dependency.kind} · revision ${dependency.resourceRevision}`,
-      }),
-      element("small", {
-        className: dependency.deletionBlocked ? "connection-impact-blocker" : "",
-        text: dependency.deletionBlocked
-          ? dependency.blockingReason || "This workspace is temporarily locked by migration activity."
-          : "Delete this saved workspace before deleting the connection.",
-      }),
-    );
-    const actions = element("div", { className: "manager-actions ui-action-group end wrap" });
-    if (dependency.kind === "workspace") {
-      const open = element("button", { className: "ui-button compact", type: "button", text: "Open" });
-      open.addEventListener("click", () => openConnectionDependency(dependency));
-      const remove = element("button", {
-        className: "ui-button compact danger-text",
-        type: "button",
-        text: dependency.deletionBlocked ? "Migration active" : "Delete workspace",
-      });
-      remove.disabled = dependency.deletionBlocked;
-      remove.addEventListener("click", () => confirmDeleteConnectionDependency(dependency));
-      actions.append(open, remove);
-    }
-    card.append(copy, actions);
-    elements.connectionImpactList.append(card);
+      consequence: dependency.deletionBlocked
+        ? blocker
+        : "Delete this saved workspace before deleting the connection.",
+      children: [],
+      deleteDisabled: dependency.kind !== "workspace" || dependency.deletionBlocked,
+      deleteLabel: dependency.deletionBlocked
+        ? `Cannot delete workspace ${dependency.name} while migration activity is unresolved`
+        : `Delete workspace ${dependency.name}`,
+      deleteTooltip: dependency.deletionBlocked ? blocker : `Delete ${dependency.name}`,
+      onSelect: () => openConnectionDependency(dependency),
+      onDelete: () => confirmDeleteConnectionDependency(dependency),
+    }));
   }
 }
 
