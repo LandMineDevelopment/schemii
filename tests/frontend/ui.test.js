@@ -13,7 +13,7 @@ import {
   isOverflowingText,
   renderStatePanel,
   setControlLoading,
-} from "../../src/schemii/schemii/web/assets/ui.js";
+} from "../../src/schemii/common/web/assets/ui.js";
 
 class ClassList {
   constructor() { this.values = new Set(); }
@@ -106,7 +106,7 @@ function dockFixture() {
 }
 
 test("shared icon registry preserves the legacy visual vocabulary", () => {
-  for (const name of ["close", "sql", "database", "edit", "earlier", "later", "copy", "link", "check", "duplicate", "delete", "add", "refresh", "calendar", "schemas", "search", "more", "assistant", "history", "settings", "new-chat", "key", "rows", "migration"]) {
+  for (const name of ["close", "sql", "database", "edit", "earlier", "later", "copy", "link", "check", "duplicate", "delete", "add", "refresh", "calendar", "schemas", "search", "more", "assistant", "history", "settings", "new-chat", "key", "rows", "migration", "pin", "pin-filled"]) {
     assert.match(ICONS[name], /^<svg viewBox="0 0 20 20" aria-hidden="true">/);
   }
   assert.equal(Object.isFrozen(ICONS), true);

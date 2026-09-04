@@ -9,6 +9,7 @@ from schemii.common.api.errors import ApiProblem
 from schemii.common.api.models import ApiModel
 from schemii.common.api.postgres import postgres_api_problem
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.common.metadata.limit_events import LimitEventNotice
 from schemii.common.postgres.errors import PostgresGatewayError
 
 from .models import (
@@ -120,8 +121,14 @@ def create_connection(
         raise ApiProblem(
             409,
             "connection_limit_reached",
-            str(error),
-            details={"limit": error.limit},
+            f"This user already has {error.limit} saved connections. Delete an unused connection or ask the administrator to raise resources.maximum_connections_per_user.",
+            details={"resource": "saved_connections", "limitName": "resources.maximum_connections_per_user", "limit": error.limit, "observed": error.limit},
+            limit_event=LimitEventNotice(
+                resource="saved_connections",
+                limit_name="resources.maximum_connections_per_user",
+                configured_limit=error.limit,
+                observed_value=error.limit,
+            ),
         ) from error
 
 

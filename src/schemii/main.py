@@ -1,7 +1,9 @@
 """Assemble the Schemii API application."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import AsyncIterator
 
 from fastapi import APIRouter, FastAPI
@@ -13,6 +15,8 @@ from schemii.common.api import (
 from schemii.common.api.models import ApiErrorResponse
 from schemii.common.api.routes import router as runtime_router
 from schemii.common.api.runtime import RuntimeConfig, TargetEgressMode
+from schemii.common.admin_config import AdminConfig
+from schemii.common.ai.opencode import OpenCodeClient
 from schemii.common.ai.routes import router as ai_provider_router
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.policy import (
@@ -25,11 +29,17 @@ from schemii.common.metadata import MetadataRepositories, create_metadata_reposi
 from schemii.common.metadata.migrations import (
     MIGRATION_PACKAGE as COMMON_METADATA_MIGRATION_PACKAGE,
 )
-from schemii.common.postgres import PostgresGateway, PsycopgPostgresGateway
+from schemii.common.postgres import (
+    PostgresCatalogLimits,
+    PostgresGateway,
+    PsycopgPostgresGateway,
+)
 from schemii.schemer.routes import router as schemer_router
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
 from schemii.schemii.designs.store import DesignRepository, InMemoryDesignRepository
 from schemii.schemii.frontend import install_schemii_frontend
+from schemii.schemii.ai.repository import AiRepository, InMemoryAiRepository, PostgresAiRepository
+from schemii.schemii.ai.service import AiService
 from schemii.schemii.console.repository import (
     InMemoryConsoleRepository,
     PostgresConsoleRepository,
@@ -62,27 +72,50 @@ class ApplicationServices:
     designs: DesignRepository
     migrations: MigrationService | None = None
     console: ConsoleService | None = None
+    admin_config: AdminConfig = AdminConfig()
+    ai_repository: AiRepository | None = None
 
 
 def create_services(
     runtime_config: RuntimeConfig | None = None,
+    admin_config: AdminConfig | None = None,
 ) -> ApplicationServices:
     selected_runtime = runtime_config or RuntimeConfig.from_env()
+    selected_admin = admin_config or AdminConfig.from_env()
     metadata = create_metadata_repositories(
         migration_packages=(
             COMMON_METADATA_MIGRATION_PACKAGE,
             SCHEMII_METADATA_MIGRATION_PACKAGE,
-        )
+        ),
+        maximum_connections_per_owner=(
+            selected_admin.resources.maximum_connections_per_user
+        ),
+        limit_event_retention_days=selected_admin.limit_events.retention_days,
+        maximum_limit_events=selected_admin.limit_events.maximum_events,
     )
+    history_limit = selected_admin.resources.design_history_actions_per_workspace
     designs: DesignRepository = (
-        PostgresDesignRepository(metadata.connection_factory)
+        PostgresDesignRepository(
+            metadata.connection_factory,
+            history_action_limit=history_limit,
+        )
         if metadata.connection_factory is not None
-        else InMemoryDesignRepository()
+        else InMemoryDesignRepository(history_action_limit=history_limit)
     )
     workspaces: WorkspaceRepository = (
-        PostgresWorkspaceRepository(metadata.connection_factory)
+        PostgresWorkspaceRepository(
+            metadata.connection_factory,
+            max_workspaces_per_owner=(
+                selected_admin.resources.maximum_workspaces_per_user
+            ),
+        )
         if metadata.connection_factory is not None
-        else InMemoryWorkspaceRepository(designs=designs)
+        else InMemoryWorkspaceRepository(
+            designs=designs,
+            max_workspaces_per_owner=(
+                selected_admin.resources.maximum_workspaces_per_user
+            ),
+        )
     )
     target_policy = metadata.target_policy
     if selected_runtime.target_egress_mode is TargetEgressMode.INTERNAL_ONLY:
@@ -100,20 +133,73 @@ def create_services(
         target_policy=target_policy,
     )
     migration_repository = (
-        PostgresMigrationRepository(metadata.connection_factory)
+        PostgresMigrationRepository(
+            metadata.connection_factory,
+            history_action_limit=history_limit,
+        )
         if metadata.connection_factory is not None
         else InMemoryMigrationRepository(designs)
     )
     mutation_guard = getattr(designs, "set_mutation_guard", None)
     if callable(mutation_guard):
         mutation_guard(migration_repository.has_active_execution)
-    postgres = PsycopgPostgresGateway()
+    postgres = PsycopgPostgresGateway(
+        limits=PostgresCatalogLimits(
+            max_namespaces=selected_admin.postgres_catalog.maximum_namespaces,
+            max_tables=selected_admin.postgres_catalog.maximum_tables,
+            max_columns=selected_admin.postgres_catalog.maximum_columns,
+            max_constraints=selected_admin.postgres_catalog.maximum_constraints,
+            max_indexes=selected_admin.postgres_catalog.maximum_indexes,
+            max_triggers=selected_admin.postgres_catalog.maximum_triggers,
+            max_functions=selected_admin.postgres_catalog.maximum_functions,
+            max_views=selected_admin.postgres_catalog.maximum_views,
+            max_types=selected_admin.postgres_catalog.maximum_types,
+            max_total_objects=(
+                selected_admin.postgres_catalog.maximum_total_objects
+            ),
+            max_definition_bytes=(
+                selected_admin.postgres_catalog.maximum_definition_bytes
+            ),
+            max_total_text_bytes=(
+                selected_admin.postgres_catalog.maximum_total_text_bytes
+            ),
+        ),
+        maximum_connections=selected_admin.postgres_connections.maximum_total,
+        maximum_connections_per_identity=(
+            selected_admin.postgres_connections.maximum_per_identity
+        ),
+        connection_acquire_timeout=(
+            selected_admin.postgres_connections.acquire_timeout_seconds
+        ),
+        maximum_console_statements=(
+            selected_admin.console.maximum_statements_per_run
+        ),
+        console_page_memory_bytes=selected_admin.console_results.page_memory_bytes,
+        console_maximum_cell_bytes=(
+            selected_admin.console_results.maximum_cell_bytes
+        ),
+        catalog_statement_timeout_seconds=(
+            selected_admin.postgres_timeouts.catalog_statement_seconds
+        ),
+        migration_statement_timeout_seconds=(
+            selected_admin.postgres_timeouts.migration_statement_seconds
+        ),
+        lock_timeout_seconds=selected_admin.postgres_timeouts.lock_wait_seconds,
+        console_idle_transaction_seconds=(
+            selected_admin.console.transaction_idle_seconds
+        ),
+    )
     migrations = MigrationService(
         repository=migration_repository,
         connections=connections,
         postgres=postgres,
         workspaces=workspaces,
         designs=designs,
+        plan_ttl=timedelta(seconds=selected_admin.migrations.review_ttl_seconds),
+        execution_lease_ttl=timedelta(
+            seconds=selected_admin.migrations.execution_lease_seconds
+        ),
+        limit_events=metadata.limit_events,
     )
     console_repository = (
         PostgresConsoleRepository(metadata.connection_factory)
@@ -125,6 +211,35 @@ def create_services(
         connections=connections,
         postgres=postgres,
         workspaces=workspaces,
+        result_ttl=timedelta(
+            seconds=selected_admin.console_results.result_ttl_seconds
+        ),
+        row_page_size=selected_admin.console_results.page_rows,
+        page_memory_bytes=selected_admin.console_results.page_memory_bytes,
+        maximum_live_read_sessions=(
+            selected_admin.console_results.maximum_live_read_sessions
+        ),
+        maximum_live_read_sessions_per_identity=min(
+            selected_admin.console_results.maximum_live_read_sessions,
+            max(1, selected_admin.postgres_connections.maximum_per_identity - 1),
+        ),
+        query_history_limit=selected_admin.console_history.limit,
+        statement_limit=selected_admin.console.maximum_statements_per_run,
+        transaction_idle_ttl=timedelta(
+            seconds=selected_admin.console.transaction_idle_seconds
+        ),
+        transaction_maximum_ttl=timedelta(
+            seconds=selected_admin.console.transaction_maximum_seconds
+        ),
+        maximum_saved_queries_per_workspace=(
+            selected_admin.console.maximum_saved_queries_per_workspace
+        ),
+        limit_events=metadata.limit_events,
+    )
+    ai_repository: AiRepository = (
+        PostgresAiRepository(metadata.connection_factory, selected_admin.ai)
+        if metadata.connection_factory is not None
+        else InMemoryAiRepository(selected_admin.ai)
     )
     return ApplicationServices(
         metadata=metadata,
@@ -134,6 +249,8 @@ def create_services(
         designs=designs,
         migrations=migrations,
         console=console,
+        admin_config=selected_admin,
+        ai_repository=ai_repository,
     )
 
 
@@ -176,6 +293,13 @@ def create_app(
                 postgres=active_services.postgres,
                 workspaces=active_services.workspaces,
                 designs=active_services.designs,
+                plan_ttl=timedelta(
+                    seconds=active_services.admin_config.migrations.review_ttl_seconds
+                ),
+                execution_lease_ttl=timedelta(
+                    seconds=active_services.admin_config.migrations.execution_lease_seconds
+                ),
+                limit_events=active_services.metadata.limit_events,
             ),
         )
     assert active_services.migrations is not None
@@ -187,19 +311,55 @@ def create_app(
                 connections=active_services.connections,
                 postgres=active_services.postgres,
                 workspaces=active_services.workspaces,
+                result_ttl=timedelta(
+                    seconds=active_services.admin_config.console_results.result_ttl_seconds
+                ),
+                row_page_size=active_services.admin_config.console_results.page_rows,
+                page_memory_bytes=(
+                    active_services.admin_config.console_results.page_memory_bytes
+                ),
+                maximum_live_read_sessions=(
+                    active_services.admin_config.console_results.maximum_live_read_sessions
+                ),
+                maximum_live_read_sessions_per_identity=min(
+                    active_services.admin_config.console_results.maximum_live_read_sessions,
+                    max(
+                        1,
+                        active_services.admin_config.postgres_connections.maximum_per_identity
+                        - 1,
+                    ),
+                ),
+                query_history_limit=active_services.admin_config.console_history.limit,
+                statement_limit=(
+                    active_services.admin_config.console.maximum_statements_per_run
+                ),
+                transaction_idle_ttl=timedelta(
+                    seconds=active_services.admin_config.console.transaction_idle_seconds
+                ),
+                transaction_maximum_ttl=timedelta(
+                    seconds=active_services.admin_config.console.transaction_maximum_seconds
+                ),
+                maximum_saved_queries_per_workspace=(
+                    active_services.admin_config.console.maximum_saved_queries_per_workspace
+                ),
+                limit_events=active_services.metadata.limit_events,
             ),
         )
     migration_worker = MigrationExecutionWorker(
-        active_services.migrations.execution_coordinator
+        active_services.migrations.execution_coordinator,
+        poll_interval_seconds=active_services.admin_config.migrations.worker_poll_seconds,
     )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        await asyncio.to_thread(application.state.ai_service.recover_interrupted)
         active_services.migrations.set_execution_waker(migration_worker.notify)
         await migration_worker.start()
         try:
             yield
         finally:
+            assert active_services.console is not None
+            active_services.console.close()
             active_services.migrations.set_execution_waker(None)
             await migration_worker.stop()
 
@@ -219,6 +379,15 @@ def create_app(
         },
     )
     application.state.services = active_services
+    ai_runtime = OpenCodeClient.from_env()
+    if ai_runtime is not None:
+        ai_runtime.timeout = active_services.admin_config.ai.provider_timeout_seconds
+    application.state.ai_service = AiService(
+        active_services.ai_repository
+        or InMemoryAiRepository(active_services.admin_config.ai),
+        ai_runtime,
+        active_services,
+    )
     application.state.migration_worker = migration_worker
     install_api_middleware(application)
     install_api_error_handlers(application)

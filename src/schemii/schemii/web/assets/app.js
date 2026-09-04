@@ -66,6 +66,7 @@ import { installSortableList, reorderedValues } from "/assets/common/sortable.js
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
 import { closeDetailsMenus, createIconButton, createIconElement, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
 import {
+  extractLinkedSqlDraft,
   readWorkspaceNavigation,
   readWorkspacePreferences,
   updateWorkspacePreferences,
@@ -74,6 +75,7 @@ import {
 import { renderDesignViewStory } from "./view-story.js";
 import { renderRelationBrowser, renderRelationRows } from "./relation-browser.js";
 import { createRelationDataSource } from "./relation-data-source.js";
+import { appendDataGridPage, installAutoPageLoader } from "./data-grid.js";
 import { createViewAnalysisController } from "./view-analysis.js";
 import {
   catalogTableId,
@@ -95,9 +97,12 @@ import {
 } from "./request-coordinator.js";
 import { createMigrationReviewController } from "./migration-review.js";
 import { createSqlConsole } from "./sql-console.js";
+import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
 
 const byId = id => document.getElementById(id);
 const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
+const linkedSqlDraft = extractLinkedSqlDraft(window.location.href);
+if (linkedSqlDraft.href) window.history.replaceState(null, "", linkedSqlDraft.href);
 
 const elements = {
   runtimeDot: byId("runtime-dot"),
@@ -112,6 +117,7 @@ const elements = {
   exportDesignSqlButton: byId("export-design-sql-button"),
   introductionButton: byId("introduction-button"),
   mainLayout: byId("main-layout"),
+  toolRail: byId("tool-rail"),
   canvas: byId("canvas"),
   canvasStage: byId("canvas-stage"),
   tablesLayer: byId("tables-layer"),
@@ -153,7 +159,6 @@ const elements = {
   inspectorRowsTitle: byId("inspector-rows-title"),
   inspectorRowsBody: byId("inspector-rows-body"),
   inspectorRowsStatus: byId("inspector-rows-status"),
-  inspectorRowsMore: byId("inspector-rows-more"),
   refreshInspectorRows: byId("refresh-inspector-rows"),
   openFullRowPreview: byId("open-full-row-preview"),
   inspectorSqlDraft: byId("inspector-sql-draft"),
@@ -182,13 +187,44 @@ const elements = {
   viewDetail: byId("view-detail"),
   refreshViewsButton: byId("refresh-views-button"),
   createViewButton: byId("create-view-button"),
+  browseViewsTool: byId("browse-views-tool"),
+  createViewTool: byId("create-view-tool"),
+  refreshViewsTool: byId("refresh-views-tool"),
+  deleteViewTool: byId("delete-view-tool"),
   viewsSourceLabel: byId("views-source-label"),
   sqlDraft: byId("sql-draft"),
   newSqlDraftButton: byId("new-sql-draft-button"),
+  copySqlButton: byId("copy-sql-button"),
   runSqlButton: byId("run-sql-button"),
+  runAllSqlButton: byId("run-all-sql-button"),
   cancelSqlButton: byId("cancel-sql-button"),
+  newQueryTool: byId("new-query-tool"),
+  savedQueriesTool: byId("saved-queries-tool"),
+  saveQueryTool: byId("save-query-tool"),
+  writeModeTool: byId("write-mode-tool"),
   sqlEditorStatus: byId("sql-editor-status"),
+  sqlEditorSummary: byId("sql-editor-summary"),
   sqlResults: byId("sql-results"),
+  sqlResultsSummary: byId("sql-results-summary"),
+  sqlPanes: byId("sql-panes"),
+  showSqlEditor: byId("show-sql-editor"),
+  showSqlResults: byId("show-sql-results"),
+  sqlWorkspace: byId("sql-workspace"),
+  sqlTransactionBar: byId("sql-transaction-bar"),
+  sqlTransactionStatus: byId("sql-transaction-status"),
+  commitSqlButton: byId("commit-sql-button"),
+  rollbackSqlButton: byId("rollback-sql-button"),
+  sqlQueryTabs: byId("sql-query-tabs"),
+  sqlResultTabs: byId("sql-result-tabs"),
+  sqlQueryDrawer: byId("sql-query-drawer"),
+  closeSqlQueryDrawer: byId("close-sql-query-drawer"),
+  saveQueryDrawerButton: byId("save-query-drawer-button"),
+  sqlSavedQueries: byId("sql-saved-queries"),
+  sqlQueryHistory: byId("sql-query-history"),
+  sqlHistoryCount: byId("sql-history-count"),
+  sqlSaveDialog: byId("sql-save-dialog"),
+  sqlSaveForm: byId("sql-save-form"),
+  sqlSaveName: byId("sql-save-name"),
   sqlTargetConnection: byId("sql-target-connection"),
   sqlTargetDatabase: byId("sql-target-database"),
   sqlTargetNamespace: byId("sql-target-namespace"),
@@ -355,10 +391,10 @@ const elements = {
   relationPreviewCopy: byId("relation-preview-copy"),
   relationPreviewBody: byId("relation-preview-body"),
   relationPreviewStatus: byId("relation-preview-status"),
-  relationPreviewMore: byId("relation-preview-more"),
   createTriggerButton: byId("create-trigger-button"),
   reviewMigrationButton: byId("review-migration-button"),
   migrationDialog: byId("migration-dialog"),
+  migrationRebuildHelp: byId("migration-rebuild-help"),
   migrationReviewBody: byId("migration-review-body"),
   migrationStatus: byId("migration-status"),
   refreshMigrationButton: byId("refresh-migration-button"),
@@ -478,6 +514,7 @@ const state = {
   relationPreview: null,
   relationPreviewLoading: false,
   relationPreviewError: null,
+  relationPreviewPagingError: null,
   relationPreviewGeneration: 0,
   inspectorMode: "structure",
   inspectorDataMaximized: false,
@@ -487,6 +524,7 @@ const state = {
   inspectorRows: null,
   inspectorRowsLoading: false,
   inspectorRowsError: null,
+  inspectorRowsPagingError: null,
   inspectorRowsGeneration: 0,
   liveViewLineage: null,
   liveViewLineageKey: null,
@@ -560,6 +598,7 @@ const state = {
   navigationGeneration: 0,
   restoringNavigation: false,
 };
+syncWorkspaceToolbar(elements.toolRail, state.activeLayer);
 let inspectorDataVisibilityTimer = null;
 let inspectorDataPaneTransitionTimer = null;
 inspectorPreferenceReady = true;
@@ -574,6 +613,7 @@ const migrationReview = createMigrationReviewController({
   api,
   elements: {
     dialog: elements.migrationDialog,
+    rebuildHelp: elements.migrationRebuildHelp,
     body: elements.migrationReviewBody,
     status: elements.migrationStatus,
     refresh: elements.refreshMigrationButton,
@@ -594,12 +634,38 @@ const sqlConsole = createSqlConsole({
   api,
   draft: elements.sqlDraft,
   runButton: elements.runSqlButton,
+  runAllButton: elements.runAllSqlButton,
   cancelButton: elements.cancelSqlButton,
+  writeModeToggleButton: elements.writeModeTool,
   editorStatus: elements.sqlEditorStatus,
   results: elements.sqlResults,
+  resultsSummary: elements.sqlResultsSummary,
+  editorSummary: elements.sqlEditorSummary,
+  modeRoot: elements.sqlWorkspace,
+  transactionBar: elements.sqlTransactionBar,
+  transactionStatus: elements.sqlTransactionStatus,
+  commitButton: elements.commitSqlButton,
+  rollbackButton: elements.rollbackSqlButton,
+  confirm: askConfirmation,
   getWorkspace: () => state.activeWorkspace,
   showToast,
   onError: errorToast,
+  onCommit: refreshCatalog,
+  onRunStart: () => setSqlPane("results"),
+  onPaneRequest: setSqlPane,
+  queryTabs: elements.sqlQueryTabs,
+  resultTabs: elements.sqlResultTabs,
+  queryDrawer: elements.sqlQueryDrawer,
+  queryDrawerToggle: elements.savedQueriesTool,
+  queryDrawerClose: elements.closeSqlQueryDrawer,
+  savedQueries: elements.sqlSavedQueries,
+  queryHistory: elements.sqlQueryHistory,
+  historyCount: elements.sqlHistoryCount,
+  saveQueryButtons: [elements.saveQueryTool, elements.saveQueryDrawerButton],
+  saveDialog: elements.sqlSaveDialog,
+  saveForm: elements.sqlSaveForm,
+  saveName: elements.sqlSaveName,
+  initialDraft: linkedSqlDraft.sql,
 });
 const inspectorSqlConsole = createSqlConsole({
   api,
@@ -612,6 +678,27 @@ const inspectorSqlConsole = createSqlConsole({
   showToast,
   onError: errorToast,
   onRunStart: showInspectorSqlResults,
+});
+installAutoPageLoader({
+  container: elements.inspectorRowsBody,
+  canLoad: () => Boolean(
+    state.inspectorMode === "rows"
+    && state.inspectorRowsView === "table"
+    && state.inspectorRows?.nextCursor
+    && !state.inspectorRowsLoading
+    && !state.inspectorRowsPagingError
+  ),
+  loadNext: () => loadInspectorRows({ cursor: state.inspectorRows?.nextCursor }),
+});
+installAutoPageLoader({
+  container: elements.relationPreviewBody,
+  canLoad: () => Boolean(
+    elements.relationPreviewDialog.open
+    && state.relationPreview?.page?.nextCursor
+    && !state.relationPreviewLoading
+    && !state.relationPreviewPagingError
+  ),
+  loadNext: loadRelationPreviewRows,
 });
 
 function showDesignChangeTargets(targets) {
@@ -928,6 +1015,7 @@ function updateDesignControls() {
   const designWorkspace = isDesignWorkspace();
   const busy = state.catalogLoading || state.designSubmitting || state.historySubmitting || state.layoutConflict || state.inspectorTableEditorDirty;
   const selected = selectedDesignTable();
+  const selectedView = selectedDesignView();
   const hasTargetKey = state.design?.content.tables.some(table => (
     table.keys.some(key => key.kind === "primary" || key.kind === "unique")
   ));
@@ -946,6 +1034,13 @@ function updateDesignControls() {
   elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index";
   elements.deleteTableButton.disabled = !selected || busy;
   elements.createViewButton.disabled = !designWorkspace || busy;
+  elements.browseViewsTool.disabled = !designWorkspace || state.catalogLoading;
+  elements.createViewTool.disabled = !designWorkspace || busy;
+  elements.refreshViewsTool.disabled = !designWorkspace || state.catalogLoading;
+  elements.deleteViewTool.disabled = !selectedView || busy;
+  const deleteViewLabel = selectedView ? `Delete view ${selectedView.name}` : "Delete selected view";
+  elements.deleteViewTool.setAttribute("aria-label", deleteViewLabel);
+  elements.deleteViewTool.dataset.uiTooltip = deleteViewLabel;
   elements.createFunctionButton.disabled = !designWorkspace || busy;
   elements.typesButton.disabled = !designWorkspace || busy;
   elements.createTypeButton.disabled = !designWorkspace || busy;
@@ -1343,11 +1438,26 @@ function renderConnections() {
     else if (testState?.result) copy.append(element("p", { className: "connection-test", text: `Connected to ${testState.result.database} · PostgreSQL ${testState.result.serverVersion}` }));
     else if (testState?.error) copy.append(errorPanel(testState.error));
     const actions = element("div", { className: "manager-actions ui-action-group end wrap" });
-    const test = element("button", { className: "ui-button compact", type: "button", text: "Test" });
+    const test = createIconButton({
+      icon: "check",
+      label: `Test ${connection.name}`,
+      tooltip: "Test connection",
+      className: "compact",
+    });
     test.addEventListener("click", () => testConnection(connection));
-    const edit = element("button", { className: "ui-button compact", type: "button", text: "Edit" });
+    const edit = createIconButton({
+      icon: "edit",
+      label: `Edit ${connection.name}`,
+      tooltip: "Edit connection",
+      className: "compact",
+    });
     edit.addEventListener("click", () => openConnectionEditor(connection));
-    const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
+    const remove = createIconButton({
+      icon: "delete",
+      label: `Delete ${connection.name}`,
+      tooltip: "Delete connection",
+      className: "compact danger",
+    });
     remove.addEventListener("click", () => confirmDeleteConnection(connection));
     actions.append(test, edit, remove);
     card.append(copy, actions);
@@ -1501,12 +1611,24 @@ async function testConnection(connection) {
   renderConnections();
 }
 
-function askConfirmation({ title, message, label, callback }) {
+function askConfirmation({ title, message, label, callback, tone = "danger" }) {
   state.confirmCallback = callback;
   elements.confirmTitle.textContent = title;
   elements.confirmMessage.textContent = message;
   elements.confirmAction.textContent = label;
+  elements.confirmAction.classList.toggle("danger", tone === "danger");
+  elements.confirmAction.classList.toggle("primary", tone === "primary");
   openDialog(elements.confirmDialog);
+}
+
+function setSqlPane(pane) {
+  const activePane = pane === "results" ? "results" : "editor";
+  elements.sqlPanes.dataset.activePane = activePane;
+  elements.showSqlEditor.setAttribute("aria-expanded", String(activePane === "editor"));
+  elements.showSqlResults.setAttribute("aria-expanded", String(activePane === "results"));
+  if (activePane === "editor") {
+    requestAnimationFrame(() => elements.sqlDraft.focus({ preventScroll: true }));
+  }
 }
 
 function deletionLabel(node) {
@@ -2080,7 +2202,12 @@ function renderWorkspaces() {
     open.addEventListener("click", async () => {
       if (await openWorkspace(workspace)) elements.workspacesDialog.close();
     });
-    const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
+    const remove = createIconButton({
+      icon: "delete",
+      label: `Delete ${workspaceLabel(workspace)}`,
+      tooltip: "Delete workspace",
+      className: "compact danger",
+    });
     remove.addEventListener("click", () => confirmDeleteWorkspace(workspace));
     actions.append(open, remove);
     card.append(copy);
@@ -2538,11 +2665,20 @@ function inspectorDataKey(table) {
   return `${state.activeWorkspace.id}:${table.namespace || state.activeWorkspace.namespace}:${table.name}:${table.kind || "table"}`;
 }
 
-function renderInspectorRows() {
+function pagedRowsStatus(page, { loading = false, pagingError = null } = {}) {
+  if (!page) return loading ? "Loading rows…" : "Up to 100 rows";
+  const count = `${page.rows.length} rows · ${page.columns.length} columns`;
+  if (loading) return `${count} · loading more…`;
+  if (pagingError) return `${count} · more rows could not load · refresh to retry`;
+  if (page.nextCursor) return `${count} · scroll for more`;
+  return count;
+}
+
+function renderInspectorRows({ preserveGrid = false } = {}) {
   const showingResults = state.inspectorRowsView === "results";
   elements.inspectorRowsBody.hidden = showingResults;
   elements.inspectorSqlResults.hidden = !showingResults;
-  if (!showingResults) renderRelationRows(elements.inspectorRowsBody, {
+  if (!showingResults && !preserveGrid) renderRelationRows(elements.inspectorRowsBody, {
     page: state.inspectorRows,
     loading: state.inspectorRowsLoading,
     error: state.inspectorRowsError,
@@ -2553,11 +2689,10 @@ function renderInspectorRows() {
     : `${currentCatalogTable()?.name || "Table"} rows`;
   elements.inspectorRowsStatus.textContent = showingResults
     ? "Read-only result"
-    : page
-      ? `${page.rows.length} rows · ${page.columns.length} columns${page.truncated ? " · more available" : ""}`
-      : "Up to 100 rows";
-  elements.inspectorRowsMore.hidden = showingResults || !page?.nextCursor;
-  elements.inspectorRowsMore.disabled = state.inspectorRowsLoading;
+    : pagedRowsStatus(page, {
+      loading: state.inspectorRowsLoading,
+      pagingError: state.inspectorRowsPagingError,
+    });
   elements.refreshInspectorRows.disabled = state.inspectorRowsLoading;
   elements.openFullRowPreview.disabled = !showingResults && (state.inspectorRowsLoading || !state.inspectorRelation);
   elements.openFullRowPreview.setAttribute("aria-label", showingResults ? "Return to table rows" : "Open full row preview");
@@ -2694,6 +2829,7 @@ function syncInspectorDataContext(table) {
   state.inspectorRows = null;
   state.inspectorRowsLoading = false;
   state.inspectorRowsError = null;
+  state.inspectorRowsPagingError = null;
   state.inspectorRowsView = "table";
   inspectorSqlConsole.reset(key ? relationDataSource.statement(table.name) : "");
   if (table) elements.inspectorRowsTitle.textContent = `${table.name} rows`;
@@ -2751,10 +2887,14 @@ async function loadInspectorRows({ cursor = null } = {}) {
   const table = currentCatalogTable();
   const key = inspectorDataKey(table);
   if (!key || state.inspectorRowsLoading) return;
+  const previousPage = cursor ? state.inspectorRows : null;
+  const paging = Boolean(cursor && previousPage);
   const generation = ++state.inspectorRowsGeneration;
   state.inspectorRowsLoading = true;
-  state.inspectorRowsError = null;
-  renderInspectorRows();
+  if (!paging) state.inspectorRowsError = null;
+  state.inspectorRowsPagingError = null;
+  renderInspectorRows({ preserveGrid: paging });
+  let appended = false;
   try {
     const relation = cursor && state.inspectorRelation
       ? state.inspectorRelation
@@ -2764,13 +2904,23 @@ async function loadInspectorRows({ cursor = null } = {}) {
     const page = await relationDataSource.page(relation, { cursor, pageSize: 100 });
     if (generation !== state.inspectorRowsGeneration || key !== state.inspectorDataKey) return;
     state.inspectorRelation = relation;
-    state.inspectorRows = page;
+    if (paging) {
+      const viewport = elements.inspectorRowsBody.querySelector(".relation-preview-viewport");
+      const merged = appendDataGridPage(viewport, previousPage, page);
+      state.inspectorRows = merged.page;
+      appended = merged.appended;
+    } else state.inspectorRows = page;
   } catch (error) {
-    if (generation === state.inspectorRowsGeneration && key === state.inspectorDataKey) state.inspectorRowsError = error;
+    if (generation === state.inspectorRowsGeneration && key === state.inspectorDataKey) {
+      if (paging) {
+        state.inspectorRowsPagingError = error;
+        errorToast(error);
+      } else state.inspectorRowsError = error;
+    }
   } finally {
     if (generation === state.inspectorRowsGeneration && key === state.inspectorDataKey) {
       state.inspectorRowsLoading = false;
-      renderInspectorRows();
+      renderInspectorRows({ preserveGrid: paging && (appended || Boolean(state.inspectorRowsPagingError)) });
     }
   }
 }
@@ -3027,6 +3177,7 @@ function renderViews() {
     onSelect: selectView,
   });
   renderSelectedViewDetail();
+  updateDesignControls();
 }
 
 function renderSelectedViewDetail() {
@@ -3894,32 +4045,63 @@ function openLiveRelation(relation) {
 async function openRelationPreview(relation, { page: initialPage = null } = {}) {
   if (!state.activeWorkspace?.connectionId) return;
   if (elements.objectsDialog.open) elements.objectsDialog.close();
-  const generation = ++state.relationPreviewGeneration;
+  state.relationPreviewGeneration += 1;
   state.relationPreview = { relation, page: initialPage };
-  state.relationPreviewLoading = !initialPage;
+  state.relationPreviewLoading = false;
   state.relationPreviewError = null;
+  state.relationPreviewPagingError = null;
   elements.relationPreviewTitle.textContent = `${relation.name} rows`;
   elements.relationPreviewCopy.textContent = "Read-only, bounded live PostgreSQL data. Values can change between pages.";
-  elements.relationPreviewMore.hidden = true;
   renderRelationRows(elements.relationPreviewBody, initialPage ? { page: initialPage } : { loading: true });
+  elements.relationPreviewStatus.textContent = pagedRowsStatus(initialPage);
   openDialog(elements.relationPreviewDialog);
-  if (initialPage) {
-    elements.relationPreviewStatus.textContent = `${initialPage.rows.length} rows · ${initialPage.columns.length} columns${initialPage.truncated ? " · more available" : ""}`;
-    elements.relationPreviewMore.hidden = !initialPage.nextCursor;
-    return;
-  }
+  if (!initialPage) await loadRelationPreviewRows();
+}
+
+async function loadRelationPreviewRows() {
+  const current = state.relationPreview;
+  if (!current || state.relationPreviewLoading) return;
+  const previousPage = current.page;
+  const paging = Boolean(previousPage);
+  if (paging && !previousPage.nextCursor) return;
+  const generation = ++state.relationPreviewGeneration;
+  state.relationPreviewLoading = true;
+  if (!paging) state.relationPreviewError = null;
+  state.relationPreviewPagingError = null;
+  elements.relationPreviewStatus.textContent = pagedRowsStatus(previousPage, { loading: paging });
+  if (!paging) renderRelationRows(elements.relationPreviewBody, { loading: true });
+  let appended = false;
   try {
-    const page = await relationDataSource.page(relation, { pageSize: 100 });
+    const page = await relationDataSource.page(current.relation, {
+      cursor: previousPage?.nextCursor || null,
+      pageSize: 100,
+    });
     if (generation !== state.relationPreviewGeneration) return;
-    state.relationPreview.page = page;
-    elements.relationPreviewStatus.textContent = `${page.rows.length} rows · ${page.columns.length} columns${page.truncated ? " · more available" : ""}`;
-    elements.relationPreviewMore.hidden = !page.nextCursor;
+    if (paging) {
+      const viewport = elements.relationPreviewBody.querySelector(".relation-preview-viewport");
+      const merged = appendDataGridPage(viewport, previousPage, page);
+      state.relationPreview.page = merged.page;
+      appended = merged.appended;
+    } else state.relationPreview.page = page;
   } catch (error) {
-    if (generation === state.relationPreviewGeneration) state.relationPreviewError = error;
+    if (generation === state.relationPreviewGeneration) {
+      if (paging) {
+        state.relationPreviewPagingError = error;
+        errorToast(error);
+      } else state.relationPreviewError = error;
+    }
   } finally {
     if (generation === state.relationPreviewGeneration) {
       state.relationPreviewLoading = false;
-      renderRelationRows(elements.relationPreviewBody, { page: state.relationPreview?.page, error: state.relationPreviewError });
+      if (!paging || (!appended && !state.relationPreviewPagingError)) {
+        renderRelationRows(elements.relationPreviewBody, {
+          page: state.relationPreview?.page,
+          error: state.relationPreviewError,
+        });
+      }
+      elements.relationPreviewStatus.textContent = pagedRowsStatus(state.relationPreview?.page, {
+        pagingError: state.relationPreviewPagingError,
+      });
     }
   }
 }
@@ -4991,17 +5173,15 @@ function renderOrderedDesignColumns(container, table, columnIds, onMove, emptyCo
       className: "compact design-sort-handle",
     });
     sortHandle.dataset.sortHandle = "";
-    const up = element("button", {
-      className: "ui-button compact",
-      type: "button",
-      text: "↑",
-      attrs: { "aria-label": `Move ${column.name} earlier` },
+    const up = createIconButton({
+      icon: "earlier",
+      label: `Move ${column.name} earlier`,
+      className: "compact",
     });
-    const down = element("button", {
-      className: "ui-button compact",
-      type: "button",
-      text: "↓",
-      attrs: { "aria-label": `Move ${column.name} later` },
+    const down = createIconButton({
+      icon: "later",
+      label: `Move ${column.name} later`,
+      className: "compact",
     });
     up.disabled = index === 0;
     down.disabled = index === columnIds.length - 1;
@@ -5734,6 +5914,7 @@ function setLayerState(layer) {
   if (layer !== "tables" && (state.relationshipAuthoring || state.keyAuthoring || state.indexAuthoring)) cancelColumnAuthoring();
   if (layer !== "tables") closeInspectorDataWorkspace();
   state.activeLayer = layer;
+  syncWorkspaceToolbar(elements.toolRail, layer);
   for (const button of document.querySelectorAll("[data-layer]")) {
     const active = button.dataset.layer === layer;
     button.classList.toggle("active", active);
@@ -5908,11 +6089,9 @@ function bindEvents() {
     }
     state.inspectorRows = null;
     state.inspectorRowsError = null;
+    state.inspectorRowsPagingError = null;
     state.inspectorRelation = null;
     void loadInspectorRows();
-  });
-  elements.inspectorRowsMore.addEventListener("click", () => {
-    if (state.inspectorRows?.nextCursor) void loadInspectorRows({ cursor: state.inspectorRows.nextCursor });
   });
   elements.openFullRowPreview.addEventListener("click", () => {
     if (state.inspectorRowsView === "results") {
@@ -5991,6 +6170,16 @@ function bindEvents() {
   elements.inspectorTableForm.addEventListener("submit", submitInspectorTable);
   elements.discardInspectorTableButton.addEventListener("click", discardInspectorTableChanges);
   elements.createViewButton.addEventListener("click", () => openDesignViewEditor());
+  elements.browseViewsTool.addEventListener("click", () => {
+    elements.viewsSearch.scrollIntoView({ behavior: "smooth", block: "center" });
+    elements.viewsSearch.focus({ preventScroll: true });
+  });
+  elements.createViewTool.addEventListener("click", () => openDesignViewEditor());
+  elements.refreshViewsTool.addEventListener("click", refreshCatalog);
+  elements.deleteViewTool.addEventListener("click", () => {
+    const view = selectedDesignView();
+    if (view) confirmDeleteDesignView(view.id);
+  });
   elements.designViewForm.addEventListener("submit", submitDesignView);
   elements.designViewName.addEventListener("input", () => scheduleDesignViewPreview());
   elements.designViewDefinition.addEventListener("input", () => scheduleDesignViewPreview());
@@ -6122,32 +6311,11 @@ function bindEvents() {
     window.clearTimeout(state.liveRelationsSearchTimer);
     state.liveRelationsSearchTimer = window.setTimeout(() => loadLiveRelations({ force: true }), 180);
   });
-  elements.relationPreviewMore.addEventListener("click", async () => {
-    const current = state.relationPreview;
-    if (!current?.page?.nextCursor || state.relationPreviewLoading) return;
-    const generation = ++state.relationPreviewGeneration;
-    state.relationPreviewLoading = true;
-    elements.relationPreviewMore.disabled = true;
-    try {
-      const page = await relationDataSource.page(current.relation, { cursor: current.page.nextCursor, pageSize: 100 });
-      if (generation !== state.relationPreviewGeneration) return;
-      state.relationPreview.page = page;
-      elements.relationPreviewStatus.textContent = `${page.rows.length} rows · ${page.columns.length} columns${page.truncated ? " · more available" : ""}`;
-      elements.relationPreviewMore.hidden = !page.nextCursor;
-      renderRelationRows(elements.relationPreviewBody, { page });
-    } catch (error) {
-      if (generation === state.relationPreviewGeneration) renderRelationRows(elements.relationPreviewBody, { error });
-    } finally {
-      if (generation === state.relationPreviewGeneration) {
-        state.relationPreviewLoading = false;
-        elements.relationPreviewMore.disabled = false;
-      }
-    }
-  });
   elements.relationPreviewDialog.addEventListener("close", () => {
     state.relationPreviewGeneration += 1;
     state.relationPreview = null;
     state.relationPreviewError = null;
+    state.relationPreviewPagingError = null;
   });
   elements.reviewMigrationButton.addEventListener("click", async () => {
     elements.objectsDialog.close();
@@ -6174,6 +6342,18 @@ function bindEvents() {
       showToast("The SQL draft is already empty.");
     }
   });
+  elements.newQueryTool.addEventListener("click", sqlConsole.addQuery);
+  elements.copySqlButton.addEventListener("click", async () => {
+    if (!elements.sqlDraft.value) return showToast("The SQL draft is empty.");
+    try {
+      await navigator.clipboard.writeText(elements.sqlDraft.value);
+      showToast("SQL copied.");
+    } catch {
+      showToast("Could not copy SQL.");
+    }
+  });
+  elements.showSqlEditor.addEventListener("click", () => setSqlPane("editor"));
+  elements.showSqlResults.addEventListener("click", () => setSqlPane("results"));
 
   window.addEventListener("resize", () => {
     if (state.activeLayer !== "tables" || state.canvasResizeFrame !== null) return;
@@ -6184,7 +6364,7 @@ function bindEvents() {
   });
   window.addEventListener("pagehide", persistCanvasView);
   window.addEventListener("beforeunload", event => {
-    if (!state.inspectorTableEditorDirty) return;
+    if (!state.inspectorTableEditorDirty && !sqlConsole.hasOpenTransaction()) return;
     event.preventDefault();
     event.returnValue = "";
   });

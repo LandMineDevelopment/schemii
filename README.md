@@ -63,7 +63,7 @@ Shared frontend primitives used across product surfaces live in `src/schemii/com
 
 Promote a frontend implementation into the shared UI layer when multiple real page consumers need the same contract or when one central implementation is required for accessibility or interaction correctness. Keep page-specific code local rather than adding speculative variants. If a future Schemoo or Schemer frontend becomes a second package-level consumer, establish a frontend package boundary at that point instead of coupling it to Schemii's asset directory prematurely.
 
-Desired designs support durable schema authoring independently of a backing database. Database-backed designs can be reviewed and applied through server-authoritative migration plans with drift detection, explicit conflict resolution, durable execution recovery, and PostgreSQL-enforced permissions. General SQL execution and AI workflows remain separate planned or evolving contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
+Desired designs support durable schema authoring independently of a backing database. Database-backed designs can be reviewed and applied through server-authoritative migration plans with drift detection, explicit conflict resolution, durable execution recovery, and PostgreSQL-enforced permissions. General SQL execution and the workspace assistant use separate server-authoritative contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
 `common/metadata/factory.py` selects its storage boundary from the required `SCHEMII_STORAGE_MODE`. The launcher always selects durable PostgreSQL; in-memory storage must be explicitly selected and remains available for isolated unit tests. Missing or incomplete durable configuration fails startup rather than falling back to process memory. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
 
@@ -87,6 +87,40 @@ certutil -A -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"
 Restart the browser or T3Code after changing trust. Remove the exception with `certutil -D -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"`. Other clients can either trust `.schemii/tls/localhost.crt` through their own certificate store or retain their normal self-signed-certificate warning.
 
 Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. `SCHEMII_ALLOWED_TARGET_HOSTS` is deployment-owned and must contain only PostgreSQL aliases reachable on the intended private target network. Database identity and password overrides are initialization inputs and must continue to match retained local state. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
+
+Non-secret administrator policy is loaded once at startup from the absolute path in `SCHEMII_CONFIG_FILE`; the local stack mounts [`dev/schemii.toml`](dev/schemii.toml). The file owns process connection admission, bounded catalog materialization, operation timeouts, Console statement/session/memory policy, query-history and saved-query retention, migration review/lease timing, and per-user metadata resource limits. Invalid, unknown, or internally conflicting settings fail startup instead of being silently ignored. These are Schemii safety ceilings; PostgreSQL permissions and stricter database-side limits remain authoritative.
+
+Query history stores only normalized SQL and its run timestamp. Result rows are never written to the metadata database or a Schemii filesystem spool; interactive pages stay transient and full CSV downloads stream from PostgreSQL. When a configured limit rejects an action or evicts a transient result session, Schemii returns an actionable error where a request is still active and writes a bounded `metadata.limit_events` record containing only the limit identity, configured and observed values, outcome, request identity, user/workspace context, and timestamp. SQL, credentials, parameters, and row data are deliberately absent from that journal.
+
+## Workspace assistant
+
+The local Compose stack includes a private, Basic-authenticated OpenCode sidecar.
+It has no published host port, a read-only workspace, a read-only root filesystem,
+and an explicit deny-by-default tool policy. The browser talks only to Schemii's
+same-origin API; OpenCode can propose four typed actions and cannot read the source
+tree, run shell commands, browse, write files, or contact PostgreSQL directly.
+Provider and model selection are discovered from OpenCode. An operator may supply
+an explicit fallback only for a known deployment through
+`SCHEMII_AI_FALLBACK_PROVIDER_ID` and `SCHEMII_AI_FALLBACK_MODEL_ID`.
+
+Each turn receives the current owner-scoped workspace, desired design, bounded chat
+history, and—only when granted—a freshly inspected live catalog. Design proposals
+cover the complete desired-design model and execute through the same revision and
+integrity checks as direct edits. Read-only SQL runs through the shared managed-read
+Console; model-authored writes can only be opened as inert Console drafts. Migration
+requests create the normal server-derived migration review and never apply it.
+
+Assistant metadata stores conversations, SQL proposals, revision bindings, action
+receipts, counts, and transient result identifiers. It never stores query result
+rows. Rows shown in the assistant remain in the Console's bounded process memory.
+If they have been released when a user reopens or attaches a result, Schemii reruns
+the saved read-only SQL and displays a warning that the data may have changed. Sending
+rows back to a model is a separate capability and is bounded by both row count and
+encoded byte size in [`dev/schemii.toml`](dev/schemii.toml).
+
+Anonymous or free upstream models should be used only for non-confidential prototype
+data because their providers may retain prompts. A production deployment should
+select and authenticate an approved provider before sending schema or row context.
 
 ## Development checks
 
@@ -161,15 +195,19 @@ workspace, design, baseline, layout, and history metadata with:
 ./start.sh --reset-demo baseline
 ```
 
-The saved scenarios are `baseline`, `column-migrations`, `compatible-drift`,
-`conflicting-drift`, `live-browser`, and `undo-redo`. `live-browser` creates a
+The saved scenarios are `baseline`, `column-migrations`, `column-order`, `compatible-drift`,
+`conflicting-drift`, `live-browser`, `sql-console`, and `undo-redo`. `live-browser` creates a
 database-backed workspace with populated tables, joined views, and a materialized
 view for testing search, row previews, and source-derived lineage.
-`column-migrations` demonstrates a new
+`sql-console` opens a guided set of starter query tabs for cursor/selection
+execution, Run all, pinned and paged results, saved-query history, and explicit
+commit/rollback testing. `column-migrations` demonstrates a new
 required column on an empty table alongside a safe widening on a populated
 table. The reset output prints the new workspace URL. Each run records the
 current Git commit (with `+dirty` when applicable) and a digest of its base and
 alteration files in `schemii_fixture.fixture_state` inside the demo database.
+`column-order` shows the independent saved app order for an empty and a
+populated table, plus the optional reviewed PostgreSQL reconstruction choices.
 This makes a reproduced state traceable to both code and fixture content.
 
 The former command remains a baseline alias:

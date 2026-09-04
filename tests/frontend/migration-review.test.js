@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearAppliedMigrationReview,
   migrationCanApply,
   migrationConflictsResolved,
   migrationExecutionNeedsPolling,
@@ -76,4 +77,22 @@ test("execution state distinguishes polling from explicit reconciliation", () =>
   assert.equal(migrationExecutionNeedsReconciliation({ status: "uncertain" }), true);
   assert.equal(migrationExecutionNeedsReconciliation({ status: "reconciliation_required" }), true);
   assert.equal(migrationExecutionNeedsReconciliation({ status: "succeeded" }), false);
+});
+
+test("successful execution clears choices that belong to the applied plan", () => {
+  const state = {
+    plan: { id: "applied" },
+    rebuildTableIds: new Set(["table_applied"]),
+    allowDestructive: true,
+    confirmExternalChanges: true,
+    resolutions: new Map([["conflict", "keep_design"]]),
+  };
+
+  clearAppliedMigrationReview(state);
+
+  assert.equal(state.plan, null);
+  assert.equal(state.rebuildTableIds, null);
+  assert.equal(state.allowDestructive, false);
+  assert.equal(state.confirmExternalChanges, false);
+  assert.equal(state.resolutions.size, 0);
 });

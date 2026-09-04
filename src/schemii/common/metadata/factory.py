@@ -22,6 +22,11 @@ from .database import (
     packaged_migrations,
 )
 from .migrations import MIGRATION_PACKAGE as COMMON_MIGRATION_PACKAGE
+from .limit_events import (
+    InMemoryLimitEventRecorder,
+    LimitEventRecorder,
+    PostgresLimitEventRecorder,
+)
 from .secrets import read_encryption_key
 
 
@@ -32,6 +37,11 @@ def _memory_readiness_probe() -> None:
 @dataclass(frozen=True)
 class MetadataRepositories:
     connections: ConnectionRepository
+    limit_events: LimitEventRecorder = field(
+        default_factory=InMemoryLimitEventRecorder,
+        repr=False,
+        compare=False,
+    )
     storage: str = "memory"
     durable: bool = False
     readiness_probe: Callable[[], None] = field(
@@ -58,12 +68,23 @@ def create_metadata_repositories(
     env: Mapping[str, str] | None = None,
     *,
     migration_packages: tuple[str, ...] = (COMMON_MIGRATION_PACKAGE,),
+    maximum_connections_per_owner: int = 100,
+    limit_event_retention_days: int = 30,
+    maximum_limit_events: int = 100_000,
 ) -> MetadataRepositories:
     """Build metadata adapters with an explicitly owned migration composition."""
 
     config = MetadataConfig.from_env(env)
     if config is None:
-        return MetadataRepositories(connections=InMemoryConnectionRepository())
+        return MetadataRepositories(
+            connections=InMemoryConnectionRepository(
+                max_connections_per_owner=maximum_connections_per_owner
+            ),
+            limit_events=InMemoryLimitEventRecorder(
+                retention_days=limit_event_retention_days,
+                maximum_events=maximum_limit_events,
+            ),
+        )
     from schemii.common.connections.postgres_store import PostgresConnectionRepository
 
     connection_factory = MetadataConnectionFactory(config)
@@ -78,7 +99,16 @@ def create_metadata_repositories(
         application_name="schemii-metadata-readiness",
     )
     return MetadataRepositories(
-        connections=PostgresConnectionRepository(connection_factory, cipher),
+        connections=PostgresConnectionRepository(
+            connection_factory,
+            cipher,
+            max_connections_per_owner=maximum_connections_per_owner,
+        ),
+        limit_events=PostgresLimitEventRecorder(
+            connection_factory,
+            retention_days=limit_event_retention_days,
+            maximum_events=maximum_limit_events,
+        ),
         storage="postgresql",
         durable=True,
         readiness_probe=MetadataReadinessProbe(readiness_factory),

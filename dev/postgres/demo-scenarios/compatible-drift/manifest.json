@@ -4,5 +4,6 @@
   "description": "Changes a desired column type while PostgreSQL independently adds a different column.",
   "sourceRevision": "runtime",
   "designAlterations": ["design-01.json"],
+  "consoleQueries": [],
   "targetAlteration": "target.sql"
 }

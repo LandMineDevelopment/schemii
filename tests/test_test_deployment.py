@@ -100,6 +100,22 @@ def test_containerized_application_is_non_root_and_read_only() -> None:
     assert "no-new-privileges:true" in demo_bootstrap
 
 
+def test_opencode_read_only_workspace_contains_its_generated_ignore_file() -> None:
+    compose = (ROOT / "compose.test.yaml").read_text(encoding="utf-8")
+    opencode = _service(compose, "opencode")
+    ignored = ROOT / "ai" / "workspace" / ".opencode" / ".gitignore"
+
+    assert "./ai/workspace:/workspace:ro" in opencode
+    assert "XDG_DATA_HOME: /opencode/data" in opencode
+    assert "schemii-test-opencode-data:/opencode/data" in opencode
+    assert "schemii-test-opencode-data:" in compose.split("\nvolumes:\n", 1)[1]
+    assert "read_only: true" in opencode
+    assert ignored.read_text(encoding="utf-8").splitlines() == [
+        "node_modules",
+        "bun.lock",
+    ]
+
+
 def test_database_roles_are_split_by_control_plane_and_demo_responsibility() -> None:
     compose = (ROOT / "compose.test.yaml").read_text(encoding="utf-8")
     metadata_bootstrap = (ROOT / "dev" / "postgres" / "metadata-bootstrap.sh").read_text(
@@ -197,10 +213,12 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
     scenarios = ROOT / "dev" / "postgres" / "demo-scenarios"
     expected = {
         "baseline",
-        "column-migrations",
-        "compatible-drift",
+            "column-migrations",
+            "column-order",
+            "compatible-drift",
         "conflicting-drift",
         "live-browser",
+        "sql-console",
         "undo-redo",
     }
     assert {path.parent.name for path in scenarios.glob("*/manifest.json")} == expected
@@ -213,6 +231,9 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
         assert (scenarios / scenario / manifest["targetAlteration"]).is_file()
         for alteration in manifest["designAlterations"]:
             assert (scenarios / scenario / alteration).is_file()
+        for query in manifest["consoleQueries"]:
+            assert set(query) == {"name", "file"}
+            assert (scenarios / scenario / query["file"]).is_file()
 
     compatible = (scenarios / "compatible-drift" / "target.sql").read_text(
         encoding="utf-8"
@@ -222,6 +243,12 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
     )
     assert "ADD COLUMN external_reference" in compatible
     assert "ADD COLUMN migration_note" in conflicting
+
+    console_manifest = __import__("json").loads(
+        (scenarios / "sql-console" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert len(console_manifest["consoleQueries"]) == 7
+    assert console_manifest["consoleQueries"][0]["name"] == "00 · Test guide"
 
     column_migrations = __import__("json").loads(
         (scenarios / "column-migrations" / "design-01.json").read_text(

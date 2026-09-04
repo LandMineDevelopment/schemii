@@ -1,4 +1,5 @@
 import { element, errorPanel, formatTimestamp, replace } from "./dom.js";
+import { createIconButton } from "./ui.js";
 
 const RUNNING_EXECUTION_STATUSES = new Set(["reserved", "applying"]);
 const RECOVERABLE_EXECUTION_STATUSES = new Set(["uncertain", "reconciliation_required"]);
@@ -54,6 +55,14 @@ export function migrationCanApply({
   );
 }
 
+export function clearAppliedMigrationReview(state) {
+  state.plan = null;
+  state.rebuildTableIds = null;
+  state.allowDestructive = false;
+  state.confirmExternalChanges = false;
+  state.resolutions.clear();
+}
+
 function displayValue(value) {
   if (value === null || value === undefined) return "Not present";
   if (typeof value === "string") return value;
@@ -70,11 +79,18 @@ function badge(text, tone = "") {
   return element("span", { className: `migration-badge${tone ? ` ${tone}` : ""}`, text });
 }
 
-function reviewSection(title, count, children, className = "") {
+function reviewSection(title, count, children, className = "", action = null) {
   const section = element("section", { className: `migration-section${className ? ` ${className}` : ""}` });
   const header = element("header");
   header.append(element("h3", { text: title }));
-  if (count !== null) header.append(element("span", { text: count }));
+  if (action) {
+    const actions = element("div", { className: "migration-section-actions" });
+    if (count !== null) actions.append(element("span", { text: count }));
+    actions.append(action);
+    header.append(actions);
+  } else if (count !== null) {
+    header.append(element("span", { text: count }));
+  }
   section.append(header, ...children);
   return section;
 }
@@ -95,7 +111,9 @@ function renderMessages(title, messages, tone = "") {
 function renderSteps(plan) {
   if (!plan.steps.length) {
     const copy = plan.complete
-      ? "The saved design already matches the current PostgreSQL target."
+      ? plan.columnOrderRebuilds?.length
+        ? "No physical reorder is selected. The saved app order remains available without changing PostgreSQL."
+        : "The saved design already matches the current PostgreSQL target."
       : plan.conflicts.length
         ? "Resolve every conflict above before the server can derive executable PostgreSQL changes."
         : "Address the blocking differences above before the server can derive executable PostgreSQL changes.";
@@ -138,6 +156,109 @@ function renderExternalChanges(plan) {
     return item;
   });
   return reviewSection("External changes preserved", String(changes.length), changes, "external");
+}
+
+function renderColumnOrderRebuilds(plan, state, refresh) {
+  if (!plan.columnOrderRebuilds?.length) return null;
+  const choices = plan.columnOrderRebuilds.map(rebuild => {
+    const input = element("input", { type: "checkbox" });
+    input.checked = rebuild.selected;
+    input.disabled = state.loading || state.submitting || !rebuild.eligible;
+    input.addEventListener("change", () => {
+      const selected = new Set(state.rebuildTableIds || []);
+      if (input.checked) selected.add(rebuild.tableId);
+      else selected.delete(rebuild.tableId);
+      state.rebuildTableIds = selected;
+      state.confirmExternalChanges = false;
+      void refresh();
+    });
+    const item = element("label", {
+      className: `migration-rebuild-choice${rebuild.containsData ? " destructive" : " empty"}${rebuild.eligible ? "" : " blocked"}`,
+    });
+    const comparison = element("div", { className: "migration-rebuild-orders" }, [
+      element("span", {}, [
+        element("small", { text: "PostgreSQL now" }),
+        element("code", { text: rebuild.currentOrder.join("  →  ") }),
+      ]),
+      element("span", {}, [
+        element("small", { text: "Saved app order" }),
+        element("code", { text: rebuild.desiredOrder.join("  →  ") }),
+      ]),
+    ]);
+    const copy = rebuild.eligible
+      ? rebuild.containsData
+        ? "Optional. PostgreSQL locks the table, stages and restores its rows, then automatically restores modeled constraints, indexes, foreign keys, triggers, and identities. Leaving this off does not affect the saved app order."
+        : "Optional and selected by default because the live table is empty. Schemii already saved the app order; deselect this to keep PostgreSQL's current physical order. If selected, modeled constraints, indexes, foreign keys, triggers, and identities are restored automatically."
+      : rebuild.blockingReasons.join(" ");
+    item.append(
+      input,
+      element("div", { className: "migration-rebuild-content" }, [
+        element("header", {}, [
+          element("strong", { text: rebuild.tableName }),
+          badge(rebuild.containsData ? "Contains data" : "Empty table", rebuild.containsData ? "danger" : "success"),
+          !rebuild.eligible ? badge("Unavailable", "warning") : null,
+        ].filter(Boolean)),
+        comparison,
+        element("p", { text: copy }),
+      ]),
+    );
+    return { containsData: rebuild.containsData, item };
+  });
+  const groups = [
+    {
+      kind: "populated",
+      title: "Populated tables",
+      copy: "Physical reordering copies and restores rows inside PostgreSQL. Review the operational cost before selecting it.",
+      label: "How populated physical column reordering preserves data",
+      tooltip: "How populated tables are reordered",
+      containsData: true,
+    },
+    {
+      kind: "empty",
+      title: "Empty tables",
+      copy: "No row copy is required. The visual order is already saved in Schemii whether or not PostgreSQL is reordered.",
+      label: "Why empty-table physical column reordering is optional",
+      tooltip: "Why empty-table reordering is optional",
+      containsData: false,
+    },
+  ];
+  const groupNodes = groups.flatMap(group => {
+    const groupChoices = choices
+      .filter(choice => choice.containsData === group.containsData)
+      .map(choice => choice.item);
+    if (!groupChoices.length) return [];
+    const information = createIconButton({
+      icon: "info",
+      label: group.label,
+      tooltip: group.tooltip,
+      className: "compact migration-section-help",
+    });
+    information.addEventListener("click", () => {
+      state.openRebuildHelp(information, group.kind);
+    });
+    return [element("section", { className: `migration-rebuild-group ${group.kind}` }, [
+      element("header", {}, [
+        element("div", {}, [
+          element("h4", { text: group.title }),
+          element("p", { text: group.copy }),
+        ]),
+        information,
+      ]),
+      ...groupChoices,
+    ])];
+  });
+  return reviewSection(
+    "Physical column order",
+    String(choices.length),
+    [
+      element("p", {
+        className: "migration-section-copy",
+        text: "Schemii always saves the app order shown below. These independent options also rebuild PostgreSQL's physical column order.",
+      }),
+      ...groupNodes,
+    ],
+    "column-order",
+  );
 }
 
 function conflictValue(label, value) {
@@ -235,11 +356,55 @@ export function createMigrationReviewController({
     allowDestructive: false,
     confirmExternalChanges: false,
     resolutions: new Map(),
+    rebuildTableIds: null,
     version: 0,
     controller: null,
     pollTimer: null,
     handledExecutionId: null,
+    rebuildHelp: elements.rebuildHelp,
+    rebuildHelpInvoker: null,
+    openRebuildHelp: null,
   };
+
+  function setReviewControlsInert(inert) {
+    for (const child of state.rebuildHelp.parentElement.children) {
+      if (child !== state.rebuildHelp) child.inert = inert;
+    }
+  }
+
+  function openRebuildHelp(invoker, kind) {
+    state.rebuildHelpInvoker = invoker;
+    for (const card of state.rebuildHelp.querySelectorAll("[data-rebuild-help-kind]")) {
+      card.hidden = card.dataset.rebuildHelpKind !== kind;
+    }
+    setReviewControlsInert(true);
+    state.rebuildHelp.hidden = false;
+    state.rebuildHelp.querySelector(`[data-rebuild-help-kind="${kind}"] [data-close-rebuild-help]`)?.focus();
+  }
+
+  function closeRebuildHelp({ restoreFocus = true } = {}) {
+    state.rebuildHelp.hidden = true;
+    setReviewControlsInert(false);
+    const invoker = state.rebuildHelpInvoker;
+    state.rebuildHelpInvoker = null;
+    if (restoreFocus && elements.dialog.open && invoker?.isConnected) invoker.focus();
+  }
+  state.openRebuildHelp = openRebuildHelp;
+
+  for (const control of state.rebuildHelp.querySelectorAll("[data-close-rebuild-help]")) {
+    control.addEventListener("click", closeRebuildHelp);
+  }
+  state.rebuildHelp.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeRebuildHelp();
+  });
+  elements.dialog.addEventListener("cancel", event => {
+    if (state.rebuildHelp.hidden) return;
+    event.preventDefault();
+    closeRebuildHelp({ restoreFocus: false });
+  });
 
   const context = () => {
     const value = getContext();
@@ -294,7 +459,9 @@ export function createMigrationReviewController({
     const title = plan.status === "blocked"
       ? "Resolve blockers before applying"
       : !plan.steps.length && plan.complete
-        ? "PostgreSQL is up to date"
+        ? plan.columnOrderRebuilds?.length
+          ? "App order saved; physical reorder is optional"
+          : "PostgreSQL is up to date"
         : `${plan.steps.length} ${plan.steps.length === 1 ? "change" : "changes"} ready for review`;
     overview.append(
       element("div", {}, [
@@ -367,8 +534,9 @@ export function createMigrationReviewController({
       const warnings = renderMessages("Review notes", plan.warnings);
       const external = renderExternalChanges(plan);
       const conflicts = renderConflicts(plan, state, updateActions);
+      const columnOrder = renderColumnOrderRebuilds(plan, state, refresh);
       const confirmations = renderConfirmations(plan);
-      for (const section of [blockers, external, conflicts, renderSteps(plan), warnings, confirmations]) {
+      for (const section of [blockers, external, conflicts, columnOrder, renderSteps(plan), warnings, confirmations]) {
         if (section) elements.body.append(section);
       }
     }
@@ -381,6 +549,10 @@ export function createMigrationReviewController({
     state.handledExecutionId = state.execution.id;
     try {
       if (state.execution.status === "succeeded") {
+        // The immutable plan is consumed as soon as PostgreSQL reports a
+        // successful execution. Clear it before the workspace reload so even
+        // a refresh failure cannot leave an applied plan actionable.
+        clearAppliedMigrationReview(state);
         await reloadWorkspace();
         if (!current(version, workspaceId)) return;
         notify("Migration committed and the workspace baseline was refreshed.");
@@ -449,9 +621,17 @@ export function createMigrationReviewController({
         expectedDesignRevision: value.design.revision,
         expectedCatalogFingerprint: null,
         allowDestructive: state.allowDestructive,
+        rebuildTableIds: state.rebuildTableIds === null
+          ? null
+          : [...state.rebuildTableIds],
       }, { signal: beginRequest() });
       if (!current(version, workspaceId)) return;
       state.plan = plan;
+      state.rebuildTableIds = new Set(
+        plan.columnOrderRebuilds
+          .filter(rebuild => rebuild.selected)
+          .map(rebuild => rebuild.tableId),
+      );
       state.confirmExternalChanges = false;
     } catch (error) {
       if (!current(version, workspaceId) || error?.code === "request_cancelled") return;
@@ -476,7 +656,9 @@ export function createMigrationReviewController({
     state.allowDestructive = false;
     state.confirmExternalChanges = false;
     state.resolutions.clear();
+    state.rebuildTableIds = null;
     state.handledExecutionId = null;
+    closeRebuildHelp();
     if (!elements.dialog.open) elements.dialog.showModal();
     render();
     const version = state.version;
@@ -590,6 +772,9 @@ export function createMigrationReviewController({
     const risks = [
       plan.destructive ? "destructive changes" : null,
       plan.requiresExternalChangeAcknowledgement ? "preserved external changes" : null,
+      plan.columnOrderRebuilds?.some(rebuild => rebuild.selected)
+        ? "physical column reconstruction"
+        : null,
     ].filter(Boolean);
     confirm({
       title: "Apply migration",
@@ -635,7 +820,10 @@ export function createMigrationReviewController({
 
   return {
     open,
-    close: invalidate,
+    close: () => {
+      closeRebuildHelp({ restoreFocus: false });
+      invalidate();
+    },
     refresh,
     render,
     available: () => Boolean(context()),

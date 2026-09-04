@@ -44,6 +44,39 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert head.headers["content-type"].startswith("text/html")
 
 
+def test_assistant_exposes_legacy_quality_controls_and_safe_rich_messages() -> None:
+    web = files("schemii.schemii").joinpath("web")
+    index = web.joinpath("index.html").read_text(encoding="utf-8")
+    source = web.joinpath("assets", "ai-assistant.js").read_text(encoding="utf-8")
+    styles = web.joinpath("assets", "ai-assistant.css").read_text(encoding="utf-8")
+
+    for control_id in (
+        "ai-assistant-model",
+        "ai-assistant-permissions",
+        "ai-assistant-history",
+        "ai-assistant-new",
+        "ai-assistant-settings",
+        "ai-settings-dialog",
+        "ai-provider-list",
+        "ai-history-dialog",
+    ):
+        assert f'id="{control_id}"' in index
+    assert 'data-ui-icon="history"' in index
+    assert 'data-ui-icon="new-chat"' in index
+    assert 'data-ui-icon="settings"' in index
+    assert "function renderMarkdown(source)" in source
+    assert "document.createTextNode" in source
+    assert 'event.key === "Enter" && !event.shiftKey && !event.isComposing' in source
+    assert "elements.form.requestSubmit()" in source
+    assert "activity?after=${activitySequence}" in source
+    assert 'requestJson("/api/v1/ai/auth/oauth/authorize"' in source
+    assert 'requestJson("/api/v1/ai/auth/oauth/callback"' in source
+    assert 'requestJson("/api/v1/ai/auth/api"' in source
+    assert 'grid-template-areas: "head" "context" "notice" "body" "composer"' in styles
+    assert "@keyframes ai-dot-wave" in styles
+    assert ".ai-markdown-table" in styles
+
+
 def test_index_access_method_uses_the_complete_styled_selector() -> None:
     index = (
         files("schemii.schemii")
@@ -260,9 +293,10 @@ def test_source_derived_change_cues_follow_workspace_section_colors() -> None:
 
 
 def test_mobile_status_toasts_never_cover_or_capture_workspace_tools() -> None:
-    web = files("schemii.schemii").joinpath("web", "assets")
-    shared_styles = web.joinpath("ui.css").read_text(encoding="utf-8")
-    app_styles = web.joinpath("app.css").read_text(encoding="utf-8")
+    app_assets = files("schemii.schemii").joinpath("web", "assets")
+    common_assets = files("schemii.common").joinpath("web", "assets")
+    shared_styles = common_assets.joinpath("ui.css").read_text(encoding="utf-8")
+    app_styles = app_assets.joinpath("app.css").read_text(encoding="utf-8")
 
     assert ".ui-toast" in shared_styles
     assert "pointer-events: none" in shared_styles
@@ -431,17 +465,63 @@ def test_api_map_route_stages_use_the_dense_summary_contract() -> None:
 
 def test_frontends_share_the_visual_component_and_dock_pane_contract() -> None:
     assets = files("schemii.schemii").joinpath("web", "assets")
-    ui_source = assets.joinpath("ui.js").read_text(encoding="utf-8")
-    ui_styles = assets.joinpath("ui.css").read_text(encoding="utf-8")
+    common_assets = files("schemii.common").joinpath("web", "assets")
+    ui_source = common_assets.joinpath("ui.js").read_text(encoding="utf-8")
+    ui_styles = common_assets.joinpath("ui.css").read_text(encoding="utf-8")
+    compatibility_source = assets.joinpath("ui.js").read_text(encoding="utf-8")
+    compatibility_styles = assets.joinpath("ui.css").read_text(encoding="utf-8")
     app_source = assets.joinpath("app.js").read_text(encoding="utf-8")
     map_source = assets.joinpath("api-map.js").read_text(encoding="utf-8")
 
     assert "export class DockPane" in ui_source
     assert "export const ICONS" in ui_source
+    assert '"/assets/common/ui.js"' in compatibility_source
+    assert '@import url("/assets/common/ui.css")' in compatibility_styles
     assert 'data-ui-dock-state="minimized"' in ui_styles
     assert "new DockPane" in app_source
     assert map_source.count("new DockPane") == 1
     assert "getViewportInsets" in assets.joinpath("canvas.js").read_text(encoding="utf-8")
+
+
+def test_product_utility_controls_use_the_common_icon_registry() -> None:
+    web = files("schemii.schemii").joinpath("web")
+    assets = web.joinpath("assets")
+    common_ui = (
+        files("schemii.common")
+        .joinpath("web", "assets", "ui.js")
+        .read_text(encoding="utf-8")
+    )
+    compatibility_ui = assets.joinpath("ui.js").read_text(encoding="utf-8")
+    console_source = assets.joinpath("sql-console.js").read_text(encoding="utf-8")
+    index = web.joinpath("index.html").read_text(encoding="utf-8")
+
+    assert "const ICON_PATHS" in common_ui
+    assert "const ICON_PATHS" not in compatibility_ui
+    assert 'icon: "edit"' in console_source
+    assert '"pin-filled" : "pin"' in console_source
+    assert 'data-ui-icon="copy" aria-label="Copy current query"' in index
+    assert 'data-ui-icon="delete" aria-label="Clear current query"' in index
+    for product_local_glyph in ("✎", "◆", "◇"):
+        assert product_local_glyph not in console_source
+
+
+def test_physical_column_reorder_help_distinguishes_populated_and_empty_tables() -> None:
+    web = files("schemii.schemii").joinpath("web")
+    index = web.joinpath("index.html").read_text(encoding="utf-8")
+    source = web.joinpath("assets", "migration-review.js").read_text(encoding="utf-8")
+
+    assert 'id="migration-rebuild-help"' in index
+    assert 'data-rebuild-help-kind="populated" role="dialog" aria-modal="true"' in index
+    assert 'data-rebuild-help-kind="empty" role="dialog" aria-modal="true"' in index
+    assert "copies its rows to a temporary table inside the connected PostgreSQL database" in index
+    assert "More rows take longer to copy and restore" in index
+    assert "never stored in the Schemii metadata database" in index
+    assert "Your app order is already saved" in index
+    assert "verifies that the table is still empty immediately before applying" in index
+    assert index.count("constraints, indexes, foreign keys, triggers, and identity values") == 2
+    assert 'icon: "info"' in source
+    assert 'label: "How populated physical column reordering preserves data"' in source
+    assert 'label: "Why empty-table physical column reordering is optional"' in source
 
 
 def test_frontends_use_explicit_shared_state_and_text_action_contracts() -> None:
@@ -450,8 +530,9 @@ def test_frontends_use_explicit_shared_state_and_text_action_contracts() -> None
     index = web.joinpath("index.html").read_text(encoding="utf-8")
     map_html = web.joinpath("api-map.html").read_text(encoding="utf-8")
     map_source = assets.joinpath("api-map.js").read_text(encoding="utf-8")
-    ui_source = assets.joinpath("ui.js").read_text(encoding="utf-8")
-    ui_styles = assets.joinpath("ui.css").read_text(encoding="utf-8")
+    common_assets = files("schemii.common").joinpath("web", "assets")
+    ui_source = common_assets.joinpath("ui.js").read_text(encoding="utf-8")
+    ui_styles = common_assets.joinpath("ui.css").read_text(encoding="utf-8")
 
     assert "export function createStatePanel" in ui_source
     assert "export function renderStatePanel" in ui_source

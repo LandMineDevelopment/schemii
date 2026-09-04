@@ -2,9 +2,30 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 
 from schemii.common.api.models import ApiModel
+
+
+class AiProviderAuthOption(ApiModel):
+    label: Annotated[str, Field(max_length=256)]
+    value: Annotated[str, Field(max_length=256)]
+    hint: Annotated[str, Field(max_length=256)] = ""
+
+
+class AiProviderAuthPrompt(ApiModel):
+    key: Annotated[str, Field(min_length=1, max_length=128)]
+    message: Annotated[str, Field(min_length=1, max_length=512)]
+    type: Literal["text", "select"]
+    placeholder: Annotated[str, Field(max_length=256)] = ""
+    options: list[AiProviderAuthOption] = Field(default_factory=list, max_length=50)
+
+
+class AiProviderAuthMethod(ApiModel):
+    id: Annotated[int, Field(strict=True, ge=0, le=100)]
+    type: Literal["api", "oauth"]
+    label: Annotated[str, Field(min_length=1, max_length=256)]
+    prompts: list[AiProviderAuthPrompt] = Field(default_factory=list, max_length=20)
 
 
 class AiProviderStatus(ApiModel):
@@ -14,8 +35,16 @@ class AiProviderStatus(ApiModel):
     name: Annotated[str, Field(min_length=1, max_length=256)]
     available: bool
     authenticated: bool
-    auth_methods: list[Literal["api_key", "oauth"]]
-    models: list[str] = Field(max_length=1000)
+    auth_methods: list[AiProviderAuthMethod] = Field(default_factory=list, max_length=20)
+    models: list["AiModelStatus"] = Field(max_length=1000)
+
+
+class AiModelStatus(ApiModel):
+    """One provider-advertised model suitable for a chat session."""
+
+    id: Annotated[str, Field(min_length=1, max_length=256)]
+    name: Annotated[str, Field(min_length=1, max_length=256)]
+    status: Literal["active", "deprecated", "unavailable"] = "active"
 
 
 class AiStatusResponse(ApiModel):
@@ -24,35 +53,46 @@ class AiStatusResponse(ApiModel):
     enabled: bool
     healthy: bool
     providers: list[AiProviderStatus]
+    message: str | None = None
 
 
-class AiProviderCredentialUpdate(ApiModel):
-    """Replace one encrypted owner-scoped provider API credential."""
-
+class AiProviderApiCredentialCreate(ApiModel):
+    provider_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")]
     key: SecretStr = Field(min_length=1, max_length=16_384)
-    inputs: dict[str, str] = Field(default_factory=dict, max_length=32)
+    inputs: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("inputs")
+    @classmethod
+    def validate_inputs(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 20 or any(len(key) > 128 or len(item) > 4096 for key, item in value.items()):
+            raise ValueError("provider inputs are too large")
+        return value
 
 
-class AiOauthAuthorizationCreate(ApiModel):
-    """Begin an OAuth authorization using a provider-advertised method."""
+class AiProviderOauthAuthorizeCreate(ApiModel):
+    provider_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")]
+    method: Annotated[int, Field(strict=True, ge=0, le=100)]
+    inputs: dict[str, str] = Field(default_factory=dict)
 
-    method: Annotated[str, Field(min_length=1, max_length=128)]
-    redirect_uri: Annotated[str, Field(min_length=1, max_length=2048)]
-    inputs: dict[str, str] = Field(default_factory=dict, max_length=32)
-
-
-class AiOauthAuthorization(ApiModel):
-    """Short-lived browser authorization URL and state binding."""
-
-    provider_id: Annotated[str, Field(min_length=1, max_length=128)]
-    authorization_url: Annotated[str, Field(min_length=1, max_length=4096)]
-    state: Annotated[str, Field(min_length=32, max_length=512)]
-    expires_in_seconds: Annotated[int, Field(strict=True, ge=1, le=3600)]
+    @field_validator("inputs")
+    @classmethod
+    def validate_inputs(cls, value: dict[str, str]) -> dict[str, str]:
+        return AiProviderApiCredentialCreate.validate_inputs(value)
 
 
-class AiOauthCallbackCreate(ApiModel):
-    """Complete OAuth with the exact state issued during authorization."""
+class AiProviderOauthCallbackCreate(ApiModel):
+    provider_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")]
+    method: Annotated[int, Field(strict=True, ge=0, le=100)]
+    code: SecretStr | None = Field(default=None, max_length=16_384)
 
-    method: Annotated[str, Field(min_length=1, max_length=128)]
-    state: Annotated[str, Field(min_length=32, max_length=512)]
-    code: SecretStr = Field(min_length=1, max_length=16_384)
+
+class AiProviderOauthAuthorization(ApiModel):
+    url: Annotated[str, Field(min_length=1, max_length=8192)]
+    method: Literal["auto", "code"]
+    instructions: Annotated[str, Field(max_length=4096)] = ""
+
+
+class AiProviderCredentialResult(ApiModel):
+    saved: bool = False
+    deleted: bool = False
+    authenticated: bool = False

@@ -1,0 +1,17 @@
+{
+  "id": "sql-console",
+  "title": "SQL Console interaction lab",
+  "description": "Seeds guided query tabs for cursor and selection execution, multi-result runs, pagination, result pinning, saved-query history, and explicit commit and rollback workflows.",
+  "sourceRevision": "runtime",
+  "designAlterations": [],
+  "consoleQueries": [
+    {"name": "00 · Test guide", "file": "query-00-guide.sql"},
+    {"name": "01 · Cursor and selection", "file": "query-01-cursor-selection.sql"},
+    {"name": "02 · Run all and results", "file": "query-02-run-all.sql"},
+    {"name": "03 · Pin, page, and export", "file": "query-03-pin-page-export.sql"},
+    {"name": "04 · Write then roll back", "file": "query-04-write-rollback.sql"},
+    {"name": "05 · Write then commit", "file": "query-05-write-commit.sql"},
+    {"name": "06 · Parser and history", "file": "query-06-parser-history.sql"}
+  ],
+  "targetAlteration": "target.sql"
+}

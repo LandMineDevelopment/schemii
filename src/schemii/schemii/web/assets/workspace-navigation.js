@@ -3,6 +3,7 @@ const VIEW_KINDS = new Set(["view", "materialized_view"]);
 const DOCK_STATES = new Set(["expanded", "minimized", "dismissed"]);
 const WORKSPACE_ID = /^ws_[0-9a-f]{32}$/;
 const MAX_IDENTIFIER_LENGTH = 256;
+const MAX_LINKED_SQL_LENGTH = 64 * 1024;
 const MAX_CAMERA_COORDINATE = 1_000_000;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 1.7;
@@ -83,6 +84,24 @@ export function workspaceNavigationHref(urlValue, navigation) {
     }
   }
   return `${url.pathname}${url.search}${url.hash}`;
+}
+
+export function extractLinkedSqlDraft(urlValue) {
+  const url = new URL(urlValue, "https://schemii.invalid/");
+  const navigation = readWorkspaceNavigation(url);
+  if (!navigation.workspaceId || navigation.layer !== "sql" || !url.hash.startsWith("#")) {
+    return { sql: null, href: null };
+  }
+  const parameters = new URLSearchParams(url.hash.slice(1));
+  if (!parameters.has("sql")) return { sql: null, href: null };
+  const value = parameters.get("sql") || "";
+  parameters.delete("sql");
+  const remaining = parameters.toString();
+  url.hash = remaining ? `#${remaining}` : "";
+  return {
+    sql: value.trim() && value.length <= MAX_LINKED_SQL_LENGTH ? value : null,
+    href: `${url.pathname}${url.search}${url.hash}`,
+  };
 }
 
 export function readWorkspacePreferences(storage, workspaceId) {

@@ -161,6 +161,13 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         11,
         12,
         13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -176,12 +183,35 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0011_console_executions.sql": "6f98a2f29b676f3bfb1e69a6d3c3d5e507bdf30a2f885a3ae769c982ca5c939c",
         "0012_remove_workspace_modes.sql": "e8c7428bfa7e3143bbfe49df044520c06ddaba4926b9df2a51c9be4879876bcf",
         "0013_unique_workspace_targets.sql": "06c8c323f5f25c3a7f34edcdd636c5d08b975d006238065b60a698d2b2323a4e",
+        "0014_console_transactions.sql": "5ebae3eb1abe811be761ee02458827d83095af5f8a147df60afc5beb95e402cf",
+        "0015_console_saved_queries.sql": "472a6c067bc7e10c96ade52915d9e93023f6de69ac9ce7d2fc431e9fe209d431",
+        "0016_console_query_starters.sql": "03725dd0b2e4a95b0ecb0fb452af9dd705a11d3b0bab9fe84a86ee2e3439e76b",
+        "0017_console_result_privacy_and_history.sql": "2c4416a083f9058fc33bced8b03a8392ee96fcc5b06e3980233041f68b9eb8fd",
+            "0018_limit_events.sql": "61d9a1522051aac24226a3ceeb57d69ba9859ecf53806fa57068399739d73412",
+            "0019_ai_assistant.sql": "0f4a8baf1a85aee4e7e4f9d65227134a9347add2776f982553ff28367789fece",
+            "0020_ai_lifecycle_retention.sql": "e341b3a48847351054e03835454fda22d6f1c7bbc16c06017b375cc082c74b94",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
     assert "CREATE TABLE schemii.workspace_targets" in migrations[1].sql
     assert "CREATE TABLE schemii.workspace_table_positions" in migrations[1].sql
     assert "ON DELETE RESTRICT" in migrations[1].sql
+    privacy_migration = next(
+        migration.sql
+        for migration in migrations
+        if migration.name == "0017_console_result_privacy_and_history.sql"
+    )
+    assert "DROP COLUMN IF EXISTS rows_document" in privacy_migration
+    assert "CREATE TABLE schemii.console_query_history" in privacy_migration
+    assert "error_message" not in privacy_migration
+    limit_events_migration = next(
+        migration.sql
+        for migration in migrations
+        if migration.name == "0018_limit_events.sql"
+    )
+    assert "CREATE TABLE metadata.limit_events" in limit_events_migration
+    assert "query_text" not in limit_events_migration
+    assert "row_data" not in limit_events_migration
     assert migrations[2].name == "0003_schemii_designs.sql"
     assert "CREATE TABLE schemii.workspace_designs" in migrations[2].sql
     assert "CREATE TABLE schemii.workspace_design_layouts" in migrations[2].sql
@@ -201,6 +231,8 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
     assert migrations[10].name == "0011_console_executions.sql"
     assert "UNIQUE (owner_id, connection_id, database_name, namespace)" in migrations[12].sql
     assert "CREATE TABLE schemii.console_executions" in migrations[10].sql
+    assert "CREATE TABLE schemii.console_saved_queries" in migrations[14].sql
+    assert "ADD COLUMN starter" in migrations[15].sql
     migrator = MetadataMigrator(lambda: None, migrations)
     assert migrator._validate_applied(
         [

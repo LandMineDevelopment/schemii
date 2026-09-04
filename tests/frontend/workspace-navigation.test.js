@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  extractLinkedSqlDraft,
   readWorkspaceNavigation,
   readWorkspacePreferences,
   updateWorkspacePreferences,
@@ -59,6 +60,23 @@ test("workspace navigation represents view kind and removes stale object paramet
     view: "monthly_sales",
     viewKind: "materialized_view",
   });
+});
+
+test("a SQL deep link extracts one bounded browser-local draft and cleans the fragment", () => {
+  const sql = "SELECT 1;\nSELECT 'two';";
+  const fragment = new URLSearchParams({ sql, panel: "editor" }).toString();
+
+  assert.deepEqual(
+    extractLinkedSqlDraft(`https://example.test/?workspace=${WORKSPACE}&layer=sql#${fragment}`),
+    {
+      sql,
+      href: `/?workspace=${WORKSPACE}&layer=sql#panel=editor`,
+    },
+  );
+  assert.deepEqual(
+    extractLinkedSqlDraft(`https://example.test/?workspace=${WORKSPACE}&layer=views#${fragment}`),
+    { sql: null, href: null },
+  );
 });
 
 test("invalid or absent workspace navigation safely returns the landing state", () => {

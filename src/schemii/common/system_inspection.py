@@ -36,10 +36,10 @@ _MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96
 # Keep the whole registered application visible as implemented route families grow.
 # This remains a hard bound; it is not a pagination or runtime discovery setting.
-_MAX_OBJECTS = 800
+_MAX_OBJECTS = 1024
 _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
-_MAX_JOURNEY_NODES = 480
+_MAX_JOURNEY_NODES = 512
 _JOURNEY_STAGES = ("api", "internals", "database", "response")
 
 
@@ -684,8 +684,8 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
     registry = SourceRegistry(
         SourceInspectionLimits(
             object_limit=_MAX_OBJECTS,
-            source_limit=48_000,
-            total_source_limit=1_024_000,
+            source_limit=128_000,
+            total_source_limit=2_048_000,
         )
     )
     runtime = RuntimeBindingIndex(application.state.services, registry)

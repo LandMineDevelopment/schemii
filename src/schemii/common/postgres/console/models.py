@@ -69,6 +69,7 @@ class ConsoleResultSummary(ApiModel):
     columns: list[ConsoleResultColumn] = Field(max_length=1600)
     row_count: Annotated[int, Field(strict=True, ge=0)] | None = None
     has_more: bool
+    replayable: bool = False
 
 
 class ConsoleExecution(ApiModel):
@@ -112,6 +113,7 @@ class ConsoleTransactionCreate(ApiModel):
 class ConsoleTransactionExecutionCreate(ApiModel):
     """Reviewed statements to run inside an already owned explicit transaction."""
 
+    expected_revision: Annotated[int, Field(strict=True, ge=1)]
     statements: list[Annotated[str, Field(min_length=1, max_length=1024 * 1024)]] = Field(
         min_length=1,
         max_length=1000,
@@ -134,4 +136,5 @@ class ConsoleTransaction(ApiModel):
     status: Literal["open", "committed", "rolled_back", "expired", "failed", "uncertain"]
     execution_ids: list[str] = Field(max_length=1000)
     created_at: datetime
+    updated_at: datetime
     expires_at: datetime

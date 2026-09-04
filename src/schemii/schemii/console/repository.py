@@ -16,7 +16,9 @@ from schemii.common.postgres.console.models import (
     ConsoleResultColumn,
     ConsoleResultPage,
     ConsoleResultSummary,
+    ConsoleTransaction,
 )
+from .models import ConsoleHistoryEntry, ConsoleSavedQuery
 
 
 class ConsoleRepositoryError(RuntimeError):
@@ -35,6 +37,14 @@ class ConsoleConflictError(ConsoleRepositoryError):
 
 class ConsoleResultGoneError(ConsoleRepositoryError):
     pass
+
+
+class ConsoleLimitReachedError(ConsoleRepositoryError):
+    def __init__(self, resource: str, limit: int, observed: int) -> None:
+        self.resource = resource
+        self.limit = limit
+        self.observed = observed
+        super().__init__(f"The {resource} limit has been reached")
 
 
 class ConsoleStorageUnavailableError(ConsoleRepositoryError):
@@ -62,16 +72,35 @@ class ConsoleExecutionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ConsoleTransactionRecord:
+    owner_id: str
+    transaction: ConsoleTransaction
+    workspace_revision: int
+    target: ConsoleTarget
+    backend_pid: int
+    maximum_expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class _StoredResult:
     id: str
     execution_id: str
-    query: ConsoleQueryResult
+    statement_index: int
+    command: str
+    columns: tuple[ConsoleResultColumn, ...]
+    row_count: int | None
+    truncated: bool
+    replayable: bool
     expires_at: datetime
     closed_at: datetime | None = None
 
 
 class ConsoleRepository(Protocol):
     def recover_interrupted(self, now: datetime) -> None: ...
+
+    def prune_operational_receipts(self, before: datetime) -> None: ...
+
+    def prune_history(self, limit: int) -> None: ...
 
     def reserve(
         self,
@@ -83,7 +112,56 @@ class ConsoleRepository(Protocol):
         statements: tuple[str, ...],
         page_size: int,
         now: datetime,
+        *,
+        transaction_id: str | None = None,
+        expected_transaction_revision: int | None = None,
+        transaction_expires_at: datetime | None = None,
     ) -> ConsoleExecutionRecord: ...
+
+    def recover_transactions(self, now: datetime) -> None: ...
+
+    def create_transaction(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        console_id: str,
+        workspace_revision: int,
+        target: ConsoleTarget,
+        backend_pid: int,
+        created_at: datetime,
+        expires_at: datetime,
+        maximum_expires_at: datetime,
+    ) -> ConsoleTransactionRecord: ...
+
+    def get_transaction(
+        self,
+        owner_id: str,
+        transaction_id: str,
+    ) -> ConsoleTransactionRecord: ...
+
+    def finish_transaction(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        transaction_id: str,
+        expected_revision: int,
+        terminal_status: str,
+        now: datetime,
+    ) -> ConsoleTransactionRecord: ...
+
+    def fail_transaction(
+        self,
+        owner_id: str,
+        transaction_id: str,
+        now: datetime,
+    ) -> ConsoleTransactionRecord: ...
+
+    def expire_transaction(
+        self,
+        owner_id: str,
+        transaction_id: str,
+        now: datetime,
+    ) -> ConsoleTransactionRecord: ...
 
     def claim(self, owner_id: str, execution_id: str, now: datetime) -> ConsoleExecutionRecord | None: ...
 
@@ -133,6 +211,38 @@ class ConsoleRepository(Protocol):
         now: datetime,
     ) -> None: ...
 
+    def list_history(
+        self, owner_id: str, workspace_id: str, limit: int
+    ) -> list[ConsoleHistoryEntry]: ...
+
+    def record_history(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        sql: str,
+        ran_at: datetime,
+        limit: int,
+    ) -> None: ...
+
+    def list_saved_queries(
+        self, owner_id: str, workspace_id: str
+    ) -> list[ConsoleSavedQuery]: ...
+
+    def create_saved_query(
+        self, owner_id: str, workspace_id: str, name: str, sql: str,
+        starter: bool, now: datetime, limit: int,
+    ) -> ConsoleSavedQuery: ...
+
+    def update_saved_query(
+        self, owner_id: str, workspace_id: str, query_id: str,
+        expected_revision: int, name: str | None, sql: str | None, now: datetime,
+    ) -> ConsoleSavedQuery: ...
+
+    def delete_saved_query(
+        self, owner_id: str, workspace_id: str, query_id: str,
+        expected_revision: int,
+    ) -> None: ...
+
 
 def _execution(
     record: ConsoleExecutionRecord,
@@ -166,8 +276,11 @@ class InMemoryConsoleRepository:
 
     def __init__(self) -> None:
         self._records: dict[str, ConsoleExecutionRecord] = {}
+        self._transactions: dict[str, ConsoleTransactionRecord] = {}
         self._results: dict[str, _StoredResult] = {}
         self._cursors: dict[str, tuple[str, int, datetime, bool]] = {}
+        self._saved_queries: dict[str, tuple[str, ConsoleSavedQuery]] = {}
+        self._history: list[tuple[str, str, ConsoleHistoryEntry]] = []
         self._lock = threading.RLock()
 
     def recover_interrupted(self, now: datetime) -> None:
@@ -187,7 +300,70 @@ class InMemoryConsoleRepository:
                     ),
                 )
 
-    def reserve(self, owner_id, workspace_id, console_id, workspace_revision, target, statements, page_size, now):
+    def recover_transactions(self, now: datetime) -> None:
+        with self._lock:
+            for identifier, record in list(self._transactions.items()):
+                if record.transaction.status not in {"open", "failed"}:
+                    continue
+                self._transactions[identifier] = self._replace_transaction(
+                    record,
+                    transaction=record.transaction.model_copy(
+                        update={
+                            "revision": record.transaction.revision + 1,
+                            "status": "expired",
+                            "updated_at": now,
+                            "expires_at": now,
+                        }
+                    ),
+                )
+
+    def prune_operational_receipts(self, before: datetime) -> None:
+        with self._lock:
+            removable = {
+                identifier for identifier, record in self._records.items()
+                if record.execution.status not in {"reserved", "running"}
+                and record.execution.updated_at < before
+            }
+            for identifier in removable:
+                self._records.pop(identifier, None)
+            self._results = {
+                identifier: result for identifier, result in self._results.items()
+                if result.execution_id not in removable
+            }
+            removable_transactions = {
+                identifier for identifier, record in self._transactions.items()
+                if record.transaction.status not in {"open", "failed"}
+                and record.transaction.updated_at < before
+                and not any(
+                    execution.execution.transaction_id == identifier
+                    for execution in self._records.values()
+                )
+            }
+            for identifier in removable_transactions:
+                self._transactions.pop(identifier, None)
+
+    def prune_history(self, limit: int) -> None:
+        with self._lock:
+            if limit <= 0:
+                self._history.clear()
+                return
+            retained: list[tuple[str, str, ConsoleHistoryEntry]] = []
+            counts: dict[tuple[str, str], int] = {}
+            for value in sorted(
+                self._history, key=lambda item: item[2].ran_at, reverse=True
+            ):
+                key = (value[0], value[1])
+                if counts.get(key, 0) >= limit:
+                    continue
+                retained.append(value)
+                counts[key] = counts.get(key, 0) + 1
+            self._history = retained
+
+    def reserve(
+        self, owner_id, workspace_id, console_id, workspace_revision, target,
+        statements, page_size, now, *, transaction_id=None,
+        expected_transaction_revision=None, transaction_expires_at=None,
+    ):
         with self._lock:
             self._purge(now)
             if any(
@@ -201,6 +377,26 @@ class InMemoryConsoleRepository:
                     "This workspace already has an active Console execution",
                 )
             identifier = f"cex_{secrets.token_hex(16)}"
+            transaction_record = None
+            if transaction_id is not None:
+                transaction_record = self._transaction_record(owner_id, transaction_id)
+                if transaction_record.transaction.workspace_id != workspace_id:
+                    raise ConsoleNotFoundError()
+                if transaction_record.transaction.status != "open":
+                    raise ConsoleConflictError(
+                        "console_transaction_not_open",
+                        "The Console transaction is not open",
+                    )
+                if transaction_record.transaction.revision != expected_transaction_revision:
+                    raise ConsoleConflictError(
+                        "console_transaction_changed",
+                        "The Console transaction changed after the editor loaded",
+                    )
+                if transaction_expires_at is None:
+                    raise ConsoleConflictError(
+                        "console_transaction_expired",
+                        "The Console transaction expiry is unavailable",
+                    )
             record = ConsoleExecutionRecord(
                 owner_id=owner_id,
                 execution=ConsoleExecution(
@@ -208,6 +404,7 @@ class InMemoryConsoleRepository:
                     revision=1,
                     workspace_id=workspace_id,
                     console_id=console_id,
+                    transaction_id=transaction_id,
                     status="reserved",
                     completed_statement_indexes=[],
                     results=[],
@@ -220,7 +417,131 @@ class InMemoryConsoleRepository:
                 page_size=page_size,
             )
             self._records[identifier] = record
+            if transaction_record is not None:
+                self._transactions[transaction_id] = self._replace_transaction(
+                    transaction_record,
+                    transaction=transaction_record.transaction.model_copy(
+                        update={
+                            "revision": transaction_record.transaction.revision + 1,
+                            "execution_ids": [
+                                *transaction_record.transaction.execution_ids,
+                                identifier,
+                            ],
+                            "updated_at": now,
+                            "expires_at": transaction_expires_at,
+                        }
+                    ),
+                )
             return record
+
+    def create_transaction(
+        self, owner_id, workspace_id, console_id, workspace_revision, target,
+        backend_pid, created_at, expires_at, maximum_expires_at,
+    ):
+        with self._lock:
+            if any(
+                item.owner_id == owner_id
+                and item.transaction.workspace_id == workspace_id
+                and item.transaction.status in {"open", "failed"}
+                for item in self._transactions.values()
+            ):
+                raise ConsoleConflictError(
+                    "console_transaction_active",
+                    "This workspace already has an open Console transaction",
+                )
+            identifier = f"ctx_{secrets.token_hex(16)}"
+            record = ConsoleTransactionRecord(
+                owner_id=owner_id,
+                transaction=ConsoleTransaction(
+                    id=identifier,
+                    workspace_id=workspace_id,
+                    console_id=console_id,
+                    revision=1,
+                    status="open",
+                    execution_ids=[],
+                    created_at=created_at,
+                    updated_at=created_at,
+                    expires_at=expires_at,
+                ),
+                workspace_revision=workspace_revision,
+                target=target,
+                backend_pid=backend_pid,
+                maximum_expires_at=maximum_expires_at,
+            )
+            self._transactions[identifier] = record
+            return record
+
+    def get_transaction(self, owner_id, transaction_id):
+        with self._lock:
+            return self._transaction_record(owner_id, transaction_id)
+
+    def finish_transaction(
+        self, owner_id, workspace_id, transaction_id, expected_revision,
+        terminal_status, now,
+    ):
+        if terminal_status not in {"committed", "rolled_back", "uncertain"}:
+            raise ValueError("Unsupported Console transaction terminal status")
+        with self._lock:
+            record = self._transaction_record(owner_id, transaction_id)
+            if record.transaction.workspace_id != workspace_id:
+                raise ConsoleNotFoundError()
+            if record.transaction.revision != expected_revision:
+                raise ConsoleConflictError(
+                    "console_transaction_changed",
+                    "The Console transaction changed after the confirmation opened",
+                )
+            if record.transaction.status not in {"open", "failed"}:
+                return record
+            updated = self._replace_transaction(
+                record,
+                transaction=record.transaction.model_copy(
+                    update={
+                        "revision": record.transaction.revision + 1,
+                        "status": terminal_status,
+                        "updated_at": now,
+                        "expires_at": now,
+                    }
+                ),
+            )
+            self._transactions[transaction_id] = updated
+            return updated
+
+    def fail_transaction(self, owner_id, transaction_id, now):
+        with self._lock:
+            record = self._transaction_record(owner_id, transaction_id)
+            if record.transaction.status != "open":
+                return record
+            updated = self._replace_transaction(
+                record,
+                transaction=record.transaction.model_copy(
+                    update={
+                        "revision": record.transaction.revision + 1,
+                        "status": "failed",
+                        "updated_at": now,
+                    }
+                ),
+            )
+            self._transactions[transaction_id] = updated
+            return updated
+
+    def expire_transaction(self, owner_id, transaction_id, now):
+        with self._lock:
+            record = self._transaction_record(owner_id, transaction_id)
+            if record.transaction.status not in {"open", "failed"}:
+                return record
+            updated = self._replace_transaction(
+                record,
+                transaction=record.transaction.model_copy(
+                    update={
+                        "revision": record.transaction.revision + 1,
+                        "status": "expired",
+                        "updated_at": now,
+                        "expires_at": now,
+                    }
+                ),
+            )
+            self._transactions[transaction_id] = updated
+            return updated
 
     def _purge(self, now: datetime) -> None:
         expired_results = {
@@ -233,13 +554,6 @@ class InMemoryConsoleRepository:
             token: value for token, value in self._cursors.items()
             if value[0] not in expired_results and value[2] > now
         }
-        cutoff = now - timedelta(days=7)
-        for identifier, record in list(self._records.items()):
-            if (
-                record.execution.status not in {"reserved", "running"}
-                and record.execution.updated_at < cutoff
-            ):
-                self._records.pop(identifier, None)
 
     def claim(self, owner_id, execution_id, now):
         with self._lock:
@@ -292,7 +606,12 @@ class InMemoryConsoleRepository:
                 self._results[result_id] = _StoredResult(
                     id=result_id,
                     execution_id=execution_id,
-                    query=query,
+                    statement_index=query.statement_index,
+                    command=query.command,
+                    columns=query.columns,
+                    row_count=(query.row_count if query.row_count is not None else len(query.rows)),
+                    truncated=query.truncated,
+                    replayable=query.replayable,
                     expires_at=expires_at,
                 )
                 summaries.append(
@@ -301,8 +620,9 @@ class InMemoryConsoleRepository:
                         statement_index=query.statement_index,
                         command=query.command,
                         columns=list(query.columns),
-                        row_count=len(query.rows),
-                        has_more=len(query.rows) > record.page_size,
+                        row_count=(query.row_count if query.row_count is not None else len(query.rows)),
+                        has_more=(query.row_count if query.row_count is not None else len(query.rows)) > record.page_size,
+                        replayable=query.replayable,
                     )
                 )
             updated = self._replace(
@@ -385,26 +705,7 @@ class InMemoryConsoleRepository:
                 if consumed or cursor_result != result_id or expires_at <= now:
                     raise ConsoleResultGoneError()
                 self._cursors[cursor] = (cursor_result, offset, expires_at, True)
-            rows = result.query.rows[offset : offset + record.page_size]
-            next_offset = offset + len(rows)
-            next_cursor = None
-            if next_offset < len(result.query.rows):
-                next_cursor = f"crc_{secrets.token_hex(16)}"
-                self._cursors[next_cursor] = (
-                    result_id,
-                    next_offset,
-                    result.expires_at,
-                    False,
-                )
-            return ConsoleResultPage(
-                execution_id=execution_id,
-                result_id=result_id,
-                columns=list(result.query.columns),
-                rows=[list(row) for row in rows],
-                next_cursor=next_cursor,
-                truncated=result.query.truncated,
-                expires_at=result.expires_at,
-            )
+            raise ConsoleResultGoneError()
 
     def close_result(self, owner_id, workspace_id, execution_id, result_id, now):
         with self._lock:
@@ -415,13 +716,123 @@ class InMemoryConsoleRepository:
             self._results[result_id] = _StoredResult(
                 id=result.id,
                 execution_id=result.execution_id,
-                query=result.query,
+                statement_index=result.statement_index,
+                command=result.command,
+                columns=result.columns,
+                row_count=result.row_count,
+                truncated=result.truncated,
+                replayable=result.replayable,
                 expires_at=result.expires_at,
                 closed_at=now,
             )
 
+    def list_history(self, owner_id, workspace_id, limit):
+        with self._lock:
+            entries = [
+                entry for history_owner, history_workspace, entry in self._history
+                if history_owner == owner_id and history_workspace == workspace_id
+            ]
+            return sorted(
+                entries,
+                key=lambda entry: entry.ran_at,
+                reverse=True,
+            )[:limit]
+
+    def record_history(self, owner_id, workspace_id, sql, ran_at, limit):
+        if limit <= 0:
+            return
+        with self._lock:
+            self._history.append(
+                (owner_id, workspace_id, ConsoleHistoryEntry(sql=sql, ran_at=ran_at))
+            )
+            owned = [
+                index for index, (history_owner, history_workspace, _entry)
+                in enumerate(self._history)
+                if history_owner == owner_id and history_workspace == workspace_id
+            ]
+            for index in reversed(owned[:-limit]):
+                del self._history[index]
+
+    def list_saved_queries(self, owner_id, workspace_id):
+        with self._lock:
+            return sorted(
+                [query for query_owner, query in self._saved_queries.values()
+                 if query_owner == owner_id and query.workspace_id == workspace_id],
+                key=lambda query: (query.updated_at, query.id),
+                reverse=True,
+            )
+
+    def create_saved_query(self, owner_id, workspace_id, name, sql, starter, now, limit):
+        with self._lock:
+            count = sum(
+                query_owner == owner_id and query.workspace_id == workspace_id
+                for query_owner, query in self._saved_queries.values()
+            )
+            if count >= limit:
+                raise ConsoleLimitReachedError("saved queries", limit, count)
+            if any(
+                query_owner == owner_id
+                and query.workspace_id == workspace_id
+                and query.name.casefold() == name.casefold()
+                for query_owner, query in self._saved_queries.values()
+            ):
+                raise ConsoleConflictError("console_saved_query_name_exists", "A saved query already uses this name")
+            query = ConsoleSavedQuery(
+                id=f"sq_{secrets.token_hex(16)}", workspace_id=workspace_id,
+                revision=1, name=name, sql=sql, starter=starter,
+                created_at=now, updated_at=now,
+            )
+            self._saved_queries[query.id] = (owner_id, query)
+            return query
+
+    def update_saved_query(
+        self, owner_id, workspace_id, query_id, expected_revision, name, sql, now,
+    ):
+        with self._lock:
+            stored = self._saved_queries.get(query_id)
+            if stored is None or stored[0] != owner_id or stored[1].workspace_id != workspace_id:
+                raise ConsoleNotFoundError()
+            query = stored[1]
+            if query.revision != expected_revision:
+                raise ConsoleConflictError("console_saved_query_changed", "The saved query changed after it was opened")
+            next_name = name if name is not None else query.name
+            if any(
+                identifier != query_id and query_owner == owner_id
+                and candidate.workspace_id == workspace_id
+                and candidate.name.casefold() == next_name.casefold()
+                for identifier, (query_owner, candidate) in self._saved_queries.items()
+            ):
+                raise ConsoleConflictError("console_saved_query_name_exists", "A saved query already uses this name")
+            updated = query.model_copy(update={
+                "revision": query.revision + 1,
+                "name": next_name,
+                "sql": sql if sql is not None else query.sql,
+                "updated_at": now,
+            })
+            self._saved_queries[query_id] = (owner_id, updated)
+            return updated
+
+    def delete_saved_query(self, owner_id, workspace_id, query_id, expected_revision):
+        with self._lock:
+            stored = self._saved_queries.get(query_id)
+            if stored is None or stored[0] != owner_id or stored[1].workspace_id != workspace_id:
+                raise ConsoleNotFoundError()
+            if stored[1].revision != expected_revision:
+                raise ConsoleConflictError("console_saved_query_changed", "The saved query changed after it was opened")
+            del self._saved_queries[query_id]
+
     def _record(self, owner_id: str, execution_id: str) -> ConsoleExecutionRecord:
         record = self._records.get(execution_id)
+        if record is None or record.owner_id != owner_id:
+            raise ConsoleNotFoundError()
+        return record
+
+    def _transaction_record(
+        self,
+        owner_id: str,
+        transaction_id: str,
+    ) -> ConsoleTransactionRecord:
+        record = self._transactions.get(transaction_id)
         if record is None or record.owner_id != owner_id:
             raise ConsoleNotFoundError()
         return record
@@ -452,6 +863,22 @@ class InMemoryConsoleRepository:
         }
         return ConsoleExecutionRecord(**values)
 
+    @staticmethod
+    def _replace_transaction(
+        record: ConsoleTransactionRecord,
+        **changes: Any,
+    ) -> ConsoleTransactionRecord:
+        values = {
+            "owner_id": record.owner_id,
+            "transaction": record.transaction,
+            "workspace_revision": record.workspace_revision,
+            "target": record.target,
+            "backend_pid": record.backend_pid,
+            "maximum_expires_at": record.maximum_expires_at,
+            **changes,
+        }
+        return ConsoleTransactionRecord(**values)
+
 
 class PostgresConsoleRepository:
     """PostgreSQL metadata adapter with atomic state transitions and cursors."""
@@ -471,6 +898,17 @@ class PostgresConsoleRepository:
         except Exception as error:
             connection.rollback()
             if getattr(error, "sqlstate", None) == "23505":
+                constraint = getattr(getattr(error, "diag", None), "constraint_name", None)
+                if constraint == "console_transactions_one_active_workspace":
+                    raise ConsoleConflictError(
+                        "console_transaction_active",
+                        "This workspace already has an open Console transaction",
+                    ) from error
+                if constraint == "console_saved_queries_owner_workspace_name":
+                    raise ConsoleConflictError(
+                        "console_saved_query_name_exists",
+                        "A saved query already uses this name",
+                    ) from error
                 raise ConsoleConflictError(
                     "console_execution_active",
                     "This workspace already has an active Console execution",
@@ -497,8 +935,7 @@ class PostgresConsoleRepository:
                     (now,),
                 )
 
-    def reserve(self, owner_id, workspace_id, console_id, workspace_revision, target, statements, page_size, now):
-        identifier = f"cex_{secrets.token_hex(16)}"
+    def prune_operational_receipts(self, before):
         with self._transaction() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -507,26 +944,249 @@ class PostgresConsoleRepository:
                     WHERE status NOT IN ('reserved', 'running')
                       AND updated_at < %s
                     """,
-                    (now - timedelta(days=7),),
+                    (before,),
                 )
+                cursor.execute(
+                    """
+                    DELETE FROM schemii.console_transactions AS transaction
+                    WHERE status NOT IN ('open', 'failed')
+                      AND updated_at < %s
+                      AND NOT EXISTS (
+                          SELECT 1 FROM schemii.console_executions AS execution
+                          WHERE execution.transaction_id = transaction.id
+                      )
+                    """,
+                    (before,),
+                )
+
+    def prune_history(self, limit):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                if limit <= 0:
+                    cursor.execute("DELETE FROM schemii.console_query_history")
+                    return
+                cursor.execute(
+                    """
+                    DELETE FROM schemii.console_query_history
+                    WHERE id IN (
+                        SELECT id FROM (
+                            SELECT id, row_number() OVER (
+                                PARTITION BY owner_id, workspace_id
+                                ORDER BY ran_at DESC, id DESC
+                            ) AS retained_position
+                            FROM schemii.console_query_history
+                        ) AS ranked
+                        WHERE retained_position > %s
+                    )
+                    """,
+                    (limit,),
+                )
+
+    def recover_transactions(self, now):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE schemii.console_transactions
+                    SET status = 'expired', revision = revision + 1,
+                        updated_at = %s, expires_at = %s
+                    WHERE status IN ('open', 'failed')
+                    """,
+                    (now, now),
+                )
+
+    def reserve(
+        self, owner_id, workspace_id, console_id, workspace_revision, target,
+        statements, page_size, now, *, transaction_id=None,
+        expected_transaction_revision=None, transaction_expires_at=None,
+    ):
+        identifier = f"cex_{secrets.token_hex(16)}"
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                transaction_row = None
+                if transaction_id is not None:
+                    transaction_row = self._locked_transaction(
+                        cursor, owner_id, transaction_id
+                    )
+                    if transaction_row["workspace_id"] != workspace_id:
+                        raise ConsoleNotFoundError()
+                    if transaction_row["status"] != "open":
+                        raise ConsoleConflictError(
+                            "console_transaction_not_open",
+                            "The Console transaction is not open",
+                        )
+                    if int(transaction_row["revision"]) != expected_transaction_revision:
+                        raise ConsoleConflictError(
+                            "console_transaction_changed",
+                            "The Console transaction changed after the editor loaded",
+                        )
+                    if (
+                        transaction_expires_at is None
+                        or transaction_expires_at > transaction_row["maximum_expires_at"]
+                        or transaction_row["expires_at"] <= now
+                    ):
+                        raise ConsoleConflictError(
+                            "console_transaction_expired",
+                            "The Console transaction has expired",
+                        )
                 cursor.execute(
                     """
                     INSERT INTO schemii.console_executions (
                         id, owner_id, workspace_id, console_id, workspace_revision,
                         connection_id, connection_revision, database_name, namespace,
-                        status, statements, page_size, created_at, updated_at
+                        transaction_id, status, statements, page_size, created_at, updated_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                              'reserved', %s::jsonb, %s, %s, %s)
+                              %s, 'reserved', %s::jsonb, %s, %s, %s)
                     RETURNING *
                     """,
                     (
                         identifier, owner_id, workspace_id, console_id,
                         workspace_revision, target.connection_id,
                         target.connection_revision, target.database, target.namespace,
-                        json.dumps(statements), page_size, now, now,
+                        transaction_id, json.dumps(statements), page_size, now, now,
                     ),
                 )
-                return self._record_from_row(cursor.fetchone())
+                record = self._record_from_row(cursor.fetchone())
+                if transaction_row is not None:
+                    cursor.execute(
+                        """
+                        UPDATE schemii.console_transactions
+                        SET revision = revision + 1, updated_at = %s, expires_at = %s
+                        WHERE owner_id = %s AND id = %s AND revision = %s
+                          AND status = 'open'
+                        RETURNING id
+                        """,
+                        (
+                            now,
+                            transaction_expires_at,
+                            owner_id,
+                            transaction_id,
+                            expected_transaction_revision,
+                        ),
+                    )
+                    if cursor.fetchone() is None:
+                        raise ConsoleConflictError(
+                            "console_transaction_changed",
+                            "The Console transaction changed while reserving execution",
+                        )
+                return record
+
+    def create_transaction(
+        self, owner_id, workspace_id, console_id, workspace_revision, target,
+        backend_pid, created_at, expires_at, maximum_expires_at,
+    ):
+        identifier = f"ctx_{secrets.token_hex(16)}"
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO schemii.console_transactions (
+                        id, owner_id, workspace_id, console_id, workspace_revision,
+                        connection_id, connection_revision, database_name, namespace,
+                        backend_pid, status, created_at, updated_at, expires_at,
+                        maximum_expires_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                              %s, 'open', %s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        identifier, owner_id, workspace_id, console_id,
+                        workspace_revision, target.connection_id,
+                        target.connection_revision, target.database, target.namespace,
+                        backend_pid, created_at, created_at, expires_at,
+                        maximum_expires_at,
+                    ),
+                )
+                return self._transaction_from_row(cursor, cursor.fetchone())
+
+    def get_transaction(self, owner_id, transaction_id):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT * FROM schemii.console_transactions
+                    WHERE owner_id = %s AND id = %s
+                    """,
+                    (owner_id, transaction_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ConsoleNotFoundError()
+                return self._transaction_from_row(cursor, row)
+
+    def finish_transaction(
+        self, owner_id, workspace_id, transaction_id, expected_revision,
+        terminal_status, now,
+    ):
+        if terminal_status not in {"committed", "rolled_back", "uncertain"}:
+            raise ValueError("Unsupported Console transaction terminal status")
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                row = self._locked_transaction(cursor, owner_id, transaction_id)
+                if row["workspace_id"] != workspace_id:
+                    raise ConsoleNotFoundError()
+                if row["status"] not in {"open", "failed"}:
+                    return self._transaction_from_row(cursor, row)
+                if int(row["revision"]) != expected_revision:
+                    raise ConsoleConflictError(
+                        "console_transaction_changed",
+                        "The Console transaction changed after the confirmation opened",
+                    )
+                cursor.execute(
+                    """
+                    UPDATE schemii.console_transactions
+                    SET status = %s, revision = revision + 1,
+                        updated_at = %s, expires_at = %s
+                    WHERE owner_id = %s AND id = %s AND revision = %s
+                    RETURNING *
+                    """,
+                    (
+                        terminal_status, now, now, owner_id, transaction_id,
+                        expected_revision,
+                    ),
+                )
+                updated = cursor.fetchone()
+                if updated is None:
+                    raise ConsoleConflictError(
+                        "console_transaction_changed",
+                        "The Console transaction changed while it was closing",
+                    )
+                return self._transaction_from_row(cursor, updated)
+
+    def fail_transaction(self, owner_id, transaction_id, now):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                row = self._locked_transaction(cursor, owner_id, transaction_id)
+                if row["status"] != "open":
+                    return self._transaction_from_row(cursor, row)
+                cursor.execute(
+                    """
+                    UPDATE schemii.console_transactions
+                    SET status = 'failed', revision = revision + 1, updated_at = %s
+                    WHERE owner_id = %s AND id = %s AND status = 'open'
+                    RETURNING *
+                    """,
+                    (now, owner_id, transaction_id),
+                )
+                return self._transaction_from_row(cursor, cursor.fetchone())
+
+    def expire_transaction(self, owner_id, transaction_id, now):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                row = self._locked_transaction(cursor, owner_id, transaction_id)
+                if row["status"] not in {"open", "failed"}:
+                    return self._transaction_from_row(cursor, row)
+                cursor.execute(
+                    """
+                    UPDATE schemii.console_transactions
+                    SET status = 'expired', revision = revision + 1,
+                        updated_at = %s, expires_at = %s
+                    WHERE owner_id = %s AND id = %s
+                    RETURNING *
+                    """,
+                    (now, now, owner_id, transaction_id),
+                )
+                return self._transaction_from_row(cursor, cursor.fetchone())
 
     def claim(self, owner_id, execution_id, now):
         with self._transaction() as connection:
@@ -576,13 +1236,15 @@ class PostgresConsoleRepository:
                         """
                         INSERT INTO schemii.console_results (
                             id, execution_id, statement_index, command,
-                            columns_document, rows_document, truncated, expires_at
-                        ) VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+                            columns_document, row_count, replayable,
+                            truncated, expires_at
+                        ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                         """,
                         (
                             result_id, execution_id, query.statement_index, query.command,
                             json.dumps([column.model_dump(mode="json", by_alias=True) for column in query.columns]),
-                            json.dumps(query.rows), query.truncated, expires_at,
+                            (query.row_count if query.row_count is not None else len(query.rows)),
+                            query.replayable, query.truncated, expires_at,
                         ),
                     )
                     summaries.append(
@@ -591,8 +1253,9 @@ class PostgresConsoleRepository:
                             statement_index=query.statement_index,
                             command=query.command,
                             columns=list(query.columns),
-                            row_count=len(query.rows),
-                            has_more=len(query.rows) > int(row["page_size"]),
+                            row_count=(query.row_count if query.row_count is not None else len(query.rows)),
+                            has_more=(query.row_count if query.row_count is not None else len(query.rows)) > int(row["page_size"]),
+                            replayable=query.replayable,
                         )
                     )
                 cursor.execute(
@@ -660,7 +1323,7 @@ class PostgresConsoleRepository:
     def page(self, owner_id, workspace_id, execution_id, result_id, cursor, now):
         with self._transaction() as connection:
             with connection.cursor() as db_cursor:
-                record = self._owned_execution(db_cursor, owner_id, workspace_id, execution_id)
+                self._owned_execution(db_cursor, owner_id, workspace_id, execution_id)
                 db_cursor.execute(
                     """
                     SELECT * FROM schemii.console_results
@@ -672,45 +1335,10 @@ class PostgresConsoleRepository:
                 result = db_cursor.fetchone()
                 if result is None or result["closed_at"] is not None or result["expires_at"] <= now:
                     raise ConsoleResultGoneError()
-                offset = 0
-                if cursor is not None:
-                    db_cursor.execute(
-                        """
-                        UPDATE schemii.console_result_cursors
-                        SET consumed_at = %s
-                        WHERE token = %s AND result_id = %s
-                          AND consumed_at IS NULL AND expires_at > %s
-                        RETURNING row_offset
-                        """,
-                        (now, cursor, result_id, now),
-                    )
-                    cursor_row = db_cursor.fetchone()
-                    if cursor_row is None:
-                        raise ConsoleResultGoneError()
-                    offset = int(cursor_row["row_offset"])
-                rows = list(result["rows_document"])
-                page_rows = rows[offset : offset + record.page_size]
-                next_offset = offset + len(page_rows)
-                next_cursor = None
-                if next_offset < len(rows):
-                    next_cursor = f"crc_{secrets.token_hex(16)}"
-                    db_cursor.execute(
-                        """
-                        INSERT INTO schemii.console_result_cursors
-                            (token, result_id, row_offset, expires_at)
-                        VALUES (%s, %s, %s, %s)
-                        """,
-                        (next_cursor, result_id, next_offset, result["expires_at"]),
-                    )
-                return ConsoleResultPage(
-                    execution_id=execution_id,
-                    result_id=result_id,
-                    columns=[ConsoleResultColumn.model_validate(item) for item in result["columns_document"]],
-                    rows=page_rows,
-                    next_cursor=next_cursor,
-                    truncated=bool(result["truncated"]),
-                    expires_at=result["expires_at"],
-                )
+                # Raw values are process-bound data-plane state. The repository
+                # verifies ownership/lifecycle only and can never reconstruct a
+                # page from metadata.
+                raise ConsoleResultGoneError()
 
     def close_result(self, owner_id, workspace_id, execution_id, result_id, now):
         with self._transaction() as connection:
@@ -727,10 +1355,185 @@ class PostgresConsoleRepository:
                 if cursor.fetchone() is None:
                     raise ConsoleResultGoneError()
 
+    def list_history(self, owner_id, workspace_id, limit):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT sql, ran_at FROM schemii.console_query_history
+                    WHERE owner_id = %s AND workspace_id = %s
+                    ORDER BY ran_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (owner_id, workspace_id, limit),
+                )
+                return [ConsoleHistoryEntry(sql=row["sql"], ran_at=row["ran_at"])
+                        for row in cursor.fetchall()]
+
+    def record_history(self, owner_id, workspace_id, sql, ran_at, limit):
+        if limit <= 0:
+            return
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO schemii.console_query_history
+                        (owner_id, workspace_id, sql, ran_at)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (owner_id, workspace_id, sql, ran_at),
+                )
+                cursor.execute(
+                    """
+                    DELETE FROM schemii.console_query_history
+                    WHERE id IN (
+                        SELECT id FROM schemii.console_query_history
+                        WHERE owner_id = %s AND workspace_id = %s
+                        ORDER BY ran_at DESC, id DESC
+                        OFFSET %s
+                    )
+                    """,
+                    (owner_id, workspace_id, limit),
+                )
+
+    def list_saved_queries(self, owner_id, workspace_id):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT * FROM schemii.console_saved_queries
+                    WHERE owner_id = %s AND workspace_id = %s
+                    ORDER BY updated_at DESC, id DESC
+                    """,
+                    (owner_id, workspace_id),
+                )
+                return [self._saved_query(row) for row in cursor.fetchall()]
+
+    def create_saved_query(self, owner_id, workspace_id, name, sql, starter, now, limit):
+        identifier = f"sq_{secrets.token_hex(16)}"
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id FROM schemii.workspaces
+                    WHERE owner_id = %s AND id = %s
+                    FOR UPDATE
+                    """,
+                    (owner_id, workspace_id),
+                )
+                if cursor.fetchone() is None:
+                    raise ConsoleNotFoundError()
+                cursor.execute(
+                    """
+                    SELECT count(*)::integer AS count
+                    FROM schemii.console_saved_queries
+                    WHERE owner_id = %s AND workspace_id = %s
+                    """,
+                    (owner_id, workspace_id),
+                )
+                count = int(cursor.fetchone()["count"])
+                if count >= limit:
+                    raise ConsoleLimitReachedError("saved queries", limit, count)
+                cursor.execute(
+                    """
+                    INSERT INTO schemii.console_saved_queries
+                        (id, owner_id, workspace_id, name, sql, starter,
+                         created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (identifier, owner_id, workspace_id, name, sql, starter, now, now),
+                )
+                return self._saved_query(cursor.fetchone())
+
+    def update_saved_query(
+        self, owner_id, workspace_id, query_id, expected_revision, name, sql, now,
+    ):
+        assignments = []
+        values: list[Any] = []
+        if name is not None:
+            assignments.append("name = %s")
+            values.append(name)
+        if sql is not None:
+            assignments.append("sql = %s")
+            values.append(sql)
+        assignments.extend(["revision = revision + 1", "updated_at = %s"])
+        values.extend([now, owner_id, workspace_id, query_id, expected_revision])
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    UPDATE schemii.console_saved_queries
+                    SET {', '.join(assignments)}
+                    WHERE owner_id = %s AND workspace_id = %s AND id = %s
+                      AND revision = %s
+                    RETURNING *
+                    """,
+                    values,
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    self._saved_query_conflict(cursor, owner_id, workspace_id, query_id)
+                return self._saved_query(row)
+
+    def delete_saved_query(self, owner_id, workspace_id, query_id, expected_revision):
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM schemii.console_saved_queries
+                    WHERE owner_id = %s AND workspace_id = %s AND id = %s
+                      AND revision = %s
+                    RETURNING id
+                    """,
+                    (owner_id, workspace_id, query_id, expected_revision),
+                )
+                if cursor.fetchone() is None:
+                    self._saved_query_conflict(cursor, owner_id, workspace_id, query_id)
+
+    @staticmethod
+    def _saved_query(row):
+        return ConsoleSavedQuery(
+            id=row["id"], workspace_id=row["workspace_id"],
+            revision=int(row["revision"]), name=row["name"], sql=row["sql"],
+            starter=bool(row.get("starter", False)),
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _saved_query_conflict(cursor, owner_id, workspace_id, query_id):
+        cursor.execute(
+            """
+            SELECT revision FROM schemii.console_saved_queries
+            WHERE owner_id = %s AND workspace_id = %s AND id = %s
+            """,
+            (owner_id, workspace_id, query_id),
+        )
+        if cursor.fetchone() is None:
+            raise ConsoleNotFoundError()
+        raise ConsoleConflictError(
+            "console_saved_query_changed",
+            "The saved query changed after it was opened",
+        )
+
     def _locked_row(self, cursor, owner_id, execution_id):
         cursor.execute(
             "SELECT * FROM schemii.console_executions WHERE owner_id = %s AND id = %s FOR UPDATE",
             (owner_id, execution_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ConsoleNotFoundError()
+        return row
+
+    @staticmethod
+    def _locked_transaction(cursor, owner_id, transaction_id):
+        cursor.execute(
+            """
+            SELECT * FROM schemii.console_transactions
+            WHERE owner_id = %s AND id = %s FOR UPDATE
+            """,
+            (owner_id, transaction_id),
         )
         row = cursor.fetchone()
         if row is None:
@@ -774,8 +1577,8 @@ class PostgresConsoleRepository:
         cursor.execute(
             """
             SELECT console_results.id, statement_index, command, columns_document,
-                   jsonb_array_length(rows_document) AS row_count,
-                   jsonb_array_length(rows_document) > execution.page_size AS has_more
+                   row_count, replayable,
+                   row_count > execution.page_size AS has_more
             FROM schemii.console_results
             JOIN schemii.console_executions AS execution
               ON execution.id = console_results.execution_id
@@ -788,7 +1591,9 @@ class PostgresConsoleRepository:
                 id=row["id"], statement_index=int(row["statement_index"]),
                 command=row["command"],
                 columns=[ConsoleResultColumn.model_validate(item) for item in row["columns_document"]],
-                row_count=int(row["row_count"]), has_more=bool(row["has_more"]),
+                row_count=(int(row["row_count"]) if row["row_count"] is not None else None),
+                has_more=bool(row["has_more"]),
+                replayable=bool(row["replayable"]),
             )
             for row in cursor.fetchall()
         ]
@@ -798,6 +1603,7 @@ class PostgresConsoleRepository:
         execution = ConsoleExecution(
             id=row["id"], revision=int(row["revision"]),
             workspace_id=row["workspace_id"], console_id=row["console_id"],
+            transaction_id=row.get("transaction_id"),
             status=row["status"],
             completed_statement_indexes=list(row["completed_statement_indexes"]),
             results=summaries or [], error_code=row["error_code"],
@@ -816,4 +1622,38 @@ class PostgresConsoleRepository:
             statements=tuple(row["statements"]), page_size=int(row["page_size"]),
             backend_pid=row["backend_pid"],
             cancel_requested=bool(row["cancel_requested"]),
+        )
+
+    @staticmethod
+    def _transaction_from_row(cursor, row):
+        cursor.execute(
+            """
+            SELECT id FROM schemii.console_executions
+            WHERE transaction_id = %s ORDER BY created_at, id
+            """,
+            (row["id"],),
+        )
+        execution_ids = [item["id"] for item in cursor.fetchall()]
+        return ConsoleTransactionRecord(
+            owner_id=row["owner_id"],
+            transaction=ConsoleTransaction(
+                id=row["id"],
+                workspace_id=row["workspace_id"],
+                console_id=row["console_id"],
+                revision=int(row["revision"]),
+                status=row["status"],
+                execution_ids=execution_ids,
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                expires_at=row["expires_at"],
+            ),
+            workspace_revision=int(row["workspace_revision"]),
+            target=ConsoleTarget(
+                connection_id=row["connection_id"],
+                connection_revision=int(row["connection_revision"]),
+                database=row["database_name"],
+                namespace=row["namespace"],
+            ),
+            backend_pid=int(row["backend_pid"]),
+            maximum_expires_at=row["maximum_expires_at"],
         )

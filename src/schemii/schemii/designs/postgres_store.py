@@ -53,8 +53,16 @@ class _PostgresHistoryEntry:
 class PostgresDesignRepository:
     """Persist canonical designs, layout, and durable semantic history."""
 
-    def __init__(self, connection_factory: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        connection_factory: Callable[[], Any],
+        *,
+        history_action_limit: int = 100,
+    ) -> None:
+        if history_action_limit < 1:
+            raise ValueError("history_action_limit must be positive")
         self._connection_factory = connection_factory
+        self._history_action_limit = history_action_limit
 
     def initialize(
         self,
@@ -205,7 +213,9 @@ class PostgresDesignRepository:
                     """,
                     (entry_id, entry_id, owner_id, workspace_id),
                 )
-                prune_postgres_history(cursor, owner_id, workspace_id)
+                prune_postgres_history(
+                    cursor, owner_id, workspace_id, self._history_action_limit
+                )
                 design = SchemiiDesign(
                     workspace_id=workspace_id,
                     revision=next_revision,
@@ -418,7 +428,9 @@ class PostgresDesignRepository:
                     """,
                     (workspace_id, owner_id, action, from_id, target.id, next_revision),
                 )
-                prune_postgres_history(cursor, owner_id, workspace_id)
+                prune_postgres_history(
+                    cursor, owner_id, workspace_id, self._history_action_limit
+                )
                 design = SchemiiDesign(
                     workspace_id=workspace_id,
                     revision=next_revision,

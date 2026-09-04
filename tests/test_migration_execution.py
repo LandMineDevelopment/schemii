@@ -362,6 +362,16 @@ class _PlanningEmptinessGateway:
         self.emptiness_calls.append(table_names)
         return {name: self.is_empty for name in table_names}
 
+    def table_column_rebuild_blockers(
+        self,
+        connection: Any,
+        namespace: str,
+        table_names: tuple[str, ...],
+    ) -> dict[str, tuple[str, ...]]:
+        del connection
+        assert namespace == "public"
+        return {name: () for name in table_names}
+
 
 class _BlockingGateway(_SuccessfulGateway):
     def __init__(self) -> None:
@@ -1283,6 +1293,87 @@ def test_plan_creation_uses_exact_table_emptiness_for_required_columns(
     stored = repository.get_plan(OWNER_ID, plan.id)
     assert stored.authority.required_empty_tables == expected_preconditions
     assert [step.operation for step in plan.steps] == (["add"] if is_empty else [])
+
+
+@pytest.mark.parametrize(
+    ("is_empty", "requested", "selected", "step_count_positive", "destructive"),
+    [
+        (True, None, True, True, False),
+        (True, [], False, False, False),
+        (False, None, False, False, False),
+        (False, ["selected"], True, True, True),
+    ],
+)
+def test_physical_column_reorder_is_optional_and_only_defaults_for_empty_tables(
+    is_empty: bool,
+    requested: list[str] | None,
+    selected: bool,
+    step_count_positive: bool,
+    destructive: bool,
+) -> None:
+    catalog = build_postgres_catalog(
+        database="analytics",
+        namespace="public",
+        server_version="17.2",
+        server_version_num=170002,
+        server_timezone="UTC",
+        tables=(PostgresTable(
+            namespace="public",
+            name="events",
+            kind="table",
+            is_partition=False,
+            columns=(
+                PostgresColumn(name="id", ordinal=1, data_type="bigint", nullable=False),
+                PostgresColumn(name="label", ordinal=2, data_type="text", nullable=True),
+            ),
+        ),),
+        relationships=(),
+        functions=(),
+        views=(),
+        materialized_views=(),
+        captured_at=NOW,
+    )
+    baseline_content = import_postgres_catalog(catalog).content
+    desired = baseline_content.model_copy(deep=True)
+    desired.tables[0].columns.reverse()
+    table_id = desired.tables[0].id
+    request_ids = (
+        None
+        if requested is None
+        else [table_id] if requested == ["selected"] else []
+    )
+    designs = _DesignRepository(design_fingerprint(desired), content=desired)
+    repository = InMemoryMigrationRepository(designs)
+    _seed_baseline(repository, catalog=catalog, content=baseline_content)
+    service = MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=_PlanningEmptinessGateway(catalog, is_empty=is_empty),
+        workspaces=_WorkspaceRepository(),
+        designs=designs,
+        clock=lambda: NOW,
+    )
+
+    plan = service.create_plan(
+        OWNER_ID,
+        WORKSPACE_ID,
+        MigrationPlanCreate(
+            expected_workspace_revision=1,
+            expected_design_revision=1,
+            allow_destructive=destructive,
+            rebuild_table_ids=request_ids,
+        ),
+    )
+
+    assert len(plan.column_order_rebuilds) == 1
+    assert plan.column_order_rebuilds[0].selected is selected
+    assert bool(plan.steps) is step_count_positive
+    assert plan.destructive is destructive
+    stored = repository.get_plan(OWNER_ID, plan.id)
+    assert stored.authority.rebuild_table_ids == ((table_id,) if selected else ())
+    assert stored.authority.required_empty_tables == (
+        ("events",) if selected and is_empty else ()
+    )
 
 
 @pytest.mark.parametrize("execution_status", ["reserved", "applying"])

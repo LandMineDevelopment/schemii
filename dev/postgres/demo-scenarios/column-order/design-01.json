@@ -1,0 +1,14 @@
+{
+  "changes": [
+    {
+      "operation": "reorderColumns",
+      "table": "empty_migration_lab",
+      "columns": ["label", "id"]
+    },
+    {
+      "operation": "reorderColumns",
+      "table": "console_demo_notes",
+      "columns": ["scenario_key", "note", "change_count", "updated_at", "id"]
+    }
+  ]
+}

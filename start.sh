@@ -20,9 +20,11 @@ SCHEMII_LAUNCH_LOCK_FILE="${SCHEMII_LAUNCH_LOCK_FILE-${ROOT_DIR}/.schemii/start.
 SCHEMII_RESET_MIGRATION_DEMO="${SCHEMII_RESET_MIGRATION_DEMO-0}"
 SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
+SCHEMII_LAUNCH_ACTION=start
+SCHEMII_LOG_SERVICE=
 
 usage() {
-  printf 'Usage: %s [--reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios]\n' "$0"
+  printf 'Usage: %s [--reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -55,6 +57,16 @@ if (( $# > 0 )); then
       (( $# == 1 )) || { usage >&2; exit 2; }
       list_demo_scenarios
       exit 0
+      ;;
+    --logs)
+      (( $# == 2 )) || { usage >&2; exit 2; }
+      case "$2" in
+        schemii|opencode|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
+          SCHEMII_LAUNCH_ACTION=logs
+          SCHEMII_LOG_SERVICE="$2"
+          ;;
+        *) printf 'Unknown log service: %s\n' "$2" >&2; usage >&2; exit 2 ;;
+      esac
       ;;
     -h|--help)
       (( $# == 1 )) || { usage >&2; exit 2; }
@@ -106,6 +118,7 @@ SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_
 SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/demo_admin_password"
 SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/demo_target_password"
 SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_encryption_key"
+SCHEMII_OPENCODE_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/opencode_password"
 
 certificate_is_current() {
   local certificate_text certificate_modulus key_modulus
@@ -262,6 +275,7 @@ ensure_configured_secret \
   "demo-target-password"
 ensure_random_secret "$SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE" "metadata-app-password"
 ensure_random_secret "$SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE" "demo-admin-password"
+ensure_random_secret "$SCHEMII_OPENCODE_PASSWORD_SECRET_FILE" "opencode-password"
 if ! metadata_encryption_key_is_valid; then
   if [[ -e "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" ]]; then
     fail "the existing metadata encryption key is invalid; restore the original 256-bit base64 key"
@@ -284,6 +298,7 @@ export SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE
 export SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE
 export SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE
 export SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE
+export SCHEMII_OPENCODE_PASSWORD_SECRET_FILE
 export SCHEMII_SECRET_READER_GID
 export SCHEMII_RESET_MIGRATION_DEMO
 if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
@@ -306,15 +321,19 @@ compose_args=(
   --file "$COMPOSE_FILE"
 )
 
+if [[ "$SCHEMII_LAUNCH_ACTION" == "logs" ]]; then
+  exec docker "${compose_args[@]}" logs --no-color --tail 200 "$SCHEMII_LOG_SERVICE"
+fi
+
 printf 'Building the current Schemii application image...\n'
-if ! docker "${compose_args[@]}" build schemii; then
+if ! docker "${compose_args[@]}" build schemii opencode; then
   fail "the application image could not be built; the running deployment was left unchanged"
 fi
 
 # The launcher is also the restart boundary. Build first so a compilation
 # failure does not interrupt the last known-good HTTP processes.
 docker "${compose_args[@]}" rm --stop --force \
-  ingress schemii metadata-bootstrap demo-bootstrap
+  ingress schemii opencode metadata-bootstrap demo-bootstrap
 
 # The former single PostgreSQL service used the control-plane volume now owned
 # by metadata-postgres. Remove only that exact legacy container before mounting
@@ -343,6 +362,8 @@ if ! docker "${compose_args[@]}" up --detach --wait --wait-timeout "$SCHEMII_STA
   docker "${compose_args[@]}" --profile demo-fixture ps --all >&2 || true
   printf 'Schemii service logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 schemii >&2 || true
+  printf 'OpenCode service logs:\n' >&2
+  docker "${compose_args[@]}" logs --no-color --tail 200 opencode >&2 || true
   printf 'Metadata bootstrap logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 metadata-bootstrap >&2 || true
   printf 'Demo seed logs:\n' >&2

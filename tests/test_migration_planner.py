@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from schemii.common.postgres.models import PostgresColumn, PostgresTable, build_postgres_catalog
+from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
     DesignCheckConstraint,
     DesignColumn,
@@ -7,11 +11,15 @@ from schemii.schemii.designs.models import (
     DesignKeyConstraint,
     DesignRelationship,
     DesignTable,
+    DesignTrigger,
     DesignView,
     SchemiiDesignContent,
 )
 from schemii.schemii.migrations.planner import (
+    column_order_differences,
     compile_migration_steps,
+    preserve_column_display_order,
+    reconcile_designs,
     tables_requiring_empty_for_required_columns,
 )
 from schemii.schemii.migrations.type_changes import classify_type_change
@@ -153,6 +161,214 @@ def test_required_column_with_default_does_not_need_empty_table() -> None:
     assert blockers == []
     assert len(steps) == 1
     assert steps[0].data_movement is True
+
+
+def test_column_order_remains_metadata_only_until_rebuild_is_selected() -> None:
+    first = _column("a", "first", "text")
+    second = _column("b", "second", "integer")
+    table = _table("c", "examples", [first, second])
+    live = SchemiiDesignContent(tables=[table])
+    desired = live.model_copy(deep=True)
+    desired.tables[0].columns.reverse()
+
+    differences = column_order_differences("public", live, desired)
+    steps, blockers = compile_migration_steps("public", live, desired)
+
+    assert steps == []
+    assert blockers == []
+    assert len(differences) == 1
+    assert differences[0].current_order == ("first", "second")
+    assert differences[0].desired_order == ("second", "first")
+    assert differences[0].blocking_reasons == ()
+
+
+def test_populated_physical_reorder_stages_rows_and_is_destructive() -> None:
+    first = _column("a", "first", "text")
+    second = _column("b", "second", "integer")
+    table = _table("c", "examples", [first, second])
+    live = SchemiiDesignContent(tables=[table])
+    desired = live.model_copy(deep=True)
+    desired.tables[0].columns.reverse()
+
+    steps, blockers = compile_migration_steps(
+        "public",
+        live,
+        desired,
+        rebuild_table_ids={table.id},
+        populated_rebuild_table_ids={table.id},
+    )
+
+    assert blockers == []
+    assert steps[0].operation == "lock_for_physical_reorder"
+    assert any(step.operation == "stage_rows_for_physical_reorder" for step in steps)
+    assert any(
+        step.operation == "clear_staged_rows_for_physical_reorder"
+        and step.sql == 'TRUNCATE TABLE "public"."examples";'
+        for step in steps
+    )
+    assert any(step.operation == "restore_rows_after_physical_reorder" for step in steps)
+    assert any(step.destructive for step in steps)
+    added = [step.sql for step in steps if step.operation == "restore_in_physical_order"]
+    assert added == [
+        'ALTER TABLE "public"."examples" ADD COLUMN "second" integer;',
+        'ALTER TABLE "public"."examples" ADD COLUMN "first" text;',
+    ]
+
+
+def test_empty_physical_reorder_skips_row_copy_and_destructive_flag() -> None:
+    first = _column("a", "first", "text")
+    second = _column("b", "second", "integer")
+    table = _table("c", "examples", [first, second])
+    live = SchemiiDesignContent(tables=[table])
+    desired = live.model_copy(deep=True)
+    desired.tables[0].columns.reverse()
+
+    steps, blockers = compile_migration_steps(
+        "public",
+        live,
+        desired,
+        rebuild_table_ids={table.id},
+    )
+
+    assert blockers == []
+    assert not any("rows_for_physical_reorder" in step.operation for step in steps)
+    assert not any(step.destructive for step in steps)
+
+
+def test_physical_reorder_restores_dependent_objects_for_empty_and_populated_tables() -> None:
+    identifier = _column("a", "id", "bigint", nullable=False, identity="by_default")
+    label = _column("b", "label", "text")
+    parent_key = DesignKeyConstraint(
+        id=_id("key", "c"),
+        name="parents_pkey",
+        kind="primary",
+        column_ids=[identifier.id],
+    )
+    parent_index = DesignIndex(
+        id=_id("index", "d"),
+        name="parents_label_idx",
+        column_ids=[label.id],
+    )
+    parents = _table(
+        "e",
+        "parents",
+        [identifier, label],
+        keys=[parent_key],
+        indexes=[parent_index],
+    )
+    parent_id = _column("f", "parent_id", "bigint")
+    children = _table("a", "children", [parent_id])
+    relationship = DesignRelationship(
+        id=_id("relationship", "b"),
+        name="children_parent_id_fkey",
+        source_table_id=children.id,
+        source_column_ids=[parent_id.id],
+        target_table_id=parents.id,
+        target_column_ids=[identifier.id],
+    )
+    trigger = DesignTrigger.model_validate({
+        "id": _id("trigger", "c"),
+        "definition": (
+            "CREATE TRIGGER parents_changed AFTER UPDATE ON parents "
+            "FOR EACH ROW EXECUTE FUNCTION audit_parent();"
+        ),
+    })
+    live = SchemiiDesignContent(
+        tables=[parents, children],
+        relationships=[relationship],
+        triggers=[trigger],
+    )
+    desired = live.model_copy(deep=True)
+    desired.tables[0].columns.reverse()
+
+    for populated in (False, True):
+        steps, blockers = compile_migration_steps(
+            "public",
+            live,
+            desired,
+            rebuild_table_ids={parents.id},
+            populated_rebuild_table_ids={parents.id} if populated else set(),
+        )
+
+        assert blockers == []
+        operations_by_kind = {
+            kind: [step.operation for step in steps if step.object_kind == kind]
+            for kind in ("constraint", "index", "relationship", "trigger")
+        }
+        assert operations_by_kind == {
+            "constraint": ["drop_for_physical_reorder", "restore_after_physical_reorder"],
+            "index": ["drop_for_physical_reorder", "restore_after_physical_reorder"],
+            "relationship": ["drop_for_physical_reorder", "restore_after_physical_reorder"],
+            "trigger": ["drop_for_physical_reorder", "restore_after_physical_reorder"],
+        }
+        assert any(
+            step.operation == "synchronize_identity_after_physical_reorder"
+            for step in steps
+        )
+        assert any(step.operation == "stage_rows_for_physical_reorder" for step in steps) is populated
+        assert any(step.operation == "restore_rows_after_physical_reorder" for step in steps) is populated
+
+
+def test_inspected_content_keeps_the_saved_app_column_order() -> None:
+    first = _column("a", "first", "text")
+    second = _column("b", "second", "integer")
+    inspected = SchemiiDesignContent(tables=[_table("c", "examples", [first, second])])
+    preferred = inspected.model_copy(deep=True)
+    preferred.tables[0].columns.reverse()
+
+    preserved = preserve_column_display_order(inspected, preferred)
+
+    assert [column.name for column in preserved.tables[0].columns] == ["second", "first"]
+    assert preserved.tables[0].columns[0].data_type == "integer"
+
+
+def test_saved_display_order_is_not_reported_as_external_catalog_drift() -> None:
+    catalog = build_postgres_catalog(
+        database="analytics",
+        namespace="public",
+        server_version="17.2",
+        server_version_num=170002,
+        server_timezone="UTC",
+        tables=(
+            PostgresTable(
+                namespace="public",
+                name="examples",
+                kind="table",
+                is_partition=False,
+                columns=(
+                    PostgresColumn(
+                        name="first",
+                        ordinal=1,
+                        data_type="text",
+                        nullable=True,
+                    ),
+                    PostgresColumn(
+                        name="second",
+                        ordinal=2,
+                        data_type="integer",
+                        nullable=True,
+                    ),
+                ),
+            ),
+        ),
+        relationships=(),
+        functions=(),
+        views=(),
+        materialized_views=(),
+        captured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    saved = import_postgres_catalog(catalog).content
+    saved.tables[0].columns.reverse()
+
+    result = reconcile_designs(saved, saved, catalog)
+
+    assert result.external_changes == []
+    assert result.conflicts == []
+    assert result.merged is not None
+    assert [column.name for column in result.merged.tables[0].columns] == [
+        "second",
+        "first",
+    ]
 
 
 def test_foreign_key_is_rebuilt_around_safe_type_changes() -> None:

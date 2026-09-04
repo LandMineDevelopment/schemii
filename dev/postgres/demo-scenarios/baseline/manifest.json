@@ -4,5 +4,6 @@
   "description": "Imports the canonical demo schema without desired or external changes.",
   "sourceRevision": "runtime",
   "designAlterations": [],
+  "consoleQueries": [],
   "targetAlteration": "target.sql"
 }

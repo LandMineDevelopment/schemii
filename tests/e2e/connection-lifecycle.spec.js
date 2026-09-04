@@ -56,7 +56,7 @@ test("connection review exposes a navigable child workspace with direct deletion
   const connections = page.locator("#connections-dialog");
   const connectionCard = connections.locator(".manager-card").filter({ hasText: name });
   await expect(connectionCard).toBeVisible();
-  await connectionCard.getByRole("button", { name: "Delete", exact: true }).click();
+  await connectionCard.getByRole("button", { name: `Delete ${name}`, exact: true }).click();
 
   const review = page.locator("#connection-impact-dialog");
   await expect(review).toBeVisible();
@@ -70,7 +70,7 @@ test("connection review exposes a navigable child workspace with direct deletion
   await expect(page.locator("#workspace-title")).toHaveText(workspace.name);
 
   await page.getByRole("button", { name: "PostgreSQL connections", exact: true }).first().click();
-  await connections.locator(".manager-card").filter({ hasText: name }).getByRole("button", { name: "Delete", exact: true }).click();
+  await connections.locator(".manager-card").filter({ hasText: name }).getByRole("button", { name: `Delete ${name}`, exact: true }).click();
   await review.getByRole("button", { name: `Delete workspace ${workspace.name}` }).click();
   const confirmation = page.locator("#confirm-dialog");
   await expect(confirmation).toContainText("PostgreSQL schemas and data will not be changed");

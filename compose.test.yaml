@@ -16,18 +16,29 @@ services:
       SCHEMII_METADATA_PASSWORD_FILE: /run/secrets/metadata_app_password
       SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key
       SCHEMII_METADATA_TARGET_HOST_ALIASES: metadata-postgres
+      SCHEMII_CONFIG_FILE: /etc/schemii/schemii.toml
+      SCHEMII_OPENCODE_URL: http://opencode:4096
+      SCHEMII_OPENCODE_USERNAME: opencode
+      SCHEMII_OPENCODE_PASSWORD_FILE: /run/secrets/opencode_password
+      SCHEMII_AI_FALLBACK_PROVIDER_ID: ${SCHEMII_AI_FALLBACK_PROVIDER_ID:-}
+      SCHEMII_AI_FALLBACK_MODEL_ID: ${SCHEMII_AI_FALLBACK_MODEL_ID:-}
     depends_on:
       metadata-bootstrap:
         condition: service_completed_successfully
       postgres-seed:
         condition: service_completed_successfully
+      opencode:
+        condition: service_healthy
     init: true
     networks:
       - database
       - app-ingress
+      - ai-runtime
     volumes:
       - "${SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_app_password}:/run/secrets/metadata_app_password:ro"
       - "${SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE:-./.schemii/secrets/metadata_encryption_key}:/run/secrets/metadata_encryption_key:ro"
+      - ./dev/schemii.toml:/etc/schemii/schemii.toml:ro
+      - "${SCHEMII_OPENCODE_PASSWORD_SECRET_FILE:-./.schemii/secrets/opencode_password}:/run/secrets/opencode_password:ro"
     group_add:
       - "${SCHEMII_SECRET_READER_GID:-10001}"
     read_only: true
@@ -37,6 +48,40 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    restart: unless-stopped
+
+  opencode:
+    image: schemii-test-opencode
+    build:
+      context: .
+      dockerfile: ai/Dockerfile
+    command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
+    environment:
+      OPENCODE_SERVER_USERNAME: opencode
+      OPENCODE_SERVER_PASSWORD_FILE: /run/secrets/opencode_password
+      XDG_DATA_HOME: /opencode/data
+      XDG_CONFIG_HOME: /tmp/opencode/config
+      XDG_STATE_HOME: /tmp/opencode/state
+      XDG_CACHE_HOME: /tmp/opencode/cache
+    volumes:
+      - ./ai/workspace:/workspace:ro
+      - schemii-test-opencode-data:/opencode/data
+      - "${SCHEMII_OPENCODE_PASSWORD_SECRET_FILE:-./.schemii/secrets/opencode_password}:/run/secrets/opencode_password:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-10001}"
+    working_dir: /workspace
+    networks:
+      - ai-runtime
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "password=$$(cat /run/secrets/opencode_password); auth=$$(printf 'opencode:%s' \"$$password\" | base64 | tr -d '\\n'); wget -q --spider --header \"Authorization: Basic $$auth\" http://127.0.0.1:4096/global/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
   ingress:
@@ -268,6 +313,7 @@ services:
 volumes:
   schemii-test-postgres:
   schemii-test-demo-postgres:
+  schemii-test-opencode-data:
 
 networks:
   database:
@@ -275,3 +321,4 @@ networks:
   app-ingress:
     internal: true
   loopback:
+  ai-runtime:

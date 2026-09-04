@@ -35,7 +35,7 @@ _MAX_DEPENDENCIES_PER_ROUTE = 24
 _MAX_MODELS_PER_ROLE = 32
 # The rewrite deliberately registers typed planning handlers alongside active
 # implementations so the API map can review the complete source-owned contract.
-_MAX_OBJECTS = DEFAULT_OBJECT_LIMIT * 2
+_MAX_OBJECTS = DEFAULT_OBJECT_LIMIT * 3
 _MAX_ROUTES = 200
 _MAX_DOCSTRING_CHARACTERS = DEFAULT_DOCSTRING_LIMIT
 _MAX_HIGHLIGHT_SEGMENTS = DEFAULT_HIGHLIGHT_SEGMENT_LIMIT

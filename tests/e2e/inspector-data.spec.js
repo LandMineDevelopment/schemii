@@ -11,6 +11,17 @@ async function databaseDesignWorkspace(request) {
   return workspace;
 }
 
+async function bookstoreWorkspace(request) {
+  const response = await request.get("/api/v1/schemii/workspaces");
+  expect(response.ok()).toBe(true);
+  const body = await response.json();
+  const workspace = body.workspaces.find(item => (
+    item.database === "schemii_test" && item.namespace === "bookstore"
+  ));
+  expect(workspace, "the seeded bookstore workspace should be available").toBeTruthy();
+  return workspace;
+}
+
 test("inspector ports database rows and the console workflow while migration stays separate", async ({ page, request }, testInfo) => {
   const desktop = testInfo.project.name === "desktop-chromium";
   const workspace = await databaseDesignWorkspace(request);
@@ -75,4 +86,33 @@ test("inspector ports database rows and the console workflow while migration sta
   await page.locator("#objects-button").click();
   await expect(page.locator("#objects-dialog")).toBeVisible();
   await expect(page.locator("#objects-dialog #review-migration-button")).toHaveCount(0);
+});
+
+test("inspector and full previews append rows automatically from the shared cursor pager", async ({ page, request }) => {
+  const workspace = await bookstoreWorkspace(request);
+  await page.goto(`/?workspace=${workspace.id}&layer=tables`);
+
+  await page.locator('.table-card[data-table-name="orders"]').click({ force: true });
+  await page.getByRole("button", { name: "Open table rows and console" }).click();
+  const inspectorRows = page.locator("#inspector-rows-body tbody tr");
+  await expect(inspectorRows).toHaveCount(100);
+  await expect(page.getByRole("button", { name: "Load next page" })).toHaveCount(0);
+
+  await page.locator("#inspector-rows-body").evaluate(container => {
+    container.scrollTop = container.scrollHeight;
+    container.dispatchEvent(new Event("scroll"));
+  });
+  await expect(inspectorRows).toHaveCount(200);
+  await expect(page.locator("#inspector-rows-status")).toContainText("scroll for more");
+
+  await page.getByRole("button", { name: "Open full row preview" }).click();
+  const dialog = page.locator("#relation-preview-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("tbody tr")).toHaveCount(200);
+  await dialog.locator("#relation-preview-body").evaluate(container => {
+    container.scrollTop = container.scrollHeight;
+    container.dispatchEvent(new Event("scroll"));
+  });
+  await expect(dialog.locator("tbody tr")).toHaveCount(300);
+  await expect(dialog.locator("#relation-preview-status")).toContainText("scroll for more");
 });

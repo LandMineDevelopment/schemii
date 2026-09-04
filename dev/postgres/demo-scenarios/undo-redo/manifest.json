@@ -4,5 +4,6 @@
   "description": "Creates independent schema and view revisions for section-colored undo, redo, and baseline-reset testing.",
   "sourceRevision": "runtime",
   "designAlterations": ["design-01.json", "design-02.json", "design-03.json"],
+  "consoleQueries": [],
   "targetAlteration": "target.sql"
 }

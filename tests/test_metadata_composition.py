@@ -21,7 +21,7 @@ def test_application_root_explicitly_composes_common_and_schemii_metadata(
 ) -> None:
     captured_packages: list[tuple[str, ...]] = []
 
-    def create_metadata(*, migration_packages: tuple[str, ...]):
+    def create_metadata(*, migration_packages: tuple[str, ...], **_policy):
         captured_packages.append(migration_packages)
         return MetadataRepositories(connections=InMemoryConnectionRepository())
 

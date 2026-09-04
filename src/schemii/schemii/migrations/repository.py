@@ -106,6 +106,7 @@ class PlanAuthority:
     database: str
     namespace: str
     required_empty_tables: tuple[str, ...] = ()
+    rebuild_table_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -938,8 +939,16 @@ class InMemoryMigrationRepository:
 class PostgresMigrationRepository:
     """Metadata PostgreSQL implementation with immutable plans and CAS baselines."""
 
-    def __init__(self, connection_factory: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        connection_factory: Callable[[], Any],
+        *,
+        history_action_limit: int = 100,
+    ) -> None:
+        if history_action_limit < 1:
+            raise ValueError("history_action_limit must be positive")
         self._connection_factory = connection_factory
+        self._history_action_limit = history_action_limit
 
     def current_baseline(self, owner_id: str, workspace_id: str) -> BaselineRecord | None:
         with self._transaction() as connection:
@@ -1730,6 +1739,7 @@ class PostgresMigrationRepository:
                     cursor,
                     record.owner_id,
                     record.plan.workspace_id,
+                    self._history_action_limit,
                 )
                 cursor.execute(
                     "SELECT revision, objects FROM schemii.workspace_design_layouts WHERE owner_id = %s AND workspace_id = %s FOR UPDATE",
@@ -1956,6 +1966,7 @@ class PostgresMigrationRepository:
             "database": authority.database,
             "namespace": authority.namespace,
             "requiredEmptyTables": list(authority.required_empty_tables),
+            "rebuildTableIds": list(authority.rebuild_table_ids),
         }
 
     def _baseline(self, row: dict[str, Any]) -> BaselineRecord:
@@ -1993,6 +2004,7 @@ class PostgresMigrationRepository:
                 connection_revision=authority["connectionRevision"],
                 database=authority["database"], namespace=authority["namespace"],
                 required_empty_tables=tuple(authority.get("requiredEmptyTables", ())),
+                rebuild_table_ids=tuple(authority.get("rebuildTableIds", ())),
             ),
         )
 

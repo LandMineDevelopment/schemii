@@ -70,6 +70,7 @@ def history_target_index(
 
 def retained_history_entries(
     entries: Sequence[HistoryEntry],
+    retained_limit: int = MAX_RETAINED_HISTORY_ACTIONS,
 ) -> list[HistoryEntry]:
     """Keep the immutable root, one snapshot per action, and the undo boundary.
 
@@ -86,13 +87,18 @@ def retained_history_entries(
             compacted[-1] = entry
         else:
             compacted.append(entry)
-    boundary = history_boundary_index(compacted)
+    boundary = history_boundary_index(compacted, retained_limit)
     if boundary == 0:
         return compacted
     return [compacted[0], *compacted[boundary:]]
 
 
-def prune_postgres_history(cursor: Any, owner_id: str, workspace_id: str) -> None:
+def prune_postgres_history(
+    cursor: Any,
+    owner_id: str,
+    workspace_id: str,
+    retained_limit: int = MAX_RETAINED_HISTORY_ACTIONS,
+) -> None:
     """Physically retain only the active, bounded history chain.
 
     The state row is locked by each caller before this runs. Kept entries are first
@@ -137,7 +143,7 @@ def prune_postgres_history(cursor: Any, owner_id: str, workspace_id: str) -> Non
         chain.append(current)
         current = by_id.get(current.parent_id) if current.parent_id is not None else None
     chain.reverse()
-    retained = retained_history_entries(chain)
+    retained = retained_history_entries(chain, retained_limit)
     previous_id: int | None = None
     for entry in retained:
         if entry.parent_id != previous_id:
@@ -179,5 +185,5 @@ def prune_postgres_history(cursor: Any, owner_id: str, workspace_id: str) -> Non
             OFFSET %s
         )
         """,
-        (owner_id, workspace_id, MAX_RETAINED_HISTORY_TRANSITIONS),
+        (owner_id, workspace_id, retained_limit * 2),
     )

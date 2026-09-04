@@ -131,11 +131,11 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert "docker:info" in commands
     assert (
         f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
-        "build schemii"
+        "build schemii opencode"
     ) in commands
     assert (
         f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
-        "rm --stop --force ingress schemii metadata-bootstrap"
+        "rm --stop --force ingress schemii opencode metadata-bootstrap"
     ) in commands
     assert (
         f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
@@ -210,7 +210,7 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert metadata_app_password.read_bytes() == metadata_app_password_bytes
     assert demo_admin_password.read_bytes() == demo_admin_password_bytes
     second_commands = command_log.read_text(encoding="utf-8")
-    assert "rm --stop --force ingress schemii metadata-bootstrap" in second_commands
+    assert "rm --stop --force ingress schemii opencode metadata-bootstrap" in second_commands
 
 
 def test_startup_rejects_a_password_change_that_would_desynchronize_persisted_roles(

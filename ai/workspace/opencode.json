@@ -1,0 +1,1 @@
+{"$schema":"https://opencode.ai/config.json","instructions":["AGENTS.md"],"share":"disabled","autoupdate":false,"snapshot":false,"formatter":false,"lsp":false,"mcp":{},"permission":{"*":"deny","schemii_design_change":"allow","schemii_read_query":"allow","schemii_open_console":"allow","schemii_review_migration":"allow"}}

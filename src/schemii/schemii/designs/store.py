@@ -590,13 +590,16 @@ class DesignRepository(Protocol):
 class InMemoryDesignRepository:
     """Thread-safe desired-design adapter for isolated application tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, history_action_limit: int = 100) -> None:
+        if history_action_limit < 1:
+            raise ValueError("history_action_limit must be positive")
         self._designs: dict[tuple[str, str], SchemiiDesign] = {}
         self._layouts: dict[tuple[str, str], SchemiiDesignLayout] = {}
         self._history: dict[tuple[str, str], dict[int, _MemoryHistoryEntry]] = {}
         self._history_state: dict[tuple[str, str], tuple[int, int]] = {}
         self._position_memory: dict[tuple[str, str], dict[str, Any]] = {}
         self._next_history_id = 1
+        self._history_action_limit = history_action_limit
         self._mutation_guard: Any = None
         self._lock = threading.RLock()
 
@@ -889,7 +892,7 @@ class InMemoryDesignRepository:
 
     def _prune_history(self, key: tuple[str, str]) -> None:
         entries, _ = self._active_chain(*key)
-        retained = retained_history_entries(entries)
+        retained = retained_history_entries(entries, self._history_action_limit)
         previous_id: int | None = None
         compacted: dict[int, _MemoryHistoryEntry] = {}
         for entry in retained:

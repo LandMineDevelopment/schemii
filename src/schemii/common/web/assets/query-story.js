@@ -1,3 +1,5 @@
+import { createIconButton } from "./ui.js";
+
 const TRANSFORMATION_LABELS = Object.freeze({
   stages: "Named query stages",
   joins: "Join relations",
@@ -568,12 +570,12 @@ function renderQueryStory(container, {
   if (onEdit || onDelete) {
     const actions = element("div", { className: "ui-action-group" });
     if (onEdit) {
-      const edit = element("button", { className: "ui-button compact", type: "button", text: "Edit query" });
+      const edit = createIconButton({ icon: "edit", label: `Edit ${subject.name}`, tooltip: "Edit query", className: "compact" });
       edit.addEventListener("click", onEdit);
       actions.append(edit);
     }
     if (onDelete) {
-      const remove = element("button", { className: "ui-button compact danger", type: "button", text: "Delete" });
+      const remove = createIconButton({ icon: "delete", label: `Delete ${subject.name}`, tooltip: "Delete query", className: "compact danger" });
       remove.addEventListener("click", onDelete);
       actions.append(remove);
     }

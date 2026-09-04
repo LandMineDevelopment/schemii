@@ -4,5 +4,6 @@
   "description": "Changes the same column type differently in Schemii and PostgreSQL.",
   "sourceRevision": "runtime",
   "designAlterations": ["design-01.json"],
+  "consoleQueries": [],
   "targetAlteration": "target.sql"
 }

@@ -2,6 +2,8 @@
 
 from typing import Literal
 
+from fastapi import Request
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -15,13 +17,15 @@ class Principal(BaseModel):
     authentication_source: Literal["local_prototype"]
 
 
-def get_current_principal() -> Principal:
+def get_current_principal(request: Request) -> Principal:
     """Return the single local owner until deployment-neutral auth is added.
 
     A future identity adapter can resolve an authenticated owner without
     changing product route or repository signatures.
     """
-    return Principal(
+    principal = Principal(
         user_id=LOCAL_PROTOTYPE_USER_ID,
         authentication_source="local_prototype",
     )
+    request.state.principal = principal
+    return principal

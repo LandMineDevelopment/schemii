@@ -10,6 +10,7 @@ from schemii.common.connections.store import (
     ConnectionNotFoundError,
 )
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.common.metadata.limit_events import LimitEventNotice
 from schemii.common.postgres.errors import PostgresGatewayError
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.importer import import_postgres_catalog
@@ -91,11 +92,22 @@ def _connection_not_found(error: ConnectionNotFoundError) -> ApiProblem:
 
 
 def _workspace_limit(error: WorkspaceLimitError) -> ApiProblem:
+    limit_name = {
+        "workspace": "resources.maximum_workspaces_per_user",
+        "table position": "workspace_layout.maximum_table_positions",
+        "column display order": "workspace_layout.maximum_column_display_orders",
+    }.get(error.category, f"workspace.{error.category}")
     return ApiProblem(
         409,
         "workspace_limit_reached",
-        str(error),
-        details={"category": error.category, "limit": error.limit},
+        f"The {error.category} limit of {error.limit} has been reached. Remove unused {error.category} data or ask the administrator to raise {limit_name}.",
+        details={"resource": error.category, "limitName": limit_name, "limit": error.limit, "observed": error.limit},
+        limit_event=LimitEventNotice(
+            resource=error.category.replace(" ", "_"),
+            limit_name=limit_name,
+            configured_limit=error.limit,
+            observed_value=error.limit,
+        ),
     )
 
 

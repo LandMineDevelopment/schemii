@@ -202,7 +202,12 @@ class RelationBrowserService:
         quote = lambda value: '"' + value.replace('"', '""') + '"'
         statement = f"SELECT * FROM {quote(workspace.namespace)}.{quote(relation.value.name)} OFFSET {offset} LIMIT {page_size + 1}"
         with self._connections.use(owner_id, workspace.connection_id) as connection:
-            results = self._postgres.execute_console(connection, (statement,), on_started=lambda _pid: True)
+            results = self._postgres.execute_console(
+                connection,
+                workspace.namespace,
+                (statement,),
+                on_started=lambda _pid: True,
+            )
         result = results[0]
         rows = list(result.rows[:page_size])
         has_more = len(result.rows) > page_size or result.truncated

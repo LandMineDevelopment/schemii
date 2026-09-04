@@ -478,12 +478,12 @@ export function renderFunctions(container, catalog, query = "", { onEdit = null,
     if (routine.designId && (onEdit || onDelete)) {
       const actions = element("div", { className: "catalog-object-actions" });
       if (onEdit) {
-        const edit = element("button", { className: "ui-button compact", type: "button", text: "Edit source" });
+        const edit = createIconButton({ icon: "edit", label: `Edit ${routine.name}`, tooltip: "Edit source", className: "compact" });
         edit.addEventListener("click", () => onEdit(routine));
         actions.append(edit);
       }
       if (onDelete) {
-        const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
+        const remove = createIconButton({ icon: "delete", label: `Delete ${routine.name}`, tooltip: "Delete routine", className: "compact danger" });
         remove.addEventListener("click", () => onDelete(routine));
         actions.append(remove);
       }
@@ -566,12 +566,12 @@ export function renderTypes(container, catalog, query = "", filter = "all", { on
       if (designType.designId && (onEdit || onDelete)) {
         const actions = element("div", { className: "catalog-object-actions" });
         if (onEdit) {
-          const edit = element("button", { className: "ui-button compact", type: "button", text: "Edit source" });
+          const edit = createIconButton({ icon: "edit", label: `Edit ${designType.name}`, tooltip: "Edit source", className: "compact" });
           edit.addEventListener("click", () => onEdit(designType));
           actions.append(edit);
         }
         if (onDelete) {
-          const remove = element("button", { className: "ui-button compact danger-text", type: "button", text: "Delete" });
+          const remove = createIconButton({ icon: "delete", label: `Delete ${designType.name}`, tooltip: "Delete type", className: "compact danger" });
           remove.addEventListener("click", () => onDelete(designType));
           actions.append(remove);
         }
@@ -656,7 +656,7 @@ export function renderObjects(container, catalog, query = "", onOpen) {
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
     } else if (object.target === "trigger") {
-      const action = element("button", { className: "ui-button compact", type: "button", text: "Edit trigger source" });
+      const action = createIconButton({ icon: "edit", label: `Edit ${object.name}`, tooltip: "Edit trigger source", className: "compact" });
       action.addEventListener("click", () => onOpen(object));
       body.append(action);
     } else if (object.target === "type") {

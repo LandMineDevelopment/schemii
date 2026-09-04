@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from schemii.common.api.models import ApiModel
+from schemii.schemii.designs.models import DesignIdentifier, DesignObjectId
 
 
 MigrationPlanStatus = Literal[
@@ -52,6 +53,16 @@ class MigrationPlanCreate(ApiModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     allow_destructive: bool = False
+    rebuild_table_ids: list[DesignObjectId] | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    @model_validator(mode="after")
+    def unique_rebuild_tables(self) -> "MigrationPlanCreate":
+        if self.rebuild_table_ids is not None and len(self.rebuild_table_ids) != len(set(self.rebuild_table_ids)):
+            raise ValueError("each table may be selected for physical reordering once")
+        return self
 
 
 class MigrationWarning(ApiModel):
@@ -106,6 +117,22 @@ class MigrationStep(ApiModel):
     data_movement: bool = False
 
 
+class MigrationColumnOrderRebuild(ApiModel):
+    """One explicit physical-order reconstruction choice derived by the server."""
+
+    table_id: DesignObjectId
+    table_name: DesignIdentifier
+    current_order: list[DesignIdentifier] = Field(min_length=1, max_length=1600)
+    desired_order: list[DesignIdentifier] = Field(min_length=1, max_length=1600)
+    selected: bool
+    eligible: bool
+    contains_data: bool
+    blocking_reasons: list[Annotated[str, Field(min_length=1, max_length=2048)]] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+
+
 class MigrationPlan(ApiModel):
     """Immutable server-derived review of desired, baseline, and live state."""
 
@@ -124,6 +151,10 @@ class MigrationPlan(ApiModel):
     apply_capable: bool
     destructive: bool
     requires_external_change_acknowledgement: bool
+    column_order_rebuilds: list[MigrationColumnOrderRebuild] = Field(
+        default_factory=list,
+        max_length=100,
+    )
     steps: list[MigrationStep] = Field(max_length=10_000)
     external_changes: list[MigrationExternalChange] = Field(
         default_factory=list,

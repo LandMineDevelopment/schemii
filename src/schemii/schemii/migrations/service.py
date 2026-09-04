@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import ConnectionNotFoundError
+from schemii.common.metadata.limit_events import LimitEventRecorder
 from schemii.common.postgres import PostgresGateway
 from schemii.common.postgres.errors import PostgresGatewayError
 from schemii.common.postgres.models import PostgresCatalog
@@ -46,6 +47,7 @@ from schemii.schemii.workspaces.models import SchemiiWorkspace, WorkspaceCreateR
 from .errors import MigrationServiceError, migration_storage_error
 from .execution import MigrationExecutionCoordinator
 from .models import (
+    MigrationColumnOrderRebuild,
     MigrationDriftResolution,
     MigrationDriftResolutionRequest,
     MigrationExecution,
@@ -56,6 +58,7 @@ from .models import (
     MigrationWarning,
 )
 from .planner import (
+    column_order_differences,
     compile_migration_steps,
     content_fingerprint,
     new_baseline_content,
@@ -152,6 +155,7 @@ class MigrationService:
         designs: DesignRepository,
         plan_ttl: timedelta = timedelta(minutes=15),
         execution_lease_ttl: timedelta = timedelta(minutes=2),
+        limit_events: LimitEventRecorder | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if plan_ttl <= timedelta(0):
@@ -173,6 +177,7 @@ class MigrationService:
             workspaces=workspaces,
             designs=designs,
             lease_ttl=execution_lease_ttl,
+            limit_events=limit_events,
             clock=self._clock,
         )
         _install_workspace_execution_guards(self._workspaces, self._repository)
@@ -412,12 +417,22 @@ class MigrationService:
             catalog,
         )
         merged = reconciliation.merged or design.content
+        order_differences = column_order_differences(
+            workspace.namespace,
+            reconciliation.live,
+            merged,
+        )
         required_empty_tables = tables_requiring_empty_for_required_columns(
             reconciliation.live,
             merged,
         )
         empty_tables: frozenset[str] = frozenset()
-        if required_empty_tables:
+        inspected_table_names = frozenset({
+            *required_empty_tables,
+            *(item.table_name for item in order_differences),
+        })
+        rebuild_blockers: dict[str, tuple[str, ...]] = {}
+        if inspected_table_names:
             try:
                 with self._connections.use(owner_id, workspace.connection_id) as connection:
                     if connection.revision != connection_revision:
@@ -429,11 +444,22 @@ class MigrationService:
                     emptiness = self._postgres.table_emptiness(
                         connection,
                         workspace.namespace,
-                        tuple(required_empty_tables),
+                        tuple(inspected_table_names),
                     )
                     empty_tables = frozenset(
                         name for name, is_empty in emptiness.items() if is_empty
                     )
+                    rebuild_safety_names = tuple(
+                        item.table_name
+                        for item in order_differences
+                        if not item.blocking_reasons
+                    )
+                    if rebuild_safety_names:
+                        rebuild_blockers = self._postgres.table_column_rebuild_blockers(
+                            connection,
+                            workspace.namespace,
+                            rebuild_safety_names,
+                        )
             except ConnectionNotFoundError as error:
                 raise MigrationServiceError(404, "connection_not_found", str(error)) from error
             except PostgresGatewayError as error:
@@ -443,11 +469,76 @@ class MigrationService:
                     str(error),
                     retryable=True,
                 ) from error
+        requested_rebuild_ids = (
+            set(request.rebuild_table_ids)
+            if request.rebuild_table_ids is not None
+            else {
+                item.table_id
+                for item in order_differences
+                if item.table_name in empty_tables
+                and not item.blocking_reasons
+                and not rebuild_blockers.get(item.table_name)
+            }
+        )
+        known_rebuild_ids = {item.table_id for item in order_differences}
+        invalid_rebuild_ids = sorted(requested_rebuild_ids - known_rebuild_ids)
+        order_rebuilds: list[MigrationColumnOrderRebuild] = []
+        eligible_rebuild_ids: set[str] = set()
+        populated_rebuild_ids: set[str] = set()
+        selected_rebuild_blockers: list[MigrationWarning] = []
+        for difference in order_differences:
+            reasons = [
+                *difference.blocking_reasons,
+                *rebuild_blockers.get(difference.table_name, ()),
+            ]
+            selected = difference.table_id in requested_rebuild_ids
+            eligible = not reasons
+            contains_data = difference.table_name not in empty_tables
+            order_rebuilds.append(MigrationColumnOrderRebuild(
+                table_id=difference.table_id,
+                table_name=difference.table_name,
+                current_order=list(difference.current_order),
+                desired_order=list(difference.desired_order),
+                selected=selected,
+                eligible=eligible,
+                contains_data=contains_data,
+                blocking_reasons=list(reasons),
+            ))
+            if selected and eligible:
+                eligible_rebuild_ids.add(difference.table_id)
+                if contains_data:
+                    populated_rebuild_ids.add(difference.table_id)
+            elif selected:
+                selected_rebuild_blockers.append(MigrationWarning(
+                    code="physical_column_order_rebuild_blocked",
+                    message=(
+                        f"PostgreSQL column order for {difference.table_name} cannot be rebuilt: "
+                        + " ".join(reasons)
+                    ),
+                    object_path=f"tables.{difference.table_name}.column_order",
+                ))
+        for table_id in invalid_rebuild_ids:
+            selected_rebuild_blockers.append(MigrationWarning(
+                code="physical_column_order_not_available",
+                message="The requested table no longer has a physical column-order difference.",
+                object_path=f"tables.{table_id}.column_order",
+            ))
+        selected_empty_rebuild_names = {
+            item.table_name
+            for item in order_rebuilds
+            if item.selected and item.eligible and not item.contains_data
+        }
+        required_empty_preconditions = frozenset({
+            *(required_empty_tables & empty_tables),
+            *selected_empty_rebuild_names,
+        })
         steps, compiler_blockers = compile_migration_steps(
             workspace.namespace,
             reconciliation.live,
             merged,
             empty_tables=empty_tables,
+            rebuild_table_ids=eligible_rebuild_ids,
+            populated_rebuild_table_ids=populated_rebuild_ids,
         )
         warnings = list(reconciliation.warnings)
         if reconciliation.external_changes:
@@ -462,7 +553,7 @@ class MigrationService:
                     object_path="schema",
                 ),
             )
-        blocking = list(compiler_blockers)
+        blocking = [*compiler_blockers, *selected_rebuild_blockers]
         if any(step.destructive for step in steps) and not request.allow_destructive:
             blocking.append(
                 MigrationWarning(
@@ -490,7 +581,11 @@ class MigrationService:
             if reconciliation.external_changes
             else "none"
         )
-        complete = not reconciliation.conflicts and not compiler_blockers
+        complete = (
+            not reconciliation.conflicts
+            and not compiler_blockers
+            and not selected_rebuild_blockers
+        )
         destructive = any(step.destructive for step in steps)
         apply_capable = complete and (request.allow_destructive or not destructive)
         now = self._clock()
@@ -511,7 +606,11 @@ class MigrationService:
             "database": workspace.database,
             "namespace": workspace.namespace,
             "allowDestructive": request.allow_destructive,
-            "requiredEmptyTables": sorted(empty_tables),
+            "rebuildTableIds": sorted(eligible_rebuild_ids),
+            "requiredEmptyTables": sorted(required_empty_preconditions),
+            "columnOrderRebuilds": [
+                item.model_dump(mode="json", by_alias=True) for item in order_rebuilds
+            ],
             "steps": [step.model_dump(mode="json", by_alias=True) for step in steps],
             "externalChanges": [
                 item.model_dump(mode="json", by_alias=True)
@@ -551,6 +650,7 @@ class MigrationService:
             apply_capable=apply_capable,
             destructive=destructive,
             requires_external_change_acknowledgement=bool(reconciliation.external_changes),
+            column_order_rebuilds=order_rebuilds,
             steps=steps,
             external_changes=reconciliation.external_changes,
             conflicts=reconciliation.conflicts,
@@ -576,7 +676,8 @@ class MigrationService:
                         connection_revision=connection_revision,
                         database=workspace.database,
                         namespace=workspace.namespace,
-                        required_empty_tables=tuple(sorted(empty_tables)),
+                        required_empty_tables=tuple(sorted(required_empty_preconditions)),
+                        rebuild_table_ids=tuple(sorted(eligible_rebuild_ids)),
                     ),
                 )
             )

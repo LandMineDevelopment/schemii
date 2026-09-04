@@ -1,0 +1,9 @@
+{
+  "id": "column-order",
+  "title": "App and physical column order",
+  "description": "Saves a graphical order for an empty and a populated table so optional PostgreSQL reconstruction can be reviewed safely.",
+  "sourceRevision": "runtime",
+  "designAlterations": ["design-01.json"],
+  "consoleQueries": [],
+  "targetAlteration": "target.sql"
+}

@@ -1,0 +1,2 @@
+import { tool } from "/opt/opencode/node_modules/@opencode-ai/plugin/dist/index.js"
+export default tool({description:"Propose a read-only PostgreSQL query for row data or analysis, not catalog-object inspection. Schemii validates and requires user approval.",args:{sql:tool.schema.string().min(1).max(1048576),summary:tool.schema.string().min(1).max(2048)},async execute(){return "Proposal received for server validation."}})

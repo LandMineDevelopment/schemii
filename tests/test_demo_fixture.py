@@ -71,3 +71,31 @@ def test_demo_cleanup_uses_the_application_metadata_composition(
         fixture.main()
 
     assert events == ["compose", "cleanup"]
+
+
+def test_demo_console_queries_are_seeded_as_first_visit_starters(
+    tmp_path: Path,
+) -> None:
+    fixture = _load_demo_fixture()
+    query_path = tmp_path / "guided.sql"
+    query_path.write_text("  SELECT 42 AS answer;\n", encoding="utf-8")
+    created: list[tuple[str, str, object]] = []
+
+    class Console:
+        def create_saved_query(self, owner_id, workspace_id, request):
+            created.append((owner_id, workspace_id, request))
+
+    fixture._seed_console_queries(
+        SimpleNamespace(console=Console()),
+        "ws_" + "a" * 32,
+        tmp_path,
+        [{"name": "01 · Guided query", "file": "guided.sql"}],
+    )
+
+    assert len(created) == 1
+    owner_id, workspace_id, request = created[0]
+    assert owner_id == fixture.LOCAL_PROTOTYPE_USER_ID
+    assert workspace_id == "ws_" + "a" * 32
+    assert request.name == "01 · Guided query"
+    assert request.sql == "SELECT 42 AS answer;"
+    assert request.starter is True

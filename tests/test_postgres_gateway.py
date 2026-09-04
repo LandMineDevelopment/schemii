@@ -67,6 +67,7 @@ class FakeConnection:
         self.closed_cursors = 0
         self.cursor_names: list[str | None] = []
         self.rollbacks = 0
+        self.commits = 0
         self.closed = False
 
     def cursor(self, *, name: str | None = None) -> FakeCursor:
@@ -77,12 +78,19 @@ class FakeConnection:
         for marker, rows in self.responses.items():
             if marker in query:
                 return rows
-        if query.startswith("BEGIN TRANSACTION") or query.startswith("SET LOCAL"):
+        if (
+            query.startswith("BEGIN TRANSACTION")
+            or query.startswith("SET LOCAL")
+            or query.startswith("SELECT set_config(")
+        ):
             return []
         raise AssertionError("unexpected query")
 
     def rollback(self) -> None:
         self.rollbacks += 1
+
+    def commit(self) -> None:
+        self.commits += 1
 
     def close(self) -> None:
         self.closed = True
@@ -427,6 +435,38 @@ def test_transaction_recovery_binds_status_to_fresh_target_identity() -> None:
     )
 
 
+def test_console_transaction_retains_exact_target_until_explicit_commit() -> None:
+    factory = FakeConnectFactory(
+        {
+            "current_database() AS database, pg_backend_pid() AS backend_pid": [
+                {"database": "analytics", "backend_pid": 7123}
+            ]
+        }
+    )
+
+    transaction = PsycopgPostgresGateway(
+        connect_factory=factory,
+    ).open_console_transaction(resolved_connection(), "custom schema")
+
+    connection = factory.connections[0]
+    assert transaction.backend_pid == 7123
+    assert connection.closed is False
+    assert connection.rollbacks == 0
+    assert any(
+        "idle_in_transaction_session_timeout" in query and "300000ms" in query
+        for query, _parameters in connection.executed
+    )
+    assert any(
+        query == 'SET LOCAL search_path TO "custom schema", pg_catalog'
+        for query, _parameters in connection.executed
+    )
+
+    transaction.commit()
+
+    assert connection.commits == 1
+    assert connection.closed is True
+
+
 def test_driver_failures_are_mapped_without_leaking_credentials_or_driver_text() -> None:
     secret = "this-password-must-not-leak"
 
@@ -556,6 +596,51 @@ def test_table_emptiness_uses_an_exact_bounded_probe() -> None:
     assert 'FROM "public"."empty_table" LIMIT 1' in query
     assert parameters == ()
     assert "count" not in query.lower()
+
+
+def test_column_rebuild_safety_reports_unpreserved_postgresql_features() -> None:
+    responses = metadata_responses()
+    responses["schemii_column_rebuild_safety"] = [{
+        "column_privileges": False,
+        "column_comments": True,
+        "column_security_labels": False,
+        "column_storage_settings": False,
+        "policies": True,
+        "extended_statistics": False,
+        "publications": False,
+        "custom_replica_identity": False,
+        "dependent_views": False,
+        "custom_rules": False,
+        "custom_identity_sequence": False,
+        "identity_sequence_metadata": False,
+    }]
+    factory = FakeConnectFactory(responses)
+
+    result = PsycopgPostgresGateway(
+        connect_factory=factory,
+    ).table_column_rebuild_blockers(
+        resolved_connection(),
+        "public",
+        ["events"],
+    )
+
+    assert result == {
+        "events": (
+            "Column comments would be lost.",
+            "Row-security policies may depend on physical columns.",
+        )
+    }
+    query, parameters = next(
+        item
+        for item in factory.connections[0].executed
+        if "schemii_column_rebuild_safety" in item[0]
+    )
+    assert parameters == ("public", "events")
+    assert "format('%%I.%%I'" in query
+    # An in-place reorder leaves dropped pg_attribute rows behind. Identity
+    # inspection must ignore them just like the other column safety checks.
+    assert query.count("a.attnum > 0") == 4
+    assert query.count("NOT a.attisdropped") == 4
 
 
 def test_missing_namespace_has_no_fallback() -> None:

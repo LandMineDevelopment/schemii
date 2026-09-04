@@ -141,6 +141,23 @@ def _unordered_dependency_path(path: str) -> bool:
 
 
 def _equivalent_value(path: str, left: Any, right: Any) -> bool:
+    if left is _MISSING or right is _MISSING:
+        return left is right
+    if (
+        path.endswith(".columns")
+        and _id_list(left)
+        and _id_list(right)
+    ):
+        left_items = _item_map(left)
+        right_items = _item_map(right)
+        return left_items.keys() == right_items.keys() and all(
+            _equivalent_value(
+                f"{path}[{identifier}]",
+                left_items[identifier],
+                right_items[identifier],
+            )
+            for identifier in left_items
+        )
     if (
         _unordered_dependency_path(path)
         and isinstance(left, list)
@@ -148,6 +165,20 @@ def _equivalent_value(path: str, left: Any, right: Any) -> bool:
         and all(isinstance(item, str) for item in (*left, *right))
     ):
         return set(left) == set(right)
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _equivalent_value(
+                f"{path}.{key}" if path else key,
+                left[key],
+                right[key],
+            )
+            for key in left
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _equivalent_value(f"{path}[{index}]", left_item, right_item)
+            for index, (left_item, right_item) in enumerate(zip(left, right))
+        )
     return left == right
 
 
@@ -174,6 +205,17 @@ class ReconciliationResult:
     import_complete: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ColumnOrderDifference:
+    """One logical display order that differs from PostgreSQL physical order."""
+
+    table_id: str
+    table_name: str
+    current_order: tuple[str, ...]
+    desired_order: tuple[str, ...]
+    blocking_reasons: tuple[str, ...] = ()
+
+
 class _Merger:
     def __init__(self, resolutions: dict[str, str] | None = None) -> None:
         self.external: list[MigrationExternalChange] = []
@@ -184,12 +226,6 @@ class _Merger:
         if desired is _MISSING and live is _MISSING:
             return _MISSING
         if _equivalent_value(path, desired, live):
-            return _copy(desired)
-        if _equivalent_value(path, desired, baseline):
-            if not _equivalent_value(path, live, baseline):
-                self._external(path, baseline, live)
-            return _copy(live)
-        if _equivalent_value(path, live, baseline):
             return _copy(desired)
 
         if baseline is not _MISSING:
@@ -236,6 +272,13 @@ class _Merger:
                 if merged is not _MISSING:
                     result.append(merged)
             return result
+
+        if _equivalent_value(path, desired, baseline):
+            if not _equivalent_value(path, live, baseline):
+                self._external(path, baseline, live)
+            return _copy(live)
+        if _equivalent_value(path, live, baseline):
+            return _copy(desired)
 
         return self._conflict(path, baseline, desired, live, "direct")
 
@@ -480,6 +523,7 @@ class _PendingStep:
     destructive: bool = False
     requires_lock: bool = True
     data_movement: bool = False
+    order: int = 0
 
 
 def _column_definition(column: DesignColumn) -> str:
@@ -661,12 +705,325 @@ def tables_requiring_empty_for_required_columns(
     return frozenset(required)
 
 
+def column_order_differences(
+    namespace: str,
+    live: SchemiiDesignContent,
+    desired: SchemiiDesignContent,
+) -> list[ColumnOrderDifference]:
+    """Find physical-order differences without treating them as schema deltas."""
+
+    live_tables = _by_id(live.tables)
+    desired_tables = _by_id(desired.tables)
+    live_relationships = _by_id(live.relationships)
+    desired_relationships = _by_id(desired.relationships)
+    live_triggers = _by_id(live.triggers)
+    desired_triggers = _by_id(desired.triggers)
+    differences: list[ColumnOrderDifference] = []
+    for table_id in sorted(set(live_tables) & set(desired_tables)):
+        before = live_tables[table_id]
+        after = desired_tables[table_id]
+        current_ids = tuple(column.id for column in before.columns)
+        desired_ids = tuple(column.id for column in after.columns)
+        if current_ids == desired_ids:
+            continue
+        reasons: list[str] = []
+        before_columns = _by_id(before.columns)
+        after_columns = _by_id(after.columns)
+        if set(current_ids) != set(desired_ids):
+            reasons.append("Apply this table's column additions or removals before rebuilding its physical order.")
+        elif any(before_columns[item] != after_columns[item] for item in current_ids):
+            reasons.append("Apply this table's column edits before rebuilding its physical order.")
+        if before.name != after.name:
+            reasons.append("Apply the table rename before rebuilding its physical order.")
+        if before.keys != after.keys or before.checks != after.checks or before.indexes != after.indexes:
+            reasons.append("Apply this table's constraint and index edits before rebuilding its physical order.")
+        for relationship_id in sorted(set(live_relationships) | set(desired_relationships)):
+            old_relationship = live_relationships.get(relationship_id)
+            new_relationship = desired_relationships.get(relationship_id)
+            involved = any(
+                relationship is not None
+                and table_id in {relationship.source_table_id, relationship.target_table_id}
+                for relationship in (old_relationship, new_relationship)
+            )
+            if involved and old_relationship != new_relationship:
+                reasons.append("Apply foreign-key edits involving this table before rebuilding its physical order.")
+                break
+        for trigger_id in sorted(set(live_triggers) | set(desired_triggers)):
+            old_trigger = live_triggers.get(trigger_id)
+            new_trigger = desired_triggers.get(trigger_id)
+            involved = any(
+                trigger is not None and trigger.relation_name in {before.name, after.name}
+                for trigger in (old_trigger, new_trigger)
+            )
+            if involved and old_trigger != new_trigger:
+                reasons.append("Apply trigger edits on this table before rebuilding its physical order.")
+                break
+        dependent_views = _dependent_view_names(namespace, before.name, live, desired)
+        if dependent_views:
+            reasons.append(
+                "Rebuild or remove dependent views first: " + ", ".join(dependent_views)
+            )
+        if any(column.generated_expression is not None for column in after.columns):
+            reasons.append("Physical reordering of generated columns is not yet lossless.")
+        if any(
+            column.default_expression is not None
+            and re.search(r"\bnextval\s*\(", column.default_expression, re.IGNORECASE)
+            for column in after.columns
+        ):
+            reasons.append("Serial-sequence defaults must be converted to identity columns before physical reordering.")
+        differences.append(
+            ColumnOrderDifference(
+                table_id=table_id,
+                table_name=after.name,
+                current_order=tuple(column.name for column in before.columns),
+                desired_order=tuple(column.name for column in after.columns),
+                blocking_reasons=tuple(dict.fromkeys(reasons)),
+            )
+        )
+    return differences
+
+
+def physical_column_order_mismatches(
+    live: SchemiiDesignContent,
+    desired: SchemiiDesignContent,
+    table_ids: AbstractSet[str],
+) -> list[str]:
+    """Return selected tables whose inspected physical order missed the review."""
+
+    live_tables = _by_id(live.tables)
+    desired_tables = _by_id(desired.tables)
+    mismatches: list[str] = []
+    for table_id in sorted(table_ids):
+        before = live_tables.get(table_id)
+        after = desired_tables.get(table_id)
+        if before is None or after is None or [item.id for item in before.columns] != [
+            item.id for item in after.columns
+        ]:
+            mismatches.append(after.name if after is not None else table_id)
+    return mismatches
+
+
+def preserve_column_display_order(
+    inspected: SchemiiDesignContent,
+    preferred: SchemiiDesignContent,
+) -> SchemiiDesignContent:
+    """Keep app-owned column order while retaining PostgreSQL-derived column facts."""
+
+    document = inspected.model_dump(mode="json")
+    preferred_tables = _by_id(preferred.tables)
+    for table in document["tables"]:
+        preferred_table = preferred_tables.get(table["id"])
+        if preferred_table is None:
+            continue
+        by_id = {column["id"]: column for column in table["columns"]}
+        ordered = [
+            by_id[column.id]
+            for column in preferred_table.columns
+            if column.id in by_id
+        ]
+        ordered_ids = {column["id"] for column in ordered}
+        ordered.extend(
+            column for column in table["columns"] if column["id"] not in ordered_ids
+        )
+        table["columns"] = ordered
+    return SchemiiDesignContent.model_validate(document)
+
+
+def _literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _append_column_order_rebuild(
+    pending: list[_PendingStep],
+    namespace: str,
+    live: SchemiiDesignContent,
+    desired: SchemiiDesignContent,
+    table_id: str,
+    *,
+    contains_data: bool,
+) -> None:
+    """Rebuild one unchanged table's columns in place inside the migration transaction."""
+
+    live_tables, live_columns = _table_maps(live)
+    desired_tables, desired_columns = _table_maps(desired)
+    before = live_tables[table_id]
+    after = desired_tables[table_id]
+    table_path = f"tables.{after.name}.column_order"
+    qualified_table = _qualified(namespace, before.name)
+    pending.append(_PendingStep(
+        1,
+        "table",
+        table_path,
+        "lock_for_physical_reorder",
+        f"LOCK TABLE {qualified_table} IN ACCESS EXCLUSIVE MODE;",
+        data_movement=contains_data,
+    ))
+    backup_name = f"schemii_reorder_{hashlib.sha256(table_id.encode('utf-8')).hexdigest()[:20]}"
+    column_names = ", ".join(_quote(column.name) for column in before.columns)
+    if contains_data:
+        pending.append(_PendingStep(
+            2,
+            "table",
+            table_path,
+            "stage_rows_for_physical_reorder",
+            (
+                f"CREATE TEMP TABLE {_quote(backup_name)} ON COMMIT DROP AS "
+                f"SELECT {column_names} FROM {qualified_table};"
+            ),
+            data_movement=True,
+        ))
+
+    for relationship in live.relationships:
+        if table_id not in {relationship.source_table_id, relationship.target_table_id}:
+            continue
+        source = live_tables[relationship.source_table_id]
+        pending.append(_PendingStep(
+            5,
+            "relationship",
+            f"relationships.{relationship.name}",
+            "drop_for_physical_reorder",
+            (
+                f"ALTER TABLE {_qualified(namespace, source.name)} DROP CONSTRAINT "
+                f"{_quote(relationship.name)};"
+            ),
+        ))
+    for trigger in live.triggers:
+        if trigger.relation_name != before.name:
+            continue
+        pending.append(_PendingStep(
+            6,
+            "trigger",
+            f"triggers.{before.name}.{trigger.name}",
+            "drop_for_physical_reorder",
+            f"DROP TRIGGER {_quote(trigger.name)} ON {qualified_table};",
+        ))
+    for index in before.indexes:
+        pending.append(_PendingStep(
+            7,
+            "index",
+            f"tables.{before.name}.indexes.{index.name}",
+            "drop_for_physical_reorder",
+            f"DROP INDEX {_qualified(namespace, index.name)};",
+        ))
+    for item in [*before.keys, *before.checks]:
+        pending.append(_PendingStep(
+            8,
+            "constraint",
+            f"tables.{before.name}.constraints.{item.name}",
+            "drop_for_physical_reorder",
+            f"ALTER TABLE {qualified_table} DROP CONSTRAINT {_quote(item.name)};",
+        ))
+    for ordinal, column in enumerate(before.columns):
+        pending.append(_PendingStep(
+            9,
+            "column",
+            f"tables.{before.name}.columns.{column.name}",
+            "remove_for_physical_reorder",
+            f"ALTER TABLE {qualified_table} DROP COLUMN {_quote(column.name)};",
+            destructive=contains_data,
+            data_movement=contains_data,
+            order=ordinal,
+        ))
+    if contains_data:
+        pending.append(_PendingStep(
+            10,
+            "table",
+            table_path,
+            "clear_staged_rows_for_physical_reorder",
+            f"TRUNCATE TABLE {qualified_table};",
+            destructive=True,
+            data_movement=True,
+        ))
+    for ordinal, column in enumerate(after.columns):
+        pending.append(_PendingStep(
+            40,
+            "column",
+            f"tables.{after.name}.columns.{column.name}",
+            "restore_in_physical_order",
+            f"ALTER TABLE {qualified_table} ADD COLUMN {_column_definition(column)};",
+            data_movement=contains_data,
+            order=ordinal,
+        ))
+    if contains_data:
+        identity_override = " OVERRIDING SYSTEM VALUE" if any(
+            column.identity is not None for column in after.columns
+        ) else ""
+        pending.append(_PendingStep(
+            45,
+            "table",
+            table_path,
+            "restore_rows_after_physical_reorder",
+            (
+                f"INSERT INTO {qualified_table} ({column_names}){identity_override} "
+                f"SELECT {column_names} FROM pg_temp.{_quote(backup_name)};"
+            ),
+            data_movement=True,
+        ))
+    for column in after.columns:
+        if column.identity is None:
+            continue
+        sequence_lookup = (
+            f"pg_get_serial_sequence({_literal(_qualified(namespace, after.name))}, "
+            f"{_literal(column.name)})::regclass"
+        )
+        pending.append(_PendingStep(
+            46,
+            "column",
+            f"tables.{after.name}.columns.{column.name}",
+            "synchronize_identity_after_physical_reorder",
+            (
+                f"SELECT setval({sequence_lookup}, "
+                f"COALESCE(GREATEST(MAX({_quote(column.name)}), 1), 1), "
+                f"MAX({_quote(column.name)}) IS NOT NULL) FROM {qualified_table};"
+            ),
+            data_movement=contains_data,
+        ))
+    for item in [*after.keys, *after.checks]:
+        pending.append(_PendingStep(
+            60,
+            "constraint",
+            f"tables.{after.name}.constraints.{item.name}",
+            "restore_after_physical_reorder",
+            _constraint_sql(namespace, after, item, desired_columns),
+        ))
+    for index in after.indexes:
+        pending.append(_PendingStep(
+            65,
+            "index",
+            f"tables.{after.name}.indexes.{index.name}",
+            "restore_after_physical_reorder",
+            _create_index(namespace, after, index, desired_columns),
+        ))
+    for relationship in desired.relationships:
+        if table_id not in {relationship.source_table_id, relationship.target_table_id}:
+            continue
+        pending.append(_PendingStep(
+            70,
+            "relationship",
+            f"relationships.{relationship.name}",
+            "restore_after_physical_reorder",
+            _relationship_sql(namespace, relationship, desired_tables, desired_columns),
+        ))
+    for trigger in desired.triggers:
+        if trigger.relation_name != after.name:
+            continue
+        pending.append(_PendingStep(
+            80,
+            "trigger",
+            f"triggers.{after.name}.{trigger.name}",
+            "restore_after_physical_reorder",
+            _statement(trigger.definition),
+        ))
+
+
 def compile_migration_steps(
     namespace: str,
     live: SchemiiDesignContent,
     desired: SchemiiDesignContent,
     *,
     empty_tables: AbstractSet[str] = frozenset(),
+    rebuild_table_ids: AbstractSet[str] = frozenset(),
+    populated_rebuild_table_ids: AbstractSet[str] = frozenset(),
 ) -> tuple[list[MigrationStep], list[MigrationWarning]]:
     """Compile a conservative exact delta from reviewed live to merged desired."""
 
@@ -680,6 +1037,34 @@ def compile_migration_steps(
         for column_id, decision in type_changes.items()
         if decision.disposition == "safe"
     }
+    order_differences = {
+        item.table_id: item
+        for item in column_order_differences(namespace, live, desired)
+    }
+    for table_id in sorted(rebuild_table_ids):
+        difference = order_differences.get(table_id)
+        if difference is None:
+            blocking.append(MigrationWarning(
+                code="physical_column_order_not_available",
+                message="This table no longer has a physical column-order difference to rebuild.",
+                object_path=f"tables.{table_id}.column_order",
+            ))
+            continue
+        if difference.blocking_reasons:
+            blocking.append(MigrationWarning(
+                code="physical_column_order_rebuild_blocked",
+                message=" ".join(difference.blocking_reasons),
+                object_path=f"tables.{difference.table_name}.column_order",
+            ))
+            continue
+        _append_column_order_rebuild(
+            pending,
+            namespace,
+            live,
+            desired,
+            table_id,
+            contains_data=table_id in populated_rebuild_table_ids,
+        )
 
     live_relationships = _by_id(live.relationships)
     desired_relationships = _by_id(desired.relationships)
@@ -745,10 +1130,6 @@ def compile_migration_steps(
 
         before_columns = _by_id(before.columns)
         after_columns = _by_id(after.columns)
-        # TODO(schemii-physical-column-reorder): Existing-table column order is
-        # intentionally presentation-only. Physical reordering must be an
-        # explicit reviewed table reconstruction that inventories and restores
-        # every dependent object and warns about locks and data movement.
         for column_id in sorted(set(before_columns) | set(after_columns)):
             old = before_columns.get(column_id)
             new = after_columns.get(column_id)
@@ -1024,7 +1405,11 @@ def compile_migration_steps(
                 _statement(after.definition),
             ))
 
-    pending.sort(key=lambda item: (item.phase, item.path, item.operation))
+    unique_pending: dict[tuple[int, str], _PendingStep] = {}
+    for item in pending:
+        unique_pending.setdefault((item.phase, item.sql), item)
+    pending = list(unique_pending.values())
+    pending.sort(key=lambda item: (item.phase, item.order, item.path, item.operation))
     steps = [
         MigrationStep(
             index=index,

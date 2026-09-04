@@ -1,334 +1,89 @@
-"""Planned workspace-owned Schemii assistant routes."""
-
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Query, status
-
-from schemii.common.api.planned import (
-    PLANNED_OPENAPI,
-    PLANNED_RESPONSES,
-    planned_capability,
-)
+"""Owner-scoped assistant conversations, proposals, and transient query results."""
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from schemii.common.api.errors import ApiProblem
 from schemii.common.metadata.models import Principal, get_current_principal
-
+from schemii.common.metadata.limit_events import LimitEventNotice
 from .models import (
     SchemiiActivityPage,
     SchemiiAiOperation,
-    SchemiiAiOperationReconcile,
-    SchemiiAiSettings,
-    SchemiiAiSettingsUpdate,
+    SchemiiAiOperationListResponse,
+    SchemiiAiPreferencesResult,
+    SchemiiAiPreferencesUpdate,
     SchemiiChat,
     SchemiiChatCreate,
     SchemiiChatListResponse,
     SchemiiChatPolicy,
     SchemiiChatPolicyUpdate,
     SchemiiChatUpdate,
-    SchemiiMessage,
     SchemiiMessageCreate,
     SchemiiMessageListResponse,
+    SchemiiTransientResponseList,
+    SchemiiProposal,
     SchemiiProposalExecutionCreate,
+    SchemiiProposalListResponse,
+    SchemiiQueryResult,
+    SchemiiAiSettings,
+    SchemiiAiSettingsUpdate,
+    SchemiiTurn,
 )
+from .repository import AiCapacityError, AiConflictError, AiNotFoundError
+from .service import AiService, AiServiceError
 
+router = APIRouter(tags=["schemii-assistant"])
+def _service(request: Request) -> AiService: return request.app.state.ai_service
+def _call(function, *args):
+    try: return function(*args)
+    except AiNotFoundError as error: raise ApiProblem(404, "ai_not_found", str(error)) from error
+    except AiCapacityError as error: raise ApiProblem(429, "ai_capacity_reached", str(error), retryable=True, limit_event=LimitEventNotice(resource=error.resource, limit_name=error.limit_name, configured_limit=error.configured_limit, observed_value=error.observed_value)) from error
+    except AiConflictError as error: raise ApiProblem(409, "ai_conflict", str(error)) from error
+    except AiServiceError as error: raise ApiProblem(error.status, error.code, str(error), details=error.details) from error
 
-router = APIRouter(tags=["schemii-assistant-planned"])
-
-
-@router.get(
-    "/ai/settings",
-    response_model=SchemiiAiSettings,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def get_schemii_ai_settings(
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiAiSettings:
-    """Read Schemii assistant defaults without granting chat or database authority."""
-
-    # TODO(schemii-ai-settings): Persist owner/application defaults separately
-    # from per-chat policy snapshots and human Console settings.
-    del principal
-    planned_capability("schemii.ai.settings.read")
-
-
-@router.put(
-    "/ai/settings",
-    response_model=SchemiiAiSettings,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def update_schemii_ai_settings(
-    body: SchemiiAiSettingsUpdate,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiAiSettings:
-    """Replace bounded assistant defaults after an optimistic revision check."""
-
-    # TODO(schemii-ai-settings): Validate the model against live provider status
-    # and persist an auditable settings transition without mutating existing chats.
-    del body, principal
-    planned_capability("schemii.ai.settings.update")
-
-
-@router.get(
-    "/ai/chats",
-    response_model=SchemiiChatListResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def list_schemii_chats(
-    workspace_id: str | None = Query(default=None, alias="workspaceId"),
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiChatListResponse:
-    """List owner-visible chats, optionally restricted to one workspace."""
-
-    # TODO(schemii-ai-chats): Query metadata by owner and optional workspace while
-    # excluding redacted payloads and preserving deleted-operation audit evidence.
-    del workspace_id, principal
-    planned_capability("schemii.ai.chats.list")
-
-
-@router.post(
-    "/workspaces/{workspace_id}/ai/chats",
-    response_model=SchemiiChat,
-    status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def create_schemii_chat(
-    workspace_id: str,
-    body: SchemiiChatCreate,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiChat:
-    """Create a chat bound to workspace design and optional target context."""
-
-    # TODO(schemii-ai-chats): Snapshot design/target identity and effective policy,
-    # then create the provider session only after durable ownership exists.
-    del workspace_id, body, principal
-    planned_capability("schemii.ai.chats.create")
-
-
-@router.get(
-    "/ai/chats/{chat_id}",
-    response_model=SchemiiChat,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def get_schemii_chat(
-    chat_id: str,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiChat:
-    """Return one owner-scoped conversation and its current context status."""
-
-    # TODO(schemii-ai-chats): Resolve durable chat metadata and report stale design
-    # or unavailable fixed-target context without silently rebinding authority.
-    del chat_id, principal
-    planned_capability("schemii.ai.chats.read")
-
-
-@router.patch(
-    "/ai/chats/{chat_id}",
-    response_model=SchemiiChat,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def update_schemii_chat(
-    chat_id: str,
-    body: SchemiiChatUpdate,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiChat:
-    """Rename one conversation without modifying its authority or provider session."""
-
-    # TODO(schemii-ai-chats): Normalize and persist the title through one optimistic
-    # metadata update while leaving message and operation revisions unchanged.
-    del chat_id, body, principal
-    planned_capability("schemii.ai.chats.update")
-
-
-@router.delete(
-    "/ai/chats/{chat_id}",
-    response_model=SchemiiChat,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def delete_schemii_chat(
-    chat_id: str,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiChat:
-    """Tombstone a chat while preserving required operation and policy evidence."""
-
-    # TODO(schemii-ai-chats): Cancel safe active work, revoke replayable authority,
-    # redact conversation payloads on schedule, and retain immutable audit records.
-    del chat_id, principal
-    planned_capability("schemii.ai.chats.delete")
-
-
-@router.get(
-    "/ai/chats/{chat_id}/messages",
-    response_model=SchemiiMessageListResponse,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def list_schemii_messages(
-    chat_id: str,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiMessageListResponse:
-    """Return ordered durable messages without executable proposal envelopes."""
-
-    # TODO(schemii-ai-messages): Page owner-bound messages and disclose proposal
-    # summaries separately from private, one-use server authority.
-    del chat_id, principal
-    planned_capability("schemii.ai.messages.list")
-
-
-@router.post(
-    "/ai/chats/{chat_id}/messages",
-    response_model=SchemiiMessage,
-    status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def create_schemii_message(
-    chat_id: str,
-    body: SchemiiMessageCreate,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiMessage:
-    """Persist a prompt and dispatch bounded, source-derived workspace context."""
-
-    # TODO(schemii-ai-messages): Build context from the current saved design and
-    # optional live target, reserve delivery, and persist assistant output exactly once.
-    del chat_id, body, principal
-    planned_capability("schemii.ai.messages.create")
-
-
-@router.get(
-    "/ai/chats/{chat_id}/activity",
-    response_model=SchemiiActivityPage,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def get_schemii_chat_activity(
-    chat_id: str,
-    after: Annotated[int, Query(ge=0)] = 0,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiActivityPage:
-    """Resume bounded chat progress events after a durable sequence number."""
-
-    # TODO(schemii-ai-activity): Expose the same durable event source to polling
-    # and a later SSE transport without making HTTP connection state authoritative.
-    del chat_id, after, principal
-    planned_capability("schemii.ai.activity")
-
-
-@router.get(
-    "/ai/chats/{chat_id}/policy",
-    response_model=SchemiiChatPolicy,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def get_schemii_chat_policy(
-    chat_id: str,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiChatPolicy:
-    """Read the explicit authority ceiling bound to one conversation."""
-
-    # TODO(schemii-ai-policy): Reconstruct effective policy from the immutable
-    # application policy revision and the chat's owner-approved narrowing.
-    del chat_id, principal
-    planned_capability("schemii.ai.policy.read")
-
-
-@router.put(
-    "/ai/chats/{chat_id}/policy",
-    response_model=SchemiiChatPolicy,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def update_schemii_chat_policy(
-    chat_id: str,
-    body: SchemiiChatPolicyUpdate,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiChatPolicy:
-    """Replace owner-approved chat limits without widening application policy."""
-
-    # TODO(schemii-ai-policy): Reject escalation beyond server policy, persist the
-    # new revision, and invalidate unexecuted proposals issued under older authority.
-    del chat_id, body, principal
-    planned_capability("schemii.ai.policy.update")
-
-
-@router.post(
-    "/ai/chats/{chat_id}/proposals/{proposal_id}/executions",
-    response_model=SchemiiAiOperation,
-    status_code=status.HTTP_201_CREATED,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def execute_schemii_ai_proposal(
-    chat_id: str,
-    proposal_id: str,
-    body: SchemiiProposalExecutionCreate,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiAiOperation:
-    """Consume one server-issued proposal and create its sole durable operation."""
-
-    # TODO(schemii-ai-proposals): Verify digest, context, policy, expiry, and one-use
-    # state before reserving an operation; the model never supplies authority fields.
-    del chat_id, proposal_id, body, principal
-    planned_capability("schemii.ai.proposals.execute")
-
-
-@router.get(
-    "/ai/chats/{chat_id}/operations/{operation_id}",
-    response_model=SchemiiAiOperation,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def get_schemii_ai_operation(
-    chat_id: str,
-    operation_id: str,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiAiOperation:
-    """Read durable operation status and bounded result delivery state."""
-
-    # TODO(schemii-ai-operations): Resolve exact chat ownership, recover stale
-    # leases through maintenance, and redact retained results on policy schedule.
-    del chat_id, operation_id, principal
-    planned_capability("schemii.ai.operations.read")
-
-
-@router.delete(
-    "/ai/chats/{chat_id}/operations/{operation_id}",
-    response_model=SchemiiAiOperation,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def cancel_schemii_ai_operation(
-    chat_id: str,
-    operation_id: str,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiAiOperation:
-    """Request cancellation without claiming already committed effects were undone."""
-
-    # TODO(schemii-ai-operations): Signal cancellable work, preserve exact attempts,
-    # and leave uncertain writes eligible only for evidence-based reconciliation.
-    del chat_id, operation_id, principal
-    planned_capability("schemii.ai.operations.cancel")
-
-
-@router.post(
-    "/ai/chats/{chat_id}/operations/{operation_id}/reconciliation",
-    response_model=SchemiiAiOperation,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-)
-def reconcile_schemii_ai_operation(
-    chat_id: str,
-    operation_id: str,
-    body: SchemiiAiOperationReconcile,
-    principal: Principal = Depends(get_current_principal),
-) -> SchemiiAiOperation:
-    """Resolve uncertain database work from durable evidence without replay."""
-
-    # TODO(schemii-ai-operations): Delegate migration/data reconciliation to the
-    # owning service, record evidence, and publish a terminal operation transition.
-    del chat_id, operation_id, body, principal
-    planned_capability("schemii.ai.operations.reconcile")
+@router.get("/ai/settings", response_model=SchemiiAiSettings)
+def settings(request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.settings, principal.user_id)
+@router.put("/ai/settings", response_model=SchemiiAiSettings)
+def update_settings(body: SchemiiAiSettingsUpdate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.update_settings, principal.user_id, body.expected_revision, body.enabled, body.default_provider_id, body.default_model_id, body.default_capabilities)
+@router.put("/ai/chats/{chat_id}/preferences", response_model=SchemiiAiPreferencesResult)
+def save_preferences(chat_id: str, body: SchemiiAiPreferencesUpdate, request: Request, principal: Principal = Depends(get_current_principal)):
+    return _call(_service(request).save_preferences, principal.user_id, chat_id, body)
+@router.get("/ai/chats", response_model=SchemiiChatListResponse)
+def chats(request: Request, workspace_id: str | None = Query(None, alias="workspaceId"), principal: Principal = Depends(get_current_principal)): return SchemiiChatListResponse(chats=_call(_service(request).repository.list_chats, principal.user_id, workspace_id))
+@router.post("/workspaces/{workspace_id}/ai/chats", response_model=SchemiiChat, status_code=201)
+def create_chat(workspace_id: str, body: SchemiiChatCreate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).create_chat, principal.user_id, workspace_id, body)
+@router.get("/ai/chats/{chat_id}", response_model=SchemiiChat)
+def chat(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.get_chat, principal.user_id, chat_id)
+@router.patch("/ai/chats/{chat_id}", response_model=SchemiiChat)
+def update_chat(chat_id: str, body: SchemiiChatUpdate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.update_chat, principal.user_id, chat_id, body.expected_revision, body.title)
+@router.delete("/ai/chats/{chat_id}", response_model=SchemiiChat)
+def delete_chat(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.delete_chat, principal.user_id, chat_id)
+@router.get("/ai/chats/{chat_id}/messages", response_model=SchemiiMessageListResponse)
+def messages(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return SchemiiMessageListResponse(messages=_call(_service(request).repository.list_messages, principal.user_id, chat_id, _service(request).policy.message_history_limit))
+@router.post("/ai/chats/{chat_id}/messages", response_model=SchemiiTurn, status_code=202)
+def send(chat_id: str, body: SchemiiMessageCreate, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
+    turn, _ = _call(_service(request).send, principal.user_id, chat_id, body); tasks.add_task(_service(request).run_turn, principal.user_id, chat_id, turn.id); return turn
+@router.get("/ai/chats/{chat_id}/transient-responses", response_model=SchemiiTransientResponseList)
+def transient_responses(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)):
+    return SchemiiTransientResponseList(responses=_call(_service(request).transient_responses, principal.user_id, chat_id))
+@router.post("/ai/chats/{chat_id}/turns/{turn_id}/cancel", response_model=SchemiiTurn)
+def cancel_turn(chat_id: str, turn_id: str, request: Request, principal: Principal = Depends(get_current_principal)):
+    return _call(_service(request).cancel_turn, principal.user_id, chat_id, turn_id)
+@router.get("/ai/chats/{chat_id}/activity", response_model=SchemiiActivityPage)
+def activity(chat_id: str, request: Request, after: int = Query(0, ge=0), principal: Principal = Depends(get_current_principal)):
+    events = _call(_service(request).repository.activity, principal.user_id, chat_id, after); return SchemiiActivityPage(events=events, next_sequence=events[-1].sequence if events else after)
+@router.get("/ai/chats/{chat_id}/policy", response_model=SchemiiChatPolicy)
+def policy(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)):
+    value = _call(_service(request).repository.get_chat, principal.user_id, chat_id); return SchemiiChatPolicy(revision=value.revision, capabilities=value.capabilities)
+@router.put("/ai/chats/{chat_id}/policy", response_model=SchemiiChatPolicy)
+def update_policy(chat_id: str, body: SchemiiChatPolicyUpdate, request: Request, principal: Principal = Depends(get_current_principal)):
+    value = _call(_service(request).repository.update_chat_policy, principal.user_id, chat_id, body.expected_revision, body.capabilities); return SchemiiChatPolicy(revision=value.revision, capabilities=value.capabilities)
+@router.get("/ai/chats/{chat_id}/proposals", response_model=SchemiiProposalListResponse)
+def proposals(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return SchemiiProposalListResponse(proposals=_call(_service(request).repository.list_proposals, principal.user_id, chat_id))
+@router.delete("/ai/chats/{chat_id}/proposals/{proposal_id}", response_model=SchemiiProposal)
+def dismiss(chat_id: str, proposal_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.dismiss_proposal, principal.user_id, chat_id, proposal_id)
+@router.post("/ai/chats/{chat_id}/proposals/{proposal_id}/executions", response_model=SchemiiAiOperation, status_code=201)
+def execute(chat_id: str, proposal_id: str, body: SchemiiProposalExecutionCreate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).execute, principal.user_id, chat_id, proposal_id, body)
+@router.get("/ai/chats/{chat_id}/operations/{operation_id}", response_model=SchemiiAiOperation)
+def operation(chat_id: str, operation_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.get_operation, principal.user_id, chat_id, operation_id)
+@router.get("/ai/chats/{chat_id}/operations", response_model=SchemiiAiOperationListResponse)
+def operations(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return SchemiiAiOperationListResponse(operations=_call(_service(request).repository.list_operations, principal.user_id, chat_id))
+@router.get("/ai/chats/{chat_id}/operations/{operation_id}/query-result", response_model=SchemiiQueryResult)
+def query_result(chat_id: str, operation_id: str, request: Request, cursor: str | None = None, principal: Principal = Depends(get_current_principal)): return _call(_service(request).query_result, principal.user_id, chat_id, operation_id, cursor)

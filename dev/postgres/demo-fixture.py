@@ -18,6 +18,7 @@ from schemii.common.metadata.models import LOCAL_PROTOTYPE_USER_ID
 from schemii.common.metadata.secrets import read_encryption_key, read_secret_file
 from schemii.common.metadata.users import ensure_local_metadata_user
 from schemii.main import create_services
+from schemii.schemii.console.models import ConsoleSavedQueryCreate
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import SchemiiDesignContent, SchemiiDesignReplace
 from schemii.schemii.workspaces.models import WorkspaceCreateRecord
@@ -61,6 +62,7 @@ def _scenario() -> tuple[Path, dict[str, Any]]:
         "sourceRevision",
         "designAlterations",
         "targetAlteration",
+        "consoleQueries",
     }
     if (
         not isinstance(manifest, dict)
@@ -84,12 +86,33 @@ def _scenario() -> tuple[Path, dict[str, Any]]:
     target_name = manifest["targetAlteration"]
     if Path(target_name).name != target_name or not target_name.endswith(".sql"):
         raise FixtureError(f"{manifest_path} lists an invalid target alteration")
+    console_queries = manifest["consoleQueries"]
+    if not isinstance(console_queries, list):
+        raise FixtureError(f"{manifest_path} has invalid Console queries")
+    query_names: set[str] = set()
+    for query in console_queries:
+        if (
+            not isinstance(query, dict)
+            or set(query) != {"name", "file"}
+            or not isinstance(query["name"], str)
+            or not query["name"].strip()
+            or len(query["name"].strip()) > 80
+            or not isinstance(query["file"], str)
+            or Path(query["file"]).name != query["file"]
+            or not query["file"].endswith(".sql")
+        ):
+            raise FixtureError(f"{manifest_path} lists an invalid Console query")
+        normalized_name = query["name"].strip().casefold()
+        if normalized_name in query_names:
+            raise FixtureError(f"{manifest_path} repeats a Console query name")
+        query_names.add(normalized_name)
     return directory, manifest
 
 
 def _fixture_digest(root: Path, directory: Path, manifest: dict[str, Any]) -> str:
     paths = [root / "migration-demo.sql", directory / "manifest.json"]
     paths.extend(directory / name for name in manifest["designAlterations"])
+    paths.extend(directory / query["file"] for query in manifest["consoleQueries"])
     paths.append(directory / manifest["targetAlteration"])
     digest = hashlib.sha256()
     for path in paths:
@@ -273,7 +296,11 @@ def _apply_design_alteration(services: Any, workspace_id: str, path: Path) -> No
                 }
             )
             continue
-        if change["operation"] not in {"addColumn", "setColumnType"}:
+        if change["operation"] not in {
+            "addColumn",
+            "setColumnType",
+            "reorderColumns",
+        }:
             raise FixtureError(f"{path} uses an unsupported design operation")
         if not isinstance(change.get("table"), str):
             raise FixtureError(f"{path} contains a design change without a table")
@@ -283,6 +310,20 @@ def _apply_design_alteration(services: Any, workspace_id: str, path: Path) -> No
         )
         if table is None:
             raise FixtureError(f"{path} references unknown table {change['table']}")
+        if change["operation"] == "reorderColumns":
+            expected = {"operation", "table", "columns"}
+            requested = change.get("columns")
+            existing = {item["name"]: item for item in table["columns"]}
+            if (
+                set(change) != expected
+                or not isinstance(requested, list)
+                or not all(isinstance(item, str) for item in requested)
+                or len(requested) != len(set(requested))
+                or set(requested) != set(existing)
+            ):
+                raise FixtureError(f"{path} contains an invalid reorderColumns change")
+            table["columns"] = [existing[name] for name in requested]
+            continue
         if change["operation"] == "addColumn":
             expected = {"operation", "table", "column", "dataType", "nullable"}
             if set(change) != expected or not isinstance(change["nullable"], bool):
@@ -331,6 +372,35 @@ def _apply_design_alteration(services: Any, workspace_id: str, path: Path) -> No
             history_group_id=group_id,
         ),
     )
+
+
+def _seed_console_queries(
+    services: Any,
+    workspace_id: str,
+    directory: Path,
+    queries: list[dict[str, str]],
+) -> None:
+    if not queries:
+        return
+    if services.console is None:
+        raise FixtureError("Console service is required to seed demo queries")
+    for query in queries:
+        path = directory / query["file"]
+        try:
+            sql = path.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise FixtureError(f"could not read Console query {path}") from error
+        if not sql:
+            raise FixtureError(f"{path} must contain SQL")
+        services.console.create_saved_query(
+            LOCAL_PROTOTYPE_USER_ID,
+            workspace_id,
+            ConsoleSavedQueryCreate(
+                name=query["name"],
+                sql=sql,
+                starter=True,
+            ),
+        )
 
 
 def _apply_target_alteration_and_record(
@@ -425,6 +495,12 @@ def main() -> None:
         )
     for alteration in manifest["designAlterations"]:
         _apply_design_alteration(services, workspace.id, directory / alteration)
+    _seed_console_queries(
+        services,
+        workspace.id,
+        directory,
+        manifest["consoleQueries"],
+    )
 
     target_path = directory / manifest["targetAlteration"]
     _apply_target_alteration_and_record(

@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHttpException
 
 from schemii.common.connections.policy import ConnectionTargetForbiddenError
@@ -16,6 +17,10 @@ from schemii.common.connections.store import (
     ConnectionStorageUnavailableError,
 )
 from schemii.common.errors import MetadataStorageUnavailableError
+from schemii.common.metadata.limit_events import (
+    LimitEventNotice,
+    new_limit_event,
+)
 
 from .observability import log_safe_exception
 
@@ -32,6 +37,7 @@ class ApiProblem(RuntimeError):
         *,
         retryable: bool = False,
         details: dict[str, Any] | None = None,
+        limit_event: LimitEventNotice | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -39,6 +45,7 @@ class ApiProblem(RuntimeError):
         self.message = message
         self.retryable = retryable
         self.details = details or {}
+        self.limit_event = limit_event
 
 
 def _request_id(request: Request) -> str:
@@ -74,6 +81,31 @@ def _response(
 def install_api_error_handlers(application: FastAPI) -> None:
     @application.exception_handler(ApiProblem)
     async def handle_api_problem(request: Request, error: ApiProblem) -> JSONResponse:
+        if error.limit_event is not None:
+            principal = getattr(request.state, "principal", None)
+            try:
+                await run_in_threadpool(
+                    request.app.state.services.metadata.limit_events.record,
+                    new_limit_event(
+                        error.limit_event,
+                        error_code=error.code,
+                        owner_id=getattr(principal, "user_id", None),
+                        request_id=_request_id(request),
+                        method=request.method,
+                        path=request.url.path,
+                        workspace_id=request.path_params.get("workspace_id"),
+                        connection_id=request.path_params.get("connection_id"),
+                    ),
+                )
+            except Exception as recording_error:
+                # Observability must never replace the useful limit response.
+                log_safe_exception(
+                    LOGGER,
+                    request,
+                    recording_error,
+                    status_code=503,
+                    error_code="limit_event_recording_failed",
+                )
         if error.status_code >= 500:
             log_safe_exception(
                 LOGGER,

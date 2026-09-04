@@ -474,8 +474,8 @@ def build_developer_database_document(application: FastAPI) -> dict[str, Any]:
     registry = SourceRegistry(
         SourceInspectionLimits(
             object_limit=240,
-            source_limit=48_000,
-            total_source_limit=1_024_000,
+            source_limit=128_000,
+            total_source_limit=2_048_000,
         )
     )
     query_registry = _QueryRegistry()

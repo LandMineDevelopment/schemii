@@ -10,9 +10,15 @@ from typing import Any, Callable
 
 from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import ConnectionNotFoundError
+from schemii.common.metadata.limit_events import (
+    LimitEventNotice,
+    LimitEventRecorder,
+    new_limit_event,
+)
 from schemii.common.postgres import PostgresGateway
 from schemii.common.postgres.errors import (
     PostgresCommitUncertainError,
+    PostgresConnectionCapacityError,
     PostgresGatewayError,
     PostgresMigrationExecutionError,
     PostgresMigrationPreconditionError,
@@ -41,7 +47,13 @@ from .models import (
     MigrationExecutionStatus,
     MigrationReconciliationRequest,
 )
-from .planner import compile_migration_steps, content_fingerprint, new_baseline_content
+from .planner import (
+    compile_migration_steps,
+    content_fingerprint,
+    new_baseline_content,
+    physical_column_order_mismatches,
+    preserve_column_display_order,
+)
 from .repository import (
     ExecutionRecord,
     ExecutionReservation,
@@ -69,6 +81,7 @@ class MigrationExecutionCoordinator:
         workspaces: WorkspaceRepository,
         designs: DesignRepository,
         lease_ttl: timedelta = timedelta(minutes=2),
+        limit_events: LimitEventRecorder | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if lease_ttl <= timedelta(0):
@@ -79,6 +92,7 @@ class MigrationExecutionCoordinator:
         self._workspaces = workspaces
         self._designs = designs
         self._lease_ttl = lease_ttl
+        self._limit_events = limit_events
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @property
@@ -290,8 +304,17 @@ class MigrationExecutionCoordinator:
 
         def on_intended(catalog: Any) -> None:
             nonlocal execution_record
-            candidate, issues, complete = new_baseline_content(
+            inspected_candidate, issues, complete = new_baseline_content(
                 catalog,
+                record.authority.merged_content,
+            )
+            physical_order_mismatches = physical_column_order_mismatches(
+                inspected_candidate,
+                record.authority.merged_content,
+                frozenset(record.authority.rebuild_table_ids),
+            )
+            candidate = preserve_column_display_order(
+                inspected_candidate,
                 record.authority.merged_content,
             )
             remaining, blockers = compile_migration_steps(
@@ -299,7 +322,13 @@ class MigrationExecutionCoordinator:
                 candidate,
                 record.authority.merged_content,
             )
-            if not complete or issues or remaining or blockers:
+            if (
+                not complete
+                or issues
+                or remaining
+                or blockers
+                or physical_order_mismatches
+            ):
                 raise MigrationServiceError(
                     409,
                     "migration_result_mismatch",
@@ -314,6 +343,7 @@ class MigrationExecutionCoordinator:
                             item.model_dump(mode="json", by_alias=True)
                             for item in blockers
                         ],
+                        "physicalOrderMismatches": physical_order_mismatches,
                     },
                 )
             intended.update(
@@ -415,6 +445,48 @@ class MigrationExecutionCoordinator:
                 error_code=error.code,
             )
             raise MigrationServiceError(409, error.code, str(error)) from error
+        except PostgresConnectionCapacityError as error:
+            details = {
+                "resource": "postgres_connections",
+                "limitName": error.limit_name,
+                "limit": error.limit,
+                "observed": error.observed,
+            }
+            self._transition_execution(
+                execution_record,
+                status="failed",
+                commit_outcome="rolled_back",
+                error_code=error.code,
+                error_detail=details,
+            )
+            if self._limit_events is not None:
+                try:
+                    self._limit_events.record(
+                        new_limit_event(
+                            LimitEventNotice(
+                                resource="postgres_connections",
+                                limit_name=error.limit_name,
+                                configured_limit=error.limit,
+                                observed_value=error.observed,
+                            ),
+                            error_code=error.code,
+                            owner_id=owner_id,
+                            workspace_id=plan.workspace_id,
+                            connection_id=record.authority.connection_id,
+                        )
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Could not record PostgreSQL capacity limit event",
+                        extra={"execution_id": execution_record.execution.id},
+                    )
+            raise MigrationServiceError(
+                503,
+                error.code,
+                str(error),
+                details=details,
+                retryable=True,
+            ) from error
         except (ConnectionNotFoundError, PostgresGatewayError) as error:
             code = getattr(error, "code", "connection_not_found")
             self._transition_execution(

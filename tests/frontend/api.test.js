@@ -142,14 +142,28 @@ test("console API methods bind executions and result cursors to a workspace", as
   const options = { fetcher, timeoutMs: 0 };
 
   await api.getConsoleSettings(options);
+  await api.listConsoleHistory("ws_demo", { ...options, limit: 7 });
+  await api.listConsoleSavedQueries("ws_demo", options);
+  await api.createConsoleSavedQuery("ws_demo", { name: "Demo", sql: "SELECT 1" }, options);
+  await api.updateConsoleSavedQuery("ws_demo", "sq_demo", { expectedRevision: 1, name: "Renamed" }, options);
+  await api.deleteConsoleSavedQuery("ws_demo", "sq_demo", 2, options);
   await api.createConsoleExecution("ws_demo", { statements: ["SELECT 1"] }, options);
   await api.getConsoleExecution("ws_demo", "cex_demo", options);
   await api.cancelConsoleExecution("ws_demo", "cex_demo", options);
   await api.getConsoleResultPage("ws_demo", "cex_demo", "res_demo", { ...options, cursor: "crc_demo" });
   await api.closeConsoleResult("ws_demo", "cex_demo", "res_demo", options);
+  assert.equal(
+    api.consoleResultExportUrl("ws_demo", "cex_demo", "res_demo"),
+    "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo/results/res_demo/export.csv",
+  );
 
   assert.deepEqual(requests.map(request => [request.method, request.path]), [
     ["GET", "/api/v1/schemii/console/settings"],
+    ["GET", "/api/v1/schemii/workspaces/ws_demo/console/history?limit=7"],
+    ["GET", "/api/v1/schemii/workspaces/ws_demo/console/saved-queries"],
+    ["POST", "/api/v1/schemii/workspaces/ws_demo/console/saved-queries"],
+    ["PATCH", "/api/v1/schemii/workspaces/ws_demo/console/saved-queries/sq_demo"],
+    ["DELETE", "/api/v1/schemii/workspaces/ws_demo/console/saved-queries/sq_demo?expectedRevision=2"],
     ["POST", "/api/v1/schemii/workspaces/ws_demo/console/executions"],
     ["GET", "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo"],
     ["DELETE", "/api/v1/schemii/workspaces/ws_demo/console/executions/cex_demo"],

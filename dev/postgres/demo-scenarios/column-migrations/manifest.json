@@ -4,5 +4,6 @@
   "description": "Adds a required column to an empty table and safely widens a populated indexed column.",
   "sourceRevision": "runtime",
   "designAlterations": ["design-01.json"],
+  "consoleQueries": [],
   "targetAlteration": "target.sql"
 }

@@ -10,6 +10,14 @@ __pycache__
 .env*
 .schemii
 archive
+!archive/
+archive/*
+!archive/ai/
+archive/ai/*
+!archive/ai/workspace/
+archive/ai/workspace/*
+!archive/ai/workspace/.opencode/
+!archive/ai/workspace/.opencode/package*.json
 build
 dev
 dist

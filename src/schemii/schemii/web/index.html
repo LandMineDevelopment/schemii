@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/assets/common/query-story.css" />
     <link rel="stylesheet" href="assets/app.css" />
     <link rel="stylesheet" href="/assets/common/transient-cue.css" />
+    <link rel="stylesheet" href="assets/ai-assistant.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -66,27 +67,41 @@
           </button>
         </nav>
 
-        <aside class="tool-rail" aria-label="Workspace tools">
-          <button id="create-table-button" type="button" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
-          <button id="create-relationship-button" type="button" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" aria-pressed="false" disabled></button>
-          <button id="create-key-button" type="button" data-ui-icon="key" title="Create key" aria-label="Create primary or unique key" aria-pressed="false" disabled></button>
-          <button id="create-index-button" type="button" data-ui-icon="index" title="Create index" aria-label="Create index" aria-pressed="false" disabled></button>
-          <span class="rail-divider" aria-hidden="true"></span>
-          <button id="undo-design-button" type="button" data-ui-icon="undo" title="Undo design change" aria-label="Undo design change" disabled></button>
-          <button id="redo-design-button" type="button" data-ui-icon="redo" title="Redo design change" aria-label="Redo design change" disabled></button>
-          <button id="reset-design-button" type="button" data-ui-icon="refresh" title="Reset design to baseline" aria-label="Reset design to baseline" disabled></button>
-          <span class="rail-divider" aria-hidden="true"></span>
-          <button id="fit-button" type="button" data-ui-icon="fit" title="Fit tables" aria-label="Fit tables"></button>
-          <button id="zoom-in-button" type="button" data-ui-icon="zoom-in" title="Zoom in" aria-label="Zoom in"></button>
-          <button id="zoom-out-button" type="button" data-ui-icon="zoom-out" title="Zoom out" aria-label="Zoom out"></button>
-          <span class="rail-divider" aria-hidden="true"></span>
-          <button id="functions-button" type="button" data-ui-icon="routines" title="Functions and procedures" aria-label="Functions and procedures"></button>
-          <button id="types-button" type="button" data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
-          <button id="objects-button" type="button" data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
-          <span class="rail-divider" aria-hidden="true"></span>
-          <button id="review-migration-button" type="button" data-ui-icon="migration" title="Review migration" aria-label="Review migration" disabled></button>
-          <button id="postgres-button" type="button" data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
-          <button type="button" data-ui-icon="assistant" data-unavailable="ai-assistant" title="AI schema assistant" aria-label="AI schema assistant"></button>
+        <aside class="tool-rail" id="tool-rail" data-workspace="tables" aria-label="Tables tools">
+          <button id="create-table-button" type="button" data-tool-layers="tables" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
+          <button id="create-relationship-button" type="button" data-tool-layers="tables" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" aria-pressed="false" disabled></button>
+          <button id="create-key-button" type="button" data-tool-layers="tables" data-ui-icon="key" title="Create key" aria-label="Create primary or unique key" aria-pressed="false" disabled></button>
+          <button id="create-index-button" type="button" data-tool-layers="tables" data-ui-icon="index" title="Create index" aria-label="Create index" aria-pressed="false" disabled></button>
+
+          <button id="browse-views-tool" type="button" data-tool-layers="views" data-ui-icon="views" title="Browse views" aria-label="Browse views"></button>
+          <button id="create-view-tool" type="button" data-tool-layers="views" data-ui-icon="add" title="Create view" aria-label="Create view" disabled></button>
+          <button id="refresh-views-tool" type="button" data-tool-layers="views" data-ui-icon="refresh" title="Refresh views" aria-label="Refresh views"></button>
+          <button class="danger" id="delete-view-tool" type="button" data-tool-layers="views" data-ui-icon="delete" title="Delete selected view" aria-label="Delete selected view" disabled></button>
+
+          <button id="new-query-tool" type="button" data-tool-layers="sql" data-ui-icon="new-query" title="New query" aria-label="New query"></button>
+          <button id="saved-queries-tool" type="button" data-tool-layers="sql" data-ui-icon="history" title="Saved queries and history" aria-label="Open saved queries and history" aria-expanded="false"></button>
+          <button id="save-query-tool" type="button" data-tool-layers="sql" data-ui-icon="save" title="Save current query" aria-label="Save current query"></button>
+          <button id="write-mode-tool" type="button" data-tool-layers="sql" data-ui-icon="write" title="Use write transaction" aria-label="Use write transaction" aria-pressed="false" disabled></button>
+          <button id="run-sql-button" type="button" data-tool-layers="sql" data-ui-icon="run" title="Run current statement" aria-label="Run current statement" disabled></button>
+          <button id="run-all-sql-button" type="button" data-tool-layers="sql" data-ui-icon="run-all" title="Run all statements" aria-label="Run all statements" disabled></button>
+          <button class="stop" id="cancel-sql-button" type="button" data-tool-layers="sql" data-ui-icon="stop" title="Stop query" aria-label="Stop query" disabled hidden></button>
+
+          <span class="rail-divider" data-tool-layers="tables views" aria-hidden="true"></span>
+          <button id="undo-design-button" type="button" data-tool-layers="tables views" data-ui-icon="undo" title="Undo design change" aria-label="Undo design change" disabled></button>
+          <button id="redo-design-button" type="button" data-tool-layers="tables views" data-ui-icon="redo" title="Redo design change" aria-label="Redo design change" disabled></button>
+          <button id="reset-design-button" type="button" data-tool-layers="tables views" data-ui-icon="refresh" title="Reset design to baseline" aria-label="Reset design to baseline" disabled></button>
+          <span class="rail-divider" data-tool-layers="tables" aria-hidden="true"></span>
+          <button id="fit-button" type="button" data-tool-layers="tables" data-ui-icon="fit" title="Fit tables" aria-label="Fit tables"></button>
+          <button id="zoom-in-button" type="button" data-tool-layers="tables" data-ui-icon="zoom-in" title="Zoom in" aria-label="Zoom in"></button>
+          <button id="zoom-out-button" type="button" data-tool-layers="tables" data-ui-icon="zoom-out" title="Zoom out" aria-label="Zoom out"></button>
+          <span class="rail-divider" data-tool-layers="tables views" aria-hidden="true"></span>
+          <button id="functions-button" type="button" data-tool-layers="tables views" data-ui-icon="routines" title="Functions and procedures" aria-label="Functions and procedures"></button>
+          <button id="types-button" type="button" data-tool-layers="tables views" data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
+          <button id="objects-button" type="button" data-tool-layers="tables views" data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
+          <span class="rail-divider" data-tool-layers="tables views sql" aria-hidden="true"></span>
+          <button id="review-migration-button" type="button" data-tool-layers="tables views" data-ui-icon="migration" title="Review migration" aria-label="Review migration" disabled></button>
+          <button id="postgres-button" type="button" data-tool-layers="tables views sql" data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
+          <button id="ai-assistant-button" type="button" data-tool-layers="tables views sql" data-ui-icon="assistant" title="AI schema assistant" aria-label="AI schema assistant" aria-expanded="false"></button>
         </aside>
 
         <section class="tables-workspace layer-panel" id="tables-workspace" data-layer-panel="tables" data-change-scope="schema" aria-label="Table diagram">
@@ -131,7 +146,7 @@
               <div class="inspector-rows-content" id="inspector-rows-content">
                 <div class="inspector-rows-body" id="inspector-rows-body" aria-live="polite"></div>
                 <div class="inspector-sql-results" id="inspector-sql-results" aria-live="polite" hidden></div>
-                <footer><span>Rows are read directly from the selected PostgreSQL relation.</span><button class="ui-button compact" id="inspector-rows-more" type="button" hidden>Next page</button></footer>
+                <footer><span>Rows are read directly from the selected PostgreSQL relation.</span></footer>
               </div>
             </section>
             <section class="inspector-console-pane">
@@ -141,7 +156,7 @@
               </button>
               <div class="inspector-console-content" id="inspector-console-content" hidden>
                 <textarea id="inspector-sql-draft" rows="8" spellcheck="false" aria-label="Table-scoped read-only SQL query"></textarea>
-                <footer><span>Run the table-scoped draft with <kbd>Ctrl</kbd> + <kbd>Enter</kbd>.</span><button class="ui-button compact" id="clear-inspector-sql" type="button">Clear</button><button class="ui-button compact" id="cancel-inspector-sql" type="button" hidden>Cancel</button><button class="ui-button compact primary" id="run-inspector-sql" type="button">Run query</button></footer>
+                <footer><span>Run the table-scoped draft with <kbd>Ctrl</kbd> + <kbd>Enter</kbd>.</span><button class="ui-icon-button compact danger" id="clear-inspector-sql" type="button" data-ui-icon="delete" aria-label="Clear table query"></button><button class="ui-icon-button compact" id="cancel-inspector-sql" type="button" data-ui-icon="stop" aria-label="Stop table query" hidden></button><button class="ui-icon-button compact" id="run-inspector-sql" type="button" data-ui-icon="run" aria-label="Run table query"></button></footer>
               </div>
             </section>
           </section>
@@ -176,7 +191,7 @@
                   <section class="inspector-section inspector-table-columns">
                     <header class="section-title">
                       <span><h3>Columns</h3><small id="inspector-column-count">0</small></span>
-                      <button class="ui-button compact" id="add-inspector-column-button" type="button">Add column</button>
+                      <button class="ui-icon-button compact" id="add-inspector-column-button" type="button" data-ui-icon="add" aria-label="Add column"></button>
                     </header>
                     <p class="inspector-editor-copy">Edit values in place. Drag the six-dot handle to change column order.</p>
                     <div class="design-columns" id="inspector-design-columns"></div>
@@ -213,38 +228,62 @@
 
         <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" data-change-scope="sql" aria-label="SQL workspace" hidden>
           <header class="sql-head">
-            <div><small>Bounded PostgreSQL access</small><h1>Read-only SQL Console</h1></div>
+            <div><small>Bounded PostgreSQL access</small><h1>SQL Console</h1></div>
             <dl aria-label="Current PostgreSQL target">
               <div><dt>Connection</dt><dd id="sql-target-connection">No workspace open</dd></div>
               <div><dt>Database</dt><dd id="sql-target-database">No workspace open</dd></div>
               <div><dt>Namespace</dt><dd id="sql-target-namespace">No workspace open</dd></div>
             </dl>
           </header>
-          <div class="sql-body">
-            <section class="sql-editor-panel">
-              <header><span><small>Unsaved draft</small><strong>Editor</strong></span><button class="ui-button compact" id="new-sql-draft-button" type="button">Clear draft</button></header>
-              <textarea id="sql-draft" data-change-object-id="sql-draft" data-change-root data-change-field="value" aria-label="Unsaved SQL draft" rows="14" placeholder="-- Write a read-only PostgreSQL query here.&#10;SELECT current_database();" spellcheck="false"></textarea>
-              <footer><span id="sql-editor-status">Draft text is not sent or saved.</span><button class="ui-button compact" type="button" data-unavailable="sql-upload">Upload</button><button class="ui-button compact" type="button" data-unavailable="sql-save">Save</button><button class="ui-button compact" id="cancel-sql-button" type="button" hidden>Cancel</button><button class="ui-button compact primary" id="run-sql-button" type="button">Run query</button></footer>
-            </section>
-            <aside class="sql-capabilities">
-              <header><small>Active boundary</small><strong>Execution controls</strong></header>
-              <div class="sql-capability-active"><span>Managed read</span><small>One read-only transaction · retained bounded results</small></div>
-              <button type="button" data-unavailable="sql-write"><span>Write mode</span><small>Server-authorized mutation execution</small></button>
-              <button type="button" data-unavailable="sql-transactions"><span>Transactions</span><small>Commit, rollback, and transaction ownership</small></button>
-              <button type="button" data-unavailable="sql-export"><span>Export SQL</span><small>Generate SQL from live catalog state</small></button>
-            </aside>
-          </div>
-          <section class="sql-results" id="sql-results" aria-label="SQL results" aria-live="polite">
-            <div class="sql-results-state"><span>RESULTS</span><strong>Ready for a query</strong><p>Open a database-backed workspace and run read-only PostgreSQL.</p></div>
+          <section class="sql-transaction-bar" id="sql-transaction-bar" aria-label="Write transaction status" hidden>
+            <strong>WRITE MODE</strong>
+            <div class="sql-transaction-controls">
+              <span id="sql-transaction-status">No write transaction open</span>
+              <button class="ui-button compact" id="rollback-sql-button" type="button" hidden>Roll back</button>
+              <button class="ui-button compact primary" id="commit-sql-button" type="button" hidden>Commit</button>
+            </div>
           </section>
+          <aside class="sql-query-drawer" id="sql-query-drawer" aria-label="Saved queries and recent history" hidden>
+            <header><div><small>Schemii metadata</small><strong>Queries</strong></div><button class="ui-icon-button compact" id="close-sql-query-drawer" type="button" data-ui-icon="close" aria-label="Close queries"></button></header>
+            <section><header><strong>Saved queries</strong><button class="ui-icon-button compact" id="save-query-drawer-button" type="button" data-ui-icon="add" aria-label="Save current query"></button></header><div id="sql-saved-queries"></div></section>
+            <section><header><strong>Recent history</strong><small id="sql-history-count">0 entries</small></header><div id="sql-query-history"></div></section>
+          </aside>
+          <div class="sql-body" id="sql-panes" data-active-pane="editor">
+            <section class="sql-editor-panel">
+              <header class="sql-pane-header">
+                <button class="sql-pane-heading" id="show-sql-editor" type="button" aria-expanded="true"><span><small>Browser-local query</small><strong>Editor</strong></span><em id="sql-editor-summary">Ready</em></button>
+                <div class="sql-pane-actions"><button class="ui-icon-button compact" id="copy-sql-button" type="button" data-ui-icon="copy" aria-label="Copy current query"></button><button class="ui-icon-button compact danger" id="new-sql-draft-button" type="button" data-ui-icon="delete" aria-label="Clear current query"></button></div>
+              </header>
+              <div class="sql-query-tabs" id="sql-query-tabs" role="tablist" aria-label="Open queries"></div>
+              <div class="sql-editor-content" id="sql-editor-content">
+                <textarea id="sql-draft" data-change-object-id="sql-draft" data-change-root data-change-field="value" aria-label="Unsaved SQL draft" rows="14" placeholder="-- Write PostgreSQL here. Select text or place the cursor in a statement, then run it.&#10;SELECT current_database();" spellcheck="false"></textarea>
+                <footer><span id="sql-editor-status">Select text or place the cursor in a statement.</span></footer>
+              </div>
+            </section>
+            <section class="sql-results-panel">
+              <header class="sql-pane-header"><button class="sql-pane-heading" id="show-sql-results" type="button" aria-expanded="false"><span><small>Query results</small><strong>Results</strong></span><em id="sql-results-summary">Nothing run yet</em></button></header>
+              <div class="sql-result-tabs" id="sql-result-tabs" role="tablist" aria-label="Query result tabs"></div>
+              <div class="sql-results" id="sql-results" aria-label="SQL results" aria-live="polite">
+                <div class="sql-results-state"><span>RESULTS</span><strong>Ready for a query</strong><p>Open a database-backed workspace and run PostgreSQL.</p></div>
+              </div>
+            </section>
+          </div>
         </section>
       </main>
     </div>
 
+    <dialog class="ui-dialog sql-save-dialog" id="sql-save-dialog" aria-labelledby="sql-save-title">
+      <form class="ui-dialog__shell compact-dialog" id="sql-save-form" method="dialog">
+        <header class="ui-dialog__head"><div><small>Schemii metadata</small><h2 id="sql-save-title">Save query</h2><p>Keep a named server-side copy for your current workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close save query"></button></header>
+        <div class="form-grid"><label class="span-all"><span>Name</span><input id="sql-save-name" maxlength="80" autocomplete="off" required /></label></div>
+        <footer class="ui-dialog__footer"><button class="ui-button" type="button" data-close-dialog>Cancel</button><button class="ui-button primary" type="submit">Save query</button></footer>
+      </form>
+    </dialog>
+
     <dialog class="ui-dialog manager-dialog" id="connections-dialog" aria-labelledby="connections-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>PostgreSQL</small><h2 id="connections-title">Connections</h2><p>Connection profiles are saved by this server. Passwords are encrypted and never returned to the browser.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close connections"></button></header>
-        <div class="dialog-toolbar"><span id="connections-count">Loading connections</span><button class="ui-button compact" id="reload-connections-button" type="button">Reload</button><button class="ui-button compact primary" id="add-connection-button" type="button">New connection</button></div>
+        <div class="dialog-toolbar"><span id="connections-count">Loading connections</span><button class="ui-icon-button compact" id="reload-connections-button" type="button" data-ui-icon="refresh" aria-label="Reload connections"></button><button class="ui-button compact primary" id="add-connection-button" type="button">New connection</button></div>
         <div class="manager-list" id="connections-list" aria-live="polite"></div>
       </div>
     </dialog>
@@ -282,7 +321,7 @@
     <dialog class="ui-dialog manager-dialog" id="workspaces-dialog" aria-labelledby="workspaces-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Saved schema work</small><h2 id="workspaces-title">Workspaces</h2><p>Choose a local design or create a database-backed design from PostgreSQL. Database permissions determine which operations are allowed.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close workspaces"></button></header>
-        <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button class="ui-button compact" id="reload-workspaces-button" type="button">Reload</button></div>
+        <div class="dialog-toolbar"><span id="workspaces-count">Loading workspaces</span><button class="ui-icon-button compact" id="reload-workspaces-button" type="button" data-ui-icon="refresh" aria-label="Reload workspaces"></button></div>
         <div class="manager-list" id="workspaces-list" aria-live="polite"></div>
         <form class="workspace-form" id="workspace-form">
           <header><strong>Create workspace</strong><small id="workspace-form-copy">Start a database-independent schema design.</small></header>
@@ -302,7 +341,7 @@
         <header class="ui-dialog__head"><div><small>Desired schema</small><h2 id="design-table-title">Create table</h2><p id="design-table-copy">Add a table and its initial columns. Saving replaces one exact design revision and never contacts PostgreSQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close table editor"></button></header>
         <div class="design-table-body">
           <label class="design-table-name"><span>Table name</span><input id="design-table-name" required maxlength="63" autocomplete="off" placeholder="customers" /></label>
-          <div class="design-columns-head"><span>Columns · drag the six-dot handle to order</span><button class="ui-button compact" id="add-design-column-button" type="button">Add column</button></div>
+          <div class="design-columns-head"><span>Columns · drag the six-dot handle to order</span><button class="ui-icon-button compact" id="add-design-column-button" type="button" data-ui-icon="add" aria-label="Add column"></button></div>
           <div class="design-columns" id="design-columns"></div>
         </div>
         <div class="form-status" id="design-table-status" aria-live="polite"></div>
@@ -434,7 +473,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
           <label class="compact-search"><span>Search</span><input id="types-search" type="search" autocomplete="off" /></label>
           <div class="type-filters" role="group" aria-label="Custom type filter"><button class="active" type="button" data-type-filter="all" aria-pressed="true">All</button><button type="button" data-type-filter="enum" aria-pressed="false">Enums</button><button type="button" data-type-filter="domain" aria-pressed="false">Domains</button></div>
           <span id="types-count">No design loaded</span>
-          <button class="ui-button compact primary" id="create-type-button" type="button">Create type</button>
+          <button class="ui-icon-button compact" id="create-type-button" type="button" data-ui-icon="add" aria-label="Create type"></button>
         </div>
         <div class="catalog-browser-list" id="types-list"></div>
       </div>
@@ -458,7 +497,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
     <dialog class="ui-dialog catalog-dialog" id="functions-dialog" aria-labelledby="functions-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small id="functions-source">Workspace routines</small><h2 id="functions-title">Functions and procedures</h2><p id="functions-copy">Browse routine signatures and source definitions from the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close functions"></button></header>
-        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="functions-search" type="search" autocomplete="off" /></label><span id="functions-count">No catalog loaded</span><button class="ui-button compact primary" id="create-function-button" type="button" hidden>Create routine</button></div>
+        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="functions-search" type="search" autocomplete="off" /></label><span id="functions-count">No catalog loaded</span><button class="ui-icon-button compact" id="create-function-button" type="button" data-ui-icon="add" aria-label="Create routine" hidden></button></div>
         <div class="catalog-browser-list" id="functions-list"></div>
       </div>
     </dialog>
@@ -496,7 +535,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
     <dialog class="ui-dialog catalog-dialog" id="objects-dialog" aria-labelledby="objects-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small id="objects-source">Workspace catalog</small><h2 id="objects-title">Database objects</h2><p id="objects-copy">Browse types, tables, views, constraints, indexes, triggers, functions, and procedures in the open workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close database objects"></button></header>
-        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-button compact primary" id="create-trigger-button" type="button" hidden>Create trigger</button></div>
+        <div class="dialog-toolbar"><label class="compact-search"><span>Search</span><input id="objects-search" type="search" autocomplete="off" /></label><span id="objects-count">No catalog loaded</span><button class="ui-icon-button compact" id="create-trigger-button" type="button" data-ui-icon="add" aria-label="Create trigger" hidden></button></div>
         <div class="catalog-browser-list" id="objects-list"></div>
       </div>
     </dialog>
@@ -505,7 +544,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Bounded live PostgreSQL snapshot</small><h2 id="relation-preview-title">Preview rows</h2><p id="relation-preview-copy">Read-only data preview. Values may change between pages as PostgreSQL changes.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close row preview"></button></header>
         <div class="relation-preview-body" id="relation-preview-body" aria-live="polite"></div>
-        <footer class="ui-dialog__actions"><span id="relation-preview-status">Up to 100 rows</span><button class="ui-button compact" id="relation-preview-more" type="button" hidden>Next page</button><button class="ui-button compact primary" type="button" data-close-dialog>Close</button></footer>
+        <footer class="ui-dialog__actions"><span id="relation-preview-status">Up to 100 rows</span><button class="ui-button compact primary" type="button" data-close-dialog>Close</button></footer>
       </div>
     </dialog>
 
@@ -515,6 +554,29 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <div class="migration-review-body" id="migration-review-body" aria-live="polite"></div>
         <div class="form-status migration-status" id="migration-status" aria-live="polite"></div>
         <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Close</button><button class="ui-button compact" id="refresh-migration-button" type="button">Refresh review</button><button class="ui-button compact" id="resolve-migration-button" type="button" hidden>Resolve conflicts</button><button class="ui-button compact primary" id="apply-migration-button" type="button" disabled>Apply migration</button></footer>
+        <div class="migration-rebuild-help-layer" id="migration-rebuild-help" hidden>
+          <article class="migration-rebuild-help-card" data-rebuild-help-kind="populated" role="dialog" aria-modal="true" aria-labelledby="migration-populated-rebuild-help-title">
+            <header class="ui-dialog__head"><div><small>Populated table · physical column order</small><h2 id="migration-populated-rebuild-help-title">How populated tables are reordered</h2><p>Schemii uses a server-managed PostgreSQL transaction to preserve rows while rebuilding the physical column order.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-rebuild-help aria-label="Close populated-table reorder information"></button></header>
+            <div class="migration-rebuild-help-body">
+              <section><h3>Your rows are preserved</h3><p>Schemii locks the table, copies its rows to a temporary table inside the connected PostgreSQL database, rebuilds the columns in the selected order, and restores every row by column name.</p></section>
+              <section><h3>Dependent objects are preserved automatically</h3><p>Modeled constraints, indexes, foreign keys, triggers, and identity values are recreated before the result is verified. You do not need to remove or restore them manually.</p></section>
+              <section><h3>The change is atomic</h3><p>If a step or final verification fails, PostgreSQL rolls back the entire migration, including the row copy and dependent-object changes.</p></section>
+              <p class="migration-rebuild-help-note"><strong>Large-table warning</strong><span>More rows take longer to copy and restore, require more temporary PostgreSQL storage, and keep the table exclusively locked for longer. Other database operations may have to wait until the migration finishes.</span></p>
+              <p class="migration-rebuild-help-privacy">Temporary row data remains in PostgreSQL and is never stored in the Schemii metadata database.</p>
+            </div>
+            <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-close-rebuild-help>Got it</button></footer>
+          </article>
+          <article class="migration-rebuild-help-card" data-rebuild-help-kind="empty" role="dialog" aria-modal="true" aria-labelledby="migration-empty-rebuild-help-title" hidden>
+            <header class="ui-dialog__head"><div><small>Empty table · physical column order</small><h2 id="migration-empty-rebuild-help-title">Why database reordering is optional</h2><p>Schemii's saved app order and PostgreSQL's physical column order are independent.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-rebuild-help aria-label="Close empty-table reorder information"></button></header>
+            <div class="migration-rebuild-help-body">
+              <section><h3>Your app order is already saved</h3><p>The column order shown on the canvas and in the inspector is stored in Schemii without changing PostgreSQL. Deselecting this option keeps that visual order and leaves the database's physical order alone.</p></section>
+              <section><h3>Physical reordering is an extra option</h3><p>Schemii selects it by default for an empty table because there are no rows to copy. The server verifies that the table is still empty immediately before applying the reviewed migration.</p></section>
+              <section><h3>Dependent objects are preserved automatically</h3><p>If selected, Schemii temporarily removes and recreates modeled constraints, indexes, foreign keys, triggers, and identity values in the same PostgreSQL transaction. You do not need to manage them manually.</p></section>
+              <p class="migration-rebuild-help-note"><strong>No data-copy cost</strong><span>An empty-table reorder still takes an exclusive table lock and performs schema changes, but it does not stage or restore rows.</span></p>
+            </div>
+            <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-close-rebuild-help>Got it</button></footer>
+          </article>
+        </div>
       </div>
     </dialog>
 
@@ -559,7 +621,83 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       </article>
     </dialog>
 
+    <aside class="ai-assistant" id="ai-assistant" aria-labelledby="ai-assistant-title" aria-hidden="true" inert>
+      <header class="ai-assistant__head">
+        <div class="ai-assistant__identity"><small>WORKSPACE ASSISTANT</small><h2 id="ai-assistant-title">Schemii AI</h2></div>
+        <span class="ai-status-pill" id="ai-assistant-status">Ready</span>
+        <button class="ui-icon-button compact" id="ai-assistant-history" data-ui-icon="history" aria-label="Conversation history"></button>
+        <button class="ui-icon-button compact" id="ai-assistant-new" data-ui-icon="new-chat" aria-label="New conversation"></button>
+        <button class="ui-icon-button compact" id="ai-assistant-settings" data-ui-icon="settings" aria-label="Assistant settings"></button>
+        <button class="ui-icon-button compact" id="ai-assistant-close" data-ui-icon="close" aria-label="Close assistant"></button>
+      </header>
+      <section class="ai-assistant__context" aria-label="Assistant context">
+        <label><span>Model</span><select id="ai-assistant-model" aria-label="AI model"></select></label>
+        <button class="ai-permissions-summary" id="ai-assistant-permissions" type="button"><span>Permissions</span><strong id="ai-assistant-permissions-copy">Explain only</strong></button>
+        <p id="ai-assistant-disclosure">The assistant sees the saved workspace design. Every proposed change still requires your review.</p>
+      </section>
+      <div class="ai-assistant__notice" id="ai-assistant-notice" role="status" aria-live="polite">AI actions are proposals. You review every change before Schemii applies it.</div>
+      <main class="ai-assistant__body" id="ai-assistant-body">
+        <div class="ai-assistant__messages" id="ai-assistant-messages" aria-live="polite"></div>
+        <div class="ai-assistant__activity" id="ai-assistant-activity" aria-live="polite"></div>
+      </main>
+      <form class="ai-assistant__composer" id="ai-assistant-form">
+        <label for="ai-assistant-input">Ask about this workspace</label>
+        <div class="ai-context-attachment" id="ai-assistant-attachment" hidden></div>
+        <textarea id="ai-assistant-input" rows="3" placeholder="Ask about this workspace…" required></textarea>
+        <span class="ai-composer-hint">Enter to send · Shift + Enter for a new line</span>
+        <button class="ui-icon-button primary" type="submit" data-ui-icon="run" aria-label="Send message"></button>
+      </form>
+    </aside>
+
+    <dialog class="ui-dialog ai-settings-dialog" id="ai-settings-dialog" aria-labelledby="ai-settings-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>WORKSPACE ASSISTANT</small><h2 id="ai-settings-title">Model &amp; permissions</h2><p>Choose the default model and exactly what new conversations may inspect or propose.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-ai-settings-close aria-label="Close assistant settings"></button></header>
+        <div class="ai-settings-body">
+          <form class="ai-settings-preferences" id="ai-settings-form">
+            <label class="ai-settings-model"><span>Default model</span><select id="ai-settings-model" required></select><small>Changing the model starts a new conversation so earlier answers retain their original model context.</small></label>
+            <fieldset class="ai-permission-list">
+              <legend>Conversation permissions</legend>
+              <label><span><strong>Propose design changes</strong><small>Prepare schema edits for explicit review. The assistant cannot apply them silently.</small></span><input type="checkbox" name="designChanges"></label>
+              <label><span><strong>Inspect live catalog</strong><small>Include current PostgreSQL object metadata when this workspace has a connection.</small></span><input type="checkbox" name="liveCatalog"></label>
+              <label><span><strong>Use selected result rows</strong><small>Send a bounded, temporary result snapshot only when you explicitly attach it.</small></span><input type="checkbox" name="structuredDataRead"></label>
+              <label><span><strong>Prepare read queries</strong><small>Propose read-only SQL and run it only after you approve the proposal.</small></span><input type="checkbox" name="rawSqlRead"></label>
+              <label class="danger"><span><strong>Prepare write SQL</strong><small>Put write SQL in Console for your review. It is never executed automatically.</small></span><input type="checkbox" name="rawSqlWrite"></label>
+            </fieldset>
+          </form>
+          <section class="ai-provider-settings" aria-labelledby="ai-provider-settings-title">
+            <div class="ai-settings-section-head"><div><h3 id="ai-provider-settings-title">Model providers</h3><p>Connect a provider to make its models available. Credentials stay inside the private AI runtime and are never returned to the browser.</p></div></div>
+            <div class="ai-provider-list" id="ai-provider-list"></div>
+          </section>
+          <p class="form-status" id="ai-settings-status" role="status" aria-live="polite"></p>
+        </div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-ai-settings-close>Cancel</button><button class="ui-button compact primary" type="submit" form="ai-settings-form">Save settings</button></footer>
+      </div>
+    </dialog>
+
+    <dialog class="ui-dialog ai-history-dialog" id="ai-history-dialog" aria-labelledby="ai-history-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>WORKSPACE ASSISTANT</small><h2 id="ai-history-title">Conversation history</h2><p>Open, rename, or remove your saved conversations for this workspace.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-ai-history-close aria-label="Close conversation history"></button></header>
+        <div class="ai-history-list" id="ai-history-list" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-ai-history-close>Done</button></footer>
+      </div>
+    </dialog>
+
+    <dialog class="ui-dialog confirm-dialog" id="ai-delete-chat-dialog" aria-labelledby="ai-delete-chat-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>REMOVE CONVERSATION</small><h2 id="ai-delete-chat-title">Delete this conversation?</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-ai-delete-cancel aria-label="Cancel conversation deletion"></button></header>
+        <p id="ai-delete-chat-copy">Its saved messages will be removed. This cannot be undone.</p>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-ai-delete-cancel>Cancel</button><button class="ui-button compact danger" id="ai-delete-chat-confirm" type="button">Delete conversation</button></footer>
+      </div>
+    </dialog>
+    <dialog class="ui-dialog ai-proposal-dialog" id="ai-proposal-dialog" aria-labelledby="ai-proposal-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>ASSISTANT PROPOSAL</small><h2 id="ai-proposal-title">Review proposed action</h2><p>Confirm the exact action Schemii will perform. The assistant cannot approve it for you.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-ai-proposal-cancel aria-label="Cancel proposal review"></button></header>
+        <div class="ai-proposal-review" id="ai-proposal-review"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-ai-proposal-cancel>Cancel</button><button class="ui-button compact primary" id="ai-proposal-confirm" type="button">Apply proposal</button></footer>
+      </div>
+    </dialog>
     <div class="ui-toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script type="module" src="assets/app.js"></script>
+    <script type="module" src="assets/ai-assistant.js"></script>
   </body>
 </html>

@@ -62,8 +62,9 @@ def test_openapi_exposes_typed_planned_routes_without_marking_them_implemented()
     assert all("501" in operation["responses"] for operation in planned)
     assert schema["paths"]["/api/v1/schemii/ai/chats"]["get"]["tags"] == [
         "schemii",
-        "schemii-assistant-planned",
+        "schemii-assistant",
     ]
+    assert "x-schemii-status" not in schema["paths"]["/api/v1/schemii/ai/chats"]["get"]
     assert schema["paths"]["/api/v1/schemii/workspaces/{workspace_id}/design"][
         "get"
     ]["tags"] == ["schemii", "schemii-schema-design"]

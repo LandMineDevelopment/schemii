@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
-import json
 import secrets
+import threading
+import time
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import ValidationError
@@ -21,9 +22,8 @@ from .errors import (
     PostgresCatalogValidationError,
     PostgresCommitUncertainError,
     PostgresConnectionError,
+    PostgresConnectionCapacityError,
     PostgresConsoleCancelledError,
-    PostgresConsoleLimitError,
-    PostgresConsoleQueryError,
     PostgresDatabaseMismatchError,
     PostgresDriverUnavailableError,
     PostgresGatewayError,
@@ -35,15 +35,14 @@ from .errors import (
     PostgresQueryError,
     PostgresTransactionStatusError,
 )
-from .console.execution import (
-    MAX_CONSOLE_RESULT_BYTES,
-    MAX_CONSOLE_ROWS,
-    ConsoleQueryResult,
-    ConsoleValueLimitError,
-    json_console_value,
-    validate_read_only_statements,
+from .console.execution import ConsoleQueryResult, validate_read_only_statements
+from .console.gateway import (
+    PostgresConsoleReadSession,
+    PostgresConsoleTransaction,
+    PsycopgConsoleReadSession,
+    PsycopgConsoleTransaction,
+    execute_console_statements,
 )
-from .console.models import ConsoleResultColumn
 from .models import (
     PostgresCatalog,
     PostgresCheckConstraint,
@@ -80,8 +79,6 @@ from .queries import (
 )
 
 
-STATEMENT_TIMEOUT_MS = 15_000
-LOCK_TIMEOUT_MS = 5_000
 IDLE_TRANSACTION_TIMEOUT_MS = 30_000
 
 
@@ -89,6 +86,7 @@ IDLE_TRANSACTION_TIMEOUT_MS = 30_000
 class PostgresCatalogLimits:
     """Application-side limits that prevent unbounded catalog materialization."""
 
+    max_namespaces: int = 10_000
     max_tables: int = 2_000
     max_columns: int = 30_000
     max_constraints: int = 20_000
@@ -103,6 +101,7 @@ class PostgresCatalogLimits:
 
     def __post_init__(self) -> None:
         hard_limits = {
+            "max_namespaces": 50_000,
             "max_tables": 10_000,
             "max_columns": 100_000,
             "max_constraints": 100_000,
@@ -172,13 +171,37 @@ class PostgresGateway(Protocol):
         table_names: Sequence[str],
     ) -> dict[str, bool]: ...
 
+    def table_column_rebuild_blockers(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        table_names: Sequence[str],
+    ) -> dict[str, tuple[str, ...]]: ...
+
     def execute_console(
         self,
         connection: ResolvedPostgresConnection,
+        namespace: str,
         statements: Sequence[str],
         *,
         on_started: Callable[[int], bool],
     ) -> tuple[ConsoleQueryResult, ...]: ...
+
+    def open_console_read_session(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        statements: Sequence[str],
+        *,
+        on_started: Callable[[int], bool],
+        page_memory_bytes: int,
+    ) -> PostgresConsoleReadSession: ...
+
+    def open_console_transaction(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+    ) -> "PostgresConsoleTransaction": ...
 
     def cancel_console(
         self,
@@ -212,6 +235,74 @@ def _portable_dict_row(cursor: Any) -> Callable[[Sequence[Any]], dict[str, Any]]
     return lambda values: dict(zip(names, values))
 
 
+class _ConnectionCapacity:
+    """Process-local admission control; PostgreSQL remains the pool authority."""
+
+    def __init__(self, maximum_total: int, maximum_per_identity: int) -> None:
+        self._maximum_total = maximum_total
+        self._maximum_per_identity = maximum_per_identity
+        self._total = 0
+        self._by_identity: dict[str, int] = {}
+        self._condition = threading.Condition()
+
+    def acquire(self, identity: str, timeout: float) -> tuple[str, int, int] | None:
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while (
+                self._total >= self._maximum_total
+                or self._by_identity.get(identity, 0) >= self._maximum_per_identity
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._condition.wait(remaining):
+                    identity_count = self._by_identity.get(identity, 0)
+                    if identity_count >= self._maximum_per_identity:
+                        return (
+                            "postgres.connections.maximum_per_identity",
+                            self._maximum_per_identity,
+                            identity_count,
+                        )
+                    return (
+                        "postgres.connections.maximum_total",
+                        self._maximum_total,
+                        self._total,
+                    )
+            self._total += 1
+            self._by_identity[identity] = self._by_identity.get(identity, 0) + 1
+            return None
+
+    def release(self, identity: str) -> None:
+        with self._condition:
+            count = self._by_identity.get(identity, 0)
+            if count <= 0:
+                return
+            self._total -= 1
+            if count == 1:
+                self._by_identity.pop(identity, None)
+            else:
+                self._by_identity[identity] = count - 1
+            self._condition.notify_all()
+
+
+class _LeasedConnection:
+    def __init__(self, connection: Any, capacity: _ConnectionCapacity, identity: str) -> None:
+        self._connection = connection
+        self._capacity = capacity
+        self._identity = identity
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._connection.close()
+        finally:
+            self._capacity.release(self._identity)
+
+
 class PsycopgPostgresGateway:
     """Read PostgreSQL authority through psycopg without retaining snapshots."""
 
@@ -221,10 +312,39 @@ class PsycopgPostgresGateway:
         connect_factory: Callable[..., Any] | None = None,
         limits: PostgresCatalogLimits | None = None,
         clock: Callable[[], datetime] | None = None,
+        maximum_connections: int = 20,
+        maximum_connections_per_identity: int = 4,
+        connection_acquire_timeout: float = 5.0,
+        maximum_console_statements: int = 20,
+        console_page_memory_bytes: int = 4 * 1024 * 1024,
+        console_maximum_cell_bytes: int = 256 * 1024,
+        catalog_statement_timeout_seconds: int = 15,
+        migration_statement_timeout_seconds: int = 120,
+        lock_timeout_seconds: int = 5,
+        console_idle_transaction_seconds: int = 300,
     ) -> None:
+        if maximum_connections < 1:
+            raise ValueError("Maximum PostgreSQL connections must be positive")
+        if not 1 <= maximum_connections_per_identity <= maximum_connections:
+            raise ValueError("Per-identity PostgreSQL capacity is invalid")
+        if connection_acquire_timeout <= 0:
+            raise ValueError("PostgreSQL connection acquire timeout must be positive")
+        if maximum_console_statements < 1:
+            raise ValueError("Maximum Console statements must be positive")
         self._connect_factory = connect_factory
         self._limits = limits or PostgresCatalogLimits()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._connection_capacity = _ConnectionCapacity(
+            maximum_connections, maximum_connections_per_identity
+        )
+        self._connection_acquire_timeout = connection_acquire_timeout
+        self._maximum_console_statements = maximum_console_statements
+        self._console_page_memory_bytes = console_page_memory_bytes
+        self._console_maximum_cell_bytes = console_maximum_cell_bytes
+        self._catalog_statement_timeout_ms = catalog_statement_timeout_seconds * 1000
+        self._migration_statement_timeout_ms = migration_statement_timeout_seconds * 1000
+        self._lock_timeout_ms = lock_timeout_seconds * 1000
+        self._console_idle_transaction_timeout_ms = console_idle_transaction_seconds * 1000
 
     def test_connection(
         self,
@@ -279,7 +399,7 @@ class PsycopgPostgresGateway:
         """Return visible non-temporary schemas through a bounded read-only query."""
 
         database_connection: Any | None = None
-        limit = 10_000
+        limit = self._limits.max_namespaces
         try:
             database_connection = self._connect(connection)
             self._begin_read_only(database_connection)
@@ -291,7 +411,7 @@ class PsycopgPostgresGateway:
                 (limit + 1,),
             )
             if len(rows) > limit:
-                raise PostgresCatalogLimitError("namespaces", limit)
+                raise PostgresCatalogLimitError("namespaces", limit, len(rows))
             return tuple(
                 PostgresNamespace(
                     name=row["namespace_name"],
@@ -350,21 +470,172 @@ class PsycopgPostgresGateway:
         finally:
             self._cleanup(database_connection)
 
+    def table_column_rebuild_blockers(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        table_names: Sequence[str],
+    ) -> dict[str, tuple[str, ...]]:
+        """Inventory column metadata that an in-place physical rebuild cannot preserve."""
+
+        namespace = self._validated_namespace(namespace)
+        names = self._validated_table_names(table_names)
+        database_connection: Any | None = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection, repeatable_read=True)
+            result: dict[str, tuple[str, ...]] = {}
+            for table_name in names:
+                row = self._one(self._execute_rows(
+                    database_connection,
+                    """
+                    /* schemii_column_rebuild_safety */
+                    SELECT
+                        EXISTS (
+                            SELECT 1 FROM pg_attribute a
+                            WHERE a.attrelid = c.oid AND a.attnum > 0
+                              AND NOT a.attisdropped AND a.attacl IS NOT NULL
+                        ) AS column_privileges,
+                        EXISTS (
+                            SELECT 1 FROM pg_description d
+                            WHERE d.classoid = 'pg_class'::regclass
+                              AND d.objoid = c.oid AND d.objsubid > 0
+                        ) AS column_comments,
+                        EXISTS (
+                            SELECT 1 FROM pg_seclabel s
+                            WHERE s.classoid = 'pg_class'::regclass
+                              AND s.objoid = c.oid AND s.objsubid > 0
+                        ) AS column_security_labels,
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_attribute a
+                            JOIN pg_type t ON t.oid = a.atttypid
+                            WHERE a.attrelid = c.oid AND a.attnum > 0
+                              AND NOT a.attisdropped
+                              AND (
+                                  a.attstattarget <> -1
+                                  OR a.attstorage <> t.typstorage
+                                  OR a.attcompression::text <> ''
+                              )
+                        ) AS column_storage_settings,
+                        EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
+                        EXISTS (SELECT 1 FROM pg_statistic_ext e WHERE e.stxrelid = c.oid) AS extended_statistics,
+                        EXISTS (SELECT 1 FROM pg_publication_rel p WHERE p.prrelid = c.oid) AS publications,
+                        c.relreplident <> 'd' AS custom_replica_identity,
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_depend d
+                            JOIN pg_rewrite r
+                              ON r.oid = d.objid
+                             AND d.classid = 'pg_rewrite'::regclass
+                            JOIN pg_class dependent ON dependent.oid = r.ev_class
+                            WHERE d.refclassid = 'pg_class'::regclass
+                              AND d.refobjid = c.oid
+                              AND dependent.oid <> c.oid
+                        ) AS dependent_views,
+                        EXISTS (
+                            SELECT 1 FROM pg_rewrite r
+                            WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN'
+                        ) AS custom_rules,
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_attribute a
+                            JOIN pg_sequence identity_sequence
+                              ON identity_sequence.seqrelid = pg_get_serial_sequence(
+                                  format('%%I.%%I', n.nspname, c.relname), a.attname
+                              )::regclass
+                            WHERE a.attrelid = c.oid
+                              AND a.attnum > 0
+                              AND NOT a.attisdropped
+                              AND a.attidentity <> ''
+                              AND (
+                                  identity_sequence.seqstart <> 1
+                                  OR identity_sequence.seqincrement <> 1
+                                  OR identity_sequence.seqmin <> 1
+                                  OR identity_sequence.seqcache <> 1
+                                  OR identity_sequence.seqcycle
+                                  OR identity_sequence.seqmax <> CASE identity_sequence.seqtypid
+                                      WHEN 'int2'::regtype THEN 32767
+                                      WHEN 'int4'::regtype THEN 2147483647
+                                      ELSE 9223372036854775807
+                                  END
+                              )
+                        ) AS custom_identity_sequence,
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_attribute a
+                            JOIN pg_class sequence_class
+                              ON sequence_class.oid = pg_get_serial_sequence(
+                                  format('%%I.%%I', n.nspname, c.relname), a.attname
+                              )::regclass
+                            WHERE a.attrelid = c.oid
+                              AND a.attnum > 0
+                              AND NOT a.attisdropped
+                              AND a.attidentity <> ''
+                              AND (
+                                  sequence_class.relacl IS NOT NULL
+                                  OR EXISTS (
+                                      SELECT 1 FROM pg_description d
+                                      WHERE d.classoid = 'pg_class'::regclass
+                                        AND d.objoid = sequence_class.oid
+                                  )
+                              )
+                        ) AS identity_sequence_metadata
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'
+                    """,
+                    (namespace, table_name),
+                ))
+                fields = {
+                    "column_privileges": "Column-specific privileges would be lost.",
+                    "column_comments": "Column comments would be lost.",
+                    "column_security_labels": "Column security labels would be lost.",
+                    "column_storage_settings": "Custom column statistics or storage settings would be lost.",
+                    "policies": "Row-security policies may depend on physical columns.",
+                    "extended_statistics": "Extended statistics depend on physical columns.",
+                    "publications": "Publication column lists or row filters may depend on physical columns.",
+                    "custom_replica_identity": "The table uses a custom replica identity.",
+                    "dependent_views": "A database view or materialized view depends on the table.",
+                    "custom_rules": "A custom PostgreSQL rule depends on the table.",
+                    "custom_identity_sequence": "A custom identity sequence configuration would be lost.",
+                    "identity_sequence_metadata": "Identity-sequence privileges or comments would be lost.",
+                }
+                if not row:
+                    raise PostgresCatalogValidationError()
+                for key in fields:
+                    if type(row.get(key)) is not bool:
+                        raise PostgresCatalogValidationError()
+                result[table_name] = tuple(
+                    message for key, message in fields.items() if row[key]
+                )
+            return result
+        except PostgresGatewayError:
+            raise
+        except (KeyError, TypeError, ValueError):
+            raise PostgresCatalogValidationError() from None
+        finally:
+            self._cleanup(database_connection)
+
     def execute_console(
         self,
         connection: ResolvedPostgresConnection,
+        namespace: str,
         statements: Sequence[str],
         *,
         on_started: Callable[[int], bool],
     ) -> tuple[ConsoleQueryResult, ...]:
         """Run bounded SELECT-shaped statements in one read-only transaction."""
 
-        validated = validate_read_only_statements(list(statements))
+        namespace = self._validated_namespace(namespace)
+        validated = validate_read_only_statements(
+            list(statements), statement_limit=self._maximum_console_statements
+        )
         database_connection: Any | None = None
-        statement_index = 0
         try:
             database_connection = self._connect(connection)
             self._begin_read_only(database_connection, repeatable_read=True)
+            self._set_console_namespace(database_connection, namespace)
             identity = self._one(
                 self._execute_rows(
                     database_connection,
@@ -377,74 +648,102 @@ class PsycopgPostgresGateway:
                 raise PostgresCatalogValidationError()
             if not on_started(backend_pid):
                 raise PostgresConsoleCancelledError()
-
-            remaining_rows = MAX_CONSOLE_ROWS
-            result_bytes = 0
-            results: list[ConsoleQueryResult] = []
-            for statement_index, statement in enumerate(validated):
-                cursor: Any | None = None
-                try:
-                    cursor = database_connection.cursor(
-                        row_factory=lambda _cursor: lambda values: tuple(values)
-                    )
-                    cursor.execute(statement)
-                    description = tuple(cursor.description or ())
-                    raw_rows = cursor.fetchmany(remaining_rows + 1) if description else []
-                    truncated = len(raw_rows) > remaining_rows
-                    raw_rows = raw_rows[:remaining_rows]
-                    rows: list[tuple[Any, ...]] = []
-                    for raw_row in raw_rows:
-                        converted = tuple(json_console_value(value) for value in raw_row)
-                        result_bytes += len(
-                            json.dumps(converted, ensure_ascii=False).encode("utf-8")
-                        )
-                        if result_bytes > MAX_CONSOLE_RESULT_BYTES:
-                            raise PostgresConsoleLimitError(
-                                "PostgreSQL results exceed the retained Console size limit",
-                                statement_index=statement_index,
-                            )
-                        rows.append(converted)
-                    remaining_rows -= len(rows)
-                    type_names = self._console_type_names(
-                        database_connection,
-                        tuple(column.type_code for column in description),
-                    )
-                    columns = tuple(
-                        ConsoleResultColumn(
-                            name=column.name,
-                            data_type=type_names.get(column.type_code, f"oid:{column.type_code}"),
-                        )
-                        for column in description
-                    )
-                    command = str(cursor.statusmessage or "SELECT").split(" ", 1)[0]
-                    results.append(
-                        ConsoleQueryResult(
-                            statement_index=statement_index,
-                            command=command,
-                            columns=columns,
-                            rows=tuple(rows),
-                            truncated=truncated,
-                        )
-                    )
-                finally:
-                    self._safe_close(cursor)
+            results = execute_console_statements(
+                database_connection,
+                validated,
+                maximum_result_bytes=self._console_page_memory_bytes,
+                maximum_cell_bytes=self._console_maximum_cell_bytes,
+            )
             database_connection.rollback()
-            return tuple(results)
+            return results
         except PostgresGatewayError:
             raise
-        except ConsoleValueLimitError as error:
-            raise PostgresConsoleLimitError(
-                str(error), statement_index=statement_index
-            ) from error
-        except Exception as error:
-            diagnostic = getattr(error, "diag", None)
-            message = getattr(diagnostic, "message_primary", None)
-            sqlstate = getattr(error, "sqlstate", None)
-            raise PostgresConsoleQueryError(
-                message if isinstance(message, str) and message else "PostgreSQL rejected the query",
-                statement_index=statement_index,
-                sqlstate=sqlstate if isinstance(sqlstate, str) else None,
-            ) from None
+        finally:
+            self._cleanup(database_connection)
+
+    def open_console_read_session(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+        statements: Sequence[str],
+        *,
+        on_started: Callable[[int], bool],
+        page_memory_bytes: int,
+    ) -> PostgresConsoleReadSession:
+        """Open PostgreSQL-owned, scrollable results for incremental paging."""
+
+        namespace = self._validated_namespace(namespace)
+        validated = validate_read_only_statements(
+            list(statements), statement_limit=self._maximum_console_statements
+        )
+        database_connection: Any | None = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection, repeatable_read=True)
+            self._set_console_namespace(database_connection, namespace)
+            identity = self._one(
+                self._execute_rows(
+                    database_connection,
+                    "SELECT current_database() AS database, pg_backend_pid() AS backend_pid",
+                )
+            )
+            self._require_database(identity, connection.database)
+            backend_pid = identity.get("backend_pid")
+            if isinstance(backend_pid, bool) or not isinstance(backend_pid, int):
+                raise PostgresCatalogValidationError()
+            if not on_started(backend_pid):
+                raise PostgresConsoleCancelledError()
+            session = PsycopgConsoleReadSession(
+                database_connection,
+                backend_pid,
+                validated,
+                page_memory_bytes=page_memory_bytes,
+                maximum_cell_bytes=self._console_maximum_cell_bytes,
+            )
+            database_connection = None
+            return session
+        except PostgresGatewayError:
+            raise
+        except Exception:
+            raise PostgresConnectionError() from None
+        finally:
+            self._cleanup(database_connection)
+
+    def open_console_transaction(
+        self,
+        connection: ResolvedPostgresConnection,
+        namespace: str,
+    ) -> PostgresConsoleTransaction:
+        """Open one bounded write transaction retained by the application process."""
+
+        namespace = self._validated_namespace(namespace)
+        database_connection: Any | None = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_console_write(database_connection)
+            self._set_console_namespace(database_connection, namespace)
+            identity = self._one(
+                self._execute_rows(
+                    database_connection,
+                    "SELECT current_database() AS database, pg_backend_pid() AS backend_pid",
+                )
+            )
+            self._require_database(identity, connection.database)
+            backend_pid = identity.get("backend_pid")
+            if isinstance(backend_pid, bool) or not isinstance(backend_pid, int):
+                raise PostgresCatalogValidationError()
+            transaction = PsycopgConsoleTransaction(
+                database_connection,
+                backend_pid,
+                maximum_result_bytes=self._console_page_memory_bytes,
+                maximum_cell_bytes=self._console_maximum_cell_bytes,
+            )
+            database_connection = None
+            return transaction
+        except PostgresGatewayError:
+            raise
+        except Exception:
+            raise PostgresConnectionError() from None
         finally:
             self._cleanup(database_connection)
 
@@ -633,26 +932,6 @@ class PsycopgPostgresGateway:
             raise PostgresCatalogValidationError()
         return identity
 
-    @classmethod
-    def _console_type_names(
-        cls,
-        database_connection: Any,
-        type_oids: tuple[int, ...],
-    ) -> dict[int, str]:
-        if not type_oids:
-            return {}
-        rows = cls._execute_rows(
-            database_connection,
-            "SELECT oid::integer AS oid, format_type(oid, NULL) AS data_type "
-            "FROM pg_type WHERE oid = ANY(%s::oid[])",
-            (list(set(type_oids)),),
-        )
-        return {
-            int(row["oid"]): str(row["data_type"])
-            for row in rows
-            if row.get("oid") is not None and row.get("data_type") is not None
-        }
-
     def _connect(self, connection: ResolvedPostgresConnection) -> Any:
         factory = self._connect_factory
         row_factory = _portable_dict_row
@@ -681,11 +960,21 @@ class PsycopgPostgresGateway:
         }
         if connection.password is not None:
             parameters["password"] = connection.password.get_secret_value()
+        identity = f"{connection.id}:{connection.revision}"
+        reached = self._connection_capacity.acquire(
+            identity, self._connection_acquire_timeout
+        )
+        if reached is not None:
+            limit_name, limit, observed = reached
+            raise PostgresConnectionCapacityError(limit_name, limit, observed)
         try:
-            return factory(**parameters)
+            opened = factory(**parameters)
+            return _LeasedConnection(opened, self._connection_capacity, identity)
         except PostgresGatewayError:
+            self._connection_capacity.release(identity)
             raise
         except Exception:
+            self._connection_capacity.release(identity)
             raise PostgresConnectionError() from None
 
     @staticmethod
@@ -700,44 +989,93 @@ class PsycopgPostgresGateway:
             PsycopgPostgresGateway._safe_close(cursor)
 
     @classmethod
-    def _begin_read_only(
+    def _set_timeout_ceiling(
         cls,
+        database_connection: Any,
+        setting: str,
+        configured_milliseconds: int,
+    ) -> None:
+        """Apply an application ceiling without weakening a stricter role setting."""
+
+        if setting not in {
+            "statement_timeout",
+            "lock_timeout",
+            "idle_in_transaction_session_timeout",
+        }:
+            raise ValueError("unsupported PostgreSQL timeout setting")
+        value = f"{configured_milliseconds}ms"
+        cls._execute_statement(
+            database_connection,
+            f"SELECT set_config('{setting}', CASE "
+            f"WHEN current_setting('{setting}')::interval = interval '0' "
+            f"OR current_setting('{setting}')::interval > interval '{value}' "
+            f"THEN '{value}' ELSE current_setting('{setting}') END, true)",
+        )
+
+    def _begin_read_only(
+        self,
         database_connection: Any,
         *,
         repeatable_read: bool = False,
     ) -> None:
         isolation = " ISOLATION LEVEL REPEATABLE READ" if repeatable_read else ""
-        cls._execute_statement(
+        self._execute_statement(
             database_connection,
             f"BEGIN TRANSACTION{isolation}, READ ONLY" if isolation else "BEGIN TRANSACTION READ ONLY",
         )
-        cls._execute_statement(
-            database_connection,
-            f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}",
+        self._set_timeout_ceiling(
+            database_connection, "statement_timeout", self._catalog_statement_timeout_ms
         )
-        cls._execute_statement(
-            database_connection,
-            f"SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}",
+        self._set_timeout_ceiling(
+            database_connection, "lock_timeout", self._lock_timeout_ms
         )
-        cls._execute_statement(
+        self._set_timeout_ceiling(
             database_connection,
-            f"SET LOCAL idle_in_transaction_session_timeout = {IDLE_TRANSACTION_TIMEOUT_MS}",
+            "idle_in_transaction_session_timeout",
+            IDLE_TRANSACTION_TIMEOUT_MS,
+        )
+
+    def _begin_write(self, database_connection: Any) -> None:
+        self._execute_statement(database_connection, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        self._set_timeout_ceiling(
+            database_connection,
+            "statement_timeout",
+            self._migration_statement_timeout_ms,
+        )
+        self._set_timeout_ceiling(
+            database_connection, "lock_timeout", self._lock_timeout_ms
+        )
+        self._set_timeout_ceiling(
+            database_connection,
+            "idle_in_transaction_session_timeout",
+            IDLE_TRANSACTION_TIMEOUT_MS,
+        )
+
+    def _begin_console_write(self, database_connection: Any) -> None:
+        """Begin a human-controlled transaction using PostgreSQL's normal isolation."""
+
+        self._execute_statement(database_connection, "BEGIN TRANSACTION")
+        self._set_timeout_ceiling(
+            database_connection, "statement_timeout", self._catalog_statement_timeout_ms
+        )
+        self._set_timeout_ceiling(
+            database_connection, "lock_timeout", self._lock_timeout_ms
+        )
+        self._set_timeout_ceiling(
+            database_connection,
+            "idle_in_transaction_session_timeout",
+            self._console_idle_transaction_timeout_ms,
         )
 
     @classmethod
-    def _begin_write(cls, database_connection: Any) -> None:
-        cls._execute_statement(database_connection, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+    def _set_console_namespace(
+        cls,
+        database_connection: Any,
+        namespace: str,
+    ) -> None:
         cls._execute_statement(
             database_connection,
-            f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}",
-        )
-        cls._execute_statement(
-            database_connection,
-            f"SET LOCAL lock_timeout = {LOCK_TIMEOUT_MS}",
-        )
-        cls._execute_statement(
-            database_connection,
-            f"SET LOCAL idle_in_transaction_session_timeout = {IDLE_TRANSACTION_TIMEOUT_MS}",
+            f"SET LOCAL search_path TO {cls._quote_identifier(namespace)}, pg_catalog",
         )
 
     def _introspect_connection(
@@ -802,6 +1140,7 @@ class PsycopgPostgresGateway:
             raise PostgresCatalogLimitError(
                 "total_objects",
                 self._limits.max_total_objects,
+                sum(len(rows) for rows in groups),
             )
         return self._build_catalog(
             namespace=namespace,
@@ -960,6 +1299,7 @@ class PsycopgPostgresGateway:
                     raise PostgresCatalogLimitError(
                         "catalog_text",
                         self._limits.max_definition_bytes,
+                        byte_count,
                     )
             self._consume_text((row,), text_budget)
 
@@ -975,7 +1315,7 @@ class PsycopgPostgresGateway:
             row_consumer=consume,
         )
         if len(rows) > limit:
-            raise PostgresCatalogLimitError(category, limit)
+            raise PostgresCatalogLimitError(category, limit, len(rows))
         return rows
 
     def _consume_text(
@@ -990,6 +1330,7 @@ class PsycopgPostgresGateway:
                     raise PostgresCatalogLimitError(
                         "catalog_text",
                         self._limits.max_definition_bytes,
+                        encoded,
                     )
                 return encoded
             if isinstance(value, Mapping):
@@ -1004,6 +1345,7 @@ class PsycopgPostgresGateway:
                 raise PostgresCatalogLimitError(
                     "catalog_text_total",
                     self._limits.max_total_text_bytes,
+                    text_budget[0],
                 )
 
     def _build_catalog(

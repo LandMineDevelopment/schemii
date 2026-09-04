@@ -57,7 +57,7 @@ class Postgres:
         assert namespace == "public"
         return self.value
 
-    def execute_console(self, connection, statements, *, on_started):
+    def execute_console(self, connection, namespace, statements, *, on_started):
         assert on_started(42)
         self.statements.extend(statements)
         return (ConsoleQueryResult(
