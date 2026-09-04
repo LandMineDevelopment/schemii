@@ -1,3 +1,4 @@
+import { createTableEditor } from "./table-editor.js";
 import { api, ApiError } from "./api.js";
 import { CatalogCanvas } from "./canvas.js";
 import {
@@ -30,7 +31,6 @@ import {
   suggestDesignKeyName,
   toggleDesignIndexColumn,
   updateDesignRelationship,
-  updateDesignTable,
 } from "./design.js";
 import {
   allViews,
@@ -55,12 +55,6 @@ import {
   resolveChangeTargetElements,
 } from "/assets/common/change-transition.js";
 import { createTransientCueManager } from "/assets/common/transient-cue.js";
-import {
-  composePostgresTypeModifier,
-  parsePostgresTypeModifier,
-  postgresTypeModifierSummary,
-  postgresTypeOptions,
-} from "/assets/common/postgres-types.js";
 import { createSearchableSelect } from "/assets/common/searchable-select.js";
 import { installSortableList, reorderedValues } from "/assets/common/sortable.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
@@ -431,8 +425,6 @@ const workspaceNamespaceSelect = createSearchableSelect({
 elements.workspaceNamespacePicker.append(workspaceNamespaceSelect.root);
 elements.workspaceNamespace = workspaceNamespaceSelect.input;
 
-let designColumnDraftSequence = 0;
-
 initializeUi();
 
 let inspectorPreferenceReady = false;
@@ -476,9 +468,6 @@ const state = {
   designHistory: null,
   designSubmitting: false,
   historySubmitting: false,
-  inspectorTableEditorId: null,
-  inspectorTableEditorDirty: false,
-  inspectorTableEditorPopulating: false,
   designRelationshipAutoName: null,
   designRelationshipEditorId: null,
   relationshipAuthoring: false,
@@ -1013,7 +1002,7 @@ function selectedDesignTable() {
 
 function updateDesignControls() {
   const designWorkspace = isDesignWorkspace();
-  const busy = state.catalogLoading || state.designSubmitting || state.historySubmitting || state.layoutConflict || state.inspectorTableEditorDirty;
+  const busy = state.catalogLoading || state.designSubmitting || state.historySubmitting || state.layoutConflict || tableEditor.hasDraft;
   const selected = selectedDesignTable();
   const selectedView = selectedDesignView();
   const hasTargetKey = state.design?.content.tables.some(table => (
@@ -1217,14 +1206,14 @@ function updateHeader() {
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
-  updateInspectorTableActions();
+  tableEditor.updateActions();
   elements.downloadCatalogButton.textContent = designWorkspace ? "Download desired design JSON" : "Download live catalog JSON";
   elements.exportDesignSqlButton.disabled = !designWorkspace || !state.design || state.catalogLoading;
   elements.reviewMigrationButton.disabled = !migrationReview.available()
     || state.catalogLoading
     || state.designSubmitting
     || state.historySubmitting
-    || state.inspectorTableEditorDirty;
+    || tableEditor.hasDraft;
   elements.reviewMigrationButton.title = migrationReview.available()
     ? "Compare this saved design with its live PostgreSQL target"
     : "Migration review requires a database-backed design workspace";
@@ -1808,22 +1797,6 @@ async function loadDependencyImpact(objectId, { open = true } = {}) {
   }
 }
 
-function syncDraftAfterDeletedObject(result) {
-  if (!state.inspectorTableEditorDirty) return;
-  if (result.kind === "column") {
-    const row = elements.inspectorDesignColumns.querySelector(`[data-design-column-id="${CSS.escape(result.object.id)}"]`);
-    row?.__designTypeSelector?.destroy();
-    row?.remove();
-    updateInspectorColumnCount();
-  }
-  if (result.kind === "key" && result.object.kind === "primary") {
-    const ids = new Set(result.object.columnIds);
-    for (const row of elements.inspectorDesignColumns.children) {
-      if (ids.has(row.dataset.designColumnId)) row.querySelector("[data-design-column-primary]").checked = false;
-    }
-  }
-}
-
 async function persistDesignObjectDeletion(node, { historyGroupId = null } = {}) {
   if (!await flushLayoutBeforeTransition()) return;
   const result = deleteDesignObject(state.design.content, node.objectId);
@@ -1843,7 +1816,7 @@ async function persistDesignObjectDeletion(node, { historyGroupId = null } = {})
       revealChanges: true,
     });
     if (!design) return;
-    syncDraftAfterDeletedObject(result);
+    tableEditor.syncDeletedObject(result);
     showToast(`Deleted ${node.name} from design revision ${design.revision}.`);
     if (state.dependencyImpactRootId && elements.dependencyImpactDialog.open) {
       const rootId = state.dependencyImpactRootId;
@@ -2965,7 +2938,7 @@ function renderActiveInspector(table) {
       : null,
     onPreviewRows: !desired && table ? () => openTableRowPreview(table) : null,
   });
-  renderInspectorTableEditor(desired ? table : null);
+  tableEditor.render(desired ? table : null);
   syncInspectorDataContext(table);
 }
 
@@ -2976,7 +2949,7 @@ function selectTable(value, { historyMode = "push" } = {}) {
       catalogTableId(item) === value || item.name === value
     )) || null;
   const tableId = catalogTableId(table);
-  if (state.inspectorTableEditorDirty && tableId !== state.selectedTableId) {
+  if (tableEditor.hasDraft && tableId !== state.selectedTableId) {
     const selected = selectedDesignTable();
     showToast("Save or discard the current table changes before selecting another table.");
     if (selected) canvas.select(selected.id, { focus: true });
@@ -3969,7 +3942,7 @@ function renderObjectsBrowser() {
     || state.catalogLoading
     || state.designSubmitting
     || state.historySubmitting
-    || state.inspectorTableEditorDirty;
+    || tableEditor.hasDraft;
   if (!desired) {
     const result = renderRelationBrowser(elements.objectsList, {
       response: state.liveRelations,
@@ -4132,326 +4105,6 @@ function renderSqlTarget() {
   elements.sqlTargetNamespace.textContent = workspace?.namespace || "No workspace open";
 }
 
-function appendDesignColumn({
-  id = null,
-  name = "",
-  dataType = "text",
-  nullable = true,
-  primary = false,
-  defaultExpression = null,
-  identity = null,
-  generatedExpression = null,
-} = {}, {
-  container = elements.designColumns,
-  sorter = designTableColumnSorter,
-  onMutate = null,
-} = {}) {
-  designColumnDraftSequence += 1;
-  const transitionId = id || `draft-column-${designColumnDraftSequence}`;
-  const row = element("div", {
-    className: "design-column-row",
-    dataset: {
-      designColumnId: id || "",
-      sortKey: transitionId,
-      changeObjectId: transitionId,
-      changeRoot: "",
-      changeField: "order check index relationship",
-    },
-  });
-  const sortHandle = createIconButton({
-    icon: "drag",
-    label: `Reorder ${name || "new column"}`,
-    tooltip: `Drag to reorder ${name || "new column"}`,
-    className: "compact design-sort-handle",
-  });
-  sortHandle.dataset.sortHandle = "";
-  const nameInput = element("input", { attrs: { required: "", maxlength: "63", autocomplete: "off", value: name, placeholder: "column_name", "aria-label": "Column name" }, dataset: { designColumnName: "" } });
-  const typeSelector = createSearchableSelect({
-    value: dataType,
-    options: postgresTypeOptions({ customTypes: state.catalog?.types, currentValue: dataType }),
-    label: `PostgreSQL type for ${name || "column"}`,
-    placeholder: "Search types",
-    required: true,
-    dataset: { designColumnType: "" },
-    noResultsText: "No matching PostgreSQL type",
-  });
-  const typeInput = typeSelector.input;
-  const typeWarning = element("p", { className: "design-type-warning", hidden: true, attrs: { role: "status", "aria-live": "polite" } });
-  let typeAnalysisTimer = null;
-  let typeAnalysisController = null;
-  let typeAnalysisVersion = 0;
-  const cancelTypeAnalysis = () => {
-    typeAnalysisVersion += 1;
-    clearTimeout(typeAnalysisTimer);
-    typeAnalysisController?.abort();
-  };
-  const scheduleTypeAnalysis = () => {
-    cancelTypeAnalysis();
-    const workspaceId = state.activeWorkspace?.id;
-    if (!id || !state.activeWorkspace?.connectionId) return;
-    const targetType = typeInput.value;
-    const version = typeAnalysisVersion;
-    typeWarning.hidden = true;
-    typeAnalysisTimer = setTimeout(async () => {
-      if (!row.isConnected || state.activeWorkspace?.id !== workspaceId) return;
-      typeAnalysisController = new AbortController();
-      try {
-        const analysis = await api.analyzeColumnType(workspaceId, { columnId: id, targetType }, { signal: typeAnalysisController.signal });
-        if (version !== typeAnalysisVersion || !row.isConnected || state.activeWorkspace?.id !== workspaceId) return;
-        typeWarning.hidden = !analysis.requiresConversion;
-        typeWarning.textContent = analysis.requiresConversion
-          ? `${analysis.reason}. You can save this design. During migration, explicitly choose how existing values should be converted; strict conversion is the recommended default.`
-          : "";
-      } catch (error) {
-        if (version !== typeAnalysisVersion || !row.isConnected || error?.code === "request_cancelled") return;
-        typeWarning.hidden = false;
-        typeWarning.textContent = "The conversion check is unavailable. You can save this design; migration review will validate the type change before applying it.";
-      }
-    }, 300);
-  };
-  row.__cancelTypeAnalysis = cancelTypeAnalysis;
-  typeSelector.root.dataset.changeObjectId = transitionId;
-  typeSelector.root.dataset.changeField = "dataType";
-  const typeModifierCopy = element("span", { className: "design-type-modifier-summary" });
-  const lengthInput = element("input", {
-    type: "number",
-    attrs: { min: "1", step: "1", inputmode: "numeric", placeholder: "Unlimited", "aria-label": "Maximum type length" },
-    dataset: { designTypeLength: "" },
-  });
-  const precisionInput = element("input", {
-    type: "number",
-    attrs: { min: "1", max: "1000", step: "1", inputmode: "numeric", placeholder: "Any", "aria-label": "Numeric precision" },
-    dataset: { designTypePrecision: "" },
-  });
-  const scaleInput = element("input", {
-    type: "number",
-    attrs: { min: "-1000", max: "1000", step: "1", inputmode: "numeric", placeholder: "0", "aria-label": "Numeric scale" },
-    dataset: { designTypeScale: "" },
-  });
-  const fractionalInput = element("input", {
-    type: "number",
-    attrs: { min: "0", max: "6", step: "1", inputmode: "numeric", placeholder: "Default", "aria-label": "Fractional seconds precision" },
-    dataset: { designTypeFractional: "" },
-  });
-  const lengthField = element("label", { className: "design-type-modifier-field" }, [
-    element("span", { text: "Maximum length" }),
-    lengthInput,
-    element("small", { text: "Leave blank for the PostgreSQL default." }),
-  ]);
-  const precisionField = element("label", { className: "design-type-modifier-field" }, [
-    element("span", { text: "Precision" }),
-    precisionInput,
-    element("small", { text: "Total significant digits · 1–1000." }),
-  ]);
-  const scaleField = element("label", { className: "design-type-modifier-field" }, [
-    element("span", { text: "Scale" }),
-    scaleInput,
-    element("small", { text: "Digits after the decimal · −1000–1000." }),
-  ]);
-  const fractionalField = element("label", { className: "design-type-modifier-field" }, [
-    element("span", { text: "Fractional seconds" }),
-    fractionalInput,
-    element("small", { text: "Digits after the second · 0–6." }),
-  ]);
-  const typeModifierDetails = element("details", { className: "design-type-modifiers" }, [
-    element("summary", {}, [
-      element("span", { text: "Customize type limits" }),
-      typeModifierCopy,
-    ]),
-    element("div", { className: "design-type-modifier-fields" }, [lengthField, precisionField, scaleField, fractionalField]),
-  ]);
-  typeModifierDetails.dataset.changeObjectId = transitionId;
-  typeModifierDetails.dataset.changeField = "dataType";
-
-  const typeOptions = currentValue => postgresTypeOptions({ customTypes: state.catalog?.types, currentValue });
-  const clearModifierValidity = () => {
-    for (const input of [lengthInput, precisionInput, scaleInput, fractionalInput]) input.setCustomValidity("");
-  };
-  const syncTypeModifierEditor = ({ expand = false } = {}) => {
-    const modifier = parsePostgresTypeModifier(typeInput.value);
-    clearModifierValidity();
-    typeModifierDetails.hidden = !modifier;
-    row.classList.toggle("has-type-modifiers", Boolean(modifier));
-    if (!modifier) {
-      typeModifierDetails.open = false;
-      return;
-    }
-    lengthField.hidden = modifier.kind !== "length";
-    precisionField.hidden = modifier.kind !== "numeric";
-    scaleField.hidden = modifier.kind !== "numeric";
-    fractionalField.hidden = modifier.kind !== "fractional";
-    lengthInput.max = String(modifier.maxLength || "");
-    lengthInput.value = modifier.length ?? "";
-    precisionInput.value = modifier.kind === "numeric" ? (modifier.precision ?? "") : "";
-    scaleInput.value = modifier.kind === "numeric" ? (modifier.scale ?? "") : "";
-    fractionalInput.value = modifier.kind === "fractional" ? (modifier.precision ?? "") : "";
-    typeModifierCopy.textContent = postgresTypeModifierSummary(modifier);
-    if (expand) typeModifierDetails.open = true;
-  };
-  const applyTypeModifiers = event => {
-    const modifier = parsePostgresTypeModifier(typeInput.value);
-    if (!modifier) return;
-    clearModifierValidity();
-    try {
-      const revisedType = composePostgresTypeModifier(modifier, {
-        length: lengthInput.value,
-        precision: precisionInput.value,
-        scale: scaleInput.value,
-      });
-      const finalType = modifier.kind === "fractional"
-        ? composePostgresTypeModifier(modifier, { precision: fractionalInput.value })
-        : revisedType;
-      typeSelector.setOptions(typeOptions(finalType));
-      typeSelector.setValue(finalType);
-      typeModifierCopy.textContent = postgresTypeModifierSummary(parsePostgresTypeModifier(finalType));
-      scheduleTypeAnalysis();
-    } catch (error) {
-      event.currentTarget.setCustomValidity(error.message);
-    }
-  };
-  for (const input of [lengthInput, precisionInput, scaleInput, fractionalInput]) {
-    input.addEventListener("input", applyTypeModifiers);
-  }
-  typeInput.addEventListener("change", () => {
-    typeSelector.setOptions(typeOptions(typeInput.value));
-    syncTypeModifierEditor({ expand: true });
-    scheduleTypeAnalysis();
-  });
-  const nullableInput = element("input", { type: "checkbox", dataset: { designColumnNullable: "" } });
-  nullableInput.checked = nullable && !primary;
-  const primaryInput = element("input", { type: "checkbox", dataset: { designColumnPrimary: "" } });
-  primaryInput.checked = primary;
-  const behaviorSelect = element("select", { dataset: { designColumnBehavior: "" }, attrs: { "aria-label": `Value behavior for ${name || "column"}` } });
-  const behaviorOptions = [
-    ["none", "Entered by the application"],
-    ["default", "Default expression"],
-    ["identity_by_default", "Identity · by default"],
-    ["identity_always", "Identity · always"],
-    ["generated", "Generated from columns"],
-  ];
-  for (const [value, label] of behaviorOptions) behaviorSelect.append(element("option", { text: label, attrs: { value } }));
-  behaviorSelect.value = generatedExpression
-    ? "generated"
-    : identity === "always"
-      ? "identity_always"
-      : identity === "by_default"
-        ? "identity_by_default"
-        : defaultExpression
-          ? "default"
-          : "none";
-  const expressionInput = element("input", {
-    attrs: { maxlength: "262144", autocomplete: "off", value: generatedExpression || defaultExpression || "" },
-    dataset: { designColumnExpression: "" },
-  });
-  const expressionTitle = element("span");
-  const expressionHelp = createIconButton({
-    icon: "info",
-    label: "Allowed calculated-column expression syntax",
-    tooltip: "Allowed calculated-column expression syntax",
-    className: "compact",
-  });
-  expressionHelp.addEventListener("click", () => openDialog(elements.generatedExpressionHelpDialog));
-  const expressionHeading = element("span", { className: "design-expression-heading" }, [expressionTitle, expressionHelp]);
-  const expressionField = element("div", { className: "design-expression-field" }, [expressionHeading, expressionInput]);
-  const cueField = (node, fields) => {
-    node.dataset.changeObjectId = transitionId;
-    node.dataset.changeField = fields;
-  };
-  cueField(nameInput, "name");
-  cueField(nullableInput, "nullable");
-  cueField(primaryInput, "primary unique");
-  cueField(behaviorSelect, "defaultExpression identity generatedExpression");
-  cueField(expressionInput, "defaultExpression generatedExpression");
-  const syncBehavior = () => {
-    const generated = behaviorSelect.value === "generated";
-    const defaulted = behaviorSelect.value === "default";
-    const identityBehavior = behaviorSelect.value.startsWith("identity_");
-    expressionField.hidden = !generated && !defaulted;
-    expressionTitle.textContent = generated ? "Generation expression" : "Default expression";
-    expressionHelp.hidden = !generated;
-    expressionInput.placeholder = generated ? "quantity * unit_price" : "now()";
-    expressionInput.setAttribute("aria-label", generated ? "Generation expression" : "Default expression");
-    expressionInput.required = generated || defaulted;
-    nullableInput.disabled = primaryInput.checked || identityBehavior;
-    if (nullableInput.disabled) nullableInput.checked = false;
-  };
-  primaryInput.addEventListener("change", syncBehavior);
-  behaviorSelect.addEventListener("change", syncBehavior);
-  nameInput.addEventListener("input", () => {
-    typeSelector.setLabel(`PostgreSQL type for ${nameInput.value || "column"}`);
-    sorter.refresh();
-  });
-  const remove = createIconButton({
-    icon: "delete",
-    label: `Remove ${name || "column"}`,
-    tooltip: "Remove column",
-    className: "compact danger design-column-remove",
-  });
-  nameInput.addEventListener("input", () => remove.setAttribute("aria-label", `Remove ${nameInput.value || "column"}`));
-  remove.addEventListener("click", () => {
-    if (container.childElementCount === 1) {
-      showToast("A designed table needs at least one column.");
-      return;
-    }
-    const removeDraftRow = async () => {
-      if (row.dataset.changeRemoving === "true") return;
-      row.dataset.changeRemoving = "true";
-      remove.disabled = true;
-      const prepared = await changeTransitions.prepare([{
-        objectId: transitionId,
-        operation: "remove",
-        tone: "amber",
-      }]);
-      typeSelector.destroy();
-      cancelTypeAnalysis();
-      row.remove();
-      sorter.refresh();
-      onMutate?.();
-      if (container === elements.inspectorDesignColumns) updateInspectorColumnCount();
-      changeTransitions.reflow(prepared);
-    };
-    if (!id) {
-      void removeDraftRow();
-      return;
-    }
-    requestDesignObjectDeletion(id, {
-      statusTarget: container === elements.inspectorDesignColumns
-        ? elements.inspectorTableStatus
-        : elements.designTableStatus,
-      onConfirmed: removeDraftRow,
-    });
-  });
-  row.append(
-    sortHandle,
-    element("label", { className: "design-column-name" }, [element("span", { text: "Name" }), nameInput]),
-    element("label", { className: "design-column-type" }, [element("span", { text: "PostgreSQL type" }), typeSelector.root]),
-    element("label", { className: "design-column-check design-column-nullable" }, [nullableInput, element("span", { text: "Nullable" })]),
-    element("label", { className: "design-column-check design-column-primary" }, [primaryInput, element("span", { text: "Primary" })]),
-    remove,
-    typeModifierDetails,
-    element("div", { className: "design-column-value" }, [
-      typeWarning,
-      element("label", {}, [element("span", { text: "Value behavior" }), behaviorSelect]),
-      expressionField,
-    ]),
-  );
-  syncTypeModifierEditor();
-  syncBehavior();
-  row.__designTypeSelector = typeSelector;
-  container.append(row);
-  scheduleTypeAnalysis();
-  sorter.refresh();
-  return row;
-}
-
-function clearDesignColumns(container) {
-  for (const row of container.children) {
-    row.__cancelTypeAnalysis?.();
-    row.__designTypeSelector?.destroy();
-  }
-  replace(container);
-}
-
 function openDesignTableEditor(tableId = null) {
   if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
   cancelColumnAuthoring();
@@ -4467,175 +4120,16 @@ function openDesignTableEditor(tableId = null) {
     return;
   }
   elements.designTableForm.reset();
-  clearDesignColumns(elements.designColumns);
+  tableEditor.clearColumns(elements.designColumns);
   replace(elements.designTableStatus);
   elements.designTableTitle.textContent = "Create table";
   elements.designTableCopy.textContent = "Add a table and its initial columns. Saving replaces one exact design revision and never contacts PostgreSQL.";
   elements.saveDesignTableButton.textContent = "Create table";
   elements.designTableName.value = "";
-  appendDesignColumn({ name: "id", dataType: "bigint", nullable: false, primary: true });
-  appendDesignColumn({ name: "name", dataType: "text", nullable: false });
+  tableEditor.appendColumn({ name: "id", dataType: "bigint", nullable: false, primary: true });
+  tableEditor.appendColumn({ name: "name", dataType: "text", nullable: false });
   openDialog(elements.designTableDialog);
   elements.designTableName.focus();
-}
-
-function designColumnValues(container = elements.designColumns) {
-  return [...container.children].map(row => {
-    const behavior = row.querySelector("[data-design-column-behavior]").value;
-    const expression = row.querySelector("[data-design-column-expression]").value;
-    return {
-      id: row.dataset.designColumnId || null,
-      name: row.querySelector("[data-design-column-name]").value,
-      dataType: row.querySelector("[data-design-column-type]").value,
-      nullable: row.querySelector("[data-design-column-nullable]").checked,
-      primary: row.querySelector("[data-design-column-primary]").checked,
-      defaultExpression: behavior === "default" ? expression : null,
-      identity: behavior === "identity_always" ? "always" : behavior === "identity_by_default" ? "by_default" : null,
-      generatedExpression: behavior === "generated" ? expression : null,
-    };
-  });
-}
-
-function inspectorTableContext() {
-  return {
-    container: elements.inspectorDesignColumns,
-    sorter: inspectorTableColumnSorter,
-    onMutate: markInspectorTableDirty,
-  };
-}
-
-function updateInspectorColumnCount() {
-  elements.inspectorColumnCount.textContent = String(elements.inspectorDesignColumns.childElementCount);
-}
-
-function updateInspectorTableActions() {
-  const dirty = state.inspectorTableEditorDirty;
-  const busy = state.designSubmitting || state.catalogLoading || state.layoutConflict;
-  elements.saveInspectorTableButton.disabled = !dirty || busy;
-  elements.discardInspectorTableButton.disabled = !dirty || busy;
-  elements.addInspectorColumnButton.disabled = busy;
-  elements.inspectorTableForm.toggleAttribute("inert", busy);
-  elements.inspectorTableForm.setAttribute("aria-busy", busy ? "true" : "false");
-  elements.inspector.classList.toggle("has-table-draft", dirty);
-  elements.inspectorContent.toggleAttribute("inert", dirty || busy);
-}
-
-function markInspectorTableDirty() {
-  if (state.inspectorTableEditorPopulating || !state.inspectorTableEditorId) return;
-  state.inspectorTableEditorDirty = true;
-  updateInspectorColumnCount();
-  updateInspectorTableActions();
-  updateDesignControls();
-  replace(elements.inspectorTableStatus, element("span", { text: "Unsaved changes · save to edit related objects." }));
-}
-
-function populateInspectorTableEditor(table) {
-  state.inspectorTableEditorPopulating = true;
-  state.inspectorTableEditorId = table.id;
-  state.inspectorTableEditorDirty = false;
-  elements.inspectorTableForm.dataset.changeObjectId = table.id;
-  elements.inspectorTableForm.dataset.changeRoot = "";
-  elements.inspectorTableName.dataset.changeObjectId = table.id;
-  elements.inspectorTableName.dataset.changeField = "name";
-  elements.inspectorTableName.value = table.name;
-  clearDesignColumns(elements.inspectorDesignColumns);
-  const primaryIds = new Set(table.keys.find(key => key.kind === "primary")?.columnIds || []);
-  for (const column of table.columns) appendDesignColumn({
-    ...column,
-    primary: primaryIds.has(column.id),
-  }, inspectorTableContext());
-  state.inspectorTableEditorPopulating = false;
-  updateInspectorColumnCount();
-  updateInspectorTableActions();
-  updateDesignControls();
-  replace(elements.inspectorTableStatus, element("span", {
-    text: `Saved in design revision ${state.design?.revision ?? "current"}.`,
-  }));
-}
-
-function renderInspectorTableEditor(table) {
-  const designedTable = table?.designId
-    ? state.design?.content.tables.find(item => item.id === table.designId) || null
-    : null;
-  elements.inspector.classList.toggle("is-editable", Boolean(designedTable));
-  elements.mainLayout.classList.toggle("inspector-table-editable", Boolean(designedTable));
-  elements.inspectorTableForm.hidden = !designedTable;
-  if (!designedTable) {
-    delete elements.inspectorTableForm.dataset.changeObjectId;
-    delete elements.inspectorTableForm.dataset.changeRoot;
-    delete elements.inspectorTableName.dataset.changeObjectId;
-    delete elements.inspectorTableName.dataset.changeField;
-    state.inspectorTableEditorId = null;
-    state.inspectorTableEditorDirty = false;
-    elements.inspector.classList.remove("has-table-draft");
-    elements.inspectorContent.removeAttribute("inert");
-    clearDesignColumns(elements.inspectorDesignColumns);
-    replace(elements.inspectorTableStatus);
-    return;
-  }
-  if (state.inspectorTableEditorId === designedTable.id && state.inspectorTableEditorDirty) {
-    elements.inspectorTitle.textContent = elements.inspectorTableName.value.trim() || "Untitled table";
-    updateInspectorColumnCount();
-    updateInspectorTableActions();
-    return;
-  }
-  populateInspectorTableEditor(designedTable);
-}
-
-function discardInspectorTableChanges() {
-  const table = state.design?.content.tables.find(item => item.id === state.inspectorTableEditorId) || null;
-  if (!table || state.designSubmitting) return;
-  populateInspectorTableEditor(table);
-  elements.inspectorTitle.textContent = table.name;
-  elements.inspectorTableName.focus();
-}
-
-async function submitInspectorTable(event) {
-  event.preventDefault();
-  if (
-    state.designSubmitting
-    || !state.inspectorTableEditorDirty
-    || !isDesignWorkspace()
-    || !state.design
-  ) return;
-  const editingId = state.inspectorTableEditorId;
-  let table;
-  try {
-    table = updateDesignTable(
-      state.design.content,
-      editingId,
-      elements.inspectorTableName.value,
-      designColumnValues(elements.inspectorDesignColumns),
-    );
-  } catch (error) {
-    replace(elements.inspectorTableStatus, errorPanel(error));
-    return;
-  }
-
-  state.designSubmitting = true;
-  updateInspectorTableActions();
-  updateDesignControls();
-  replace(elements.inspectorTableStatus, element("span", { text: "Validating and saving the table…" }));
-  try {
-    if (!await flushLayoutBeforeTransition()) {
-      replace(elements.inspectorTableStatus, element("span", { text: "Unsaved changes · resolve the layout save before retrying." }));
-      return;
-    }
-    const content = structuredClone(state.design.content);
-    content.tables = content.tables.map(item => item.id === editingId ? table : item);
-    state.inspectorTableEditorDirty = false;
-    const design = await replaceActiveDesign(content, { selectedTableId: table.id });
-    if (!design) return;
-    canvas.select(table.id, { focus: true, notify: true });
-    showToast(`Updated ${table.name} in design revision ${design.revision}.`);
-  } catch (error) {
-    state.inspectorTableEditorDirty = true;
-    replace(elements.inspectorTableStatus, conflictPanel(error));
-  } finally {
-    state.designSubmitting = false;
-    updateInspectorTableActions();
-    updateHeader();
-  }
 }
 
 function conflictPanel(error) {
@@ -4742,7 +4236,7 @@ async function applyDesignHistoryPreview(delta) {
 }
 
 function historyDraftBlocked() {
-  if (!state.inspectorTableEditorDirty) return false;
+  if (!tableEditor.hasDraft) return false;
   showToast("Save or discard the table edits before changing design history.", { error: true });
   return true;
 }
@@ -4905,7 +4399,7 @@ async function submitDesignTable(event) {
   if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
   let table;
   try {
-    table = createDesignTable(elements.designTableName.value, designColumnValues());
+    table = createDesignTable(elements.designTableName.value, tableEditor.columnValues());
     if (state.design.content.tables.some(item => item.name === table.name)) {
       throw new Error("A table with this name already exists in the design.");
     }
@@ -6194,23 +5688,8 @@ function bindEvents() {
     state.workspaceDialogGeneration += 1;
   });
 
-  elements.addDesignColumnButton.addEventListener("click", () => appendDesignColumn());
+  elements.addDesignColumnButton.addEventListener("click", () => tableEditor.appendColumn());
   elements.designTableForm.addEventListener("submit", submitDesignTable);
-  elements.addInspectorColumnButton.addEventListener("click", () => {
-    const row = appendDesignColumn({}, inspectorTableContext());
-    markInspectorTableDirty();
-    updateInspectorColumnCount();
-    row.querySelector("[data-design-column-name]")?.focus();
-  });
-  elements.inspectorTableForm.addEventListener("input", event => {
-    if (event.target === elements.inspectorTableName) {
-      elements.inspectorTitle.textContent = event.target.value.trim() || "Untitled table";
-    }
-    markInspectorTableDirty();
-  });
-  elements.inspectorTableForm.addEventListener("change", markInspectorTableDirty);
-  elements.inspectorTableForm.addEventListener("submit", submitInspectorTable);
-  elements.discardInspectorTableButton.addEventListener("click", discardInspectorTableChanges);
   elements.createViewButton.addEventListener("click", () => openDesignViewEditor());
   elements.browseViewsTool.addEventListener("click", () => {
     elements.viewsSearch.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -6406,7 +5885,7 @@ function bindEvents() {
   });
   window.addEventListener("pagehide", persistCanvasView);
   window.addEventListener("beforeunload", event => {
-    if (!state.inspectorTableEditorDirty && !sqlConsole.hasOpenTransaction()) return;
+    if (!tableEditor.hasDraft && !sqlConsole.hasOpenTransaction()) return;
     event.preventDefault();
     event.returnValue = "";
   });
@@ -6415,19 +5894,38 @@ function bindEvents() {
   });
 }
 
-const inspectorTableColumnSorter = installSortableList(elements.inspectorDesignColumns, {
-  itemSelector: ".design-column-row",
-  itemLabel: item => item.querySelector("[data-design-column-name]")?.value || "new column",
-  onReorder: () => {
-    markInspectorTableDirty();
-    inspectorTableColumnSorter.refresh();
+const tableEditor = createTableEditor({
+  elements,
+  getContext: () => ({
+    activeWorkspace: state.activeWorkspace,
+    catalog: state.catalog,
+    design: state.design,
+    designSubmitting: state.designSubmitting,
+    catalogLoading: state.catalogLoading,
+    layoutConflict: state.layoutConflict,
+    editable: isDesignWorkspace(),
+  }),
+  setSubmitting: value => { state.designSubmitting = value; },
+  onDraftChange: updateDesignControls,
+  onSettled: updateHeader,
+  flushLayoutBeforeTransition,
+  saveTable: table => {
+    const content = structuredClone(state.design.content);
+    content.tables = content.tables.map(item => item.id === table.id ? table : item);
+    return replaceActiveDesign(content, { selectedTableId: table.id });
   },
+  onSaved: (table, design) => {
+    canvas.select(table.id, { focus: true, notify: true });
+    showToast(`Updated ${table.name} in design revision ${design.revision}.`);
+  },
+  conflictPanel,
+  requestDesignObjectDeletion,
+  changeTransitions,
+  notify: showToast,
+  showExpressionHelp: () => openDialog(elements.generatedExpressionHelpDialog),
+  analyzeColumnType: (...args) => api.analyzeColumnType(...args),
 });
-const designTableColumnSorter = installSortableList(elements.designColumns, {
-  itemSelector: ".design-column-row",
-  itemLabel: item => item.querySelector("[data-design-column-name]")?.value || "new column",
-  onReorder: () => designTableColumnSorter.refresh(),
-});
+
 const designKeyColumnSorter = installSortableList(elements.designKeyColumns, {
   itemSelector: ".design-key-column",
   itemLabel: item => item.querySelector("strong")?.textContent || "key column",

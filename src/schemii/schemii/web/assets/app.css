@@ -945,7 +945,8 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .zoom-output { right: 10px; bottom: 65px; }
   .relationship-output { right: 70px; bottom: 65px; max-width: calc(100% - 90px); }
   .inspector { top: auto; right: 7px; bottom: 63px; left: 7px; width: auto; height: min(45%, 390px); border-right: 1px solid var(--line); border-radius: 9px; box-shadow: 0 -14px 40px rgba(0, 0, 0, .5); }
-  .inspector.is-editable { width: auto; height: min(72%, 620px); }
+  .inspector.is-editable { width: auto; }
+  .inspector.is-editable[data-ui-dock-state="expanded"] { height: min(72%, 620px); }
   .inspector-data-workspace, .main-layout.inspector-table-editable .inspector-data-workspace { z-index: 38; top: 58px; right: 7px; bottom: 63px; left: 7px; }
   .main-layout.inspector-data-open .inspector { visibility: hidden; opacity: 0; pointer-events: none; transform: translate3d(0, 18px, 0); }
   .inspector-data-actions > span { display: none; }

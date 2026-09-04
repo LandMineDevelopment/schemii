@@ -112,8 +112,10 @@ def test_designed_tables_are_edited_directly_in_the_table_inspector() -> None:
     assert 'id="inspector-design-columns"' in inspector
     assert 'id="save-inspector-table-button"' in inspector
     assert 'id="edit-table-button"' not in index
-    assert "submitInspectorTable" in source
-    assert "designColumnValues(elements.inspectorDesignColumns)" in source
+    editor = web.joinpath("assets", "table-editor.js").read_text(encoding="utf-8")
+    assert 'from "./table-editor.js"' in source
+    assert "submitInspectorTable" in editor
+    assert "designColumnValues(elements.inspectorDesignColumns)" in editor
     assert "showTableDetails: !desired" in source
     assert ".inspector-table-savebar { position: sticky" in styles
     assert ".inspector.is-editable" in styles
@@ -257,7 +259,7 @@ def test_every_packaged_frontend_asset_is_available_and_revalidated() -> None:
 def test_column_type_editor_uses_the_shared_searchable_selector() -> None:
     web = files("schemii.schemii").joinpath("web")
     index = web.joinpath("index.html").read_text(encoding="utf-8")
-    app = web.joinpath("assets", "app.js").read_text(encoding="utf-8")
+    app = web.joinpath("assets", "table-editor.js").read_text(encoding="utf-8")
 
     assert 'href="/assets/common/searchable-select.css"' in index
     assert 'from "/assets/common/searchable-select.js"' in app
