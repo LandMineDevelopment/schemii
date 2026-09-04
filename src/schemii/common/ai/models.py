@@ -35,6 +35,7 @@ class AiProviderStatus(ApiModel):
     name: Annotated[str, Field(min_length=1, max_length=256)]
     available: bool
     authenticated: bool
+    privacy: str | None = None
     auth_methods: list[AiProviderAuthMethod] = Field(default_factory=list, max_length=20)
     models: list["AiModelStatus"] = Field(max_length=1000)
 

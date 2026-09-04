@@ -22,9 +22,10 @@ SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
 SCHEMII_LAUNCH_ACTION=start
 SCHEMII_LOG_SERVICE=
+SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE]\n' "$0"
+  printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -39,6 +40,10 @@ list_demo_scenarios() {
 
 if (( $# > 0 )); then
   case "$1" in
+    --ai-prototype)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
+      ;;
     --reset-demo)
       SCHEMII_RESET_MIGRATION_DEMO=1
       if (( $# == 2 )); then
@@ -58,10 +63,14 @@ if (( $# > 0 )); then
       list_demo_scenarios
       exit 0
       ;;
+    --test-ai-prototype)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION=test-ai-prototype
+      ;;
     --logs)
       (( $# == 2 )) || { usage >&2; exit 2; }
       case "$2" in
-        schemii|opencode|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
+        schemii|opencode|ai-prototype-runtime|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
           SCHEMII_LAUNCH_ACTION=logs
           SCHEMII_LOG_SERVICE="$2"
           ;;
@@ -179,6 +188,26 @@ exec {SCHEMII_LAUNCH_LOCK_FD}>"$SCHEMII_LAUNCH_LOCK_FILE"
 chmod 600 "$SCHEMII_LAUNCH_LOCK_FILE"
 if ! flock --nonblock "$SCHEMII_LAUNCH_LOCK_FD"; then
   fail "another ./start.sh lifecycle operation is already running"
+fi
+
+compose_args=(
+  compose
+  --project-name schemii-test
+  --project-directory "$ROOT_DIR"
+  --file "$COMPOSE_FILE"
+)
+
+if [[ "$SCHEMII_LAUNCH_ACTION" == "test-ai-prototype" ]]; then
+  printf 'Building the isolated AI prototype test image...\n'
+  if ! docker "${compose_args[@]}" --profile ai-prototype build ai-prototype; then
+    fail "the AI prototype test image could not be built"
+  fi
+  printf 'Running AI prototype tests without network access...\n'
+  exec docker "${compose_args[@]}" --profile ai-prototype run --rm --no-deps -T ai-prototype
+fi
+
+if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
+  compose_args+=(--profile ai-prototype-runtime)
 fi
 
 if ! certificate_is_current; then
@@ -299,6 +328,7 @@ export SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE
 export SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE
 export SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE
 export SCHEMII_OPENCODE_PASSWORD_SECRET_FILE
+export SCHEMII_PI_PROTOTYPE_URL
 export SCHEMII_SECRET_READER_GID
 export SCHEMII_RESET_MIGRATION_DEMO
 if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
@@ -314,26 +344,25 @@ fi
 export SCHEMII_DEMO_SCENARIO
 export SCHEMII_DEMO_SOURCE_REVISION
 
-compose_args=(
-  compose
-  --project-name schemii-test
-  --project-directory "$ROOT_DIR"
-  --file "$COMPOSE_FILE"
-)
-
 if [[ "$SCHEMII_LAUNCH_ACTION" == "logs" ]]; then
   exec docker "${compose_args[@]}" logs --no-color --tail 200 "$SCHEMII_LOG_SERVICE"
 fi
 
 printf 'Building the current Schemii application image...\n'
-if ! docker "${compose_args[@]}" build schemii opencode; then
+if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
+  if ! docker "${compose_args[@]}" build schemii ai-prototype-runtime; then
+    fail "the application or AI prototype runtime image could not be built; the running deployment was left unchanged"
+  fi
+elif ! docker "${compose_args[@]}" build schemii ai-prototype-runtime; then
   fail "the application image could not be built; the running deployment was left unchanged"
 fi
 
 # The launcher is also the restart boundary. Build first so a compilation
 # failure does not interrupt the last known-good HTTP processes.
 docker "${compose_args[@]}" rm --stop --force \
-  ingress schemii opencode metadata-bootstrap demo-bootstrap
+  ingress schemii metadata-bootstrap demo-bootstrap
+# Remove a previous optional runtime even when this launch disables it.
+docker "${compose_args[@]}" --profile ai-prototype-runtime rm --stop --force ai-prototype-runtime
 
 # The former single PostgreSQL service used the control-plane volume now owned
 # by metadata-postgres. Remove only that exact legacy container before mounting
@@ -357,13 +386,15 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
 fi
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
-if ! docker "${compose_args[@]}" up --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
+if ! docker "${compose_args[@]}" up --detach --remove-orphans --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
   printf 'Schemii did not become healthy. Current service state:\n' >&2
   docker "${compose_args[@]}" --profile demo-fixture ps --all >&2 || true
   printf 'Schemii service logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 schemii >&2 || true
-  printf 'OpenCode service logs:\n' >&2
-  docker "${compose_args[@]}" logs --no-color --tail 200 opencode >&2 || true
+  if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
+    printf 'Pi prototype service logs:\n' >&2
+    docker "${compose_args[@]}" logs --no-color --tail 200 ai-prototype-runtime >&2 || true
+  fi
   printf 'Metadata bootstrap logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 metadata-bootstrap >&2 || true
   printf 'Demo seed logs:\n' >&2

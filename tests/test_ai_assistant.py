@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from schemii.common.admin_config import AdminConfig, AiPolicy
-from schemii.common.ai.opencode import OpenCodeClient, OpenCodeError, OpenCodeReply
+from schemii.common.ai.pi import PiReply
 from schemii.common.postgres.console.models import (
     ConsoleExecution,
     ConsoleResultColumn,
@@ -22,222 +22,57 @@ from schemii.schemii.ai.tools import (
 )
 
 
-class StubOpenCodeClient(OpenCodeClient):
-    def __init__(self, responses, **kwargs):
-        super().__init__("http://opencode", "user", "password", **kwargs)
-        self.responses = responses
-
-    def _request(self, method, path, body=None):
-        value = self.responses[path]
-        if isinstance(value, Exception):
-            raise value
-        return value
+class AvailableRuntime:
+    def status(self, owner):
+        return {"healthy": True, "providers": [{"id": "provider", "available": True,
+                "models": [{"id": "model", "status": "active"}]}]}
 
 
-def test_opencode_status_uses_discovery_when_available() -> None:
-    client = StubOpenCodeClient(
-        {
-            "/global/health": {"healthy": True},
-            "/provider": {
-                "all": [{"id": "provider", "models": {}}],
-                "connected": ["provider"],
-                "default": {"provider": "model"},
-            },
-            "/provider/auth": {},
-        }
-    )
-
-    status = client.status()
-
-    assert status["healthy"] is True
-    assert status["providers"]["providers"][0]["id"] == "provider"
-    assert status["providers"]["connected"] == ["provider"]
-    assert "message" not in status
+def test_service_uses_owner_runtime_catalog_without_substituting_models():
+    runtime = SimpleNamespace(status=lambda owner: {
+        "healthy": True, "providers": [{
+            "id": "opencode", "available": True, "models": [{"id": "free", "status": "active"}],
+        }],
+    })
+    service = AiService(InMemoryAiRepository(), runtime, SimpleNamespace(admin_config=AdminConfig()))
+    service.model_catalog = SimpleNamespace(snapshot=lambda: {"models": [{"id": "free"}]})
+    assert [m["id"] for m in service.status("owner")["providers"][0]["models"]] == ["free"]
+    with pytest.raises(AiServiceError) as error:
+        service._require_available_model("owner", "opencode", "retired")
+    assert error.value.code == "ai_model_unavailable"
 
 
-def test_opencode_status_falls_back_only_when_deployment_model_is_explicit() -> None:
-    unavailable = OpenCodeError("opencode_rejected", "catalog unavailable")
-    client = StubOpenCodeClient(
-        {
-            "/global/health": {"healthy": True},
-            "/provider": unavailable,
-        },
-        fallback_provider_id="opencode",
-        fallback_model_id="big-pickle",
-    )
-
-    status = client.status()
-
-    provider = status["providers"]["providers"][0]
-    assert provider["models"]["big-pickle"]["status"] == "active"
-    assert "explicitly configured fallback" in status["message"]
-
-    without_fallback = StubOpenCodeClient(
-        {
-            "/global/health": {"healthy": True},
-            "/provider": unavailable,
-        }
-    )
-    with pytest.raises(OpenCodeError):
-        without_fallback.status()
+def test_send_rejects_unavailable_model_without_saving_message():
+    repo = InMemoryAiRepository()
+    chat = repo.create_chat("owner", "ws_" + "b" * 32, "Keep", "gone", "gone", AiCapabilities())
+    service = AiService(repo, None, SimpleNamespace(
+        admin_config=AdminConfig(), designs=SimpleNamespace(get=lambda *_: SimpleNamespace(revision=0)),
+    ))
+    with pytest.raises(AiServiceError) as error:
+        service.send("owner", chat.id, SimpleNamespace(
+            expected_chat_revision=chat.revision, expected_design_revision=0,
+            text="Keep my draft", result_context_operation_id=None,
+        ))
+    assert error.value.code == "ai_model_unavailable"
+    assert repo.list_messages("owner", chat.id, 100) == []
+    assert repo.get_chat("owner", chat.id).status == "idle"
 
 
-def test_ai_status_exposes_connected_providers_and_normalizes_upstream_statuses() -> None:
-    runtime = StubOpenCodeClient(
-        {
-            "/global/health": {"healthy": True},
-            "/provider": {
-                "all": [
-                    {
-                        "id": "connected",
-                        "name": "Connected",
-                        "models": {
-                            "preview": {
-                                "id": "preview",
-                                "name": "Preview",
-                                "status": "beta",
-                            }
-                        },
-                    },
-                    {
-                        "id": "not-connected",
-                        "models": {"model": {"id": "model"}},
-                    },
-                ],
-                "connected": ["connected"],
-            },
-            "/provider/auth": {
-                "not-connected": [
-                    {"type": "oauth", "label": "Connect subscription"}
-                ]
-            },
-        }
-    )
+def test_ai_status_passes_current_owner_without_sharing_availability() -> None:
+    owners = []
+    def status(owner):
+        owners.append(owner)
+        return {"healthy": True, "providers": [{"id": "provider", "available": owner == "alice"}]}
+    runtime = SimpleNamespace(status=status)
     service = AiService(
         InMemoryAiRepository(),
         runtime,
         SimpleNamespace(admin_config=AdminConfig(), ai=SimpleNamespace()),
     )
 
-    status = service.status()
-
-    assert status["healthy"] is True
-    assert [provider["id"] for provider in status["providers"]] == [
-        "connected",
-        "not-connected",
-    ]
-    assert status["providers"][0]["models"][0]["status"] == "active"
-    assert status["providers"][1]["available"] is False
-    assert status["providers"][1]["authenticated"] is False
-    assert status["providers"][1]["authMethods"] == [
-        {
-            "id": 0,
-            "type": "oauth",
-            "label": "Connect subscription",
-            "prompts": [],
-        }
-    ]
-
-
-def test_opencode_provider_authentication_uses_runtime_owned_secret_storage() -> None:
-    class RecordingClient(OpenCodeClient):
-        def __init__(self) -> None:
-            super().__init__("http://opencode", "user", "password")
-            self.calls = []
-
-        def _request(self, method, path, body=None):
-            self.calls.append((method, path, body))
-            if path.endswith("/oauth/authorize"):
-                return {
-                    "url": "https://example.test/authorize",
-                    "method": "code",
-                    "instructions": "Paste the returned code.",
-                }
-            return True
-
-    client = RecordingClient()
-
-    client.set_api_key("openai", "secret", {"account": "personal"})
-    authorization = client.oauth_authorize("openai", 1, {"plan": "pro"})
-    client.oauth_callback("openai", 1, "returned-code")
-    client.delete_provider_auth("openai")
-
-    assert authorization["method"] == "code"
-    assert client.calls == [
-        (
-            "PUT",
-            "/auth/openai",
-            {
-                "type": "api",
-                "key": "secret",
-                "metadata": {"account": "personal"},
-            },
-        ),
-        (
-            "POST",
-            "/provider/openai/oauth/authorize",
-            {"method": 1, "inputs": {"plan": "pro"}},
-        ),
-        (
-            "POST",
-            "/provider/openai/oauth/callback",
-            {"method": 1, "code": "returned-code"},
-        ),
-        ("DELETE", "/auth/openai", None),
-    ]
-
-
-def test_opencode_recovers_tool_calls_split_from_the_final_message() -> None:
-    session_id = "session-1"
-    prompt = "Add the audit table"
-    tool_input = {
-        "summary": "Add audit table",
-        "action": {
-            "type": "add_table",
-            "name": "audit_log",
-            "columns": [{"name": "id", "data_type": "bigint"}],
-        },
-    }
-    client = StubOpenCodeClient(
-        {
-            f"/session/{session_id}/message": {
-                "info": {"role": "assistant"},
-                "parts": [{"type": "text", "text": "Review the proposal."}],
-            },
-            f"/session/{session_id}/message?limit=20": [
-                {
-                    "info": {"role": "user"},
-                    "parts": [{"type": "text", "text": prompt}],
-                },
-                {
-                    "info": {"role": "assistant"},
-                    "parts": [
-                        {
-                            "type": "tool",
-                            "tool": "schemii_design_change",
-                            "state": {"status": "completed", "input": tool_input},
-                        }
-                    ],
-                },
-                {
-                    "info": {"role": "assistant"},
-                    "parts": [{"type": "text", "text": "Review the proposal."}],
-                },
-            ],
-        }
-    )
-
-    reply = client.prompt(
-        session_id,
-        "provider",
-        "model",
-        "system",
-        prompt,
-        {"schemii_design_change": True, "bash": False},
-    )
-
-    assert reply.text == "Review the proposal."
-    assert reply.tool_calls == (("schemii_design_change", tool_input),)
+    assert service.status("alice")["providers"][0]["available"] is True
+    assert service.status("bob")["providers"][0]["available"] is False
+    assert owners == ["alice", "bob"]
 
 
 class ReplayRequired(RuntimeError):
@@ -259,27 +94,13 @@ def test_preferences_save_defaults_and_chat_policy_as_one_change() -> None:
         AiCapabilities(),
     )
 
-    with pytest.raises(AiCapacityError):
-        repository.save_preferences(
-            owner,
-            chat.id,
-            1,
-            1,
-            "provider",
-            "different-model",
-            AiCapabilities(live_catalog=True),
-        )
-
-    assert repository.settings(owner).revision == 1
-    assert repository.get_chat(owner, chat.id).capabilities.live_catalog is False
-
     saved_settings, saved_chat, started_new = repository.save_preferences(
         owner,
         chat.id,
         1,
         1,
         "provider",
-        "model",
+        "different-model",
         AiCapabilities(live_catalog=True),
     )
 
@@ -287,6 +108,8 @@ def test_preferences_save_defaults_and_chat_policy_as_one_change() -> None:
     assert saved_settings.revision == 2
     assert saved_settings.default_capabilities.live_catalog is True
     assert saved_chat.revision == 2
+    assert saved_chat.id == chat.id
+    assert saved_chat.model_id == "different-model"
     assert saved_chat.capabilities.live_catalog is True
 
 
@@ -565,14 +388,14 @@ def test_turn_activity_reports_real_orchestration_stages() -> None:
         100,
     )
 
-    class Runtime:
+    class Runtime(AvailableRuntime):
         def create_session(self, title):
             assert title == "Explain"
             return "session"
 
-        def prompt(self, session_id, provider_id, model_id, system, prompt, tools):
-            assert (session_id, provider_id, model_id) == (
-                "session",
+        def run(self, owner_id, turn_id, provider_id, model_id, system, prompt, tools, **kwargs):
+            assert (owner_id, provider_id, model_id) == (
+                owner,
                 "provider",
                 "model",
             )
@@ -586,9 +409,9 @@ def test_turn_activity_reports_real_orchestration_stages() -> None:
                 "location": "CONTEXT.liveCatalog",
             }
             assert "do not substitute 'Prepare read queries'" in system
-            assert tools["schemii_design_change"] is False
-            assert tools["schemii_read_query"] is False
-            return OpenCodeReply("A formatted answer", ())
+            assert "schemii_design_change" not in {tool["name"] for tool in tools}
+            assert "schemii_read_query" not in {tool["name"] for tool in tools}
+            return PiReply("A formatted answer", ())
 
         def delete_session(self, session_id):
             assert session_id == "session"
@@ -655,17 +478,17 @@ def test_permission_changes_take_effect_on_the_next_turn_and_denied_calls_are_tr
         },
     )
 
-    class Runtime:
+    class Runtime(AvailableRuntime):
         def __init__(self):
             self.turns = []
 
         def create_session(self, title):
             return f"session-{len(self.turns) + 1}"
 
-        def prompt(self, session_id, provider_id, model_id, system, prompt, tools):
+        def run(self, owner_id, turn_id, provider_id, model_id, system, prompt, tools, **kwargs):
             context = json.loads(system.split("\nCONTEXT ", 1)[1])
             self.turns.append((context["authority"], tools))
-            return OpenCodeReply("I approved and created the table.", (table_call,))
+            return PiReply("I approved and created the table.", (table_call,))
 
         def delete_session(self, session_id):
             return None
@@ -691,7 +514,7 @@ def test_permission_changes_take_effect_on_the_next_turn_and_denied_calls_are_tr
     service.run_turn(owner, chat.id, first_turn.id)
 
     assert runtime.turns[0][0]["policyRevision"] == 1
-    assert runtime.turns[0][1]["schemii_design_change"] is False
+    assert "schemii_design_change" not in {tool["name"] for tool in runtime.turns[0][1]}
     assert repository.list_proposals(owner, chat.id) == []
     denied_reply = repository.list_messages(owner, chat.id, 100)[-1].text
     assert "No proposal was created" in denied_reply
@@ -711,62 +534,10 @@ def test_permission_changes_take_effect_on_the_next_turn_and_denied_calls_are_tr
 
     assert runtime.turns[1][0]["policyRevision"] == 2
     assert runtime.turns[1][0]["capabilities"]["design_changes"]["enabled"] is True
-    assert runtime.turns[1][1]["schemii_design_change"] is True
+    assert "schemii_design_change" in {tool["name"] for tool in runtime.turns[1][1]}
     proposals = repository.list_proposals(owner, chat.id)
     assert len(proposals) == 1
     assert proposals[0].details["name"] == "audit_log"
-
-
-def test_disabled_runtime_tools_are_not_recovered_from_sidecar_messages() -> None:
-    session_id = "session-disabled"
-    prompt = "Add a table"
-    client = StubOpenCodeClient(
-        {
-            f"/session/{session_id}/message": {
-                "info": {"role": "assistant"},
-                "parts": [{"type": "text", "text": "I cannot do that."}],
-            },
-            f"/session/{session_id}/message?limit=20": [
-                {
-                    "info": {"role": "user"},
-                    "parts": [{"type": "text", "text": prompt}],
-                },
-                {
-                    "info": {"role": "assistant"},
-                    "parts": [
-                        {
-                            "type": "tool",
-                            "tool": "schemii_design_change",
-                            "state": {
-                                "status": "completed",
-                                "input": {
-                                    "summary": "Unauthorized",
-                                    "action": {
-                                        "type": "add_table",
-                                        "name": "forbidden",
-                                        "columns": [
-                                            {"name": "id", "data_type": "bigint"}
-                                        ],
-                                    },
-                                },
-                            },
-                        }
-                    ],
-                },
-            ],
-        }
-    )
-
-    reply = client.prompt(
-        session_id,
-        "provider",
-        "model",
-        "system",
-        prompt,
-        {"schemii_design_change": False},
-    )
-
-    assert reply.tool_calls == ()
 
 
 def test_permission_change_during_model_work_discards_reply_and_tool_calls() -> None:
@@ -783,15 +554,15 @@ def test_permission_change_during_model_work_discards_reply_and_tool_calls() -> 
     )
     turn, _ = repository.create_turn(owner, chat.id, "Add a table", None, 4, 2, 100)
 
-    class Runtime:
+    class Runtime(AvailableRuntime):
         def create_session(self, title):
             return "session"
 
-        def prompt(self, *args):
+        def run(self, *args, **kwargs):
             repository.update_chat_policy(
                 owner, chat.id, chat.revision, AiCapabilities()
             )
-            return OpenCodeReply(
+            return PiReply(
                 "I created it.",
                 (
                     (
@@ -848,13 +619,13 @@ def test_row_backed_assistant_answer_is_transient_and_never_saved_as_message() -
     )
     sentinel = "private-row-d116ece0"
 
-    class Runtime:
+    class Runtime(AvailableRuntime):
         def create_session(self, title):
             return "session"
 
-        def prompt(self, session_id, provider_id, model_id, system, prompt, tools):
+        def run(self, owner_id, turn_id, provider_id, model_id, system, prompt, tools, **kwargs):
             assert sentinel in system
-            return OpenCodeReply(f"The value is {sentinel}.", ())
+            return PiReply(f"The value is {sentinel}.", ())
 
         def delete_session(self, session_id):
             return None
@@ -961,11 +732,11 @@ def test_active_turn_cancel_stops_runtime_and_returns_chat_to_idle() -> None:
     repository.claim_turn(owner, chat.id, turn.id)
     repository.set_chat_runtime(owner, chat.id, external_session_id="session-active")
 
-    class Runtime:
+    class Runtime(AvailableRuntime):
         deleted_sessions: list[str] = []
 
-        def delete_session(self, session_id: str) -> None:
-            self.deleted_sessions.append(session_id)
+        def cancel(self, owner_id: str, turn_id: str) -> None:
+            self.deleted_sessions.append((owner_id, turn_id))
 
     runtime = Runtime()
     service = AiService(
@@ -978,7 +749,7 @@ def test_active_turn_cancel_stops_runtime_and_returns_chat_to_idle() -> None:
 
     assert cancelled.status == "cancelled"
     assert repository.get_chat(owner, chat.id).status == "idle"
-    assert runtime.deleted_sessions == ["session-active"]
+    assert runtime.deleted_sessions == [(owner, turn.id)]
     assert repository.activity(owner, chat.id, 0)[-1].payload == {
         "turnId": turn.id,
         "stage": "response",

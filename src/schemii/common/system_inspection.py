@@ -296,12 +296,20 @@ class RuntimeBindingIndex:
         if parts and "services" in parts:
             service_index = parts.index("services")
             remaining = parts[service_index + 1 :]
-            if len(remaining) == 2 and remaining[0] in self.top_level:
-                implementation = type(self.top_level[remaining[0]])
-                return ResolvedCall(
-                    getattr(implementation, remaining[1], None),
-                    "runtime-service",
-                )
+            if len(remaining) >= 2 and remaining[0] in self.top_level:
+                implementations = (type(self.top_level[remaining[0]]),)
+                for field in remaining[1:-1]:
+                    implementations = tuple(dict.fromkeys(
+                        child
+                        for implementation in implementations
+                        for child in self.field_types.get((implementation, field), ())
+                    ))
+                methods = list(dict.fromkeys(
+                    method for implementation in implementations
+                    if (method := getattr(implementation, remaining[-1], None)) is not None
+                ))
+                if len(methods) == 1:
+                    return ResolvedCall(methods[0], "runtime-service")
 
         if parts and owner_type is not None and parts[0] in {"self", "cls"}:
             if len(parts) == 2:

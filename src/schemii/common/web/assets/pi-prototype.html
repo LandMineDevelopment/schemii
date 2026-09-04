@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi sign-in prototype · Schemii</title><link rel="stylesheet" href="/assets/common/pi-prototype.css">
+<script type="module" src="/assets/common/user-activity.js"></script>
+<script type="module" src="/assets/common/pi-prototype.js"></script></head>
+<body><main><a href="/">← Back to Schemii</a><p class="eyebrow">EXPERIMENTAL · PRIVATE SIDECAR</p>
+<h1>Connect Codex</h1><p>Test account sign-in for the shared Pi sidecar. Your existing AI chat and its credentials are unchanged.</p>
+<p>Credentials are encrypted in this server’s metadata database, never stored in the browser. This deployment currently uses one local prototype user—not separate authenticated user accounts.</p>
+<section><h2>Account connection</h2><p id="status" role="status" aria-live="polite">Checking connection…</p>
+<div id="device" hidden><p>Open the provider’s sign-in page, then enter this one-time code:</p><code id="code"></code><p><a id="authorize" target="_blank" rel="noopener noreferrer">Open OpenAI sign-in ↗</a></p><p>Keep this page open while authorizing. The code expires in ten minutes.</p></div>
+<div class="actions"><button id="connect" disabled>Connect Codex</button><button id="cancel" hidden>Cancel sign-in</button><button id="disconnect" hidden>Disconnect prototype</button></div></section>
+<p>This verifies sign-in and encrypted storage only. Pi is not yet the chat engine. Disconnect removes the stored prototype credential; it does not revoke access at OpenAI.</p>
+</main></body></html>

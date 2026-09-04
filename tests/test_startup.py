@@ -33,7 +33,7 @@ def test_startup_script_owns_the_compose_launch_contract() -> None:
     assert "docker info" in source
     assert 'exec newgrp docker -c "$restart_command"' in source
     assert 'docker "${compose_args[@]}" build schemii' in source
-    assert 'docker "${compose_args[@]}" up --detach --wait --wait-timeout' in source
+    assert 'docker "${compose_args[@]}" up --detach --remove-orphans --wait --wait-timeout' in source
     assert 'docker "${compose_args[@]}" logs --no-color --tail 200 schemii' in source
     assert 'docker "${compose_args[@]}" logs --no-color --tail 200 metadata-bootstrap' in source
     assert 'docker "${compose_args[@]}" logs --no-color --tail 200 postgres-seed' in source
@@ -88,6 +88,48 @@ def test_startup_script_rejects_empty_database_configuration() -> None:
     assert "SCHEMII_TEST_POSTGRES_DB must not be empty" in result.stderr
 
 
+def test_pi_runtime_is_default_and_normal_restart_cannot_redirect_it(tmp_path: Path) -> None:
+    command_log = tmp_path / "commands.log"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "printf '%s|pi=%s\\n' \"$*\" \"$SCHEMII_PI_PROTOTYPE_URL\" >> \"$COMMAND_LOG\"\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "COMMAND_LOG": str(command_log),
+        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
+        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
+        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
+    }
+    enabled = subprocess.run(
+        [str(START), "--ai-prototype"], cwd=ROOT, env=environment,
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert enabled.returncode == 0, enabled.stderr
+    commands = command_log.read_text(encoding="utf-8")
+    assert "--profile ai-prototype-runtime build schemii ai-prototype-runtime|pi=http://ai-prototype-runtime:4097" in commands
+    assert "--profile ai-prototype-runtime up --detach --remove-orphans --wait" in commands
+    assert "build schemii opencode" not in commands
+    assert "run --rm --no-deps -T ai-prototype" not in commands
+    command_log.write_text("", encoding="utf-8")
+    restarted = subprocess.run(
+        [str(START)], cwd=ROOT,
+        env={**environment, "SCHEMII_PI_PROTOTYPE_URL": "http://untrusted.invalid"},
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert restarted.returncode == 0, restarted.stderr
+    commands = command_log.read_text(encoding="utf-8")
+    assert "build schemii ai-prototype-runtime|pi=http://ai-prototype-runtime:4097" in commands
+    assert "build schemii opencode" not in commands
+    assert "rm --stop --force ai-prototype-runtime|pi=http://ai-prototype-runtime:4097" in commands
+    assert "--profile ai-prototype-runtime up --detach --remove-orphans --wait" in commands
+    assert "untrusted.invalid" not in commands
+
+
 def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -> None:
     command_log = tmp_path / "commands.log"
     docker = tmp_path / "docker"
@@ -131,17 +173,17 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert "docker:info" in commands
     assert (
         f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
-        "build schemii opencode"
+        "--profile ai-prototype-runtime build schemii ai-prototype-runtime"
     ) in commands
     assert (
         f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
-        "rm --stop --force ingress schemii opencode metadata-bootstrap"
+        "--profile ai-prototype-runtime rm --stop --force ingress schemii metadata-bootstrap"
     ) in commands
     assert (
         f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} "
-        "up --detach --wait --wait-timeout 7"
+        "--profile ai-prototype-runtime up --detach --remove-orphans --wait --wait-timeout 7"
     ) in commands
-    assert f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} ps" in commands
+    assert f"compose --project-name schemii-test --project-directory {ROOT} --file {ROOT / 'compose.test.yaml'} --profile ai-prototype-runtime ps" in commands
     assert "port=8123|db=startup_db|user=startup_user" in commands
     certificate = tls_directory / "localhost.crt"
     private_key = tls_directory / "localhost.key"
@@ -210,7 +252,9 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert metadata_app_password.read_bytes() == metadata_app_password_bytes
     assert demo_admin_password.read_bytes() == demo_admin_password_bytes
     second_commands = command_log.read_text(encoding="utf-8")
-    assert "rm --stop --force ingress schemii opencode metadata-bootstrap" in second_commands
+    assert "rm --stop --force ingress schemii metadata-bootstrap" in second_commands
+    assert "build schemii ai-prototype-runtime" in second_commands
+    assert "build schemii opencode" not in second_commands
 
 
 def test_startup_rejects_a_password_change_that_would_desynchronize_persisted_roles(

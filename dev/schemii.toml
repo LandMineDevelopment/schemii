@@ -58,6 +58,11 @@ maximum_concurrent_turns = 4
 maximum_concurrent_turns_per_user = 2
 maximum_chats_per_workspace = 50
 chat_retention_days = 90
+# Set false to retain Pi credentials until manual disconnect.
+# This does not manage the existing OpenCode credential store.
+credential_expiration_enabled = true
+# Days without Schemii activity before deletion; ignored when expiration is disabled.
+credential_inactivity_days = 30
 message_history_limit = 200
 activity_history_limit = 1000
 maximum_proposals_per_turn = 10
@@ -73,3 +78,6 @@ transient_response_ttl_seconds = 900
 proposal_ttl_seconds = 900
 provider_timeout_seconds = 300
 runtime_status_cache_seconds = 30
+# Refresh public free-model availability/prices; hide entries older than max stale.
+catalog_refresh_seconds = 3600
+catalog_max_stale_seconds = 86400

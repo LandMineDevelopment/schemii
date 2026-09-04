@@ -1,8 +1,12 @@
 """Metadata repository composition boundary."""
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+if TYPE_CHECKING:
+    from schemii.common.ai.credential_store import MemoryAiCredentialStore, PostgresAiCredentialStore
 from schemii.common.connections.store import (
     ConnectionRepository,
     InMemoryConnectionRepository,
@@ -34,6 +38,12 @@ def _memory_readiness_probe() -> None:
     """In-memory repositories have no external dependency to probe."""
 
 
+def _memory_ai_credentials() -> MemoryAiCredentialStore:
+    from schemii.common.ai.credential_store import MemoryAiCredentialStore
+
+    return MemoryAiCredentialStore()
+
+
 @dataclass(frozen=True)
 class MetadataRepositories:
     connections: ConnectionRepository
@@ -59,6 +69,11 @@ class MetadataRepositories:
         repr=False,
         compare=False,
     )
+    ai_credentials: MemoryAiCredentialStore | PostgresAiCredentialStore = field(
+        default_factory=_memory_ai_credentials,
+        repr=False,
+        compare=False,
+    )
 
     def check_readiness(self) -> None:
         self.readiness_probe()
@@ -71,12 +86,20 @@ def create_metadata_repositories(
     maximum_connections_per_owner: int = 100,
     limit_event_retention_days: int = 30,
     maximum_limit_events: int = 100_000,
+    credential_inactivity_days: int = 30,
+    credential_expiration_enabled: bool = True,
 ) -> MetadataRepositories:
     """Build metadata adapters with an explicitly owned migration composition."""
 
     config = MetadataConfig.from_env(env)
     if config is None:
+        from schemii.common.ai.credential_store import MemoryAiCredentialStore
+
         return MetadataRepositories(
+            ai_credentials=MemoryAiCredentialStore(
+                inactivity_days=credential_inactivity_days,
+                expiration_enabled=credential_expiration_enabled,
+            ),
             connections=InMemoryConnectionRepository(
                 max_connections_per_owner=maximum_connections_per_owner
             ),
@@ -86,6 +109,7 @@ def create_metadata_repositories(
             ),
         )
     from schemii.common.connections.postgres_store import PostgresConnectionRepository
+    from schemii.common.ai.credential_store import PostgresAiCredentialStore
 
     connection_factory = MetadataConnectionFactory(config)
     MetadataMigrator(
@@ -117,4 +141,8 @@ def create_metadata_repositories(
             host_aliases=config.target_host_aliases,
         ),
         connection_factory=connection_factory,
+        ai_credentials=PostgresAiCredentialStore(
+            connection_factory, cipher, inactivity_days=credential_inactivity_days,
+            expiration_enabled=credential_expiration_enabled,
+        ),
     )

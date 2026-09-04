@@ -56,7 +56,9 @@ let timelineProposals = [];
 let timelineOperations = [];
 let timelineSignature = "";
 let pendingDeleteChatId = null;
-let oauthAuthorization = null;
+let providerLogin = null;
+let loginTimer = null;
+let streamingResponse = null;
 let pendingProposal = null;
 let proposalArmTimer = null;
 let proposalReviewOpenedAt = 0;
@@ -102,7 +104,14 @@ function loadModelOptions(select, selectedProvider, selectedId) {
     option.selected = option.value === current;
     return option;
   }));
-  if (![...select.options].some(option => option.selected) && select.options.length) {
+  if (selectedId && !models.some(item => modelValue(item.providerId, item.id) === current)) {
+    const unavailable = document.createElement("option");
+    unavailable.value = current;
+    unavailable.textContent = `${selectedId} · unavailable — choose another model`;
+    unavailable.disabled = true;
+    unavailable.selected = true;
+    select.prepend(unavailable);
+  } else if (!selectedId && select.options.length) {
     select.options[0].selected = true;
   }
 }
@@ -127,6 +136,9 @@ function updateContextControls() {
   elements.disclosure.textContent = chat
     ? "This conversation uses the saved workspace design. Proposed actions always wait for your review."
     : "Start a conversation using the saved workspace design. Proposed actions always wait for your review.";
+  const providerStatus = runtime?.providers?.find(item => item.id === provider);
+  const privacyNotice = providerStatus?.privacy || providerStatus?.privacyNotice;
+  if (privacyNotice) elements.disclosure.textContent += ` ${privacyNotice}`;
 }
 
 function appendInline(parent, source) {
@@ -259,6 +271,9 @@ function renderTimeline(messages = timelineMessages, proposals = timelineProposa
   timelineMessages = messages;
   timelineProposals = proposals;
   timelineOperations = operations;
+  if (streamingResponse?.text && !messages.some(item => item.turnId === streamingResponse.turnId && item.role === "assistant")) {
+    messages = [...messages, { id: `stream:${streamingResponse.turnId}`, turnId: streamingResponse.turnId, role: "assistant", text: streamingResponse.text, sequence: Number.MAX_SAFE_INTEGER, createdAt: streamingResponse.createdAt, transient: true }];
+  }
   const nextSignature = JSON.stringify([
     messages.map(item => [item.id, item.sequence, item.role, item.text]),
     proposals.map(item => [item.id, item.turnId, item.revision, item.status]),
@@ -490,75 +505,77 @@ function safeExternalUrl(value) {
   }
 }
 
-function providerInputs(form, method) {
-  return Object.fromEntries((method.prompts || []).map(prompt => [
-    prompt.key,
-    String(form.elements[prompt.key]?.value || ""),
-  ]));
+function clearProviderLogin() {
+  globalThis.clearTimeout(loginTimer);
+  providerLogin = null;
 }
 
-function authPrompt(prompt) {
-  const label = document.createElement("label");
-  const copy = document.createElement("span"); copy.textContent = prompt.message;
-  let control;
-  if (prompt.type === "select") {
-    control = document.createElement("select");
-    for (const choice of prompt.options || []) {
-      const option = document.createElement("option"); option.value = choice.value; option.textContent = choice.hint ? `${choice.label} · ${choice.hint}` : choice.label; control.append(option);
+async function pollProviderLogin(login) {
+  try {
+    const state = await requestJson(`/api/v1/ai/prototype/logins/${encodeURIComponent(login.id)}`);
+    if (providerLogin !== login) return;
+    if (state.status === "succeeded") {
+      clearProviderLogin(); await refreshProviderStatus();
+      elements.settingsStatus.textContent = "Codex connected to your account."; return;
     }
+    if (state.status !== "pending") throw new Error(state.message || "Sign-in expired. Connect again.");
+    Object.assign(login, { userCode: state.userCode, verificationUrl: state.verificationUrl });
+    renderProviders();
+    loginTimer = globalThis.setTimeout(() => void pollProviderLogin(login), 2000);
+  } catch (error) {
+    if (providerLogin !== login) return;
+    clearProviderLogin(); renderProviders(); elements.settingsStatus.textContent = error.message;
+  }
+}
+
+function codexConnection() {
+  const section = document.createElement("div"); section.className = "ai-auth-form";
+  if (providerLogin) {
+    const login = providerLogin;
+    const copy = document.createElement("p");
+    copy.textContent = login.userCode ? "Enter this code at OpenAI to connect your account:" : "Preparing device sign-in…";
+    section.append(copy);
+    if (login.userCode) {
+      const code = document.createElement("strong"); code.textContent = login.userCode; section.append(code);
+      const url = safeExternalUrl(login.verificationUrl);
+      if (url) { const link = document.createElement("a"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Continue at OpenAI"; section.append(link); }
+    }
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "ui-button compact"; cancel.textContent = "Cancel sign-in";
+    cancel.disabled = !login.id;
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      try {
+        await requestJson(`/api/v1/ai/prototype/logins/${encodeURIComponent(login.id)}`, { method: "DELETE" });
+        if (providerLogin === login) { clearProviderLogin(); renderProviders(); elements.settingsStatus.textContent = "Sign-in cancelled."; }
+      } catch (error) { elements.settingsStatus.textContent = error.message; cancel.disabled = false; }
+    });
+    section.append(cancel);
   } else {
-    control = document.createElement("input"); control.type = "text"; control.placeholder = prompt.placeholder || "";
+    const connect = document.createElement("button"); connect.type = "button"; connect.className = "ui-button compact primary"; connect.textContent = "Connect Codex";
+    connect.addEventListener("click", async () => {
+      const login = {}; providerLogin = login; renderProviders(); elements.settingsStatus.textContent = "Preparing device sign-in…";
+      try {
+        const result = await requestJson("/api/v1/ai/prototype/login", { method: "POST" });
+        if (providerLogin !== login) return;
+        login.id = result.id; renderProviders(); void pollProviderLogin(login);
+      } catch (error) { clearProviderLogin(); renderProviders(); elements.settingsStatus.textContent = error.message; }
+    });
+    section.append(connect);
   }
-  control.name = prompt.key; control.required = true; control.autocomplete = "off";
-  label.append(copy, control); return label;
+  return section;
 }
 
-function renderOauthCompletion(provider, method, authorization) {
-  const form = document.createElement("form"); form.className = "ai-oauth-completion";
-  const instructions = document.createElement("p"); instructions.textContent = authorization.instructions || "Complete authorization in the provider page, then return here.";
-  form.append(instructions);
-  const url = safeExternalUrl(authorization.url);
-  if (url) {
-    const link = document.createElement("a"); link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Open authorization page"; form.append(link);
-  }
-  let code = null;
-  if (authorization.method === "code") {
-    const label = document.createElement("label"); const copy = document.createElement("span"); copy.textContent = "Authorization code";
-    code = document.createElement("input"); code.type = "password"; code.autocomplete = "off"; code.required = true; label.append(copy, code); form.append(label);
-  }
-  const complete = document.createElement("button"); complete.type = "submit"; complete.className = "ui-button compact primary"; complete.textContent = "Complete connection"; form.append(complete);
-  form.addEventListener("submit", async event => {
-    event.preventDefault(); complete.disabled = true; elements.settingsStatus.textContent = "Completing provider connection…";
-    try {
-      await requestJson("/api/v1/ai/auth/oauth/callback", { method: "POST", body: { providerId: provider.id, method: method.id, ...(code?.value ? { code: code.value } : {}) } });
-      oauthAuthorization = null; await refreshProviderStatus(); elements.settingsStatus.textContent = `${provider.name} connected.`;
-    } catch (error) { elements.settingsStatus.textContent = error.message; complete.disabled = false; }
-  });
-  return form;
-}
-
-function authMethodForm(provider, method) {
+function apiKeyConnection(provider) {
   const form = document.createElement("form"); form.className = "ai-auth-form";
-  const title = document.createElement("strong"); title.textContent = method.label; form.append(title);
-  if (method.type === "api") {
-    const label = document.createElement("label"); const copy = document.createElement("span"); copy.textContent = method.label;
-    const key = document.createElement("input"); key.type = "password"; key.name = "credential"; key.required = true; key.autocomplete = "off"; label.append(copy, key); form.append(label);
-  }
-  for (const prompt of method.prompts || []) form.append(authPrompt(prompt));
-  const submit = document.createElement("button"); submit.type = "submit"; submit.className = "ui-button compact primary"; submit.textContent = method.type === "api" ? "Connect" : "Authorize"; form.append(submit);
+  const label = document.createElement("label"); const copy = document.createElement("span"); copy.textContent = "API key";
+  const key = document.createElement("input"); key.type = "password"; key.required = true; key.autocomplete = "off"; label.append(copy, key);
+  const submit = document.createElement("button"); submit.type = "submit"; submit.className = "ui-button compact primary"; submit.textContent = "Connect";
+  form.append(label, submit);
   form.addEventListener("submit", async event => {
-    event.preventDefault(); submit.disabled = true; elements.settingsStatus.textContent = method.type === "api" ? "Saving provider credential…" : "Starting provider authorization…";
+    event.preventDefault(); submit.disabled = true;
     try {
-      if (method.type === "api") {
-        await requestJson("/api/v1/ai/auth/api", { method: "POST", body: { providerId: provider.id, key: form.elements.credential.value, inputs: providerInputs(form, method) } });
-        form.elements.credential.value = ""; await refreshProviderStatus(); elements.settingsStatus.textContent = `${provider.name} connected.`;
-      } else {
-        const authorization = await requestJson("/api/v1/ai/auth/oauth/authorize", { method: "POST", body: { providerId: provider.id, method: method.id, inputs: providerInputs(form, method) } });
-        oauthAuthorization = { providerId: provider.id, methodId: method.id, authorization };
-        form.replaceWith(renderOauthCompletion(provider, method, authorization));
-        const url = safeExternalUrl(authorization.url); if (url) window.open(url, "_blank", "noopener,noreferrer");
-        elements.settingsStatus.textContent = "Finish authorization with the provider, then complete the connection here.";
-      }
+      await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "POST", body: { apiKey: key.value } });
+      key.value = ""; await refreshProviderStatus(); elements.settingsStatus.textContent = `${provider.name} connected.`;
     } catch (error) { elements.settingsStatus.textContent = error.message; submit.disabled = false; }
   });
   return form;
@@ -568,34 +585,31 @@ function renderProviders() {
   if (!elements.providerList) return;
   const providers = runtime?.providers || [];
   if (!providers.length) {
-    const empty = document.createElement("p"); empty.className = "ai-provider-empty"; empty.textContent = runtime?.message || "No model providers are available from the AI runtime."; elements.providerList.replaceChildren(empty); return;
+    const empty = document.createElement("p"); empty.className = "ai-provider-empty"; empty.textContent = runtime?.message || "No model providers are available."; elements.providerList.replaceChildren(empty); return;
   }
   elements.providerList.replaceChildren(...providers.map(provider => {
     const card = document.createElement("details"); card.className = "ai-provider-card";
-    card.open = oauthAuthorization?.providerId === provider.id || provider.id === (chat?.providerId || settings?.defaultProviderId);
+    card.open = (providerLogin && provider.id === "openai-codex") || provider.id === (chat?.providerId || settings?.defaultProviderId);
     const heading = document.createElement("summary"); heading.className = "ai-provider-heading";
     const name = document.createElement("strong"); name.textContent = provider.name;
-    const state = document.createElement("span"); state.className = `ai-provider-state${provider.authenticated ? " connected" : ""}`; state.textContent = provider.authenticated ? "Connected" : "Not connected";
+    const state = document.createElement("span"); state.className = `ai-provider-state${provider.available ? " connected" : ""}`;
+    state.textContent = provider.authenticated ? "Connected" : provider.available ? "Available" : "Not connected";
     const caret = document.createElement("span"); caret.className = "ai-provider-caret"; caret.textContent = "⌄";
     heading.append(name, state, caret); card.append(heading);
-    if (provider.authenticated) {
-      if (provider.authMethods?.length) {
-        const disconnect = document.createElement("button"); disconnect.type = "button"; disconnect.className = "ui-button compact"; disconnect.textContent = "Disconnect";
-        disconnect.addEventListener("click", async () => {
-          disconnect.disabled = true; elements.settingsStatus.textContent = `Disconnecting ${provider.name}…`;
-          try { await requestJson(`/api/v1/ai/auth/${encodeURIComponent(provider.id)}`, { method: "DELETE" }); await refreshProviderStatus(); elements.settingsStatus.textContent = `${provider.name} disconnected.`; }
-          catch (error) { elements.settingsStatus.textContent = error.message; disconnect.disabled = false; }
-        });
-        card.append(disconnect);
-      }
-    } else if (provider.authMethods?.length) {
-      for (const method of provider.authMethods) {
-        const pending = oauthAuthorization?.providerId === provider.id && oauthAuthorization.methodId === method.id ? oauthAuthorization.authorization : null;
-        card.append(pending ? renderOauthCompletion(provider, method, pending) : authMethodForm(provider, method));
-      }
-    } else {
-      const unavailable = document.createElement("p"); unavailable.className = "ai-provider-empty"; unavailable.textContent = "This provider did not advertise a supported connection method."; card.append(unavailable);
+    if (provider.privacy || provider.privacyNotice) {
+      const privacy = document.createElement("p"); privacy.className = "ai-provider-empty"; privacy.textContent = provider.privacy || provider.privacyNotice; card.append(privacy);
     }
+    if (provider.authenticated && ["openai-codex", "openai"].includes(provider.id)) {
+      const disconnect = document.createElement("button"); disconnect.type = "button"; disconnect.className = "ui-button compact"; disconnect.textContent = "Disconnect";
+      disconnect.addEventListener("click", async () => {
+        disconnect.disabled = true;
+        try {
+          await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
+          await refreshProviderStatus(); elements.settingsStatus.textContent = `${provider.name} disconnected.`;
+        } catch (error) { elements.settingsStatus.textContent = error.message; disconnect.disabled = false; }
+      }); card.append(disconnect);
+    } else if (provider.id === "openai-codex") card.append(codexConnection());
+    else if (provider.id === "openai") card.append(apiKeyConnection(provider));
     return card;
   }));
 }
@@ -648,13 +662,16 @@ function scheduleProgressPoll() {
 async function pollProgress() {
   if (!chat) return;
   const chatId = chat.id;
-  const [activity, currentChat] = await Promise.all([
+  const [activity, currentChat, stream] = await Promise.all([
     requestJson(`/api/v1/schemii/ai/chats/${chatId}/activity?after=${activitySequence}`),
     requestJson(`/api/v1/schemii/ai/chats/${chatId}`),
+    requestJson(`/api/v1/schemii/ai/chats/${chatId}/stream`),
   ]);
   if (chat?.id !== chatId) return;
   chat = currentChat; applyActivityPage(activity, currentChat); updateContextControls();
   if (chat.status === "working") {
+    streamingResponse = stream?.turnId && stream.text ? { ...stream, createdAt: streamingResponse?.createdAt || new Date().toISOString() } : null;
+    renderTimeline();
     setStatus("Working"); if (!activityRun) beginActivity(); scheduleProgressPoll(); return;
   }
   if (chat.status === "failed") { setStatus("Needs attention"); finishActivity("failed"); }
@@ -664,6 +681,7 @@ async function pollProgress() {
 
 async function refresh({ includeChat = true } = {}) {
   if (!chat) return;
+  const chatId = chat.id;
   globalThis.clearTimeout(pollTimer); pollTimer = null;
   const initialActivityLoad = activitySequence === 0;
   const [history, proposalList, operationList, activity, transient, currentChat] = await Promise.all([
@@ -672,7 +690,9 @@ async function refresh({ includeChat = true } = {}) {
     requestJson(`/api/v1/schemii/ai/chats/${chat.id}/transient-responses`),
     includeChat ? requestJson(`/api/v1/schemii/ai/chats/${chat.id}`) : Promise.resolve(chat),
   ]);
+  if (chat?.id !== chatId) return;
   chat = currentChat;
+  streamingResponse = null;
   const transientByTurn = new Map((transient.responses || []).map(item => [item.turnId, item]));
   const renderedMessages = history.messages.map(message => {
     const response = message.role === "assistant" ? transientByTurn.get(message.turnId) : null;
@@ -803,7 +823,15 @@ elements.newButton?.addEventListener("click", async () => {
 
 elements.model?.addEventListener("change", async () => {
   const model = selectedModel(); if (!model || (model.providerId === chat?.providerId && model.id === chat?.modelId)) return;
-  try { await createConversation({ model, capabilities: chat?.capabilities || defaultCapabilities() }); setNotice(`Started a new conversation with ${model.name}. The previous conversation remains in history.`); await refresh(); elements.input.focus(); }
+  elements.model.disabled = true;
+  try {
+    if (!chat) await createConversation({ model, capabilities: defaultCapabilities() });
+    else {
+      const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities: chat.capabilities } });
+      settings = result.settings; chat = result.chat;
+    }
+    setNotice(`Switched to ${model.name}. Conversation retained.`); await refresh(); elements.input.focus();
+  }
   catch (error) { showError(error); updateContextControls(); }
 });
 
@@ -813,13 +841,16 @@ elements.input?.addEventListener("keydown", event => {
 
 elements.form?.addEventListener("submit", async event => {
   event.preventDefault(); const text = elements.input.value.trim(); if (!text || !chat || chat.status === "working") return;
+  const provider = runtime?.providers?.find(item => item.id === chat.providerId);
+  const requiresAcknowledgment = chat.providerId === "opencode";
+  if (requiresAcknowledgment && !window.confirm(`${provider?.privacy || provider?.privacyNotice || "OpenCode Zen free models may use prompts and responses for training. Do not send sensitive, private, or confidential data."}\n\nSend this message and the conversation context to this provider?`)) return;
   elements.input.value = ""; elements.send.disabled = true; beginActivity(); setStatus("Working"); setNotice("");
   try {
     design = await requestJson(`/api/v1/schemii/workspaces/${workspaceId()}/design`);
-    const turn = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/messages`, { method: "POST", body: { text, expectedChatRevision: chat.revision, expectedDesignRevision: design.revision, resultContextOperationId } });
+    const turn = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/messages`, { method: "POST", body: { text, expectedChatRevision: chat.revision, expectedDesignRevision: design.revision, resultContextOperationId, ...(requiresAcknowledgment ? { acknowledgeProviderDataPolicy: true } : {}) } });
     if (activityRun) { activityRun.turnId = turn.id; placeActivity(); }
     resultContextOperationId = null; renderAttachment(); await refresh();
-  } catch (error) { finishActivity("failed"); showError(error); }
+  } catch (error) { if (!elements.input.value) elements.input.value = text; finishActivity("failed"); showError(error); }
   finally { elements.send.disabled = false; }
 });
 
@@ -827,10 +858,10 @@ elements.settingsForm?.addEventListener("submit", async event => {
   event.preventDefault(); const model = selectedModel(elements.settingsModel); if (!model) return;
   const capabilities = Object.fromEntries(CAPABILITIES.map(name => [name, elements.settingsForm.elements[name].checked])); elements.settingsStatus.textContent = "Saving…";
   try {
+    const modelChanged = model.providerId !== chat.providerId || model.id !== chat.modelId;
     const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities } });
     settings = result.settings; chat = result.chat;
-    const modelChanged = result.startedNewConversation;
-    updateContextControls(); closeDialog(elements.settingsDialog); setNotice(modelChanged ? `Started a new conversation with ${model.name}.` : "Assistant permissions saved."); await refresh();
+    updateContextControls(); closeDialog(elements.settingsDialog); setNotice(modelChanged ? `Switched to ${model.name}. Conversation retained; permissions saved.` : "Assistant permissions saved."); await refresh();
   } catch (error) { elements.settingsStatus.textContent = error.message; }
 });
 
@@ -900,4 +931,4 @@ elements.body?.addEventListener("click", async event => {
   } catch (error) { showError(error); }
 });
 
-window.addEventListener("beforeunload", () => { globalThis.clearTimeout(pollTimer); globalThis.clearInterval(elapsedTimer); });
+window.addEventListener("beforeunload", () => { globalThis.clearTimeout(pollTimer); globalThis.clearTimeout(loginTimer); globalThis.clearInterval(elapsedTimer); });

@@ -78,6 +78,7 @@ class SchemiiChatListResponse(ApiModel):
 
 
 class SchemiiMessageCreate(ApiModel):
+    acknowledge_provider_data_policy: bool = Field(default=False, strict=True)
     text: Annotated[str, Field(min_length=1, max_length=65_536)]
     expected_chat_revision: Annotated[int, Field(strict=True, ge=1)]
     expected_design_revision: Annotated[int, Field(strict=True, ge=0)]

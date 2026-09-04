@@ -16,7 +16,8 @@ from schemii.common.api.models import ApiErrorResponse
 from schemii.common.api.routes import router as runtime_router
 from schemii.common.api.runtime import RuntimeConfig, TargetEgressMode
 from schemii.common.admin_config import AdminConfig
-from schemii.common.ai.opencode import OpenCodeClient
+from schemii.common.ai.credential_lifecycle import CredentialExpiryWorker, router as activity_router
+from schemii.common.ai.model_catalog import ModelCatalogWorker, ZenModelCatalog
 from schemii.common.ai.routes import router as ai_provider_router
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.policy import (
@@ -92,6 +93,8 @@ def create_services(
         ),
         limit_event_retention_days=selected_admin.limit_events.retention_days,
         maximum_limit_events=selected_admin.limit_events.maximum_events,
+        credential_inactivity_days=selected_admin.ai.credential_inactivity_days,
+        credential_expiration_enabled=selected_admin.ai.credential_expiration_enabled,
     )
     history_limit = selected_admin.resources.design_history_actions_per_workspace
     designs: DesignRepository = (
@@ -355,9 +358,23 @@ def create_app(
         await asyncio.to_thread(application.state.ai_service.recover_interrupted)
         active_services.migrations.set_execution_waker(migration_worker.notify)
         await migration_worker.start()
+        credential_worker = CredentialExpiryWorker(
+            active_services.metadata.ai_credentials,
+            enabled=active_services.admin_config.ai.credential_expiration_enabled,
+        )
+        await credential_worker.start()
+        catalog_worker = (
+            ModelCatalogWorker(application.state.ai_model_catalog)
+            if application.state.ai_model_catalog is not None else None
+        )
+        if catalog_worker is not None:
+            await catalog_worker.start()
         try:
             yield
         finally:
+            if catalog_worker is not None:
+                await catalog_worker.stop()
+            await credential_worker.stop()
             assert active_services.console is not None
             active_services.console.close()
             active_services.migrations.set_execution_waker(None)
@@ -378,10 +395,26 @@ def create_app(
             503: {"model": ApiErrorResponse, "description": "Required service unavailable"},
         },
     )
+    from schemii.common.ai.prototype import PiClient, router as pi_router
+
     application.state.services = active_services
-    ai_runtime = OpenCodeClient.from_env()
-    if ai_runtime is not None:
-        ai_runtime.timeout = active_services.admin_config.ai.provider_timeout_seconds
+    application.state.pi_client = PiClient.from_env()
+    application.state.ai_model_catalog = (
+        ZenModelCatalog(
+            refresh_seconds=active_services.admin_config.ai.catalog_refresh_seconds,
+            max_stale_seconds=active_services.admin_config.ai.catalog_max_stale_seconds,
+        )
+        if active_services.admin_config.ai.enabled and application.state.pi_client is not None
+        else None
+    )
+    application.include_router(pi_router)
+    application.include_router(activity_router)
+    from schemii.common.ai.pi import PiRuntime
+    ai_runtime = (
+        PiRuntime(application.state.pi_client, active_services.metadata.ai_credentials,
+                  application.state.ai_model_catalog, active_services.admin_config.ai)
+        if application.state.pi_client is not None else None
+    )
     application.state.ai_service = AiService(
         active_services.ai_repository
         or InMemoryAiRepository(active_services.admin_config.ai),

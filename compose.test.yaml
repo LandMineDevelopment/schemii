@@ -1,6 +1,61 @@
 name: schemii-test
 
 services:
+  ai-prototype:
+    profiles: [ai-prototype]
+    image: schemii-test-ai-prototype
+    build:
+      context: .
+      dockerfile: ai/prototype/Dockerfile
+    network_mode: none
+    user: node
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    restart: "no"
+
+  ai-prototype-runtime:
+    image: schemii-test-ai-prototype
+    build:
+      context: .
+      dockerfile: ai/prototype/Dockerfile
+    command: ["node", "server.js"]
+    environment:
+      SCHEMII_PI_PASSWORD_FILE: /run/secrets/opencode_password
+    volumes:
+      - "${SCHEMII_OPENCODE_PASSWORD_SECRET_FILE:-./.schemii/secrets/opencode_password}:/run/secrets/opencode_password:ro"
+    group_add:
+      - "${SCHEMII_SECRET_READER_GID:-10001}"
+    networks:
+      - ai-runtime
+    user: node
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - --input-type=module
+        - -e
+        - "import {readFileSync} from 'node:fs'; const secret=readFileSync('/run/secrets/opencode_password','utf8').trim(); try { const r=await fetch('http://127.0.0.1:4097/health',{headers:{Authorization:'Bearer '+secret},signal:AbortSignal.timeout(2000)}); process.exit(r.ok?0:1); } catch { process.exit(1); }"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   schemii:
     image: schemii-test-application
     build:
@@ -17,17 +72,13 @@ services:
       SCHEMII_METADATA_ENCRYPTION_KEY_FILE: /run/secrets/metadata_encryption_key
       SCHEMII_METADATA_TARGET_HOST_ALIASES: metadata-postgres
       SCHEMII_CONFIG_FILE: /etc/schemii/schemii.toml
-      SCHEMII_OPENCODE_URL: http://opencode:4096
-      SCHEMII_OPENCODE_USERNAME: opencode
-      SCHEMII_OPENCODE_PASSWORD_FILE: /run/secrets/opencode_password
-      SCHEMII_AI_FALLBACK_PROVIDER_ID: ${SCHEMII_AI_FALLBACK_PROVIDER_ID:-}
-      SCHEMII_AI_FALLBACK_MODEL_ID: ${SCHEMII_AI_FALLBACK_MODEL_ID:-}
+      SCHEMII_PI_PROTOTYPE_URL: http://ai-prototype-runtime:4097
     depends_on:
       metadata-bootstrap:
         condition: service_completed_successfully
       postgres-seed:
         condition: service_completed_successfully
-      opencode:
+      ai-prototype-runtime:
         condition: service_healthy
     init: true
     networks:
@@ -50,39 +101,6 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
-  opencode:
-    image: schemii-test-opencode
-    build:
-      context: .
-      dockerfile: ai/Dockerfile
-    command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
-    environment:
-      OPENCODE_SERVER_USERNAME: opencode
-      OPENCODE_SERVER_PASSWORD_FILE: /run/secrets/opencode_password
-      XDG_DATA_HOME: /opencode/data
-      XDG_CONFIG_HOME: /tmp/opencode/config
-      XDG_STATE_HOME: /tmp/opencode/state
-      XDG_CACHE_HOME: /tmp/opencode/cache
-    volumes:
-      - ./ai/workspace:/workspace:ro
-      - schemii-test-opencode-data:/opencode/data
-      - "${SCHEMII_OPENCODE_PASSWORD_SECRET_FILE:-./.schemii/secrets/opencode_password}:/run/secrets/opencode_password:ro"
-    group_add:
-      - "${SCHEMII_SECRET_READER_GID:-10001}"
-    working_dir: /workspace
-    networks:
-      - ai-runtime
-    read_only: true
-    tmpfs:
-      - /tmp:size=128m,mode=1777
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    healthcheck:
-      test: ["CMD-SHELL", "password=$$(cat /run/secrets/opencode_password); auth=$$(printf 'opencode:%s' \"$$password\" | base64 | tr -d '\\n'); wget -q --spider --header \"Authorization: Basic $$auth\" http://127.0.0.1:4096/global/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
 
   ingress:
     image: nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8
