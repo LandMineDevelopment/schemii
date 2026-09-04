@@ -1,0 +1,8 @@
+{
+  "changes": [
+    {"operation": "setColumnType", "table": "empty_migration_lab", "column": "label", "dataType": "character varying(8)"},
+    {"operation": "setColumnType", "table": "console_demo_notes", "column": "scenario_key", "dataType": "character varying(40)"},
+    {"operation": "setColumnType", "table": "console_demo_notes", "column": "change_count", "dataType": "smallint"},
+    {"operation": "setColumnType", "table": "console_demo_notes", "column": "note", "dataType": "character varying(8)"}
+  ]
+}

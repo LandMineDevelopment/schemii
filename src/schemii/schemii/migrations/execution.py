@@ -379,6 +379,11 @@ class MigrationExecutionCoordinator:
                     execution_arguments["required_empty_tables"] = (
                         record.authority.required_empty_tables
                     )
+                conversion_ids = {item.table_id for item in plan.column_type_conversions if item.strategy and not item.validation_error}
+                if conversion_ids:
+                    execution_arguments["conversion_tables"] = tuple(
+                        table.name for table in record.authority.live_content.tables if table.id in conversion_ids
+                    )
                 result = executor(
                     connection,
                     record.authority.namespace,
@@ -437,14 +442,17 @@ class MigrationExecutionCoordinator:
                         error_detail=callback_error.details,
                     )
                 raise callback_error from error
+            failed_step = plan.steps[error.completed_step_count] if error.completed_step_count < len(plan.steps) else None
+            details = {"message": str(error), "objectPath": failed_step.object_path if failed_step else None}
             self._transition_execution(
                 execution_record,
                 status="failed",
                 completed_step_count=error.completed_step_count,
                 commit_outcome="rolled_back",
                 error_code=error.code,
+                error_detail=details,
             )
-            raise MigrationServiceError(409, error.code, str(error)) from error
+            raise MigrationServiceError(409, error.code, str(error), details=details) from error
         except PostgresConnectionCapacityError as error:
             details = {
                 "resource": "postgres_connections",

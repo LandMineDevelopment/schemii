@@ -63,6 +63,7 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         "open_console_read_session",
         "open_console_transaction",
         "cancel_console",
+        "validate_column_conversion",
         "execute_migration",
         "transaction_status",
     ]

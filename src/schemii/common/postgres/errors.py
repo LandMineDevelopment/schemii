@@ -39,7 +39,8 @@ class PostgresConnectionCapacityError(PostgresGatewayError):
 class PostgresQueryError(PostgresGatewayError):
     code = "postgres_query_failed"
 
-    def __init__(self) -> None:
+    def __init__(self, *, sqlstate: str | None = None) -> None:
+        self.sqlstate = sqlstate
         super().__init__("PostgreSQL catalog query failed")
 
 
@@ -152,9 +153,28 @@ class PostgresMigrationPreconditionError(PostgresGatewayError):
 class PostgresMigrationExecutionError(PostgresGatewayError):
     code = "postgres_migration_failed"
 
-    def __init__(self, completed_step_count: int) -> None:
+    def __init__(self, completed_step_count: int, *, sqlstate: str | None = None) -> None:
         self.completed_step_count = completed_step_count
-        super().__init__("PostgreSQL rejected the migration; all migration statements were rolled back")
+        self.sqlstate = sqlstate
+        detail = conversion_validation_message(sqlstate) if sqlstate else "PostgreSQL rejected the migration"
+        super().__init__(detail + "; all migration statements were rolled back")
+
+
+def conversion_validation_message(sqlstate: str | None) -> str:
+    """Never propagate PostgreSQL diagnostics containing actual row values."""
+    if sqlstate == "SC001":
+        return "Strict conversion would alter or lose existing values. Choose a custom expression or revise the target type"
+    if sqlstate == "57014":
+        return "Conversion validation exceeded the PostgreSQL statement timeout. Ask the administrator to review the configured timeout"
+    if sqlstate == "42501":
+        return "The connection lacks permission to validate or convert this column"
+    if sqlstate in {"42846", "42804", "42883", "42704"}:
+        return "PostgreSQL cannot use this conversion or its default expression. Review the types and USING expression"
+    if sqlstate and sqlstate.startswith("22"):
+        return "Some values cannot be converted to the target type. Revise the type or provide an explicit custom expression"
+    if sqlstate and sqlstate.startswith("23"):
+        return "The conversion violates a required value, unique key, foreign key, or check constraint"
+    return "PostgreSQL could not validate the conversion. Check the expression, connection permissions and target availability"
 
 
 class PostgresCommitUncertainError(PostgresGatewayError):

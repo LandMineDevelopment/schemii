@@ -219,6 +219,7 @@ def test_demo_scenarios_are_saved_and_runtime_provenanced() -> None:
         "conflicting-drift",
         "live-browser",
         "sql-console",
+        "type-conversions",
         "undo-redo",
     }
     assert {path.parent.name for path in scenarios.glob("*/manifest.json")} == expected

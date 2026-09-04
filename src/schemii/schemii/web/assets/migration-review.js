@@ -41,6 +41,7 @@ export function migrationCanApply({
   busy,
   allowDestructive,
   confirmExternalChanges,
+  unreviewedConversions = false,
 }) {
   return Boolean(
     plan
@@ -50,6 +51,7 @@ export function migrationCanApply({
       && !migrationExecutionNeedsPolling(execution)
       && !migrationExecutionNeedsReconciliation(execution)
       && !busy
+      && !unreviewedConversions
       && (!plan.destructive || allowDestructive)
       && (!plan.requiresExternalChangeAcknowledgement || confirmExternalChanges),
   );
@@ -58,9 +60,83 @@ export function migrationCanApply({
 export function clearAppliedMigrationReview(state) {
   state.plan = null;
   state.rebuildTableIds = null;
+  state.columnTypeConversions?.clear();
+  state.conversionDrafts?.clear();
   state.allowDestructive = false;
   state.confirmExternalChanges = false;
   state.resolutions.clear();
+}
+
+export function retainedConversionChoices(conversions, choices) {
+  const available = new Set((conversions || []).map(item => item.columnId));
+  return new Map([...choices].filter(([columnId]) => available.has(columnId)));
+}
+
+export function hasUnreviewedConversions(choices, drafts) {
+  return [...drafts].some(([id, expression]) => {
+    const choice = choices.get(id);
+    return choice?.strategy !== "custom" || expression.trim() !== choice.expression;
+  });
+}
+
+function renderColumnTypeConversions(plan, state, refresh, updateActions) {
+  if (!plan.columnTypeConversions?.length) return null;
+  const cards = plan.columnTypeConversions.map(conversion => {
+    const busy = state.loading || state.submitting;
+    const card = element("article", { className: "migration-conversion" });
+    const help = element("div", { className: "migration-conversion-help", hidden: true, text: "Strict conversion checks that every existing value can be converted and converted back without changing its value. If any value fails, PostgreSQL rolls back the migration. A custom USING expression defines your intended transformation and may change values. Checks run again while the table is locked before applying. Large tables can take longer to scan and rewrite." });
+    const info = createIconButton({ icon: "info", label: "About column type conversion", className: "compact" });
+    info.setAttribute("aria-expanded", "false");
+    info.addEventListener("click", () => {
+      help.hidden = !help.hidden;
+      info.setAttribute("aria-expanded", String(!help.hidden));
+    });
+    card.append(element("header", {}, [element("strong", { text: `${conversion.tableName}.${conversion.columnName}` }), info]),
+      element("code", { text: `${conversion.sourceType} → ${conversion.targetType}` }),
+      element("p", { text: conversion.reason }), help);
+    const selectChoice = choice => {
+      if (choice.strategy === "strict") state.conversionDrafts.delete(conversion.columnId);
+      state.columnTypeConversions.set(conversion.columnId, { columnId: conversion.columnId, ...choice });
+      state.confirmExternalChanges = false;
+      void refresh();
+    };
+    const strict = element("button", { type: "button", className: "ui-button", text: conversion.strategy === "strict" ? "Strict conversion selected" : "Use strict conversion" });
+    strict.disabled = busy;
+    strict.setAttribute("aria-pressed", String(conversion.strategy === "strict"));
+    strict.addEventListener("click", () => selectChoice({ strategy: "strict" }));
+    card.append(element("strong", { text: "Recommended: preserve every value or stop" }),
+      element("code", { className: "migration-conversion-expression", text: `USING ${conversion.defaultExpression}` }), strict);
+    const custom = element("details", { className: "migration-conversion-custom" });
+    custom.open = conversion.strategy === "custom" || state.conversionDrafts.has(conversion.columnId);
+    const expression = element("textarea", { attrs: { rows: "3", maxlength: "8192", "aria-label": `Custom USING expression for ${conversion.tableName}.${conversion.columnName}`, spellcheck: "false" } });
+    expression.value = state.conversionDrafts.get(conversion.columnId) ?? conversion.expression ?? conversion.defaultExpression;
+    expression.disabled = busy;
+    const useCustom = element("button", { type: "button", className: "ui-button", text: "Review custom conversion" });
+    const draftNotice = element("p", { attrs: { role: "status" } });
+    const updateDraftNotice = () => {
+      const accepted = state.columnTypeConversions.get(conversion.columnId);
+      draftNotice.textContent = state.conversionDrafts.has(conversion.columnId)
+        && (accepted?.strategy !== "custom" || expression.value.trim() !== accepted.expression)
+        ? "Expression changed. Review this conversion before applying the migration."
+        : conversion.strategy === "custom" ? "Custom conversion selected for this review." : "";
+    };
+    updateDraftNotice();
+    useCustom.disabled = busy || !expression.value.trim();
+    expression.addEventListener("input", () => {
+      state.conversionDrafts.set(conversion.columnId, expression.value);
+      useCustom.disabled = busy || !expression.value.trim();
+      updateDraftNotice();
+      updateActions();
+    });
+    useCustom.addEventListener("click", () => selectChoice({ strategy: "custom", expression: expression.value.trim() }));
+    custom.append(element("summary", { text: "Custom USING expression" }), expression, draftNotice,
+      element("p", { text: "Use the column shown above. Enter one expression, without the USING keyword. Review any rounding, truncation, or replacement of values before applying." }), useCustom);
+    card.append(custom);
+    if (conversion.validationError) card.append(element("p", { className: "migration-conversion-error", attrs: { role: "alert" }, text: conversion.validationError }));
+    if (!conversion.strategy) card.append(element("p", { text: "Choose a conversion explicitly to continue the migration. Your saved design is unaffected." }));
+    return card;
+  });
+  return reviewSection("Column type conversions", String(cards.length), cards);
 }
 
 function displayValue(value) {
@@ -328,6 +404,7 @@ function renderExecution(execution) {
     element("small", { text: `Updated ${formatTimestamp(execution.updatedAt)}` }),
   );
   if (execution.errorCode) summary.append(element("code", { text: execution.errorCode }));
+  if (execution.errorMessage) summary.append(element("p", { text: execution.errorMessage }));
   if (execution.commitOutcome) summary.append(element("span", { text: `Transaction: ${sentence(execution.commitOutcome)}` }));
   if (execution.errorCode === "migration_result_mismatch") {
     summary.append(element("p", {
@@ -357,6 +434,8 @@ export function createMigrationReviewController({
     confirmExternalChanges: false,
     resolutions: new Map(),
     rebuildTableIds: null,
+    columnTypeConversions: new Map(),
+    conversionDrafts: new Map(),
     version: 0,
     controller: null,
     pollTimer: null,
@@ -450,6 +529,7 @@ export function createMigrationReviewController({
       busy,
       allowDestructive: state.allowDestructive,
       confirmExternalChanges: state.confirmExternalChanges,
+      unreviewedConversions: hasUnreviewedConversions(state.columnTypeConversions, state.conversionDrafts),
     });
     elements.apply.textContent = migrationExecutionNeedsPolling(state.execution) ? "Applying…" : "Apply migration";
   }
@@ -535,8 +615,9 @@ export function createMigrationReviewController({
       const external = renderExternalChanges(plan);
       const conflicts = renderConflicts(plan, state, updateActions);
       const columnOrder = renderColumnOrderRebuilds(plan, state, refresh);
+      const conversions = renderColumnTypeConversions(plan, state, refresh, updateActions);
       const confirmations = renderConfirmations(plan);
-      for (const section of [blockers, external, conflicts, columnOrder, renderSteps(plan), warnings, confirmations]) {
+      for (const section of [conversions, blockers, external, conflicts, columnOrder, renderSteps(plan), warnings, confirmations]) {
         if (section) elements.body.append(section);
       }
     }
@@ -621,12 +702,15 @@ export function createMigrationReviewController({
         expectedDesignRevision: value.design.revision,
         expectedCatalogFingerprint: null,
         allowDestructive: state.allowDestructive,
+        columnTypeConversions: [...state.columnTypeConversions.values()],
         rebuildTableIds: state.rebuildTableIds === null
           ? null
           : [...state.rebuildTableIds],
       }, { signal: beginRequest() });
       if (!current(version, workspaceId)) return;
       state.plan = plan;
+      state.columnTypeConversions = retainedConversionChoices(plan.columnTypeConversions, state.columnTypeConversions);
+      state.conversionDrafts = retainedConversionChoices(plan.columnTypeConversions, state.conversionDrafts);
       state.rebuildTableIds = new Set(
         plan.columnOrderRebuilds
           .filter(rebuild => rebuild.selected)
@@ -657,6 +741,8 @@ export function createMigrationReviewController({
     state.confirmExternalChanges = false;
     state.resolutions.clear();
     state.rebuildTableIds = null;
+    state.columnTypeConversions.clear();
+    state.conversionDrafts.clear();
     state.handledExecutionId = null;
     closeRebuildHelp();
     if (!elements.dialog.open) elements.dialog.showModal();
@@ -738,6 +824,7 @@ export function createMigrationReviewController({
       busy: state.loading || state.submitting,
       allowDestructive: state.allowDestructive,
       confirmExternalChanges: state.confirmExternalChanges,
+      unreviewedConversions: hasUnreviewedConversions(state.columnTypeConversions, state.conversionDrafts),
     })) return;
     invalidate();
     const version = state.version;

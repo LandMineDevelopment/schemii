@@ -196,7 +196,7 @@ workspace, design, baseline, layout, and history metadata with:
 ```
 
 The saved scenarios are `baseline`, `column-migrations`, `column-order`, `compatible-drift`,
-`conflicting-drift`, `live-browser`, `sql-console`, and `undo-redo`. `live-browser` creates a
+`conflicting-drift`, `live-browser`, `sql-console`, `type-conversions`, and `undo-redo`. `live-browser` creates a
 database-backed workspace with populated tables, joined views, and a materialized
 view for testing search, row previews, and source-derived lineage.
 `sql-console` opens a guided set of starter query tabs for cursor/selection
@@ -209,6 +209,20 @@ alteration files in `schemii_fixture.fixture_state` inside the demo database.
 `column-order` shows the independent saved app order for an empty and a
 populated table, plus the optional reviewed PostgreSQL reconstruction choices.
 This makes a reproduced state traceable to both code and fixture content.
+
+`type-conversions` saves four narrowing changes. Open **Review migration** and
+explicitly choose strict conversion for each column. Three pass; `note` refuses
+to truncate `Reset baseline` to eight characters. A custom `left(note, 8)`
+expression demonstrates an intentional transformation requiring destructive
+confirmation. The integer default and unique key remain intact. Reset with
+`./start.sh --reset-demo type-conversions` to repeat the exercise.
+
+Type conversions use PostgreSQL to validate values at review time and recheck
+strict preservation while holding table locks during execution. Custom expressions
+currently support one source column, built-in scalar types, casts, arithmetic,
+CASE, COALESCE/NULLIF, and common text/numeric functions. User routines, subqueries,
+aggregates and array conversions remain explicitly unsupported. Validation retains
+SQL and safe outcomes in the existing expiring plan; it never retains row values.
 
 The former command remains a baseline alias:
 

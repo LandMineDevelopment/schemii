@@ -8,7 +8,7 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from typing import AbstractSet, Any, Iterable, Literal
+from typing import AbstractSet, Any, Iterable, Literal, Mapping
 
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.common.postgres.query_analysis import referenced_relations
@@ -33,6 +33,7 @@ from .models import (
     MigrationWarning,
 )
 from .type_changes import TypeChangeDecision, classify_type_change
+from .conversions import CompiledConversion
 
 
 _MISSING = object()
@@ -1024,6 +1025,7 @@ def compile_migration_steps(
     empty_tables: AbstractSet[str] = frozenset(),
     rebuild_table_ids: AbstractSet[str] = frozenset(),
     populated_rebuild_table_ids: AbstractSet[str] = frozenset(),
+    column_type_conversions: Mapping[str, CompiledConversion] | None = None,
 ) -> tuple[list[MigrationStep], list[MigrationWarning]]:
     """Compile a conservative exact delta from reviewed live to merged desired."""
 
@@ -1032,10 +1034,11 @@ def compile_migration_steps(
     live_tables, live_columns = _table_maps(live)
     desired_tables, desired_columns = _table_maps(desired)
     type_changes = _column_type_changes(live_tables, desired_tables)
+    conversions = column_type_conversions or {}
     safe_type_change_ids = {
         column_id
         for column_id, decision in type_changes.items()
-        if decision.disposition == "safe"
+        if decision.disposition == "safe" or column_id in conversions
     }
     order_differences = {
         item.table_id: item
@@ -1179,18 +1182,19 @@ def compile_migration_steps(
                 ))
                 current_column_name = new.name
             type_change = classify_type_change(old.data_type, new.data_type)
-            if type_change.disposition == "safe":
+            conversion = conversions.get(column_id)
+            if type_change.disposition == "safe" or conversion is not None:
                 dependent_generated = sorted(
                     column.name
                     for column in after.columns
                     if column_id in column.generated_source_column_ids
                 )
-                dependent_views = _dependent_view_names(
+                dependent_views = sorted(set(_dependent_view_names(
                     namespace,
                     after.name,
                     live,
                     desired,
-                )
+                )) | set(_dependent_view_names(namespace, before.name, live, desired)))
                 if dependent_generated or dependent_views:
                     dependencies = [
                         *(f"generated column {after.name}.{name}" for name in dependent_generated),
@@ -1205,6 +1209,20 @@ def compile_migration_steps(
                         object_path=path,
                     ))
                 else:
+                    if conversion is not None:
+                        pending.append(_PendingStep(
+                            5, "table", f"tables.{before.name}", "lock_for_conversion",
+                            f"LOCK TABLE {_qualified(namespace, before.name)} IN ACCESS EXCLUSIVE MODE;",
+                        ))
+                        if conversion.guard_sql:
+                            pending.append(_PendingStep(
+                                46, "column", path, "validate_conversion", conversion.guard_sql,
+                            ))
+                        if old.default_expression is not None:
+                            pending.append(_PendingStep(
+                                47, "column", path, "drop_default_for_conversion",
+                                f"ALTER TABLE {_qualified(namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} DROP DEFAULT;",
+                            ))
                     pending.append(_PendingStep(
                         48,
                         "column",
@@ -1212,8 +1230,10 @@ def compile_migration_steps(
                         "alter_type",
                         (
                             f"ALTER TABLE {_qualified(namespace, active_name)} ALTER COLUMN "
-                            f"{_quote(current_column_name)} TYPE {new.data_type.strip()};"
+                            f"{_quote(current_column_name)} TYPE {conversion.target_type if conversion else new.data_type.strip()}"
+                            + (f" USING {conversion.expression}" if conversion else "") + ";"
                         ),
+                        destructive=bool(conversion and conversion.review.strategy == "custom"),
                         data_movement=True,
                     ))
             elif type_change.disposition == "blocked":
@@ -1239,7 +1259,7 @@ def compile_migration_steps(
                     message=f"Changing generated or identity behavior for {after.name}.{new.name} is not yet lossless",
                     object_path=path,
                 ))
-            if old.default_expression != new.default_expression and new.generated_expression is None:
+            if (old.default_expression != new.default_expression or (conversion is not None and old.default_expression is not None)) and new.generated_expression is None:
                 if new.default_expression is None:
                     action = "DROP DEFAULT"
                 else:

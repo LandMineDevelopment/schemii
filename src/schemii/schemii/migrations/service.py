@@ -47,6 +47,9 @@ from schemii.schemii.workspaces.models import SchemiiWorkspace, WorkspaceCreateR
 from .errors import MigrationServiceError, migration_storage_error
 from .execution import MigrationExecutionCoordinator
 from .models import (
+    ColumnTypeAnalysis,
+    ColumnTypeAnalysisRequest,
+    ColumnTypeConversion,
     MigrationColumnOrderRebuild,
     MigrationDriftResolution,
     MigrationDriftResolutionRequest,
@@ -57,6 +60,8 @@ from .models import (
     MigrationReconciliationRequest,
     MigrationWarning,
 )
+from .conversions import compile_conversion, conversion_candidates, quote
+from .type_changes import classify_type_change
 from .planner import (
     column_order_differences,
     compile_migration_steps,
@@ -532,6 +537,40 @@ class MigrationService:
             *(required_empty_tables & empty_tables),
             *selected_empty_rebuild_names,
         })
+        conversion_reviews = []
+        conversions = {}
+        conversion_blockers = []
+        choices = {choice.column_id: choice for choice in request.column_type_conversions}
+        for before, after, old, new in conversion_candidates(reconciliation.live, merged):
+            choice = choices.pop(new.id, None)
+            review = ColumnTypeConversion(
+                column_id=new.id, table_id=after.id, table_name=after.name,
+                column_name=new.name, source_type=old.data_type, target_type=new.data_type,
+                reason=classify_type_change(old.data_type, new.data_type).reason,
+                default_expression=f"{quote(new.name)}::{new.data_type}",
+                strategy=choice.strategy if choice else None,
+                expression=choice.expression if choice else None,
+            )
+            if choice:
+                try:
+                    compiled = compile_conversion(workspace.namespace, before, after, old, new, choice)
+                    review = compiled.review
+                    with self._connections.use(owner_id, workspace.connection_id) as connection:
+                        review.validation_error = self._postgres.validate_column_conversion(connection, compiled.validation_sql)
+                    if not review.validation_error:
+                        conversions[new.id] = compiled
+                except ValueError as error:
+                    review.validation_error = str(error)
+                except (PostgresGatewayError, ConnectionNotFoundError) as error:
+                    raise MigrationServiceError(502, "conversion_validation_unavailable", str(error), retryable=True) from error
+                if review.validation_error:
+                    conversion_blockers.append(MigrationWarning(
+                        code="column_type_conversion_invalid", message=review.validation_error,
+                        object_path=f"tables.{after.name}.columns.{new.name}",
+                    ))
+            conversion_reviews.append(review)
+        if choices:
+            raise MigrationServiceError(409, "column_conversion_changed", "A selected column no longer requires conversion. Refresh the review.")
         steps, compiler_blockers = compile_migration_steps(
             workspace.namespace,
             reconciliation.live,
@@ -539,7 +578,9 @@ class MigrationService:
             empty_tables=empty_tables,
             rebuild_table_ids=eligible_rebuild_ids,
             populated_rebuild_table_ids=populated_rebuild_ids,
+            column_type_conversions=conversions,
         )
+        compiler_blockers.extend(conversion_blockers)
         warnings = list(reconciliation.warnings)
         if reconciliation.external_changes:
             warnings.insert(
@@ -606,6 +647,7 @@ class MigrationService:
             "database": workspace.database,
             "namespace": workspace.namespace,
             "allowDestructive": request.allow_destructive,
+            "columnTypeConversions": [item.model_dump(mode="json", by_alias=True) for item in conversion_reviews],
             "rebuildTableIds": sorted(eligible_rebuild_ids),
             "requiredEmptyTables": sorted(required_empty_preconditions),
             "columnOrderRebuilds": [
@@ -649,6 +691,7 @@ class MigrationService:
             complete=complete,
             apply_capable=apply_capable,
             destructive=destructive,
+            column_type_conversions=conversion_reviews,
             requires_external_change_acknowledgement=bool(reconciliation.external_changes),
             column_order_rebuilds=order_rebuilds,
             steps=steps,
@@ -685,6 +728,18 @@ class MigrationService:
             raise self._repository_conflict(error) from error
         except MigrationStorageUnavailableError as error:
             raise self._storage_error(error) from error
+
+    def analyze_column_type(self, owner_id: str, workspace_id: str, request: ColumnTypeAnalysisRequest) -> ColumnTypeAnalysis:
+        workspace = self._workspace(owner_id, workspace_id)
+        try:
+            baseline = self._repository.current_baseline(owner_id, workspace_id) if workspace.connection_id else None
+        except MigrationStorageUnavailableError as error:
+            raise self._storage_error(error) from error
+        source = next((column for table in baseline.content.tables for column in table.columns if column.id == request.column_id), None) if baseline else None
+        if source is None:
+            return ColumnTypeAnalysis(requires_conversion=False, source_type=None, target_type=request.target_type, reason="This column has no live baseline to convert.")
+        decision = classify_type_change(source.data_type, request.target_type)
+        return ColumnTypeAnalysis(requires_conversion=decision.disposition == "blocked", source_type=source.data_type, target_type=request.target_type, reason=decision.reason)
 
     def get_plan(self, owner_id: str, plan_id: str) -> MigrationPlan:
         record = self._plan(owner_id, plan_id)

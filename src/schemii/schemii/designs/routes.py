@@ -19,6 +19,7 @@ from schemii.common.postgres.type_analysis import (
 )
 from schemii.schemii.workspaces.store import WorkspaceNotFoundError, WorkspaceRepository
 from schemii.schemii.migrations.service import MigrationService, MigrationServiceError
+from schemii.schemii.migrations.models import ColumnTypeAnalysis, ColumnTypeAnalysisRequest
 
 from .export import export_design
 from .deletion_impact import DesignObjectNotFoundError, design_deletion_impact
@@ -118,6 +119,20 @@ def _migration_problem(error: MigrationServiceError) -> ApiProblem:
         details=error.details,
         retryable=error.retryable,
     )
+
+
+@router.post("/design/column-type-analysis", response_model=ColumnTypeAnalysis)
+def analyze_column_type(
+    workspace_id: str,
+    body: ColumnTypeAnalysisRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> ColumnTypeAnalysis:
+    """Warn against the server's live baseline without blocking design edits."""
+    try:
+        return _migrations(request).analyze_column_type(principal.user_id, workspace_id, body)
+    except MigrationServiceError as error:
+        raise _migration_problem(error) from error
 
 
 @router.get("/design", response_model=SchemiiDesign)

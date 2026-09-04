@@ -165,6 +165,7 @@ export const api = Object.freeze({
   getDesignLayout: (id, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, options),
   replaceDesignLayout: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/layout`, { ...options, method: "PUT", body }),
   exportDesign: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/exports`, { ...options, method: "POST", body }),
+  analyzeColumnType: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/design/column-type-analysis`, { ...options, method: "POST", body }),
   createMigrationPlan: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(id)}/migration-plans`, { ...options, method: "POST", body }),
   getMigrationPlan: (id, options) => requestJson(`${API_ROOT}/schemii/migration-plans/${encodeURIComponent(id)}`, options),
   resolveMigrationDrift: (id, body, options = {}) => requestJson(`${API_ROOT}/schemii/migration-plans/${encodeURIComponent(id)}/drift-resolutions`, { ...options, method: "POST", body }),

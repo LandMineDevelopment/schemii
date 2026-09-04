@@ -30,7 +30,9 @@ from schemii.common.source_inspection import (
 
 DEVELOPER_SYSTEM_PATH = "/_developer/system"
 _MAX_ROUTES = 200
-_MAX_CALLABLES = 512
+# The registered application includes more than 512 callables and its migration
+# journey has over 600 nodes. Keep the developer map bounded with modest headroom.
+_MAX_CALLABLES = 768
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96
@@ -39,7 +41,7 @@ _MAX_BINDINGS = 96
 _MAX_OBJECTS = 1024
 _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
-_MAX_JOURNEY_NODES = 512
+_MAX_JOURNEY_NODES = 768
 _JOURNEY_STAGES = ("api", "internals", "database", "response")
 
 

@@ -728,6 +728,21 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .migration-section.execution.warning { border-color: #6c5729; background: #1b170e; }
 .migration-section.execution.danger { border-color: #6a343c; background: #1d1316; }
 .migration-section-copy { margin: 0; color: #7b8795; font-size: 8px; line-height: 1.5; }
+.migration-conversion { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; padding: 12px; border: 1px solid #655084; border-radius: 8px; background: #171321; overflow-wrap: anywhere; }
+.migration-conversion > *, .migration-conversion-custom > * { min-width: 0; max-width: 100%; }
+.migration-conversion > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.migration-conversion > header > strong { min-width: 0; overflow-wrap: anywhere; }
+.migration-conversion > header > button { flex-shrink: 0; }
+.migration-conversion strong, .migration-conversion p, .migration-conversion summary { white-space: normal; overflow-wrap: anywhere; }
+.migration-conversion .ui-button { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.migration-conversion p { margin: 0; line-height: 1.5; color: #aeb7c3; }
+.migration-conversion code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.migration-conversion-help { padding: 12px; line-height: 1.5; border: 1px solid #655084; border-radius: 7px; background: #211b30; }
+.migration-conversion-custom { min-width: 0; }
+.migration-conversion-custom > textarea { display: block; width: 100%; min-height: 80px; margin: 10px 0; resize: vertical; }
+.migration-conversion-custom > button { margin-top: 10px; }
+.migration-conversion .migration-conversion-error { color: #f0a6ae; }
+.design-type-warning { grid-column: 1 / -1; margin: 0; padding: 8px; border: 1px solid #80652b; border-radius: 7px; background: #282114; color: #e9c473; font-size: 9px; line-height: 1.5; }
 .migration-badge { display: inline-flex; min-height: 18px; align-items: center; padding: 0 6px; border: 1px solid #3c4754; border-radius: 999px; color: #8996a4; background: #131a22; font: 700 6px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
 .migration-badge.success { border-color: #37694d; color: #7dd6a1; background: #102119; }
 .migration-badge.warning { border-color: #725d2b; color: #d7b45d; background: #221d10; }

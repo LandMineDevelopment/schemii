@@ -1,0 +1,9 @@
+{
+  "id": "type-conversions",
+  "title": "Explicit column type conversions",
+  "description": "Review safe strict narrowing on empty and populated tables, then resolve a deliberately lossy text conversion with a custom expression.",
+  "sourceRevision": "runtime",
+  "designAlterations": ["design-01.json"],
+  "consoleQueries": [],
+  "targetAlteration": "target.sql"
+}

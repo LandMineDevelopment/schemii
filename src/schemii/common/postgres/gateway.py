@@ -18,6 +18,7 @@ from schemii.common.connections.models import (
 )
 
 from .errors import (
+    conversion_validation_message,
     PostgresCatalogLimitError,
     PostgresCatalogValidationError,
     PostgresCommitUncertainError,
@@ -209,6 +210,10 @@ class PostgresGateway(Protocol):
         backend_pid: int,
     ) -> bool: ...
 
+    def validate_column_conversion(
+        self, connection: ResolvedPostgresConnection, query: str,
+    ) -> str | None: ...
+
     def execute_migration(
         self,
         connection: ResolvedPostgresConnection,
@@ -219,6 +224,7 @@ class PostgresGateway(Protocol):
         on_started: Callable[[str, dict[str, Any]], None],
         on_intended: Callable[[PostgresCatalog], None],
         required_empty_tables: Sequence[str] = (),
+        conversion_tables: Sequence[str] = (),
     ) -> PostgresMigrationResult: ...
 
     def transaction_status(
@@ -773,6 +779,33 @@ class PsycopgPostgresGateway:
         finally:
             self._cleanup(database_connection)
 
+    def validate_column_conversion(
+        self, connection: ResolvedPostgresConnection, query: str,
+    ) -> str | None:
+        """Evaluate a server-compiled scalar check without returning row data."""
+        database_connection = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection)
+            self._execute_statement(database_connection, "SET LOCAL row_security = off")
+            self._execute_statement(database_connection, "SET LOCAL extra_float_digits = 3")
+            with database_connection.cursor() as cursor:
+                cursor.execute(query)
+                row = cursor.fetchone()
+            if not isinstance(row, Mapping):
+                return conversion_validation_message(None)
+            if row.get("invalid") is True:
+                return conversion_validation_message("SC001")
+            if row.get("invalid") is False or (type(row.get("count")) is int and row["count"] >= 0):
+                return None
+            return conversion_validation_message(None)
+        except PostgresConnectionCapacityError:
+            raise
+        except Exception as error:
+            return conversion_validation_message(getattr(error, "sqlstate", None))
+        finally:
+            self._cleanup(database_connection)
+
     def execute_migration(
         self,
         connection: ResolvedPostgresConnection,
@@ -783,27 +816,35 @@ class PsycopgPostgresGateway:
         on_started: Callable[[str, dict[str, Any]], None],
         on_intended: Callable[[PostgresCatalog], None],
         required_empty_tables: Sequence[str] = (),
+        conversion_tables: Sequence[str] = (),
     ) -> PostgresMigrationResult:
         """Validate and apply one immutable server plan in one target transaction."""
 
         namespace = self._validated_namespace(namespace)
         empty_preconditions = self._validated_table_names(required_empty_tables)
+        conversion_locks = self._validated_table_names(conversion_tables)
         database_connection: Any | None = None
         completed = 0
         commit_attempted = False
         try:
             database_connection = self._connect(connection)
-            self._begin_write(database_connection)
-            for table_name in empty_preconditions:
-                self._execute_statement(
-                    database_connection,
-                    f"LOCK TABLE {self._qualified(namespace, table_name)} IN ACCESS EXCLUSIVE MODE",
-                )
+            # Conversion checks must see rows committed while waiting for a lock.
+            # READ COMMITTED supplies that fresh snapshot; ACCESS EXCLUSIVE holds
+            # every converted table stable from inspection through final commit.
+            self._begin_write(database_connection, fresh_snapshots=bool(conversion_locks))
             self._execute_rows(
                 database_connection,
                 "SELECT pg_advisory_xact_lock(hashtext(current_database()), hashtext(%s))",
                 (namespace,),
             )
+            for table_name in sorted(set(empty_preconditions) | set(conversion_locks)):
+                self._execute_statement(
+                    database_connection,
+                    f"LOCK TABLE {self._qualified(namespace, table_name)} IN ACCESS EXCLUSIVE MODE",
+                )
+            if conversion_locks:
+                self._execute_statement(database_connection, "SET LOCAL row_security = off")
+                self._execute_statement(database_connection, "SET LOCAL extra_float_digits = 3")
             live = self._introspect_connection(database_connection, connection, namespace)
             if live.fingerprint != expected_catalog_fingerprint:
                 raise PostgresMigrationStaleError(live.fingerprint)
@@ -856,12 +897,12 @@ class PsycopgPostgresGateway:
             raise
         except PostgresGatewayError as error:
             if completed or commit_attempted:
-                raise PostgresMigrationExecutionError(completed) from error
+                raise PostgresMigrationExecutionError(completed, sqlstate=getattr(error, "sqlstate", None) if conversion_locks else None) from error
             raise
         except Exception as error:
             if commit_attempted:
                 raise PostgresCommitUncertainError() from None
-            raise PostgresMigrationExecutionError(completed) from error
+            raise PostgresMigrationExecutionError(completed, sqlstate=getattr(error, "sqlstate", None) if conversion_locks else None) from error
         finally:
             self._cleanup(database_connection)
 
@@ -983,8 +1024,8 @@ class PsycopgPostgresGateway:
         try:
             cursor = database_connection.cursor()
             cursor.execute(query)
-        except Exception:
-            raise PostgresQueryError() from None
+        except Exception as error:
+            raise PostgresQueryError(sqlstate=getattr(error, "sqlstate", None)) from None
         finally:
             PsycopgPostgresGateway._safe_close(cursor)
 
@@ -1035,8 +1076,9 @@ class PsycopgPostgresGateway:
             IDLE_TRANSACTION_TIMEOUT_MS,
         )
 
-    def _begin_write(self, database_connection: Any) -> None:
-        self._execute_statement(database_connection, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+    def _begin_write(self, database_connection: Any, *, fresh_snapshots: bool = False) -> None:
+        isolation = "READ COMMITTED" if fresh_snapshots else "SERIALIZABLE"
+        self._execute_statement(database_connection, f"BEGIN TRANSACTION ISOLATION LEVEL {isolation}")
         self._set_timeout_ceiling(
             database_connection,
             "statement_timeout",

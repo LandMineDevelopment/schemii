@@ -823,6 +823,8 @@ class InMemoryMigrationRepository:
                 if value is not UNSET:
                     update[target] = value
             update["reconcile_required"] = status in {"uncertain", "reconciliation_required"}
+            if error_detail is not UNSET:
+                update["error_message"] = (error_detail or {}).get("message")
             revised = current.execution.model_copy(update=update)
             record = ExecutionRecord(
                 owner_id=owner_id,
@@ -2031,12 +2033,14 @@ class PostgresMigrationRepository:
 
     @staticmethod
     def _public_execution(row: dict[str, Any]) -> MigrationExecution:
+        detail = PostgresMigrationRepository._json_load(row.get("error_detail")) or {}
         return MigrationExecution(
             id=row["id"], plan_id=row["plan_id"], workspace_id=row["workspace_id"],
             revision=row["revision"], status=row["status"],
             completed_step_count=row["completed_step_count"], transaction_id=row["target_xid"],
             commit_outcome=row["commit_outcome"], sync_status=row.get("sync_status"),
             error_code=row["error_code"],
+            error_message=detail.get("message"),
             reconcile_required=row["status"] in {"uncertain", "reconciliation_required"},
             recovery_available_at=(
                 row.get("lease_expires_at")

@@ -43,6 +43,46 @@ MigrationObjectKind = Literal[
 ]
 
 
+class ColumnTypeAnalysisRequest(ApiModel):
+    column_id: DesignObjectId
+    target_type: Annotated[str, Field(min_length=1, max_length=512)]
+
+
+class ColumnTypeAnalysis(ApiModel):
+    requires_conversion: bool
+    source_type: str | None
+    target_type: str
+    reason: str
+
+
+class ColumnTypeConversionChoice(ApiModel):
+    column_id: DesignObjectId
+    strategy: Literal["strict", "custom"]
+    expression: Annotated[str, Field(min_length=1, max_length=8192)] | None = None
+
+    @model_validator(mode="after")
+    def explicit_expression(self) -> "ColumnTypeConversionChoice":
+        if self.strategy == "custom" and not (self.expression or "").strip():
+            raise ValueError("a custom conversion requires a USING expression")
+        if self.strategy == "strict" and self.expression is not None:
+            raise ValueError("the server supplies the strict conversion expression")
+        return self
+
+
+class ColumnTypeConversion(ApiModel):
+    column_id: DesignObjectId
+    table_id: DesignObjectId
+    table_name: DesignIdentifier
+    column_name: DesignIdentifier
+    source_type: str
+    target_type: str
+    reason: str
+    default_expression: str
+    strategy: Literal["strict", "custom"] | None = None
+    expression: str | None = None
+    validation_error: str | None = None
+
+
 class MigrationPlanCreate(ApiModel):
     """Optimistic UI context; every authoritative value is re-read server-side."""
 
@@ -53,6 +93,7 @@ class MigrationPlanCreate(ApiModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     allow_destructive: bool = False
+    column_type_conversions: list[ColumnTypeConversionChoice] = Field(default_factory=list, max_length=100)
     rebuild_table_ids: list[DesignObjectId] | None = Field(
         default=None,
         max_length=100,
@@ -60,6 +101,9 @@ class MigrationPlanCreate(ApiModel):
 
     @model_validator(mode="after")
     def unique_rebuild_tables(self) -> "MigrationPlanCreate":
+        identifiers = [choice.column_id for choice in self.column_type_conversions]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("each column may have one conversion choice")
         if self.rebuild_table_ids is not None and len(self.rebuild_table_ids) != len(set(self.rebuild_table_ids)):
             raise ValueError("each table may be selected for physical reordering once")
         return self
@@ -150,6 +194,7 @@ class MigrationPlan(ApiModel):
     complete: bool
     apply_capable: bool
     destructive: bool
+    column_type_conversions: list[ColumnTypeConversion] = Field(default_factory=list, max_length=160000)
     requires_external_change_acknowledgement: bool
     column_order_rebuilds: list[MigrationColumnOrderRebuild] = Field(
         default_factory=list,
@@ -230,6 +275,7 @@ class MigrationExecution(ApiModel):
     commit_outcome: Literal["committed", "rolled_back", "uncertain"] | None = None
     sync_status: Literal["pending", "succeeded", "conflict", "failed"] | None = None
     error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=2048)
     reconcile_required: bool = False
     recovery_available_at: datetime | None = None
     created_at: datetime

@@ -4176,6 +4176,40 @@ function appendDesignColumn({
     noResultsText: "No matching PostgreSQL type",
   });
   const typeInput = typeSelector.input;
+  const typeWarning = element("p", { className: "design-type-warning", hidden: true, attrs: { role: "status", "aria-live": "polite" } });
+  let typeAnalysisTimer = null;
+  let typeAnalysisController = null;
+  let typeAnalysisVersion = 0;
+  const cancelTypeAnalysis = () => {
+    typeAnalysisVersion += 1;
+    clearTimeout(typeAnalysisTimer);
+    typeAnalysisController?.abort();
+  };
+  const scheduleTypeAnalysis = () => {
+    cancelTypeAnalysis();
+    const workspaceId = state.activeWorkspace?.id;
+    if (!id || !state.activeWorkspace?.connectionId) return;
+    const targetType = typeInput.value;
+    const version = typeAnalysisVersion;
+    typeWarning.hidden = true;
+    typeAnalysisTimer = setTimeout(async () => {
+      if (!row.isConnected || state.activeWorkspace?.id !== workspaceId) return;
+      typeAnalysisController = new AbortController();
+      try {
+        const analysis = await api.analyzeColumnType(workspaceId, { columnId: id, targetType }, { signal: typeAnalysisController.signal });
+        if (version !== typeAnalysisVersion || !row.isConnected || state.activeWorkspace?.id !== workspaceId) return;
+        typeWarning.hidden = !analysis.requiresConversion;
+        typeWarning.textContent = analysis.requiresConversion
+          ? `${analysis.reason}. You can save this design. During migration, explicitly choose how existing values should be converted; strict conversion is the recommended default.`
+          : "";
+      } catch (error) {
+        if (version !== typeAnalysisVersion || !row.isConnected || error?.code === "request_cancelled") return;
+        typeWarning.hidden = false;
+        typeWarning.textContent = "The conversion check is unavailable. You can save this design; migration review will validate the type change before applying it.";
+      }
+    }, 300);
+  };
+  row.__cancelTypeAnalysis = cancelTypeAnalysis;
   typeSelector.root.dataset.changeObjectId = transitionId;
   typeSelector.root.dataset.changeField = "dataType";
   const typeModifierCopy = element("span", { className: "design-type-modifier-summary" });
@@ -4270,6 +4304,7 @@ function appendDesignColumn({
       typeSelector.setOptions(typeOptions(finalType));
       typeSelector.setValue(finalType);
       typeModifierCopy.textContent = postgresTypeModifierSummary(parsePostgresTypeModifier(finalType));
+      scheduleTypeAnalysis();
     } catch (error) {
       event.currentTarget.setCustomValidity(error.message);
     }
@@ -4280,6 +4315,7 @@ function appendDesignColumn({
   typeInput.addEventListener("change", () => {
     typeSelector.setOptions(typeOptions(typeInput.value));
     syncTypeModifierEditor({ expand: true });
+    scheduleTypeAnalysis();
   });
   const nullableInput = element("input", { type: "checkbox", dataset: { designColumnNullable: "" } });
   nullableInput.checked = nullable && !primary;
@@ -4367,6 +4403,7 @@ function appendDesignColumn({
         tone: "amber",
       }]);
       typeSelector.destroy();
+      cancelTypeAnalysis();
       row.remove();
       sorter.refresh();
       onMutate?.();
@@ -4393,6 +4430,7 @@ function appendDesignColumn({
     remove,
     typeModifierDetails,
     element("div", { className: "design-column-value" }, [
+      typeWarning,
       element("label", {}, [element("span", { text: "Value behavior" }), behaviorSelect]),
       expressionField,
     ]),
@@ -4401,12 +4439,16 @@ function appendDesignColumn({
   syncBehavior();
   row.__designTypeSelector = typeSelector;
   container.append(row);
+  scheduleTypeAnalysis();
   sorter.refresh();
   return row;
 }
 
 function clearDesignColumns(container) {
-  for (const row of container.children) row.__designTypeSelector?.destroy();
+  for (const row of container.children) {
+    row.__cancelTypeAnalysis?.();
+    row.__designTypeSelector?.destroy();
+  }
   replace(container);
 }
 
