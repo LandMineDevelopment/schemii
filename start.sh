@@ -24,7 +24,7 @@ SCHEMII_LAUNCH_ACTION=start
 SCHEMII_LOG_SERVICE=
 
 usage() {
-  printf 'Usage: %s [--reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE]\n' "$0"
+  printf 'Usage: %s [--reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -57,6 +57,10 @@ if (( $# > 0 )); then
       (( $# == 1 )) || { usage >&2; exit 2; }
       list_demo_scenarios
       exit 0
+      ;;
+    --test-ai-prototype)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION=test-ai-prototype
       ;;
     --logs)
       (( $# == 2 )) || { usage >&2; exit 2; }
@@ -179,6 +183,22 @@ exec {SCHEMII_LAUNCH_LOCK_FD}>"$SCHEMII_LAUNCH_LOCK_FILE"
 chmod 600 "$SCHEMII_LAUNCH_LOCK_FILE"
 if ! flock --nonblock "$SCHEMII_LAUNCH_LOCK_FD"; then
   fail "another ./start.sh lifecycle operation is already running"
+fi
+
+compose_args=(
+  compose
+  --project-name schemii-test
+  --project-directory "$ROOT_DIR"
+  --file "$COMPOSE_FILE"
+)
+
+if [[ "$SCHEMII_LAUNCH_ACTION" == "test-ai-prototype" ]]; then
+  printf 'Building the isolated AI prototype test image...\n'
+  if ! docker "${compose_args[@]}" --profile ai-prototype build ai-prototype; then
+    fail "the AI prototype test image could not be built"
+  fi
+  printf 'Running AI prototype tests without network access...\n'
+  exec docker "${compose_args[@]}" --profile ai-prototype run --rm --no-deps -T ai-prototype
 fi
 
 if ! certificate_is_current; then
@@ -313,13 +333,6 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
 fi
 export SCHEMII_DEMO_SCENARIO
 export SCHEMII_DEMO_SOURCE_REVISION
-
-compose_args=(
-  compose
-  --project-name schemii-test
-  --project-directory "$ROOT_DIR"
-  --file "$COMPOSE_FILE"
-)
 
 if [[ "$SCHEMII_LAUNCH_ACTION" == "logs" ]]; then
   exec docker "${compose_args[@]}" logs --no-color --tail 200 "$SCHEMII_LOG_SERVICE"
