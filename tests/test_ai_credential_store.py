@@ -1,4 +1,5 @@
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -76,6 +77,7 @@ def test_ciphertext_is_bound_to_owner_id_and_provider():
     store.begin_login("alice", "primary", "openai")
     store.save("alice", "primary", "openai", {"key": "secret"}, 1)
     original = deepcopy(store._rows[("alice", "primary")])
+    store.touch_activity("bob")
     store._rows[("bob", "primary")] = deepcopy(original)
     with pytest.raises(InvalidTag):
         store.get("bob", "primary")
@@ -110,3 +112,87 @@ def test_oversized_credentials_and_unknown_providers_are_rejected():
     store.begin_login("alice", "one", "openai")
     with pytest.raises(ValueError, match="maximum size"):
         store.save("alice", "one", "openai", {"key": "x" * 65536}, 1)
+
+
+def test_inactivity_expires_at_boundary_and_fences_late_refresh():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = MemoryAiCredentialStore(clock=lambda: now, inactivity_days=30)
+    first = store.begin_login("alice", "one", "openai")
+    assert store.save("alice", "one", "openai", {"key": "old"}, first["generation"])
+    now += timedelta(days=29)
+    assert store.save("alice", "one", "openai", {"key": "refresh"}, first["generation"])
+    assert store.list("alice")
+    now += timedelta(days=1)
+    assert store.expire_inactive() == 1
+    assert store.expire_inactive() == 0
+    assert store.get("alice", "one") is None
+    store.touch_activity("alice")
+    assert not store.save("alice", "one", "openai", {"key": "late"}, first["generation"])
+    assert all(store._rows[("alice", "one")][key] is None
+               for key in ("ciphertext", "nonce", "key_version"))
+
+
+def test_touch_expires_before_extending_activity_and_is_owner_scoped():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = MemoryAiCredentialStore(clock=lambda: now, inactivity_days=1)
+    for owner in ("alice", "bob"):
+        store.begin_login(owner, "one", "openai")
+        store.save(owner, "one", "openai", {"key": owner}, 1)
+    now += timedelta(hours=23)
+    store.touch_activity("bob")
+    now += timedelta(hours=1)
+    store.touch_activity("alice")
+    assert store.get("alice", "one") is None
+    assert store.get("bob", "one") is not None
+
+
+@pytest.mark.parametrize("access", ["get", "list", "save"])
+def test_access_enforces_expiry_without_cleanup_job(access):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = MemoryAiCredentialStore(clock=lambda: now, inactivity_days=1)
+    store.begin_login("alice", "one", "openai")
+    store.save("alice", "one", "openai", {"key": "old"}, 1)
+    now += timedelta(days=1)
+    if access == "save":
+        assert not store.save("alice", "one", "openai", {"key": "late"}, 1)
+    elif access == "get":
+        assert store.get("alice", "one") is None
+    else:
+        assert store.list("alice") == []
+    assert store._rows[("alice", "one")]["ciphertext"] is None
+
+
+def test_disabled_expiry_preserves_credentials_but_tracks_real_activity():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = MemoryAiCredentialStore(clock=lambda: now, expiration_enabled=False)
+    store.begin_login("alice", "one", "openai")
+    store.save("alice", "one", "openai", {"key": "old"}, 1)
+    now += timedelta(days=500)
+    assert store.expire_inactive() == 0
+    assert store.get("alice", "one")
+    assert store.save("alice", "one", "openai", {"key": "refresh"}, 1)
+    store._expiration_enabled = True
+    assert store.get("alice", "one") is None
+
+
+def test_pending_login_is_fenced_on_inactivity_even_without_saved_credentials():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = MemoryAiCredentialStore(clock=lambda: now, inactivity_days=1)
+    attempt = store.begin_login("alice", "one", "openai")
+    now += timedelta(days=1)
+    store.expire_inactive()
+    store.touch_activity("alice")
+    assert not store.save("alice", "one", "openai", {"key": "late"}, attempt["generation"])
+
+
+def test_login_completion_advances_generation_to_reject_replayed_login_results():
+    store = MemoryAiCredentialStore()
+    attempt = store.begin_login("alice", "one", "openai-codex")
+    assert store.save("alice", "one", "openai-codex", {"refresh": "initial"},
+                      attempt["generation"], advance_generation=True)
+    current = store.get("alice", "one")
+    assert current["generation"] == attempt["generation"] + 1
+    assert store.save("alice", "one", "openai-codex", {"refresh": "rotated"}, current["generation"])
+    assert not store.save("alice", "one", "openai-codex", {"refresh": "initial"},
+                          attempt["generation"], advance_generation=True)
+    assert store.get("alice", "one")["credential"]["refresh"] == "rotated"

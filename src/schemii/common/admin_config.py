@@ -196,6 +196,8 @@ class AiPolicy:
     maximum_concurrent_turns_per_user: int = 2
     maximum_chats_per_workspace: int = 50
     chat_retention_days: int = 90
+    credential_expiration_enabled: bool = True
+    credential_inactivity_days: int = 30
     message_history_limit: int = 200
     activity_history_limit: int = 1_000
     maximum_proposals_per_turn: int = 10
@@ -211,6 +213,8 @@ class AiPolicy:
     proposal_ttl_seconds: int = 15 * 60
     provider_timeout_seconds: int = 5 * 60
     runtime_status_cache_seconds: int = 30
+    catalog_refresh_seconds: int = 3600
+    catalog_max_stale_seconds: int = 86400
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -224,6 +228,9 @@ class AiPolicy:
         )
         _integer("ai.maximum_chats_per_workspace", self.maximum_chats_per_workspace, 1, 10_000)
         _integer("ai.chat_retention_days", self.chat_retention_days, 1, 3_650)
+        if not isinstance(self.credential_expiration_enabled, bool):
+            raise ValueError("ai.credential_expiration_enabled must be a boolean")
+        _integer("ai.credential_inactivity_days", self.credential_inactivity_days, 1, 3_650)
         _integer("ai.message_history_limit", self.message_history_limit, 1, 10_000)
         _integer("ai.activity_history_limit", self.activity_history_limit, 10, 100_000)
         _integer("ai.maximum_proposals_per_turn", self.maximum_proposals_per_turn, 1, 100)
@@ -251,6 +258,9 @@ class AiPolicy:
         _integer("ai.proposal_ttl_seconds", self.proposal_ttl_seconds, 30, 86_400)
         _integer("ai.provider_timeout_seconds", self.provider_timeout_seconds, 10, 3_600)
         _integer("ai.runtime_status_cache_seconds", self.runtime_status_cache_seconds, 1, 300)
+        _integer("ai.catalog_refresh_seconds", self.catalog_refresh_seconds, 1, 86_400)
+        _integer("ai.catalog_max_stale_seconds", self.catalog_max_stale_seconds,
+                 self.catalog_refresh_seconds, 604_800)
 
 
 @dataclass(frozen=True, slots=True)

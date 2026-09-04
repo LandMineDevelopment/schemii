@@ -73,6 +73,15 @@ def credentials(request: Request, principal: Principal = Depends(get_current_pri
     return {"credentials": store.list(principal.user_id)}
 
 
+@router.get("/api/v1/ai/prototype/catalog")
+def model_catalog(request: Request, principal: Principal = Depends(get_current_principal)):
+    del principal  # Catalog is shared public metadata; route still requires app identity.
+    catalog = getattr(request.app.state, "ai_model_catalog", None)
+    if catalog is None:
+        raise ApiProblem(503, "pi_disabled", "The Pi prototype model catalog is not enabled on this server.")
+    return catalog.snapshot()
+
+
 @router.post("/api/v1/ai/prototype/login")
 def login(request: Request, principal: Principal = Depends(get_current_principal)):
     client, store = _services(request)
@@ -88,9 +97,15 @@ def poll(login_id: str, request: Request, principal: Principal = Depends(get_cur
     result = client.call("/logins/status", {"owner": principal.user_id, "id": login_id})
     if result.get("status") == "succeeded":
         saved = store.save(principal.user_id, result["credentialId"], "openai-codex",
-                           result["credential"], result["generation"])
+                           result["credential"], result["generation"], advance_generation=True)
         if not saved:
-            raise ApiProblem(409, "pi_login_superseded", "This sign-in was replaced or disconnected. Start again.")
+            raise ApiProblem(409, "pi_login_superseded", "This sign-in was replaced, disconnected, or expired after inactivity. Start a fresh sign-in.")
+        # Once encrypted storage owns the credential, remove the login service's
+        # short-lived plaintext copy. Generation fencing also defeats overlapping polls.
+        try:
+            client.call("/logins/cancel", {"owner": principal.user_id, "id": login_id})
+        except ApiProblem:
+            pass  # The sidecar's bounded login TTL remains the fallback cleanup.
     public = {key: result[key] for key in ("id", "status", "expiresAt", "userCode") if key in result}
     # Never reflect an arbitrary provider-supplied navigation target.
     if result.get("verificationUrl") == "https://auth.openai.com/codex/device":
@@ -113,4 +128,7 @@ def cancel(login_id: str, request: Request, principal: Principal = Depends(get_c
 def disconnect(request: Request, principal: Principal = Depends(get_current_principal)):
     _, store = _services(request)
     store.delete(principal.user_id, "codex-prototype")
+    runtime = request.app.state.ai_service.runtime
+    if runtime is not None:
+        runtime.disconnect(principal.user_id, "codex-prototype")
     return {"status": "disconnected"}

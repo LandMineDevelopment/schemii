@@ -651,10 +651,10 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
 
     <dialog class="ui-dialog ai-settings-dialog" id="ai-settings-dialog" aria-labelledby="ai-settings-title">
       <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small>WORKSPACE ASSISTANT</small><h2 id="ai-settings-title">Model &amp; permissions</h2><p>Choose the default model and exactly what new conversations may inspect or propose.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-ai-settings-close aria-label="Close assistant settings"></button></header>
+        <header class="ui-dialog__head"><div><small>WORKSPACE ASSISTANT</small><h2 id="ai-settings-title">Model &amp; permissions</h2><p>Choose this conversation’s model and permitted tools. These choices also become your defaults.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-ai-settings-close aria-label="Close assistant settings"></button></header>
         <div class="ai-settings-body">
           <form class="ai-settings-preferences" id="ai-settings-form">
-            <label class="ai-settings-model"><span>Default model</span><select id="ai-settings-model" required></select><small>Changing the model starts a new conversation so earlier answers retain their original model context.</small></label>
+            <label class="ai-settings-model"><span>Model</span><select id="ai-settings-model" required></select><small>Switch between available providers between messages. The next model receives this conversation’s retained history; earlier answers remain unchanged.</small></label>
             <fieldset class="ai-permission-list">
               <legend>Conversation permissions</legend>
               <label><span><strong>Propose design changes</strong><small>Prepare schema edits for explicit review. The assistant cannot apply them silently.</small></span><input type="checkbox" name="designChanges"></label>
@@ -665,7 +665,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
             </fieldset>
           </form>
           <section class="ai-provider-settings" aria-labelledby="ai-provider-settings-title">
-            <div class="ai-settings-section-head"><div><h3 id="ai-provider-settings-title">Model providers</h3><p>Connect a provider to make its models available. Credentials stay inside the private AI runtime and are never returned to the browser.</p></div></div>
+            <div class="ai-settings-section-head"><div><h3 id="ai-provider-settings-title">Model providers</h3><p>Connect your account to make its models available. Credentials are encrypted on this server and are never returned to the browser. Review each provider’s data policy before sending workspace context.</p></div></div>
             <div class="ai-provider-list" id="ai-provider-list"></div>
           </section>
           <p class="form-status" id="ai-settings-status" role="status" aria-live="polite"></p>
@@ -697,6 +697,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       </div>
     </dialog>
     <div class="ui-toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/assets/common/user-activity.js"></script>
     <script type="module" src="assets/app.js"></script>
     <script type="module" src="assets/ai-assistant.js"></script>
   </body>

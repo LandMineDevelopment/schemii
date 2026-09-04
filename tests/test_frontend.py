@@ -69,9 +69,14 @@ def test_assistant_exposes_legacy_quality_controls_and_safe_rich_messages() -> N
     assert 'event.key === "Enter" && !event.shiftKey && !event.isComposing' in source
     assert "elements.form.requestSubmit()" in source
     assert "activity?after=${activitySequence}" in source
-    assert 'requestJson("/api/v1/ai/auth/oauth/authorize"' in source
-    assert 'requestJson("/api/v1/ai/auth/oauth/callback"' in source
-    assert 'requestJson("/api/v1/ai/auth/api"' in source
+    assert 'requestJson("/api/v1/ai/prototype/login"' in source
+    assert '/api/v1/ai/prototype/logins/${encodeURIComponent(login.id)}' in source
+    assert '/api/v1/ai/credentials/${encodeURIComponent(provider.id)}' in source
+    assert 'Cancel sign-in' in source
+    assert 'acknowledgeProviderDataPolicy: true' in source
+    assert 'window.confirm' in source
+    assert '/api/v1/schemii/ai/chats/${chatId}/stream' in source
+    assert 'Temporary · not saved' in source
     assert 'grid-template-areas: "head" "context" "notice" "body" "composer"' in styles
     assert "@keyframes ai-dot-wave" in styles
     assert ".ai-markdown-table" in styles

@@ -137,37 +137,10 @@ class InMemoryAiRepository:
             if current_chat.revision != expected_chat_revision:
                 raise AiConflictError("Chat changed")
             model_changed = current_chat.provider_id != provider_id or current_chat.model_id != model_id
-            if model_changed:
-                self._cleanup_locked(_now())
-                count = sum(
-                    owner == owner_id and item.workspace_id == current_chat.workspace_id
-                    for owner, item, _ in self._chats.values()
-                )
-                if count >= self._policy.maximum_chats_per_workspace:
-                    raise AiCapacityError(
-                        "This workspace has reached the configured conversation limit. Delete an old conversation before changing models.",
-                        resource="ai_chat",
-                        limit_name="maximum_chats_per_workspace",
-                        configured_limit=self._policy.maximum_chats_per_workspace,
-                        observed_value=count,
-                    )
-                now = _now()
-                saved_chat = SchemiiChat(
-                    id=f"chat_{secrets.token_hex(16)}",
-                    workspace_id=current_chat.workspace_id,
-                    revision=1,
-                    title="New conversation",
-                    provider_id=provider_id,
-                    model_id=model_id,
-                    capabilities=capabilities,
-                    status="idle",
-                    created_at=now,
-                    updated_at=now,
-                )
-                self._chats[saved_chat.id] = (owner_id, saved_chat, None)
-                self._messages[saved_chat.id] = []
-                self._events[saved_chat.id] = []
-            elif current_chat.capabilities != capabilities:
+            if model_changed and current_chat.status == "working":
+                raise AiConflictError("Wait for the current response to finish before changing models")
+            policy_changed = current_chat.capabilities != capabilities
+            if model_changed or policy_changed:
                 saved_chat = self._replace_chat(
                     owner_id,
                     chat_id,
@@ -175,12 +148,14 @@ class InMemoryAiRepository:
                         update={
                             "revision": current_chat.revision + 1,
                             "capabilities": capabilities,
+                            "provider_id": provider_id,
+                            "model_id": model_id,
                             "updated_at": _now(),
                         }
                     ),
                 )
                 for proposal_id, (owner, proposal, action) in list(self._proposals.items()):
-                    if owner == owner_id and proposal.chat_id == chat_id and proposal.status == "pending":
+                    if policy_changed and owner == owner_id and proposal.chat_id == chat_id and proposal.status == "pending":
                         self._proposals[proposal_id] = (
                             owner,
                             proposal.model_copy(update={"revision": proposal.revision + 1, "status": "dismissed"}),
@@ -196,7 +171,7 @@ class InMemoryAiRepository:
                 default_capabilities=capabilities,
             )
             self._settings[owner_id] = saved_settings
-            return saved_settings.model_copy(deep=True), saved_chat.model_copy(deep=True), model_changed
+            return saved_settings.model_copy(deep=True), saved_chat.model_copy(deep=True), False
 
     def list_chats(self, owner_id, workspace_id=None):
         with self._lock:
@@ -318,6 +293,8 @@ class InMemoryAiRepository:
 
     def finish_turn(self, owner_id, chat_id, turn_id, text, *, rerun=False, history_limit=200):
         with self._lock:
+            if self.get_turn(owner_id, chat_id, turn_id).status not in {"queued", "running"}:
+                raise AiConflictError("Turn is no longer active")
             turn = self.get_turn(owner_id, chat_id, turn_id).model_copy(update={"status": "succeeded", "completed_at": _now(), "result_context_rerun": rerun})
             self._turns[turn_id] = (owner_id, turn)
             sequence = (self._messages[chat_id][-1].sequence if self._messages[chat_id] else 0) + 1
@@ -328,6 +305,8 @@ class InMemoryAiRepository:
 
     def fail_turn(self, owner_id, chat_id, turn_id, code, message):
         with self._lock:
+            if self.get_turn(owner_id, chat_id, turn_id).status not in {"queued", "running"}:
+                raise AiConflictError("Turn is no longer active")
             turn = self.get_turn(owner_id, chat_id, turn_id).model_copy(update={"status": "failed", "error_code": code, "error_message": message, "completed_at": _now()}); self._turns[turn_id] = (owner_id, turn); self.set_chat_runtime(owner_id, chat_id, status="failed"); return turn
 
     def cancel_turn(self, owner_id, chat_id, turn_id):
@@ -337,6 +316,9 @@ class InMemoryAiRepository:
                 raise AiConflictError("Turn is no longer active")
             cancelled = turn.model_copy(update={"status": "cancelled", "completed_at": _now()})
             self._turns[turn_id] = (owner_id, cancelled)
+            for proposal_id, (proposal_owner, proposal, action) in list(self._proposals.items()):
+                if proposal_owner == owner_id and proposal.turn_id == turn_id and proposal.status == "pending":
+                    self._proposals[proposal_id] = (owner_id, proposal.model_copy(update={"status": "dismissed", "revision": proposal.revision + 1}), action)
             session_id = self._chats[chat_id][2]
             self.set_chat_runtime(owner_id, chat_id, status="idle")
             return cancelled.model_copy(deep=True), session_id
@@ -359,6 +341,8 @@ class InMemoryAiRepository:
         self.get_turn(owner_id, chat_id, turn_id); now = _now(); proposal = SchemiiProposal(id=f"prop_{secrets.token_hex(16)}", chat_id=chat_id, turn_id=turn_id, revision=1, capability=capability, action_type=action_type, summary=summary, details=copy.deepcopy(action), digest=digest, destructive=destructive, expected_workspace_revision=workspace_revision, expected_design_revision=design_revision, status="pending", created_at=now, expires_at=expires_at)
         with self._lock:
             chat = self.get_chat(owner_id, chat_id)
+            if self.get_turn(owner_id, chat_id, turn_id).status not in {"queued", "running"}:
+                raise AiConflictError("Turn is no longer active")
             if chat_revision is not None and chat.revision != chat_revision:
                 raise AiConflictError("Conversation permissions changed while the proposal was being prepared")
             if not getattr(chat.capabilities, capability, False):
@@ -581,30 +565,17 @@ class PostgresAiRepository:
                 raise AiConflictError("Chat changed or was deleted")
             current_chat = self._chat(chat_row)
             model_changed = current_chat.provider_id != provider_id or current_chat.model_id != model_id
-            if model_changed:
-                cursor.execute("SELECT count(*) AS total FROM schemii.ai_chats WHERE owner_id=%s AND workspace_id=%s AND status<>'deleted'", (owner_id, current_chat.workspace_id))
-                count = cursor.fetchone()["total"]
-                if count >= self._policy.maximum_chats_per_workspace:
-                    raise AiCapacityError(
-                        "This workspace has reached the configured conversation limit. Delete an old conversation before changing models.",
-                        resource="ai_chat",
-                        limit_name="maximum_chats_per_workspace",
-                        configured_limit=self._policy.maximum_chats_per_workspace,
-                        observed_value=count,
-                    )
-                new_chat_id = f"chat_{secrets.token_hex(16)}"
+            if model_changed and current_chat.status == "working":
+                raise AiConflictError("Wait for the current response to finish before changing models")
+            policy_changed = current_chat.capabilities != capabilities
+            if model_changed or policy_changed:
                 cursor.execute(
-                    "INSERT INTO schemii.ai_chats (id,owner_id,workspace_id,title,provider_id,model_id,capabilities) VALUES (%s,%s,%s,'New conversation',%s,%s,%s::jsonb) RETURNING *",
-                    (new_chat_id, owner_id, current_chat.workspace_id, provider_id, model_id, capabilities.model_dump_json(by_alias=True)),
+                    "UPDATE schemii.ai_chats SET revision=revision+1,provider_id=%s,model_id=%s,capabilities=%s::jsonb,updated_at=clock_timestamp() WHERE owner_id=%s AND id=%s AND revision=%s RETURNING *",
+                    (provider_id, model_id, capabilities.model_dump_json(by_alias=True), owner_id, chat_id, expected_chat_revision),
                 )
                 saved_chat = self._chat(cursor.fetchone())
-            elif current_chat.capabilities != capabilities:
-                cursor.execute(
-                    "UPDATE schemii.ai_chats SET revision=revision+1,capabilities=%s::jsonb,updated_at=clock_timestamp() WHERE owner_id=%s AND id=%s AND revision=%s RETURNING *",
-                    (capabilities.model_dump_json(by_alias=True), owner_id, chat_id, expected_chat_revision),
-                )
-                saved_chat = self._chat(cursor.fetchone())
-                cursor.execute("UPDATE schemii.ai_proposals SET revision=revision+1,status='dismissed' WHERE owner_id=%s AND chat_id=%s AND status='pending'", (owner_id, chat_id))
+                if policy_changed:
+                    cursor.execute("UPDATE schemii.ai_proposals SET revision=revision+1,status='dismissed' WHERE owner_id=%s AND chat_id=%s AND status='pending'", (owner_id, chat_id))
             else:
                 saved_chat = current_chat
             cursor.execute(
@@ -619,7 +590,7 @@ class PostgresAiRepository:
             default_model_id=saved_settings_row["default_model_id"],
             default_capabilities=AiCapabilities.model_validate(saved_settings_row["capabilities"]),
         )
-        return saved_settings, saved_chat, model_changed
+        return saved_settings, saved_chat, False
 
     def list_chats(self, owner_id, workspace_id=None):
         with self._transaction() as connection, connection.cursor() as cursor:
@@ -725,6 +696,7 @@ class PostgresAiRepository:
 
     def finish_turn(self, owner_id, chat_id, turn_id, text, *, rerun=False, history_limit=200):
         with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM schemii.ai_chats WHERE owner_id=%s AND id=%s FOR UPDATE", (owner_id, chat_id))
             cursor.execute("UPDATE schemii.ai_turns SET status='succeeded',result_context_rerun=%s,completed_at=clock_timestamp() WHERE owner_id=%s AND chat_id=%s AND id=%s AND status='running' RETURNING *",(rerun,owner_id,chat_id,turn_id)); row=cursor.fetchone()
             if row is None: raise AiConflictError("Turn is no longer running")
             cursor.execute("SELECT COALESCE(max(sequence),0)+1 AS next FROM schemii.ai_messages WHERE chat_id=%s",(chat_id,)); sequence=cursor.fetchone()["next"]
@@ -732,6 +704,7 @@ class PostgresAiRepository:
 
     def fail_turn(self, owner_id, chat_id, turn_id, code, message):
         with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM schemii.ai_chats WHERE owner_id=%s AND id=%s FOR UPDATE", (owner_id, chat_id))
             cursor.execute("UPDATE schemii.ai_turns SET status='failed',error_code=%s,error_message=%s,completed_at=clock_timestamp() WHERE owner_id=%s AND chat_id=%s AND id=%s AND status IN ('queued','running') RETURNING *",(code,message,owner_id,chat_id,turn_id)); row=cursor.fetchone()
             if row is None: raise AiConflictError("Turn is no longer active")
             cursor.execute("UPDATE schemii.ai_chats SET status='failed',updated_at=clock_timestamp() WHERE owner_id=%s AND id=%s",(owner_id,chat_id)); return self._turn(row)
@@ -752,6 +725,7 @@ class PostgresAiRepository:
             row = cursor.fetchone()
             if row is None:
                 raise AiConflictError("Turn is no longer active")
+            cursor.execute("UPDATE schemii.ai_proposals SET status='dismissed',revision=revision+1 WHERE owner_id=%s AND chat_id=%s AND turn_id=%s AND status='pending'", (owner_id, chat_id, turn_id))
             cursor.execute(
                 "UPDATE schemii.ai_chats SET status='idle',updated_at=clock_timestamp() WHERE owner_id=%s AND id=%s",
                 (owner_id, chat_id),
@@ -810,6 +784,10 @@ class PostgresAiRepository:
             if chat is None:
                 raise AiNotFoundError("Chat was not found")
             capabilities = AiCapabilities.model_validate(chat["capabilities"])
+            cursor.execute("SELECT status FROM schemii.ai_turns WHERE owner_id=%s AND chat_id=%s AND id=%s", (owner_id, chat_id, turn_id))
+            active_turn = cursor.fetchone()
+            if active_turn is None or active_turn["status"] not in {"queued", "running"}:
+                raise AiConflictError("Turn is no longer active")
             if chat_revision is not None and chat["revision"] != chat_revision:
                 raise AiConflictError("Conversation permissions changed while the proposal was being prepared")
             if not getattr(capabilities, capability, False):

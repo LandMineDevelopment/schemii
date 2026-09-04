@@ -100,20 +100,19 @@ def test_containerized_application_is_non_root_and_read_only() -> None:
     assert "no-new-privileges:true" in demo_bootstrap
 
 
-def test_opencode_read_only_workspace_contains_its_generated_ignore_file() -> None:
+def test_pi_sidecar_is_default_and_has_no_chat_data_volume() -> None:
     compose = (ROOT / "compose.test.yaml").read_text(encoding="utf-8")
-    opencode = _service(compose, "opencode")
-    ignored = ROOT / "ai" / "workspace" / ".opencode" / ".gitignore"
-
-    assert "./ai/workspace:/workspace:ro" in opencode
-    assert "XDG_DATA_HOME: /opencode/data" in opencode
-    assert "schemii-test-opencode-data:/opencode/data" in opencode
-    assert "schemii-test-opencode-data:" in compose.split("\nvolumes:\n", 1)[1]
-    assert "read_only: true" in opencode
-    assert ignored.read_text(encoding="utf-8").splitlines() == [
-        "node_modules",
-        "bun.lock",
-    ]
+    runtime = _service(compose, "ai-prototype-runtime")
+    app = _service(compose, "schemii")
+    assert "  opencode:" not in compose
+    assert "profiles:" not in runtime
+    assert "read_only: true" in runtime
+    assert "no-new-privileges:true" in runtime
+    assert "ports:" not in runtime
+    assert "/opencode/data" not in runtime
+    assert "/var/run/docker.sock" not in compose
+    assert "SCHEMII_PI_PROTOTYPE_URL: http://ai-prototype-runtime:4097" in app
+    assert "ai-prototype-runtime:" in app
 
 
 def test_database_roles_are_split_by_control_plane_and_demo_responsibility() -> None:

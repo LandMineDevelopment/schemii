@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +19,20 @@ from schemii.common.system_inspection import build_developer_system_document
 from schemii.main import ApplicationServices, create_app
 from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
+
+
+def test_runtime_binding_resolves_nested_installed_services_without_name_special_cases():
+    from schemii.common.ai.credential_lifecycle import record_activity
+    from schemii.common.source_inspection import SourceRegistry
+
+    services = create_app().state.services
+    index = system_inspection.RuntimeBindingIndex(services, SourceRegistry())
+    call = ast.parse("request.app.state.services.metadata.ai_credentials.touch_activity(owner)").body[0].value
+    resolved = index.resolve(call.func, callable_subject=record_activity)
+    assert resolved.subject is type(services.metadata.ai_credentials).touch_activity
+    assert resolved.resolution == "runtime-service"
+    unknown = ast.parse("request.app.state.services.metadata.missing.touch_activity(owner)").body[0].value
+    assert index.resolve(unknown.func, callable_subject=record_activity).subject is None
 
 
 def test_developer_system_inspection_is_opt_in_and_hidden_from_openapi() -> None:

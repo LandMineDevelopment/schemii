@@ -51,6 +51,9 @@ def chats(request: Request, workspace_id: str | None = Query(None, alias="worksp
 def create_chat(workspace_id: str, body: SchemiiChatCreate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).create_chat, principal.user_id, workspace_id, body)
 @router.get("/ai/chats/{chat_id}", response_model=SchemiiChat)
 def chat(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.get_chat, principal.user_id, chat_id)
+@router.get("/ai/chats/{chat_id}/stream")
+def stream(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)):
+    return _call(_service(request).stream, principal.user_id, chat_id)
 @router.patch("/ai/chats/{chat_id}", response_model=SchemiiChat)
 def update_chat(chat_id: str, body: SchemiiChatUpdate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.update_chat, principal.user_id, chat_id, body.expected_revision, body.title)
 @router.delete("/ai/chats/{chat_id}", response_model=SchemiiChat)

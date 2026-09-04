@@ -22,7 +22,7 @@ SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
 SCHEMII_LAUNCH_ACTION=start
 SCHEMII_LOG_SERVICE=
-SCHEMII_PI_PROTOTYPE_URL=
+SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
   printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype]\n' "$0"
@@ -350,17 +350,17 @@ fi
 
 printf 'Building the current Schemii application image...\n'
 if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
-  if ! docker "${compose_args[@]}" build schemii opencode ai-prototype-runtime; then
+  if ! docker "${compose_args[@]}" build schemii ai-prototype-runtime; then
     fail "the application or AI prototype runtime image could not be built; the running deployment was left unchanged"
   fi
-elif ! docker "${compose_args[@]}" build schemii opencode; then
+elif ! docker "${compose_args[@]}" build schemii ai-prototype-runtime; then
   fail "the application image could not be built; the running deployment was left unchanged"
 fi
 
 # The launcher is also the restart boundary. Build first so a compilation
 # failure does not interrupt the last known-good HTTP processes.
 docker "${compose_args[@]}" rm --stop --force \
-  ingress schemii opencode metadata-bootstrap demo-bootstrap
+  ingress schemii metadata-bootstrap demo-bootstrap
 # Remove a previous optional runtime even when this launch disables it.
 docker "${compose_args[@]}" --profile ai-prototype-runtime rm --stop --force ai-prototype-runtime
 
@@ -386,13 +386,11 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
 fi
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
-if ! docker "${compose_args[@]}" up --detach --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
+if ! docker "${compose_args[@]}" up --detach --remove-orphans --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
   printf 'Schemii did not become healthy. Current service state:\n' >&2
   docker "${compose_args[@]}" --profile demo-fixture ps --all >&2 || true
   printf 'Schemii service logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 schemii >&2 || true
-  printf 'OpenCode service logs:\n' >&2
-  docker "${compose_args[@]}" logs --no-color --tail 200 opencode >&2 || true
   if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
     printf 'Pi prototype service logs:\n' >&2
     docker "${compose_args[@]}" logs --no-color --tail 200 ai-prototype-runtime >&2 || true

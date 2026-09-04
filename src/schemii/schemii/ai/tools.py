@@ -162,6 +162,37 @@ def tools_for_capabilities(capabilities: Any) -> dict[str, bool]:
     }
 
 
+def tool_definitions(capabilities: Any) -> list[dict[str, Any]]:
+    """Provider-neutral JSON schemas, derived from the same validated actions."""
+    action = DESIGN_ACTION.json_schema()
+    definitions = action.pop("$defs", {})
+    summary = {"type": "string", "maxLength": 2048, "description": "A short, user-readable explanation of the proposed action."}
+    schemas = {
+        "schemii_design_change": {
+            "description": "Propose a desired-schema change for human approval; never executes it. Use IDs from the provided design. For add_column, column must include id, name, dataType and nullable. For full objects use the same shape as CONTEXT.design.",
+            "parameters": {"type": "object", "properties": {"summary": summary, "action": action},
+                           "required": ["summary", "action"], "additionalProperties": False, "$defs": definitions},
+        },
+        "schemii_read_query": {
+            "description": "Propose a read-only SQL query for human approval. Does not run SQL or return rows.",
+            "parameters": {"type": "object", "properties": {"summary": summary, "sql": {"type": "string", "minLength": 1}},
+                           "required": ["summary", "sql"], "additionalProperties": False},
+        },
+        "schemii_open_console": {
+            "description": "Propose opening SQL in the console for human review, including writes. Never executes or commits SQL.",
+            "parameters": {"type": "object", "properties": {"summary": summary, "sql": {"type": "string", "minLength": 1}},
+                           "required": ["summary", "sql"], "additionalProperties": False},
+        },
+        "schemii_review_migration": {
+            "description": "Propose opening migration review. Never approves or applies a migration.",
+            "parameters": {"type": "object", "properties": {"summary": summary},
+                           "required": ["summary"], "additionalProperties": False},
+        },
+    }
+    return [{"name": name, **schema} for name, schema in schemas.items()
+            if getattr(capabilities, TOOL_CAPABILITIES[name], False)]
+
+
 def authority_manifest(revision: int, capabilities: Any) -> dict[str, Any]:
     """Describe current authority without relying on earlier chat messages."""
 

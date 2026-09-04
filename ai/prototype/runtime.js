@@ -1,6 +1,7 @@
 import { createModels, InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
+import { opencodeProvider } from '@earendil-works/pi-ai/providers/opencode';
 
 // Experimental library boundary, not a public HTTP service. Owner/credentialId
 // must come from authenticated Schemii code, never from model arguments.
@@ -21,6 +22,14 @@ export class CredentialVault {
   async remove(owner, credentialId, providerId) {
     await this.scope(owner, credentialId).delete(providerId);
   }
+
+  async read(owner, credentialId, providerId) {
+    return this.scope(owner, credentialId).read(providerId);
+  }
+
+  clearIdentity(owner, credentialId) {
+    this.#stores.delete(JSON.stringify([owner, credentialId]));
+  }
 }
 
 export class TurnError extends Error {
@@ -36,6 +45,10 @@ export class TurnError extends Error {
       response_too_large: 'The AI response exceeds the configured limit.',
       permission_changed: 'Assistant permissions changed. Request a new response.',
       tool_denied: 'The model requested a tool that is not enabled for this turn.',
+      invalid_request: 'The AI request is invalid.',
+      not_found: 'The AI request was not found.',
+      rate_limited: 'The AI provider usage or capacity limit was reached. Wait and try again, or select another available model.',
+      billing_required: 'The AI provider requires billing or credits for this request. Check your provider account or select another model.',
     };
     super(messages[code]);
     this.name = 'TurnError';
@@ -43,9 +56,10 @@ export class TurnError extends Error {
   }
 }
 
-const providers = {
+export const providers = {
   openai: openaiProvider,
   'openai-codex': openaiCodexProvider,
+  opencode: opencodeProvider,
 };
 const noAmbientAuth = Object.freeze({
   env: async () => undefined,
@@ -68,16 +82,20 @@ export class TurnRunner {
   }
 
   async run({ owner, credentialId, providerId, modelId, context, signal,
-    onText = () => {}, isAuthorized = async () => true }) {
+    onText = () => {}, isAuthorized = async () => true, limits = {} }) {
+    const policy = { ...this.limits, ...limits };
+    for (const value of Object.values(policy)) {
+      if (!Number.isSafeInteger(value) || value < 1) throw new TurnError('invalid_request');
+    }
     const ownerActive = this.#owners.get(owner) ?? 0;
-    if (this.#active >= this.limits.maxConcurrent || ownerActive >= this.limits.maxPerOwner) {
+    if (this.#active >= policy.maxConcurrent || ownerActive >= policy.maxPerOwner) {
       throw new TurnError('busy');
     }
     this.#active++;
     this.#owners.set(owner, ownerActive + 1);
     const controller = new AbortController();
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.limits.timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, policy.timeoutMs);
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
@@ -85,7 +103,7 @@ export class TurnRunner {
       controller.signal.throwIfAborted();
       if (!await isAuthorized()) throw new TurnError('permission_changed');
       const snapshot = structuredClone(context);
-      if (Buffer.byteLength(JSON.stringify(snapshot)) > this.limits.contextBytes) {
+      if (Buffer.byteLength(JSON.stringify(snapshot)) > policy.contextBytes) {
         throw new TurnError('context_too_large');
       }
       const factory = Object.hasOwn(this.providerFactories, providerId) && this.providerFactories[providerId];
@@ -109,14 +127,22 @@ export class TurnRunner {
         // Never forward SDK error/thinking/raw events or diagnostic payloads.
         if (event.type === 'text_delta' || event.type === 'toolcall_delta' || event.type === 'thinking_delta') {
           bytes += Buffer.byteLength(event.delta ?? '');
-          if (bytes > this.limits.responseBytes) throw new TurnError('response_too_large');
+          if (bytes > policy.responseBytes) throw new TurnError('response_too_large');
         }
-        if (event.type === 'text_delta') onText(event.delta);
+        if (event.type === 'text_delta') await onText(event.delta);
       }
       const reply = await stream.result();
       controller.signal.throwIfAborted();
-      if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new TurnError('provider_failed');
-      if (Buffer.byteLength(JSON.stringify(reply)) > this.limits.responseBytes) throw new TurnError('response_too_large');
+      if (reply.stopReason === 'error' || reply.stopReason === 'aborted') {
+        // Only classify a leading HTTP status; never expose provider text, which
+        // may contain private diagnostics or credentials.
+        const status = typeof reply.errorMessage === 'string'
+          ? /^(?:OpenAI API error \()?(401|402|429)(?:\):|\b)/.exec(reply.errorMessage)?.[1]
+          : undefined;
+        throw new TurnError({ '401': 'credentials_required', '402': 'billing_required',
+          '429': 'rate_limited' }[status] ?? 'provider_failed');
+      }
+      if (Buffer.byteLength(JSON.stringify(reply)) > policy.responseBytes) throw new TurnError('response_too_large');
       // This callback represents the existing Schemii revision/permission check.
       // The real application still validates argument schemas and every apply.
       if (!await isAuthorized()) throw new TurnError('permission_changed');

@@ -12,7 +12,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from schemii.common.ai.opencode import OpenCodeClient, OpenCodeError
+from schemii.common.ai.pi import PiRuntime, PiError
 from schemii.common.postgres.console.models import ConsoleExecutionCreate
 from schemii.schemii.designs.models import (
     DesignCheckConstraint,
@@ -39,7 +39,7 @@ from .tools import (
     authority_manifest,
     normalize_tool_call,
     permission_label,
-    tools_for_capabilities,
+    tool_definitions,
 )
 
 
@@ -78,204 +78,29 @@ class AiService:
     def __init__(
         self,
         repository: AiRepository,
-        runtime: OpenCodeClient | None,
+        runtime: PiRuntime | None,
         services: Any,
     ) -> None:
         self.repository = repository
         self.runtime = runtime
         self.services = services
         self.policy = services.admin_config.ai
-        self._status_lock = threading.RLock()
-        self._status_cache: tuple[float, dict[str, Any]] | None = None
+        self._streams: dict[tuple[str, str], dict[str, str]] = {}
         self._transient_lock = threading.RLock()
         self._transient_responses: OrderedDict[
             tuple[str, str, str], tuple[SchemiiTransientResponse, int]
         ] = OrderedDict()
         self._transient_response_bytes = 0
 
-    def status(self) -> dict[str, Any]:
-        with self._status_lock:
-            if self._status_cache is not None and self._status_cache[0] > time.monotonic():
-                return deepcopy(self._status_cache[1])
+    def status(self, owner: str) -> dict[str, Any]:
         if not self.policy.enabled or self.runtime is None:
-            return {
-                "enabled": self.policy.enabled,
-                "healthy": False,
-                "providers": [],
-            }
-        try:
-            value = self.runtime.status()
-            providers = []
-            catalog = value["providers"]
-            connected = {
-                provider_id
-                for provider_id in catalog.get("connected", [])
-                if isinstance(provider_id, str)
-            }
-            auth_methods = catalog.get("authMethods", {})
-            if not isinstance(auth_methods, dict):
-                auth_methods = {}
-            for provider in catalog.get("providers", [])[:200]:
-                if not isinstance(provider, dict):
-                    continue
-                provider_id = provider.get("id")
-                if not isinstance(provider_id, str) or (
-                    provider_id not in connected and provider_id not in auth_methods
-                ):
-                    continue
-                source_models = provider.get("models") or {}
-                if isinstance(source_models, dict):
-                    model_items = source_models.items()
-                elif isinstance(source_models, list):
-                    model_items = (
-                        (item.get("id", ""), item)
-                        for item in source_models
-                        if isinstance(item, dict)
-                    )
-                else:
-                    model_items = ()
-                models = [
-                    {
-                        "id": item.get("id", key),
-                        "name": item.get("name", item.get("id", key)),
-                        "status": (
-                            item.get("status")
-                            if item.get("status") in {"deprecated", "unavailable"}
-                            else "active"
-                        ),
-                    }
-                    for key, item in list(model_items)[:1000]
-                    if isinstance(item, dict)
-                    and isinstance(item.get("id", key), str)
-                    and item.get("id", key)
-                ]
-                methods = []
-                source_methods = auth_methods.get(provider_id, [])
-                if isinstance(source_methods, list):
-                    for method_index, method in enumerate(source_methods[:20]):
-                        if (
-                            not isinstance(method, dict)
-                            or method.get("type") not in {"api", "oauth"}
-                        ):
-                            continue
-                        prompts = []
-                        source_prompts = method.get("prompts", [])
-                        if isinstance(source_prompts, list):
-                            for prompt in source_prompts[:20]:
-                                if (
-                                    not isinstance(prompt, dict)
-                                    or prompt.get("type") not in {"text", "select"}
-                                    or not isinstance(prompt.get("key"), str)
-                                    or not prompt["key"]
-                                ):
-                                    continue
-                                options = []
-                                if isinstance(prompt.get("options"), list):
-                                    options = [
-                                        {
-                                            "label": str(option.get("label", ""))[:256],
-                                            "value": str(option.get("value", ""))[:256],
-                                            "hint": str(option.get("hint", ""))[:256],
-                                        }
-                                        for option in prompt["options"][:50]
-                                        if isinstance(option, dict)
-                                    ]
-                                prompts.append(
-                                    {
-                                        "key": prompt["key"][:128],
-                                        "message": str(
-                                            prompt.get("message", prompt["key"])
-                                        )[:512],
-                                        "type": prompt["type"],
-                                        "placeholder": str(
-                                            prompt.get("placeholder", "")
-                                        )[:256],
-                                        "options": options,
-                                    }
-                                )
-                        methods.append(
-                            {
-                                "id": method_index,
-                                "type": method["type"],
-                                "label": str(
-                                    method.get("label", method["type"])
-                                )[:256],
-                                "prompts": prompts,
-                            }
-                        )
-                is_connected = provider_id in connected
-                providers.append(
-                    {
-                        "id": provider_id,
-                        "name": provider.get("name", provider_id),
-                        "available": is_connected and bool(models),
-                        "authenticated": is_connected,
-                        "authMethods": methods,
-                        "models": models,
-                    }
-                )
-            response = {
-                "enabled": True,
-                "healthy": value["healthy"],
-                "providers": providers,
-                "message": value.get("message"),
-            }
-            with self._status_lock:
-                self._status_cache = (
-                    time.monotonic() + self.policy.runtime_status_cache_seconds,
-                    deepcopy(response),
-                )
-            return response
-        except OpenCodeError as error:
-            return {
-                "enabled": True,
-                "healthy": False,
-                "providers": [],
-                "message": str(error),
-            }
+            return {"enabled": self.policy.enabled, "healthy": False, "providers": []}
+        return self.runtime.status(owner)
 
-    def _require_runtime(self) -> OpenCodeClient:
-        if not self.policy.enabled or self.runtime is None:
-            raise OpenCodeError(
-                "ai_runtime_unavailable", "The AI runtime is not configured"
-            )
-        return self.runtime
-
-    def set_api_credential(self, owner: str, body: Any) -> dict[str, bool]:
-        del owner
-        self._require_runtime().set_api_key(
-            body.provider_id, body.key.get_secret_value(), body.inputs
-        )
-        self._invalidate_status()
-        return {"saved": True}
-
-    def authorize_oauth(self, owner: str, body: Any) -> dict[str, str]:
-        del owner
-        return self._require_runtime().oauth_authorize(
-            body.provider_id, body.method, body.inputs
-        )
-
-    def complete_oauth(self, owner: str, body: Any) -> dict[str, bool]:
-        del owner
-        self._require_runtime().oauth_callback(
-            body.provider_id,
-            body.method,
-            body.code.get_secret_value() if body.code is not None else None,
-        )
-        self._invalidate_status()
-        return {"authenticated": True}
-
-    def remove_provider_credential(
-        self, owner: str, provider_id: str
-    ) -> dict[str, bool]:
-        del owner
-        self._require_runtime().delete_provider_auth(provider_id)
-        self._invalidate_status()
-        return {"deleted": True}
-
-    def _invalidate_status(self) -> None:
-        with self._status_lock:
-            self._status_cache = None
+    def stream(self, owner: str, chat_id: str) -> dict[str, str | None]:
+        chat = self.repository.get_chat(owner, chat_id)
+        with self._transient_lock:
+            return dict(self._streams.get((owner, chat_id), {})) if chat.status == "working" else {}
 
     def recover_interrupted(self) -> None:
         """Resolve durable work that could not survive a process restart."""
@@ -285,9 +110,9 @@ class AiService:
             return
         for owner, chat_id, session_id in sessions:
             try:
-                self.runtime.delete_session(session_id)
+                self.runtime.cancel(owner, session_id)
                 self.repository.clear_chat_runtime(owner, chat_id)
-            except OpenCodeError:
+            except PiError:
                 continue
             except Exception:
                 continue
@@ -296,9 +121,9 @@ class AiService:
         turn, session_id = self.repository.cancel_turn(owner, chat_id, turn_id)
         if session_id and self.runtime is not None:
             try:
-                self.runtime.delete_session(session_id)
+                self.runtime.cancel(owner, turn_id)
                 self.repository.clear_chat_runtime(owner, chat_id)
-            except OpenCodeError:
+            except PiError:
                 pass
         try:
             self.repository.add_event(
@@ -372,8 +197,8 @@ class AiService:
         room = max(0, self.policy.response_bytes - len(suffix.encode("utf-8")))
         return encoded[:room].decode("utf-8", errors="ignore") + suffix
 
-    def _require_available_model(self, provider_id: str, model_id: str) -> None:
-        status = self.status()
+    def _require_available_model(self, owner: str, provider_id: str, model_id: str) -> None:
+        status = self.status(owner)
         available = {
             (provider["id"], model["id"])
             for provider in status["providers"]
@@ -385,12 +210,12 @@ class AiService:
             raise AiServiceError(
                 422,
                 "ai_model_unavailable",
-                "The selected AI model is not available in this deployment",
+                "The selected AI model is unavailable. Connect its provider or choose another model; your conversation is retained.",
             )
 
     def create_chat(self, owner: str, workspace_id: str, body: Any) -> Any:
         self.services.workspaces.get(owner, workspace_id)
-        self._require_available_model(body.provider_id, body.model_id)
+        self._require_available_model(owner, body.provider_id, body.model_id)
         return self.repository.create_chat(
             owner,
             workspace_id,
@@ -403,7 +228,8 @@ class AiService:
     def save_preferences(self, owner: str, chat_id: str, body: Any) -> SchemiiAiPreferencesResult:
         current_chat = self.repository.get_chat(owner, chat_id)
         self.services.workspaces.get(owner, current_chat.workspace_id)
-        self._require_available_model(body.provider_id, body.model_id)
+        if (current_chat.provider_id, current_chat.model_id) != (body.provider_id, body.model_id):
+            self._require_available_model(owner, body.provider_id, body.model_id)
         settings, saved_chat, started_new = self.repository.save_preferences(
             owner,
             chat_id,
@@ -450,6 +276,10 @@ class AiService:
                 "ai_result_context_not_allowed",
                 "This conversation is not allowed to send query rows to the model",
             )
+        self._require_available_model(owner, chat.provider_id, chat.model_id)
+        if chat.provider_id == "opencode" and not getattr(body, "acknowledge_provider_data_policy", False):
+            raise AiServiceError(422, "ai_provider_consent_required",
+                                 "Free Zen models may use prompts for training. Do not send personal or confidential data. Confirm the provider notice before sending.")
         return self.repository.create_turn(
             owner,
             chat_id,
@@ -539,10 +369,28 @@ class AiService:
 
             record_stage("context", "completed", "Workspace context ready")
             record_stage("model", "running", f"Waiting for {chat.model_id}")
-            session_id = self.runtime.create_session(chat.title)
+            self._require_available_model(owner, chat.provider_id, chat.model_id)
+            session_id = turn_id
             self.repository.set_chat_runtime(
                 owner, chat_id, external_session_id=session_id
             )
+            with self._transient_lock:
+                self._streams[(owner, chat_id)] = {"turnId": turn_id, "text": ""}
+
+            def on_text(delta):
+                with self._transient_lock:
+                    current = self._streams.get((owner, chat_id))
+                    if current is not None:
+                        value = current["text"] + delta
+                        other_bytes = sum(len(item["text"].encode("utf-8")) for key, item in self._streams.items() if key != (owner, chat_id))
+                        if (len(value.encode("utf-8")) <= self.policy.response_bytes
+                                and other_bytes + len(value.encode("utf-8")) <= self.policy.transient_response_memory_bytes):
+                            current["text"] = value
+
+            def is_authorized():
+                current = self.repository.get_chat(owner, chat_id)
+                return (current.revision == chat.revision and current.status == "working"
+                        and self.repository.get_turn(owner, chat_id, turn_id).status == "running")
             system = (
                 "You are Schemii's database design assistant. Explain clearly. "
                 "AUTHORITY in CONTEXT is the current server-authoritative policy for "
@@ -565,16 +413,21 @@ class AiService:
                 "result and may have been rerun.\nCONTEXT "
                 + encoded_context
             )
-            reply = self.runtime.prompt(
-                session_id,
+            reply = self.runtime.run(
+                owner,
+                turn_id,
                 chat.provider_id,
                 chat.model_id,
                 system,
                 messages[-1].text,
-                tools_for_capabilities(chat.capabilities),
+                tool_definitions(chat.capabilities),
+                on_text=on_text,
+                is_authorized=is_authorized,
             )
             record_stage("model", "completed", "Model response received")
             current_chat = self.repository.get_chat(owner, chat_id)
+            if self.repository.get_turn(owner, chat_id, turn_id).status == "cancelled":
+                return
             policy_changed = current_chat.revision != chat.revision
             tool_calls = () if policy_changed else reply.tool_calls
             if tool_calls:
@@ -714,13 +567,19 @@ class AiService:
                 owner, chat_id, "message", {"turnId": turn_id, "rerun": rerun}
             )
         except Exception as error:
+            try:
+                if self.repository.get_turn(owner, chat_id, turn_id).status == "cancelled":
+                    return
+            except Exception:
+                pass
             code = getattr(error, "code", "ai_turn_failed")
+            message = str(error) if isinstance(error, (PiError, AiServiceError)) else "The assistant turn could not be completed. Try again; no unvalidated action was applied."
             try:
                 record_stage("response", "failed", "Assistant turn stopped")
             except Exception:
                 pass
             try:
-                self.repository.fail_turn(owner, chat_id, turn_id, code, str(error))
+                self.repository.fail_turn(owner, chat_id, turn_id, code, message)
             except Exception:
                 pass
             try:
@@ -728,23 +587,18 @@ class AiService:
                     owner,
                     chat_id,
                     "error",
-                    {"turnId": turn_id, "code": code, "message": str(error)},
+                    {"turnId": turn_id, "code": code, "message": message},
                 )
             except Exception:
                 pass
         finally:
+            with self._transient_lock:
+                self._streams.pop((owner, chat_id), None)
             if session_id is not None and self.runtime is not None:
-                deleted = False
                 try:
-                    self.runtime.delete_session(session_id)
-                    deleted = True
-                except OpenCodeError:
+                    self.repository.clear_chat_runtime(owner, chat_id)
+                except Exception:
                     pass
-                if deleted:
-                    try:
-                        self.repository.clear_chat_runtime(owner, chat_id)
-                    except Exception:
-                        pass
 
     def execute(self, owner: str, chat_id: str, proposal_id: str, body: Any) -> Any:
         chat = self.repository.get_chat(owner, chat_id)

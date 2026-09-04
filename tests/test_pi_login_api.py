@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -25,9 +27,19 @@ class Sidecar:
         entry = self.entries.get(body['id'])
         if not entry or entry['owner'] != body['owner']:
             raise ApiProblem(404, 'pi_login_missing', 'Not found')
+        if path == '/logins/status' and hasattr(self, 'status_barrier'):
+            self.status_barrier.wait(timeout=5)
         if path == '/logins/cancel':
             del self.entries[body['id']]
         return entry
+
+
+class PiRuntimeStub:
+    def __init__(self):
+        self.disconnected = []
+
+    def disconnect(self, owner, credential_id):
+        self.disconnected.append((owner, credential_id))
 
 
 @pytest.fixture
@@ -38,6 +50,7 @@ def setup():
     store = MemoryAiCredentialStore()
     app.state.services = SimpleNamespace(metadata=SimpleNamespace(ai_credentials=store))
     app.state.pi_client = Sidecar()
+    app.state.ai_service = SimpleNamespace(runtime=PiRuntimeStub())
     app.dependency_overrides[get_current_principal] = lambda: Principal(user_id='alice', authentication_source='local_prototype')
     return app, TestClient(app), store
 
@@ -62,20 +75,30 @@ def test_owner_is_from_principal_not_request(setup):
 
 
 def test_disconnect_fences_late_completion(setup):
-    _, client, store = setup
+    app, client, store = setup
     start = client.post('/api/v1/ai/prototype/login').json()
     assert client.delete('/api/v1/ai/prototype/credentials').status_code == 200
     assert client.get('/api/v1/ai/prototype/logins/' + start['id']).status_code == 409
     assert store.get('alice', 'codex-prototype') is None
+    assert app.state.ai_service.runtime.disconnected == [('alice', 'codex-prototype')]
 
 
-def test_new_login_supersedes_old_and_repeated_poll_is_safe(setup):
-    _, client, _ = setup
+def test_new_login_supersedes_old_and_repeated_poll_cannot_restore_old_tokens(setup):
+    app, client, store = setup
     old = client.post('/api/v1/ai/prototype/login').json()
     new = client.post('/api/v1/ai/prototype/login').json()
     assert client.get('/api/v1/ai/prototype/logins/' + old['id']).status_code == 409
-    for _ in range(2):
-        assert client.get('/api/v1/ai/prototype/logins/' + new['id']).status_code == 200
+    late = dict(app.state.pi_client.entries[new['id']])
+    assert client.get('/api/v1/ai/prototype/logins/' + new['id']).status_code == 200
+    assert new['id'] not in app.state.pi_client.entries
+    credential = store.get('alice', 'codex-prototype')
+    assert store.save('alice', 'codex-prototype', 'openai-codex',
+                      {'type': 'oauth', 'access': 'ROTATED', 'refresh': 'NEW_REFRESH'},
+                      credential['generation'])
+    # Model a status response fetched before the successful poll cleaned it up.
+    app.state.pi_client.entries[new['id']] = late
+    assert client.get('/api/v1/ai/prototype/logins/' + new['id']).status_code == 409
+    assert store.get('alice', 'codex-prototype')['credential']['refresh'] == 'NEW_REFRESH'
 
 
 def test_disabled_page_and_api(setup):
@@ -83,6 +106,20 @@ def test_disabled_page_and_api(setup):
     app.state.pi_client = None
     assert client.get('/ai-prototype').status_code == 503
     assert client.post('/api/v1/ai/prototype/login').status_code == 503
+
+
+def test_concurrent_login_completion_consumes_generation_once(setup):
+    app, client, store = setup
+    start = client.post('/api/v1/ai/prototype/login').json()
+    initial_generation = app.state.pi_client.entries[start['id']]['generation']
+    app.state.pi_client.status_barrier = Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = list(executor.map(
+            lambda _: client.get('/api/v1/ai/prototype/logins/' + start['id']).status_code,
+            range(2),
+        ))
+    assert sorted(statuses) == [200, 409]
+    assert store.get('alice', 'codex-prototype')['generation'] == initial_generation + 1
 
 
 def test_cancel_fences_an_already_fetched_completion(setup):

@@ -13,7 +13,7 @@ function error(e) { el('status').textContent = e.message; el('connect').disabled
 async function refresh() {
   const { credentials } = await api('credentials');
   const connected = credentials.length > 0;
-  el('status').textContent = connected ? 'Connected. Credentials are encrypted on this server.' : 'No prototype account connected.';
+  el('status').textContent = connected ? 'Connected. Credentials are encrypted on this server.' : 'No prototype account connected. Connect again if your credentials expired after inactivity.';
   el('connect').textContent = connected ? 'Reconnect Codex' : 'Connect Codex';
   el('connect').disabled = false;
   el('disconnect').hidden = !connected;

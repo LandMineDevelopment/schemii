@@ -70,7 +70,7 @@ def test_postgres_factory_composes_encrypted_ai_credentials(monkeypatch, tmp_pat
 
     key_file = tmp_path / "key"
     key_file.write_text(base64.b64encode(bytes(range(32))).decode("ascii") + "\n")
-    monkeypatch.setattr(factory_module.MetadataMigrator, "migrate", lambda self: 21)
+    monkeypatch.setattr(factory_module.MetadataMigrator, "migrate", lambda self: 22)
     repositories = create_metadata_repositories(
         {
             "SCHEMII_STORAGE_MODE": "postgresql",
@@ -198,6 +198,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         19,
         20,
         21,
+        22,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -221,6 +222,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
             "0019_ai_assistant.sql": "0f4a8baf1a85aee4e7e4f9d65227134a9347add2776f982553ff28367789fece",
             "0020_ai_lifecycle_retention.sql": "e341b3a48847351054e03835454fda22d6f1c7bbc16c06017b375cc082c74b94",
             "0021_ai_credentials.sql": "c5378cf82fb32ede10d44481e940474ddc84ae4eb1e5fed8af87dce141e07bbf",
+            "0022_ai_credential_activity.sql": "eb6bfa354d91d2307ed26349be47c03e1611af0abf709270c9b7710d6f809758",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
