@@ -22,9 +22,10 @@ SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
 SCHEMII_LAUNCH_ACTION=start
 SCHEMII_LOG_SERVICE=
+SCHEMII_PI_PROTOTYPE_URL=
 
 usage() {
-  printf 'Usage: %s [--reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype]\n' "$0"
+  printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -39,6 +40,10 @@ list_demo_scenarios() {
 
 if (( $# > 0 )); then
   case "$1" in
+    --ai-prototype)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
+      ;;
     --reset-demo)
       SCHEMII_RESET_MIGRATION_DEMO=1
       if (( $# == 2 )); then
@@ -65,7 +70,7 @@ if (( $# > 0 )); then
     --logs)
       (( $# == 2 )) || { usage >&2; exit 2; }
       case "$2" in
-        schemii|opencode|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
+        schemii|opencode|ai-prototype-runtime|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
           SCHEMII_LAUNCH_ACTION=logs
           SCHEMII_LOG_SERVICE="$2"
           ;;
@@ -201,6 +206,10 @@ if [[ "$SCHEMII_LAUNCH_ACTION" == "test-ai-prototype" ]]; then
   exec docker "${compose_args[@]}" --profile ai-prototype run --rm --no-deps -T ai-prototype
 fi
 
+if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
+  compose_args+=(--profile ai-prototype-runtime)
+fi
+
 if ! certificate_is_current; then
   printf 'Creating a persistent local HTTPS certificate for localhost and 127.0.0.1...\n'
   create_local_certificate
@@ -319,6 +328,7 @@ export SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE
 export SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE
 export SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE
 export SCHEMII_OPENCODE_PASSWORD_SECRET_FILE
+export SCHEMII_PI_PROTOTYPE_URL
 export SCHEMII_SECRET_READER_GID
 export SCHEMII_RESET_MIGRATION_DEMO
 if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
@@ -339,7 +349,11 @@ if [[ "$SCHEMII_LAUNCH_ACTION" == "logs" ]]; then
 fi
 
 printf 'Building the current Schemii application image...\n'
-if ! docker "${compose_args[@]}" build schemii opencode; then
+if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
+  if ! docker "${compose_args[@]}" build schemii opencode ai-prototype-runtime; then
+    fail "the application or AI prototype runtime image could not be built; the running deployment was left unchanged"
+  fi
+elif ! docker "${compose_args[@]}" build schemii opencode; then
   fail "the application image could not be built; the running deployment was left unchanged"
 fi
 
@@ -347,6 +361,8 @@ fi
 # failure does not interrupt the last known-good HTTP processes.
 docker "${compose_args[@]}" rm --stop --force \
   ingress schemii opencode metadata-bootstrap demo-bootstrap
+# Remove a previous optional runtime even when this launch disables it.
+docker "${compose_args[@]}" --profile ai-prototype-runtime rm --stop --force ai-prototype-runtime
 
 # The former single PostgreSQL service used the control-plane volume now owned
 # by metadata-postgres. Remove only that exact legacy container before mounting
@@ -377,6 +393,10 @@ if ! docker "${compose_args[@]}" up --detach --wait --wait-timeout "$SCHEMII_STA
   docker "${compose_args[@]}" logs --no-color --tail 200 schemii >&2 || true
   printf 'OpenCode service logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 opencode >&2 || true
+  if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
+    printf 'Pi prototype service logs:\n' >&2
+    docker "${compose_args[@]}" logs --no-color --tail 200 ai-prototype-runtime >&2 || true
+  fi
   printf 'Metadata bootstrap logs:\n' >&2
   docker "${compose_args[@]}" logs --no-color --tail 200 metadata-bootstrap >&2 || true
   printf 'Demo seed logs:\n' >&2

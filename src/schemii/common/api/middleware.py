@@ -16,7 +16,7 @@ from .observability import (
 
 
 LOCAL_PROTOTYPE_HOSTS = ("127.0.0.1", "localhost")
-FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map"))
+FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map", "/ai-prototype"))
 
 
 FRONTEND_CONTENT_SECURITY_POLICY = "; ".join(

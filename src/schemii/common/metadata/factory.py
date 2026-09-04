@@ -1,8 +1,12 @@
 """Metadata repository composition boundary."""
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+if TYPE_CHECKING:
+    from schemii.common.ai.credential_store import MemoryAiCredentialStore, PostgresAiCredentialStore
 from schemii.common.connections.store import (
     ConnectionRepository,
     InMemoryConnectionRepository,
@@ -34,6 +38,12 @@ def _memory_readiness_probe() -> None:
     """In-memory repositories have no external dependency to probe."""
 
 
+def _memory_ai_credentials() -> MemoryAiCredentialStore:
+    from schemii.common.ai.credential_store import MemoryAiCredentialStore
+
+    return MemoryAiCredentialStore()
+
+
 @dataclass(frozen=True)
 class MetadataRepositories:
     connections: ConnectionRepository
@@ -56,6 +66,11 @@ class MetadataRepositories:
     )
     connection_factory: Callable[[], Any] | None = field(
         default=None,
+        repr=False,
+        compare=False,
+    )
+    ai_credentials: MemoryAiCredentialStore | PostgresAiCredentialStore = field(
+        default_factory=_memory_ai_credentials,
         repr=False,
         compare=False,
     )
@@ -86,6 +101,7 @@ def create_metadata_repositories(
             ),
         )
     from schemii.common.connections.postgres_store import PostgresConnectionRepository
+    from schemii.common.ai.credential_store import PostgresAiCredentialStore
 
     connection_factory = MetadataConnectionFactory(config)
     MetadataMigrator(
@@ -117,4 +133,5 @@ def create_metadata_repositories(
             host_aliases=config.target_host_aliases,
         ),
         connection_factory=connection_factory,
+        ai_credentials=PostgresAiCredentialStore(connection_factory, cipher),
     )

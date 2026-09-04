@@ -88,6 +88,47 @@ def test_startup_script_rejects_empty_database_configuration() -> None:
     assert "SCHEMII_TEST_POSTGRES_DB must not be empty" in result.stderr
 
 
+def test_optional_ai_runtime_builds_with_stack_and_is_disabled_on_normal_restart(tmp_path: Path) -> None:
+    command_log = tmp_path / "commands.log"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "printf '%s|pi=%s\\n' \"$*\" \"$SCHEMII_PI_PROTOTYPE_URL\" >> \"$COMMAND_LOG\"\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "COMMAND_LOG": str(command_log),
+        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
+        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
+        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
+    }
+    enabled = subprocess.run(
+        [str(START), "--ai-prototype"], cwd=ROOT, env=environment,
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert enabled.returncode == 0, enabled.stderr
+    commands = command_log.read_text(encoding="utf-8")
+    assert "--profile ai-prototype-runtime build schemii opencode ai-prototype-runtime|pi=http://ai-prototype-runtime:4097" in commands
+    assert "--profile ai-prototype-runtime up --detach --wait" in commands
+    assert "run --rm --no-deps -T ai-prototype" not in commands
+    command_log.write_text("", encoding="utf-8")
+    disabled = subprocess.run(
+        [str(START)], cwd=ROOT,
+        env={**environment, "SCHEMII_PI_PROTOTYPE_URL": "http://untrusted.invalid"},
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert disabled.returncode == 0, disabled.stderr
+    commands = command_log.read_text(encoding="utf-8")
+    assert "build schemii opencode|pi=\n" in commands
+    assert "build schemii opencode ai-prototype-runtime" not in commands
+    assert "--profile ai-prototype-runtime rm --stop --force ai-prototype-runtime|pi=\n" in commands
+    assert "--profile ai-prototype-runtime up" not in commands
+    assert "untrusted.invalid" not in commands
+
+
 def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -> None:
     command_log = tmp_path / "commands.log"
     docker = tmp_path / "docker"

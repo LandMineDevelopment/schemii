@@ -3,7 +3,26 @@
 Branch: `prototype/shared-ai-sidecar`. Baseline: `9f29247`.
 This is a **library-boundary prototype**, not the replacement chat service.
 The existing OpenCode deployment, saved credentials, chats, metadata and demo DB
-are unchanged. There is no new public endpoint or UI toggle.
+are unchanged. An opt-in device-login page is now available; it does not replace
+the existing chat engine.
+
+## Try encrypted account sign-in
+
+Run `./start.sh --ai-prototype`, then open `/ai-prototype` at the normal HTTPS
+origin. Connect Codex and authorize on OpenAI's device page. Only the device code
+and connection status reach the browser. Credentials are encrypted with the
+existing metadata encryption key in migration 0021's owner-scoped table.
+Disconnect clears ciphertext and advances a generation fence, preventing late
+login responses from restoring it. The bounded tombstone contains no tokens.
+
+The optional Node service is private and authenticated, with no database mount,
+host port or Docker access. It retains pending/successful login state only for
+up to ten minutes (32 total, four per owner). Failed sign-ins can be retried.
+An ordinary `./start.sh` disables/removes this optional service. Existing
+OpenCode authentication is never copied or changed.
+
+The application still uses its single local-prototype principal. Owner isolation
+is tested using distinct principals, not a claim of deployed multiuser auth.
 
 ## Repeat the experiment
 
@@ -46,11 +65,11 @@ change rejects final acceptance, but cannot retract text already displayed.
 ## Deliberate limits / next gate
 
 - No real login, paid model request, account-entitlement or provider availability
-  test has run. Device-code login and its owner-bound expiring UI transaction
-  still need integration. We do not claim subscription-provider endorsement.
-- The credential vault is in-memory and test-only. It has no encryption, durable
-  persistence or cross-process lock. A production implementation must use encrypted
-  owner/credential/provider-scoped storage and coordinate refresh across replicas.
+  test has run. Real authorization requires the user's participation.
+  We do not claim subscription-provider endorsement.
+- The turn runner's credential vault remains in-memory and test-only. The separate
+  login repository is encrypted and durable, but streaming integration and
+  refresh coordination across replicas are still required.
   A crash after remote token rotation but before saving it may require re-login.
 - Already-authorized in-flight requests may finish after logout. Future requests
   fail; production revocation also needs active-turn cancellation.

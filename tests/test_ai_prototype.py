@@ -49,7 +49,7 @@ def test_prototype_launcher_isolated_and_propagates_failure(tmp_path, build_stat
 
 def test_prototype_container_has_no_access_to_credentials_or_databases():
     compose = (ROOT / "compose.test.yaml").read_text()
-    prototype = compose.split("  ai-prototype:\n")[1].split("\n  schemii:")[0]
+    prototype = compose.split("  ai-prototype:\n")[1].split("\n  ai-prototype-runtime:")[0]
     for setting in ("profiles: [ai-prototype]", "network_mode: none", "user: node", "read_only: true", "mem_limit: 512m"):
         assert setting in prototype
     for forbidden in ("volumes:", "ports:", "environment:", "depends_on:"):

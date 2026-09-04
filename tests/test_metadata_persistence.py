@@ -31,6 +31,9 @@ def test_metadata_storage_mode_is_explicit_and_memory_is_test_selectable() -> No
 
     assert repositories.storage == "memory"
     assert repositories.durable is False
+    from schemii.common.ai.credential_store import MemoryAiCredentialStore
+
+    assert isinstance(repositories.ai_credentials, MemoryAiCredentialStore)
     repositories.check_readiness()
 
     with pytest.raises(ValueError, match="must not be set"):
@@ -59,6 +62,32 @@ def test_metadata_configuration_requires_absolute_secret_files() -> None:
             password_file="/run/secrets/password",
             encryption_key_file="key",
         )
+
+
+def test_postgres_factory_composes_encrypted_ai_credentials(monkeypatch, tmp_path) -> None:
+    import schemii.common.metadata.factory as factory_module
+    from schemii.common.ai.credential_store import PostgresAiCredentialStore
+
+    key_file = tmp_path / "key"
+    key_file.write_text(base64.b64encode(bytes(range(32))).decode("ascii") + "\n")
+    monkeypatch.setattr(factory_module.MetadataMigrator, "migrate", lambda self: 21)
+    repositories = create_metadata_repositories(
+        {
+            "SCHEMII_STORAGE_MODE": "postgresql",
+            "SCHEMII_METADATA_DSN": "host=metadata dbname=schemii",
+            "SCHEMII_METADATA_PASSWORD_FILE": str(tmp_path / "password"),
+            "SCHEMII_METADATA_ENCRYPTION_KEY_FILE": str(key_file),
+        },
+        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE),
+    )
+
+    store = repositories.ai_credentials
+    assert isinstance(store, PostgresAiCredentialStore)
+    assert store._connection_factory is repositories.connection_factory
+    encrypted = store._encrypt("owner", "primary", "openai", {"apiKey": "secret"})
+    assert CredentialCipher(bytes(range(32))).decrypt(
+        "owner", "ai-credential:primary", encrypted
+    ) == '{"provider_id":"openai","credential":{"apiKey":"secret"}}'
 
 
 def test_secret_files_are_strict_and_encryption_keys_are_exact(tmp_path) -> None:
@@ -168,6 +197,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         18,
         19,
         20,
+        21,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -190,6 +220,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
             "0018_limit_events.sql": "61d9a1522051aac24226a3ceeb57d69ba9859ecf53806fa57068399739d73412",
             "0019_ai_assistant.sql": "0f4a8baf1a85aee4e7e4f9d65227134a9347add2776f982553ff28367789fece",
             "0020_ai_lifecycle_retention.sql": "e341b3a48847351054e03835454fda22d6f1c7bbc16c06017b375cc082c74b94",
+            "0021_ai_credentials.sql": "c5378cf82fb32ede10d44481e940474ddc84ae4eb1e5fed8af87dce141e07bbf",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql

@@ -378,7 +378,11 @@ def create_app(
             503: {"model": ApiErrorResponse, "description": "Required service unavailable"},
         },
     )
+    from schemii.common.ai.prototype import PiClient, router as pi_router
+
     application.state.services = active_services
+    application.state.pi_client = PiClient.from_env()
+    application.include_router(pi_router)
     ai_runtime = OpenCodeClient.from_env()
     if ai_runtime is not None:
         ai_runtime.timeout = active_services.admin_config.ai.provider_timeout_seconds
