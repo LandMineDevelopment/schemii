@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { pagedRowsStatus } from "../../src/schemii/schemii/web/assets/relation-browser.js";
 
 import {
   installAutoPageLoader,
@@ -24,6 +25,16 @@ class ScrollContainer {
   removeAttribute(name) { this.attributes.delete(name); }
   scroll() { this.listeners.get("scroll")?.(); }
 }
+
+test("inspector and full preview share paging status for empty, loading and failed pages", () => {
+  const page = { rows: [[1], [2]], columns: [{ name: "id" }], nextCursor: "next" };
+  assert.equal(pagedRowsStatus(null, { loading: true }), "Loading rows…");
+  assert.equal(pagedRowsStatus(null), "Up to 100 rows");
+  assert.equal(pagedRowsStatus(page), "2 rows · 1 columns · scroll for more");
+  assert.equal(pagedRowsStatus(page, { loading: true }), "2 rows · 1 columns · loading more…");
+  assert.equal(pagedRowsStatus(page, { pagingError: new Error("offline") }), "2 rows · 1 columns · more rows could not load · refresh to retry");
+  assert.equal(pagedRowsStatus({ rows: [], columns: [], nextCursor: null }), "0 rows · 0 columns");
+});
 
 test("scroll-end detection uses the remaining vertical distance", () => {
   const container = new ScrollContainer();

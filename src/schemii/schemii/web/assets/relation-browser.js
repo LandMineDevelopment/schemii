@@ -74,3 +74,12 @@ export function renderRelationRows(container, { page = null, loading = false, er
   }
   container.append(createDataGrid({ columns: page.columns, rows: page.rows, className: "relation-preview-viewport" }));
 }
+
+export function pagedRowsStatus(page, { loading = false, pagingError = null } = {}) {
+  if (!page) return loading ? "Loading rows…" : "Up to 100 rows";
+  const count = `${page.rows.length} rows · ${page.columns.length} columns`;
+  if (loading) return `${count} · loading more…`;
+  if (pagingError) return `${count} · more rows could not load · refresh to retry`;
+  if (page.nextCursor) return `${count} · scroll for more`;
+  return count;
+}

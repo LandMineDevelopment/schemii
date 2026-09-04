@@ -116,3 +116,81 @@ test("inspector and full previews append rows automatically from the shared curs
   await expect(dialog.locator("tbody tr")).toHaveCount(300);
   await expect(dialog.locator("#relation-preview-status")).toContainText("scroll for more");
 });
+
+test("changing tables resets the inspector query and results without breaking pane transitions", async ({ page, request }) => {
+  const workspace = await bookstoreWorkspace(request);
+  await page.goto(`/?workspace=${workspace.id}&layer=tables&table=authors`);
+  await page.getByRole("button", { name: "Open table rows and console" }).click();
+  await expect(page.locator("#inspector-rows-body .data-grid")).toBeVisible();
+  await page.locator("#show-inspector-console").click();
+  const draft = page.getByRole("textbox", { name: "Table-scoped read-only SQL query" });
+  await draft.fill("SELECT 'old table result' AS inspector_marker;");
+  await page.locator("#run-inspector-sql").click();
+  await expect(page.locator("#inspector-sql-results")).toContainText("old table result");
+
+  await page.locator("#minimize-inspector-data").click();
+  await page.locator("#table-inspector-close").click();
+  await page.locator("#fit-button").click();
+  await page.locator('.table-card[data-table-name="books"] .table-head').click();
+  await page.getByRole("button", { name: "Open table rows and console" }).click();
+  await expect(page.locator("#inspector-rows-title")).toHaveText("books rows");
+  await expect(page.locator("#inspector-rows-body .data-grid")).toBeVisible();
+  await expect(page.locator("#inspector-sql-results")).not.toContainText("old table result");
+  await page.locator("#show-inspector-console").click();
+  await expect(draft).toHaveValue('SELECT *\nFROM "bookstore"."books"\nLIMIT 100;');
+
+  // Reverse direction while the shared slide transition is still settling.
+  await page.locator("#show-inspector-rows").click();
+  await page.locator("#show-inspector-console").click();
+  await expect(draft).toBeVisible();
+  await expect(page.locator("#inspector-rows-content")).toHaveJSProperty("hidden", true);
+  await page.locator("#minimize-inspector-data").click();
+  await page.getByRole("button", { name: "Open table rows and console" }).click();
+  await expect(page.locator("#inspector-data-workspace")).toHaveClass(/open/);
+  await expect(page.locator("#inspector-data-workspace")).toHaveJSProperty("inert", false);
+  await expect(page.locator("#inspector-rows-body .data-grid")).toBeVisible();
+});
+
+test("late rows from the previous table cannot replace the newly selected table", async ({ page, request }) => {
+  const workspace = await bookstoreWorkspace(request);
+  let releaseOldRows;
+  const oldRowsGate = new Promise(resolve => { releaseOldRows = resolve; });
+  let notifyOldRows;
+  const oldRowsStarted = new Promise(resolve => { notifyOldRows = resolve; });
+  let heldFirstPage = false;
+  await page.route("**/relations/*/rows?*", async route => {
+    if (heldFirstPage) return route.continue();
+    heldFirstPage = true;
+    const response = await route.fetch();
+    notifyOldRows();
+    await oldRowsGate;
+    await route.fulfill({ response });
+  });
+
+  try {
+    await page.goto(`/?workspace=${workspace.id}&layer=tables&table=authors`);
+    await page.getByRole("button", { name: "Open table rows and console" }).click();
+    await oldRowsStarted;
+    await expect(page.locator("#inspector-rows-status")).toContainText("Loading");
+    await page.locator("#minimize-inspector-data").click();
+    await page.locator("#table-inspector-close").click();
+    await page.locator("#fit-button").click();
+    await page.locator('.table-card[data-table-name="books"] .table-head').click();
+    await page.getByRole("button", { name: "Open table rows and console" }).click();
+    const grid = page.locator("#inspector-rows-body .data-grid");
+    await expect(grid).toBeVisible();
+    await expect(grid.locator("thead")).toContainText("isbn");
+    const newTableRows = await grid.locator("tbody").innerText();
+    const oldResponse = page.waitForResponse(response => response.url().includes("/rows?") && response.request().resourceType() === "fetch");
+    releaseOldRows();
+    await (await oldResponse).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(page.locator("#inspector-rows-title")).toHaveText("books rows");
+    await expect(grid.locator("thead")).toContainText("isbn");
+    await expect(grid.locator("tbody")).toHaveText(newTableRows, { useInnerText: true });
+    await expect(page.locator("#refresh-inspector-rows")).toBeEnabled();
+  } finally {
+    releaseOldRows();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
