@@ -26,6 +26,7 @@ from .models import (
     TablePosition,
     WorkspaceImportIssue,
     WorkspaceImportSummary,
+    WorkspaceMetadataUpdate,
 )
 from .store import (
     MAX_COLUMN_DISPLAY_ORDER_ENTRIES_PER_OWNER,
@@ -448,6 +449,30 @@ class PostgresWorkspaceRepository:
                 expected_database=expected_database,
                 current_database=current_database,
             )
+
+    def rename(self, owner_id: str, workspace_id: str, request: WorkspaceMetadataUpdate) -> SchemiiWorkspace:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT revision FROM schemii.workspaces WHERE owner_id = %s AND id = %s FOR UPDATE",
+                    (owner_id, workspace_id),
+                )
+                current = cursor.fetchone()
+                if current is None:
+                    raise WorkspaceNotFoundError("Schemii workspace was not found")
+                if current["revision"] != request.expected_revision:
+                    raise WorkspaceConflictError(current["revision"])
+                cursor.execute(
+                    "UPDATE schemii.workspaces SET name = %s, revision = revision + 1, updated_at = clock_timestamp() WHERE owner_id = %s AND id = %s",
+                    (request.name, owner_id, workspace_id),
+                )
+                row = self._select_workspace(cursor, owner_id, workspace_id)
+                return self._workspace(
+                    row,
+                    self._workspace_positions(cursor, owner_id, workspace_id),
+                    self._workspace_column_orders(cursor, owner_id, workspace_id),
+                    self._workspace_import_summary(cursor, owner_id, workspace_id),
+                )
 
     def update_layout(
         self,

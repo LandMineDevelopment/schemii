@@ -6,10 +6,13 @@ from schemii.schemii.workspaces.models import (
     TableColumnDisplayOrder,
     TablePosition,
     WorkspaceCreateRecord,
+    WorkspaceMetadataUpdate,
 )
 from schemii.schemii.workspaces.store import (
     InMemoryWorkspaceRepository,
     WorkspaceLimitError,
+    WorkspaceConflictError,
+    WorkspaceNotFoundError,
 )
 
 
@@ -19,6 +22,29 @@ def workspace_request(namespace: str = "public") -> WorkspaceCreateRecord:
         database="analytics",
         namespace=namespace,
     )
+
+
+def test_rename_preserves_target_and_layout_with_owner_revision_guard() -> None:
+    repository = InMemoryWorkspaceRepository()
+    original = repository.create("owner", workspace_request())
+    original = repository.update_layout("owner", original.id, SchemiiWorkspaceLayoutUpdate(
+        expected_revision=1, expected_connection_revision=1,
+        tables=[TablePosition(name="orders", x=100, y=20)],
+        column_orders=[TableColumnDisplayOrder(name="orders", columns=["name", "id"])],
+    ))
+    request = WorkspaceMetadataUpdate(expected_revision=original.revision, name="  My schema  ")
+    with pytest.raises(WorkspaceNotFoundError):
+        repository.rename("other", original.id, request)
+    renamed = repository.rename("owner", original.id, request)
+    assert renamed.name == "My schema"
+    assert renamed.revision == original.revision + 1
+    assert renamed.model_dump(exclude={"name", "revision", "updated_at"}) == original.model_dump(exclude={"name", "revision", "updated_at"})
+    with pytest.raises(WorkspaceConflictError):
+        repository.rename("owner", original.id, request)
+    assert repository.get("owner", original.id) == renamed
+    for name in (" ", "x" * 129):
+        with pytest.raises(ValidationError):
+            WorkspaceMetadataUpdate(expected_revision=renamed.revision, name=name)
 
 
 def test_workspace_targets_preserve_exact_postgres_identifiers() -> None:

@@ -26,6 +26,7 @@ from .models import (
     TableColumnDisplayOrder,
     TablePosition,
     WorkspaceCreateRecord,
+    WorkspaceMetadataUpdate,
 )
 from .store import (
     WorkspaceConflictError,
@@ -248,6 +249,22 @@ def open_postgres_workspace(
             details=error.details,
             retryable=error.retryable,
         ) from error
+
+
+@router.patch("/{workspace_id}", response_model=SchemiiWorkspace)
+def update_workspace_metadata(
+    workspace_id: str,
+    body: WorkspaceMetadataUpdate,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> SchemiiWorkspace:
+    """Rename an owner-scoped workspace without altering its database identity."""
+    try:
+        return _workspaces(request).rename(principal.user_id, workspace_id, body)
+    except WorkspaceNotFoundError as error:
+        raise _workspace_not_found(error) from error
+    except WorkspaceConflictError as error:
+        raise _workspace_conflict(error) from error
 
 
 @router.get("/{workspace_id}", response_model=SchemiiWorkspace)

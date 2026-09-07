@@ -93,6 +93,13 @@ class SchemiiWorkspaceCreate(ApiModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class WorkspaceMetadataUpdate(SchemiiWorkspaceCreate):
+    """Rename only the workspace label, preserving its target and children."""
+
+    expected_revision: Annotated[int, Field(strict=True, ge=1)]
+    name: WorkspaceName
+
+
 class WorkspaceCreateRecord(SchemiiWorkspaceCreate):
     """Internal creation record with an optional fixed PostgreSQL identity."""
 

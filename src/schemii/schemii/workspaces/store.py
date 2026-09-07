@@ -24,6 +24,7 @@ from .models import (
     SchemiiWorkspaceLayoutUpdate,
     TableColumnDisplayOrder,
     WorkspaceImportSummary,
+    WorkspaceMetadataUpdate,
 )
 
 MAX_WORKSPACES_PER_OWNER = 1_000
@@ -144,6 +145,8 @@ class WorkspaceRepository(Protocol):
     def list(self, owner_id: str) -> list[SchemiiWorkspace]: ...
 
     def get(self, owner_id: str, workspace_id: str) -> SchemiiWorkspace: ...
+
+    def rename(self, owner_id: str, workspace_id: str, request: WorkspaceMetadataUpdate) -> SchemiiWorkspace: ...
 
     def find_by_target(
         self,
@@ -389,6 +392,19 @@ class InMemoryWorkspaceRepository:
                     discard(owner_id, workspace.id)
                 raise
             return workspace.model_copy(deep=True)
+
+    def rename(self, owner_id: str, workspace_id: str, request: WorkspaceMetadataUpdate) -> SchemiiWorkspace:
+        with self._lock:
+            current = self._record(owner_id, workspace_id)
+            if current.revision != request.expected_revision:
+                raise WorkspaceConflictError(current.revision)
+            updated = current.model_copy(update={
+                "name": request.name,
+                "revision": current.revision + 1,
+                "updated_at": datetime.now(timezone.utc),
+            }, deep=True)
+            self._records[owner_id][workspace_id] = updated
+            return updated.model_copy(deep=True)
 
     def update_layout(
         self,
