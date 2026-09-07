@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { api, ApiError, requestJson } from "../../src/schemii/schemii/web/assets/api.js";
+import { api } from "../../src/schemii/schemii/web/assets/api.js";
+import { ApiError, requestJson } from "#common/http.js";
 
 test("requestJson forwards caller cancellation to fetch", async () => {
   const caller = new AbortController();

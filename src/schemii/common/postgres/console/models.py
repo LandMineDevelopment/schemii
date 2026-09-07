@@ -21,36 +21,39 @@ ConsoleExecutionStatus = Literal[
 
 
 class ConsoleSettings(ApiModel):
-    """Application-scoped human SQL Console policy independent from AI authority."""
+    """Owner preferences plus read-only administrator execution policy."""
 
     revision: Annotated[int, Field(strict=True, ge=1)]
-    write_intent: bool
-    default_mode: ConsoleMode
+    write_intent: Literal[False] = False
+    default_mode: Literal["managed_read"] = "managed_read"
     statement_limit: Annotated[int, Field(strict=True, ge=1, le=1000)]
     row_page_size: Annotated[int, Field(strict=True, ge=1, le=1000)]
+    maximum_row_page_size: Annotated[int, Field(strict=True, ge=1, le=1000)] = 1000
 
 
 class ConsoleSettingsUpdate(ApiModel):
     """Optimistic replacement of bounded human Console preferences."""
 
     expected_revision: Annotated[int, Field(strict=True, ge=1)]
-    write_intent: bool
-    default_mode: ConsoleMode
-    statement_limit: Annotated[int, Field(strict=True, ge=1, le=1000)]
     row_page_size: Annotated[int, Field(strict=True, ge=1, le=1000)]
 
 
-class ConsoleExecutionCreate(ApiModel):
-    """Reviewed SQL script bound to current workspace target and settings."""
+class ManagedReadCreate(ApiModel):
+    """Read-only statements validated against current execution preferences."""
 
     console_id: str = Field(pattern=r"^con_[0-9a-f]{32}$")
-    expected_workspace_revision: Annotated[int, Field(strict=True, ge=1)]
     expected_settings_revision: Annotated[int, Field(strict=True, ge=1)]
     mode: ConsoleMode
     statements: list[Annotated[str, Field(min_length=1, max_length=1024 * 1024)]] = Field(
         min_length=1,
         max_length=1000,
     )
+
+
+class ConsoleExecutionCreate(ManagedReadCreate):
+    """Reviewed SQL script bound to current workspace target and settings."""
+
+    expected_workspace_revision: Annotated[int, Field(strict=True, ge=1)]
 
 
 class ConsoleResultColumn(ApiModel):
@@ -77,7 +80,7 @@ class ConsoleExecution(ApiModel):
 
     id: str = Field(pattern=r"^cex_[0-9a-f]{32}$")
     revision: Annotated[int, Field(strict=True, ge=1)]
-    workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
+    workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{32}$")
     console_id: str = Field(pattern=r"^con_[0-9a-f]{32}$")
     transaction_id: str | None = Field(default=None, pattern=r"^ctx_[0-9a-f]{32}$")
     status: ConsoleExecutionStatus

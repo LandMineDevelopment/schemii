@@ -3,11 +3,6 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from schemii.common.api.planned import (
-    PLANNED_OPENAPI,
-    PLANNED_RESPONSES,
-    planned_capability,
-)
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.api.errors import ApiProblem
 from schemii.common.postgres.console import (
@@ -59,27 +54,27 @@ def get_console_settings(
     request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleSettings:
-    """Read Schemii's human SQL Console defaults and durable write intent."""
-    return _service(request).settings(principal.user_id)
+    """Read owner result preferences and administrator limits. Reloads start read-only."""
+    try:
+        return _service(request).settings(principal.user_id)
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
 
 
 @router.put(
     "/console/settings",
     response_model=ConsoleSettings,
-    responses=PLANNED_RESPONSES,
-    openapi_extra=PLANNED_OPENAPI,
-    tags=["schemii-sql-console-planned"],
 )
 def update_console_settings(
     body: ConsoleSettingsUpdate,
+    request: Request,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleSettings:
-    """Replace bounded SQL Console settings after an optimistic revision check."""
-
-    # TODO(console-settings): Persist application-scoped settings and audit every
-    # write-intent transition independently from statement execution.
-    del body, principal
-    planned_capability("schemii.console.settings.update")
+    """Save owner result-page size; execution policy and write intent are not preferences."""
+    try:
+        return _service(request).update_settings(principal.user_id, body.expected_revision, body.row_page_size)
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
 
 
 @router.get(

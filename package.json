@@ -2,6 +2,9 @@
   "name": "schemii-frontend-tests",
   "private": true,
   "type": "module",
+  "imports": {
+    "#common/*": "./src/schemii/common/web/assets/*"
+  },
   "scripts": {
     "test": "node --test tests/frontend/*.test.js",
     "test:e2e": "playwright test"

@@ -685,8 +685,17 @@ class PsycopgPostgresGateway:
         database_connection: Any | None = None
         try:
             database_connection = self._connect(connection)
-            self._begin_read_only(database_connection, repeatable_read=True)
+            self._begin_read_only(
+                database_connection,
+                repeatable_read=True,
+                idle_timeout_ms=self._console_idle_transaction_timeout_ms,
+            )
             self._set_console_namespace(database_connection, namespace)
+            # Console reads optimize for delivering the next visible page, not
+            # for completing an unbounded result before the user sees rows.
+            self._execute_statement(
+                database_connection, "SET LOCAL cursor_tuple_fraction = 0.0001"
+            )
             identity = self._one(
                 self._execute_rows(
                     database_connection,
@@ -1058,6 +1067,7 @@ class PsycopgPostgresGateway:
         database_connection: Any,
         *,
         repeatable_read: bool = False,
+        idle_timeout_ms: int = IDLE_TRANSACTION_TIMEOUT_MS,
     ) -> None:
         isolation = " ISOLATION LEVEL REPEATABLE READ" if repeatable_read else ""
         self._execute_statement(
@@ -1073,7 +1083,7 @@ class PsycopgPostgresGateway:
         self._set_timeout_ceiling(
             database_connection,
             "idle_in_transaction_session_timeout",
-            IDLE_TRANSACTION_TIMEOUT_MS,
+            idle_timeout_ms,
         )
 
     def _begin_write(self, database_connection: Any, *, fresh_snapshots: bool = False) -> None:

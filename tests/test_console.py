@@ -185,6 +185,69 @@ def execution_body(workspace: dict, sql: str) -> dict:
     }
 
 
+def test_console_preferences_are_durable_bounded_and_not_write_authority() -> None:
+    api, _ = console_client()
+    path = "/api/v1/schemii/console/settings"
+    defaults = api.get(path).json()
+    assert defaults["rowPageSize"] == defaults["maximumRowPageSize"] == 100
+    saved = api.put(path, json={"expectedRevision": 1, "rowPageSize": 25})
+    assert saved.status_code == 200
+    assert saved.json()["revision"] == 2
+    assert saved.json()["writeIntent"] is False
+    assert saved.json()["defaultMode"] == "managed_read"
+    assert api.get(path).json() == saved.json()
+    assert api.put(path, json={"expectedRevision": 1, "rowPageSize": 50}).status_code == 409
+    for page_size in (0, 101, 1001):
+        assert api.put(path, json={"expectedRevision": 2, "rowPageSize": page_size}).status_code == 422
+    for forbidden in ({"writeIntent": True}, {"defaultMode": "autocommit"}, {"statementLimit": 1000}):
+        assert api.put(path, json={"expectedRevision": 2, "rowPageSize": 50, **forbidden}).status_code == 422
+
+
+def test_console_preferences_apply_to_new_results_and_reject_stale_start() -> None:
+    api, _ = console_client()
+    workspace = target_workspace(api)
+    settings = api.put("/api/v1/schemii/console/settings", json={"expectedRevision": 1, "rowPageSize": 25}).json()
+    path = f"/api/v1/schemii/workspaces/{workspace['id']}/console/executions"
+    body = execution_body(workspace, "SELECT 1")
+    stale = api.post(path, json=body)
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "console_settings_changed"
+    body["expectedSettingsRevision"] = settings["revision"]
+    created = api.post(path, json=body)
+    assert created.status_code == 201
+    receipt = api.get(f"{path}/{created.json()['id']}").json()
+    page = api.get(f"{path}/{receipt['id']}/results/{receipt['results'][0]['id']}").json()
+    assert len(page["rows"]) == 25
+
+
+def test_console_preference_repository_is_owner_scoped() -> None:
+    from schemii.schemii.console.repository import ConsoleConflictError
+    import pytest
+
+    repository = InMemoryConsoleRepository()
+    repository.update_settings("owner-a", 1, 25)
+    assert repository.settings("owner-a") == (2, 25)
+    assert repository.settings("owner-b") == (1, None)
+    with pytest.raises(ConsoleConflictError):
+        repository.update_settings("owner-a", 1, 50)
+
+
+def test_console_preferences_read_postgres_dictionary_rows() -> None:
+    from unittest.mock import MagicMock
+    from schemii.schemii.console.repository import PostgresConsoleRepository
+
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    repository = PostgresConsoleRepository(lambda: connection)
+    cursor.fetchone.return_value = {"revision": 3, "row_page_size": 25}
+    assert repository.settings("owner-a") == (3, 25)
+    assert cursor.execute.call_args.args[1] == ("owner-a",)
+    connection.commit.assert_called_once()
+    connection.close.assert_called_once()
+    cursor.fetchone.return_value = None
+    assert repository.settings("owner-b") == (1, None)
+
+
 def test_console_runs_multi_statement_script_and_pages_retained_rows() -> None:
     api, postgres = console_client()
     workspace = target_workspace(api)

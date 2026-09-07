@@ -63,7 +63,7 @@ class ConsoleTarget:
 class ConsoleExecutionRecord:
     owner_id: str
     execution: ConsoleExecution
-    workspace_revision: int
+    workspace_revision: int | None
     target: ConsoleTarget
     statements: tuple[str, ...]
     page_size: int
@@ -96,6 +96,10 @@ class _StoredResult:
 
 
 class ConsoleRepository(Protocol):
+    def settings(self, owner_id: str) -> tuple[int, int | None]: ...
+
+    def update_settings(self, owner_id: str, revision: int, page_size: int) -> None: ...
+
     def recover_interrupted(self, now: datetime) -> None: ...
 
     def prune_operational_receipts(self, before: datetime) -> None: ...
@@ -105,9 +109,9 @@ class ConsoleRepository(Protocol):
     def reserve(
         self,
         owner_id: str,
-        workspace_id: str,
+        workspace_id: str | None,
         console_id: str,
-        workspace_revision: int,
+        workspace_revision: int | None,
         target: ConsoleTarget,
         statements: tuple[str, ...],
         page_size: int,
@@ -281,7 +285,18 @@ class InMemoryConsoleRepository:
         self._cursors: dict[str, tuple[str, int, datetime, bool]] = {}
         self._saved_queries: dict[str, tuple[str, ConsoleSavedQuery]] = {}
         self._history: list[tuple[str, str, ConsoleHistoryEntry]] = []
+        self._settings: dict[str, tuple[int, int]] = {}
         self._lock = threading.RLock()
+
+    def settings(self, owner_id: str) -> tuple[int, int | None]:
+        with self._lock:
+            return self._settings.get(owner_id, (1, None))
+
+    def update_settings(self, owner_id: str, revision: int, page_size: int) -> None:
+        with self._lock:
+            if self.settings(owner_id)[0] != revision:
+                raise ConsoleConflictError("console_settings_changed", "Console preferences changed; reload them before saving")
+            self._settings[owner_id] = (revision + 1, page_size)
 
     def recover_interrupted(self, now: datetime) -> None:
         with self._lock:
@@ -369,12 +384,14 @@ class InMemoryConsoleRepository:
             if any(
                 item.owner_id == owner_id
                 and item.execution.workspace_id == workspace_id
+                and (workspace_id is not None or item.execution.console_id == console_id)
                 and item.execution.status in {"reserved", "running"}
                 for item in self._records.values()
             ):
                 raise ConsoleConflictError(
                     "console_execution_active",
-                    "This workspace already has an active Console execution",
+                    "This query editor already has an active execution" if workspace_id is None
+                    else "This workspace already has an active Console execution",
                 )
             identifier = f"cex_{secrets.token_hex(16)}"
             transaction_record = None
@@ -609,7 +626,7 @@ class InMemoryConsoleRepository:
                     statement_index=query.statement_index,
                     command=query.command,
                     columns=query.columns,
-                    row_count=(query.row_count if query.row_count is not None else len(query.rows)),
+                    row_count=(query.row_count if query.row_count is not None else (None if query.replayable else len(query.rows))),
                     truncated=query.truncated,
                     replayable=query.replayable,
                     expires_at=expires_at,
@@ -620,8 +637,8 @@ class InMemoryConsoleRepository:
                         statement_index=query.statement_index,
                         command=query.command,
                         columns=list(query.columns),
-                        row_count=(query.row_count if query.row_count is not None else len(query.rows)),
-                        has_more=(query.row_count if query.row_count is not None else len(query.rows)) > record.page_size,
+                        row_count=(query.row_count if query.row_count is not None else (None if query.replayable else len(query.rows))),
+                        has_more=(query.row_count > record.page_size if query.row_count is not None else query.replayable),
                         replayable=query.replayable,
                     )
                 )
@@ -886,6 +903,34 @@ class PostgresConsoleRepository:
     def __init__(self, connection_factory: Callable[[], Any]) -> None:
         self._connection_factory = connection_factory
 
+    def settings(self, owner_id: str) -> tuple[int, int | None]:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT revision, row_page_size FROM schemii.console_preferences WHERE owner_id = %s",
+                    (owner_id,),
+                )
+                row = cursor.fetchone()
+                return (row["revision"], row["row_page_size"]) if row else (1, None)
+
+    def update_settings(self, owner_id: str, revision: int, page_size: int) -> None:
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                if revision == 1:
+                    cursor.execute(
+                        """INSERT INTO schemii.console_preferences (owner_id, revision, row_page_size)
+                        VALUES (%s, 2, %s) ON CONFLICT (owner_id) DO NOTHING RETURNING revision""",
+                        (owner_id, page_size),
+                    )
+                else:
+                    cursor.execute(
+                        """UPDATE schemii.console_preferences SET revision = revision + 1, row_page_size = %s
+                        WHERE owner_id = %s AND revision = %s RETURNING revision""",
+                        (page_size, owner_id, revision),
+                    )
+                if cursor.fetchone() is None:
+                    raise ConsoleConflictError("console_settings_changed", "Console preferences changed; reload them before saving")
+
     @contextmanager
     def _transaction(self) -> Iterator[Any]:
         connection = self._connection_factory()
@@ -908,6 +953,11 @@ class PostgresConsoleRepository:
                     raise ConsoleConflictError(
                         "console_saved_query_name_exists",
                         "A saved query already uses this name",
+                    ) from error
+                if constraint == "console_executions_one_active_console":
+                    raise ConsoleConflictError(
+                        "console_execution_active",
+                        "This query editor already has an active execution",
                     ) from error
                 raise ConsoleConflictError(
                     "console_execution_active",
@@ -1243,7 +1293,7 @@ class PostgresConsoleRepository:
                         (
                             result_id, execution_id, query.statement_index, query.command,
                             json.dumps([column.model_dump(mode="json", by_alias=True) for column in query.columns]),
-                            (query.row_count if query.row_count is not None else len(query.rows)),
+                            (query.row_count if query.row_count is not None else (None if query.replayable else len(query.rows))),
                             query.replayable, query.truncated, expires_at,
                         ),
                     )
@@ -1253,8 +1303,8 @@ class PostgresConsoleRepository:
                             statement_index=query.statement_index,
                             command=query.command,
                             columns=list(query.columns),
-                            row_count=(query.row_count if query.row_count is not None else len(query.rows)),
-                            has_more=(query.row_count if query.row_count is not None else len(query.rows)) > int(row["page_size"]),
+                            row_count=(query.row_count if query.row_count is not None else (None if query.replayable else len(query.rows))),
+                            has_more=(query.row_count > int(row["page_size"]) if query.row_count is not None else query.replayable),
                             replayable=query.replayable,
                         )
                     )
@@ -1544,7 +1594,7 @@ class PostgresConsoleRepository:
         cursor.execute(
             """
             SELECT * FROM schemii.console_executions
-            WHERE owner_id = %s AND workspace_id = %s AND id = %s
+            WHERE owner_id = %s AND workspace_id IS NOT DISTINCT FROM %s AND id = %s
             """,
             (owner_id, workspace_id, execution_id),
         )
@@ -1578,7 +1628,7 @@ class PostgresConsoleRepository:
             """
             SELECT console_results.id, statement_index, command, columns_document,
                    row_count, replayable,
-                   row_count > execution.page_size AS has_more
+                   COALESCE(row_count > execution.page_size, replayable) AS has_more
             FROM schemii.console_results
             JOIN schemii.console_executions AS execution
               ON execution.id = console_results.execution_id
@@ -1613,7 +1663,7 @@ class PostgresConsoleRepository:
         )
         return ConsoleExecutionRecord(
             owner_id=row["owner_id"], execution=execution,
-            workspace_revision=int(row["workspace_revision"]),
+            workspace_revision=(int(row["workspace_revision"]) if row["workspace_revision"] is not None else None),
             target=ConsoleTarget(
                 connection_id=row["connection_id"],
                 connection_revision=int(row["connection_revision"]),

@@ -15,6 +15,7 @@ from typing import Callable, Iterator
 from schemii.common.connections.models import ResolvedPostgresConnection
 from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import ConnectionNotFoundError
+from schemii.common.query_executions.errors import ConsoleServiceError
 from schemii.common.metadata.limit_events import (
     LimitEventNotice,
     LimitEventRecorder,
@@ -40,6 +41,7 @@ from schemii.common.postgres.console.execution import (
 from schemii.common.postgres.console.models import (
     ConsoleExecution,
     ConsoleExecutionCreate,
+    ManagedReadCreate,
     ConsoleResultPage,
     ConsoleSettings,
     ConsoleTransaction,
@@ -97,7 +99,7 @@ class _ActiveConsoleTransaction:
 @dataclass(slots=True)
 class _TransientConsoleResult:
     owner_id: str
-    workspace_id: str
+    workspace_id: str | None
     execution_id: str
     result_id: str
     query: ConsoleQueryResult
@@ -110,29 +112,10 @@ class _TransientConsoleResult:
 @dataclass(slots=True)
 class _ActiveConsoleReadSession:
     owner_id: str
-    workspace_id: str
+    workspace_id: str | None
     connection_id: str
     connection_revision: int
     postgres: PostgresConsoleReadSession
-
-
-class ConsoleServiceError(RuntimeError):
-    def __init__(
-        self,
-        status: int,
-        code: str,
-        message: str,
-        *,
-        details: dict[str, object] | None = None,
-        retryable: bool = False,
-        limit_event: LimitEventNotice | None = None,
-    ) -> None:
-        self.status = status
-        self.code = code
-        self.details = details or {}
-        self.retryable = retryable
-        self.limit_event = limit_event
-        super().__init__(message)
 
 
 class ConsoleService:
@@ -212,14 +195,39 @@ class ConsoleService:
         self._repository.prune_history(self._query_history_limit)
 
     def settings(self, owner_id: str) -> ConsoleSettings:
-        del owner_id
+        try:
+            revision, page_size = self._repository.settings(owner_id)
+        except ConsoleRepositoryError as error:
+            raise self._repository_error(error) from error
         return DEFAULT_CONSOLE_SETTINGS.model_copy(
             update={
-                "row_page_size": self._row_page_size,
+                "revision": revision,
+                "row_page_size": min(page_size or self._row_page_size, self._row_page_size),
+                "maximum_row_page_size": self._row_page_size,
                 "statement_limit": self._statement_limit,
             },
             deep=True,
         )
+
+    def update_settings(self, owner_id: str, expected_revision: int, page_size: int) -> ConsoleSettings:
+        if page_size > self._row_page_size:
+            raise ConsoleServiceError(
+                422,
+                "console_page_size_limit",
+                f"Rows per page cannot exceed the administrator limit of {self._row_page_size}",
+                details={"maximumRowPageSize": self._row_page_size},
+                limit_event=LimitEventNotice(
+                    resource="console_page_rows",
+                    limit_name="console.row_page_size",
+                    configured_limit=self._row_page_size,
+                    observed_value=page_size,
+                ),
+            )
+        try:
+            self._repository.update_settings(owner_id, expected_revision, page_size)
+        except ConsoleRepositoryError as error:
+            raise self._repository_error(error) from error
+        return self.settings(owner_id)
 
     def history(
         self, owner_id: str, workspace_id: str, limit: int | None
@@ -339,6 +347,53 @@ class ConsoleService:
         workspace_id: str,
         request: ConsoleExecutionCreate,
     ) -> ConsoleExecution:
+        workspace, target = self._workspace_target(
+            owner_id, workspace_id, request.expected_workspace_revision
+        )
+        return self._reserve_read(owner_id, workspace_id, workspace.revision, target, request)
+
+    def reserve_read_target(
+        self,
+        owner_id: str,
+        *,
+        connection_id: str,
+        database: str,
+        namespace: str,
+        console_id: str,
+        statements: list[str],
+    ) -> ConsoleExecution:
+        """Reserve product-compiled reads without manufacturing a Schemii workspace.
+
+        The caller owns model/parameter authorization. This boundary still resolves
+        the owner's credentials, validates read-only SQL, and uses the same bounded
+        execution runtime as the SQL Console. Receipts expire normally; these reads
+        do not enter the workspace's human-authored query history.
+        """
+        try:
+            profile = self._connections.get(owner_id, connection_id)
+        except ConnectionNotFoundError as error:
+            raise ConsoleServiceError(
+                404, "console_connection_missing", "The PostgreSQL connection was not found"
+            ) from error
+        if profile.database != database:
+            raise ConsoleServiceError(
+                409, "console_database_changed", "The database no longer matches its connection"
+            )
+        if not namespace or "\x00" in namespace:
+            raise ConsoleServiceError(422, "invalid_namespace", "A valid schema is required")
+        request = ManagedReadCreate(
+            console_id=console_id,
+            expected_settings_revision=self.settings(owner_id).revision,
+            mode="managed_read",
+            statements=statements,
+        )
+        target = ConsoleTarget(profile.id, profile.revision, database, namespace)
+        return self._reserve_read(owner_id, None, None, target, request)
+
+    def _reserve_read(
+        self, owner_id: str, workspace_id: str | None, workspace_revision: int | None,
+        target: ConsoleTarget, request: ManagedReadCreate,
+    ) -> ConsoleExecution:
         try:
             self._repository.prune_operational_receipts(
                 self._clock() - self._result_ttl
@@ -351,13 +406,7 @@ class ConsoleService:
                 "console_mode_not_available",
                 "Only managed read mode is available",
             )
-        if request.expected_settings_revision != DEFAULT_CONSOLE_SETTINGS.revision:
-            raise ConsoleServiceError(
-                409,
-                "console_settings_changed",
-                "Console settings changed after the editor loaded",
-                details={"currentRevision": DEFAULT_CONSOLE_SETTINGS.revision},
-            )
+        preferences = self._validate_settings_revision(owner_id, request.expected_settings_revision)
         try:
             statements = validate_read_only_statements(
                 request.statements,
@@ -371,52 +420,15 @@ class ConsoleService:
                 details=self._statement_error_details(error),
                 limit_event=self._statement_limit_event(error),
             ) from error
-        workspace = self._workspace(owner_id, workspace_id)
-        if workspace.revision != request.expected_workspace_revision:
-            raise ConsoleServiceError(
-                409,
-                "console_workspace_changed",
-                "Workspace changed after the Console loaded",
-                details={"currentRevision": workspace.revision},
-            )
-        if (
-            workspace.connection_id is None
-            or workspace.database is None
-            or workspace.namespace is None
-        ):
-            raise ConsoleServiceError(
-                409,
-                "console_target_required",
-                "SQL requires a workspace created from or for a PostgreSQL database",
-            )
-        try:
-            profile = self._connections.get(owner_id, workspace.connection_id)
-        except ConnectionNotFoundError as error:
-            raise ConsoleServiceError(
-                409,
-                "console_connection_missing",
-                "The workspace PostgreSQL connection no longer exists",
-            ) from error
-        if profile.database != workspace.database:
-            raise ConsoleServiceError(
-                409,
-                "console_database_changed",
-                "The workspace database no longer matches its connection",
-            )
         try:
             record = self._repository.reserve(
                 owner_id,
                 workspace_id,
                 request.console_id,
-                workspace.revision,
-                ConsoleTarget(
-                    connection_id=profile.id,
-                    connection_revision=profile.revision,
-                    database=workspace.database,
-                    namespace=workspace.namespace,
-                ),
+                workspace_revision,
+                target,
                 statements,
-                self._row_page_size,
+                preferences.row_page_size,
                 self._clock(),
             )
         except ConsoleRepositoryError as error:
@@ -512,7 +524,7 @@ class ConsoleService:
     ) -> ConsoleTransaction:
         """Open one exact-target PostgreSQL transaction and durable ownership receipt."""
 
-        self._validate_settings_revision(request.expected_settings_revision)
+        self._validate_settings_revision(owner_id, request.expected_settings_revision)
         workspace, target = self._workspace_target(
             owner_id,
             workspace_id,
@@ -672,7 +684,7 @@ class ConsoleService:
                     record.workspace_revision,
                     record.target,
                     script.statements,
-                    self._row_page_size,
+                    self.settings(owner_id).row_page_size,
                     now,
                     transaction_id=transaction_id,
                     expected_transaction_revision=request.expected_revision,
@@ -807,7 +819,14 @@ class ConsoleService:
         for read_session in read_sessions:
             read_session.close()
 
-    def get(self, owner_id: str, workspace_id: str, execution_id: str) -> ConsoleExecution:
+    def get_owned(self, owner_id: str, execution_id: str) -> ConsoleExecution:
+        """Resolve an exact owner-bound receipt for product-neutral result routes."""
+        try:
+            return self._repository.get(owner_id, execution_id).execution
+        except ConsoleRepositoryError as error:
+            raise self._repository_error(error) from error
+
+    def get(self, owner_id: str, workspace_id: str | None, execution_id: str) -> ConsoleExecution:
         try:
             record = self._repository.get(owner_id, execution_id)
         except ConsoleRepositoryError as error:
@@ -816,7 +835,7 @@ class ConsoleService:
             raise ConsoleServiceError(404, "console_execution_not_found", "Console execution was not found")
         return record.execution
 
-    def cancel(self, owner_id: str, workspace_id: str, execution_id: str) -> ConsoleExecution:
+    def cancel(self, owner_id: str, workspace_id: str | None, execution_id: str) -> ConsoleExecution:
         try:
             existing = self._repository.get(owner_id, execution_id)
             if existing.execution.workspace_id != workspace_id:
@@ -880,17 +899,23 @@ class ConsoleService:
                 try:
                     if execution_id in self._active_read_sessions:
                         self._active_read_sessions.move_to_end(execution_id)
-                    rows = result.read_session.page(
+                    fetched = result.read_session.page(
                         result.query.statement_index, offset, result.page_size
                     )
+                    rows = fetched
                 except PostgresGatewayError as error:
                     raise self._postgres_error(error) from error
             next_offset = offset + len(rows)
             next_cursor = None
             row_count = result.query.row_count
-            if row_count is None:
-                row_count = len(result.query.rows)
-            if next_offset < row_count:
+            buffered_rows = False
+            if result.read_session is not None:
+                has_buffered_rows = getattr(result.read_session, "has_buffered_rows", None)
+                if callable(has_buffered_rows):
+                    buffered_rows = has_buffered_rows(result.query.statement_index)
+            has_more = (len(fetched) == result.page_size or buffered_rows) if result.read_session is not None and result.query.row_count is None else (
+                next_offset < (row_count if row_count is not None else len(result.query.rows)))
+            if has_more:
                 next_cursor = f"crc_{secrets.token_hex(16)}"
                 self._result_cursors[next_cursor] = (
                     result_id, next_offset, result.expires_at
@@ -923,7 +948,7 @@ class ConsoleService:
     def export_csv(
         self,
         owner_id: str,
-        workspace_id: str,
+        workspace_id: str | None,
         execution_id: str,
         result_id: str,
     ) -> Iterator[bytes]:
@@ -962,18 +987,17 @@ class ConsoleService:
                 writer.writerow([column.name for column in result.query.columns])
                 yield buffer.getvalue().encode("utf-8")
                 row_count = result.query.row_count
-                if row_count is None:
-                    row_count = len(result.query.rows)
-                while offset < row_count:
+                while row_count is None or offset < row_count:
                     if result.read_session is None:
                         rows = result.query.rows[
                             offset : offset + result.page_size
                         ]
                     else:
-                        rows = result.read_session.page(
-                            result.query.statement_index,
-                            offset,
-                            result.page_size,
+                        export_page = getattr(
+                            result.read_session, "export_page", result.read_session.page
+                        )
+                        rows = export_page(
+                            result.query.statement_index, offset, result.page_size
                         )
                     if not rows:
                         break
@@ -991,7 +1015,7 @@ class ConsoleService:
         return stream()
 
     def _record_history(self, record: ConsoleExecutionRecord) -> None:
-        if self._query_history_limit == 0:
+        if self._query_history_limit == 0 or record.execution.workspace_id is None:
             return
         ran_at = self._clock()
         for statement in record.statements:
@@ -1413,15 +1437,16 @@ class ConsoleService:
             namespace=workspace.namespace,
         )
 
-    @staticmethod
-    def _validate_settings_revision(revision: int) -> None:
-        if revision != DEFAULT_CONSOLE_SETTINGS.revision:
+    def _validate_settings_revision(self, owner_id: str, revision: int) -> ConsoleSettings:
+        preferences = self.settings(owner_id)
+        if revision != preferences.revision:
             raise ConsoleServiceError(
                 409,
                 "console_settings_changed",
                 "Console settings changed after the editor loaded",
-                details={"currentRevision": DEFAULT_CONSOLE_SETTINGS.revision},
+                details={"currentRevision": preferences.revision},
             )
+        return preferences
 
     @staticmethod
     def _postgres_error(error: PostgresGatewayError) -> ConsoleServiceError:

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { GraphViewport } from "../../src/schemii/schemii/web/assets/graph-viewport.js";
+import { GraphViewport } from "#common/graph-viewport.js";
 
 class ClassList {
   values = new Set();
@@ -47,11 +47,12 @@ class PointerTarget {
       deltaX: 0,
       deltaY: 0,
       preventDefault() { this.defaultPrevented = true; },
+      stopImmediatePropagation() { this.stopped = true; },
       target: this,
       currentTarget: this,
       ...values,
     };
-    for (const listener of [...(this.listeners.get(type) || [])]) listener(event);
+    for (const listener of [...(this.listeners.get(type) || [])]) { listener(event); if (event.stopped) break; }
     event.currentTarget = null;
     return event;
   }
@@ -96,6 +97,47 @@ function fixture(initialView = { x: 20, y: 30, zoom: 1 }) {
   });
   return { frames, host, stage, viewport, zoomOutput };
 }
+
+test("touch pinch zooms and pans around its moving midpoint, then resets cleanly", () => {
+  const {host, viewport} = fixture();
+  const touch = (type, id, x, y) => host.dispatch(type, {pointerType:"touch", pointerId:id, clientX:x, clientY:y});
+  const anchor = viewport.screenToWorld(300, 250);
+  touch("pointerdown", 1, 250, 250);
+  touch("pointerdown", 2, 350, 250);
+  assert.equal(viewport.pan, null);
+  touch("pointermove", 2, 450, 250);
+  assert.equal(viewport.getView().zoom, 2);
+  assert.deepEqual(viewport.screenToWorld(350, 250), anchor);
+  touch("pointermove", 2, 950, 250);
+  assert.equal(viewport.getView().zoom, 3);
+  touch("pointerup", 2, 950, 250);
+  const view = viewport.getView();
+  touch("pointermove", 1, 100, 100);
+  assert.deepEqual(viewport.getView(), view);
+  touch("pointercancel", 1, 100, 100);
+  assert.equal(viewport.touches.size, 0);
+  assert.equal(host.dispatch("click", {pointerType:"touch"}).defaultPrevented, true);
+  touch("pointerdown", 3, 200, 200);
+  touch("pointermove", 3, 210, 220);
+  assert.equal(viewport.getView().x, view.x + 10);
+  assert.equal(viewport.getView().y, view.y + 20);
+  viewport.destroy();
+  assert.equal(host.capturedPointers.size, 0);
+});
+
+test("starting a pinch cancels node drag without committing layout", () => {
+  const {host, viewport} = fixture();
+  const node = new PointerTarget(); let commits = 0, cancels = 0;
+  const event = {pointerType:"touch",pointerId:1,button:0,clientX:200,clientY:200,preventDefault(){},currentTarget:node};
+  viewport.trackTouch(event);
+  viewport.beginNodeDrag(event, {key:"node",element:node,position:{x:0,y:0},onCommit:()=>commits++,onCancel:()=>cancels++});
+  viewport.moveNodeDrag({...event,clientX:220});
+  host.dispatch("pointerdown", {pointerType:"touch",pointerId:2,clientX:300,clientY:200});
+  assert.equal(viewport.drag, null);
+  assert.equal(commits, 0);
+  assert.equal(cancels, 1);
+  viewport.destroy();
+});
 
 test("viewport applies and reports its initial camera", () => {
   const { stage, viewport, zoomOutput } = fixture({ x: 12, y: 34, zoom: 0.8 });

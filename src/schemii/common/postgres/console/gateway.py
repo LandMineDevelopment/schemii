@@ -58,6 +58,12 @@ class PostgresConsoleReadSession(Protocol):
         self, statement_index: int, offset: int, page_size: int
     ) -> tuple[tuple[Any, ...], ...]: ...
 
+    def export_page(
+        self, statement_index: int, offset: int, page_size: int
+    ) -> tuple[tuple[Any, ...], ...]: ...
+
+    def has_buffered_rows(self, statement_index: int) -> bool: ...
+
     def close(self) -> None: ...
 
 
@@ -65,10 +71,16 @@ class PostgresConsoleReadSession(Protocol):
 class _ReadCursor:
     cursor: Any | None
     rows: tuple[tuple[Any, ...], ...]
+    statement: str | None = None
+    position: int = 0
+    pending: tuple[tuple[Any, ...], ...] = ()
+    export_cursor: Any | None = None
+    export_position: int = 0
+    export_pending: tuple[tuple[Any, ...], ...] = ()
 
 
 class PsycopgConsoleReadSession:
-    """Hold scrollable PostgreSQL cursors; never copy result rows to metadata."""
+    """Hold forward-only PostgreSQL cursors; never copy result rows to metadata."""
 
     def __init__(
         self,
@@ -125,14 +137,8 @@ class PsycopgConsoleReadSession:
                     results.append(result)
                     continue
 
-                row_count = self._count(statement)
-                cursor = self._database_connection.cursor(
-                    name=f"schemii_{secrets.token_hex(12)}",
-                    scrollable=True,
-                    withhold=True,
-                    row_factory=lambda _cursor: lambda values: tuple(values),
-                )
-                cursor.execute(statement)
+                query = statement.rstrip().removesuffix(";")
+                cursor = self._open_cursor(query, statement_index)
                 description = tuple(cursor.description or ())
                 type_names = _console_type_names(
                     self._database_connection,
@@ -147,7 +153,9 @@ class PsycopgConsoleReadSession:
                     )
                     for column in description
                 )
-                self._readers[statement_index] = _ReadCursor(cursor=cursor, rows=())
+                self._readers[statement_index] = _ReadCursor(
+                    cursor=cursor, rows=(), statement=query
+                )
                 results.append(
                     ConsoleQueryResult(
                         statement_index=statement_index,
@@ -155,11 +163,12 @@ class PsycopgConsoleReadSession:
                         columns=columns,
                         rows=(),
                         truncated=False,
-                        row_count=row_count,
+                        # Exact counting can cost more than the requested page
+                        # and must never delay an unbounded result's first rows.
+                        row_count=None,
                         replayable=True,
                     )
                 )
-            self._database_connection.commit()
             return tuple(results)
         except PostgresGatewayError:
             self.close()
@@ -174,36 +183,82 @@ class PsycopgConsoleReadSession:
                 limit=error.limit,
                 observed=error.observed,
             ) from error
-        except Exception:
+        except Exception as error:
+            diagnostic = getattr(error, "diag", None)
+            message = getattr(diagnostic, "message_primary", None)
+            sqlstate = getattr(error, "sqlstate", None)
             self.close()
             raise PostgresConsoleQueryError(
-                "PostgreSQL rejected the query",
+                message if isinstance(message, str) and message else "PostgreSQL rejected the query",
                 statement_index=statement_index,
+                sqlstate=sqlstate if isinstance(sqlstate, str) else None,
             ) from None
 
-    def _count(self, statement: str) -> int:
-        cursor: Any | None = None
-        try:
-            cursor = self._database_connection.cursor()
-            cursor.execute(
-                f"SELECT count(*)::bigint AS row_count FROM ({statement}) "
-                "AS schemii_count_source"
+    def _open_cursor(self, statement: str, statement_index: int) -> Any:
+        cursor = self._database_connection.cursor(
+            name=f"schemii_read_{statement_index}_{secrets.token_hex(8)}",
+            scrollable=False,
+            withhold=False,
+            row_factory=lambda _cursor: lambda values: tuple(values),
+        )
+        cursor.execute(statement)
+        return cursor
+
+    def _fetch_forward(
+        self,
+        reader: _ReadCursor,
+        *,
+        statement_index: int,
+        offset: int,
+        page_size: int,
+        export: bool = False,
+    ) -> tuple[tuple[Any, ...], ...]:
+        cursor = reader.export_cursor if export else reader.cursor
+        position = reader.export_position if export else reader.position
+        pending = reader.export_pending if export else reader.pending
+        if cursor is None:
+            if not export or reader.statement is None:
+                return reader.rows[offset : offset + page_size]
+            cursor = self._open_cursor(reader.statement, statement_index)
+            reader.export_cursor = cursor
+        if offset != position:
+            raise PostgresQueryError(
+                "Result pages must be read in sequence; rerun the query to restart this result"
             )
-            row = cursor.fetchone()
-            if isinstance(row, Mapping):
-                value = row.get("row_count")
-            elif isinstance(row, Sequence) and not isinstance(row, (str, bytes)):
-                value = row[0] if row else None
-            else:
-                value = None
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise PostgresConsoleQueryError(
-                    "PostgreSQL did not return a valid result count",
-                    statement_index=0,
+        raw_rows = list(pending)
+        if len(raw_rows) < page_size:
+            raw_rows.extend(cursor.fetchmany(page_size - len(raw_rows)))
+
+        rows: list[tuple[Any, ...]] = []
+        used_bytes = 0
+        remaining: tuple[tuple[Any, ...], ...] = ()
+        for row_index, raw_row in enumerate(raw_rows):
+            converted = tuple(
+                json_console_value(value, maximum_bytes=self._maximum_cell_bytes)
+                for value in raw_row
+            )
+            row_bytes = len(json.dumps(converted, ensure_ascii=False).encode("utf-8"))
+            if rows and used_bytes + row_bytes > self._page_memory_bytes:
+                remaining = tuple(raw_rows[row_index:])
+                break
+            if row_bytes > self._page_memory_bytes:
+                raise PostgresConsoleLimitError(
+                    f"One PostgreSQL row is {row_bytes} bytes, above the configured Console page memory limit of {self._page_memory_bytes} bytes. Narrow the selected columns or ask the administrator to raise console.results.page_memory_bytes.",
+                    statement_index=statement_index,
+                    resource="console_result_page",
+                    limit_name="console.results.page_memory_bytes",
+                    limit=self._page_memory_bytes,
+                    observed=row_bytes,
                 )
-            return value
-        finally:
-            _safe_close(cursor)
+            rows.append(converted)
+            used_bytes += row_bytes
+        if export:
+            reader.export_position += len(rows)
+            reader.export_pending = remaining
+        else:
+            reader.position += len(rows)
+            reader.pending = remaining
+        return tuple(rows)
 
     def page(self, statement_index, offset, page_size):
         with self._lock:
@@ -213,35 +268,63 @@ class PsycopgConsoleReadSession:
                 reader = self._readers[statement_index]
             except KeyError as error:
                 raise PostgresQueryError() from error
-            if reader.cursor is None:
-                raw_rows = reader.rows[offset : offset + page_size]
-            else:
-                reader.cursor.scroll(offset, mode="absolute")
-                raw_rows = reader.cursor.fetchmany(page_size)
-            rows: list[tuple[Any, ...]] = []
-            used_bytes = 0
-            for raw_row in raw_rows:
-                converted = tuple(
-                    json_console_value(value, maximum_bytes=self._maximum_cell_bytes)
-                    for value in raw_row
+            try:
+                raw_rows = self._fetch_forward(
+                    reader,
+                    statement_index=statement_index,
+                    offset=offset,
+                    page_size=page_size,
                 )
-                row_bytes = len(
-                    json.dumps(converted, ensure_ascii=False).encode("utf-8")
+            except PostgresGatewayError:
+                raise
+            except Exception as error:
+                diagnostic = getattr(error, "diag", None)
+                message = getattr(diagnostic, "message_primary", None)
+                sqlstate = getattr(error, "sqlstate", None)
+                raise PostgresConsoleQueryError(
+                    message if isinstance(message, str) and message else "PostgreSQL rejected the query",
+                    statement_index=statement_index,
+                    sqlstate=sqlstate if isinstance(sqlstate, str) else None,
+                ) from None
+            return raw_rows
+
+    def export_page(self, statement_index, offset, page_size):
+        """Read a separate forward-only portal so export cannot disturb UI paging."""
+
+        with self._lock:
+            if self._closed or offset < 0 or page_size < 1:
+                raise PostgresQueryError()
+            try:
+                reader = self._readers[statement_index]
+            except KeyError as error:
+                raise PostgresQueryError() from error
+            try:
+                raw_rows = self._fetch_forward(
+                    reader,
+                    statement_index=statement_index,
+                    offset=offset,
+                    page_size=page_size,
+                    export=True,
                 )
-                if rows and used_bytes + row_bytes > self._page_memory_bytes:
-                    break
-                if row_bytes > self._page_memory_bytes:
-                    raise PostgresConsoleLimitError(
-                        f"One PostgreSQL row is {row_bytes} bytes, above the configured Console page memory limit of {self._page_memory_bytes} bytes. Narrow the selected columns or ask the administrator to raise console.results.page_memory_bytes.",
-                        statement_index=statement_index,
-                        resource="console_result_page",
-                        limit_name="console.results.page_memory_bytes",
-                        limit=self._page_memory_bytes,
-                        observed=row_bytes,
-                    )
-                rows.append(converted)
-                used_bytes += row_bytes
-            return tuple(rows)
+            except PostgresGatewayError:
+                raise
+            except Exception as error:
+                diagnostic = getattr(error, "diag", None)
+                message = getattr(diagnostic, "message_primary", None)
+                sqlstate = getattr(error, "sqlstate", None)
+                raise PostgresConsoleQueryError(
+                    message if isinstance(message, str) and message else "PostgreSQL rejected the query",
+                    statement_index=statement_index,
+                    sqlstate=sqlstate if isinstance(sqlstate, str) else None,
+                ) from None
+            return raw_rows
+
+    def has_buffered_rows(self, statement_index: int) -> bool:
+        """Report rows already fetched from PostgreSQL but held for the next page."""
+
+        with self._lock:
+            reader = self._readers.get(statement_index)
+            return bool(reader is not None and reader.pending)
 
     def close(self) -> None:
         with self._lock:
@@ -250,6 +333,7 @@ class PsycopgConsoleReadSession:
             self._closed = True
             for reader in self._readers.values():
                 _safe_close(reader.cursor)
+                _safe_close(reader.export_cursor)
             self._readers.clear()
             _safe_close(self._database_connection)
 

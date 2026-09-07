@@ -35,9 +35,31 @@ export function filterSearchableSelectOptions(options, query) {
   ].join(" ")).includes(needle));
 }
 
-export function matchingSearchableSelectOption(options, value) {
+export function matchingSearchableSelectOption(options, value, { matchLabel = false } = {}) {
   const target = normalized(value);
-  return options.find(option => normalized(option.value) === target) ?? null;
+  const exactValue = options.find(option => normalized(option.value) === target);
+  if (exactValue) return exactValue;
+  const labels = matchLabel ? options.filter(option => normalized(option.label) === target) : [];
+  return labels.length === 1 ? labels[0] : null;
+}
+
+export function searchableSelectPlacement(rect, viewport, contentHeight) {
+  const margin = Math.min(8, viewport.width / 2, viewport.height / 2);
+  const gap = 5;
+  const width = Math.max(0, Math.min(Math.max(rect.width, 280), viewport.width - margin * 2));
+  const topBound = viewport.top + margin;
+  const bottomBound = viewport.top + viewport.height - margin;
+  const below = Math.max(0, bottomBound - rect.bottom - gap);
+  const above = Math.max(0, rect.top - topBound - gap);
+  const placeAbove = below < 190 && above > below;
+  const maxHeight = Math.max(0, Math.min(310, viewport.height - margin * 2, placeAbove ? above : below));
+  const height = Math.min(contentHeight, maxHeight);
+  return {
+    width,
+    maxHeight,
+    left: Math.max(viewport.left + margin, Math.min(rect.left, viewport.left + viewport.width - width - margin)),
+    top: Math.max(topBound, Math.min(placeAbove ? rect.top - height - gap : rect.bottom + gap, bottomBound - height)),
+  };
 }
 
 function assignDataset(node, dataset) {
@@ -52,6 +74,7 @@ export function createSearchableSelect({
   required = false,
   dataset = {},
   noResultsText = "No matching options",
+  displayLabel = false,
   documentRef = document,
 } = {}) {
   searchableSelectSequence += 1;
@@ -61,12 +84,18 @@ export function createSearchableSelect({
   let filtered = [];
   let activeIndex = -1;
   let open = false;
+  let destroyed = false;
+  let dispatchingCommit = false;
+  const displayValue = () => displayLabel
+    ? matchingSearchableSelectOption(available, committed)?.label ?? ""
+    : committed;
+  const matchingInput = () => matchingSearchableSelectOption(available, input.value, { matchLabel: displayLabel });
 
   const root = documentRef.createElement("div");
   root.className = "ui-searchable-select";
   const input = documentRef.createElement("input");
   input.type = "text";
-  input.value = committed;
+  input.value = displayValue();
   input.placeholder = placeholder;
   input.autocomplete = "off";
   input.spellcheck = false;
@@ -96,7 +125,7 @@ export function createSearchableSelect({
   root.append(input, toggle);
 
   const setValidity = () => {
-    const exact = matchingSearchableSelectOption(available, input.value);
+    const exact = matchingInput();
     input.setCustomValidity(exact ? "" : `Choose ${label.toLocaleLowerCase()} from the list.`);
     return exact;
   };
@@ -110,21 +139,13 @@ export function createSearchableSelect({
     const viewportLeft = visualViewport?.offsetLeft ?? 0;
     const viewportWidth = visualViewport?.width ?? viewport.innerWidth;
     const viewportHeight = visualViewport?.height ?? viewport.innerHeight;
-    const margin = 8;
-    const gap = 5;
-    const width = Math.min(Math.max(rect.width, 280), viewportWidth - margin * 2);
-    const left = Math.max(viewportLeft + margin, Math.min(rect.left, viewportLeft + viewportWidth - width - margin));
-    const availableBelow = viewportTop + viewportHeight - rect.bottom - margin;
-    const availableAbove = rect.top - viewportTop - margin;
-    const placeAbove = availableBelow < 190 && availableAbove > availableBelow;
-    const maxHeight = Math.max(110, Math.min(310, (placeAbove ? availableAbove : availableBelow) - gap));
+    const { width, left, top, maxHeight } = searchableSelectPlacement(rect, {
+      top: viewportTop, left: viewportLeft, width: viewportWidth, height: viewportHeight,
+    }, list.scrollHeight);
     list.style.width = `${width}px`;
     list.style.maxHeight = `${maxHeight}px`;
-    const renderedHeight = Math.min(list.scrollHeight, maxHeight);
     list.style.left = `${left}px`;
-    list.style.top = placeAbove
-      ? `${Math.max(viewportTop + margin, rect.top - renderedHeight - gap)}px`
-      : `${rect.bottom + gap}px`;
+    list.style.top = `${top}px`;
   };
 
   const updateActive = nextIndex => {
@@ -144,13 +165,17 @@ export function createSearchableSelect({
   };
 
   const commit = option => {
-    if (!option) return;
+    if (destroyed || !option) return;
     const changed = committed !== option.value;
     committed = option.value;
-    input.value = option.value;
+    input.value = displayValue();
     input.setCustomValidity("");
     close();
-    if (changed) input.dispatchEvent(new Event("change", { bubbles: true }));
+    if (changed) {
+      dispatchingCommit = true;
+      try { input.dispatchEvent(new Event("change", { bubbles: true })); }
+      finally { dispatchingCommit = false; }
+    }
   };
 
   const render = (query, { showAll = false } = {}) => {
@@ -208,17 +233,20 @@ export function createSearchableSelect({
   const onViewportChange = () => position();
   const onOutsidePointer = event => {
     if (root.contains(event.target) || list.contains(event.target)) return;
-    const exact = matchingSearchableSelectOption(available, input.value);
+    const exact = matchingInput();
     if (exact) commit(exact);
     else {
-      input.value = committed;
+      input.value = displayValue();
       input.setCustomValidity("");
       close();
     }
   };
 
   function close({ restore = false } = {}) {
-    if (restore) input.value = committed;
+    if (restore) {
+      input.value = displayValue();
+      input.setCustomValidity("");
+    }
     if (!open) return;
     open = false;
     input.setAttribute("aria-expanded", "false");
@@ -234,9 +262,14 @@ export function createSearchableSelect({
   }
 
   function show({ showAll = false } = {}) {
-    if (!available.length) return;
+    if (destroyed || !available.length) return;
     render(input.value, { showAll });
     if (!open) {
+      // A modal dialog makes the rest of the document inert. A top-layer
+      // popover outside that dialog may be visible but cannot receive clicks.
+      // Keep ownership inside the dialog while retaining viewport positioning.
+      const portal = root.closest?.("dialog[open]") || documentRef.body;
+      if (list.parentElement !== portal) portal.append(list);
       open = true;
       input.setAttribute("aria-expanded", "true");
       toggle.setAttribute("aria-expanded", "true");
@@ -261,6 +294,17 @@ export function createSearchableSelect({
     show();
     updateActive(0);
   });
+  input.addEventListener("change", event => {
+    if (destroyed) {
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (dispatchingCommit) return;
+    event.stopImmediatePropagation();
+    const exact = matchingInput();
+    if (exact) commit(exact);
+    else close({ restore: true });
+  });
   input.addEventListener("keydown", event => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -271,7 +315,7 @@ export function createSearchableSelect({
     if (event.key === "Enter") {
       event.preventDefault();
       if (!open) show({ showAll: true });
-      else commit(filtered[activeIndex] ?? matchingSearchableSelectOption(available, input.value));
+      else commit(filtered[activeIndex] ?? matchingInput());
       return;
     }
     if (event.key === "Escape" && open) {
@@ -281,14 +325,14 @@ export function createSearchableSelect({
       return;
     }
     if (event.key === "Tab") {
-      const exact = matchingSearchableSelectOption(available, input.value);
+      const exact = matchingInput();
       if (exact) commit(exact);
       else close({ restore: true });
     }
   });
   input.addEventListener("invalid", () => show());
   toggle.addEventListener("click", () => {
-    if (open) close();
+    if (open) close({ restore: true });
     else {
       input.focus();
       show({ showAll: true });
@@ -300,21 +344,25 @@ export function createSearchableSelect({
     root,
     input,
     close,
+    getValue: () => committed,
     destroy() {
+      if (destroyed) return;
+      destroyed = true;
       close();
       list.remove();
     },
     setOptions(nextOptions) {
       available = normalizeSearchableSelectOptions(nextOptions);
-      const exact = matchingSearchableSelectOption(available, input.value);
-      if (exact) committed = exact.value;
+      const exact = matchingSearchableSelectOption(available, committed);
+      committed = exact?.value ?? "";
+      input.value = displayValue();
       setValidity();
       if (open) show({ showAll: true });
     },
     setValue(nextValue) {
       const exact = matchingSearchableSelectOption(available, nextValue);
       committed = exact?.value ?? "";
-      input.value = committed;
+      input.value = displayValue();
       setValidity();
     },
     setLabel(nextLabel) {

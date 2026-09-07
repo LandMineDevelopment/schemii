@@ -1,11 +1,11 @@
-import { ApiError } from "./api.js";
-import { element, replace } from "./dom.js";
+import { ApiError } from "#common/http.js";
+import { element, replace } from "#common/dom.js";
 import {
   appendDataGridPage,
   createDataGrid,
   formatDataCell,
   installAutoPageLoader,
-} from "./data-grid.js";
+} from "#common/data-grid.js";
 import { sqlForRun, sqlStatementRanges, transactionTerminalAction } from "./sql-statements.js";
 import { createIconButton } from "./ui.js";
 
@@ -706,7 +706,7 @@ export function createSqlConsole({
     const card = element("article", { className: "sql-result-card" });
     card.append(element("header", {}, [
       element("div", {}, [element("small", { text: `STATEMENT ${summary.statementIndex + 1}` }), element("strong", { text: summary.command })]),
-      element("span", { text: `${summary.rowCount ?? 0} ${summary.rowCount === 1 ? "row" : "rows"}` }),
+      element("span", { text: summary.rowCount == null ? "Paged result" : `${summary.rowCount} ${summary.rowCount === 1 ? "row" : "rows"}` }),
     ]));
     if (!page) card.append(statePanel("…", "Loading retained result", "Reading the first result page from the server."));
     else if (!page.rows.length) card.append(statePanel("0", "No rows returned", "PostgreSQL returned the column shape without any records."));
@@ -734,9 +734,9 @@ export function createSqlConsole({
 
   function resultProgressText(summary, page) {
     const count = page.rows.length;
-    if (page.nextCursor) return `${count} of ${summary.rowCount} rows loaded · scroll for more`;
+    if (page.nextCursor) return summary.rowCount == null ? `${count} rows loaded · scroll for more` : `${count} of ${summary.rowCount} rows loaded · scroll for more`;
     if (page.truncated) return `${count} rows loaded · result reached the server retention limit`;
-    return `${count} of ${summary.rowCount} rows loaded`;
+    return summary.rowCount == null ? `${count} rows loaded · end of result` : `${count} of ${summary.rowCount} rows loaded`;
   }
 
   function activePagedResultTab() {
@@ -747,11 +747,65 @@ export function createSqlConsole({
   }
 
   async function loadSettings(runGeneration) {
-    if (settings) return settings;
     const response = await api.getConsoleSettings();
     if (runGeneration !== generation) return null;
     settings = response;
     return response;
+  }
+
+  // The main console and inspector share this preference and component. It only
+  // sizes future result pages; it never unlocks writes or changes retained pages.
+  if (api.updateConsoleSettings) {
+    const preferences = element("details", { className: "sql-console-preferences" });
+    preferences.append(element("summary", { text: "Result preferences" }));
+    const pageSize = element("input", { type: "number", attrs: { min: "1", step: "1", required: "", "aria-label": "Rows per page" } });
+    const save = createIconButton({ icon: "save", label: "Save result preferences", tooltip: "Save result preferences", className: "compact" });
+    save.type = "submit";
+    const feedback = element("small", { attrs: { role: "status" } });
+    const form = element("form", { className: "sql-console-preferences-form" }, [
+      element("label", {}, ["Rows per page", pageSize]), save,
+      element("small", { text: "Applies to future queries in all consoles. Scrolling still loads every row." }), feedback,
+    ]);
+    preferences.append(form);
+    results.before(preferences);
+    let preferenceRevision = null;
+    let savingPreferences = false;
+    async function reloadPreferences() {
+      save.disabled = true;
+      feedback.textContent = "Loading…";
+      try {
+        const current = await api.getConsoleSettings();
+        preferenceRevision = current.revision;
+        pageSize.value = current.rowPageSize;
+        pageSize.max = current.maximumRowPageSize;
+        feedback.textContent = `Administrator maximum: ${current.maximumRowPageSize} rows per page.`;
+        save.disabled = false;
+      } catch (error) {
+        feedback.textContent = error.message;
+      }
+    }
+    preferences.addEventListener("toggle", () => {
+      if (preferences.open && !savingPreferences) void reloadPreferences();
+    });
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (savingPreferences || save.disabled || !form.reportValidity()) return;
+      savingPreferences = true;
+      save.disabled = true;
+      try {
+        settings = await api.updateConsoleSettings({ expectedRevision: preferenceRevision, rowPageSize: Number(pageSize.value) });
+        preferenceRevision = settings.revision;
+        feedback.textContent = "Saved for future queries. Existing results and transactions are unchanged.";
+      } catch (error) {
+        if (error.code === "console_settings_changed") {
+          await reloadPreferences();
+          feedback.textContent = "Preferences changed elsewhere. Current values loaded; review and save again.";
+        } else feedback.textContent = error.message;
+      } finally {
+        savingPreferences = false;
+        save.disabled = false;
+      }
+    });
   }
 
   async function loadFirstPages(runGeneration) {
@@ -763,7 +817,7 @@ export function createSqlConsole({
     const newTabs = execution.results.map((summary, index) => ({
       id: browserIdentifier("rtab"),
       label: labels[index],
-      meta: `${summary.command} · ${summary.rowCount ?? 0} ${summary.rowCount === 1 ? "row" : "rows"}`,
+      meta: `${summary.command} · ${summary.rowCount == null ? "paged result" : `${summary.rowCount} ${summary.rowCount === 1 ? "row" : "rows"}`}`,
       kind: "result",
       pinned: false,
       executionId: execution.id,
@@ -1016,7 +1070,7 @@ export function createSqlConsole({
     const requestedTabId = tab.id;
     const requestedCursor = page.nextCursor;
     const progress = results.querySelector("[data-result-progress]");
-    if (progress) progress.textContent = `Loading rows ${page.rows.length + 1}–${Math.min(page.rows.length + 100, tab.summary.rowCount)}…`;
+    if (progress) progress.textContent = `Loading rows ${page.rows.length + 1}–${tab.summary.rowCount == null ? page.rows.length + 100 : Math.min(page.rows.length + 100, tab.summary.rowCount)}…`;
     busy = true;
     updateControls();
     try {

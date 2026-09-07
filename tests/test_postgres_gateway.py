@@ -467,6 +467,26 @@ def test_console_transaction_retains_exact_target_until_explicit_commit() -> Non
     assert connection.closed is True
 
 
+def test_console_read_session_uses_configured_idle_timeout() -> None:
+    factory = FakeConnectFactory({})
+    gateway = PsycopgPostgresGateway(
+        connect_factory=factory,
+        console_idle_transaction_seconds=420,
+    )
+
+    connection = gateway._connect(resolved_connection())  # noqa: SLF001
+    gateway._begin_read_only(  # noqa: SLF001 - verifies the shared transaction boundary
+        connection,
+        repeatable_read=True,
+        idle_timeout_ms=gateway._console_idle_transaction_timeout_ms,  # noqa: SLF001
+    )
+
+    assert any(
+        "idle_in_transaction_session_timeout" in query and "420000ms" in query
+        for query, _parameters in connection.executed
+    )
+
+
 def test_driver_failures_are_mapped_without_leaking_credentials_or_driver_text() -> None:
     secret = "this-password-must-not-leak"
 

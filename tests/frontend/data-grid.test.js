@@ -6,7 +6,7 @@ import {
   installAutoPageLoader,
   isNearScrollEnd,
   mergeDataGridPages,
-} from "../../src/schemii/schemii/web/assets/data-grid.js";
+} from "#common/data-grid.js";
 
 class ScrollContainer {
   constructor() {
