@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, model_validator
 
 from schemii.common.api.models import ApiModel
+from .action_policy import PERMISSIONS, action_modes, permission_descriptors, policy_descriptors
 
 
 class AiCapabilities(ApiModel):
@@ -16,9 +17,37 @@ class AiCapabilities(ApiModel):
     structured_data_read: bool = False
     raw_sql_read: bool = False
     raw_sql_write: bool = False
+    read_approval_required: bool = True
+    design_approval_required: bool = True
+    migration_apply: bool = False
+    migration_approval_required: bool = True
+    design_history: bool = False
+    history_approval_required: bool = True
+    structured_query: bool = False
+    structured_query_approval_required: bool = True
+    sql_write_execute: bool = False
+    write_approval_required: bool = True
+    action_modes: dict[str, Literal["disabled", "ask", "automatic"]] | None = None
+
+    @model_validator(mode="after")
+    def normalize_action_modes(self):
+        if self.action_modes is not None and set(self.action_modes) - PERMISSIONS.keys():
+            raise ValueError("Unknown AI action permission")
+        modes = action_modes(self)
+        object.__setattr__(self, "action_modes", modes)
+        # Legacy fields are a derived projection, never the action-level authority.
+        for field in {entry[2] for entry in PERMISSIONS.values()}:
+            keys = [key for key, entry in PERMISSIONS.items() if entry[2] == field]
+            object.__setattr__(self, field, any(modes[key] != "disabled" for key in keys))
+        for field in {entry[3] for entry in PERMISSIONS.values() if entry[3]}:
+            keys = [key for key, entry in PERMISSIONS.items() if entry[3] == field]
+            object.__setattr__(self, field, any(modes[key] == "ask" for key in keys))
+        return self
 
 
 class SchemiiAiSettings(ApiModel):
+    permission_actions: list[dict[str, Any]] = Field(default_factory=permission_descriptors)
+    action_policies: list[dict[str, Any]] = Field(default_factory=policy_descriptors)
     revision: Annotated[int, Field(strict=True, ge=1)]
     enabled: bool
     default_provider_id: str | None = Field(default=None, max_length=128)
@@ -62,7 +91,7 @@ class SchemiiChat(ApiModel):
     provider_id: Annotated[str, Field(min_length=1, max_length=128)]
     model_id: Annotated[str, Field(min_length=1, max_length=256)]
     capabilities: AiCapabilities
-    status: Literal["idle", "working", "failed", "deleted"]
+    status: Literal["idle", "working", "waiting_approval", "failed", "deleted"]
     created_at: datetime
     updated_at: datetime
 
@@ -115,7 +144,7 @@ class SchemiiTransientResponseList(ApiModel):
 class SchemiiTurn(ApiModel):
     id: str = Field(pattern=r"^turn_[0-9a-f]{32}$")
     chat_id: str = Field(pattern=r"^chat_[0-9a-f]{32}$")
-    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    status: Literal["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled"]
     result_context_operation_id: str | None = Field(
         default=None, pattern=r"^aop_[0-9a-f]{32}$"
     )
@@ -189,7 +218,7 @@ class SchemiiAiOperation(ApiModel):
     chat_id: str = Field(pattern=r"^chat_[0-9a-f]{32}$")
     proposal_id: str = Field(pattern=r"^prop_[0-9a-f]{32}$")
     revision: Annotated[int, Field(strict=True, ge=1)]
-    kind: Literal["design_change", "migration_review", "data_read", "console_script", "navigation"]
+    kind: Literal["design_change", "migration_review", "migration_apply", "migration_resolve", "migration_reconcile", "design_history", "sql_write", "data_read", "console_script", "navigation"]
     status: Literal["running", "succeeded", "failed", "cancelled", "uncertain"]
     resource_kind: str | None = Field(default=None, max_length=128)
     resource_id: str | None = Field(default=None, max_length=256)
@@ -198,6 +227,14 @@ class SchemiiAiOperation(ApiModel):
     error_message: str | None = Field(default=None, max_length=2048)
     created_at: datetime
     updated_at: datetime
+
+
+class SchemiiBatchProposalApproval(SchemiiProposalExecutionCreate):
+    proposal_id: str = Field(pattern=r"^prop_[0-9a-f]{32}$")
+
+
+class SchemiiBatchApproval(ApiModel):
+    items: list[SchemiiBatchProposalApproval] = Field(min_length=1, max_length=100)
 
 
 class SchemiiAiOperationListResponse(ApiModel):
@@ -210,8 +247,26 @@ class SchemiiAiOperationReconcile(ApiModel):
 
 class SchemiiQueryResult(ApiModel):
     operation_id: str = Field(pattern=r"^aop_[0-9a-f]{32}$")
-    columns: list[dict[str, str]]
-    rows: list[list[Any]]
+    columns: list[dict[str, str]] = Field(default_factory=list)
+    rows: list[list[Any]] = Field(default_factory=list)
+    results: list[dict[str, Any]] | None = None
     next_cursor: str | None = None
     rerun: bool = False
     freshness_notice: str | None = None
+
+
+class SchemiiReadRun(ApiModel):
+    """A retained query reference, never retained result values."""
+
+    id: str = Field(pattern=r"^arr_[0-9a-f]{32}$")
+    chat_id: str
+    turn_id: str
+    operation_id: str
+    sql: str
+    label: str
+    execution_id: str
+    result_id: str
+    row_count: int | None = Field(default=None, ge=0)
+    has_more: bool
+    executed_at: datetime
+    rerun_of: str | None = None

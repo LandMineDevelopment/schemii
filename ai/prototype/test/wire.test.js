@@ -99,6 +99,23 @@ test('real provider transforms tool declarations and decodes streamed function a
   assert.equal(outgoing.body.tools[0].type, 'function');
   assert.equal(outgoing.body.tools[0].name, 'lookup');
   assert.deepEqual(outgoing.body.tools[0].parameters, parameters);
+  assert.equal(result.assistantMessage.role, 'assistant');
+  assert.equal(result.assistantMessage.content.find(part => part.type === 'toolCall').id,
+    result.toolCalls[0].id);
+  request.context.messages.push(result.assistantMessage, {
+    role: 'toolResult', toolCallId: result.toolCalls[0].id, toolName: 'lookup',
+    content: [{ type: 'text', text: JSON.stringify({ results: [{ city: 'Boston', population: 100 }] }) }],
+    isError: false, timestamp: Date.now(),
+  });
+  t.mock.method(globalThis, 'fetch', async (input, init) => {
+    outgoing = await requestDetails(input, init);
+    return textResponse('Boston has 100 residents in this result.');
+  });
+  const analysis = await runner.run(request);
+  assert.match(analysis.text, /100 residents/);
+  const returned = outgoing.body.input.find(item => item.type === 'function_call_output');
+  assert.equal(returned.call_id, 'call_lookup');
+  assert.match(returned.output, /population/);
 });
 
 test('cancellation reaches the real provider HTTP request', { timeout: 10000 }, async (t) => {
@@ -159,16 +176,39 @@ test('permission revision changes during a real provider request reject the resp
   assert.deepEqual(checks, [true, false]);
 });
 
-test('provider function calls outside the turn allowlist are rejected', async (t) => {
+test('unadvertised provider calls stay inert and receive the server denial on continuation', async (t) => {
   const runner = await setup('alice');
-  t.mock.method(globalThis, 'fetch', async () => sse([
+  const fetch = t.mock.method(globalThis, 'fetch', async () => sse([
     { type: 'response.output_item.done', output_index: 0, item: {
       type: 'function_call', id: 'fc_unauthorized', call_id: 'call_unauthorized',
       name: 'delete_everything', arguments: '{}',
     } },
     { type: 'response.completed', response: { id: 'resp_denied', status: 'completed' } },
   ]));
-  await assert.rejects(runner.run(turn('alice')), { code: 'tool_denied' });
+  const request = turn('alice');
+  const result = await runner.run(request);
+  assert.deepEqual(result.toolCalls, [{ id: 'call_unauthorized|fc_unauthorized',
+    name: 'delete_everything', arguments: {} }]);
+  // Only inference ran: there is no executable tool callback in this runtime.
+  assert.equal(fetch.mock.callCount(), 1);
+  assert.deepEqual(request.context.tools, []);
+  request.context.messages.push(result.assistantMessage, {
+    role: 'toolResult', toolCallId: result.toolCalls[0].id, toolName: 'delete_everything',
+    content: [{ type: 'text', text: JSON.stringify({ error: 'tool_not_available',
+      message: 'This tool is unavailable. Use only the advertised Schemii tools.' }) }],
+    isError: true, timestamp: Date.now(),
+  });
+  let outgoing;
+  fetch.mock.mockImplementation(async (input, init) => {
+    outgoing = await requestDetails(input, init);
+    return textResponse('That tool is unavailable. No change was made.');
+  });
+  const next = await runner.run(request);
+  assert.match(next.text, /No change was made/);
+  const denial = outgoing.body.input.find(item => item.type === 'function_call_output');
+  assert.equal(denial.call_id, 'call_unauthorized');
+  assert.match(denial.output, /tool_not_available/);
+  assert.ok(!outgoing.body.tools?.length);
 });
 
 test('capacity rejects excess work and recovers its slot after cancellation', { timeout: 10000 }, async (t) => {

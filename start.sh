@@ -25,7 +25,7 @@ SCHEMII_LOG_SERVICE=
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype]\n' "$0"
+  printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -67,10 +67,14 @@ if (( $# > 0 )); then
       (( $# == 1 )) || { usage >&2; exit 2; }
       SCHEMII_LAUNCH_ACTION=test-ai-prototype
       ;;
+    --remove-legacy-ai-data)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION=remove-legacy-ai-data
+      ;;
     --logs)
       (( $# == 2 )) || { usage >&2; exit 2; }
       case "$2" in
-        schemii|opencode|ai-prototype-runtime|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
+        schemii|ai-prototype-runtime|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
           SCHEMII_LAUNCH_ACTION=logs
           SCHEMII_LOG_SERVICE="$2"
           ;;
@@ -196,6 +200,28 @@ compose_args=(
   --project-directory "$ROOT_DIR"
   --file "$COMPOSE_FILE"
 )
+# Optional machine-local target networks; never part of the portable base stack.
+if [[ -f "${ROOT_DIR}/.schemii/compose.local.yaml" ]]; then
+  compose_args+=(--file "${ROOT_DIR}/.schemii/compose.local.yaml")
+fi
+
+if [[ "$SCHEMII_LAUNCH_ACTION" == "remove-legacy-ai-data" ]]; then
+  # Exact former Compose volume only; never prune or remove active mounted data.
+  legacy_ai_volume=schemii-test_schemii-test-opencode-data
+  legacy_ai_match="$(docker volume ls --filter "name=^${legacy_ai_volume}$" --format '{{.Name}}')"
+  if [[ -z "$legacy_ai_match" ]]; then
+    printf 'No unused OpenCode data volume remains.\n'
+    exit 0
+  fi
+  [[ "$legacy_ai_match" == "$legacy_ai_volume" ]] || fail "ambiguous legacy AI volume identity"
+  legacy_ai_labels="$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}/{{index .Labels "com.docker.compose.volume"}}' "$legacy_ai_volume")"
+  [[ "$legacy_ai_labels" == 'schemii-test/schemii-test-opencode-data' ]] || fail "legacy AI volume ownership labels do not match"
+  legacy_ai_users="$(docker ps --all --filter "volume=${legacy_ai_volume}" --format '{{.ID}}')"
+  [[ -z "$legacy_ai_users" ]] || fail "legacy AI volume is still attached to a container; refusing removal"
+  docker volume rm "$legacy_ai_volume"
+  printf 'Removed unused OpenCode credentials/history. This cannot be undone without a separate backup. Current Pi and database data were not touched.\n'
+  exit 0
+fi
 
 if [[ "$SCHEMII_LAUNCH_ACTION" == "test-ai-prototype" ]]; then
   printf 'Building the isolated AI prototype test image...\n'

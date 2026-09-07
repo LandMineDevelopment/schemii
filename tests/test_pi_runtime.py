@@ -99,7 +99,7 @@ def test_error_refresh_is_retained_but_provider_error_text_is_not_exposed():
     assert store.get("alice", "codex-prototype")["credential"]["refresh"] == "rotated"
 
 
-def test_permission_change_suppresses_terminal_and_unauthorized_tool_is_rejected():
+def test_permission_change_suppresses_terminal_response():
     runtime, _, _ = setup([{"type": "result", "text": "hidden"}])
     calls = iter([True, False])
     text = []
@@ -107,10 +107,27 @@ def test_permission_change_suppresses_terminal_and_unauthorized_tool_is_rejected
         run(runtime, is_authorized=lambda: next(calls), on_text=text.append)
     assert caught.value.code == "permission_changed"
     assert text == []
-    runtime, _, _ = setup([{"type": "result", "text": "", "toolCalls": [{"name": "bash", "arguments": {}}]}])
+
+
+def test_unadvertised_tool_is_returned_as_inert_data_for_server_denial():
+    call = {"id": "denied1", "name": "bash", "arguments": {"command": "do not execute"}}
+    message = {"role": "assistant", "content": [{"type": "toolCall", **call}]}
+    runtime, _, requests = setup([{"type": "result", "text": "", "toolCalls": [call],
+                                   "assistantMessage": message}])
+    reply = run(runtime)
+    assert reply.tool_calls == (("bash", call["arguments"]),)
+    assert reply.tool_call_ids == ("denied1",)
+    assert reply.assistant_message == message
+    assert requests[0]["context"]["tools"] == []
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("name", [None, "", "  ", 42, {}])
+def test_malformed_tool_names_are_rejected(name):
+    runtime, _, _ = setup([{"type": "result", "text": "", "toolCalls": [{"name": name, "arguments": {}}]}])
     with pytest.raises(PiError) as caught:
         run(runtime)
-    assert caught.value.code == "tool_denied"
+    assert caught.value.code == "invalid_response"
 
 
 def test_same_identity_reentrant_turn_is_rejected_until_save_finishes():
@@ -147,3 +164,33 @@ def test_disconnect_fences_database_even_if_sidecar_is_unavailable():
     runtime.disconnect("alice")
     assert store.get("alice", "codex-prototype") is None
     assert not store.save("alice", "codex-prototype", "openai-codex", {"refresh": "late"}, 1)
+
+
+def test_tool_continuation_preserves_provider_message_and_result_identifiers():
+    call = {"id": "call_one|provider_id", "name": "read", "arguments": {"queries": ["select 1"]}}
+    message = {"role": "assistant", "content": [{"type": "toolCall", **call}],
+               "provider": "openai-codex", "api": "openai-codex-responses", "model": "model",
+               "stopReason": "toolUse", "timestamp": 10, "responseId": "resp_private"}
+    runtime, _, requests = setup([{"type": "result", "text": "", "toolCalls": [call],
+                                   "assistantMessage": message}])
+    tools = [{"name": "read"}]
+    reply = runtime.run("alice", "turn1", "openai-codex", "model", "system", "hello", tools)
+    assert reply.assistant_message == message
+    assert reply.tool_call_ids == (call["id"],)
+    assert reply.tool_calls == (("read", call["arguments"]),)
+    messages = [{"role": "user", "content": "hello", "timestamp": 0}, reply.assistant_message,
+                {"role": "toolResult", "toolCallId": reply.tool_call_ids[0], "toolName": "read",
+                 "content": [{"type": "text", "text": '{"rows":[[1]]}'}],
+                 "isError": False, "timestamp": 11}]
+    runtime.run("alice", "turn1", "openai-codex", "model", "system", "ignored", tools, messages=messages)
+    assert requests[-1]["context"]["messages"] == messages
+
+
+def test_replay_message_cannot_smuggle_a_different_tool_call():
+    call = {"id": "call1", "name": "read", "arguments": {}}
+    runtime, _, _ = setup([{"type": "result", "text": "", "toolCalls": [call],
+                           "assistantMessage": {"role": "assistant", "content": [
+                               {"type": "toolCall", **call, "name": "write"}]}}])
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "turn", "openai-codex", "model", "system", "hello", [{"name": "read"}])
+    assert caught.value.code == "invalid_response"

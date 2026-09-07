@@ -39,6 +39,8 @@ _MESSAGES = {
 class PiReply:
     text: str
     tool_calls: tuple[tuple[str, dict], ...]
+    assistant_message: dict | None = None
+    tool_call_ids: tuple[str, ...] = ()
 
 
 class PiRuntime:
@@ -103,8 +105,13 @@ class PiRuntime:
             pass  # Persisted generation fencing still rejects every late completion.
 
     def run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
-            on_text=lambda text: None, is_authorized=lambda: True):
+            on_text=lambda text: None, is_authorized=lambda: True, messages=None):
         identity = (owner, self.credential_id(provider_id))
+        # TODO(multi-replica-ai): Before enabling multiple API workers/replicas,
+        # acquire a durable owner/credential lease and read credentials AFTER it
+        # is acquired; hold it through token-refresh persistence. This process-local
+        # guard and sidecar overlap rejection cannot prevent stale cross-worker reads.
+        # Retain the shared sidecar, not a process per user. Deferred for local dev.
         with self._identity_lock:
             if identity[1] and identity in self._identities:
                 raise PiError("busy", status=429)
@@ -112,14 +119,14 @@ class PiRuntime:
                 self._identities.add(identity)
         try:
             return self._run(owner, turn_id, provider_id, model_id, system, prompt,
-                             tools, on_text, is_authorized)
+                             tools, on_text, is_authorized, messages)
         finally:
             with self._identity_lock:
                 if identity[1]:
                     self._identities.discard(identity)
 
     def _run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
-             on_text, is_authorized):
+             on_text, is_authorized, messages):
         if not self.policy.enabled:
             raise PiError("unavailable", status=503)
         status = self.status(owner)
@@ -130,9 +137,13 @@ class PiRuntime:
         record = self.store.get(owner, credential_id) if credential_id else None
         if credential_id and record is None:
             raise PiError("credentials_required", status=401)
-        allowed = {tool["name"] for tool in tools}
+        if messages is not None and (not isinstance(messages, list) or not messages
+                                    or any(not isinstance(message, dict) or message.get("role") not in
+                                           {"user", "assistant", "toolResult"} for message in messages)):
+            raise PiError("invalid_response")
         context = {"systemPrompt": system,
-                   "messages": [{"role": "user", "content": prompt, "timestamp": int(time.time() * 1000)}],
+                   "messages": messages if messages is not None else [
+                       {"role": "user", "content": prompt, "timestamp": int(time.time() * 1000)}],
                    "tools": tools}
         context_bytes = len(json.dumps(context, ensure_ascii=False).encode())
         if context_bytes > self.policy.context_bytes:
@@ -220,12 +231,37 @@ class PiRuntime:
                             raise PiError("response_too_large", status=413)
                         result = []
                         for call in calls:
-                            if not isinstance(call, dict) or call.get("name") not in allowed:
-                                raise PiError("tool_denied", status=403)
+                            # Transport carries untrusted calls; only the server
+                            # dispatcher authorizes execution and returns useful
+                            # permission denials to the model.
+                            if (not isinstance(call, dict) or not isinstance(call.get("name"), str)
+                                    or not call["name"].strip()):
+                                raise PiError("invalid_response")
                             if not isinstance(call.get("arguments"), dict):
                                 raise PiError("invalid_response")
                             result.append((call["name"], call["arguments"]))
-                        return PiReply(text, tuple(result))
+                        message = event.get("assistantMessage")
+                        ids = tuple(call.get("id", "") for call in calls)
+                        if message is not None:
+                            if len(json.dumps(message, ensure_ascii=False).encode()) > self.policy.response_bytes:
+                                raise PiError("response_too_large", status=413)
+                            if (not isinstance(message, dict) or message.get("role") != "assistant"
+                                    or not isinstance(message.get("content"), list)):
+                                raise PiError("invalid_response")
+                            parts = message["content"]
+                            if any(not isinstance(part, dict) or part.get("type") not in
+                                   {"text", "thinking", "toolCall"} for part in parts):
+                                raise PiError("invalid_response")
+                            replay_calls = [{"id": part.get("id"), "name": part.get("name"),
+                                             "arguments": part.get("arguments")}
+                                            for part in parts if part["type"] == "toolCall"]
+                            replay_text = [part.get("text") for part in parts if part["type"] == "text"]
+                            if (replay_calls != calls or any(not isinstance(item, str) for item in replay_text)
+                                    or "".join(replay_text) != text
+                                    or any(not isinstance(item, str) or not item for item in ids)
+                                    or len(set(ids)) != len(ids)):
+                                raise PiError("invalid_response")
+                        return PiReply(text, tuple(result), message, ids)
                     else:
                         raise PiError("invalid_response")
         except PiError:

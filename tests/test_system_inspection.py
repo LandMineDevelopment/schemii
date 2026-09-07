@@ -166,6 +166,12 @@ def test_system_inspection_joins_routes_services_repositories_and_gateway_calls(
         "ConnectionInUseError",
         "InMemoryConnectionRepository.delete",
     }.issubset(delete_targets)
+    # Both products now implement the same dependency protocol. Neither may be
+    # silently dropped just because a method name no longer has one candidate.
+    assert any(target.endswith(".count_for_connection") and target != "InMemoryWorkspaceRepository.count_for_connection" for target in delete_targets)
+    model_route = next(route for route in document["routes"] if route["id"] == "get:/api/v1/schemoo/models")
+    assert any(objects[call["objectId"]]["qualname"] == "InMemoryModelRepository.list"
+        for call in callables[model_route["endpointObjectId"]]["calls"])
 
 
 def test_system_inspection_derives_runtime_protocol_bindings_without_values() -> None:
@@ -241,7 +247,7 @@ def test_every_route_journey_is_derived_from_live_source_relationships() -> None
             assert node["provenance"] == "derived"
             assert node["evidence"]["kind"]
             assert source_object["location"]["path"].startswith("schemii/")
-            assert source_object["location"]["definitionLine"] is not None
+            assert source_object["location"]["definitionLine"] is not None, source_object
 
     migration_review = next(
         route

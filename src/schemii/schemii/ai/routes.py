@@ -4,6 +4,7 @@ from schemii.common.api.errors import ApiProblem
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.metadata.limit_events import LimitEventNotice
 from .models import (
+    SchemiiBatchApproval,
     SchemiiActivityPage,
     SchemiiAiOperation,
     SchemiiAiOperationListResponse,
@@ -31,6 +32,22 @@ from .service import AiService, AiServiceError
 
 router = APIRouter(tags=["schemii-assistant"])
 def _service(request: Request) -> AiService: return request.app.state.ai_service
+def _resume(service, owner, chat_id, tasks):
+    try:
+        turn = service.ready_continuation(owner, chat_id)
+    except AiCapacityError:
+        service.repository.add_event(owner, chat_id, "error", {"code": "ai_capacity_reached",
+            "message": "Actions are resolved, but assistant capacity is full. Use Continue to resume; completed actions will not be repeated."})
+        return
+    if turn is not None:
+        tasks.add_task(service.run_turn, owner, chat_id, turn.id)
+
+@router.post("/ai/chats/{chat_id}/continue")
+def continue_turn(chat_id: str, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
+    turn = _call(_service(request).ready_continuation, principal.user_id, chat_id)
+    if turn is not None:
+        tasks.add_task(_service(request).run_turn, principal.user_id, chat_id, turn.id)
+    return {"resumed": turn is not None}
 def _call(function, *args):
     try: return function(*args)
     except AiNotFoundError as error: raise ApiProblem(404, "ai_not_found", str(error)) from error
@@ -43,8 +60,10 @@ def settings(request: Request, principal: Principal = Depends(get_current_princi
 @router.put("/ai/settings", response_model=SchemiiAiSettings)
 def update_settings(body: SchemiiAiSettingsUpdate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.update_settings, principal.user_id, body.expected_revision, body.enabled, body.default_provider_id, body.default_model_id, body.default_capabilities)
 @router.put("/ai/chats/{chat_id}/preferences", response_model=SchemiiAiPreferencesResult)
-def save_preferences(chat_id: str, body: SchemiiAiPreferencesUpdate, request: Request, principal: Principal = Depends(get_current_principal)):
-    return _call(_service(request).save_preferences, principal.user_id, chat_id, body)
+def save_preferences(chat_id: str, body: SchemiiAiPreferencesUpdate, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
+    result = _call(_service(request).save_preferences, principal.user_id, chat_id, body)
+    _resume(_service(request), principal.user_id, chat_id, tasks)
+    return result
 @router.get("/ai/chats", response_model=SchemiiChatListResponse)
 def chats(request: Request, workspace_id: str | None = Query(None, alias="workspaceId"), principal: Principal = Depends(get_current_principal)): return SchemiiChatListResponse(chats=_call(_service(request).repository.list_chats, principal.user_id, workspace_id))
 @router.post("/workspaces/{workspace_id}/ai/chats", response_model=SchemiiChat, status_code=201)
@@ -76,14 +95,29 @@ def activity(chat_id: str, request: Request, after: int = Query(0, ge=0), princi
 def policy(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)):
     value = _call(_service(request).repository.get_chat, principal.user_id, chat_id); return SchemiiChatPolicy(revision=value.revision, capabilities=value.capabilities)
 @router.put("/ai/chats/{chat_id}/policy", response_model=SchemiiChatPolicy)
-def update_policy(chat_id: str, body: SchemiiChatPolicyUpdate, request: Request, principal: Principal = Depends(get_current_principal)):
-    value = _call(_service(request).repository.update_chat_policy, principal.user_id, chat_id, body.expected_revision, body.capabilities); return SchemiiChatPolicy(revision=value.revision, capabilities=value.capabilities)
+def update_policy(chat_id: str, body: SchemiiChatPolicyUpdate, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
+    value = _call(_service(request).repository.update_chat_policy, principal.user_id, chat_id, body.expected_revision, body.capabilities)
+    _resume(_service(request), principal.user_id, chat_id, tasks)
+    return SchemiiChatPolicy(revision=value.revision, capabilities=value.capabilities)
 @router.get("/ai/chats/{chat_id}/proposals", response_model=SchemiiProposalListResponse)
 def proposals(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return SchemiiProposalListResponse(proposals=_call(_service(request).repository.list_proposals, principal.user_id, chat_id))
+@router.post("/ai/chats/{chat_id}/proposal-batch/executions")
+def execute_batch(chat_id: str, body: SchemiiBatchApproval, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
+    try:
+        return _call(_service(request).execute_batch, principal.user_id, chat_id, body)
+    finally:
+        _resume(_service(request), principal.user_id, chat_id, tasks)
 @router.delete("/ai/chats/{chat_id}/proposals/{proposal_id}", response_model=SchemiiProposal)
-def dismiss(chat_id: str, proposal_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.dismiss_proposal, principal.user_id, chat_id, proposal_id)
+def dismiss(chat_id: str, proposal_id: str, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
+    result = _call(_service(request).repository.dismiss_proposal, principal.user_id, chat_id, proposal_id)
+    _resume(_service(request), principal.user_id, chat_id, tasks)
+    return result
 @router.post("/ai/chats/{chat_id}/proposals/{proposal_id}/executions", response_model=SchemiiAiOperation, status_code=201)
-def execute(chat_id: str, proposal_id: str, body: SchemiiProposalExecutionCreate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).execute, principal.user_id, chat_id, proposal_id, body)
+def execute(chat_id: str, proposal_id: str, body: SchemiiProposalExecutionCreate, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
+    try:
+        return _call(_service(request).execute, principal.user_id, chat_id, proposal_id, body)
+    finally:
+        _resume(_service(request), principal.user_id, chat_id, tasks)
 @router.get("/ai/chats/{chat_id}/operations/{operation_id}", response_model=SchemiiAiOperation)
 def operation(chat_id: str, operation_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.get_operation, principal.user_id, chat_id, operation_id)
 @router.get("/ai/chats/{chat_id}/operations", response_model=SchemiiAiOperationListResponse)

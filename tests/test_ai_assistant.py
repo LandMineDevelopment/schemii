@@ -114,6 +114,9 @@ def test_preferences_save_defaults_and_chat_policy_as_one_change() -> None:
 
 
 class ReplayConsole:
+    def settings(self, owner):
+        return SimpleNamespace(revision=2)
+
     def __init__(self) -> None:
         self.reserve_calls = []
 
@@ -338,14 +341,14 @@ def test_tool_availability_and_authority_manifest_follow_current_policy() -> Non
     assert tools["schemii_open_console"] is False
     assert tools["bash"] is False
     assert authority["policyRevision"] == 7
-    assert authority["assistantCanApproveOrApply"] is False
+    assert authority["assistantCanSelfApprove"] is False
     assert authority["capabilities"]["design_changes"] == {
         "enabled": True,
-        "permissionLabel": "Propose design changes",
+        "permissionLabel": "Edit workspace design",
     }
     assert {
         "tool": "schemii_read_query",
-        "requiredPermission": "Prepare read queries",
+        "requiredPermission": "Run read SQL",
     } in authority["disabledTools"]
     assert authority["contextSources"]["liveCatalog"] == {
         "enabled": True,
@@ -402,13 +405,14 @@ def test_turn_activity_reports_real_orchestration_stages() -> None:
             assert prompt == "Explain this design"
             context = json.loads(system.split("\nCONTEXT ", 1)[1])
             assert context["authority"]["policyRevision"] == chat.revision
-            assert context["authority"]["assistantCanApproveOrApply"] is False
+            assert context["authority"]["assistantCanSelfApprove"] is False
             assert context["authority"]["contextSources"]["liveCatalog"] == {
                 "enabled": False,
                 "requiredPermission": "Inspect live catalog",
                 "location": "CONTEXT.liveCatalog",
             }
-            assert "do not substitute 'Prepare read queries'" in system
+            assert "'Inspect live catalog' permission" in system
+            assert "Batch related queries in one call" in system
             assert "schemii_design_change" not in {tool["name"] for tool in tools}
             assert "schemii_read_query" not in {tool["name"] for tool in tools}
             return PiReply("A formatted answer", ())
@@ -487,14 +491,29 @@ def test_permission_changes_take_effect_on_the_next_turn_and_denied_calls_are_tr
 
         def run(self, owner_id, turn_id, provider_id, model_id, system, prompt, tools, **kwargs):
             context = json.loads(system.split("\nCONTEXT ", 1)[1])
+            tool_results = [message for message in kwargs["messages"] if message["role"] == "toolResult"]
+            if tool_results:
+                result = json.loads(tool_results[-1]["content"][0]["text"])
+                if result.get("error"):
+                    assert "tables.create" in result["message"]
+                    assert "columns.create" in result["message"]
+                    return PiReply("No proposal was created. Enable table and column creation in Assistant settings.", ())
+                pytest.fail("Ask-mode design changes must pause before another inference request")
             self.turns.append((context["authority"], tools))
-            return PiReply("I approved and created the table.", (table_call,))
+            name, arguments = table_call
+            return PiReply("I approved and created the table.", (table_call,), {
+                "role": "assistant", "content": [{"type": "toolCall", "id": "call1",
+                                                    "name": name, "arguments": arguments}],
+                "timestamp": 0,
+            }, ("call1",))
 
         def delete_session(self, session_id):
             return None
 
+    from schemii.schemii.designs.models import SchemiiDesignContent
     design = SimpleNamespace(
         revision=0,
+        content=SchemiiDesignContent(),
         model_dump=lambda **_kwargs: {"revision": 0, "tables": []},
     )
     workspace = SimpleNamespace(
@@ -518,7 +537,7 @@ def test_permission_changes_take_effect_on_the_next_turn_and_denied_calls_are_tr
     assert repository.list_proposals(owner, chat.id) == []
     denied_reply = repository.list_messages(owner, chat.id, 100)[-1].text
     assert "No proposal was created" in denied_reply
-    assert "Propose design changes" in denied_reply
+    assert "table and column creation" in denied_reply
     assert "approved and created" not in denied_reply
 
     chat = repository.update_chat_policy(
@@ -538,6 +557,64 @@ def test_permission_changes_take_effect_on_the_next_turn_and_denied_calls_are_tr
     proposals = repository.list_proposals(owner, chat.id)
     assert len(proposals) == 1
     assert proposals[0].details["name"] == "audit_log"
+    assert proposals[0].status == "pending"
+    assert repository.get_turn(owner, chat.id, second_turn.id).status == "waiting_approval"
+    assert repository.get_chat(owner, chat.id).status == "waiting_approval"
+    assert repository.list_operations(owner, chat.id) == []
+
+
+def test_autonomous_design_turn_refreshes_real_context_and_continues_across_revisions():
+    from schemii.schemii.designs.models import SchemiiDesignContent, SchemiiDesignReplace
+    from schemii.schemii.designs.store import InMemoryDesignRepository
+
+    owner, workspace_id = "owner", "ws_" + "a" * 32
+    repository, designs = InMemoryAiRepository(), InMemoryDesignRepository()
+    initial = designs.replace(owner, workspace_id, SchemiiDesignReplace(
+        expected_design_revision=0, content=SchemiiDesignContent()))
+    workspace = SimpleNamespace(revision=1, connection_id=None, namespace=None,
+                                model_dump=lambda **_kwargs: {"id": workspace_id, "revision": 1})
+    chat = repository.create_chat(owner, workspace_id, "Autonomous design", "provider", "model",
+                                  AiCapabilities(design_changes=True, design_approval_required=False))
+    turn, _ = repository.create_turn(owner, chat.id, "Add audit_log and then rename it audit_events", None, 4, 2, 100)
+
+    class Runtime(AvailableRuntime):
+        contexts = []
+
+        def run(self, _owner, _turn, _provider, _model, system, _prompt, _tools, **kwargs):
+            assert kwargs["is_authorized"]()
+            context = json.loads(system.split("\nCONTEXT ", 1)[1])
+            self.contexts.append(context)
+            tables = context["design"]["content"]["tables"]
+            if not tables:
+                action = {"type": "add_table", "name": "audit_log",
+                          "columns": [{"name": "id", "data_type": "bigint"}]}
+            elif tables[0]["name"] == "audit_log":
+                assert context["design"]["revision"] == initial.revision + 1
+                action = {"type": "rename_table", "table_id": tables[0]["id"], "name": "audit_events"}
+            else:
+                assert tables[0]["name"] == "audit_events"
+                assert context["design"]["revision"] == initial.revision + 2
+                results = [json.loads(item["content"][0]["text"]) for item in kwargs["messages"]
+                           if item["role"] == "toolResult"]
+                assert len(results) == 2
+                assert all(item["status"] == "succeeded" and item["kind"] == "design_change" for item in results)
+                return PiReply("Saved audit_events in the design; PostgreSQL was not changed.", ())
+            arguments = {"summary": "Update audit table", "action": action}
+            call_id = "call" + str(len(self.contexts))
+            return PiReply("", (("schemii_design_change", arguments),), {
+                "role": "assistant", "content": [{"type": "toolCall", "id": call_id,
+                 "name": "schemii_design_change", "arguments": arguments}], "timestamp": 0}, (call_id,))
+
+    runtime = Runtime()
+    service = AiService(repository, runtime, SimpleNamespace(admin_config=AdminConfig(), designs=designs,
+                        workspaces=SimpleNamespace(get=lambda *_args: workspace)))
+    service.run_turn(owner, chat.id, turn.id)
+    assert repository.get_turn(owner, chat.id, turn.id).status == "succeeded"
+    assert repository.get_chat(owner, chat.id).status == "idle"
+    assert len(runtime.contexts) == 3
+    assert designs.get(owner, workspace_id).content.tables[0].name == "audit_events"
+    assert len(repository.list_operations(owner, chat.id)) == 2
+    assert "PostgreSQL was not changed" in repository.list_messages(owner, chat.id, 100)[-1].text
 
 
 def test_permission_change_during_model_work_discards_reply_and_tool_calls() -> None:
@@ -596,9 +673,11 @@ def test_permission_change_during_model_work_discards_reply_and_tool_calls() -> 
     AiService(repository, Runtime(), services).run_turn(owner, chat.id, turn.id)
 
     assert repository.list_proposals(owner, chat.id) == []
-    response = repository.list_messages(owner, chat.id, 100)[-1].text
-    assert "permissions changed while I was working" in response
-    assert "created it" not in response
+    failed = repository.get_turn(owner, chat.id, turn.id)
+    assert failed.status == "failed"
+    assert failed.error_code == "permission_changed"
+    assert all(message.role == "user" for message in repository.list_messages(owner, chat.id, 100))
+    assert "created it" not in " ".join(message.text for message in repository.list_messages(owner, chat.id, 100))
 
 
 def test_row_backed_assistant_answer_is_transient_and_never_saved_as_message() -> None:

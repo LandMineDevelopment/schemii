@@ -1,11 +1,14 @@
 """Cross-cutting response safety for the shared API."""
 
 import logging
+import base64
+import hashlib
 import secrets
 import time
 
 from fastapi import FastAPI, Request, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from schemii.common.frontend import COMMON_IMPORT_MAP
 
 from .observability import (
     REQUEST_ID_PATTERN,
@@ -16,7 +19,8 @@ from .observability import (
 
 
 LOCAL_PROTOTYPE_HOSTS = ("127.0.0.1", "localhost")
-FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map", "/ai-prototype"))
+FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map", "/ai-prototype", "/schemoo"))
+IMPORT_MAP_DIGEST = base64.b64encode(hashlib.sha256(COMMON_IMPORT_MAP.encode()).digest()).decode()
 
 
 FRONTEND_CONTENT_SECURITY_POLICY = "; ".join(
@@ -29,7 +33,7 @@ FRONTEND_CONTENT_SECURITY_POLICY = "; ".join(
         "frame-ancestors 'none'",
         "img-src 'self' data:",
         "object-src 'none'",
-        "script-src 'self'",
+        f"script-src 'self' 'sha256-{IMPORT_MAP_DIGEST}'",
         "style-src 'self' 'unsafe-inline'",
     )
 )
@@ -73,7 +77,7 @@ def install_api_middleware(application: FastAPI) -> None:
             )
             raise
         path = request.url.path
-        if path.startswith("/assets/"):
+        if path.startswith(("/assets/", "/schemoo-assets/")):
             response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
         elif path in FRONTEND_DOCUMENT_PATHS:
             response.headers["Cache-Control"] = "no-cache"
@@ -85,7 +89,7 @@ def install_api_middleware(application: FastAPI) -> None:
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        if path in FRONTEND_DOCUMENT_PATHS or path.startswith("/assets/"):
+        if path in FRONTEND_DOCUMENT_PATHS or path.startswith(("/assets/", "/schemoo-assets/")):
             response.headers["Content-Security-Policy"] = FRONTEND_CONTENT_SECURITY_POLICY
         response.headers["X-Request-ID"] = request_id
         emit_event(

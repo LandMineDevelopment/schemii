@@ -20,6 +20,7 @@ from .models import (
     SchemiiChat,
     SchemiiMessage,
     SchemiiProposal,
+    SchemiiReadRun,
     SchemiiTurn,
 )
 
@@ -77,6 +78,13 @@ class AiRepository(Protocol):
     def create_turn(self, owner_id: str, chat_id: str, text: str, result_context_operation_id: str | None, maximum_total: int, maximum_per_owner: int, history_limit: int) -> tuple[SchemiiTurn, SchemiiMessage]: ...
     def get_turn(self, owner_id: str, chat_id: str, turn_id: str) -> SchemiiTurn: ...
     def claim_turn(self, owner_id: str, chat_id: str, turn_id: str) -> SchemiiTurn | None: ...
+    def pause_turn(self, owner_id: str, chat_id: str, turn_id: str) -> SchemiiTurn: ...
+    def resume_turn(self, owner_id: str, chat_id: str, turn_id: str) -> SchemiiTurn | None: ...
+    def save_continuation(self, owner_id: str, chat_id: str, turn_id: str, state: dict[str, Any]) -> None: ...
+    def continuation(self, owner_id: str, chat_id: str, turn_id: str) -> dict[str, Any] | None: ...
+    def create_read_run(self, owner_id: str, chat_id: str, turn_id: str, operation_id: str, sql: str, label: str, execution_id: str, result_id: str, row_count: int | None, has_more: bool, rerun_of: str | None = None) -> SchemiiReadRun: ...
+    def list_read_runs(self, owner_id: str, chat_id: str, limit: int = 50) -> list[SchemiiReadRun]: ...
+    def get_read_run(self, owner_id: str, chat_id: str, run_id: str) -> SchemiiReadRun: ...
     def finish_turn(self, owner_id: str, chat_id: str, turn_id: str, text: str, *, rerun: bool = False, history_limit: int = 200) -> SchemiiTurn: ...
     def fail_turn(self, owner_id: str, chat_id: str, turn_id: str, code: str, message: str) -> SchemiiTurn: ...
     def cancel_turn(self, owner_id: str, chat_id: str, turn_id: str) -> tuple[SchemiiTurn, str | None]: ...
@@ -89,7 +97,7 @@ class AiRepository(Protocol):
     def claim_proposal(self, owner_id: str, chat_id: str, proposal_id: str, revision: int, digest: str, now: datetime) -> tuple[SchemiiProposal, dict[str, Any]]: ...
     def dismiss_proposal(self, owner_id: str, chat_id: str, proposal_id: str) -> SchemiiProposal: ...
     def create_operation(self, owner_id: str, chat_id: str, proposal_id: str, kind: str) -> SchemiiAiOperation: ...
-    def begin_operation(self, owner_id: str, chat_id: str, proposal_id: str, proposal_revision: int, digest: str, chat_revision: int, capability: str, now: datetime) -> tuple[SchemiiAiOperation, SchemiiProposal, dict[str, Any]]: ...
+    def begin_operation(self, owner_id: str, chat_id: str, proposal_id: str, proposal_revision: int, digest: str, chat_revision: int, capability: str, now: datetime, *, required_actions=None) -> tuple[SchemiiAiOperation, SchemiiProposal, dict[str, Any]]: ...
     def finish_operation(self, owner_id: str, chat_id: str, operation_id: str, *, status: str, resource_kind: str | None = None, resource_id: str | None = None, result_summary: dict[str, Any] | None = None, error_code: str | None = None, error_message: str | None = None) -> SchemiiAiOperation: ...
     def get_operation(self, owner_id: str, chat_id: str, operation_id: str) -> SchemiiAiOperation: ...
     def list_operations(self, owner_id: str, chat_id: str) -> list[SchemiiAiOperation]: ...
@@ -114,6 +122,8 @@ class InMemoryAiRepository:
         self._events: dict[str, list[SchemiiActivityEvent]] = {}
         self._proposals: dict[str, tuple[str, SchemiiProposal, dict[str, Any]]] = {}
         self._operations: dict[str, tuple[str, SchemiiAiOperation]] = {}
+        self._continuations: dict[str, dict[str, Any]] = {}
+        self._read_runs: dict[str, SchemiiReadRun] = {}
 
     def settings(self, owner_id: str) -> SchemiiAiSettings:
         with self._lock:
@@ -237,6 +247,8 @@ class InMemoryAiRepository:
             for turn_id, (_, turn) in list(self._turns.items()):
                 if turn.chat_id == chat_id:
                     self._turns.pop(turn_id, None)
+                    self._continuations.pop(turn_id, None)
+            self._read_runs = {key: run for key, run in self._read_runs.items() if run.chat_id != chat_id}
             for proposal_id, (_, proposal, _) in list(self._proposals.items()):
                 if proposal.chat_id == chat_id:
                     self._proposals.pop(proposal_id, None)
@@ -263,6 +275,8 @@ class InMemoryAiRepository:
     def create_turn(self, owner_id, chat_id, text, result_context_operation_id, maximum_total, maximum_per_owner, history_limit):
         with self._lock:
             chat = self.get_chat(owner_id, chat_id)
+            if chat.status == "waiting_approval":
+                raise AiConflictError("Approve or dismiss the pending read before sending another message")
             active = [(owner, turn) for owner, turn in self._turns.values() if turn.status in {"queued", "running"}]
             owner_active = sum(owner == owner_id for owner, _ in active)
             if len(active) >= maximum_total:
@@ -291,6 +305,69 @@ class InMemoryAiRepository:
             if turn.status != "queued": return None
             turn = turn.model_copy(update={"status": "running", "started_at": _now()}); self._turns[turn_id] = (owner_id, turn); return turn
 
+    def pause_turn(self, owner_id, chat_id, turn_id):
+        with self._lock:
+            turn = self.get_turn(owner_id, chat_id, turn_id)
+            if turn.status != "running":
+                raise AiConflictError("Turn is no longer running")
+            turn = turn.model_copy(update={"status": "waiting_approval"})
+            self._turns[turn_id] = (owner_id, turn)
+            self.set_chat_runtime(owner_id, chat_id, status="waiting_approval")
+            return turn.model_copy(deep=True)
+
+    def resume_turn(self, owner_id, chat_id, turn_id):
+        with self._lock:
+            turn = self.get_turn(owner_id, chat_id, turn_id)
+            if turn.status != "waiting_approval":
+                return None
+            if any(other.chat_id == chat_id and other.id != turn_id and other.status in {"queued", "running", "waiting_approval"} for _, other in self._turns.values()):
+                return None
+            active = [(owner, other) for owner, other in self._turns.values() if other.status in {"queued", "running"}]
+            if len(active) >= self._policy.maximum_concurrent_turns:
+                raise AiCapacityError("Assistant turn capacity is currently full; retry continuing this request", configured_limit=self._policy.maximum_concurrent_turns, observed_value=len(active))
+            owner_active = sum(owner == owner_id for owner, _ in active)
+            if owner_active >= self._policy.maximum_concurrent_turns_per_user:
+                raise AiCapacityError("Your assistant turn capacity is currently full; retry continuing this request", limit_name="maximum_concurrent_turns_per_user", configured_limit=self._policy.maximum_concurrent_turns_per_user, observed_value=owner_active)
+            turn = turn.model_copy(update={"status": "queued"})
+            self._turns[turn_id] = (owner_id, turn)
+            self.set_chat_runtime(owner_id, chat_id, status="working")
+            return turn.model_copy(deep=True)
+
+    def save_continuation(self, owner_id, chat_id, turn_id, state):
+        _require_row_free_metadata(state)
+        with self._lock:
+            self.get_turn(owner_id, chat_id, turn_id)
+            self._continuations[turn_id] = copy.deepcopy(state)
+
+    def continuation(self, owner_id, chat_id, turn_id):
+        with self._lock:
+            self.get_turn(owner_id, chat_id, turn_id)
+            return copy.deepcopy(self._continuations.get(turn_id))
+
+    def create_read_run(self, owner_id, chat_id, turn_id, operation_id, sql, label, execution_id, result_id, row_count, has_more, rerun_of=None):
+        with self._lock:
+            self.get_turn(owner_id, chat_id, turn_id)
+            self.get_operation(owner_id, chat_id, operation_id)
+            if rerun_of is not None:
+                self.get_read_run(owner_id, chat_id, rerun_of)
+            run = SchemiiReadRun(id=f"arr_{secrets.token_hex(16)}", chat_id=chat_id, turn_id=turn_id, operation_id=operation_id, sql=sql, label=label, execution_id=execution_id, result_id=result_id, row_count=row_count, has_more=has_more, executed_at=_now(), rerun_of=rerun_of)
+            self._read_runs[run.id] = run
+            return run.model_copy(deep=True)
+
+    def list_read_runs(self, owner_id, chat_id, limit=50):
+        with self._lock:
+            self.get_chat(owner_id, chat_id)
+            runs = sorted((run for run in self._read_runs.values() if run.chat_id == chat_id), key=lambda run: run.executed_at, reverse=True)
+            return [run.model_copy(deep=True) for run in runs[:max(0, limit)]]
+
+    def get_read_run(self, owner_id, chat_id, run_id):
+        with self._lock:
+            self.get_chat(owner_id, chat_id)
+            run = self._read_runs.get(run_id)
+            if run is None or run.chat_id != chat_id:
+                raise AiNotFoundError("Read run was not found")
+            return run.model_copy(deep=True)
+
     def finish_turn(self, owner_id, chat_id, turn_id, text, *, rerun=False, history_limit=200):
         with self._lock:
             if self.get_turn(owner_id, chat_id, turn_id).status not in {"queued", "running"}:
@@ -312,7 +389,7 @@ class InMemoryAiRepository:
     def cancel_turn(self, owner_id, chat_id, turn_id):
         with self._lock:
             turn = self.get_turn(owner_id, chat_id, turn_id)
-            if turn.status not in {"queued", "running"}:
+            if turn.status not in {"queued", "running", "waiting_approval"}:
                 raise AiConflictError("Turn is no longer active")
             cancelled = turn.model_copy(update={"status": "cancelled", "completed_at": _now()})
             self._turns[turn_id] = (owner_id, cancelled)
@@ -392,7 +469,7 @@ class InMemoryAiRepository:
         with self._lock: self._operations[operation.id] = (owner_id, operation)
         return operation
 
-    def begin_operation(self, owner_id, chat_id, proposal_id, proposal_revision, digest, chat_revision, capability, now):
+    def begin_operation(self, owner_id, chat_id, proposal_id, proposal_revision, digest, chat_revision, capability, now, *, required_actions=None):
         with self._lock:
             chat = self.get_chat(owner_id, chat_id)
             if chat.revision != chat_revision:
@@ -401,6 +478,12 @@ class InMemoryAiRepository:
                 raise AiConflictError(
                     f"This proposal requires the {capability.replace('_', ' ')} permission"
                 )
+            from .action_policy import action_modes, required_action_ids
+            pending = self.get_proposal(owner_id, chat_id, proposal_id)
+            pending_action = self._proposals[proposal_id][2]
+            required = required_actions if required_actions is not None else required_action_ids(pending.action_type, pending_action)
+            if any(action_modes(chat.capabilities).get(key, "disabled") == "disabled" for key in required):
+                raise AiConflictError("A required action permission is disabled; review Assistant permissions")
             proposal, action = self.claim_proposal(
                 owner_id, chat_id, proposal_id, proposal_revision, digest, now
             )
@@ -490,15 +573,24 @@ class InMemoryAiRepository:
         removed_turns = {message.turn_id for message in removed if message.turn_id} - retained_turns
         for turn_id in removed_turns:
             turn = self._turns.get(turn_id)
-            if turn is None or turn[1].status in {"queued", "running"}:
+            if turn is None or turn[1].status in {"queued", "running", "waiting_approval"}:
                 continue
             self._turns.pop(turn_id, None)
+            self._continuations.pop(turn_id, None)
+            self._read_runs = {key: run for key, run in self._read_runs.items() if run.turn_id != turn_id}
+            for key, run in self._read_runs.items():
+                if run.rerun_of and run.rerun_of not in self._read_runs:
+                    self._read_runs[key] = run.model_copy(update={"rerun_of": None})
             proposal_ids = [proposal_id for proposal_id, (_, proposal, _) in self._proposals.items() if proposal.turn_id == turn_id]
             for proposal_id in proposal_ids:
                 self._proposals.pop(proposal_id, None)
                 for operation_id, (_, operation) in list(self._operations.items()):
                     if operation.proposal_id == proposal_id:
                         self._operations.pop(operation_id, None)
+                        self._read_runs = {key: run for key, run in self._read_runs.items() if run.operation_id != operation_id}
+        for key, run in self._read_runs.items():
+            if run.rerun_of and run.rerun_of not in self._read_runs:
+                self._read_runs[key] = run.model_copy(update={"rerun_of": None})
 
 
 class PostgresAiRepository:
@@ -669,14 +761,17 @@ class PostgresAiRepository:
     def create_turn(self, owner_id, chat_id, text, result_context_operation_id, maximum_total, maximum_per_owner, history_limit):
         turn_id=f"turn_{secrets.token_hex(16)}"; message_id=f"msg_{secrets.token_hex(16)}"; now=_now()
         with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('ai-turn-capacity', 0))")
             cursor.execute("SELECT * FROM schemii.ai_chats WHERE owner_id=%s AND id=%s AND status<>'deleted' FOR UPDATE",(owner_id,chat_id)); chat=cursor.fetchone()
             if chat is None: raise AiNotFoundError("Chat was not found")
+            if chat["status"] == "waiting_approval":
+                raise AiConflictError("Approve or dismiss the pending read before sending another message")
             cursor.execute("SELECT count(*) AS total, count(*) FILTER (WHERE owner_id=%s) AS owner_total FROM schemii.ai_turns WHERE status IN ('queued','running')",(owner_id,)); counts=cursor.fetchone()
             if counts["total"] >= maximum_total:
                 raise AiCapacityError("Assistant turn capacity is currently full", configured_limit=maximum_total, observed_value=counts["total"])
             if counts["owner_total"] >= maximum_per_owner:
                 raise AiCapacityError("Your assistant turn capacity is currently full", limit_name="maximum_concurrent_turns_per_user", configured_limit=maximum_per_owner, observed_value=counts["owner_total"])
-            cursor.execute("SELECT 1 FROM schemii.ai_turns WHERE chat_id=%s AND status IN ('queued','running')",(chat_id,))
+            cursor.execute("SELECT 1 FROM schemii.ai_turns WHERE chat_id=%s AND status IN ('queued','running','waiting_approval')",(chat_id,))
             if cursor.fetchone(): raise AiConflictError("This chat already has an active turn")
             cursor.execute("INSERT INTO schemii.ai_turns (id,chat_id,owner_id,status,result_context_operation_id) VALUES (%s,%s,%s,'queued',%s) RETURNING *",(turn_id,chat_id,owner_id,result_context_operation_id)); turn=self._turn(cursor.fetchone())
             cursor.execute("SELECT COALESCE(max(sequence),0)+1 AS next FROM schemii.ai_messages WHERE chat_id=%s",(chat_id,)); sequence=cursor.fetchone()["next"]
@@ -693,6 +788,82 @@ class PostgresAiRepository:
     def claim_turn(self, owner_id, chat_id, turn_id):
         with self._transaction() as connection, connection.cursor() as cursor:
             cursor.execute("UPDATE schemii.ai_turns SET status='running',started_at=clock_timestamp() WHERE owner_id=%s AND chat_id=%s AND id=%s AND status='queued' RETURNING *",(owner_id,chat_id,turn_id)); row=cursor.fetchone(); return self._turn(row) if row else None
+
+    def pause_turn(self, owner_id, chat_id, turn_id):
+        with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM schemii.ai_chats WHERE owner_id=%s AND id=%s AND status<>'deleted' FOR UPDATE", (owner_id, chat_id))
+            if cursor.fetchone() is None:
+                raise AiNotFoundError("Chat was not found")
+            cursor.execute("UPDATE schemii.ai_turns SET status='waiting_approval' WHERE owner_id=%s AND chat_id=%s AND id=%s AND status='running' RETURNING *", (owner_id, chat_id, turn_id))
+            row = cursor.fetchone()
+            if row is None:
+                raise AiConflictError("Turn is no longer running")
+            cursor.execute("UPDATE schemii.ai_chats SET status='waiting_approval',updated_at=clock_timestamp() WHERE id=%s", (chat_id,))
+            return self._turn(row)
+
+    def resume_turn(self, owner_id, chat_id, turn_id):
+        with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended('ai-turn-capacity', 0))")
+            cursor.execute("SELECT id FROM schemii.ai_chats WHERE owner_id=%s AND id=%s AND status<>'deleted' FOR UPDATE", (owner_id, chat_id))
+            if cursor.fetchone() is None:
+                raise AiNotFoundError("Chat was not found")
+            cursor.execute("SELECT 1 FROM schemii.ai_turns WHERE chat_id=%s AND id<>%s AND status IN ('queued','running','waiting_approval')", (chat_id, turn_id))
+            if cursor.fetchone():
+                return None
+            cursor.execute("SELECT status FROM schemii.ai_turns WHERE owner_id=%s AND chat_id=%s AND id=%s", (owner_id, chat_id, turn_id))
+            turn = cursor.fetchone()
+            if turn is None or turn["status"] != "waiting_approval":
+                return None
+            cursor.execute("SELECT count(*) AS total, count(*) FILTER (WHERE owner_id=%s) AS owner_total FROM schemii.ai_turns WHERE status IN ('queued','running')", (owner_id,))
+            counts = cursor.fetchone()
+            if counts["total"] >= self._policy.maximum_concurrent_turns:
+                raise AiCapacityError("Assistant turn capacity is currently full; retry continuing this request", configured_limit=self._policy.maximum_concurrent_turns, observed_value=counts["total"])
+            if counts["owner_total"] >= self._policy.maximum_concurrent_turns_per_user:
+                raise AiCapacityError("Your assistant turn capacity is currently full; retry continuing this request", limit_name="maximum_concurrent_turns_per_user", configured_limit=self._policy.maximum_concurrent_turns_per_user, observed_value=counts["owner_total"])
+            cursor.execute("UPDATE schemii.ai_turns SET status='queued' WHERE owner_id=%s AND chat_id=%s AND id=%s AND status='waiting_approval' RETURNING *", (owner_id, chat_id, turn_id))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            cursor.execute("UPDATE schemii.ai_chats SET status='working',updated_at=clock_timestamp() WHERE id=%s", (chat_id,))
+            return self._turn(row)
+
+    def save_continuation(self, owner_id, chat_id, turn_id, state):
+        _require_row_free_metadata(state)
+        with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("INSERT INTO schemii.ai_turn_continuations(turn_id,state) SELECT turn.id,%s::jsonb FROM schemii.ai_turns turn JOIN schemii.ai_chats chat ON chat.id=turn.chat_id WHERE turn.owner_id=%s AND turn.chat_id=%s AND turn.id=%s AND chat.status<>'deleted' ON CONFLICT(turn_id) DO UPDATE SET state=EXCLUDED.state,updated_at=clock_timestamp() RETURNING turn_id", (json.dumps(state), owner_id, chat_id, turn_id))
+            if cursor.fetchone() is None:
+                raise AiNotFoundError("Turn was not found")
+
+    def continuation(self, owner_id, chat_id, turn_id):
+        self.get_turn(owner_id, chat_id, turn_id)
+        with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT state FROM schemii.ai_turn_continuations WHERE turn_id=%s", (turn_id,))
+            row = cursor.fetchone()
+            return row["state"] if row else None
+
+    def create_read_run(self, owner_id, chat_id, turn_id, operation_id, sql, label, execution_id, result_id, row_count, has_more, rerun_of=None):
+        self.get_turn(owner_id, chat_id, turn_id)
+        self.get_operation(owner_id, chat_id, operation_id)
+        if rerun_of is not None:
+            self.get_read_run(owner_id, chat_id, rerun_of)
+        with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("INSERT INTO schemii.ai_read_runs(id,chat_id,turn_id,operation_id,sql,label,execution_id,result_id,row_count,has_more,rerun_of) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *", (f"arr_{secrets.token_hex(16)}", chat_id, turn_id, operation_id, sql, label, execution_id, result_id, row_count, has_more, rerun_of))
+            return SchemiiReadRun.model_validate(cursor.fetchone())
+
+    def list_read_runs(self, owner_id, chat_id, limit=50):
+        self.get_chat(owner_id, chat_id)
+        with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM schemii.ai_read_runs WHERE chat_id=%s ORDER BY executed_at DESC,id DESC LIMIT %s", (chat_id, max(0, limit)))
+            return [SchemiiReadRun.model_validate(row) for row in cursor.fetchall()]
+
+    def get_read_run(self, owner_id, chat_id, run_id):
+        self.get_chat(owner_id, chat_id)
+        with self._transaction() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM schemii.ai_read_runs WHERE chat_id=%s AND id=%s", (chat_id, run_id))
+            row = cursor.fetchone()
+            if row is None:
+                raise AiNotFoundError("Read run was not found")
+            return SchemiiReadRun.model_validate(row)
 
     def finish_turn(self, owner_id, chat_id, turn_id, text, *, rerun=False, history_limit=200):
         with self._transaction() as connection, connection.cursor() as cursor:
@@ -719,7 +890,7 @@ class PostgresAiRepository:
             if chat is None:
                 raise AiNotFoundError("Chat was not found")
             cursor.execute(
-                "UPDATE schemii.ai_turns SET status='cancelled',completed_at=clock_timestamp() WHERE owner_id=%s AND chat_id=%s AND id=%s AND status IN ('queued','running') RETURNING *",
+                "UPDATE schemii.ai_turns SET status='cancelled',completed_at=clock_timestamp() WHERE owner_id=%s AND chat_id=%s AND id=%s AND status IN ('queued','running','waiting_approval') RETURNING *",
                 (owner_id, chat_id, turn_id),
             )
             row = cursor.fetchone()
@@ -751,7 +922,7 @@ class PostgresAiRepository:
             )
             DELETE FROM schemii.ai_turns turn
             WHERE turn.chat_id=%s
-              AND turn.status NOT IN ('queued','running')
+              AND turn.status NOT IN ('queued','running','waiting_approval')
               AND turn.id IN (SELECT turn_id FROM old_turns)
             """,
             (chat_id, limit, chat_id, chat_id),
@@ -831,15 +1002,10 @@ class PostgresAiRepository:
         with self._transaction() as connection, connection.cursor() as cursor:
             cursor.execute("INSERT INTO schemii.ai_operations (id,proposal_id,chat_id,owner_id,kind,status) VALUES (%s,%s,%s,%s,%s,'running') RETURNING *",(operation_id,proposal_id,chat_id,owner_id,kind)); return self._operation(cursor.fetchone())
 
-    def begin_operation(self, owner_id, chat_id, proposal_id, proposal_revision, digest, chat_revision, capability, now):
+    def begin_operation(self, owner_id, chat_id, proposal_id, proposal_revision, digest, chat_revision, capability, now, *, required_actions=None):
         operation_id = f"aop_{secrets.token_hex(16)}"
-        capability_key = {
-            "design_changes": "designChanges",
-            "live_catalog": "liveCatalog",
-            "structured_data_read": "structuredDataRead",
-            "raw_sql_read": "rawSqlRead",
-            "raw_sql_write": "rawSqlWrite",
-        }.get(capability)
+        field = AiCapabilities.model_fields.get(capability)
+        capability_key = field.serialization_alias or field.alias if field else None
         if capability_key is None:
             raise AiConflictError("Proposal requires an unknown permission")
         with self._transaction() as connection, connection.cursor() as cursor:
@@ -851,7 +1017,7 @@ class PostgresAiRepository:
             if (
                 chat is None
                 or chat["revision"] != chat_revision
-                or not bool(chat["capabilities"].get(capability_key, False))
+                or not getattr(AiCapabilities.model_validate(chat["capabilities"]), capability, False)
             ):
                 raise AiConflictError(
                     "Conversation permissions changed or the proposal's required permission is no longer enabled"
@@ -879,6 +1045,11 @@ class PostgresAiRepository:
                 raise AiConflictError(
                     "Proposal changed, expired, was already used, or its required permission is no longer enabled"
                 )
+            from .action_policy import action_modes, required_action_ids
+            required = required_actions if required_actions is not None else required_action_ids(proposal_row["action_type"], proposal_row["action"])
+            modes = action_modes(AiCapabilities.model_validate(chat["capabilities"]))
+            if any(modes.get(key, "disabled") == "disabled" for key in required):
+                raise AiConflictError("A required action permission is disabled; review Assistant permissions")
             cursor.execute(
                 "INSERT INTO schemii.ai_operations (id,proposal_id,chat_id,owner_id,kind,status) VALUES (%s,%s,%s,%s,%s,'running') RETURNING *",
                 (operation_id, proposal_id, chat_id, owner_id, proposal_row["action_type"]),

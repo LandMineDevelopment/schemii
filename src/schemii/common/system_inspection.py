@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import textwrap
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -123,7 +124,16 @@ class RuntimeBindingIndex:
         self.truncated = False
         self._seen: set[int] = set()
         self._binding_keys: set[tuple[str, str, tuple[str, ...]]] = set()
+        self._source_trees: dict[object, ast.AST | None] = {}
         self._visit(services, path="services", depth=0)
+
+    def _source_tree(self, subject: object) -> ast.AST | None:
+        if subject not in self._source_trees:
+            try:
+                self._source_trees[subject] = ast.parse(textwrap.dedent(inspect.getsource(subject)))
+            except (OSError, TypeError, SyntaxError):
+                self._source_trees[subject] = None
+        return self._source_trees[subject]
 
     def _annotations(self, owner_type: type[object]) -> dict[str, object]:
         annotations = _type_hints(owner_type)
@@ -335,6 +345,27 @@ class RuntimeBindingIndex:
                 callable_subject=callable_subject,
             ).subject
             if provider is not None:
+                if inspect.isclass(provider):
+                    method = getattr(provider, node.attr, None)
+                    if method is not None:
+                        return ResolvedCall(method, "constructed-instance")
+                # Helpers may return a locally named runtime service without a
+                # product type annotation. Follow only a single unambiguous
+                # assignment; never execute the provider to discover its type.
+                provider_tree = self._source_tree(provider)
+                if provider_tree is not None:
+                    returned = [item.value for item in ast.walk(provider_tree) if isinstance(item, ast.Return)]
+                    if len(returned) == 1:
+                        value = returned[0]
+                        if isinstance(value, ast.Name):
+                            assignments = [item.value for item in ast.walk(provider_tree)
+                                if isinstance(item, ast.Assign) and any(isinstance(target, ast.Name) and target.id == value.id for target in item.targets)]
+                            value = assignments[0] if len(assignments) == 1 else None
+                        parts = attribute_parts(value) if value is not None else None
+                        if parts and "services" in parts:
+                            bound = self.resolve(ast.Attribute(value=value, attr=node.attr), callable_subject=provider)
+                            if bound.subject is not None:
+                                return ResolvedCall(bound.subject, "returned-runtime-service")
                 return_annotation = _type_hints(provider).get("return")
                 candidate_types = self.matching_types(return_annotation)
                 methods = [
@@ -366,6 +397,39 @@ class RuntimeBindingIndex:
                 return ResolvedCall(candidates[0], "unique-runtime-method")
 
         return ResolvedCall(None, "unresolved")
+
+    def resolve_all(self, node: ast.AST, *, callable_subject: object) -> tuple[ResolvedCall, ...]:
+        """Expand a loop over installed components into its actual implementations.
+
+        Method names alone are ambiguous once multiple products implement a
+        shared protocol. Match the receiver's enclosing loop/comprehension and
+        its bound runtime collection instead of selecting an arbitrary method.
+        """
+        subject = inspect.unwrap(callable_subject)
+        owner_type = self._owner_type(subject)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and owner_type is not None:
+            tree = self._source_tree(subject)
+            methods = []
+            if tree is not None:
+                for container in ast.walk(tree):
+                    if not isinstance(container, (ast.For, ast.AsyncFor, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                        continue
+                    if not (container.lineno <= getattr(node, "lineno", 0) <= container.end_lineno):
+                        continue
+                    loops = [container] if isinstance(container, (ast.For, ast.AsyncFor)) else container.generators
+                    for loop in loops:
+                        if not isinstance(loop.target, ast.Name) or loop.target.id != node.value.id:
+                            continue
+                        parts = attribute_parts(loop.iter)
+                        if not parts or len(parts) != 2 or parts[0] not in {"self", "cls"}:
+                            continue
+                        for candidate in self.field_types.get((owner_type, parts[1]), ()):
+                            method = getattr(candidate, node.attr, None)
+                            if method is not None and method not in methods:
+                                methods.append(method)
+            if methods:
+                return tuple(ResolvedCall(method, "runtime-iteration") for method in methods)
+        return (self.resolve(node, callable_subject=subject),)
 
     @staticmethod
     def _owner_type(subject: object) -> type[object] | None:
@@ -838,8 +902,12 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
         calls: list[dict[str, Any]] = []
         unresolved_calls: list[dict[str, Any]] = []
         calls_truncated = False
-        for site in direct_call_sites(subject):
-            resolved = runtime.resolve(site.node.func, callable_subject=subject)
+        resolved_sites = (
+            (site, resolved)
+            for site in direct_call_sites(subject)
+            for resolved in runtime.resolve_all(site.node.func, callable_subject=subject)
+        )
+        for site, resolved in resolved_sites:
             called = resolved.subject
             if called is None:
                 if runtime.is_material_unresolved_call(

@@ -106,6 +106,10 @@ export class TurnRunner {
       if (Buffer.byteLength(JSON.stringify(snapshot)) > policy.contextBytes) {
         throw new TurnError('context_too_large');
       }
+      if (!Array.isArray(snapshot.messages) || !snapshot.messages.length
+        || snapshot.messages.some(message => !message || !['user', 'assistant', 'toolResult'].includes(message.role))) {
+        throw new TurnError('invalid_request');
+      }
       const factory = Object.hasOwn(this.providerFactories, providerId) && this.providerFactories[providerId];
       if (!factory) throw new TurnError('model_unavailable');
       const store = this.vault.scope(owner, credentialId);
@@ -146,12 +150,22 @@ export class TurnRunner {
       // This callback represents the existing Schemii revision/permission check.
       // The real application still validates argument schemas and every apply.
       if (!await isAuthorized()) throw new TurnError('permission_changed');
-      const allowed = new Set((snapshot.tools ?? []).map(tool => tool.name));
       const toolCalls = reply.content.filter(part => part.type === 'toolCall');
-      if (toolCalls.some(call => !allowed.has(call.name))) throw new TurnError('tool_denied');
+      // Tool calls are untrusted inference output, never executable sidecar
+      // actions. Return even unadvertised names so the server's dispatcher can
+      // supply a permission-specific denial as a native tool result.
+      if (toolCalls.some(call => typeof call.id !== 'string' || !call.id
+        || typeof call.name !== 'string' || !call.name.trim()
+        || !call.arguments || typeof call.arguments !== 'object' || Array.isArray(call.arguments))
+        || new Set(toolCalls.map(call => call.id)).size !== toolCalls.length) {
+        throw new TurnError('provider_failed');
+      }
       return {
         text: reply.content.filter(part => part.type === 'text').map(part => part.text).join(''),
         toolCalls: toolCalls.map(({ id, name, arguments: args }) => ({ id, name, arguments: args })),
+        // Keep provider signatures and message metadata for the next inference
+        // step. This private payload is transient, never a public UI event.
+        assistantMessage: reply,
       };
     } catch (error) {
       // Do not attach causes: Pi/provider exceptions can contain OAuth tokens.

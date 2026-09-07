@@ -14,7 +14,8 @@ from schemii.schemii.ai.models import AiCapabilities
 from schemii.schemii.ai.repository import AiConflictError, InMemoryAiRepository
 from schemii.schemii.ai.routes import router
 from schemii.schemii.ai.service import AiService
-from schemii.schemii.ai.tools import DESIGN_ACTION, TOOL_CAPABILITIES, tool_definitions
+from schemii.schemii.ai.tools import DESIGN_ACTION, TOOL_CAPABILITIES, tool_definitions, tool_enabled
+from schemii.schemii.ai.action_policy import permission_descriptors
 
 
 def setup_flow(callback, capabilities=None):
@@ -99,15 +100,21 @@ def test_permission_callback_rejects_midstream_policy_change():
 
 def test_advertised_schema_is_derived_and_only_authorized_tools_are_present():
     assert tool_definitions(AiCapabilities()) == []
-    full = tool_definitions(AiCapabilities(design_changes=True, raw_sql_read=True, raw_sql_write=True))
+    full = tool_definitions(AiCapabilities(design_changes=True, raw_sql_read=True,
+                                          raw_sql_write=True, structured_data_read=True,
+                                          structured_query=True, design_history=True,
+                                          migration_apply=True, sql_write_execute=True))
     assert {tool["name"] for tool in full} == set(TOOL_CAPABILITIES)
     derived = DESIGN_ACTION.json_schema()
     design = next(tool for tool in full if tool["name"] == "schemii_design_change")["parameters"]
     assert design["$defs"] == derived.pop("$defs")
     assert design["properties"]["action"] == derived
-    for capability in set(TOOL_CAPABILITIES.values()):
-        names = {tool["name"] for tool in tool_definitions(AiCapabilities(**{capability: True}))}
-        assert names == {name for name, required in TOOL_CAPABILITIES.items() if required == capability}
+    for action in permission_descriptors():
+        capabilities = AiCapabilities(action_modes={action["id"]: "ask"})
+        names = {tool["name"] for tool in tool_definitions(capabilities)}
+        assert names == {name for name in TOOL_CAPABILITIES if tool_enabled(name, capabilities)}
+    review = {tool["name"] for tool in tool_definitions(AiCapabilities(action_modes={"migration.review": "automatic"}))}
+    assert review == {"schemii_review_migration", "schemii_get_migration_plan", "schemii_migration_status"}
 
 
 def test_repository_cancel_dismisses_pending_and_atomically_rejects_late_proposal():

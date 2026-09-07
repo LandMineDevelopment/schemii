@@ -331,7 +331,6 @@ services:
 volumes:
   schemii-test-postgres:
   schemii-test-demo-postgres:
-  schemii-test-opencode-data:
 
 networks:
   database:

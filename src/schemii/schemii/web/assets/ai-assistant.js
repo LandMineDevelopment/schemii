@@ -1,5 +1,6 @@
-import { requestJson } from "./api.js";
+import { requestJson } from "#common/http.js";
 import { createIconButton } from "./ui.js";
+import { PERMISSION_MODES, permissionMode, permissionValues, permissionSummary } from "./ai-permissions.js";
 
 const elements = {
   button: document.querySelector("#ai-assistant-button"),
@@ -23,6 +24,7 @@ const elements = {
   attachment: document.querySelector("#ai-assistant-attachment"),
   settingsDialog: document.querySelector("#ai-settings-dialog"),
   settingsForm: document.querySelector("#ai-settings-form"),
+  permissionActions: document.querySelector("#ai-permission-actions"),
   settingsModel: document.querySelector("#ai-settings-model"),
   settingsStatus: document.querySelector("#ai-settings-status"),
   providerList: document.querySelector("#ai-provider-list"),
@@ -36,13 +38,27 @@ const elements = {
   proposalConfirm: document.querySelector("#ai-proposal-confirm"),
 };
 
-const CAPABILITIES = Object.freeze([
-  "designChanges", "liveCatalog", "structuredDataRead", "rawSqlRead", "rawSqlWrite",
-]);
-
 let chat = null;
 let chats = [];
 let design = null;
+let designSavedHandler = null;
+const observedDesignOperations = new Map();
+
+async function refreshChangedDesign(chatId, operations) {
+  const completed = operations.filter(operation => operation.status === "succeeded" && ["design_change", "design_history", "migration_apply", "migration_resolve", "migration_reconcile"].includes(operation.kind)).map(operation => operation.id);
+  const previous = observedDesignOperations.get(chatId);
+  observedDesignOperations.set(chatId, new Set(completed));
+  if (previous && completed.some(id => !previous.has(id))) {
+    const workspace = chat.workspaceId;
+    await designSavedHandler?.(workspace);
+    const currentDesign = await requestJson(`/api/v1/schemii/workspaces/${workspace}/design`);
+    if (chat?.id === chatId) design = currentDesign;
+  }
+}
+
+export function setAssistantDesignSavedHandler(handler) {
+  designSavedHandler = handler;
+}
 let settings = null;
 let runtime = null;
 let models = [];
@@ -60,6 +76,7 @@ let providerLogin = null;
 let loginTimer = null;
 let streamingResponse = null;
 let pendingProposal = null;
+let pendingProposalBatch = null;
 let proposalArmTimer = null;
 let proposalReviewOpenedAt = 0;
 
@@ -116,26 +133,22 @@ function loadModelOptions(select, selectedProvider, selectedId) {
   }
 }
 
-function permissionSummary(capabilities = {}) {
-  const enabled = CAPABILITIES.filter(name => capabilities[name]);
-  if (!enabled.length) return "Explain only";
-  if (enabled.length === CAPABILITIES.length) return "All proposal tools";
-  return `${enabled.length} of ${CAPABILITIES.length} tools`;
-}
-
 function updateContextControls() {
   const provider = chat?.providerId || settings?.defaultProviderId;
   const model = chat?.modelId || settings?.defaultModelId;
   loadModelOptions(elements.model, provider, model);
-  elements.permissionsCopy.textContent = permissionSummary(chat?.capabilities || settings?.defaultCapabilities);
+  elements.permissionsCopy.textContent = permissionSummary(chat?.capabilities || settings?.defaultCapabilities, settings?.permissionActions || []);
   const working = chat?.status === "working";
   elements.model.disabled = !models.length || working;
   elements.newButton.disabled = !models.length || working;
-  elements.settingsButton.disabled = working;
-  elements.permissions.disabled = working;
-  elements.disclosure.textContent = chat
-    ? "This conversation uses the saved workspace design. Proposed actions always wait for your review."
-    : "Start a conversation using the saved workspace design. Proposed actions always wait for your review.";
+  elements.settingsButton.disabled = false;
+  elements.permissions.disabled = false;
+  elements.send.disabled = working || chat?.status === "waiting_approval";
+  const capabilities = chat?.capabilities || settings?.defaultCapabilities || {};
+  const automatic = (settings?.permissionActions || []).some(({ id }) => permissionMode(capabilities, id) === "automatic");
+  elements.disclosure.textContent = automatic
+    ? "Automatic actions are enabled. Other permitted actions wait for batch approval. Query rows are temporary."
+    : "Actions wait for your approval as a batch. Query rows are temporary.";
   const providerStatus = runtime?.providers?.find(item => item.id === provider);
   const privacyNotice = providerStatus?.privacy || providerStatus?.privacyNotice;
   if (privacyNotice) elements.disclosure.textContent += ` ${privacyNotice}`;
@@ -279,9 +292,11 @@ function renderTimeline(messages = timelineMessages, proposals = timelineProposa
     proposals.map(item => [item.id, item.turnId, item.revision, item.status]),
     operations.map(item => [item.id, item.proposalId, item.revision, item.status]),
     Boolean(chat?.capabilities?.structuredDataRead),
+    chat?.status,
   ]);
   if (nextSignature === timelineSignature) { placeActivity(); return; }
   const wasNearBottom = elements.body.scrollHeight - elements.body.scrollTop - elements.body.clientHeight < 80;
+  const loadedResults = new Map([...elements.messages.querySelectorAll("[data-operation-id]")].map(card => [card.dataset.operationId, card.querySelector(".ai-operation__result")]));
   timelineSignature = nextSignature;
 
   const groups = new Map();
@@ -310,13 +325,37 @@ function renderTimeline(messages = timelineMessages, proposals = timelineProposa
     const responseMessages = group.messages.filter(item => item.role !== "user").sort((a, b) => a.sequence - b.sequence);
     section.append(...userMessages.map(messageNode));
     const activitySlot = document.createElement("div"); activitySlot.className = "ai-turn__activity"; section.append(activitySlot);
-    section.append(...responseMessages.map(messageNode));
-    const actions = document.createElement("div"); actions.className = "ai-turn__actions";
-    actions.innerHTML = `${renderProposalCards(group.proposals)}${renderOperationCards(group.operations, group.proposals)}`;
-    if (actions.childElementCount) section.append(actions);
+    const pending = group.proposals.filter(item => item.status === "pending");
+    if (pending.length > 1) {
+      const batch = document.createElement("button"); batch.type = "button"; batch.className = "ui-button compact primary";
+      batch.dataset.reviewBatch = group.key; batch.textContent = `Review pending batch (${pending.length})`;
+      section.append(batch);
+    }
+    const entries = responseMessages.map(message => ({ createdAt: message.createdAt, node: messageNode(message) }));
+    for (const proposal of group.proposals.filter(item => item.status === "pending")) {
+      const actions = document.createElement("div"); actions.className = "ai-turn__actions";
+      actions.innerHTML = renderProposalCards([proposal]); entries.push({ createdAt: proposal.createdAt, node: actions });
+    }
+    for (const operation of group.operations) {
+      const actions = document.createElement("div"); actions.className = "ai-turn__actions";
+      actions.innerHTML = renderOperationCards([operation], group.proposals); entries.push({ createdAt: operation.createdAt, node: actions });
+    }
+    entries.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    section.append(...entries.map(entry => entry.node));
     return section;
   });
+  if (chat?.status === "waiting_approval" && !proposals.some(proposal => proposal.status === "pending")) {
+    const recovery = document.createElement("div"); recovery.className = "ai-operation";
+    const copy = document.createElement("p"); copy.textContent = "The action decision is saved. Continue to resume the answer.";
+    const button = document.createElement("button"); button.type = "button"; button.className = "ui-button compact primary"; button.dataset.continueTurn = ""; button.textContent = "Continue answer";
+    recovery.append(copy, button);
+    if (nodes.length) nodes.at(-1).append(recovery); else nodes.push(recovery);
+  }
   elements.messages.replaceChildren(...(nodes.length ? nodes : [emptyTranscript()]));
+  for (const card of elements.messages.querySelectorAll("[data-operation-id]")) {
+    const retained = loadedResults.get(card.dataset.operationId);
+    if (retained?.childNodes.length) card.querySelector(".ai-operation__result").replaceWith(retained);
+  }
   placeActivity();
   if (wasNearBottom || messages.length <= 2) requestAnimationFrame(() => { elements.body.scrollTop = elements.body.scrollHeight; });
 }
@@ -370,7 +409,7 @@ function renderActivity() {
   const details = document.createElement("details"); details.className = `ai-run ${activityRun.state}`; details.open = true;
   const summary = document.createElement("summary"); const title = document.createElement("strong"); title.className = "ai-run-title";
   const running = activityRun.state === "working";
-  title.textContent = running ? "Working with this workspace" : activityRun.state === "failed" ? "Turn failed" : activityRun.state === "cancelled" ? "Turn stopped" : "Response ready";
+  title.textContent = running ? "Working with this workspace" : activityRun.state === "waiting_approval" ? "Waiting for action approval" : activityRun.state === "failed" ? "Turn failed" : activityRun.state === "cancelled" ? "Turn stopped" : "Response ready";
   if (running) title.classList.add("shimmer");
   const elapsed = document.createElement("time"); elapsed.className = "ai-run-time"; elapsed.textContent = `${Math.max(0, Math.round((Date.now() - activityRun.startedAt) / 1000))}s`;
   summary.append(progressDots(), title, elapsed); details.append(summary);
@@ -399,12 +438,37 @@ function displayCell(value) {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
+const ACTION_PRESENTATION = {
+  console_script: { review: "Review draft", confirm: "Open Console", completed: "DRAFT READY", scope: "This prepares SQL in the Console. No SQL is executed and no database objects are changed." },
+  design_change: { review: "Review design changes", confirm: "Save to design", completed: "SAVED TO DESIGN", scope: "This saves the workspace design only. A separate migration review and approval are required to change the live database." },
+  migration_review: { review: "Review migration", confirm: "Prepare review", completed: "REVIEW READY", scope: "This prepares a migration review. It does not apply a migration or change the live database." },
+  data_read: { review: "Approve reads", confirm: "Approve reads", completed: "SUCCEEDED", scope: "" },
+  design_history: { review: "Review history change", confirm: "Change design history", completed: "DESIGN HISTORY UPDATED" },
+  migration_apply: { review: "Review migration", confirm: "Apply migration", completed: "APPLIED TO DATABASE" },
+  migration_resolve: { review: "Review conflict choices", confirm: "Resolve conflicts", completed: "CONFLICTS RESOLVED", scope: "This updates the workspace baseline and design with the choices below. A fresh migration review is required before changing PostgreSQL." },
+  migration_reconcile: { review: "Review outcome check", confirm: "Check migration outcome", completed: "OUTCOME CHECKED", scope: "This checks the recorded commit evidence for an uncertain migration. It does not rerun migration SQL. The result may still be uncertain." },
+  sql_write: { review: "Review SQL batch", confirm: "Execute and commit", completed: "COMMITTED TO DATABASE" },
+};
+
+function actionPresentation(kind) {
+  const contract = settings?.actionPolicies?.find(policy => policy.kind === kind);
+  return { ...(ACTION_PRESENTATION[kind] || {}), ...(contract || {}) };
+}
+
+function proposalWarning(kind) {
+  return kind === "migration_resolve"
+    ? "Pulling live changes may discard conflicting saved design edits; no live data is deleted."
+    : "This action can remove data or database objects. Review every target before applying it.";
+}
+
 function renderProposalCards(items) {
   return items.filter(item => item.status === "pending").map(proposal => `
     <article class="ai-proposal${proposal.destructive ? " destructive" : ""}" data-proposal-id="${escapeHtml(proposal.id)}">
       <small>PROPOSED ${escapeHtml(proposal.actionType.replaceAll("_", " "))}</small><strong>${escapeHtml(proposal.summary)}</strong>
-      ${proposal.destructive ? "<p class=\"ai-warning\">This proposal can remove data or database objects.</p>" : ""}
-      <footer><button class="ui-button compact" type="button" data-dismiss>Dismiss</button><button class="ui-button compact primary" type="button" data-apply>Review &amp; apply</button></footer>
+      ${proposal.destructive ? `<p class="ai-warning">${escapeHtml(proposalWarning(proposal.actionType))}</p>` : ""}
+      ${actionPresentation(proposal.actionType).scope ? `<p>${escapeHtml(actionPresentation(proposal.actionType).scope)}</p>` : ""}
+      ${proposal.actionType === "data_read" ? `<details class="ai-read-sql"><summary>Read queries</summary>${(proposal.details?.queries || [{ sql: proposal.details?.sql }]).map(query => `<pre><code>${escapeHtml(query.sql)}</code></pre>`).join("")}</details>` : ""}
+      <footer><button class="ui-button compact" type="button" data-dismiss>Dismiss</button><button class="ui-button compact primary" type="button" data-apply>${escapeHtml(actionPresentation(proposal.actionType).review || "Review action")}</button></footer>
     </article>`).join("");
 }
 
@@ -420,42 +484,88 @@ function proposalDetailsNode(proposal) {
   addMetadata("Action", proposal.actionType.replaceAll("_", " "));
   addMetadata("Required permission", proposal.capability.replaceAll("_", " "));
   wrapper.append(summary, metadata);
+  const scope = document.createElement("p"); scope.textContent = actionPresentation(proposal.actionType).scope || ""; wrapper.append(scope);
   if (proposal.destructive) {
     const warning = document.createElement("p"); warning.className = "ai-warning";
-    warning.textContent = "This action can remove data or database objects. Review every target before applying it."; wrapper.append(warning);
+    warning.textContent = proposalWarning(proposal.actionType); wrapper.append(warning);
   }
-  const action = proposal.details || {};
-  if (["data_read", "console_script"].includes(proposal.actionType) && action.sql) {
-    const label = document.createElement("small"); label.textContent = proposal.actionType === "data_read" ? "READ-ONLY SQL" : "SQL CONSOLE DRAFT";
-    const pre = document.createElement("pre"); const code = document.createElement("code"); code.textContent = action.sql; pre.append(code); wrapper.append(label, pre);
-  } else if (action.type === "add_table") {
-    const heading = document.createElement("small"); heading.textContent = `TABLE ${action.name}`; wrapper.append(heading);
-    const list = document.createElement("div"); list.className = "ai-proposal-review__columns";
-    for (const column of action.columns || []) {
-      const row = document.createElement("div");
-      const name = document.createElement("strong"); name.textContent = column.name;
-      const type = document.createElement("code"); type.textContent = column.data_type || column.dataType;
-      const state = document.createElement("span"); state.textContent = column.nullable === false ? "required" : "nullable";
-      row.append(name, type, state); list.append(row);
+  const actions = proposal.details?.type === "batch" ? proposal.details.actions || [] : [proposal.details || {}];
+  if (proposal.details?.type === "batch" && proposal.actionType === "design_change") {
+    const note = document.createElement("p"); note.textContent = `${actions.length} changes saved together in one design revision. If validation fails, none are saved.`; wrapper.append(note);
+  }
+  for (const [index, action] of actions.entries()) {
+    if (actions.length > 1) {
+      const heading = document.createElement("h4"); heading.textContent = `${index + 1}. ${String(action.type || "Change").replaceAll("_", " ")}`; wrapper.append(heading);
     }
-    wrapper.append(list);
-    if (action.keys?.length) {
-      const keys = document.createElement("p"); keys.className = "ai-proposal-review__keys";
-      keys.textContent = action.keys.map(key => `${key.kind}: ${key.columns.join(", ")}`).join(" · "); wrapper.append(keys);
+    if (proposal.actionType === "migration_resolve") {
+      addMetadata("Migration plan", action.plan_id);
+      addMetadata("Design revision", action.expected_design_revision);
+      const conflicts = Array.isArray(action.reviewContext) ? action.reviewContext : action.reviewContext?.conflicts || [];
+      const choices = document.createElement("dl"); choices.className = "ai-proposal-review__metadata";
+      for (const resolution of action.resolutions || []) {
+        const conflict = conflicts.find(item => item.id === resolution.conflict_id);
+        const target = document.createElement("dt"); target.textContent = conflict?.path || resolution.conflict_id;
+        const detail = document.createElement("dd");
+        const choice = document.createElement("strong"); choice.textContent = resolution.resolution === "pull_live" ? "Pull live database change" : resolution.resolution === "keep_design" ? "Keep workspace design" : resolution.resolution;
+        detail.append(choice);
+        if (conflict?.reason) { const reason = document.createElement("p"); reason.textContent = conflict.reason; detail.append(reason); }
+        const consequence = document.createElement("p"); consequence.textContent = resolution.resolution === "pull_live"
+          ? "Adopt the current database definition for this conflict in the workspace."
+          : "Retain the intended workspace change for the next migration review.";
+        detail.append(consequence); choices.append(target, detail);
+      }
+      wrapper.append(choices);
+    } else if (proposal.actionType === "migration_reconcile") {
+      addMetadata("Migration execution", action.execution_id);
+      addMetadata("Execution revision", action.expected_execution_revision);
+    } else if (["data_read", "console_script"].includes(proposal.actionType) && action.sql) {
+      const label = document.createElement("small"); label.textContent = proposal.actionType === "data_read" ? "READ-ONLY SQL" : "SQL CONSOLE DRAFT";
+      const pre = document.createElement("pre"); const code = document.createElement("code"); code.textContent = action.sql; pre.append(code); wrapper.append(label, pre);
+    } else if (action.type === "add_table") {
+      const heading = document.createElement("small"); heading.textContent = `TABLE ${action.name}`; wrapper.append(heading);
+      const list = document.createElement("div"); list.className = "ai-proposal-review__columns";
+      for (const column of action.columns || []) {
+        const row = document.createElement("div");
+        const name = document.createElement("strong"); name.textContent = column.name;
+        const type = document.createElement("code"); type.textContent = column.data_type || column.dataType;
+        const state = document.createElement("span"); state.textContent = column.nullable === false ? "required" : "nullable";
+        row.append(name, type, state); list.append(row);
+      }
+      wrapper.append(list);
+      if (action.keys?.length) {
+        const keys = document.createElement("p"); keys.className = "ai-proposal-review__keys";
+        keys.textContent = action.keys.map(key => `${key.kind}: ${key.columns.join(", ")}`).join(" · "); wrapper.append(keys);
+      }
+    } else if (action.type === "put_table_member" || action.type === "put_top_level_object") {
+      const object = action.object || {};
+      const table = design?.content?.tables?.find(item => item.id === action.table_id);
+      const label = document.createElement("strong"); label.textContent = object.name || object.id || action.collection; wrapper.append(label);
+      const target = document.createElement("p"); target.textContent = `${action.collection}${action.table_id ? ` · table ${table?.name || action.table_id}` : ""}`; wrapper.append(target);
+      const fields = document.createElement("dl"); fields.className = "ai-proposal-review__metadata";
+      for (const [key, value] of Object.entries(object)) {
+        const term = document.createElement("dt"); term.textContent = key;
+        const description = document.createElement("dd");
+        description.textContent = ["columns", "columnIds", "includeColumnIds"].includes(key) && Array.isArray(value)
+          ? value.map(id => table?.columns?.find(column => column.id === id)?.name || id).join(", ")
+          : typeof value === "object" ? JSON.stringify(value) : String(value);
+        fields.append(term, description);
+      }
+      wrapper.append(fields);
+    } else if (Object.keys(action).length) {
+      const label = document.createElement("small"); label.textContent = "SERVER-VALIDATED ACTION";
+      const pre = document.createElement("pre"); const code = document.createElement("code"); code.textContent = JSON.stringify(action, null, 2); pre.append(code); wrapper.append(label, pre);
     }
-  } else if (Object.keys(action).length) {
-    const label = document.createElement("small"); label.textContent = "SERVER-VALIDATED ACTION";
-    const pre = document.createElement("pre"); const code = document.createElement("code"); code.textContent = JSON.stringify(action, null, 2); pre.append(code); wrapper.append(label, pre);
   }
   return wrapper;
 }
 
 function openProposalReview(proposal) {
+  pendingProposalBatch = null;
   pendingProposal = proposal;
   proposalReviewOpenedAt = Date.now();
   globalThis.clearTimeout(proposalArmTimer);
   elements.proposalReview.replaceChildren(proposalDetailsNode(proposal));
-  elements.proposalConfirm.textContent = proposal.destructive ? "Apply destructive proposal" : "Apply proposal";
+  elements.proposalConfirm.textContent = actionPresentation(proposal.actionType).confirm || "Confirm action";
   elements.proposalConfirm.classList.toggle("danger", proposal.destructive);
   elements.proposalConfirm.classList.toggle("primary", !proposal.destructive);
   elements.proposalConfirm.disabled = true;
@@ -465,11 +575,32 @@ function openProposalReview(proposal) {
   }, 350);
 }
 
+function openProposalBatchReview(proposals) {
+  closeProposalReview();
+  pendingProposalBatch = { chatId: chat.id, items: proposals.map(proposal => ({
+    proposalId: proposal.id, expectedChatRevision: chat.revision,
+    expectedProposalRevision: proposal.revision, proposalDigest: proposal.digest, confirmed: true,
+  })) };
+  const note = document.createElement("p"); note.className = "ai-warning";
+  note.textContent = "One approval covers exactly the actions below. They execute in order and stop on failure. Separate service actions are not one transaction: completed actions remain applied if a later action fails. Each design batch is saved atomically.";
+  elements.proposalReview.replaceChildren(note, ...proposals.map(proposalDetailsNode));
+  elements.proposalConfirm.textContent = `Approve ${proposals.length} actions`;
+  elements.proposalConfirm.classList.toggle("danger", proposals.some(proposal => proposal.destructive));
+  elements.proposalConfirm.classList.toggle("primary", !proposals.some(proposal => proposal.destructive));
+  elements.proposalConfirm.disabled = true;
+  proposalReviewOpenedAt = Date.now();
+  openDialog(elements.proposalDialog);
+  proposalArmTimer = globalThis.setTimeout(() => {
+    if (elements.proposalDialog.open && pendingProposalBatch) elements.proposalConfirm.disabled = false;
+  }, 350);
+}
+
 function closeProposalReview() {
   globalThis.clearTimeout(proposalArmTimer);
   proposalArmTimer = null;
   proposalReviewOpenedAt = 0;
   pendingProposal = null;
+  pendingProposalBatch = null;
   elements.proposalConfirm.disabled = true;
   closeDialog(elements.proposalDialog);
 }
@@ -478,9 +609,14 @@ function renderOperationCards(items, proposalItems) {
   const summaries = new Map(proposalItems.map(item => [item.id, item.summary]));
   return [...items].sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt))).map(operation => {
     const summary = summaries.get(operation.proposalId) || operation.kind.replaceAll("_", " "); let action = "";
-    if (operation.kind === "data_read" && operation.status === "succeeded") action = `<button class="ui-button compact" type="button" data-show-result>Show rows</button>${chat.capabilities.structuredDataRead ? "<button class=\"ui-button compact\" type=\"button\" data-use-result>Ask about rows</button>" : ""}`;
+    if (operation.kind === "data_read" && operation.status === "succeeded") action = `<button class="ui-button compact" type="button" data-show-result>Show rows</button>`;
     else if (operation.kind === "console_script" && operation.status === "succeeded") action = "<button class=\"ui-button compact\" type=\"button\" data-open-console>Open Console</button>";
-    return `<article class="ai-operation${operation.status === "failed" ? " failed" : ""}" data-operation-id="${escapeHtml(operation.id)}" data-proposal-id="${escapeHtml(operation.proposalId)}"><small>${escapeHtml(operation.status.toUpperCase())}</small><strong>${escapeHtml(summary)}</strong>${operation.errorMessage ? `<p>${escapeHtml(operation.errorMessage)}</p>` : ""}${action ? `<footer>${action}</footer>` : ""}<div class="ai-operation__result"></div></article>`;
+    const presentation = actionPresentation(operation.kind);
+    const status = operation.status === "succeeded" ? presentation?.completed || "SUCCEEDED" : operation.status.toUpperCase();
+    const scope = operation.status === "succeeded" ? presentation?.scope : "";
+    const receipt = operation.resultSummary;
+    const recovery = operation.kind === "migration_reconcile" && receipt ? `<dl class="ai-proposal-review__metadata"><dt>Database transaction</dt><dd>${escapeHtml((receipt.commitOutcome || "not confirmed").replaceAll("_", " "))}</dd><dt>Workspace synchronization</dt><dd>${escapeHtml(receipt.syncStatus || "not confirmed")}</dd></dl>${receipt.reconcileRequired ? "<p class=\"ai-warning\">Further reconciliation is required; do not assume the migration committed.</p>" : ""}` : "";
+    return `<article class="ai-operation${operation.status === "failed" ? " failed" : ""}" data-operation-id="${escapeHtml(operation.id)}" data-proposal-id="${escapeHtml(operation.proposalId)}"><small>${escapeHtml(status)}</small><strong>${escapeHtml(summary)}</strong>${scope ? `<p>${escapeHtml(scope)}</p>` : ""}${recovery}${operation.errorMessage ? `<p>${escapeHtml(operation.errorMessage)}</p>` : ""}${action ? `<footer>${action}</footer>` : ""}<div class="ai-operation__result"></div></article>`;
   }).join("");
 }
 
@@ -493,7 +629,7 @@ function defaultModel() {
 }
 
 function defaultCapabilities() {
-  return { ...Object.fromEntries(CAPABILITIES.map(name => [name, false])), ...(settings?.defaultCapabilities || {}) };
+  return { liveCatalog: false, structuredDataRead: false, ...permissionValues({}, settings?.permissionActions || []), ...(settings?.defaultCapabilities || {}) };
 }
 
 function safeExternalUrl(value) {
@@ -671,11 +807,20 @@ async function pollProgress() {
   chat = currentChat; applyActivityPage(activity, currentChat); updateContextControls();
   if (chat.status === "working") {
     streamingResponse = stream?.turnId && stream.text ? { ...stream, createdAt: streamingResponse?.createdAt || new Date().toISOString() } : null;
+    if (activity.events.some(event => ["query", "analysis"].includes(event.payload?.stage))) {
+      const [proposalList, operationList] = await Promise.all([
+        requestJson(`/api/v1/schemii/ai/chats/${chatId}/proposals`),
+        requestJson(`/api/v1/schemii/ai/chats/${chatId}/operations`),
+      ]);
+      if (chat?.id !== chatId) return;
+      timelineProposals = proposalList.proposals; timelineOperations = operationList.operations;
+    }
     renderTimeline();
     setStatus("Working"); if (!activityRun) beginActivity(); scheduleProgressPoll(); return;
   }
-  if (chat.status === "failed") { setStatus("Needs attention"); finishActivity("failed"); }
-  else { setStatus("Ready"); if (activityRun?.state === "working") finishActivity("completed"); else if (activityRun?.state === "cancelled") finishActivity("cancelled"); }
+  if (chat.status === "waiting_approval") { setStatus("Awaiting approval"); finishActivity("waiting_approval"); }
+  else if (chat.status === "failed") { setStatus("Needs attention"); finishActivity("failed"); }
+  else { setStatus("Ready"); if (["working", "waiting_approval"].includes(activityRun?.state)) finishActivity("completed"); else if (activityRun?.state === "cancelled") finishActivity("cancelled"); }
   await refresh({ includeChat: false });
 }
 
@@ -684,14 +829,19 @@ async function refresh({ includeChat = true } = {}) {
   const chatId = chat.id;
   globalThis.clearTimeout(pollTimer); pollTimer = null;
   const initialActivityLoad = activitySequence === 0;
-  const [history, proposalList, operationList, activity, transient, currentChat] = await Promise.all([
-    requestJson(`/api/v1/schemii/ai/chats/${chat.id}/messages`), requestJson(`/api/v1/schemii/ai/chats/${chat.id}/proposals`),
-    requestJson(`/api/v1/schemii/ai/chats/${chat.id}/operations`), requestJson(`/api/v1/schemii/ai/chats/${chat.id}/activity?after=${activitySequence}`),
-    requestJson(`/api/v1/schemii/ai/chats/${chat.id}/transient-responses`),
-    includeChat ? requestJson(`/api/v1/schemii/ai/chats/${chat.id}`) : Promise.resolve(chat),
+  // Observe status before loading its transcript: terminal status guarantees the
+  // final message is committed, while working status keeps polling active.
+  const currentChat = includeChat ? await requestJson(`/api/v1/schemii/ai/chats/${chatId}`) : chat;
+  if (chat?.id !== chatId) return;
+  const [history, proposalList, operationList, activity, transient] = await Promise.all([
+    requestJson(`/api/v1/schemii/ai/chats/${chatId}/messages`), requestJson(`/api/v1/schemii/ai/chats/${chatId}/proposals`),
+    requestJson(`/api/v1/schemii/ai/chats/${chatId}/operations`), requestJson(`/api/v1/schemii/ai/chats/${chatId}/activity?after=${activitySequence}`),
+    requestJson(`/api/v1/schemii/ai/chats/${chatId}/transient-responses`),
   ]);
   if (chat?.id !== chatId) return;
   chat = currentChat;
+  await refreshChangedDesign(chatId, operationList.operations);
+  if (chat?.id !== chatId) return;
   streamingResponse = null;
   const transientByTurn = new Map((transient.responses || []).map(item => [item.turnId, item]));
   const renderedMessages = history.messages.map(message => {
@@ -703,8 +853,9 @@ async function refresh({ includeChat = true } = {}) {
   updateContextControls();
   if (chat.status === "working") {
     setStatus("Working"); if (!activityRun) beginActivity(); scheduleProgressPoll();
-  } else if (chat.status === "failed") { setStatus("Needs attention"); finishActivity("failed"); }
-  else { setStatus("Ready"); if (activityRun?.state === "working") finishActivity("completed"); else if (activityRun?.state === "cancelled") finishActivity("cancelled"); }
+  } else if (chat.status === "waiting_approval") { setStatus("Awaiting approval"); finishActivity("waiting_approval"); }
+  else if (chat.status === "failed") { setStatus("Needs attention"); finishActivity("failed"); }
+  else { setStatus("Ready"); if (["working", "waiting_approval"].includes(activityRun?.state)) finishActivity("completed"); else if (activityRun?.state === "cancelled") finishActivity("cancelled"); }
 }
 
 function showError(error) {
@@ -717,7 +868,7 @@ async function openAssistant() {
   try {
     await loadAssistant();
     if (!runtime?.healthy) setNotice(runtime?.message || "The AI runtime is not currently available.", "error");
-    else setNotice("AI actions are proposals. Query rows are temporary and are never saved by Schemii.");
+    else setNotice("Query results can be analyzed in this conversation. Rows are temporary and are never saved by Schemii.");
     await refresh({ includeChat: false }); elements.input.focus();
   } catch (error) { showError(error); }
 }
@@ -733,8 +884,27 @@ function closeDialog(dialog) { if (dialog.open) dialog.close(); }
 
 function fillSettings() {
   loadModelOptions(elements.settingsModel, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
+  elements.settingsModel.disabled = chat?.status === "working";
   const capabilities = chat?.capabilities || defaultCapabilities();
-  for (const name of CAPABILITIES) elements.settingsForm.elements[name].checked = Boolean(capabilities[name]);
+  elements.permissionActions.replaceChildren();
+  const groups = new Map();
+  for (const action of settings?.permissionActions || []) {
+    let group = groups.get(action.group);
+    if (!group) {
+      group = document.createElement("fieldset"); group.className = "ai-permission-list";
+      const legend = document.createElement("legend"); legend.textContent = action.group;
+      group.append(legend); groups.set(action.group, group); elements.permissionActions.append(group);
+    }
+    const label = document.createElement("label");
+    if (action.destructive) label.className = "danger";
+    const copy = document.createElement("span");
+    const title = document.createElement("strong"); title.textContent = action.label; copy.append(title);
+    if (action.description) { const note = document.createElement("small"); note.textContent = action.description; copy.append(note); }
+    const select = document.createElement("select"); select.name = action.id; select.dataset.permissionAction = action.id;
+    for (const mode of PERMISSION_MODES) { const option = document.createElement("option"); option.value = mode; option.textContent = { disabled: "Disabled", ask: "Ask per batch", automatic: "Automatic" }[mode]; select.append(option); }
+    select.value = permissionMode(capabilities, action.id); label.append(copy, select); group.append(label);
+  }
+  for (const name of ["liveCatalog", "structuredDataRead"]) elements.settingsForm.elements[name].checked = Boolean(capabilities[name]);
   elements.settingsStatus.textContent = "Permission changes apply to this conversation and become the default for new ones.";
   renderProviders();
 }
@@ -799,10 +969,19 @@ async function switchConversation(id) {
 
 async function showQueryResult(operationId) {
   const card = elements.messages.querySelector(`[data-operation-id="${operationId}"]`); const target = card?.querySelector(".ai-operation__result"); if (!target) return;
+  const chatId = chat.id;
   target.innerHTML = "<p>Loading temporary rows…</p>";
   try {
-    const page = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/operations/${operationId}/query-result`);
-    target.innerHTML = `${page.freshnessNotice ? `<p class="ai-freshness">${escapeHtml(page.freshnessNotice)}</p>` : ""}<div class="ai-query-result"><table><thead><tr>${page.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${page.rows.map(row => `<tr>${row.map(value => `<td>${escapeHtml(displayCell(value))}</td>`).join("")}</tr>`).join("")}</tbody></table></div><p class="ai-result-note">${page.rows.length} temporary row${page.rows.length === 1 ? "" : "s"} shown. Rows are not saved by Schemii.</p>`;
+    const page = await requestJson(`/api/v1/schemii/ai/chats/${chatId}/operations/${operationId}/query-result`);
+    if (chat?.id !== chatId) return;
+    target.innerHTML = (page.results || [page]).map((result, index) => {
+      const rows = result.rows || []; const columns = result.columns || [];
+      const title = `<strong>${escapeHtml(result.label || `Query ${index + 1}`)}</strong>${result.executedAt ? `<time>${escapeHtml(formatDate(result.executedAt))}</time>` : ""}`;
+      if (result.released) return `<section class="ai-result-set">${title}<p class="ai-freshness">${escapeHtml(result.message || "These temporary rows have been released.")}</p><p class="ai-result-note">Ask the assistant to rerun this query. The new result may differ.</p></section>`;
+      if (result.errorMessage) return `<section class="ai-result-set">${title}<p class="ai-warning">${escapeHtml(result.errorMessage)}</p></section>`;
+      const table = rows.length ? `<div class="ai-query-result" tabindex="0" aria-label="Scrollable query results"><table><thead><tr>${columns.map(column => `<th scope="col">${escapeHtml(column.name)}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${escapeHtml(displayCell(value))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : "<p class=\"ai-result-note\">Query returned no rows.</p>";
+      return `<section class="ai-result-set">${title}${result.freshnessNotice ? `<p class="ai-freshness">${escapeHtml(result.freshnessNotice)}</p>` : ""}${table}<p class="ai-result-note">${rows.length} temporary row${rows.length === 1 ? "" : "s"} shown${result.sampled || result.truncated ? " · partial result" : ""}. Rows are not saved by Schemii.</p></section>`;
+    }).join("") || "<p class=\"ai-result-note\">No query results are available.</p>";
   } catch (error) { target.innerHTML = `<p class="ai-warning">${escapeHtml(error.message)}</p>`; }
 }
 
@@ -840,7 +1019,7 @@ elements.input?.addEventListener("keydown", event => {
 });
 
 elements.form?.addEventListener("submit", async event => {
-  event.preventDefault(); const text = elements.input.value.trim(); if (!text || !chat || chat.status === "working") return;
+  event.preventDefault(); const text = elements.input.value.trim(); if (!text || !chat || ["working", "waiting_approval"].includes(chat.status)) return;
   const provider = runtime?.providers?.find(item => item.id === chat.providerId);
   const requiresAcknowledgment = chat.providerId === "opencode";
   if (requiresAcknowledgment && !window.confirm(`${provider?.privacy || provider?.privacyNotice || "OpenCode Zen free models may use prompts and responses for training. Do not send sensitive, private, or confidential data."}\n\nSend this message and the conversation context to this provider?`)) return;
@@ -851,12 +1030,16 @@ elements.form?.addEventListener("submit", async event => {
     if (activityRun) { activityRun.turnId = turn.id; placeActivity(); }
     resultContextOperationId = null; renderAttachment(); await refresh();
   } catch (error) { if (!elements.input.value) elements.input.value = text; finishActivity("failed"); showError(error); }
-  finally { elements.send.disabled = false; }
+  finally { elements.send.disabled = ["working", "waiting_approval"].includes(chat?.status); }
 });
 
 elements.settingsForm?.addEventListener("submit", async event => {
   event.preventDefault(); const model = selectedModel(elements.settingsModel); if (!model) return;
-  const capabilities = Object.fromEntries(CAPABILITIES.map(name => [name, elements.settingsForm.elements[name].checked])); elements.settingsStatus.textContent = "Saving…";
+  const capabilities = {
+    ...Object.fromEntries(["liveCatalog", "structuredDataRead"].map(name => [name, elements.settingsForm.elements[name].checked])),
+    ...permissionValues(Object.fromEntries([...elements.permissionActions.querySelectorAll("select[data-permission-action]")].map(control => [control.dataset.permissionAction, control.value])), settings?.permissionActions || []),
+  };
+  elements.settingsStatus.textContent = "Saving…";
   try {
     const modelChanged = model.providerId !== chat.providerId || model.id !== chat.modelId;
     const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities } });
@@ -871,16 +1054,24 @@ for (const control of document.querySelectorAll("[data-ai-delete-cancel]")) cont
 for (const control of document.querySelectorAll("[data-ai-proposal-cancel]")) control.addEventListener("click", closeProposalReview);
 
 elements.proposalConfirm?.addEventListener("click", async () => {
-  const proposal = pendingProposal; if (!proposal || !chat) return;
+  const proposal = pendingProposal; const batch = pendingProposalBatch;
+  if ((!proposal && !batch) || !chat) return;
   if (Date.now() - proposalReviewOpenedAt < 350) return;
   elements.proposalConfirm.disabled = true;
   try {
+    if (batch) {
+      const result = await requestJson(`/api/v1/schemii/ai/chats/${batch.chatId}/proposal-batch/executions`, { method: "POST", body: { items: batch.items } });
+      closeProposalReview();
+      setNotice(result.message || (result.status === "completed" ? "Approved batch completed." : "Batch stopped. Review completed and unattempted actions."), result.status === "completed" ? "" : "error");
+      await refresh();
+      return;
+    }
     const operation = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/proposals/${proposal.id}/executions`, { method: "POST", body: { expectedChatRevision: chat.revision, expectedProposalRevision: proposal.revision, proposalDigest: proposal.digest, confirmed: true } });
     closeProposalReview();
-    if (operation.kind === "design_change") { location.reload(); return; }
+    if (operation.kind === "console_script" && operation.status === "succeeded") openConsole(proposal.details.sql);
     await refresh(); if (operation.kind === "data_read") await showQueryResult(operation.id);
   } catch (error) { showError(error); }
-  finally { if (elements.proposalDialog.open && pendingProposal) elements.proposalConfirm.disabled = false; }
+  finally { if (elements.proposalDialog.open && (pendingProposal || pendingProposalBatch)) elements.proposalConfirm.disabled = false; }
 });
 
 elements.deleteConfirm?.addEventListener("click", async () => {
@@ -909,6 +1100,26 @@ elements.historyList?.addEventListener("click", async event => {
 });
 
 elements.body?.addEventListener("click", async event => {
+  const batchReview = event.target.closest("[data-review-batch]");
+  if (batchReview) {
+    try {
+      const list = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/proposals`);
+      const proposals = list.proposals.filter(item => item.status === "pending" && item.turnId === batchReview.dataset.reviewBatch);
+      if (proposals.length < 2) { await refresh(); return; }
+      openProposalBatchReview(proposals);
+    } catch (error) { showError(error); }
+    return;
+  }
+  const continueTurn = event.target.closest("[data-continue-turn]");
+  if (continueTurn) {
+    continueTurn.disabled = true;
+    try {
+      const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/continue`, { method: "POST" });
+      await refresh();
+      if (!result.resumed) setNotice("The answer has not resumed. Check its current status and try again.");
+    } catch (error) { showError(error); continueTurn.disabled = false; }
+    return;
+  }
   const proposalCard = event.target.closest("[data-proposal-id]"); const operationCard = event.target.closest("[data-operation-id]");
   const cancelTurn = event.target.closest("[data-cancel-turn]");
   if (cancelTurn) {
@@ -918,7 +1129,6 @@ elements.body?.addEventListener("click", async event => {
     return;
   }
   if (operationCard && event.target.closest("[data-show-result]")) { await showQueryResult(operationCard.dataset.operationId); return; }
-  if (operationCard && event.target.closest("[data-use-result]")) { resultContextOperationId = operationCard.dataset.operationId; renderAttachment(); setNotice("The next message will include a bounded, temporary copy of these rows. Released rows are rerun and clearly marked as refreshed."); elements.input.focus(); return; }
   if (operationCard && event.target.closest("[data-open-console]")) {
     const list = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/proposals`); const proposal = list.proposals.find(item => item.id === operationCard.dataset.proposalId); if (proposal?.details?.sql) openConsole(proposal.details.sql); return;
   }
@@ -927,8 +1137,16 @@ elements.body?.addEventListener("click", async event => {
     const list = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/proposals`); const proposal = list.proposals.find(item => item.id === proposalCard.dataset.proposalId); if (!proposal) return;
     if (event.target.closest("[data-dismiss]")) { await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/proposals/${proposal.id}`, { method: "DELETE" }); await refresh(); return; }
     if (!event.target.closest("[data-apply]")) return;
+    if (proposal.actionType === "data_read") {
+      event.target.closest("[data-apply]").disabled = true;
+      await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/proposals/${proposal.id}/executions`, { method: "POST", body: { expectedChatRevision: chat.revision, expectedProposalRevision: proposal.revision, proposalDigest: proposal.digest, confirmed: true } });
+      await refresh(); return;
+    }
     openProposalReview(proposal);
-  } catch (error) { showError(error); }
+  } catch (error) {
+    const apply = proposalCard.querySelector("[data-apply]"); if (apply) apply.disabled = false;
+    showError(error);
+  }
 });
 
 window.addEventListener("beforeunload", () => { globalThis.clearTimeout(pollTimer); globalThis.clearTimeout(loginTimer); globalThis.clearInterval(elapsedTimer); });

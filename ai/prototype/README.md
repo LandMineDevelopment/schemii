@@ -1,6 +1,6 @@
 # Shared Pi AI sidecar
 
-Branch: `prototype/shared-ai-sidecar`. Original checkpoint: `9f29247`.
+Integrated into `architecture/unified-backend`. Original checkpoint: `9f29247`.
 Pi now supplies the application's chat inference and account sign-in transport.
 Schemii still owns conversations, permissions, tool execution and proposal review.
 The directory retains its prototype name while this integration is evaluated.
@@ -23,6 +23,11 @@ Old provider credentials may remain there until the operator explicitly removes
 that data. Pi's expiration cannot clear an unmounted legacy volume. The historical
 `opencode_password` secret filename now authenticates the private sidecar service;
 it is not a user's provider credential.
+
+After deciding that old OpenCode history and credentials are no longer needed,
+run `./start.sh --remove-legacy-ai-data`. This permanently removes only the exact
+former Compose volume after checking its ownership labels and that no container
+uses it. It never prunes volumes or touches Pi credentials or database storage.
 
 ## Ownership and streaming
 
@@ -133,3 +138,11 @@ inference or account entitlement. Verify those separately with user participatio
 No T3 Code source was copied. Pi is MIT-licensed; retain its packaged license.
 Its provider SDK dependency tree is locked and install scripts are disabled.
 External provider retention and subscription policies still apply.
+# Assistant instruction ownership
+
+Schemii supplies the active system prompt from `schemii/ai/prompt.py` and typed
+tool schemas from `schemii/ai/tools.py`. The sidecar is inference-only: it does not
+load repository AGENTS files, skills, or general-purpose execution tools. Unknown
+tool calls remain inert and return to Schemii for server-owned denial guidance.
+Read receipts record the execution's approval policy; retained query references
+do not preserve raw rows or reconstruct an old snapshot after a rerun.
