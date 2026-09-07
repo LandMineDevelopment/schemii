@@ -54,8 +54,12 @@ def test_openapi_exposes_typed_planned_routes_without_marking_them_implemented()
         if operation.get("x-schemii-status") == "planned"
     ]
 
-    assert planned
     assert len(planned) < len(operations)
+    for path, method in (
+        ("/api/v1/schemii/workspaces/{workspace_id}", "patch"),
+        ("/api/v1/schemii/console/settings", "put"),
+    ):
+        assert schema["paths"][path][method].get("x-schemii-status") is None
     assert {
         operation.get("x-schemii-status") for operation in operations
     } <= {None, "planned"}

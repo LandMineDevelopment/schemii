@@ -1,4 +1,4 @@
-import { GraphViewport } from "./graph-viewport.js";
+import { GraphViewport } from "#common/graph-viewport.js";
 
 const MAX_COORDINATE = 1_000_000;
 const DEFAULT_WIDTH = 230;

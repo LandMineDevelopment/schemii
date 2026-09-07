@@ -1,6 +1,8 @@
+import { setAssistantDesignSavedHandler } from "./ai-assistant.js";
 import { createInspectorDataController } from "./inspector-data.js";
 import { createTableEditor } from "./table-editor.js";
-import { api, ApiError } from "./api.js";
+import { api } from "./api.js";
+import { ApiError, requestJson } from "#common/http.js";
 import { CatalogCanvas } from "./canvas.js";
 import {
   alignRelationshipColumnTypes,
@@ -43,7 +45,7 @@ import {
   renderViewDetail,
   renderViewsList,
 } from "./catalog.js";
-import { element, emptyPanel, errorPanel, formatTimestamp, replace } from "./dom.js";
+import { element, emptyPanel, errorPanel, formatTimestamp, replace } from "#common/dom.js";
 import {
   applyColumnDisplayOrders,
   removeColumnDisplayOrder,
@@ -70,7 +72,7 @@ import {
 import { renderDesignViewStory } from "./view-story.js";
 import { renderRelationBrowser, renderRelationRows, pagedRowsStatus } from "./relation-browser.js";
 import { createRelationDataSource } from "./relation-data-source.js";
-import { appendDataGridPage, installAutoPageLoader } from "./data-grid.js";
+import { appendDataGridPage, installAutoPageLoader } from "#common/data-grid.js";
 import { createViewAnalysisController } from "./view-analysis.js";
 import {
   catalogTableId,
@@ -582,6 +584,11 @@ syncWorkspaceToolbar(elements.toolRail, state.activeLayer);
 inspectorPreferenceReady = true;
 
 const workspaceOperations = createWorkspaceOperationController();
+setAssistantDesignSavedHandler(async workspaceId => {
+  if (state.activeWorkspace?.id === workspaceId) {
+    await loadActiveWorkspace({ clearConflictOnSuccess: true });
+  }
+});
 const runtimeRequests = createLatestRequestController();
 const connectionRequests = createLatestRequestController();
 const workspaceListRequests = createLatestRequestController();
@@ -1911,12 +1918,12 @@ function renderConnectionDeletionImpact() {
           : `${dependency.kind} · revision ${dependency.resourceRevision}`,
       consequence: dependency.deletionBlocked
         ? blocker
-        : "Delete this saved workspace before deleting the connection.",
+        : "Delete this saved resource before deleting the connection. PostgreSQL data will not change.",
       children: [],
-      deleteDisabled: dependency.kind !== "workspace" || dependency.deletionBlocked,
+      deleteDisabled: !["workspace", "semantic_model"].includes(dependency.kind) || dependency.deletionBlocked,
       deleteLabel: dependency.deletionBlocked
         ? `Cannot delete workspace ${dependency.name} while migration activity is unresolved`
-        : `Delete workspace ${dependency.name}`,
+        : `Delete ${dependency.kind === "semantic_model" ? "model" : "workspace"} ${dependency.name}`,
       deleteTooltip: dependency.deletionBlocked ? blocker : `Delete ${dependency.name}`,
       onSelect: () => openConnectionDependency(dependency),
       onDelete: () => confirmDeleteConnectionDependency(dependency),
@@ -1957,6 +1964,10 @@ function confirmDeleteConnection(connection) {
 }
 
 async function openConnectionDependency(dependency) {
+  if (dependency.kind === "semantic_model") {
+    window.location.assign(`/schemoo?model=${encodeURIComponent(dependency.resourceId)}`);
+    return;
+  }
   if (dependency.kind !== "workspace") return;
   replace(elements.connectionImpactStatus, element("span", { text: "Opening the selected workspace…" }));
   try {
@@ -1974,6 +1985,22 @@ async function openConnectionDependency(dependency) {
 }
 
 function confirmDeleteConnectionDependency(dependency) {
+  if (dependency.kind === "semantic_model" && !dependency.deletionBlocked) {
+    askConfirmation({
+      title: "Delete semantic model",
+      message: `Delete “${dependency.name}” and its saved model rules, layout, and Explore settings? PostgreSQL schemas and data will not change.`,
+      label: "Delete model",
+      callback: async () => {
+        try {
+          await requestJson(`/api/v1/schemoo/models/${encodeURIComponent(dependency.resourceId)}?expected_revision=${dependency.resourceRevision}`, { method: "DELETE" });
+          await loadConnectionDeletionImpact(state.connectionDeletionTarget, { open: false });
+        } catch (error) {
+          replace(elements.connectionImpactStatus, errorPanel(error));
+        }
+      },
+    });
+    return;
+  }
   if (dependency.kind !== "workspace" || dependency.deletionBlocked) return;
   const existing = state.workspaces.find(item => item.id === dependency.resourceId);
   const workspace = {
@@ -2162,7 +2189,41 @@ function renderWorkspaces() {
       className: "compact danger",
     });
     remove.addEventListener("click", () => confirmDeleteWorkspace(workspace));
-    actions.append(open, remove);
+    const rename = createIconButton({ icon: "edit", label: `Rename ${workspaceLabel(workspace)}`, tooltip: "Rename workspace", className: "compact" });
+    rename.addEventListener("click", () => {
+      const form = element("form", { className: "workspace-rename-form" });
+      const input = element("input", { type: "text", attrs: { value: workspace.name, required: "", maxlength: 128, "aria-label": "Workspace name" } });
+      const save = createIconButton({ icon: "save", label: "Save workspace name", className: "compact" });
+      save.type = "submit";
+      const cancel = createIconButton({ icon: "close", label: "Cancel rename", className: "compact" });
+      cancel.addEventListener("click", renderWorkspaces);
+      const status = element("div", { attrs: { role: "status" } });
+      form.append(input, status);
+      replace(copy, form);
+      replace(actions, save, cancel);
+      save.addEventListener("click", event => { event.preventDefault(); form.requestSubmit(); });
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        if (save.disabled) return;
+        const name = input.value.trim();
+        if (!name) { input.setCustomValidity("Enter a workspace name."); input.reportValidity(); return; }
+        save.disabled = cancel.disabled = true;
+        try {
+          const updated = await api.renameWorkspace(workspace.id, { name, expectedRevision: workspace.revision });
+          state.workspaces = state.workspaces.map(item => item.id === updated.id ? updated : item);
+          if (state.activeWorkspace?.id === updated.id) { state.activeWorkspace = updated; updateHeader(); }
+          state.workspaceActionError = null;
+          renderWorkspaces();
+          showToast("Workspace renamed. PostgreSQL was not changed.");
+        } catch (error) {
+          replace(status, errorPanel(error, { retryLabel: "Reload workspaces", onRetry: loadWorkspaces }));
+        } finally { save.disabled = cancel.disabled = false; }
+      });
+      input.addEventListener("input", () => input.setCustomValidity(""));
+      input.focus();
+      input.select();
+    });
+    actions.append(open, rename, remove);
     card.append(copy);
     if (workspace.importSummary?.issues?.length) {
       const review = element("details", { className: "workspace-import-review" });

@@ -17,6 +17,7 @@ from schemii.common.metadata.migrations import (
 from schemii.schemii.metadata import (
     MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
 )
+from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO_MIGRATION_PACKAGE
 from schemii.common.postgres.models import (
     PostgresColumn,
     PostgresTable,
@@ -111,7 +112,7 @@ def test_postgres_metadata_migrates_persists_encrypts_and_reports_ready(
 
     reopened = create_metadata_repositories(
         postgres_metadata.environment,
-        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE),
+        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE, SCHEMOO_MIGRATION_PACKAGE),
     )
     assert reopened.connections.list(owner_id) == [saved]
     resolved = reopened.connections.resolve(owner_id, saved.id)
@@ -138,7 +139,7 @@ def test_postgres_metadata_migrates_persists_encrypts_and_reports_ready(
     assert applied_versions == [
         migration.version
         for migration in packaged_migrations(
-            (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE)
+            (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE, SCHEMOO_MIGRATION_PACKAGE)
         )
     ]
 

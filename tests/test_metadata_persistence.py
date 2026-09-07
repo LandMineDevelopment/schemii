@@ -21,6 +21,9 @@ from schemii.common.metadata.secrets import read_encryption_key, read_secret_fil
 from schemii.schemii.metadata import (
     MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
 )
+from schemii.schemoo.metadata.migrations import (
+    MIGRATION_PACKAGE as SCHEMOO_MIGRATION_PACKAGE,
+)
 
 
 def test_metadata_storage_mode_is_explicit_and_memory_is_test_selectable() -> None:
@@ -78,7 +81,11 @@ def test_postgres_factory_composes_encrypted_ai_credentials(monkeypatch, tmp_pat
             "SCHEMII_METADATA_PASSWORD_FILE": str(tmp_path / "password"),
             "SCHEMII_METADATA_ENCRYPTION_KEY_FILE": str(key_file),
         },
-        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE),
+        migration_packages=(
+            COMMON_MIGRATION_PACKAGE,
+            SCHEMII_MIGRATION_PACKAGE,
+            SCHEMOO_MIGRATION_PACKAGE,
+        ),
     )
 
     store = repositories.ai_credentials
@@ -173,7 +180,11 @@ def test_common_metadata_migrations_are_product_independent() -> None:
 
 def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> None:
     migrations = packaged_migrations(
-        (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE)
+        (
+            COMMON_MIGRATION_PACKAGE,
+            SCHEMII_MIGRATION_PACKAGE,
+            SCHEMOO_MIGRATION_PACKAGE,
+        )
     )
 
     assert [migration.version for migration in migrations] == [
@@ -199,6 +210,13 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         20,
         21,
         22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -223,6 +241,13 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
             "0020_ai_lifecycle_retention.sql": "e341b3a48847351054e03835454fda22d6f1c7bbc16c06017b375cc082c74b94",
             "0021_ai_credentials.sql": "c5378cf82fb32ede10d44481e940474ddc84ae4eb1e5fed8af87dce141e07bbf",
             "0022_ai_credential_activity.sql": "eb6bfa354d91d2307ed26349be47c03e1611af0abf709270c9b7710d6f809758",
+        "0023_console_preferences.sql": "b7ecb231f3ca4c6dcd017e537ca6b9882db32bf737723bc72617941be5ac37a4",
+        "0024_ai_read_continuations.sql": "8cf84f7fd08300e0ecd1ad778ca4fa4d0f57a81d449d5cb8fe6d725396e50621",
+        "0025_ai_action_policies.sql": "0f9e6a0df3a76a4ecc1c64fc846ebc3328d4ba336683d6680246dd0c45e2492f",
+        "0026_ai_migration_recovery.sql": "a4b6db530ce706ceb9f4b3015951487bb96eed582a9f4e0bafc799894b2f3e39",
+        "0027_schemoo_models.sql": "580b4e31d851132934a2c785db81d0a888b27dbdda9790ed2cc8f945222a124b",
+        "0028_explicit_model_exposure.sql": "cd5d61feae9fcb9f58593369d1e16a7ea2a022296256c30220c4365deb6a8c9f",
+        "0029_unknown_ai_read_counts.sql": "25242c625e8bb12f8f4eca8d1aefebf6af94b0afd4cfca1e80377f40b97fd779",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql

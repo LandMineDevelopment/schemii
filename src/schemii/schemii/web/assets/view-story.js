@@ -1,6 +1,6 @@
 import { createQueryStoryRenderer } from "/assets/common/query-story.js";
 
-import { element, emptyPanel, errorPanel, replace } from "./dom.js";
+import { element, emptyPanel, errorPanel, replace } from "#common/dom.js";
 import { installOverflowDisclosure } from "./ui.js";
 
 const { renderQueryStory } = createQueryStoryRenderer({

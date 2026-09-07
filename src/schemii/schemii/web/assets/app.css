@@ -401,6 +401,13 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .sql-body[data-active-pane="results"] .sql-editor-panel { flex: 0 0 var(--sql-pane-header); }
 .sql-pane-header { display: flex; min-height: var(--sql-pane-header); flex: none; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid #29313d; background: #131920; transition: background .15s ease; }
 .sql-pane-header:hover, .sql-pane-header:focus-within { background: #171e27; }
+.sql-console-preferences { flex: none; padding: 6px 12px; border-bottom: 1px solid #29313d; color: #94a1af; font-size: 12px; }
+.sql-console-preferences summary { cursor: pointer; color: var(--blue); }
+.sql-console-preferences:has(+ .inspector-sql-results[hidden]) { display: none; }
+.sql-console-preferences-form { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.sql-console-preferences-form label { display: grid; gap: 4px; }
+.sql-console-preferences-form input { width: 100px; padding: 6px 8px; border: 1px solid #34414e; border-radius: 5px; background: #0b1016; color: #cbd3dd; }
+.sql-console-preferences-form small { flex-basis: 100%; }
 .sql-pane-heading { display: flex; min-width: 0; min-height: var(--sql-pane-header); flex: 1; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 12px; border: 0 !important; color: inherit !important; text-align: left; background: transparent !important; cursor: pointer; }
 .sql-pane-heading > span { display: grid; min-width: 0; gap: 2px; }
 .sql-pane-heading small { color: var(--faint); font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .14em; }
@@ -509,7 +516,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .workspace-form header strong { font-size: 10px; }
 .workspace-form header small { color: var(--faint); font-size: 7px; }
 .workspace-form label, .form-grid label { display: grid; min-width: 0; gap: 6px; color: #9aa6b4; font-size: 8px; }
-.workspace-form input, .workspace-form select, .form-grid input, .form-grid select { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
+.workspace-rename-form input, .workspace-form input, .workspace-form select, .form-grid input, .form-grid select { width: 100%; height: 36px; min-width: 0; padding: 0 9px; border: 1px solid #303a46; border-radius: 5px; color: #d8e0e8; background: #0d1218; }
 .workspace-form output { display: flex; height: 36px; min-width: 0; align-items: center; overflow: hidden; padding: 0 9px; border: 1px solid #29333f; border-radius: 5px; color: #83909e; background: #10151c; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-form > .ui-button { height: 36px; font-size: 8px; }
 .joined-control { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; }

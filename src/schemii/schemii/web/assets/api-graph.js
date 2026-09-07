@@ -1,4 +1,4 @@
-import { GraphViewport } from "./graph-viewport.js";
+import { GraphViewport } from "#common/graph-viewport.js";
 
 const OPERATION_WIDTH = 280;
 const OPERATION_HEIGHT = 104;

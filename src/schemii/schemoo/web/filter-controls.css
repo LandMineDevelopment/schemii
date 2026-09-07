@@ -1,0 +1,75 @@
+.mf-help { color: var(--muted, #9aa7b7); font-size: 12px; line-height: 1.5; margin: 5px 0 12px; }
+.ui-async-value-select, .ui-async-value-select__list { --accent: var(--purple); }
+.mf-label textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 80px; padding: 9px; border: 1px solid #354151; border-radius: 6px; background: #0a1017; color: #e0e6ee; font: inherit; }
+.mf-section { border: 1px solid var(--border, #303b49); border-radius: 8px; margin: 10px 0; background: #111820; min-width: 0; }
+.mf-section > summary { padding: 12px; cursor: pointer; color: #ccbafa; font-weight: 600; overflow-wrap: anywhere; }
+.mf-section > summary:hover { background: #211b31; border-radius: 8px; }
+.mf-content { padding: 0 12px 12px; min-width: 0; }
+.mf-heading { display: flex; align-items: end; gap: 8px; margin-bottom: 10px; }
+.mf-heading > .mf-label { flex: 1; min-width: 0; }
+.mf-label { display: grid; gap: 5px; min-width: 0; margin-bottom: 8px; font-size: 12px; color: #aeb9c7; }
+.mf-label input, .mf-label select, .mf-condition input:not([type=checkbox]), .mf-condition select { width: 100%; min-width: 0; box-sizing: border-box; background: #0a1017; color: #e0e6ee; border: 1px solid #354151; border-radius: 6px; padding: 9px; font: inherit; font-size: 13px; }
+.mf-label input:focus-visible, .mf-label select:focus-visible, .mf-condition input:focus-visible, .mf-condition select:focus-visible { outline: 2px solid #a68af0; outline-offset: 1px; }
+.mf-condition { display: grid; grid-template-columns: minmax(0,1fr) 105px 36px; gap: 7px; padding: 10px 0; border-top: 1px solid #2a3441; align-items: end; }
+.mf-condition > .mf-label { margin: 0; }
+.mf-wide { grid-column: 1 / -1; }
+.mf-caption { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.mf-binding-summary { color: #c6b7eb; margin: 0; font-size: 12px; line-height: 1.5; }
+.mf-input-definition .mf-help { overflow-wrap: anywhere; }
+.mf-and { grid-column: 1 / -1; font-size: 10px; color: #b39af8; letter-spacing: .08em; }
+.mf-condition > input:not([type=checkbox]), .mf-condition > select:nth-of-type(3), .mf-checkbox { grid-column: 1 / -1; }
+.mf-checkbox { display: flex; align-items: center; gap: 8px; color: #aeb9c7; font-size: 12px; }
+.mf-checkbox input { accent-color: #a68af0; }
+.mf-add { display: flex; align-items: center; gap: 10px; margin: 10px 0; font-size: 12px; color: #c6b7eb; }
+.mf-input-definition { padding: 10px; border: 1px solid #303b49; border-radius: 7px; margin: 10px 0; }
+.mf-parameter-block { padding: 12px; border: 1px solid #303b49; border-left: 3px solid #536074; border-radius: 7px; margin: 10px 0; }
+.mf-parameter-block.active { border-left-color: #b39af8; }
+.mf-section .icon-only, .mf-add .icon-only, .mf-condition .icon-only { flex: 0 0 auto; width: 34px; height: 34px; min-height: 34px; padding: 7px; }
+@media (prefers-reduced-motion: no-preference) { .mf-section > summary { transition: background 120ms ease; } }
+.mf-filter-card { border: 1px solid var(--line-strong); border-radius: 8px; padding: 12px; margin-bottom: 12px; background: var(--canvas); }
+.mf-filter-card > header { display: flex; gap: 8px; align-items: center; }
+.mf-filter-card > header strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.mf-rule-summary { overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+.mf-rule-summary > p:not(.mf-help):not(.warning) { font-family: ui-monospace, monospace; color: #d0c1f3; }
+.mf-dialog { width: min(1080px, calc(100vw - 32px)); height: min(880px, calc(100dvh - 32px)); max-width: none; max-height: none; padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line-strong); border-radius: 12px; overflow: hidden; }
+.mf-dialog[open] { display: flex; flex-direction: column; }
+.mf-dialog::backdrop { background: #05080dc9; backdrop-filter: blur(3px); }
+.mf-dialog-header, .mf-dialog-footer { display: flex; align-items: center; gap: 12px; padding: 16px 20px; flex: none; }
+.mf-dialog-header { border-bottom: 1px solid var(--line); }
+.mf-dialog-header > div, .mf-dialog-footer > div { flex: 1; min-width: 0; }
+.mf-dialog-header small { color: var(--purple); letter-spacing: .12em; font-size: 10px; }
+.mf-dialog-header h2 { font-size: 21px; margin: 6px 0; }
+.mf-dialog-header .mf-help, .mf-dialog-footer .mf-help { margin: 0; }
+.mf-dialog-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; min-height: 0; flex: 1; overflow: auto; align-items: start; }
+.mf-dialog-editor { padding: 20px; min-width: 0; }
+.mf-dialog-editor > .mf-content { padding: 0; }
+.mf-dialog-editor > .mf-content > .mf-content { padding: 0; }
+.mf-dialog-body { scroll-padding-block: 24px; }
+.mf-dialog .mf-inputs { padding: 10px; }
+.mf-dialog-summary { padding: 20px; position: sticky; top: 0; min-width: 0; }
+.mf-dialog-summary .mf-rule-summary { border-left: 3px solid var(--purple); padding-left: 12px; }
+.mf-dialog-footer { border-top: 1px solid var(--line); }
+.mf-dialog-error { color: var(--danger); margin: 0 0 4px; font-size: 12px; }
+.mf-dialog-error:empty { display: none; }
+.mf-rule-choices { grid-column: 1 / -1; padding: 28px; display: grid; gap: 16px; max-width: 760px; margin: 0 auto; }
+.mf-rule-choices > button { text-align: left; white-space: normal; display: block; padding: 20px; height: auto; font-size: 16px; border-radius: 8px; }
+.mf-rule-choices > button .mf-help { margin: 8px 0 0; }
+.mf-dialog .mf-condition { grid-template-columns: minmax(0,1fr) 155px 36px; }
+@media(max-width:700px) {
+  .mf-dialog { width: calc(100vw - 16px); height: calc(100dvh - 16px); border-radius: 8px; }
+  .mf-dialog-body { display: block; }
+  .mf-dialog-editor, .mf-dialog-summary { padding: 12px; }
+  .mf-dialog-summary { position: static; border-top: 1px solid var(--line); }
+  .mf-dialog-header, .mf-dialog-footer { padding: 12px; }
+  .mf-dialog-header .mf-help { display: none; }
+  .mf-dialog-footer { flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .mf-dialog-footer > div { flex-basis: 100%; }
+  .mf-dialog .mf-condition { grid-template-columns: minmax(0,1fr) 36px; }
+  .mf-dialog .mf-condition > .mf-label:first-of-type { grid-column: 1 / -1; }
+  .mf-dialog .mf-heading { flex-wrap: wrap; }
+  .mf-rule-choices { padding: 16px; }
+}
+@media(prefers-reduced-motion:no-preference) {
+  .mf-dialog[open] { animation: mf-appear 140ms ease-out; }
+  @keyframes mf-appear { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+}

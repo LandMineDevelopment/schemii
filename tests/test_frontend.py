@@ -399,10 +399,38 @@ def test_frontend_uses_only_the_active_same_origin_api_contract() -> None:
     )
 
     assert 'const API_ROOT = "/api/v1";' in api_source
-    assert "credentials: \"same-origin\"" in api_source
-    assert "cache: \"no-store\"" in api_source
+    http_source = files("schemii.common").joinpath("web", "assets", "http.js").read_text(encoding="utf-8")
+    assert 'import { requestJson } from "#common/http.js"' in api_source
+    assert "credentials: \"same-origin\"" in http_source
+    assert "cache: \"no-store\"" in http_source
     assert "http://" not in api_source
     assert "https://" not in api_source
+
+
+def test_shared_frontend_entrypoints_use_the_csp_authorized_import_map():
+    from schemii.common.frontend import COMMON_IMPORT_MAP
+    from schemii.common.api.middleware import IMPORT_MAP_DIGEST
+
+    documents = [
+        files("schemii.schemii").joinpath("web", name)
+        for name in ("index.html", "system-map.html", "api-map.html", "db-map.html")
+    ] + [
+        files("schemii.schemoo").joinpath("web", "index.html"),
+        files("schemii.common").joinpath("web", "assets", "pi-prototype.html"),
+    ]
+    for document in documents:
+        html = document.read_text(encoding="utf-8")
+        assert re.findall(r'<script type="importmap">(.*?)</script>', html) == [COMMON_IMPORT_MAP]
+        assert html.index('type="importmap"') < html.index('type="module"')
+
+    api = TestClient(create_app(), base_url="http://localhost")
+    for path in ("/", "/schemoo", "/system-map"):
+        policy = api.get(path).headers["content-security-policy"]
+        assert f"'sha256-{IMPORT_MAP_DIGEST}'" in policy
+        assert "script-src 'self' 'unsafe-inline'" not in policy
+    for asset in ("dom.js", "data-grid.js", "graph-viewport.js", "http.js"):
+        assert api.get(f"/assets/common/{asset}").status_code == 200
+        assert api.get(f"/assets/{asset}").status_code == 404
 
 
 def test_api_map_uses_only_the_live_same_origin_openapi_contract() -> None:

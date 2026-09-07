@@ -16,6 +16,7 @@ from schemii.schemii.metadata import (
     MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
 )
 from tests.integration.postgres_fixture import PostgresMetadataHarness
+from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO_MIGRATION_PACKAGE
 
 
 _REQUIRED_ENVIRONMENT = (
@@ -52,7 +53,7 @@ def postgres_metadata(tmp_path: Path) -> Iterator[PostgresMetadataHarness]:
     owner_id = f"integration_{uuid.uuid4().hex}"
     repositories = create_metadata_repositories(
         environment,
-        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE),
+        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE, SCHEMOO_MIGRATION_PACKAGE),
     )
     harness = PostgresMetadataHarness(
         owner_id=owner_id,
@@ -64,6 +65,7 @@ def postgres_metadata(tmp_path: Path) -> Iterator[PostgresMetadataHarness]:
     finally:
         with harness.connection_factory() as connection:
             with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM schemoo.models WHERE owner_id = %s", (owner_id,))
                 cursor.execute(
                     "DELETE FROM schemii.workspaces WHERE owner_id = %s",
                     (owner_id,),

@@ -162,11 +162,15 @@ class MigrationPolicy:
 class ResourcePolicy:
     maximum_connections_per_user: int = 100
     maximum_workspaces_per_user: int = 1_000
+    maximum_models_per_user: int = 100
+    maximum_model_document_bytes: int = 1024 * 1024
     design_history_actions_per_workspace: int = 100
 
     def __post_init__(self) -> None:
         _integer("resources.maximum_connections_per_user", self.maximum_connections_per_user, 1, 10_000)
         _integer("resources.maximum_workspaces_per_user", self.maximum_workspaces_per_user, 1, 100_000)
+        _integer("resources.maximum_models_per_user", self.maximum_models_per_user, 1, 10_000)
+        _integer("resources.maximum_model_document_bytes", self.maximum_model_document_bytes, 1024, 16 * 1024 * 1024)
         _integer(
             "resources.design_history_actions_per_workspace",
             self.design_history_actions_per_workspace,
@@ -201,6 +205,9 @@ class AiPolicy:
     message_history_limit: int = 200
     activity_history_limit: int = 1_000
     maximum_proposals_per_turn: int = 10
+    maximum_read_queries_per_batch: int = 8
+    maximum_tool_rounds: int = 8
+    tool_timeout_seconds: int = 300
     prompt_bytes: int = 64 * 1024
     response_bytes: int = 256 * 1024
     proposal_bytes: int = 512 * 1024
@@ -234,6 +241,9 @@ class AiPolicy:
         _integer("ai.message_history_limit", self.message_history_limit, 1, 10_000)
         _integer("ai.activity_history_limit", self.activity_history_limit, 10, 100_000)
         _integer("ai.maximum_proposals_per_turn", self.maximum_proposals_per_turn, 1, 100)
+        _integer("ai.maximum_read_queries_per_batch", self.maximum_read_queries_per_batch, 1, 32)
+        _integer("ai.maximum_tool_rounds", self.maximum_tool_rounds, 1, 32)
+        _integer("ai.tool_timeout_seconds", self.tool_timeout_seconds, 10, 3600)
         _integer("ai.prompt_bytes", self.prompt_bytes, 1_024, 1024 * 1024)
         _integer("ai.response_bytes", self.response_bytes, 1_024, 8 * 1024 * 1024)
         _integer("ai.proposal_bytes", self.proposal_bytes, 1_024, 4 * 1024 * 1024)
@@ -264,6 +274,16 @@ class AiPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class SchemooPolicy:
+    maximum_cached_catalogs: int = 8
+    catalog_refresh_seconds: int = 30
+
+    def __post_init__(self):
+        _integer("schemoo.maximum_cached_catalogs", self.maximum_cached_catalogs, 1, 100)
+        _integer("schemoo.catalog_refresh_seconds", self.catalog_refresh_seconds, 1, 300)
+
+
+@dataclass(frozen=True, slots=True)
 class AdminConfig:
     """Complete administrator policy; credentials deliberately live elsewhere."""
 
@@ -277,6 +297,7 @@ class AdminConfig:
     resources: ResourcePolicy = ResourcePolicy()
     limit_events: LimitEventPolicy = LimitEventPolicy()
     ai: AiPolicy = AiPolicy()
+    schemoo: SchemooPolicy = SchemooPolicy()
 
     def __post_init__(self) -> None:
         if self.console_results.maximum_live_read_sessions >= self.postgres_connections.maximum_total:
@@ -303,7 +324,7 @@ class AdminConfig:
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> "AdminConfig":
-        _reject_unknown(document, {"postgres", "console", "migrations", "resources", "metadata", "ai"}, "root")
+        _reject_unknown(document, {"postgres", "console", "migrations", "resources", "metadata", "ai", "schemoo"}, "root")
         postgres = _mapping(document.get("postgres"), "postgres")
         console = _mapping(document.get("console"), "console")
         metadata = _mapping(document.get("metadata"), "metadata")
@@ -320,6 +341,7 @@ class AdminConfig:
             console_history=ConsoleHistoryPolicy(**_table(console, "history", ConsoleHistoryPolicy, "console.history")),
             migrations=MigrationPolicy(**_root_table(document, "migrations", MigrationPolicy)),
             resources=ResourcePolicy(**_root_table(document, "resources", ResourcePolicy)),
+            schemoo=SchemooPolicy(**_root_table(document, "schemoo", SchemooPolicy)),
             limit_events=LimitEventPolicy(**_table(metadata, "limit_events", LimitEventPolicy, "metadata.limit_events")),
             ai=AiPolicy(**_root_table(document, "ai", AiPolicy)),
         )

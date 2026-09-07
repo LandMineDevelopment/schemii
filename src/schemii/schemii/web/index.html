@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script type="importmap">{"imports":{"#common/":"/assets/common/"}}</script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0b0e13" />
@@ -43,6 +44,7 @@
           <details class="ui-menu">
             <summary class="ui-icon-button" data-ui-icon="help" title="Help and app controls" aria-label="Help and app controls"></summary>
             <div class="ui-menu__surface menu-wide">
+              <a href="/schemoo">Open Schemoo semantic models</a>
               <a href="/system-map">Open live system map</a>
               <a href="/api-map">Open API lens</a>
               <a href="/db-map">Open database lens</a>
@@ -656,13 +658,12 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
           <form class="ai-settings-preferences" id="ai-settings-form">
             <label class="ai-settings-model"><span>Model</span><select id="ai-settings-model" required></select><small>Switch between available providers between messages. The next model receives this conversation’s retained history; earlier answers remain unchanged.</small></label>
             <fieldset class="ai-permission-list">
-              <legend>Conversation permissions</legend>
-              <label><span><strong>Propose design changes</strong><small>Prepare schema edits for explicit review. The assistant cannot apply them silently.</small></span><input type="checkbox" name="designChanges"></label>
-              <label><span><strong>Inspect live catalog</strong><small>Include current PostgreSQL object metadata when this workspace has a connection.</small></span><input type="checkbox" name="liveCatalog"></label>
-              <label><span><strong>Use selected result rows</strong><small>Send a bounded, temporary result snapshot only when you explicitly attach it.</small></span><input type="checkbox" name="structuredDataRead"></label>
-              <label><span><strong>Prepare read queries</strong><small>Propose read-only SQL and run it only after you approve the proposal.</small></span><input type="checkbox" name="rawSqlRead"></label>
-              <label class="danger"><span><strong>Prepare write SQL</strong><small>Put write SQL in Console for your review. It is never executed automatically.</small></span><input type="checkbox" name="rawSqlWrite"></label>
+              <legend>Context access</legend>
+              <label><span><strong>Inspect live catalog</strong><small>Allow access to PostgreSQL object metadata. This does not grant query or migration execution.</small></span><input type="checkbox" name="liveCatalog"></label>
+              <label><span><strong>Analyze query results</strong><small>Allow the model to inspect temporary rows and compare query results. Executing queries has its own permissions below.</small></span><input type="checkbox" name="structuredDataRead"></label>
             </fieldset>
+            <p class="ai-permission-help">Choose each action independently. Related “Ask per batch” actions share one approval; Disabled actions remain blocked.</p>
+            <div id="ai-permission-actions" class="ai-permission-actions"></div>
           </form>
           <section class="ai-provider-settings" aria-labelledby="ai-provider-settings-title">
             <div class="ai-settings-section-head"><div><h3 id="ai-provider-settings-title">Model providers</h3><p>Connect your account to make its models available. Credentials are encrypted on this server and are never returned to the browser. Review each provider’s data policy before sending workspace context.</p></div></div>

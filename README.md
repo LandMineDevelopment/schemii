@@ -42,8 +42,19 @@ The current API deliberately uses one local application user while product workf
 - `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
 - `/api/v1/schemii/workspaces` manages each user's durable local and PostgreSQL-backed designs plus presentation preferences.
 - `POST /api/v1/schemii/workspaces/postgres` opens the user's existing design for one exact saved connection and namespace, or imports it once from a bounded PostgreSQL catalog snapshot when none exists.
+- `PATCH /api/v1/schemii/workspaces/{id}` renames the owner's saved workspace with a revision check, without renaming its PostgreSQL database/schema or changing its saved design.
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
+- `/schemoo` opens the durable semantic-model editor; `/api/v1/schemoo/models` manages owner-private models over an explicit saved connection and schema.
+- `/api/v1/common/query-executions/{id}` provides shared read-result paging, cancellation, release, and export without requiring a Schemii workspace.
 - Interactive OpenAPI documentation is available at `/docs`.
+
+Schemoo stores current model rules, independently revisioned canvas layouts, and
+Explore inputs in metadata—not query rows or copied credentials. Existing browser
+prototype drafts are imported explicitly and left intact. See the
+[Schemoo architecture and API guide](src/schemii/schemoo/README.md) for source-drift
+handling, configuration limits, shared execution, and the remaining semantic-engine
+limitations. Schemer can consume saved-model plans through the same boundary; model
+publishing, ETL and materialization remain separate future work.
 
 This phase has no application authentication, so the packaged local deployment is explicitly `local-development` and its Compose ingress remains bound to loopback. The configured Tailscale Serve route exposes that loopback listener only to the tailnet and must be protected by tailnet ACLs. It is a preview route, not a public deployment boundary. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures. The server currently rejects an authenticated/public deployment mode instead of silently starting without its future identity adapter.
 
@@ -61,7 +72,7 @@ The frontend manages real connection profiles and workspaces, authors durable de
 
 Shared frontend primitives used across product surfaces live in `src/schemii/common/web/assets`; Schemii-specific composition remains in `src/schemii/schemii/web/assets`. The shared layer owns reusable interaction and presentation contracts such as searchable selectors, sortable rows, query stories, buttons, icons, menus, tooltips, state panels, dialog chrome, and dock panes. Page modules own workflow-specific dialog lifecycles and product composition such as the schema canvas, catalog cards, API route stages, and response-contract rails.
 
-Promote a frontend implementation into the shared UI layer when multiple real page consumers need the same contract or when one central implementation is required for accessibility or interaction correctness. Keep page-specific code local rather than adding speculative variants. If a future Schemoo or Schemer frontend becomes a second package-level consumer, establish a frontend package boundary at that point instead of coupling it to Schemii's asset directory prematurely.
+Promote a frontend implementation into the shared UI layer when multiple real page consumers need the same contract or when one central implementation is required for accessibility or interaction correctness. Keep page-specific code local rather than adding speculative variants. Schemii and Schemoo share the HTTP client, DOM helpers, graph viewport, and result grid directly through `#common/*` imports. HTML import maps resolve that alias to `/assets/common/`; the Node package imports map resolves it to the same source files for tests. The common frontend installer owns that asset mount, independently of product frontends. Do not add product-owned copies or compatibility wrappers for these primitives.
 
 Desired designs support durable schema authoring independently of a backing database. Database-backed designs can be reviewed and applied through server-authoritative migration plans with drift detection, explicit conflict resolution, durable execution recovery, and PostgreSQL-enforced permissions. General SQL execution and the workspace assistant use separate server-authoritative contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
@@ -94,29 +105,66 @@ Query history stores only normalized SQL and its run timestamp. Result rows are 
 
 ## Workspace assistant
 
-The local Compose stack includes a private, Basic-authenticated OpenCode sidecar.
-It has no published host port, a read-only workspace, a read-only root filesystem,
-and an explicit deny-by-default tool policy. The browser talks only to Schemii's
-same-origin API; OpenCode can propose four typed actions and cannot read the source
-tree, run shell commands, browse, write files, or contact PostgreSQL directly.
-Provider and model selection are discovered from OpenCode. An operator may supply
-an explicit fallback only for a known deployment through
-`SCHEMII_AI_FALLBACK_PROVIDER_ID` and `SCHEMII_AI_FALLBACK_MODEL_ID`.
+The local Compose stack includes one shared, private Pi inference sidecar,
+authenticated with a server-held bearer secret. It has no published host port,
+database access, shell tools or persistent chat storage. The browser talks only
+to Schemii's same-origin API. Pi returns structured proposals; Schemii owns tool
+validation, permissions, execution and user approval.
+
+AI settings support ChatGPT Codex device sign-in, OpenAI API keys, and verified
+free OpenCode Zen models. The server periodically refreshes free-model availability;
+it never silently substitutes a model. Conversations can switch models between
+turns. Credentials are encrypted and owner-scoped, with configurable inactivity
+expiration. See [AI runtime documentation](ai/prototype/README.md) for retention,
+provider privacy, deployment limitations and sidecar tests. The current supported
+deployment remains a single API process with the local development principal.
 
 Each turn receives the current owner-scoped workspace, desired design, bounded chat
 history, and—only when granted—a freshly inspected live catalog. Design proposals
 cover the complete desired-design model and execute through the same revision and
-integrity checks as direct edits. Read-only SQL runs through the shared managed-read
-Console; model-authored writes can only be opened as inert Console drafts. Migration
-requests create the normal server-derived migration review and never apply it.
+integrity checks as direct edits. Structured browsing, history/reset, migration
+planning/execution, and SQL use the same application services as the UI.
+Migration review, apply, external-conflict choices, and uncertain-outcome
+reconciliation have independent permissions. Conflict resolution updates metadata and requires
+a fresh plan. Reconciliation checks transaction evidence without rerunning SQL;
+its receipt can still report uncertainty or a newer-design synchronization conflict.
+Each individual action supports Disabled, Ask per batch, or Automatic, including
+create/update/delete for each design object type and separate undo/redo/reset.
+The server derives design permissions from actual before/after effects, so a
+whole-table replacement cannot bypass permissions on its columns or indexes.
+All effects in a batch must be enabled; any Ask effect requires one review.
+Existing capability JSON is normalized on read to equivalent action modes;
+new settings save the complete bounded action map in the same metadata field.
+Omitted actions in an explicit map are disabled. Catalog and result visibility
+remain separate binary context-access switches. Preparing a
+Console draft remains distinct from executing write SQL. Authorized write batches
+use one transaction; uncertain commits are not retried. Migration submission is
+not proof of completion: the assistant must inspect the execution receipt.
+Related design calls save atomically in one revision. An exact mixed-service batch
+can share one approval, but is sequential, stops on failure, and reports partial
+completion; it is not a distributed transaction.
 
 Assistant metadata stores conversations, SQL proposals, revision bindings, action
 receipts, counts, and transient result identifiers. It never stores query result
 rows. Rows shown in the assistant remain in the Console's bounded process memory.
-If they have been released when a user reopens or attaches a result, Schemii reruns
-the saved read-only SQL and displays a warning that the data may have changed. Sending
-rows back to a model is a separate capability and is bounded by both row count and
-encoded byte size in [`dev/schemii.toml`](dev/schemii.toml).
+The assistant can bundle labeled reads in one tool call, receive their results
+together, and continue analyzing without another user message. Read approval
+defaults on; approving or dismissing actions resumes the same question. Automatic
+reads do not authorize schema edits or writes. “Analyze query results” separately
+controls access to row values.
+
+Earlier runs are referenced by chat-scoped IDs and timestamps. Retained results
+can be compared; released results require rerunning saved SQL under the current
+read permission and approval policy. Reruns explicitly warn that data may have
+changed: they cannot reconstruct historical snapshots. Each query in a batch
+uses its own read-only transaction. Result samples share a row/byte budget; use
+SQL aggregation for complete comparisons. Row-backed answers remain transient.
+Approval continuations store IDs only, never provider transcripts or rows, and
+expire with their conversation history. Batch size, tool rounds, active-workflow
+time, and context budgets are controlled in [`dev/schemii.toml`](dev/schemii.toml).
+At the tool-round limit, one final tools-disabled response summarizes the collected
+evidence and identifies incomplete checks. It cannot execute more actions and still
+obeys the workflow timeout, permission checks, and context/response memory limits.
 
 Anonymous or free upstream models should be used only for non-confidential prototype
 data because their providers may retain prompts. A production deployment should

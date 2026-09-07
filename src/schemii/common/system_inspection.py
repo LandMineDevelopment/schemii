@@ -284,8 +284,16 @@ class RuntimeBindingIndex:
             provider = self.resolve(
                 node.value.func,
                 callable_subject=callable_subject,
-            ).subject
-            return provider is not None and is_first_party(provider)
+            )
+            # A chained call on a scalar can share a method name with an
+            # installed first-party component (for example ``str.replace`` and
+            # a repository's ``replace`` method). A name-only match is not
+            # evidence that the scalar call crossed an application boundary.
+            return (
+                provider.resolution != "unique-runtime-method"
+                and provider.subject is not None
+                and is_first_party(provider.subject)
+            )
         return False
 
     def resolve(

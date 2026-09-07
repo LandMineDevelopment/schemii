@@ -1,5 +1,5 @@
-import { element, emptyPanel, errorPanel, replace } from "./dom.js";
-import { createDataGrid } from "./data-grid.js";
+import { element, emptyPanel, errorPanel, replace } from "#common/dom.js";
+import { createDataGrid } from "#common/data-grid.js";
 
 const LABELS = {
   table: "Tables",

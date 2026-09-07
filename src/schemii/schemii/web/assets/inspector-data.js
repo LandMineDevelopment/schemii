@@ -1,6 +1,6 @@
 import { createSqlConsole } from "./sql-console.js";
 import { renderRelationRows, pagedRowsStatus } from "./relation-browser.js";
-import { appendDataGridPage, installAutoPageLoader } from "./data-grid.js";
+import { appendDataGridPage, installAutoPageLoader } from "#common/data-grid.js";
 import { createIconElement } from "/assets/common/ui.js";
 
 /**

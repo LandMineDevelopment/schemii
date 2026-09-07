@@ -1,4 +1,4 @@
-import { element, errorPanel, replace } from "./dom.js";
+import { element, errorPanel, replace } from "#common/dom.js";
 import { updateDesignTable } from "./design.js";
 import { createIconButton } from "/assets/common/ui.js";
 import { createSearchableSelect } from "/assets/common/searchable-select.js";

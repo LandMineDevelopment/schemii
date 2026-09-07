@@ -23,6 +23,10 @@ def get_current_principal(request: Request) -> Principal:
     A future identity adapter can resolve an authenticated owner without
     changing product route or repository signatures.
     """
+    # TODO(multiuser-auth): Replace the local principal with authenticated sessions
+    # before supporting shared/public deployments. Keep connections, credentials,
+    # and unmigrated designs scoped to the resolved owner; never share DB identities.
+    # Deferred while Schemii, Schemoo, and Schemer use the single-user dev setup.
     principal = Principal(
         user_id=LOCAL_PROTOTYPE_USER_ID,
         authentication_source="local_prototype",

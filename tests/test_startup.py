@@ -169,6 +169,9 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert result.returncode == 0, result.stderr
     assert "Schemii is ready at https://localhost:8123/" in result.stdout
     commands = command_log.read_text(encoding="utf-8")
+    # Developer-local host routing may add this overlay; it does not alter the
+    # build/restart contract being asserted here.
+    commands = commands.replace(f" --file {ROOT / '.schemii/compose.local.yaml'}", "")
     assert "docker:compose version" in commands
     assert "docker:info" in commands
     assert (

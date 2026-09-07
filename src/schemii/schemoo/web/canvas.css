@@ -1,0 +1,34 @@
+.sc-canvas { position: relative; overflow: hidden; min-width: 0; min-height: 0; height: 100%; flex: 1; touch-action: none; isolation: isolate; background-color: #0b1016; background-image: linear-gradient(#25303a35 1px, transparent 1px), linear-gradient(90deg, #25303a35 1px, transparent 1px); background-size: 24px 24px; cursor: grab; }
+.sc-canvas.panning { cursor: grabbing; }
+.sc-stage { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; }
+.sc-cards { position: absolute; inset: 0; pointer-events: none; }
+.sc-node { pointer-events: auto; position: absolute; width: 286px; box-sizing: border-box; border: 1px solid #354153; border-radius: 9px; background: #121922; color: #dbe1e9; box-shadow: 0 8px 24px #0004; overflow: hidden; cursor: default; }
+.sc-node.sc-root { border-color: #aa8bef; }
+.sc-node.sc-selected { border-color: #c2a5ff; box-shadow: 0 0 0 2px #a887ef55; }
+.sc-node.dragging { z-index: 5; box-shadow: 0 15px 40px #0007; }
+.sc-node-header { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 4px; width: 100%; height: 59px; min-height: 59px; padding: 8px 12px; border: 0; border-bottom: 1px solid #354153; border-radius: 0; background: #1a202c; color: inherit; text-align: left; cursor: grab; touch-action: none; font-family: inherit; }
+.sc-node-header:hover { background: #27263c; }
+.sc-node-header:active { cursor: grabbing; }
+.sc-node-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-node-detail { font-size: 10px; color: #a2a6b4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-column { box-sizing: border-box; display: grid; grid-template-columns: 14px minmax(0, 1fr) 78px; align-items: center; gap: 7px; height: 30px; min-height: 30px; margin: 0; padding: 0 10px; border-bottom: 1px solid #2a34404d; cursor: pointer; }
+.sc-column:hover, .sc-column:has(input:checked) { background: #a887ef15; }
+.sc-column input { width: 12px; height: 12px; margin: 0; accent-color: #ad8def; }
+.sc-column-name { color: #d6dce6; font: 11px ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-column-type { color: #8291a4; font: 8px ui-monospace, monospace; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-edges { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: visible; }
+.sc-edge { cursor: pointer; color: #8294ae; }
+.sc-edge-line { fill: none; stroke: currentColor; stroke-width: 2; pointer-events: none; }
+.sc-edge-hit { fill: none; stroke: transparent; stroke-width: 24; pointer-events: stroke; }
+@media (pointer: coarse) { .sc-edge-hit { stroke-width: 40; } }
+.sc-edge circle { fill: #101720; stroke: currentColor; stroke-width: 2; }
+.sc-edge.sc-disabled { color: #586270; }
+.sc-edge.sc-disabled .sc-edge-line { stroke-dasharray: 7 5; opacity: .65; }
+.sc-edge.sc-used { color: #ad8def; }
+.sc-edge.sc-cycle { color: #f17681; }
+.sc-edge.sc-selected .sc-edge-line, .sc-edge:hover .sc-edge-line, .sc-edge:focus .sc-edge-line { stroke-width: 4; }
+.sc-edge-label { fill: currentColor; font: 10px ui-monospace, monospace; text-anchor: middle; paint-order: stroke; stroke: #0b1016; stroke-width: 4px; }
+.sc-node-header:focus-visible, .sc-canvas:focus-visible { outline: 2px solid #bc9dff; outline-offset: -3px; }
+.sc-alias { border-style: dashed; border-color: #9274b9; }
+.sc-alias .sc-node-header { background: #241d33; position: relative; padding-right: 61px; }
+.sc-alias-badge { position: absolute; right: 9px; top: 20px; padding: 3px 5px; border: 1px solid #8461b0; border-radius: 4px; font: 9px ui-monospace,monospace; color: #d4b8fc; }

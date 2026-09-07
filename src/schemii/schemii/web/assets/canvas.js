@@ -1,5 +1,5 @@
-import { element, replace } from "./dom.js";
-import { GraphViewport } from "./graph-viewport.js";
+import { element, replace } from "#common/dom.js";
+import { GraphViewport } from "#common/graph-viewport.js";
 import { catalogTableId } from "./workspace-state.js";
 
 const CARD_WIDTH = 270;

@@ -1,0 +1,24 @@
+.sm-help-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sm-help-heading h3 { margin: 0; }
+.ui-icon-button.sm-help-button { flex: none; color: var(--purple); background: transparent; border-color: transparent; }
+.ui-icon-button.sm-help-button:hover { background: var(--panel-2); border-color: var(--line-strong); }
+.sm-help-button:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+.sm-help-dialog { width: min(620px, calc(100vw - 28px)); max-height: calc(100dvh - 32px); padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 18px 70px #0008; }
+.sm-help-dialog[open] { display: flex; flex-direction: column; }
+.sm-help-dialog::backdrop { background: #050910b8; }
+.sm-help-dialog__header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 20px; border-bottom: 1px solid var(--line); flex: none; }
+.sm-help-dialog__header h2 { font-size: 17px; line-height: 1.4; margin: 0; }
+.sm-help-dialog__header h2:focus { outline: none; }
+.sm-help-dialog__body { padding: 4px 20px 20px; overflow: auto; line-height: 1.65; font-size: 13px; min-height: 0; }
+.sm-help-dialog__body p { margin: 14px 0; }
+.sm-help-dialog__body h3 { margin: 20px 0 4px; color: #d5c2ff; font-size: 13px; }
+.sm-help-dialog__body h3 + p { margin-top: 4px; }
+.sm-help-dialog__body ol { padding-left: 23px; }
+.sm-help-dialog__body li { margin: 12px 0; padding-left: 4px; }
+.sm-help-example { padding: 12px; background: var(--canvas); border: 1px solid var(--line); border-radius: 7px; font: 12px/1.7 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sm-help-dialog__body .sm-help-note { padding: 12px; background: #221c31; border-left: 3px solid var(--purple); border-radius: 5px; color: #d4c8e8; }
+@media (max-width: 600px) {
+  .sm-help-dialog__header { padding: 14px; }
+  .sm-help-dialog__body { padding: 2px 14px 14px; }
+  .sm-help-dialog__header h2 { font-size: 16px; }
+}

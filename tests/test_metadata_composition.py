@@ -14,6 +14,7 @@ from schemii.common.metadata.migrations import (
 from schemii.schemii.metadata import (
     MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
 )
+from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO_MIGRATION_PACKAGE
 
 
 def test_application_root_explicitly_composes_common_and_schemii_metadata(
@@ -35,7 +36,7 @@ def test_application_root_explicitly_composes_common_and_schemii_metadata(
 
     assert services.metadata.storage == "memory"
     assert captured_packages == [
-        (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE)
+        (COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE, SCHEMOO_MIGRATION_PACKAGE)
     ]
 
 

@@ -33,9 +33,11 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "schemii.schemii" = ["web/*.html", "web/assets/*"]
+"schemii.schemoo" = ["web/*"]
 "schemii.common" = ["web/assets/*"]
 "schemii.common.metadata" = ["migrations/*.sql"]
 "schemii.schemii.metadata" = ["migrations/*.sql"]
+"schemii.schemoo.metadata" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -39,6 +39,7 @@ from schemii.schemer.routes import router as schemer_router
 from schemii.schemii.designs.postgres_store import PostgresDesignRepository
 from schemii.schemii.designs.store import DesignRepository, InMemoryDesignRepository
 from schemii.schemii.frontend import install_schemii_frontend
+from schemii.common.frontend import install_common_frontend
 from schemii.schemii.ai.repository import AiRepository, InMemoryAiRepository, PostgresAiRepository
 from schemii.schemii.ai.service import AiService
 from schemii.schemii.console.repository import (
@@ -62,6 +63,11 @@ from schemii.schemii.workspaces.store import (
 )
 from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepository
 from schemii.schemoo.routes import router as schemoo_router
+from schemii.schemoo.frontend import install_schemoo_frontend
+from schemii.schemoo.catalog import ModelCatalogs
+from schemii.schemoo.store import ModelRepository, InMemoryModelRepository, PostgresModelRepository
+from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO_METADATA_MIGRATION_PACKAGE
+from schemii.common.query_executions.routes import router as query_executions_router
 
 
 @dataclass(frozen=True)
@@ -75,6 +81,8 @@ class ApplicationServices:
     console: ConsoleService | None = None
     admin_config: AdminConfig = AdminConfig()
     ai_repository: AiRepository | None = None
+    models: ModelRepository | None = None
+    model_catalogs: ModelCatalogs | None = None
 
 
 def create_services(
@@ -87,6 +95,7 @@ def create_services(
         migration_packages=(
             COMMON_METADATA_MIGRATION_PACKAGE,
             SCHEMII_METADATA_MIGRATION_PACKAGE,
+            SCHEMOO_METADATA_MIGRATION_PACKAGE,
         ),
         maximum_connections_per_owner=(
             selected_admin.resources.maximum_connections_per_user
@@ -120,6 +129,12 @@ def create_services(
             ),
         )
     )
+    models = (PostgresModelRepository(metadata.connection_factory,
+              maximum_models_per_owner=selected_admin.resources.maximum_models_per_user,
+              maximum_document_bytes=selected_admin.resources.maximum_model_document_bytes)
+              if metadata.connection_factory is not None else InMemoryModelRepository(
+              maximum_models_per_owner=selected_admin.resources.maximum_models_per_user,
+              maximum_document_bytes=selected_admin.resources.maximum_model_document_bytes))
     target_policy = metadata.target_policy
     if selected_runtime.target_egress_mode is TargetEgressMode.INTERNAL_ONLY:
         target_policy = CompositeConnectionTargetPolicy(
@@ -132,7 +147,7 @@ def create_services(
         )
     connections = ConnectionService(
         metadata.connections,
-        (workspaces,),
+        (workspaces, models),
         target_policy=target_policy,
     )
     migration_repository = (
@@ -254,6 +269,9 @@ def create_services(
         console=console,
         admin_config=selected_admin,
         ai_repository=ai_repository,
+        models=models,
+        model_catalogs=ModelCatalogs(maximum_entries=selected_admin.schemoo.maximum_cached_catalogs,
+                                    refresh_seconds=selected_admin.schemoo.catalog_refresh_seconds),
     )
 
 
@@ -409,6 +427,7 @@ def create_app(
     )
     application.include_router(pi_router)
     application.include_router(activity_router)
+    application.include_router(query_executions_router, prefix="/api/v1/common")
     from schemii.common.ai.pi import PiRuntime
     ai_runtime = (
         PiRuntime(application.state.pi_client, active_services.metadata.ai_credentials,
@@ -433,7 +452,9 @@ def create_app(
 
     if developer_inspection:
         install_developer_inspection(application)
+    install_common_frontend(application)
     install_schemii_frontend(application)
+    install_schemoo_frontend(application)
 
     return application
 

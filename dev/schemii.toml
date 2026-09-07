@@ -46,7 +46,15 @@ worker_poll_seconds = 1.0
 [resources]
 maximum_connections_per_user = 100
 maximum_workspaces_per_user = 1000
+maximum_models_per_user = 100
+# Per semantic definition, layout, or Explore input document; never query rows.
+maximum_model_document_bytes = 1048576
 design_history_actions_per_workspace = 100
+
+[schemoo]
+# Bounded schema-only cache for editing. Every preview revalidates live PostgreSQL.
+maximum_cached_catalogs = 8
+catalog_refresh_seconds = 30
 
 [metadata.limit_events]
 retention_days = 30
@@ -66,6 +74,12 @@ credential_inactivity_days = 30
 message_history_limit = 200
 activity_history_limit = 1000
 maximum_proposals_per_turn = 10
+# Bound autonomous work without storing any query rows in metadata.
+maximum_read_queries_per_batch = 8
+# Tool-enabled model rounds; one tools-disabled summary follows at the limit.
+# The summary still respects workflow timeout and context/memory limits.
+maximum_tool_rounds = 8
+tool_timeout_seconds = 300
 prompt_bytes = 65536
 response_bytes = 262144
 proposal_bytes = 524288

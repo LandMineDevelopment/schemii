@@ -1,0 +1,1 @@
+"""Schemoo-owned metadata persistence."""

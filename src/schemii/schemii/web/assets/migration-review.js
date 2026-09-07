@@ -1,4 +1,4 @@
-import { element, errorPanel, formatTimestamp, replace } from "./dom.js";
+import { element, errorPanel, formatTimestamp, replace } from "#common/dom.js";
 import { createIconButton } from "./ui.js";
 
 const RUNNING_EXECUTION_STATUSES = new Set(["reserved", "applying"]);

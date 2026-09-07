@@ -1,4 +1,4 @@
-import { element, emptyPanel, normalizedSearch, replace } from "./dom.js";
+import { element, emptyPanel, normalizedSearch, replace } from "#common/dom.js";
 import { unavailableButton } from "./unavailable.js";
 import { installSortableList } from "/assets/common/sortable.js";
 import { createIconButton } from "./ui.js";

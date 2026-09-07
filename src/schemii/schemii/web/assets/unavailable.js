@@ -1,4 +1,4 @@
-import { element } from "./dom.js";
+import { element } from "#common/dom.js";
 
 export const UNAVAILABLE_CAPABILITIES = Object.freeze({
   "column-create": { title: "Create column", description: "The active API can inspect columns but has no contract for adding them." },
