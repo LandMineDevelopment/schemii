@@ -5,6 +5,8 @@ separate managed read transactions so one invalid query does not discard others.
 """
 from types import SimpleNamespace
 import json
+from schemii.common.ai.limits import limit_notice, record_ai_limit
+from schemii.common.postgres.errors import PostgresConsoleCancelledError
 import time
 
 
@@ -44,11 +46,17 @@ def execute_batch(service, owner, chat, proposal, operation, action):
                 result.has_more, rerun_ids[index] if index < len(rerun_ids) else None)
             results.append({"runId": run.id, "label": run.label, "executionId": execution.id,
                             "resultId": result.id, "rowCount": result.row_count, "hasMore": result.has_more})
+        except PostgresConsoleCancelledError:
+            # A stop is not an individual failed read: end the whole batch.
+            raise
         except Exception as error:
             # Database errors can contain actual row values. Persist a code only.
+            record_ai_limit(getattr(getattr(service.services, "metadata", None), "limit_events", None),
+                            error, service.policy, owner, "schemii_ai", workspace_id=chat.workspace_id)
             code = getattr(error, "code", "ai_query_failed")
             results.append({"label": query["label"], "errorCode": code,
-                            "errorMessage": "This read failed. Check its SQL, target and database permissions."})
+                            "errorMessage": "This read reached a server capacity limit. Wait for other work to finish or narrow the query and retry."
+                                if limit_notice(error, service.policy) else "This read failed. Check its SQL, target and database permissions."})
         service.repository.add_event(owner, chat.id, "operation", {"turnId": proposal.turn_id,
             "operationId": operation.id, "completedQueries": len(results), "totalQueries": len(queries)})
     return {"results": results, "authorization": {

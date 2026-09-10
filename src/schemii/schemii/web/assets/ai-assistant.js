@@ -1,6 +1,11 @@
 import { requestJson } from "#common/http.js";
+import { renderMarkdown } from "#common/ai-markdown.js";
+import { createMessageNode, formatDate, modelValue, availableModels, populateModelOptions } from "#common/ai-presentation.js";
+import { renderAiActivity } from "#common/ai-activity.js";
+import { enhanceModelPicker } from "#common/ai-model-picker.js";
+import { placeTurnActivity } from "#common/ai-timeline.js";
 import { createIconButton } from "./ui.js";
-import { PERMISSION_MODES, permissionMode, permissionValues, permissionSummary } from "./ai-permissions.js";
+import { PERMISSION_MODES, permissionMode, permissionValues, permissionSummary } from "#common/ai-permissions.js";
 
 const elements = {
   button: document.querySelector("#ai-assistant-button"),
@@ -79,6 +84,8 @@ let pendingProposal = null;
 let pendingProposalBatch = null;
 let proposalArmTimer = null;
 let proposalReviewOpenedAt = 0;
+const modelPickers = [elements.model, elements.settingsModel].filter(Boolean).map(select =>
+  enhanceModelPicker(select, { refresh: () => refreshProviderStatus({ refresh: true }) }));
 
 function workspaceId() {
   return new URL(location.href).searchParams.get("workspace");
@@ -95,42 +102,12 @@ function setStatus(value) {
   elements.status.dataset.status = value.toLowerCase();
 }
 
-function formatDate(value) {
-  const date = new Date(value);
-  const sameDay = date.toDateString() === new Date().toDateString();
-  return new Intl.DateTimeFormat(undefined, sameDay
-    ? { hour: "numeric", minute: "2-digit" }
-    : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
-  ).format(date);
-}
-
-function modelValue(providerId, modelId) {
-  return `${providerId}\u0000${modelId}`;
-}
-
 function selectedModel(select = elements.model) {
   return models.find(item => modelValue(item.providerId, item.id) === select.value) || null;
 }
 
 function loadModelOptions(select, selectedProvider, selectedId) {
-  const current = modelValue(selectedProvider || "", selectedId || "");
-  select.replaceChildren(...models.map(item => {
-    const option = document.createElement("option");
-    option.value = modelValue(item.providerId, item.id);
-    option.textContent = `${item.name} · ${item.providerName}`;
-    option.selected = option.value === current;
-    return option;
-  }));
-  if (selectedId && !models.some(item => modelValue(item.providerId, item.id) === current)) {
-    const unavailable = document.createElement("option");
-    unavailable.value = current;
-    unavailable.textContent = `${selectedId} · unavailable — choose another model`;
-    unavailable.disabled = true;
-    unavailable.selected = true;
-    select.prepend(unavailable);
-  } else if (!selectedId && select.options.length) {
-    select.options[0].selected = true;
-  }
+  populateModelOptions(select, models, selectedProvider, selectedId);
 }
 
 function updateContextControls() {
@@ -139,7 +116,7 @@ function updateContextControls() {
   loadModelOptions(elements.model, provider, model);
   elements.permissionsCopy.textContent = permissionSummary(chat?.capabilities || settings?.defaultCapabilities, settings?.permissionActions || []);
   const working = chat?.status === "working";
-  elements.model.disabled = !models.length || working;
+  elements.model.disabled = working;
   elements.newButton.disabled = !models.length || working;
   elements.settingsButton.disabled = false;
   elements.permissions.disabled = false;
@@ -154,88 +131,6 @@ function updateContextControls() {
   if (privacyNotice) elements.disclosure.textContent += ` ${privacyNotice}`;
 }
 
-function appendInline(parent, source) {
-  const pattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)|\*[^*\n]+\*)/g;
-  let cursor = 0;
-  for (const match of source.matchAll(pattern)) {
-    parent.append(document.createTextNode(source.slice(cursor, match.index)));
-    const token = match[0];
-    let node;
-    if (token.startsWith("**")) {
-      node = document.createElement("strong"); node.textContent = token.slice(2, -2);
-    } else if (token.startsWith("`")) {
-      node = document.createElement("code"); node.textContent = token.slice(1, -1);
-    } else if (token.startsWith("[")) {
-      const boundary = token.indexOf("](");
-      node = document.createElement("a"); node.textContent = token.slice(1, boundary);
-      node.href = token.slice(boundary + 2, -1); node.target = "_blank"; node.rel = "noopener noreferrer";
-    } else {
-      node = document.createElement("em"); node.textContent = token.slice(1, -1);
-    }
-    parent.append(node); cursor = match.index + token.length;
-  }
-  parent.append(document.createTextNode(source.slice(cursor)));
-}
-
-function tableCells(line) {
-  return line.trim().replace(/^\||\|$/g, "").split("|").map(cell => cell.trim());
-}
-
-function renderMarkdown(source) {
-  const fragment = document.createDocumentFragment();
-  const lines = String(source ?? "").replace(/\r\n?/g, "\n").split("\n");
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    if (!line.trim()) { index += 1; continue; }
-    if (line.trim().startsWith("```")) {
-      const language = line.trim().slice(3).trim(); const body = []; index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith("```")) { body.push(lines[index]); index += 1; }
-      index += 1;
-      const pre = document.createElement("pre"); const code = document.createElement("code");
-      if (language) code.dataset.language = language; code.textContent = body.join("\n"); pre.append(code); fragment.append(pre); continue;
-    }
-    const heading = line.match(/^(#{1,4})\s+(.+)$/);
-    if (heading) {
-      const node = document.createElement(`h${Math.min(heading[1].length + 2, 6)}`);
-      appendInline(node, heading[2]); fragment.append(node); index += 1; continue;
-    }
-    if (line.includes("|") && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1])) {
-      const table = document.createElement("table"); const head = document.createElement("thead"); const headRow = document.createElement("tr");
-      for (const value of tableCells(line)) { const cell = document.createElement("th"); appendInline(cell, value); headRow.append(cell); }
-      head.append(headRow); table.append(head); index += 2; const body = document.createElement("tbody");
-      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
-        const row = document.createElement("tr");
-        for (const value of tableCells(lines[index])) { const cell = document.createElement("td"); appendInline(cell, value); row.append(cell); }
-        body.append(row); index += 1;
-      }
-      table.append(body); const scroll = document.createElement("div"); scroll.className = "ai-markdown-table"; scroll.tabIndex = 0; scroll.append(table); fragment.append(scroll); continue;
-    }
-    const listMatch = line.match(/^\s*(?:([-*+])|(\d+\.))\s+(.+)$/);
-    if (listMatch) {
-      const ordered = Boolean(listMatch[2]); const list = document.createElement(ordered ? "ol" : "ul");
-      while (index < lines.length) {
-        const itemMatch = lines[index].match(/^\s*(?:([-*+])|(\d+\.))\s+(.+)$/);
-        if (!itemMatch || Boolean(itemMatch[2]) !== ordered) break;
-        const item = document.createElement("li"); appendInline(item, itemMatch[3]); list.append(item); index += 1;
-      }
-      fragment.append(list); continue;
-    }
-    if (/^>\s?/.test(line)) {
-      const quote = document.createElement("blockquote"); const values = [];
-      while (index < lines.length && /^>\s?/.test(lines[index])) { values.push(lines[index].replace(/^>\s?/, "")); index += 1; }
-      appendInline(quote, values.join(" ")); fragment.append(quote); continue;
-    }
-    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { fragment.append(document.createElement("hr")); index += 1; continue; }
-    const paragraphLines = [line.trim()]; index += 1;
-    while (index < lines.length && lines[index].trim() && !/^(#{1,4})\s+/.test(lines[index]) && !/^\s*(?:[-*+] |\d+\. |>|```)/.test(lines[index])) {
-      if (lines[index].includes("|") && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1])) break;
-      paragraphLines.push(lines[index].trim()); index += 1;
-    }
-    const paragraph = document.createElement("p"); appendInline(paragraph, paragraphLines.join(" ")); fragment.append(paragraph);
-  }
-  return fragment;
-}
 
 function emptyTranscript() {
   const section = document.createElement("section"); section.className = "ai-empty-state";
@@ -246,21 +141,8 @@ function emptyTranscript() {
 }
 
 function messageNode(message) {
-  const article = document.createElement("article"); article.className = `ai-message ${message.role}`;
-  const label = document.createElement("span"); label.textContent = message.role === "assistant" ? "Schemii AI" : message.role === "user" ? "You" : "System";
-  const surface = document.createElement("div"); surface.className = "ai-message__surface";
-  const content = document.createElement("div"); content.className = "ai-message__content"; content.append(renderMarkdown(message.text));
-  const copy = createIconButton({ icon: "copy", label: "Copy message", placement: "left", className: "compact ai-message__copy" });
-  copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(message.text); copy.classList.add("copied"); copy.setAttribute("aria-label", "Copied");
-    globalThis.setTimeout(() => { copy.classList.remove("copied"); copy.setAttribute("aria-label", "Copy message"); }, 1200);
-  });
-  const time = document.createElement("time"); time.dateTime = message.createdAt; time.textContent = formatDate(message.createdAt);
-  surface.append(content, copy);
-  if (message.transient) {
-    const privacy = document.createElement("span"); privacy.className = "ai-message__privacy"; privacy.textContent = "Temporary · not saved"; surface.append(privacy);
-  }
-  article.append(label, surface, time); return article;
+  const existing = [...elements.messages.querySelectorAll("[data-message-id]")].find(node => node.dataset.messageId === message.id);
+  return createMessageNode(message, { assistantName: "Schemii AI", onError: message => setNotice(message, "error"), existing });
 }
 
 function renderAttachment() {
@@ -324,7 +206,7 @@ function renderTimeline(messages = timelineMessages, proposals = timelineProposa
     const userMessages = group.messages.filter(item => item.role === "user").sort((a, b) => a.sequence - b.sequence);
     const responseMessages = group.messages.filter(item => item.role !== "user").sort((a, b) => a.sequence - b.sequence);
     section.append(...userMessages.map(messageNode));
-    const activitySlot = document.createElement("div"); activitySlot.className = "ai-turn__activity"; section.append(activitySlot);
+    const activitySlot = document.createElement("div"); activitySlot.className = "ai-turn__activity";
     const pending = group.proposals.filter(item => item.status === "pending");
     if (pending.length > 1) {
       const batch = document.createElement("button"); batch.type = "button"; batch.className = "ui-button compact primary";
@@ -342,6 +224,7 @@ function renderTimeline(messages = timelineMessages, proposals = timelineProposa
     }
     entries.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     section.append(...entries.map(entry => entry.node));
+    section.replaceChildren(...placeTurnActivity([...section.children], activitySlot, { turnId: group.key }));
     return section;
   });
   if (chat?.status === "waiting_approval" && !proposals.some(proposal => proposal.status === "pending")) {
@@ -369,12 +252,6 @@ function placeActivity() {
   if (destination && elements.activity.parentElement !== destination) destination.append(elements.activity);
 }
 
-function progressDots() {
-  const grid = document.createElement("span"); grid.className = "ai-progress-grid"; grid.setAttribute("aria-hidden", "true");
-  for (let index = 0; index < 25; index += 1) grid.append(document.createElement("i"));
-  return grid;
-}
-
 function beginActivity(turnId = null) {
   activityRun = { turnId, startedAt: Date.now(), state: "working", stages: new Map() }; renderActivity(); placeActivity();
   globalThis.clearInterval(elapsedTimer); elapsedTimer = globalThis.setInterval(renderActivity, 1000);
@@ -399,6 +276,7 @@ function applyActivityEvent(event) {
 function finishActivity(state = "completed") {
   if (!activityRun) return;
   activityRun.state = state;
+  activityRun.finishedAt = Date.now();
   for (const [key, stage] of activityRun.stages) if (stage.state === "running") activityRun.stages.set(key, { ...stage, state });
   renderActivity(); globalThis.clearInterval(elapsedTimer); elapsedTimer = null;
   globalThis.setTimeout(() => { if (activityRun?.state !== "working") { activityRun = null; renderActivity(); } }, 2400);
@@ -406,26 +284,9 @@ function finishActivity(state = "completed") {
 
 function renderActivity() {
   if (!activityRun) { elements.activity.replaceChildren(); return; }
-  const details = document.createElement("details"); details.className = `ai-run ${activityRun.state}`; details.open = true;
-  const summary = document.createElement("summary"); const title = document.createElement("strong"); title.className = "ai-run-title";
-  const running = activityRun.state === "working";
-  title.textContent = running ? "Working with this workspace" : activityRun.state === "waiting_approval" ? "Waiting for action approval" : activityRun.state === "failed" ? "Turn failed" : activityRun.state === "cancelled" ? "Turn stopped" : "Response ready";
-  if (running) title.classList.add("shimmer");
-  const elapsed = document.createElement("time"); elapsed.className = "ai-run-time"; elapsed.textContent = `${Math.max(0, Math.round((Date.now() - activityRun.startedAt) / 1000))}s`;
-  summary.append(progressDots(), title, elapsed); details.append(summary);
-  const steps = document.createElement("div"); steps.className = "ai-run-steps"; const values = [...activityRun.stages.values()];
-  if (!values.length) values.push({ label: "Starting assistant", state: "running" });
-  for (const stage of values) {
-    const row = document.createElement("div"); row.className = `ai-run-step ${stage.state}`;
-    const marker = document.createElement("span"); marker.className = "ai-run-step-marker";
-    const copy = document.createElement("span"); copy.className = "ai-run-step-copy"; copy.textContent = stage.label; row.append(marker, copy); steps.append(row);
-  }
-  if (activityRun.error) { const error = document.createElement("p"); error.className = "ai-run-error"; error.textContent = activityRun.error; steps.append(error); }
-  if (running && activityRun.turnId) {
-    const stop = createIconButton({ icon: "stop", label: "Stop assistant turn", className: "compact danger ai-run-stop" });
-    stop.dataset.cancelTurn = activityRun.turnId; steps.append(stop);
-  }
-  details.append(steps); elements.activity.replaceChildren(details);
+  const existing = elements.activity.querySelector(".ai-run");
+  const card = renderAiActivity(activityRun, { existing });
+  if (!existing) elements.activity.replaceChildren(card);
 }
 
 function escapeHtml(value) {
@@ -620,10 +481,6 @@ function renderOperationCards(items, proposalItems) {
   }).join("");
 }
 
-function availableModels(status) {
-  return (status?.providers || []).flatMap(provider => (provider.available ? provider.models : []).filter(model => model.status === "active").map(model => ({ ...model, providerId: provider.id, providerName: provider.name })));
-}
-
 function defaultModel() {
   return models.find(item => item.providerId === settings?.defaultProviderId && item.id === settings?.defaultModelId) || models[0] || null;
 }
@@ -750,11 +607,16 @@ function renderProviders() {
   }));
 }
 
-async function refreshProviderStatus() {
-  runtime = await requestJson("/api/v1/ai/status"); models = availableModels(runtime);
+async function refreshProviderStatus({ refresh = false } = {}) {
+  const settingsSelection = elements.settingsModel.value.split("\u0000");
+  runtime = await requestJson(`/api/v1/ai/status${refresh ? "?refresh=true" : ""}`, { timeoutMs: refresh ? 20_000 : 10_000 }); models = availableModels(runtime);
   loadModelOptions(elements.model, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
-  loadModelOptions(elements.settingsModel, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
+  loadModelOptions(elements.settingsModel, settingsSelection[0] || chat?.providerId || settings?.defaultProviderId, settingsSelection[1] || chat?.modelId || settings?.defaultModelId);
   renderProviders(); updateContextControls();
+  modelPickers.forEach(picker => picker.sync());
+  if (refresh && (runtime.healthy === false || runtime.providers?.some(provider => provider.catalogError))) {
+    throw new Error(runtime.message || "Could not check available models. Try again.");
+  }
 }
 
 async function createConversation({ model = defaultModel(), capabilities = defaultCapabilities(), title = "New conversation" } = {}) {
@@ -822,6 +684,7 @@ async function pollProgress() {
   else if (chat.status === "failed") { setStatus("Needs attention"); finishActivity("failed"); }
   else { setStatus("Ready"); if (["working", "waiting_approval"].includes(activityRun?.state)) finishActivity("completed"); else if (activityRun?.state === "cancelled") finishActivity("cancelled"); }
   await refresh({ includeChat: false });
+  if (chat?.id === chatId && chat.status === "failed") await refreshProviderStatus();
 }
 
 async function refresh({ includeChat = true } = {}) {

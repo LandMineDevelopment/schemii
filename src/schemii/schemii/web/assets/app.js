@@ -73,6 +73,7 @@ import { renderDesignViewStory } from "./view-story.js";
 import { renderRelationBrowser, renderRelationRows, pagedRowsStatus } from "./relation-browser.js";
 import { createRelationDataSource } from "./relation-data-source.js";
 import { appendDataGridPage, installAutoPageLoader } from "#common/data-grid.js";
+import { installProductNavigation } from "#common/product-navigation.js";
 import { createViewAnalysisController } from "./view-analysis.js";
 import {
   catalogTableId,
@@ -428,6 +429,7 @@ const workspaceNamespaceSelect = createSearchableSelect({
 elements.workspaceNamespacePicker.append(workspaceNamespaceSelect.root);
 elements.workspaceNamespace = workspaceNamespaceSelect.input;
 
+installProductNavigation(document.getElementById("product-navigation"), { activeProduct: "schemii" });
 initializeUi();
 
 let inspectorPreferenceReady = false;

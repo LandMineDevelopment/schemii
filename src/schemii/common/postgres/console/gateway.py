@@ -10,6 +10,10 @@ import threading
 from typing import Any, Protocol, runtime_checkable
 
 from pglast import parse_sql
+from schemii.common.query_executions.cancellation import (
+    cancellable_connection,
+    check_query_authority,
+)
 
 from schemii.common.postgres.errors import (
     PostgresCommitUncertainError,
@@ -109,10 +113,15 @@ class PsycopgConsoleReadSession:
         return self._results
 
     def _prepare(self, statements: Sequence[str]) -> tuple[ConsoleQueryResult, ...]:
+        with cancellable_connection(self._database_connection):
+            return self._prepare_statements(statements)
+
+    def _prepare_statements(self, statements: Sequence[str]) -> tuple[ConsoleQueryResult, ...]:
         results: list[ConsoleQueryResult] = []
         statement_index = 0
         try:
             for statement_index, statement in enumerate(statements):
+                check_query_authority()
                 parsed = parse_sql(statement)
                 node_name = type(parsed[0].stmt).__name__ if parsed else ""
                 if node_name != "SelectStmt":
@@ -261,6 +270,10 @@ class PsycopgConsoleReadSession:
         return tuple(rows)
 
     def page(self, statement_index, offset, page_size):
+        with self._lock, cancellable_connection(self._database_connection):
+            return self._page(statement_index, offset, page_size)
+
+    def _page(self, statement_index, offset, page_size):
         with self._lock:
             if self._closed or offset < 0 or page_size < 1:
                 raise PostgresQueryError()
@@ -290,6 +303,11 @@ class PsycopgConsoleReadSession:
 
     def export_page(self, statement_index, offset, page_size):
         """Read a separate forward-only portal so export cannot disturb UI paging."""
+
+        with self._lock, cancellable_connection(self._database_connection):
+            return self._export_page(statement_index, offset, page_size)
+
+    def _export_page(self, statement_index, offset, page_size):
 
         with self._lock:
             if self._closed or offset < 0 or page_size < 1:
@@ -372,6 +390,9 @@ class PsycopgConsoleTransaction:
     def commit(self) -> None:
         if self._closed:
             raise PostgresQueryError()
+        # Once COMMIT has been dispatched its outcome must never be guessed or
+        # rewritten as a cancellation. Only fence it before dispatch.
+        check_query_authority()
         try:
             self._database_connection.commit()
         except Exception:
@@ -408,10 +429,27 @@ def execute_console_statements(
 ) -> tuple[ConsoleQueryResult, ...]:
     """Execute validated statements and materialize only bounded JSON-safe results."""
 
+    with cancellable_connection(database_connection):
+        return _execute_console_statements(
+            database_connection, statements,
+            maximum_result_bytes=maximum_result_bytes,
+            maximum_cell_bytes=maximum_cell_bytes,
+        )
+
+
+def _execute_console_statements(
+    database_connection: Any,
+    statements: Sequence[str],
+    *,
+    maximum_result_bytes: int,
+    maximum_cell_bytes: int,
+) -> tuple[ConsoleQueryResult, ...]:
+
     results: list[ConsoleQueryResult] = []
     statement_index = 0
     try:
         for statement_index, statement in enumerate(statements):
+            check_query_authority()
             cursor: Any | None = None
             try:
                 cursor = database_connection.cursor(
@@ -423,6 +461,7 @@ def execute_console_statements(
                 result_bytes = 0
                 truncated = False
                 while description:
+                    check_query_authority()
                     raw_rows = cursor.fetchmany(100)
                     if not raw_rows:
                         break

@@ -61,6 +61,135 @@ def test_save_revision_conflict_and_independent_layout_explore(setup):
     assert api.delete(url, params={"expected_revision": 2}).status_code == 204
 
 
+def test_duplicate_saved_model_without_catalog_access_and_with_owner_fencing(setup):
+    api, model, _, calls = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    preview = api.post(url + "/previews", json={"name": "Current", "explore": EXPLORE}).json()
+    before_calls = len(calls)
+    body = {"name": "People copy", "expectedRevision": 1,
+        "expectedLayoutRevision": 1, "expectedExploreRevision": 1}
+    response = api.post(url + "/duplicate", json=body)
+    assert response.status_code == 201, response.text
+    copied = response.json()
+    assert copied["id"] != model["id"] and copied["name"] == "People copy"
+    for key in ("definition", "layout", "explore", "connectionId", "catalogFingerprint"):
+        assert copied[key] == model[key]
+    previews = api.get(f"/api/v1/schemoo/models/{copied['id']}/previews").json()["previews"]
+    assert len(previews) == 1 and previews[0]["id"] != preview["id"]
+    assert previews[0]["explore"] == preview["explore"]
+    assert len(calls) == before_calls
+    assert api.post(url + "/duplicate", json={**body, "expectedLayoutRevision": 2}).status_code == 409
+    api.app.dependency_overrides[get_current_principal] = lambda: Principal(user_id="other", authentication_source="local_prototype")
+    assert api.post(url + "/duplicate", json=body).status_code == 404
+    api.app.dependency_overrides.clear()
+    api.app.state.services.models._maximum = 2
+    limited = api.post(url + "/duplicate", json=body)
+    assert limited.status_code == 409 and limited.json()["error"]["code"] == "model_limit_reached"
+
+
+def test_saved_previews_crud_owner_scope_and_model_delete_cascade(setup):
+    api, model, _, _ = setup
+    model_url = f"/api/v1/schemoo/models/{model['id']}"
+    url = model_url + "/previews"
+    assert api.get(url).json() == {"previews": []}
+    created = api.post(url, json={"name": " Current ", "explore": EXPLORE})
+    assert created.status_code == 201, created.text
+    preview = created.json()
+    assert preview["name"] == "Current" and preview["modelId"] == model["id"]
+    assert "ownerId" not in preview and "definition" not in preview and "rows" not in preview
+    item_url = url + "/" + preview["id"]
+    duplicate = api.post(url, json={"name": " CURRENT ", "explore": EXPLORE})
+    assert duplicate.status_code == 409 and duplicate.json()["error"]["code"] == "preview_name_conflict"
+    other = api.post(url, json={"name": "Other", "explore": {}}).json()
+    duplicate_update = api.put(item_url, json={"expectedRevision": 1, "name": "other", "explore": {}})
+    assert duplicate_update.status_code == 409 and duplicate_update.json()["error"]["code"] == "preview_name_conflict"
+    assert api.delete(url + "/" + other["id"], params={"expected_revision": 1}).status_code == 204
+    assert api.put(item_url, json={"expectedRevision": 1, "name": "Changed", "explore": {}}).json()["revision"] == 2
+    stale = api.put(item_url, json={"expectedRevision": 1, "name": "Stale", "explore": {}})
+    assert stale.status_code == 409 and stale.json()["error"]["details"]["currentRevision"] == 2
+    assert api.delete(item_url, params={"expected_revision": 1}).status_code == 409
+    assert api.get(model_url).json() == model
+    api.app.dependency_overrides[get_current_principal] = lambda: Principal(user_id="other", authentication_source="local_prototype")
+    assert api.get(url).status_code == 404
+    assert api.post(url, json={"name": "No", "explore": {}}).status_code == 404
+    assert api.put(item_url, json={"expectedRevision": 2, "name": "No", "explore": {}}).status_code == 404
+    assert api.delete(item_url, params={"expected_revision": 2}).status_code == 404
+    api.app.dependency_overrides.clear()
+    assert api.delete(item_url, params={"expected_revision": 2}).status_code == 204
+    assert api.get(url).json() == {"previews": []}
+    assert api.post(url, json={"name": "Another", "explore": EXPLORE}).status_code == 201
+    assert api.delete(model_url, params={"expected_revision": 1}).status_code == 204
+    assert api.get(url).status_code == 404
+
+
+def test_saved_preview_limit_logs_existing_config_resource_and_rejects_rows(setup):
+    api, model, _, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}/previews"
+    assert api.post(url, json={"name": " ", "explore": {}}).status_code == 422
+    assert api.post(url, json={"name": "Rows", "explore": {"rows": [["secret"]]}}).status_code == 422
+    api.app.state.services.models._maximum_document_bytes = 100
+    rejected = api.post(url, json={"name": "Too large", "explore": EXPLORE})
+    assert rejected.status_code == 413 and rejected.json()["error"]["code"] == "model_document_limit_reached"
+    assert api.get(url).json() == {"previews": []}
+    events = api.app.state.services.metadata.limit_events.events()
+    assert events[-1].notice.limit_name == "resources.maximum_model_document_bytes"
+
+
+def test_patch_preserves_unrelated_documents_and_schema_contract(setup):
+    api, model, _, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    patch = {"expectedRevision": 1, "nodes": {"upsert": [{"id": "manager", "table": "people", "label": "Manager"}]}}
+    response = api.patch(url, json=patch)
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert saved["revision"] == 2
+    assert saved["definition"]["nodes"][0] == model["definition"]["nodes"][0]
+    assert saved["definition"]["nodes"][1]["id"] == "manager"
+    for key in ("layout", "explore", "catalogFingerprint", "layoutRevision", "exploreRevision"):
+        assert saved[key] == model[key]
+    assert saved["definition"]["sourceContract"] == model["definition"]["sourceContract"]
+    assert api.patch(url, json=patch).status_code == 409
+    assert api.get(url).json() == saved
+
+
+def test_patch_validates_binding_before_atomic_save_without_requiring_report_values(setup):
+    api, model, _, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    scope = {"id": "date", "kind": "conditional", "alternatives": [{"id": "default",
+        "inputs": [{"id": "input", "type": "text"}], "conditions": [
+            {"parameterId": "input", "domain": {"nodeId": "people", "column": "name"}}]}]}
+    patch = {"expectedRevision": 1, "name": "Must not save", "scopes": {"upsert": [scope]}}
+    failed = api.patch(url, json=patch)
+    assert failed.status_code == 422, failed.text
+    assert failed.json()["error"]["details"] == {"scopeId": "date", "alternativeId": "default", "conditionIndex": 0}
+    assert api.get(url).json() == model
+    scope["alternatives"][0]["conditions"][0].update(table="people", column="name")
+    success = api.patch(url, json=patch)
+    assert success.status_code == 200, success.text
+    assert success.json()["revision"] == 2
+
+
+def test_patch_removals_and_exposure_are_explicit_and_owner_scoped(setup):
+    api, model, _, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    for body in (
+        {"nodes": {"remove": ["unknown"]}},
+        {"nodes": {"remove": ["people"]}},
+        {"nodes": {"remove": ["people"], "upsert": DEFINITION["nodes"]}},
+        {"expose": [{"table": "people", "column": "invented"}]},
+        {"sourceContract": {}}, {"catalogFingerprint": "invented"}, {},
+    ):
+        failed = api.patch(url, json={"expectedRevision": 1, **body})
+        assert failed.status_code == 422, failed.text
+        assert api.get(url).json() == model
+    saved = api.patch(url, json={"expectedRevision": 1, "hide": [{"table": "people", "column": "id"}]}).json()
+    assert saved["definition"]["exposedFields"] == [{"table": "people", "column": "name", "aggregate": "none"}]
+    saved = api.patch(url, json={"expectedRevision": 2, "expose": [{"table": "people", "column": "id"}]}).json()
+    assert [field["column"] for field in saved["definition"]["exposedFields"]] == ["name", "id"]
+    api.app.dependency_overrides[get_current_principal] = lambda: Principal(user_id="other", authentication_source="local_prototype")
+    assert api.patch(url, json={"expectedRevision": 3, "name": "Not mine"}).status_code == 404
+
+
 def test_owner_isolation_covers_model_and_source(setup):
     api, model, _, _ = setup
     api.app.dependency_overrides[get_current_principal] = lambda: Principal(user_id="other", authentication_source="local_prototype")

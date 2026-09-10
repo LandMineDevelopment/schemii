@@ -1039,7 +1039,7 @@ class PostgresConsoleRepository:
                     """
                     UPDATE schemii.console_transactions
                     SET status = 'expired', revision = revision + 1,
-                        updated_at = %s, expires_at = %s
+                        updated_at = %s, expires_at = LEAST(%s, maximum_expires_at)
                     WHERE status IN ('open', 'failed')
                     """,
                     (now, now),

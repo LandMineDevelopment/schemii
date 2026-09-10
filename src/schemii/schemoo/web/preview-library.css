@@ -1,0 +1,6 @@
+.saved-previews { padding-bottom: 12px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
+.saved-previews h3 { margin-top: 0; }
+.saved-preview-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.saved-preview-controls > .ui-searchable-select { flex: 1 1 180px; min-width: 0; }
+.saved-preview-controls .actions { gap: 4px; margin: 0; }
+.saved-previews p { margin: 8px 0 0; }

@@ -904,6 +904,8 @@ class ConsoleService:
                     )
                     rows = fetched
                 except PostgresGatewayError as error:
+                    if isinstance(error, PostgresConsoleCancelledError):
+                        self._discard_read_snapshot(execution_id)
                     raise self._postgres_error(error) from error
             next_offset = offset + len(rows)
             next_cursor = None
@@ -1006,6 +1008,10 @@ class ConsoleService:
                     writer.writerows(rows)
                     yield buffer.getvalue().encode("utf-8")
                     offset += len(rows)
+            except PostgresConsoleCancelledError:
+                with self._transient_results_lock:
+                    self._discard_read_snapshot(execution_id)
+                raise
             finally:
                 with self._transient_results_lock:
                     current = self._transient_results.get(result_id)
@@ -1013,6 +1019,26 @@ class ConsoleService:
                         current.active_exports = max(0, current.active_exports - 1)
 
         return stream()
+
+    def _discard_read_snapshot(self, execution_id: str) -> None:
+        """A cancelled FETCH aborts its transaction; release it for replay.
+
+        Caller holds the transient-results lock. Do not label a user-requested
+        cancellation as a capacity eviction or discard another execution.
+        """
+        active = self._active_read_sessions.pop(execution_id, None)
+        result_ids = {
+            result_id for result_id, result in self._transient_results.items()
+            if result.execution_id == execution_id
+        }
+        for result_id in result_ids:
+            self._transient_results.pop(result_id, None)
+        self._result_cursors = {
+            token: value for token, value in self._result_cursors.items()
+            if value[0] not in result_ids
+        }
+        if active is not None:
+            active.postgres.close()
 
     def _record_history(self, record: ConsoleExecutionRecord) -> None:
         if self._query_history_limit == 0 or record.execution.workspace_id is None:
@@ -1254,6 +1280,11 @@ class ConsoleService:
                     session.postgres.commit()
                 else:
                     session.postgres.rollback()
+            except PostgresConsoleCancelledError as error:
+                # The shared gateway fences a stopped AI before COMMIT is
+                # dispatched. Keep the still-open transaction available for
+                # the user's explicit commit/rollback instead of orphaning it.
+                raise self._postgres_error(error) from error
             except PostgresCommitUncertainError as error:
                 try:
                     uncertain = self._repository.finish_transaction(

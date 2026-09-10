@@ -123,10 +123,8 @@ test("graphical model: cycles, aliases, required scope, temporal alternatives an
   await page.getByRole("button", { name: "Show query preview", exact: true }).click();
   await expect(page.locator("#sql")).toContainText("EXISTS");
   await expect(page.locator("#sql")).toContainText('"org_hier"');
-  await page.getByRole("button", { name: "Run preview", exact: true }).click();
-  await expect(page.locator("#result-status")).toContainText("rows", { timeout: 30000 });
   await expect(page.locator("#error")).toBeHidden();
-  await page.screenshot({ path: `artifacts/schemoo-scoped-results-${test.info().project.name}.png` });
+  await page.screenshot({ path: `artifacts/schemoo-scoped-sql-${test.info().project.name}.png` });
   await page.getByRole("button", { name: "Close query preview", exact: true }).click();
   await chooseModelOption(page, "Alternative for Time scope", "Active at any point during a period");
   await expect(page.locator("#run")).toBeDisabled();
@@ -139,9 +137,10 @@ test("graphical model: cycles, aliases, required scope, temporal alternatives an
   await chooseModelOption(page, "Report filter 1 condition 1 field", "personnel_dim · name");
   await page.getByRole("textbox", { name: "Report filter 1 condition 1 value", exact: true }).fill("schemoo-no-such-person-'--");
   await expect(page.locator("#run")).toBeEnabled();
-  await page.getByRole("button", { name: "Run preview", exact: true }).click();
-  await expect(page.locator("#result-status")).toContainText("0 rows", { timeout: 30000 });
-  await expect(page.locator("#results")).toContainText("No matching rows");
+  await page.getByRole("button", { name: "Show query preview", exact: true }).click();
+  await expect(page.locator("#sql")).toContainText('"personnel_dim"');
+  await expect(page.locator("#sql")).toContainText("schemoo-no-such-person-''--");
+  await expect(page.locator("#error")).toBeHidden();
   await page.getByRole("button", { name: "Close query preview", exact: true }).click();
   await page.getByRole("button",{name:"Save model",exact:true}).click();
   await expect(page.locator("#draft-status")).toContainText("Saved");

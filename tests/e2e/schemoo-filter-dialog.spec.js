@@ -23,7 +23,7 @@ test.afterEach(async ({ request }) => {
 
 test("fixed domain selection works before save and remains a literal after reload", async ({ page, request }) => {
   await page.goto(`/schemoo?model=${modelId}`);
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Fixed rule/ }).click();
   await chooseModelOption(page, "Model filter / Default condition 1 field", "personnel_dim · id");
@@ -68,7 +68,7 @@ test("alias roles are selectable for domain values and source bindings and survi
   await page.getByRole("button", { name: "Create alias", exact: true }).click();
   await page.getByRole("textbox", { name: "Alias name for personnel_dim", exact: true }).fill("Domain people");
   await page.getByRole("button", { name: "Add alias to model", exact: true }).click();
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Report parameter/ }).click();
   await chooseModelOption(page, "Requirement for Model filter", "Conditional model parameter");
@@ -85,7 +85,7 @@ test("alias roles are selectable for domain values and source bindings and survi
   await page.getByRole("button", { name: "Save model", exact: true }).click();
   await expect(page.locator("#draft-status")).toContainText("Saved");
   await page.reload();
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Edit filter Model filter", exact: true }).click();
   await expect(page.getByRole("combobox", { name: /input .+ domain value column$/ })).toHaveValue("Domain people · id");
   await expect(page.getByRole("combobox", { name: "Model filter / Default condition 1 field", exact: true })).toHaveValue("Domain people · id");
@@ -101,7 +101,7 @@ test("alias roles are selectable for domain values and source bindings and survi
 test("fixed filter dialog: searchable bindings, validation, cancel, save and preview", async ({ page }) => {
   const errors = []; page.on("pageerror", e => errors.push(e.message));
   await page.goto(`/schemoo?model=${modelId}`);
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add model filter", exact: true });
   await expect(dialog).toBeVisible();
@@ -141,9 +141,31 @@ test("fixed filter dialog: searchable bindings, validation, cancel, save and pre
   expect(errors).toEqual([]);
 });
 
+test("relative date defaults persist and compile to dates", async ({ page, request }, testInfo) => {
+  await page.goto(`/schemoo?model=${modelId}`);
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
+  await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
+  await page.getByRole("button", { name: /^Report parameter/ }).click();
+  await chooseModelOption(page, "Model filter / Default condition 1 field", "personnel_dim · name");
+  const type = page.getByRole("combobox", { name: /^Model filter \/ Default input .+ type$/ });
+  await chooseModelOption(page, await type.getAttribute("aria-label"), "Date");
+  const value = page.getByRole("textbox", { name: /^Model filter \/ Default input .+ default$/ });
+  await expect(value).toHaveAttribute("placeholder", /today - 365/);
+  await value.fill("today - 365");
+  await value.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `artifacts/relative-date-${testInfo.project.name}.png` });
+  await page.getByRole("button", { name: "Apply to model", exact: true }).click();
+  const expected = new Date(); expected.setUTCDate(expected.getUTCDate() - 365);
+  await expect(page.locator("#sql")).toContainText(expected.toISOString().slice(0, 10));
+  await page.getByRole("button", { name: "Save model", exact: true }).click();
+  await expect(page.locator("#draft-status")).toContainText("Saved");
+  const saved = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  expect(saved.definition.scopes[0].alternatives[0].inputs[0].defaultValue).toBe("today - 365");
+});
+
 test("report parameter dialog binds inputs and changing to a null rule clears nullable state", async ({ page }) => {
   await page.goto(`/schemoo?model=${modelId}`);
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Report parameter/ }).click();
   await chooseModelOption(page, "Model filter / Default condition 1 field", "personnel_dim · name");

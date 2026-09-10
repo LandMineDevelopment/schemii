@@ -1,6 +1,7 @@
 // Shared visual primitives for every Schemii product. Icon paths intentionally
 // preserve the vetted legacy vocabulary instead of allowing product-local glyphs.
 const ICON_PATHS = Object.freeze({
+  filter: '<path d="M3 4h14l-5.5 6.5V16l-3 1v-6.5Z"/>',
   close: '<path d="m5 5 10 10M15 5 5 15"/>',
   sql: '<rect x="3" y="3.5" width="14" height="13" rx="2"/><path d="m6.5 8 2 2-2 2M10.5 12h3"/>',
   database: '<ellipse cx="10" cy="5" rx="6.5" ry="2.5"/><path d="M3.5 5v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V5M3.5 10v5c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5v-5"/>',
@@ -222,8 +223,20 @@ export function closeDetailsMenus(root = document, { except = null } = {}) {
 
 export function installDetailsMenu(menu) {
   const close = () => menu.removeAttribute("open");
+  const viewport = menu.ownerDocument.defaultView;
+  const position = () => {
+    if (!menu.open) return;
+    const surface = menu.querySelector(".ui-menu__surface");
+    if (!surface) return;
+    surface.style.transform = "";
+    const rect = surface.getBoundingClientRect();
+    const left = viewport.visualViewport?.offsetLeft || 0;
+    const width = viewport.visualViewport?.width || viewport.innerWidth;
+    const shift = Math.max(left + 8 - rect.left, Math.min(0, left + width - 8 - rect.right));
+    surface.style.transform = `translateX(${shift}px)`;
+  };
   const onToggle = () => {
-    if (menu.open) closeDetailsMenus(menu.ownerDocument, { except: menu });
+    if (menu.open) { closeDetailsMenus(menu.ownerDocument, { except: menu }); position(); }
   };
   const onMenuClick = event => {
     if (!event.target.closest?.("button, a, [role='menuitem']")) return;
@@ -245,12 +258,16 @@ export function installDetailsMenu(menu) {
   menu.addEventListener("click", onMenuClick);
   menu.ownerDocument.addEventListener("click", onDocumentClick);
   menu.ownerDocument.addEventListener("keydown", onKeydown);
+  viewport?.addEventListener("resize", position);
+  viewport?.visualViewport?.addEventListener("resize", position);
   return Object.freeze({
     destroy() {
       menu.removeEventListener("toggle", onToggle);
       menu.removeEventListener("click", onMenuClick);
       menu.ownerDocument.removeEventListener("click", onDocumentClick);
       menu.ownerDocument.removeEventListener("keydown", onKeydown);
+      viewport?.removeEventListener("resize", position);
+      viewport?.visualViewport?.removeEventListener("resize", position);
     },
   });
 }

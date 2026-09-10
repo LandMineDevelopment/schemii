@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { permissionMode, permissionValues, permissionSummary } from "../../src/schemii/schemii/web/assets/ai-permissions.js";
+import { permissionMode, permissionValues, permissionSummary } from "../../src/schemii/common/web/assets/ai-permissions.js";
 
 const actions = [
   { id: "tables.delete", label: "Delete tables", group: "Tables" },

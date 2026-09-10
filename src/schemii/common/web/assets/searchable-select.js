@@ -18,6 +18,7 @@ export function normalizeSearchableSelectOptions(options) {
       group: String(option.group ?? "Options"),
       description: option.description ? String(option.description) : "",
       keywords: String(option.keywords ?? ""),
+      disabled: Boolean(option.disabled),
     }));
   }
   return normalizedOptions;
@@ -75,6 +76,7 @@ export function createSearchableSelect({
   dataset = {},
   noResultsText = "No matching options",
   displayLabel = false,
+  onOpen = null,
   documentRef = document,
 } = {}) {
   searchableSelectSequence += 1;
@@ -86,6 +88,8 @@ export function createSearchableSelect({
   let open = false;
   let destroyed = false;
   let dispatchingCommit = false;
+  let refreshPromise = null;
+  let refreshError = "";
   const displayValue = () => displayLabel
     ? matchingSearchableSelectOption(available, committed)?.label ?? ""
     : committed;
@@ -165,7 +169,7 @@ export function createSearchableSelect({
   };
 
   const commit = option => {
-    if (destroyed || !option) return;
+    if (destroyed || !option || option.disabled || refreshPromise) return;
     const changed = committed !== option.value;
     committed = option.value;
     input.value = displayValue();
@@ -181,6 +185,24 @@ export function createSearchableSelect({
   const render = (query, { showAll = false } = {}) => {
     filtered = filterSearchableSelectOptions(available, showAll ? "" : query);
     list.replaceChildren();
+    list.setAttribute("aria-busy", String(Boolean(refreshPromise)));
+    if (refreshPromise || refreshError) {
+      const status = documentRef.createElement("p");
+      status.className = "ui-searchable-select__empty";
+      status.setAttribute("role", "status");
+      status.textContent = refreshPromise ? "Checking available models…" : refreshError;
+      list.append(status);
+      if (refreshError) {
+        const retry = documentRef.createElement("button");
+        retry.type = "button";
+        retry.className = "ui-searchable-select__option";
+        retry.dataset.retry = "";
+        retry.textContent = "Retry model check";
+        retry.addEventListener("click", () => refresh());
+        list.append(retry);
+      }
+      if (refreshPromise) { filtered = []; updateActive(-1); return; }
+    }
     if (!filtered.length) {
       const empty = documentRef.createElement("p");
       empty.className = "ui-searchable-select__empty";
@@ -201,8 +223,11 @@ export function createSearchableSelect({
       const control = documentRef.createElement("button");
       control.id = `${listId}-option-${index}`;
       control.type = "button";
+      control.tabIndex = -1;
       control.className = "ui-searchable-select__option";
       control.setAttribute("role", "option");
+      control.disabled = option.disabled;
+      if (option.disabled) control.setAttribute("aria-disabled", "true");
       const copy = documentRef.createElement("span");
       const title = documentRef.createElement("strong");
       title.textContent = option.label;
@@ -221,8 +246,8 @@ export function createSearchableSelect({
       }
       control.addEventListener("pointerdown", event => event.preventDefault());
       control.addEventListener("click", () => {
-        commit(option);
         input.focus();
+        commit(option);
       });
       list.append(control);
     }
@@ -234,7 +259,7 @@ export function createSearchableSelect({
   const onOutsidePointer = event => {
     if (root.contains(event.target) || list.contains(event.target)) return;
     const exact = matchingInput();
-    if (exact) commit(exact);
+    if (exact && !exact.disabled && !refreshPromise) commit(exact);
     else {
       input.value = displayValue();
       input.setCustomValidity("");
@@ -262,7 +287,7 @@ export function createSearchableSelect({
   }
 
   function show({ showAll = false } = {}) {
-    if (destroyed || !available.length) return;
+    if (destroyed || input.disabled || (!available.length && !onOpen)) return;
     render(input.value, { showAll });
     if (!open) {
       // A modal dialog makes the rest of the document inert. A top-layer
@@ -280,14 +305,30 @@ export function createSearchableSelect({
       documentRef.defaultView.addEventListener("resize", onViewportChange);
       documentRef.defaultView.visualViewport?.addEventListener("resize", onViewportChange);
       documentRef.defaultView.visualViewport?.addEventListener("scroll", onViewportChange);
+      if (onOpen) refresh();
     }
     position();
+  }
+
+  function refresh() {
+    if (refreshPromise) return refreshPromise;
+    refreshError = "";
+    refreshPromise = Promise.resolve().then(onOpen).catch(error => {
+      refreshError = error?.message || "Could not check available models.";
+    }).finally(() => {
+      refreshPromise = null;
+      if (open && !destroyed) { render(input.value, { showAll: true }); position(); }
+    });
+    render(input.value, { showAll: true });
+    position();
+    return refreshPromise;
   }
 
   input.addEventListener("focus", () => {
     input.select();
     show({ showAll: true });
   });
+  input.addEventListener("click", () => { if (onOpen && !open) show({ showAll: true }); });
   input.addEventListener("input", event => {
     event.stopPropagation();
     setValidity();
@@ -299,10 +340,16 @@ export function createSearchableSelect({
       event.stopImmediatePropagation();
       return;
     }
-    if (dispatchingCommit) return;
+    if (dispatchingCommit) {
+      // A consumer may open a modal synchronously, blurring the input while
+      // our commit event is still dispatching. Suppress that native change:
+      // consumers must receive exactly one event for this selection.
+      if (event.isTrusted) event.stopImmediatePropagation();
+      return;
+    }
     event.stopImmediatePropagation();
     const exact = matchingInput();
-    if (exact) commit(exact);
+    if (exact && !exact.disabled && !refreshPromise) commit(exact);
     else close({ restore: true });
   });
   input.addEventListener("keydown", event => {
@@ -315,6 +362,7 @@ export function createSearchableSelect({
     if (event.key === "Enter") {
       event.preventDefault();
       if (!open) show({ showAll: true });
+      else if (refreshError && !filtered.length) refresh();
       else commit(filtered[activeIndex] ?? matchingInput());
       return;
     }
@@ -325,12 +373,23 @@ export function createSearchableSelect({
       return;
     }
     if (event.key === "Tab") {
+      if (refreshError && open && !event.shiftKey) {
+        event.preventDefault();
+        list.querySelector("[data-retry]")?.focus();
+        return;
+      }
       const exact = matchingInput();
-      if (exact) commit(exact);
+      if (exact && !exact.disabled && !refreshPromise) commit(exact);
       else close({ restore: true });
     }
   });
   input.addEventListener("invalid", () => show());
+  list.addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation();
+      input.focus(); close({ restore: true });
+    }
+  });
   toggle.addEventListener("click", () => {
     if (open) close({ restore: true });
     else {
@@ -345,6 +404,11 @@ export function createSearchableSelect({
     input,
     close,
     getValue: () => committed,
+    setDisabled(disabled) {
+      input.disabled = Boolean(disabled);
+      toggle.disabled = Boolean(disabled);
+      if (disabled) close({ restore: true });
+    },
     destroy() {
       if (destroyed) return;
       destroyed = true;

@@ -49,7 +49,7 @@ async function previewValues(page) {
 
 test("fixed IN uses its own source dropdown, persists and constrains preview", async ({ page, request }) => {
   await page.goto(`/schemoo?model=${modelId}`);
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Fixed rule/ }).click();
   await chooseModelOption(page, "Model filter / Default condition 1 field", "slate_fact · slate_type");
@@ -84,7 +84,7 @@ test("report NOT IN has the same multi-value domain interaction", async ({ page 
 
 test("IN parameter defaults and Explore input accept multiple domain values", async ({ page, request }) => {
   await page.goto(`/schemoo?model=${modelId}`);
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Report parameter/ }).click();
   await chooseModelOption(page, "Model filter / Default condition 1 field", "slate_fact · slate_type");
@@ -100,7 +100,7 @@ test("IN parameter defaults and Explore input accept multiple domain values", as
   const model = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
   expect(model.definition.scopes[0].alternatives[0].inputs[0].defaultValue).toEqual(defaults);
   await page.reload();
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Edit filter Model filter", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: "Allow multiple values for Parameter", exact: true })).toBeChecked();
   await page.getByRole("checkbox", { name: "Allow multiple values for Parameter", exact: true }).uncheck();

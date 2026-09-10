@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { zstdDecompressSync } from 'node:zlib';
 import { CredentialVault, TurnRunner } from '../runtime.js';
 
 // Exercise the actual Pi provider and OpenAI SDK. Only the HTTP boundary is fake.
@@ -38,7 +39,9 @@ async function setup(...owners) {
 
 async function requestDetails(input, init) {
   const request = new Request(input, init);
-  return { url: request.url, authorization: request.headers.get('authorization'), body: await request.json() };
+  const bytes = Buffer.from(await request.arrayBuffer());
+  const body = request.headers.get('content-encoding') === 'zstd' ? zstdDecompressSync(bytes) : bytes;
+  return { url: request.url, authorization: request.headers.get('authorization'), body: JSON.parse(body.toString()) };
 }
 
 test('real provider keeps simultaneous owners credentials and context isolated', { timeout: 10000 }, async (t) => {
@@ -116,6 +119,42 @@ test('real provider transforms tool declarations and decodes streamed function a
   const returned = outgoing.body.input.find(item => item.type === 'function_call_output');
   assert.equal(returned.call_id, 'call_lookup');
   assert.match(returned.output, /population/);
+});
+
+test('saved assistant text without provider usage can continue through the real Codex SDK', async (t) => {
+  const vault = new CredentialVault();
+  const token = `header.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'alice' } })).toString('base64url')}.signature`;
+  await vault.put('alice', 'personal', 'openai-codex', {
+    type: 'oauth', access: token, refresh: 'synthetic-refresh', expires: Date.now() + 3600000,
+  });
+  const runner = new TurnRunner({ vault });
+  let outgoing;
+  t.mock.method(globalThis, 'fetch', async (input, init) => {
+    outgoing = await requestDetails(input, init);
+    return textResponse('Checked the saved model.');
+  });
+  const request = turn('alice', { providerId: 'openai-codex', modelId: 'gpt-5.3-codex-spark' });
+  request.context.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'I can help.' }], timestamp: 1 },
+    { role: 'user', content: 'Check the saved model.', timestamp: 2 });
+  const before = structuredClone(request.context);
+  const result = await runner.run(request);
+  assert.equal(result.text, 'Checked the saved model.');
+  assert.ok(outgoing.body.input.some(message => message.role === 'assistant'
+    && message.content[0].text === 'I can help.'));
+  assert.deepEqual(request.context, before);
+  const warnings = [];
+  t.mock.method(console, 'warn', value => warnings.push(JSON.parse(value)));
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ error: {
+    code: 'usage_limit_reached', message: 'private diagnostic', plan_type: 'private-plan',
+  } }, { status: 429 }));
+  await assert.rejects(runner.run(request), { code: 'rate_limited' });
+  assert.deepEqual(warnings, [{ event: 'ai_provider_failure', provider: 'openai-codex', httpStatus: 429 }]);
+  warnings.length = 0;
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ error: {
+    message: "Unsupported value: text.verbosity low. Private prompt and credential must not be retained.",
+  } }, { status: 400 }));
+  await assert.rejects(runner.run(request), { code: 'provider_request_rejected' });
+  assert.deepEqual(warnings, [{ event: 'ai_provider_failure', provider: 'openai-codex', httpStatus: 400, category: 'verbosity' }]);
 });
 
 test('cancellation reaches the real provider HTTP request', { timeout: 10000 }, async (t) => {
@@ -225,7 +264,8 @@ test('capacity rejects excess work and recovers its slot after cancellation', { 
   const pending = runner.run(turn('alice', { signal: controller.signal }));
   const rejected = assert.rejects(pending, { code: 'cancelled' });
   await fetching;
-  await assert.rejects(runner.run(turn('alice')), { code: 'busy' });
+  await assert.rejects(runner.run(turn('alice')), { code: 'busy',
+    limit: { name: 'maximum_concurrent_turns', configured: 1, observed: 1 } });
   assert.equal(fetch.mock.callCount(), 1);
   controller.abort();
   await rejected;
@@ -269,6 +309,59 @@ test('context and streamed output limits fail explicitly', async (t) => {
   await assert.rejects(new TurnRunner({ vault, contextBytes: 10 }).run(turn('alice')), { code: 'context_too_large' });
   assert.equal(fetch.mock.callCount(), 0);
   await assert.rejects(new TurnRunner({ vault, responseBytes: 1024 }).run(turn('alice')), { code: 'response_too_large' });
+});
+
+test('private reasoning replay uses the context budget, not the answer budget', async (t) => {
+  const runner = await setup('alice');
+  const signature = 'encrypted-replay-'.repeat(200);
+  const reasoning = { id: 'rs_test', type: 'reasoning', summary: [], encrypted_content: signature };
+  t.mock.method(globalThis, 'fetch', async () => sse([
+    { type: 'response.output_item.added', output_index: 0, item: reasoning },
+    { type: 'response.reasoning_summary_text.delta', output_index: 0, delta: 'r'.repeat(1500) },
+    { type: 'response.output_item.done', output_index: 0, item: reasoning },
+    { type: 'response.output_item.added', output_index: 1,
+      item: { id: 'msg_answer', type: 'message', role: 'assistant', content: [] } },
+    { type: 'response.output_text.delta', output_index: 1, content_index: 0, delta: 'Done' },
+    { type: 'response.output_item.done', output_index: 1,
+      item: { id: 'msg_answer', type: 'message', role: 'assistant',
+        content: [{ type: 'output_text', text: 'Done', annotations: [] }] } },
+    { type: 'response.completed', response: { id: 'resp_test', status: 'completed' } },
+  ]));
+  const text = [];
+  const reply = await runner.run(turn('alice', {
+    limits: { responseBytes: 1024, contextBytes: 16384 }, onText: delta => text.push(delta),
+  }));
+  assert.equal(reply.text, 'Done');
+  assert.deepEqual(text, ['Done']);
+  assert.equal(JSON.parse(reply.assistantMessage.content[0].thinkingSignature).encrypted_content, signature);
+  await assert.rejects(runner.run(turn('alice', {
+    limits: { responseBytes: 1024, contextBytes: 2048 },
+  })), error => {
+    assert.equal(error.code, 'context_too_large');
+    assert.equal(error.limit.source, 'native_response');
+    assert.equal(error.limit.configured, 2048);
+    assert.ok(error.limit.observed > 2048);
+    assert.equal(JSON.stringify(error).includes(signature), false);
+    return true;
+  });
+});
+
+test('oversized tool arguments remain bounded and report numeric accounting', async (t) => {
+  const runner = await setup('alice');
+  const args = JSON.stringify({ value: 'x'.repeat(2048) });
+  const item = { type: 'function_call', id: 'fc_large', call_id: 'call_large', name: 'inspect', arguments: '' };
+  t.mock.method(globalThis, 'fetch', async () => sse([
+    { type: 'response.output_item.added', output_index: 0, item },
+    { type: 'response.function_call_arguments.delta', output_index: 0, delta: args },
+    { type: 'response.output_item.done', output_index: 0, item: { ...item, arguments: args } },
+    { type: 'response.completed', response: { id: 'resp_tool', status: 'completed' } },
+  ]));
+  await assert.rejects(runner.run(turn('alice', { limits: { responseBytes: 1024 } })), error => {
+    assert.equal(error.code, 'response_too_large');
+    assert.deepEqual(error.limit, { name: 'response_bytes', source: 'response_stream',
+      configured: 1024, observed: Buffer.byteLength(args) });
+    return true;
+  });
 });
 
 test('personal credentials missing a key cannot borrow an ambient key', async (t) => {

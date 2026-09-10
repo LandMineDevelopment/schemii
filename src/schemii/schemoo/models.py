@@ -15,18 +15,38 @@ class Contract(ApiModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
-class ModelNode(Contract):
-    id: Identifier
-    table: Identifier
-    label: str = Field(min_length=1, max_length=100)
-
-
 class ModelEdge(Contract):
     id: Identifier
     relationshipId: Identifier
     source: Identifier
     target: Identifier
     enabled: bool = True
+
+
+class SourceColumnContract(Contract):
+    name: Identifier
+    dataType: str = Field(default="", max_length=200)
+    nullable: bool = True
+
+
+class SourceTableContract(Contract):
+    name: Identifier
+    columns: list[SourceColumnContract] = Field(default_factory=list, max_length=1000)
+    primaryKey: list[Identifier] = Field(default_factory=list, max_length=32)
+
+
+class SourceRelationshipContract(Contract):
+    id: Identifier
+    name: str = Field(default="", max_length=200)
+    sourceTable: Identifier
+    sourceColumn: Identifier
+    targetTable: Identifier
+    targetColumn: Identifier
+
+
+class SourceContract(Contract):
+    tables: list[SourceTableContract] = Field(default_factory=list, max_length=100)
+    relationships: list[SourceRelationshipContract] = Field(default_factory=list, max_length=200)
 
 
 class DomainValues(Contract):
@@ -45,13 +65,67 @@ class ParameterInput(Contract):
 
 
 class Condition(Contract):
-    domain: DomainValues | None = None
-    table: str = Field(default="", max_length=200)
-    column: str = Field(default="", max_length=200)
+    domain: DomainValues | None = Field(default=None, description="Optional value-picker lookup only; it does not bind the condition. Always set table and column separately.")
+    table: str = Field(default="", max_length=200, description="Stable model node ID whose column is filtered, including the exact alias ID. Not a physical table name unless that is also its node ID.")
+    column: str = Field(default="", max_length=200, description="Source column name on the bound model node. Required for every usable condition, including parameter comparisons.")
     operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "not_in", "is_null", "not_null"] = "eq"
     parameterId: str | None = Field(default=None, max_length=200)
     value: FilterValue = None
     allowNull: bool = False
+
+
+class DerivedCondition(Condition):
+    valueSource: Literal["literal", "today"] = "literal"
+
+    @model_validator(mode="after")
+    def supported_condition(self):
+        if self.parameterId is not None:
+            raise ValueError("Calculated-field conditions currently accept fixed values or Today; parameter bindings are not supported.")
+        if self.valueSource == "today":
+            if self.operator not in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+                raise ValueError("Today requires a single-value date comparison.")
+            if self.value not in (None, ""):
+                raise ValueError("Choose either Today or a fixed condition value, not both.")
+            if self.domain is not None:
+                raise ValueError("Today does not use a domain value list.")
+        return self
+
+
+class DerivedOutput(Contract):
+    id: Identifier
+    label: str = Field(min_length=1, max_length=100)
+    operation: Literal["add", "subtract", "multiply", "divide", "list", "count", "count_distinct", "sum", "avg", "min", "max"]
+    nodeId: Identifier | None = None
+    column: Identifier
+    operand: Identifier | None = None
+    distinct: bool = False
+    delimiter: str = Field(default=", ", max_length=20)
+    conditions: list[DerivedCondition] = Field(default_factory=list, max_length=16)
+
+
+class SummaryConnectionColumn(Contract):
+    source: Identifier
+    target: Identifier
+
+
+class SummaryConnection(Contract):
+    target: Identifier
+    columns: list[SummaryConnectionColumn] = Field(min_length=1, max_length=8)
+
+
+class Derivation(Contract):
+    kind: Literal["row", "aggregate"]
+    source: Identifier
+    groupBy: list[Identifier] = Field(default_factory=list, max_length=8)
+    connection: SummaryConnection | None = None
+    outputs: list[DerivedOutput] = Field(min_length=1, max_length=32)
+
+
+class ModelNode(Contract):
+    id: Identifier
+    table: Identifier
+    label: str = Field(min_length=1, max_length=100)
+    derivation: Derivation | None = None
 
 
 class ScopeAlternative(Contract):
@@ -80,6 +154,7 @@ class ModelDefinition(Contract):
     edges: list[ModelEdge] = Field(default_factory=list, max_length=200)
     scopes: list[ModelScope] = Field(default_factory=list, max_length=20)
     exposedFields: list[SelectedField] | None = Field(default=None, max_length=1000)
+    sourceContract: SourceContract | None = None
 
     @model_validator(mode="after")
     def unique_identifiers(self):
@@ -130,11 +205,71 @@ class ModelCreate(Contract):
     explore: ExploreState = Field(default_factory=ExploreState)
 
 
+class ModelDuplicate(Contract):
+    """Copy one consistent saved model snapshot, including its saved previews."""
+    name: str = Field(min_length=1, max_length=128)
+    expected_revision: int = Field(ge=1)
+    expected_layout_revision: int = Field(ge=1)
+    expected_explore_revision: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def trim_name(self):
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("Enter a model name")
+        return self
+
+
 class ModelUpdate(Contract):
     expected_revision: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=128)
     definition: ModelDefinition
     catalog_fingerprint: str = Field(default="", max_length=128)
+
+
+class NodeChanges(Contract):
+    upsert: list[ModelNode] = Field(default_factory=list, max_length=100)
+    remove: list[Identifier] = Field(default_factory=list, max_length=100)
+
+
+class EdgeChanges(Contract):
+    upsert: list[ModelEdge] = Field(default_factory=list, max_length=200)
+    remove: list[Identifier] = Field(default_factory=list, max_length=200)
+
+
+class ScopeChanges(Contract):
+    upsert: list[ModelScope] = Field(default_factory=list, max_length=20)
+    remove: list[Identifier] = Field(default_factory=list, max_length=20)
+
+
+class ModelPatch(Contract):
+    """Atomic edits by stable model IDs; omitted records remain unchanged."""
+
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    root: Identifier | None = None
+    nodes: NodeChanges = Field(default_factory=NodeChanges)
+    edges: EdgeChanges = Field(default_factory=EdgeChanges)
+    scopes: ScopeChanges = Field(default_factory=ScopeChanges)
+    expose: list[SelectedField] = Field(default_factory=list, max_length=1000)
+    hide: list[SelectedField] = Field(default_factory=list, max_length=1000)
+
+    @model_validator(mode="after")
+    def unambiguous_changes(self):
+        changed = self.name is not None or self.root is not None or self.expose or self.hide
+        for label in ("nodes", "edges", "scopes"):
+            changes = getattr(self, label)
+            ids = [item.id for item in changes.upsert]
+            if len(set(ids)) != len(ids) or len(set(changes.remove)) != len(changes.remove):
+                raise ValueError(f"Duplicate {label} patch IDs are not allowed")
+            if set(ids) & set(changes.remove):
+                raise ValueError(f"Cannot upsert and remove the same {label} in one patch")
+            changed = changed or changes.upsert or changes.remove
+        if {(f.table, f.column) for f in self.expose} & {(f.table, f.column) for f in self.hide}:
+            raise ValueError("Cannot expose and hide the same field in one patch")
+        if not changed:
+            raise ValueError("Supply at least one model change")
+        return self
 
 
 class LayoutUpdate(Contract):
@@ -145,6 +280,31 @@ class LayoutUpdate(Contract):
 class ExploreUpdate(Contract):
     expected_revision: int = Field(ge=1)
     explore: ExploreState
+
+
+class PreviewCreate(Contract):
+    """Named test inputs only; never result rows or copied model definitions."""
+    name: str = Field(min_length=1, max_length=128)
+    explore: ExploreState
+
+    @model_validator(mode="after")
+    def trim_name(self):
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("Enter a preview name")
+        return self
+
+
+class PreviewUpdate(PreviewCreate):
+    expected_revision: int = Field(ge=1)
+
+
+class SavedPreview(PreviewCreate):
+    id: str = Field(pattern=r"^preview_[0-9a-f]{32}$")
+    model_id: str = Field(pattern=r"^model_[0-9a-f]{32}$")
+    revision: int = Field(default=1, ge=1)
+    created_at: datetime
+    updated_at: datetime
 
 
 class ModelSummary(Contract):

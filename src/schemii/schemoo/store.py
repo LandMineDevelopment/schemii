@@ -1,7 +1,9 @@
 """Owner-scoped current semantic models, without retained catalogs or query rows."""
 
+from __future__ import annotations
+
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Protocol
 import secrets
@@ -12,7 +14,8 @@ from psycopg.types.json import Jsonb
 from schemii.common.connections.dependencies import ConnectionDependentResource
 from schemii.common.connections.store import ConnectionInUseError
 from schemii.common.errors import MetadataStorageUnavailableError
-from .models import ExploreUpdate, LayoutUpdate, ModelCreate, ModelUpdate, SchemooModel, ModelSummary
+from .models import (ExploreUpdate, LayoutUpdate, ModelCreate, ModelDuplicate, ModelUpdate, SchemooModel,
+                     ModelSummary, PreviewCreate, PreviewUpdate, SavedPreview)
 
 
 class ModelNotFoundError(RuntimeError):
@@ -23,6 +26,17 @@ class ModelConflictError(RuntimeError):
     def __init__(self, current_revision: int):
         self.current_revision = current_revision
         super().__init__("This model changed in another request. Reload before saving.")
+
+
+class PreviewConflictError(ModelConflictError):
+    def __init__(self, current_revision: int):
+        super().__init__(current_revision)
+        self.args = ("This saved preview changed in another request. Reload previews before saving or deleting it.",)
+
+
+class PreviewNameConflictError(RuntimeError):
+    def __init__(self):
+        super().__init__("A saved preview with this name already exists in this model. Choose a different name or update that preview.")
 
 
 class ModelLimitError(RuntimeError):
@@ -52,17 +66,56 @@ def _check_documents(documents, limit):
             raise ModelDocumentLimitError(name, limit)
 
 
+def _check_previews(previews, limit):
+    # One aggregate budget per model prevents unbounded copies of Explore inputs.
+    size = len(json.dumps([preview.model_dump(mode="json") for preview in previews],
+                          ensure_ascii=True).encode("utf-8"))
+    if size > limit:
+        raise ModelDocumentLimitError("saved previews (combined)", limit)
+
+
+def _check_preview_name(previews, name, replacing_id=None):
+    normalized = name.strip().casefold()
+    if any(item.id != replacing_id and item.name.strip().casefold() == normalized for item in previews):
+        raise PreviewNameConflictError()
+
+
 class ModelRepository(Protocol):
     dependency_name: str
     def list(self, owner_id: str) -> list[ModelSummary]: ...
     def get(self, owner_id: str, model_id: str) -> SchemooModel: ...
     def create(self, owner_id: str, request: ModelCreate) -> SchemooModel: ...
+    def duplicate(self, owner_id: str, model_id: str, request: ModelDuplicate) -> SchemooModel: ...
     def update(self, owner_id: str, model_id: str, request: ModelUpdate) -> SchemooModel: ...
     def update_layout(self, owner_id: str, model_id: str, request: LayoutUpdate) -> SchemooModel: ...
     def update_explore(self, owner_id: str, model_id: str, request: ExploreUpdate) -> SchemooModel: ...
+    def list_previews(self, owner_id: str, model_id: str) -> list[SavedPreview]: ...
+    def create_preview(self, owner_id: str, model_id: str, request: PreviewCreate) -> SavedPreview: ...
+    def update_preview(self, owner_id: str, model_id: str, preview_id: str, request: PreviewUpdate) -> SavedPreview: ...
+    def delete_preview(self, owner_id: str, model_id: str, preview_id: str, expected_revision: int) -> None: ...
     def delete(self, owner_id: str, model_id: str, expected_revision: int) -> None: ...
     def count_for_connection(self, owner_id: str, connection_id: str) -> int: ...
     def dependencies_for_connection(self, owner_id: str, connection_id: str) -> tuple[ConnectionDependentResource, ...]: ...
+
+
+def _duplicate_snapshot(source, previews, request, document_limit):
+    for revision in ("revision", "layout_revision", "explore_revision"):
+        if getattr(source, revision) != getattr(request, "expected_" + revision):
+            raise ModelConflictError(getattr(source, revision))
+    now = datetime.now(timezone.utc)
+    model = source.model_copy(deep=True, update={
+        "id": f"model_{secrets.token_hex(16)}", "name": request.name,
+        "revision": 1, "layout_revision": 1, "explore_revision": 1,
+        "created_at": now, "updated_at": now})
+    # Durable preview lists sort by creation time and ID. Give each new preview
+    # a distinct timestamp so fresh random IDs cannot scramble the saved order.
+    copies = [preview.model_copy(deep=True, update={
+        "id": f"preview_{secrets.token_hex(16)}", "model_id": model.id,
+        "revision": 1, "created_at": now + timedelta(microseconds=index),
+        "updated_at": now + timedelta(microseconds=index)}) for index, preview in enumerate(previews)]
+    _check_documents(model.model_dump(mode="json"), document_limit)
+    _check_previews(copies, document_limit)
+    return model, copies
 
 
 class _Dependencies:
@@ -85,6 +138,7 @@ class InMemoryModelRepository(_Dependencies):
         self._maximum = maximum_models_per_owner
         self._maximum_document_bytes = maximum_document_bytes
         self._records = {}
+        self._previews = {}
         self._lock = RLock()
 
     def list(self, owner_id):
@@ -109,6 +163,18 @@ class InMemoryModelRepository(_Dependencies):
             model = SchemooModel(**request.model_dump(), id=f"model_{secrets.token_hex(16)}",
                 owner_id=owner_id, revision=1, created_at=now, updated_at=now)
             self._records[owner_id, model.id] = model.model_copy(deep=True)
+            return model
+
+    def duplicate(self, owner_id, model_id, request):
+        request = ModelDuplicate.model_validate(request)
+        with self._lock:
+            source = self.get(owner_id, model_id)
+            model, previews = _duplicate_snapshot(source, self.list_previews(owner_id, model_id),
+                request, self._maximum_document_bytes)
+            if len(self.list(owner_id)) >= self._maximum:
+                raise ModelLimitError(self._maximum)
+            self._records[owner_id, model.id] = model.model_copy(deep=True)
+            self._previews[owner_id, model.id] = {item.id: item.model_copy(deep=True) for item in previews}
             return model
 
     def _update(self, owner_id, model_id, expected, revision_key, changes):
@@ -141,6 +207,51 @@ class InMemoryModelRepository(_Dependencies):
             if model.revision != expected_revision:
                 raise ModelConflictError(model.revision)
             del self._records[owner_id, model_id]
+            self._previews.pop((owner_id, model_id), None)
+
+    def list_previews(self, owner_id, model_id):
+        with self._lock:
+            self.get(owner_id, model_id)
+            return [item.model_copy(deep=True) for item in self._previews.get((owner_id, model_id), {}).values()]
+
+    def create_preview(self, owner_id, model_id, request):
+        request = PreviewCreate.model_validate(request)
+        with self._lock:
+            current = self.list_previews(owner_id, model_id)
+            _check_preview_name(current, request.name)
+            now = datetime.now(timezone.utc)
+            preview = SavedPreview(**request.model_dump(), id=f"preview_{secrets.token_hex(16)}",
+                model_id=model_id, created_at=now, updated_at=now)
+            _check_previews([*current, preview], self._maximum_document_bytes)
+            self._previews.setdefault((owner_id, model_id), {})[preview.id] = preview.model_copy(deep=True)
+            return preview
+
+    def update_preview(self, owner_id, model_id, preview_id, request):
+        request = PreviewUpdate.model_validate(request)
+        with self._lock:
+            current = self.list_previews(owner_id, model_id)
+            preview = next((item for item in current if item.id == preview_id), None)
+            if preview is None:
+                raise ModelNotFoundError("Saved preview was not found")
+            if preview.revision != request.expected_revision:
+                raise PreviewConflictError(preview.revision)
+            _check_preview_name(current, request.name, preview_id)
+            updated = SavedPreview.model_validate({**preview.model_dump(),
+                **request.model_dump(exclude={"expected_revision"}), "revision": preview.revision + 1,
+                "updated_at": datetime.now(timezone.utc)})
+            _check_previews([updated if item.id == preview_id else item for item in current], self._maximum_document_bytes)
+            self._previews[owner_id, model_id][preview_id] = updated.model_copy(deep=True)
+            return updated
+
+    def delete_preview(self, owner_id, model_id, preview_id, expected_revision):
+        with self._lock:
+            current = self.list_previews(owner_id, model_id)
+            preview = next((item for item in current if item.id == preview_id), None)
+            if preview is None:
+                raise ModelNotFoundError("Saved preview was not found")
+            if preview.revision != expected_revision:
+                raise PreviewConflictError(preview.revision)
+            del self._previews[owner_id, model_id][preview_id]
 
 
 class PostgresModelRepository(_Dependencies):
@@ -157,7 +268,7 @@ class PostgresModelRepository(_Dependencies):
             with self._factory() as connection:
                 with connection.cursor() as cursor:
                     yield cursor
-        except (ModelNotFoundError, ModelConflictError, ModelLimitError):
+        except (ModelNotFoundError, ModelConflictError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError):
             raise
         except Exception as error:
             raise ModelStorageUnavailableError("Semantic model storage is temporarily unavailable") from error
@@ -194,23 +305,50 @@ class PostgresModelRepository(_Dependencies):
         request = ModelCreate.model_validate(request)
         _check_documents(request.model_dump(mode="json"), self._maximum_document_bytes)
         with self._transaction() as cursor:
-            # Serialize owner limits, and connection deletion/retargeting with creation.
-            cursor.execute("SELECT id FROM metadata.users WHERE id = %s FOR UPDATE", (owner_id,))
-            cursor.execute("SELECT database_name FROM metadata.postgres_connections WHERE owner_id = %s AND id = %s FOR UPDATE", (owner_id, request.connection_id))
-            connection = cursor.fetchone()
-            if connection is None or connection["database_name"] != request.database:
-                raise ModelNotFoundError("The selected connection no longer exists or its database changed")
-            cursor.execute("SELECT count(*) AS count FROM schemoo.models WHERE owner_id = %s", (owner_id,))
-            if cursor.fetchone()["count"] >= self._maximum:
-                raise ModelLimitError(self._maximum)
+            self._lock_creation(cursor, owner_id, request)
             model_id = f"model_{secrets.token_hex(16)}"
-            cursor.execute("""INSERT INTO schemoo.models
+            return self._insert_model(cursor, owner_id, model_id, request)
+
+    def _lock_creation(self, cursor, owner_id, request):
+        # Keep the same lock order for every creation, including duplication.
+        cursor.execute("SELECT id FROM metadata.users WHERE id = %s FOR UPDATE", (owner_id,))
+        cursor.execute("SELECT database_name FROM metadata.postgres_connections WHERE owner_id = %s AND id = %s FOR UPDATE", (owner_id, request.connection_id))
+        connection = cursor.fetchone()
+        if connection is None or connection["database_name"] != request.database:
+            raise ModelNotFoundError("The selected connection no longer exists or its database changed")
+        cursor.execute("SELECT count(*) AS count FROM schemoo.models WHERE owner_id = %s", (owner_id,))
+        if cursor.fetchone()["count"] >= self._maximum:
+            raise ModelLimitError(self._maximum)
+
+    @staticmethod
+    def _insert_model(cursor, owner_id, model_id, request):
+        cursor.execute("""INSERT INTO schemoo.models
                 (id, owner_id, connection_id, database, namespace, name, definition, layout, explore, catalog_fingerprint)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                 (model_id, owner_id, request.connection_id, request.database, request.namespace, request.name,
                  Jsonb(request.definition.model_dump(mode="json")), Jsonb(request.layout.model_dump(mode="json")),
                  Jsonb(request.explore.model_dump(mode="json")), request.catalog_fingerprint))
-            return SchemooModel.model_validate(cursor.fetchone())
+        return SchemooModel.model_validate(cursor.fetchone())
+
+    def duplicate(self, owner_id, model_id, request):
+        request = ModelDuplicate.model_validate(request)
+        with self._transaction() as cursor:
+            source = self._row(cursor, owner_id, model_id)
+            self._lock_creation(cursor, owner_id, source)
+            # Every document and preview writer takes this parent row lock.
+            # Re-read after acquiring it so the copied documents and previews
+            # belong to one snapshot, even when another worker is saving them.
+            source = self._row(cursor, owner_id, model_id, lock=True)
+            model, previews = _duplicate_snapshot(source, self._preview_rows(cursor, owner_id, model_id),
+                request, self._maximum_document_bytes)
+            saved = self._insert_model(cursor, owner_id, model.id, model)
+            for preview in previews:
+                cursor.execute("""INSERT INTO schemoo.model_previews
+                    (id, owner_id, model_id, name, explore, created_at, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)""", (preview.id, owner_id, model.id,
+                    preview.name, Jsonb(preview.explore.model_dump(mode="json")),
+                    preview.created_at, preview.updated_at))
+            return saved
 
     def _update(self, owner_id, model_id, expected, revision_key, changes):
         _check_documents(changes, self._maximum_document_bytes)
@@ -243,3 +381,63 @@ class PostgresModelRepository(_Dependencies):
             if model.revision != expected_revision:
                 raise ModelConflictError(model.revision)
             cursor.execute("DELETE FROM schemoo.models WHERE owner_id = %s AND id = %s", (owner_id, model_id))
+
+    @staticmethod
+    def _preview_rows(cursor, owner_id, model_id):
+        columns = ", ".join(SavedPreview.model_fields)
+        cursor.execute(f"SELECT {columns} FROM schemoo.model_previews WHERE owner_id = %s AND model_id = %s ORDER BY created_at, id", (owner_id, model_id))
+        return [SavedPreview.model_validate(row) for row in cursor.fetchall()]
+
+    def list_previews(self, owner_id, model_id):
+        with self._transaction() as cursor:
+            self._row(cursor, owner_id, model_id)
+            return self._preview_rows(cursor, owner_id, model_id)
+
+    def create_preview(self, owner_id, model_id, request):
+        request = PreviewCreate.model_validate(request)
+        with self._transaction() as cursor:
+            # Parent lock serializes the aggregate byte budget and model deletion.
+            self._row(cursor, owner_id, model_id, lock=True)
+            current = self._preview_rows(cursor, owner_id, model_id)
+            _check_preview_name(current, request.name)
+            now = datetime.now(timezone.utc)
+            preview = SavedPreview(**request.model_dump(), id=f"preview_{secrets.token_hex(16)}",
+                model_id=model_id, created_at=now, updated_at=now)
+            _check_previews([*current, preview], self._maximum_document_bytes)
+            cursor.execute("""INSERT INTO schemoo.model_previews
+                (id, owner_id, model_id, name, explore, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)""", (preview.id, owner_id, model_id,
+                preview.name, Jsonb(preview.explore.model_dump(mode="json")), now, now))
+            return preview
+
+    def update_preview(self, owner_id, model_id, preview_id, request):
+        request = PreviewUpdate.model_validate(request)
+        with self._transaction() as cursor:
+            self._row(cursor, owner_id, model_id, lock=True)
+            current = self._preview_rows(cursor, owner_id, model_id)
+            preview = next((item for item in current if item.id == preview_id), None)
+            if preview is None:
+                raise ModelNotFoundError("Saved preview was not found")
+            if preview.revision != request.expected_revision:
+                raise PreviewConflictError(preview.revision)
+            _check_preview_name(current, request.name, preview_id)
+            updated = SavedPreview.model_validate({**preview.model_dump(),
+                **request.model_dump(exclude={"expected_revision"}), "revision": preview.revision + 1,
+                "updated_at": datetime.now(timezone.utc)})
+            _check_previews([updated if item.id == preview_id else item for item in current], self._maximum_document_bytes)
+            cursor.execute("""UPDATE schemoo.model_previews SET name = %s, explore = %s,
+                revision = %s, updated_at = %s WHERE owner_id = %s AND model_id = %s AND id = %s""",
+                (updated.name, Jsonb(updated.explore.model_dump(mode="json")), updated.revision,
+                 updated.updated_at, owner_id, model_id, preview_id))
+            return updated
+
+    def delete_preview(self, owner_id, model_id, preview_id, expected_revision):
+        with self._transaction() as cursor:
+            self._row(cursor, owner_id, model_id, lock=True)
+            current = self._preview_rows(cursor, owner_id, model_id)
+            preview = next((item for item in current if item.id == preview_id), None)
+            if preview is None:
+                raise ModelNotFoundError("Saved preview was not found")
+            if preview.revision != expected_revision:
+                raise PreviewConflictError(preview.revision)
+            cursor.execute("DELETE FROM schemoo.model_previews WHERE owner_id = %s AND model_id = %s AND id = %s", (owner_id, model_id, preview_id))

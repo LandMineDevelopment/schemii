@@ -1,8 +1,8 @@
 """Owner-scoped assistant conversations, proposals, and transient query results."""
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from schemii.common.api.errors import ApiProblem
+from schemii.common.ai.limits import limit_notice, record_ai_limit
 from schemii.common.metadata.models import Principal, get_current_principal
-from schemii.common.metadata.limit_events import LimitEventNotice
 from .models import (
     SchemiiBatchApproval,
     SchemiiActivityPage,
@@ -35,7 +35,8 @@ def _service(request: Request) -> AiService: return request.app.state.ai_service
 def _resume(service, owner, chat_id, tasks):
     try:
         turn = service.ready_continuation(owner, chat_id)
-    except AiCapacityError:
+    except AiCapacityError as error:
+        record_ai_limit(getattr(getattr(service.services, "metadata", None), "limit_events", None), error, service.policy, owner, "schemii_ai")
         service.repository.add_event(owner, chat_id, "error", {"code": "ai_capacity_reached",
             "message": "Actions are resolved, but assistant capacity is full. Use Continue to resume; completed actions will not be repeated."})
         return
@@ -51,9 +52,12 @@ def continue_turn(chat_id: str, tasks: BackgroundTasks, request: Request, princi
 def _call(function, *args):
     try: return function(*args)
     except AiNotFoundError as error: raise ApiProblem(404, "ai_not_found", str(error)) from error
-    except AiCapacityError as error: raise ApiProblem(429, "ai_capacity_reached", str(error), retryable=True, limit_event=LimitEventNotice(resource=error.resource, limit_name=error.limit_name, configured_limit=error.configured_limit, observed_value=error.observed_value)) from error
+    except AiCapacityError as error: raise ApiProblem(429, "ai_capacity_reached", str(error), retryable=True, limit_event=limit_notice(error, None)) from error
     except AiConflictError as error: raise ApiProblem(409, "ai_conflict", str(error)) from error
-    except AiServiceError as error: raise ApiProblem(error.status, error.code, str(error), details=error.details) from error
+    except AiServiceError as error:
+        policy = getattr(getattr(function, "__self__", None), "policy", None)
+        notice = None if getattr(error, "_ai_limit_recorded", False) else limit_notice(error, policy, "schemii_ai")
+        raise ApiProblem(error.status, error.code, str(error), details=error.details, limit_event=notice) from error
 
 @router.get("/ai/settings", response_model=SchemiiAiSettings)
 def settings(request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.settings, principal.user_id)
@@ -76,7 +80,7 @@ def stream(chat_id: str, request: Request, principal: Principal = Depends(get_cu
 @router.patch("/ai/chats/{chat_id}", response_model=SchemiiChat)
 def update_chat(chat_id: str, body: SchemiiChatUpdate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.update_chat, principal.user_id, chat_id, body.expected_revision, body.title)
 @router.delete("/ai/chats/{chat_id}", response_model=SchemiiChat)
-def delete_chat(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.delete_chat, principal.user_id, chat_id)
+def delete_chat(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).delete_chat, principal.user_id, chat_id)
 @router.get("/ai/chats/{chat_id}/messages", response_model=SchemiiMessageListResponse)
 def messages(chat_id: str, request: Request, principal: Principal = Depends(get_current_principal)): return SchemiiMessageListResponse(messages=_call(_service(request).repository.list_messages, principal.user_id, chat_id, _service(request).policy.message_history_limit))
 @router.post("/ai/chats/{chat_id}/messages", response_model=SchemiiTurn, status_code=202)
@@ -96,7 +100,7 @@ def policy(chat_id: str, request: Request, principal: Principal = Depends(get_cu
     value = _call(_service(request).repository.get_chat, principal.user_id, chat_id); return SchemiiChatPolicy(revision=value.revision, capabilities=value.capabilities)
 @router.put("/ai/chats/{chat_id}/policy", response_model=SchemiiChatPolicy)
 def update_policy(chat_id: str, body: SchemiiChatPolicyUpdate, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
-    value = _call(_service(request).repository.update_chat_policy, principal.user_id, chat_id, body.expected_revision, body.capabilities)
+    value = _call(_service(request).update_chat_policy, principal.user_id, chat_id, body.expected_revision, body.capabilities)
     _resume(_service(request), principal.user_id, chat_id, tasks)
     return SchemiiChatPolicy(revision=value.revision, capabilities=value.capabilities)
 @router.get("/ai/chats/{chat_id}/proposals", response_model=SchemiiProposalListResponse)

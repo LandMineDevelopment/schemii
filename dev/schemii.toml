@@ -18,13 +18,13 @@ maximum_definition_bytes = 262144
 maximum_total_text_bytes = 16777216
 
 [postgres.timeouts]
-catalog_statement_seconds = 15
+catalog_statement_seconds = 900
 migration_statement_seconds = 120
-lock_wait_seconds = 5
+lock_wait_seconds = 30
 
 [console]
 maximum_statements_per_run = 20
-transaction_idle_seconds = 300
+transaction_idle_seconds = 1800
 transaction_maximum_seconds = 1800
 maximum_saved_queries_per_workspace = 100
 
@@ -81,9 +81,12 @@ maximum_read_queries_per_batch = 8
 maximum_tool_rounds = 8
 tool_timeout_seconds = 300
 prompt_bytes = 65536
+# Public answer text and tool-call arguments per provider response; private
+# reasoning/signatures use context_bytes instead and never enter chat metadata.
 response_bytes = 262144
 proposal_bytes = 524288
 proposal_bytes_per_turn = 1048576
+# Bounds inference input and each transient native provider continuation message.
 context_bytes = 524288
 result_context_rows = 100
 result_context_bytes = 262144

@@ -14,6 +14,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from schemii.common.ai.pi import PiRuntime, PiError
+from schemii.common.ai.limits import record_ai_limit
+from schemii.common.metadata.limit_events import LimitEventNotice
+from schemii.common.query_executions.cancellation import QueryCancellationRegistry, check_query_authority
+from schemii.common.postgres.errors import PostgresConsoleCancelledError
 from schemii.common.postgres.console.models import ConsoleExecutionCreate
 from schemii.schemii.designs.models import (
     DesignCheckConstraint,
@@ -35,7 +39,7 @@ from .models import (
     SchemiiQueryResult,
     SchemiiTransientResponse,
 )
-from .repository import AiRepository
+from .repository import AiRepository, AiNotFoundError
 from .read_workflow import run_read_workflow
 from .prompt import system_prompt
 from .action_context import action_context, intent_key, object_ids
@@ -60,10 +64,12 @@ class AiServiceError(RuntimeError):
         code: str,
         message: str,
         details: dict[str, Any] | None = None,
+        *, limit_event: LimitEventNotice | None = None,
     ) -> None:
         self.status = status
         self.code = code
         self.details = details or {}
+        self.limit_event = limit_event
         super().__init__(message)
 
 
@@ -101,11 +107,12 @@ class AiService:
             tuple[str, str, str], tuple[SchemiiTransientResponse, int]
         ] = OrderedDict()
         self._transient_response_bytes = 0
+        self._query_cancellation = QueryCancellationRegistry()
 
-    def status(self, owner: str) -> dict[str, Any]:
+    def status(self, owner: str, *, refresh: bool = False) -> dict[str, Any]:
         if not self.policy.enabled or self.runtime is None:
             return {"enabled": self.policy.enabled, "healthy": False, "providers": []}
-        return self.runtime.status(owner)
+        return self.runtime.status(owner, refresh=True) if refresh else self.runtime.status(owner)
 
     def stream(self, owner: str, chat_id: str) -> dict[str, str | None]:
         chat = self.repository.get_chat(owner, chat_id)
@@ -129,6 +136,7 @@ class AiService:
 
     def cancel_turn(self, owner: str, chat_id: str, turn_id: str) -> Any:
         turn, session_id = self.repository.cancel_turn(owner, chat_id, turn_id)
+        self._query_cancellation.cancel(owner, chat_id, turn_id)
         if session_id and self.runtime is not None:
             try:
                 self.runtime.cancel(owner, turn_id)
@@ -150,6 +158,30 @@ class AiService:
         except Exception:
             pass
         return turn
+
+    def _stop_chat_work(self, owner, chat_id, session_id=None):
+        self._query_cancellation.cancel(owner, chat_id)
+        if session_id and self.runtime is not None:
+            self.runtime.cancel(owner, session_id)
+
+    def delete_chat(self, owner, chat_id):
+        session_id = self.repository.external_session_id(owner, chat_id)
+        deleted = self.repository.delete_chat(owner, chat_id)
+        self._stop_chat_work(owner, chat_id, session_id)
+        return deleted
+
+    def update_chat_policy(self, owner, chat_id, expected_revision, capabilities):
+        session_id = self.repository.external_session_id(owner, chat_id)
+        updated = self.repository.update_chat_policy(owner, chat_id, expected_revision, capabilities)
+        self._stop_chat_work(owner, chat_id, session_id)
+        return updated
+
+    def _query_authorized(self, owner, chat_id, turn_id, revision):
+        try:
+            return (self.repository.get_chat(owner, chat_id).revision == revision
+                    and self.repository.get_turn(owner, chat_id, turn_id).status != "cancelled")
+        except Exception:
+            return False
 
     def transient_responses(
         self, owner: str, chat_id: str
@@ -237,6 +269,7 @@ class AiService:
 
     def save_preferences(self, owner: str, chat_id: str, body: Any) -> SchemiiAiPreferencesResult:
         current_chat = self.repository.get_chat(owner, chat_id)
+        session_id = self.repository.external_session_id(owner, chat_id)
         self.services.workspaces.get(owner, current_chat.workspace_id)
         if (current_chat.provider_id, current_chat.model_id) != (body.provider_id, body.model_id):
             self._require_available_model(owner, body.provider_id, body.model_id)
@@ -249,6 +282,7 @@ class AiService:
             body.model_id,
             body.capabilities,
         )
+        self._stop_chat_work(owner, chat_id, session_id)
         return SchemiiAiPreferencesResult(
             settings=settings,
             chat=saved_chat,
@@ -301,6 +335,22 @@ class AiService:
         )
 
     def run_turn(self, owner: str, chat_id: str, turn_id: str) -> None:
+        try:
+            revision = self.repository.get_chat(owner, chat_id).revision
+        except AiNotFoundError:
+            return  # Chat deletion won the race with background dispatch.
+        try:
+            with self._query_cancellation.scope(owner, chat_id, turn_id,
+                    is_authorized=lambda: self._query_authorized(owner, chat_id, turn_id, revision)):
+                return self._run_turn(owner, chat_id, turn_id)
+        except PostgresConsoleCancelledError:
+            # Stop may race background dispatch, before _run_turn claims work.
+            try:
+                self.repository.fail_turn(owner, chat_id, turn_id, "ai_request_cancelled", "The request was stopped before database work started.")
+            except Exception:
+                pass  # Already cancelled/deleted; never revive a stopped turn.
+
+    def _run_turn(self, owner: str, chat_id: str, turn_id: str) -> None:
         if self.repository.claim_turn(owner, chat_id, turn_id) is None:
             return
         session_id = None
@@ -458,6 +508,7 @@ class AiService:
                 owner, chat_id, "message", {"turnId": turn_id, "rerun": rerun}
             )
         except Exception as error:
+            record_ai_limit(getattr(getattr(self.services, "metadata", None), "limit_events", None), error, self.policy, owner, "schemii_ai")
             try:
                 if self.repository.get_turn(owner, chat_id, turn_id).status == "cancelled":
                     return
@@ -542,7 +593,10 @@ class AiService:
         size = len(json.dumps(proposed.action).encode())
         used = sum(len(json.dumps(self.repository.proposal_action(owner, chat.id, p.id)).encode()) for p in prior)
         if size > self.policy.proposal_bytes or used + size > self.policy.proposal_bytes_per_turn:
-            raise AiServiceError(413, "ai_proposal_size_limit_reached", "This turn reached its proposal-size limit; split the request")
+            name = "proposal_bytes" if size > self.policy.proposal_bytes else "proposal_bytes_per_turn"
+            raise AiServiceError(413, "ai_proposal_size_limit_reached", "This turn reached its proposal-size limit; split the request",
+                limit_event=LimitEventNotice(limit_name=f"ai.{name}", configured_limit=getattr(self.policy, name),
+                    observed_value=size if name == "proposal_bytes" else used + size, resource="ai_turn"))
         canonical = {"chat": chat.id, "workspace": chat.workspace_id, "workspaceRevision": workspace.revision,
                      "designRevision": design.revision, "capability": proposed.capability,
                      "actionType": proposed.action_type, "action": proposed.action}
@@ -643,6 +697,7 @@ class AiService:
                 if result.kind in {"design_change", "design_history", "migration_resolve"}:
                     revision = result.result_summary["designRevision"]
             except Exception as error:
+                record_ai_limit(getattr(getattr(self.services, "metadata", None), "limit_events", None), error, self.policy, owner, "schemii_ai", workspace_id=chat.workspace_id)
                 return {"operations": results, "status": "partial" if results else "failed",
                         "errorCode": getattr(error, "code", "ai_batch_failed"),
                         "message": "The batch stopped. Completed actions remain recorded; remaining actions were not attempted.",
@@ -650,6 +705,17 @@ class AiService:
         return {"operations": results, "status": "completed", "notAttempted": []}
 
     def execute(self, owner: str, chat_id: str, proposal_id: str, body: Any, *, _approved_design_revision=None) -> Any:
+        if self.repository.get_chat(owner, chat_id).revision != body.expected_chat_revision:
+            raise AiServiceError(409, "ai_chat_changed", "The conversation policy changed; review the proposal again")
+        proposal = self.repository.get_proposal(owner, chat_id, proposal_id)
+        try:
+            with self._query_cancellation.scope(owner, chat_id, proposal.turn_id,
+                    is_authorized=lambda: self._query_authorized(owner, chat_id, proposal.turn_id, body.expected_chat_revision)):
+                return self._execute(owner, chat_id, proposal_id, body, _approved_design_revision=_approved_design_revision)
+        except PostgresConsoleCancelledError as error:
+            raise AiServiceError(409, "ai_request_cancelled", "The request was stopped or its permissions changed. Remaining queries were not run.") from error
+
+    def _execute(self, owner: str, chat_id: str, proposal_id: str, body: Any, *, _approved_design_revision=None) -> Any:
         chat = self.repository.get_chat(owner, chat_id)
         if chat.revision != body.expected_chat_revision:
             raise AiServiceError(
@@ -752,14 +818,18 @@ class AiService:
                 result_summary=summary,
             )
         except Exception as error:
-            self.repository.finish_operation(
-                owner,
-                chat_id,
-                operation.id,
-                status="failed",
-                error_code=getattr(error, "code", "ai_operation_failed"),
-                error_message=str(error),
-            )
+            record_ai_limit(getattr(getattr(self.services, "metadata", None), "limit_events", None), error, self.policy, owner, "schemii_ai", workspace_id=chat.workspace_id)
+            try:
+                self.repository.finish_operation(
+                    owner,
+                    chat_id,
+                    operation.id,
+                    status="failed",
+                    error_code=getattr(error, "code", "ai_operation_failed"),
+                    error_message=str(error),
+                )
+            except AiNotFoundError:
+                pass  # Deleted chats have no receipt to update; retain the cause.
             raise
 
     def _authorize_action(self, capabilities, kind, action, design=None):
@@ -984,6 +1054,9 @@ class AiService:
             ),
         )
         self.services.console.run(owner, execution.id)
+        # Console records cancellation as a terminal receipt instead of raising.
+        # Preserve the stop signal for the surrounding AI batch as well.
+        check_query_authority()
         completed = self.services.console.get(owner, workspace_id, execution.id)
         if completed.status != "succeeded" or not completed.results:
             raise AiServiceError(

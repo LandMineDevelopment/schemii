@@ -1,33 +1,39 @@
 """Owner-scoped Pi transport. Credentials cross only the private sidecar boundary."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
 import time
 from urllib.request import Request, urlopen
 
 from schemii.common.admin_config import AiPolicy
+from schemii.common.ai.context import compact_tool_context
+from schemii.common.metadata.limit_events import LimitEventNotice
 
 
 class PiError(RuntimeError):
-    def __init__(self, code, message=None, status=502):
+    def __init__(self, code, message=None, status=502, *, limit_event=None):
         self.code = code
         self.status = status
+        self.limit_event = limit_event
         super().__init__(message or _MESSAGES.get(code, _MESSAGES["provider_failed"]))
 
 
 _MESSAGES = {
     "provider_failed": "The AI provider request failed. Retry or reconnect your account.",
+    "provider_request_rejected": "The provider rejected the AI request format. Reconnecting will not fix this; the request needs to be corrected.",
     "rate_limited": "The selected provider has reached its usage or rate limit. Wait and retry, or explicitly select another available model. No fallback model was used.",
     "billing_required": "The selected provider requires billing or credits. Check that provider account or explicitly select another model. No fallback model was used.",
     "credentials_required": "Connect your own provider account before running this request.",
     "credentials_changed": "Your AI credentials were disconnected, replaced, or expired. Reconnect and try again.",
-    "model_unavailable": "This model is not currently available. Select an available model.",
+    "model_unavailable": "This model is not available through the connected provider account. Choose another model; your conversation is kept. No fallback model was used.",
     "cancelled": "The AI request was cancelled.",
-    "timeout": "The AI request exceeded the configured time limit.",
+    "timeout": "The AI request exceeded the configured time limit. Ask a narrower question and retry.",
     "busy": "AI capacity is currently in use. Wait for a running request to finish.",
-    "context_too_large": "The AI context exceeds the configured size limit.",
-    "response_too_large": "The AI response exceeds the configured size limit.",
+    "context_too_large": "The AI context exceeds the configured size limit. Start a new chat or request fewer rows or a smaller model scope.",
+    "response_too_large": "The AI response exceeds the configured size limit. Ask for a shorter answer or split the work into smaller requests.",
     "permission_changed": "Assistant permissions changed. Request a new response.",
     "tool_denied": "The model requested a tool that is not enabled for this turn.",
     "invalid_response": "The AI runtime returned an invalid response. Try again.",
@@ -53,6 +59,95 @@ class PiRuntime:
         self._catalog_lock = threading.Lock()
         self._supported = None
         self._supported_until = 0
+        # Adapter catalogs describe supported models, not account entitlements.
+        # Keep only short-lived, generation-scoped denials, never provider text.
+        self._model_denials = {}
+        # Account discovery retains only supported model IDs, timestamps and safe
+        # errors in memory. Credential generations isolate reconnects and owners.
+        self._account_catalogs = {}
+
+    def _account_catalog(self, owner, provider_id, generation):
+        now = time.monotonic()
+        with self._catalog_lock:
+            self._account_catalogs = {key: value for key, value in self._account_catalogs.items()
+                if now - value["updated"] < self.policy.catalog_max_stale_seconds
+                and (key[:2] != (owner, provider_id) or key[2] == generation)}
+            return self._account_catalogs.get((owner, provider_id, generation), {})
+
+    def _refresh_account_catalog(self, owner, metadata):
+        provider_id, credential_id = metadata["provider_id"], metadata["credential_id"]
+        generation = metadata["generation"]
+        key = (owner, provider_id, generation)
+        identity = (owner, credential_id)
+        previous = self._account_catalog(owner, provider_id, generation)
+        acquired = False
+        result = {**previous, "updated": time.monotonic(), "checkedAt": datetime.now(timezone.utc).isoformat()}
+        try:
+            with self._identity_lock:
+                if identity in self._identities:
+                    raise PiError("busy")
+                self._identities.add(identity)
+                acquired = True
+            record = self.store.get(owner, credential_id)
+            if record is None or record["generation"] != generation:
+                raise PiError("credentials_changed")
+            reply = self.client.call("/models/refresh", {
+                "owner": owner, "providerId": provider_id, "credentialId": credential_id,
+                "generation": generation, "credential": record["credential"],
+            })
+            current = self.store.get(owner, credential_id)
+            if current is None or current["generation"] != generation:
+                raise PiError("credentials_changed")
+            if reply.get("generation") != generation:
+                raise PiError("credentials_changed")
+            if "credential" in reply:
+                if not self.store.save(
+                    owner, credential_id, provider_id, reply["credential"], generation,
+                ):
+                    raise PiError("credentials_changed")
+            if reply.get("type") == "error":
+                raise PiError(reply.get("code", "unavailable"))
+            models = reply.get("models")
+            if reply.get("type") != "result" or not isinstance(models, list) or any(
+                not isinstance(item, dict) or item.get("providerId") != provider_id
+                or not isinstance(item.get("id"), str) for item in models
+            ):
+                raise PiError("invalid_response")
+            result.update(ids=frozenset(item["id"] for item in models), success=time.monotonic(), error=None)
+        except Exception as error:
+            code = error.code if isinstance(error, PiError) else "unavailable"
+            result["error"] = (
+                "Model availability could not be checked while this account is in use. Try again after the current request finishes."
+                if code == "busy" else
+                "Connect your provider account again to check model availability."
+                if code in {"credentials_required", "credentials_changed"} else
+                "Could not refresh this provider's model list. Previously listed models may be outdated; reopen the list to retry."
+            )
+        finally:
+            if acquired:
+                with self._identity_lock:
+                    self._identities.discard(identity)
+        # Late discovery must not restore a disconnected/replaced account's list.
+        current = next((row for row in self.store.list(owner)
+                        if row["credential_id"] == credential_id and row.get("connected")), None)
+        if acquired and current and current["generation"] == generation:
+            with self._catalog_lock:
+                self._account_catalogs[key] = result
+        return result
+
+    def _denied_models(self, owner, credentials):
+        current = time.monotonic()
+        generations = {row["provider_id"]: row["generation"] for row in credentials if row.get("connected")}
+        with self._catalog_lock:
+            self._model_denials = {key: until for key, until in self._model_denials.items()
+                if until > current and (key[0] != owner or generations.get(key[1], 0) == key[2])}
+            return {(key[1], key[3]) for key in self._model_denials if key[0] == owner}
+
+    def _deny_model(self, owner, provider_id, model_id, generation):
+        with self._catalog_lock:
+            current = time.monotonic()
+            self._model_denials = {key: until for key, until in self._model_denials.items() if until > current}
+            self._model_denials[owner, provider_id, generation, model_id] = current + self.policy.catalog_refresh_seconds
 
     def _supported_models(self):
         with self._catalog_lock:
@@ -68,25 +163,53 @@ class PiRuntime:
     def credential_id(provider_id):
         return {"openai-codex": "codex-prototype", "openai": "openai"}.get(provider_id)
 
-    def status(self, owner):
+    def status(self, owner, *, refresh=False):
         try:
             supported = self._supported_models()
+            credentials = self.store.list(owner)
+            refresh_results = {}
+            if refresh and self.policy.enabled:
+                records = [row for row in credentials if row.get("connected")]
+                # Providers are independent, but each identity shares the turn's
+                # credential lease so OAuth rotation cannot race a running chat.
+                if records:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        results = list(pool.map(lambda row: self._refresh_account_catalog(owner, row), records))
+                        refresh_results = {row["provider_id"]: result for row, result in zip(records, results)}
+                # Zen's credential-free catalog already refreshes in its shared
+                # background worker. Do not fetch its large pricing document on
+                # every user's dropdown opening.
+                credentials = self.store.list(owner)
             verified = {m["id"] for m in self.catalog.snapshot()["models"]} if self.catalog else set()
-            connected = {row["provider_id"] for row in self.store.list(owner) if row.get("connected")}
+            connected = {row["provider_id"] for row in credentials if row.get("connected")}
+            generations = {row["provider_id"]: row["generation"] for row in credentials if row.get("connected")}
+            denied = self._denied_models(owner, credentials)
             providers = []
             for provider_id, name in (("openai-codex", "ChatGPT Codex"), ("openai", "OpenAI"), ("opencode", "OpenCode Zen")):
-                models = [{"id": item["id"], "name": item.get("name", item["id"]), "status": "active"}
+                account = self._account_catalog(owner, provider_id, generations.get(provider_id, 0))
+                refresh_error = refresh_results.get(provider_id, {}).get("error")
+                ids = account.get("ids")
+                if time.monotonic() - account.get("success", 0) >= self.policy.catalog_max_stale_seconds:
+                    ids = None
+                models = [{"id": item["id"], "name": item.get("name", item["id"]),
+                           "status": "unavailable" if (provider_id, item["id"]) in denied
+                               or (ids is not None and item["id"] not in ids) else "active"}
                           for item in supported if item.get("providerId") == provider_id
                           and (provider_id != "opencode" or item["id"] in verified)]
                 authenticated = provider_id in connected
-                available = bool(models) and (authenticated or provider_id == "opencode")
+                available = any(model["status"] == "active" for model in models) and (authenticated or provider_id == "opencode")
                 item = {"id": provider_id, "name": name, "available": available,
                         "authenticated": authenticated, "models": models,
-                        "authMethods": []}
+                        "authMethods": [], "catalogError": refresh_error or account.get("error"),
+                        "catalogCheckedAt": account.get("checkedAt")}
                 if provider_id == "opencode":
                     item["privacy"] = "Free trial models may use prompts and selected context for training. Do not send confidential or personal data."
+                    if self.catalog and self.catalog.snapshot().get("error"):
+                        item["catalogError"] = "Could not refresh the free-model catalog. The list uses its last unexpired snapshot."
                 providers.append(item)
-            return {"enabled": self.policy.enabled, "healthy": True, "providers": providers}
+            errors = [f'{provider["name"]}: {provider["catalogError"]}' for provider in providers if provider["catalogError"]]
+            return {"enabled": self.policy.enabled, "healthy": True, "providers": providers,
+                    "message": " ".join(errors) or None}
         except Exception:
             return {"enabled": self.policy.enabled, "healthy": False, "providers": [],
                     "message": _MESSAGES["unavailable"]}
@@ -97,8 +220,23 @@ class PiRuntime:
         except Exception:
             pass  # Cancellation is best effort; terminal acceptance checks authority again.
 
+    def require_available_model(self, owner, provider_id, model_id):
+        """Validate the current owner/provider selection before admitting work."""
+        if not self.policy.enabled:
+            raise PiError("unavailable", status=503)
+        status = self.status(owner)
+        provider = next((p for p in status["providers"] if p["id"] == provider_id), None)
+        if not provider or not provider["available"] or model_id not in {
+            m["id"] for m in provider["models"] if m["status"] == "active"
+        }:
+            raise PiError("model_unavailable", status=409)
+
     def disconnect(self, owner, credential_id="codex-prototype"):
         self.store.delete(owner, credential_id)
+        self._denied_models(owner, self.store.list(owner))
+        provider_id = {"codex-prototype": "openai-codex", "openai": "openai"}.get(credential_id)
+        if provider_id:
+            self._account_catalog(owner, provider_id, 0)
         try:
             self.client.call("/credentials/remove", {"owner": owner, "credentialId": credential_id})
         except Exception:
@@ -114,7 +252,8 @@ class PiRuntime:
         # Retain the shared sidecar, not a process per user. Deferred for local dev.
         with self._identity_lock:
             if identity[1] and identity in self._identities:
-                raise PiError("busy", status=429)
+                raise PiError("busy", status=429, limit_event=LimitEventNotice(
+                    "ai_provider_credential", "credential_overlap_guard", 1, 1))
             if identity[1]:
                 self._identities.add(identity)
         try:
@@ -127,12 +266,7 @@ class PiRuntime:
 
     def _run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
              on_text, is_authorized, messages):
-        if not self.policy.enabled:
-            raise PiError("unavailable", status=503)
-        status = self.status(owner)
-        provider = next((p for p in status["providers"] if p["id"] == provider_id), None)
-        if not provider or not provider["available"] or model_id not in {m["id"] for m in provider["models"]}:
-            raise PiError("model_unavailable", status=409)
+        self.require_available_model(owner, provider_id, model_id)
         credential_id = self.credential_id(provider_id)
         record = self.store.get(owner, credential_id) if credential_id else None
         if credential_id and record is None:
@@ -145,9 +279,12 @@ class PiRuntime:
                    "messages": messages if messages is not None else [
                        {"role": "user", "content": prompt, "timestamp": int(time.time() * 1000)}],
                    "tools": tools}
+        context["messages"] = compact_tool_context(system, context["messages"], tools,
+                                                    self.policy.context_bytes)
         context_bytes = len(json.dumps(context, ensure_ascii=False).encode())
         if context_bytes > self.policy.context_bytes:
-            raise PiError("context_too_large", status=413)
+            raise PiError("context_too_large", status=413, limit_event=LimitEventNotice(
+                "ai_turn", "ai.context_bytes", self.policy.context_bytes, context_bytes))
         body = {"owner": owner, "turnId": turn_id, "providerId": provider_id,
                 "modelId": model_id, "context": context,
                 "limits": {"maxConcurrent": self.policy.maximum_concurrent_turns,
@@ -187,9 +324,11 @@ class PiRuntime:
                                        "Content-Type": "application/json", "Accept": "application/x-ndjson"})
             timer.start()
             deadline = time.monotonic() + self.policy.provider_timeout_seconds + 10
-            # Terminal JSON repeats response text and can include refreshed tokens.
-            event_limit = self.policy.response_bytes * 6 + 131072
-            total_limit = event_limit * 2
+            # Native replay context has its own bound. Terminal JSON also repeats
+            # public content and carries refreshed credentials. NDJSON envelopes
+            # must not penalize providers streaming one character at a time.
+            event_limit = self.policy.response_bytes * 6 + self.policy.context_bytes + 131072
+            total_limit = event_limit + self.policy.response_bytes * 32 + 65536
             total = 0
             text_bytes = 0
             next_authority_check = time.monotonic() + 1
@@ -216,19 +355,23 @@ class PiRuntime:
                             raise PiError("invalid_response")
                         text_bytes += len(text.encode())
                         if text_bytes > self.policy.response_bytes:
-                            raise PiError("response_too_large", status=413)
+                            raise self._size_error("response_bytes", text_bytes, "response_stream")
                         on_text(text)
                     elif kind in ("result", "error"):
                         persist(event)
                         authority()
                         if kind == "error":
                             code = event.get("code")
-                            raise PiError(code if code in _MESSAGES else "provider_failed")
+                            if code == "model_unavailable":
+                                self._deny_model(owner, provider_id, model_id, record["generation"] if record else 0)
+                            raise PiError(code if code in _MESSAGES else "provider_failed",
+                                          limit_event=self._runtime_notice(event.get("limit")))
                         text, calls = event.get("text"), event.get("toolCalls", [])
                         if not isinstance(text, str) or not isinstance(calls, list):
                             raise PiError("invalid_response")
-                        if len(text.encode()) + len(json.dumps(calls, ensure_ascii=False).encode()) > self.policy.response_bytes:
-                            raise PiError("response_too_large", status=413)
+                        content_bytes = len(text.encode()) + self._json_bytes(calls)
+                        if content_bytes > self.policy.response_bytes:
+                            raise self._size_error("response_bytes", content_bytes, "response_content")
                         result = []
                         for call in calls:
                             # Transport carries untrusted calls; only the server
@@ -243,8 +386,9 @@ class PiRuntime:
                         message = event.get("assistantMessage")
                         ids = tuple(call.get("id", "") for call in calls)
                         if message is not None:
-                            if len(json.dumps(message, ensure_ascii=False).encode()) > self.policy.response_bytes:
-                                raise PiError("response_too_large", status=413)
+                            native_bytes = self._json_bytes(message)
+                            if native_bytes > self.policy.context_bytes:
+                                raise self._size_error("context_bytes", native_bytes, "native_response")
                             if (not isinstance(message, dict) or message.get("role") != "assistant"
                                     or not isinstance(message.get("content"), list)):
                                 raise PiError("invalid_response")
@@ -275,3 +419,35 @@ class PiRuntime:
             body.pop("credential", None)
             if record:
                 record["credential"].clear()
+
+    @staticmethod
+    def _json_bytes(value):
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+
+    def _size_error(self, name, observed, source):
+        return PiError("context_too_large" if name == "context_bytes" else "response_too_large",
+                       status=413, limit_event=LimitEventNotice(
+                           "ai_" + source, "ai." + name, getattr(self.policy, name), observed))
+
+    def _runtime_notice(self, value):
+        """Trust only numeric, known private-runtime limit descriptors."""
+        if not isinstance(value, dict):
+            return None
+        name = value.get("name")
+        allowed = {"maximum_concurrent_turns": self.policy.maximum_concurrent_turns,
+                   "maximum_concurrent_turns_per_user": self.policy.maximum_concurrent_turns_per_user,
+                   "credential_overlap_guard": 1,
+                   "response_bytes": self.policy.response_bytes,
+                   "context_bytes": self.policy.context_bytes}
+        configured, observed = value.get("configured"), value.get("observed")
+        if (name not in allowed or type(configured) is not int or configured != allowed[name]
+                or type(observed) is not int or observed < 0):
+            return None
+        if name in {"response_bytes", "context_bytes"}:
+            source = value.get("source")
+            if source not in {"request_context", "native_response", "response_stream", "response_content"}:
+                return None
+            return LimitEventNotice("ai_" + source, "ai." + name, configured, observed)
+        credential = name == "credential_overlap_guard"
+        return LimitEventNotice("ai_provider_credential" if credential else "ai_turn",
+                                name if credential else "ai." + name, configured, observed)

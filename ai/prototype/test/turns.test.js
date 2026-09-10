@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { TurnService, supportedModels } from '../turns.js';
-import { CredentialVault } from '../runtime.js';
+import { CredentialVault, TurnError } from '../runtime.js';
 import { createHandler } from '../server.js';
 
 const context = { messages: [{ role: 'user', content: 'Hello', timestamp: 0 }], tools: [] };
@@ -51,7 +51,8 @@ test('same identity rejects overlap; owner-scoped cancel aborts actual SDK HTTP'
   const events = [];
   const running = service.run(input(), { emit: event => events.push(event) });
   await started.promise;
-  await assert.rejects(service.run(input({ turnId: 'other' }), { emit() {} }), { code: 'busy' });
+  await assert.rejects(service.run(input({ turnId: 'other' }), { emit() {} }), { code: 'busy',
+    limit: { name: 'credential_overlap_guard', configured: 1, observed: 1 } });
   assert.throws(() => service.cancel({ owner: 'bob', turnId: 'turn1' }), { code: 'not_found' });
   service.cancel({ owner: 'alice', turnId: 'turn1' });
   await running;
@@ -77,6 +78,18 @@ test('credential removal aborts only the matching identity and releases capacity
   await running;
   assert.equal(await vault.read('alice', 'personal', 'openai'), undefined);
   assert.throws(() => service.cancel({ owner: 'alice', turnId: 'turn1' }), { code: 'not_found' });
+});
+
+test('runtime capacity descriptor reaches the private terminal without query context', async () => {
+  const limit = { name: 'maximum_concurrent_turns_per_user', configured: 2, observed: 2 };
+  const service = new TurnService({ providerIds: ['openai'], runner: {
+    async run() { throw new TurnError('busy', limit); },
+  } });
+  const events = [];
+  await service.run(input(), { emit: event => events.push(event) });
+  assert.equal(events.at(-1).code, 'busy');
+  assert.deepEqual(events.at(-1).limit, limit);
+  assert.equal(JSON.stringify(events.at(-1).limit).includes('Hello'), false);
 });
 
 test('actual Codex OAuth refresh survives inference error in private terminal only', async t => {
@@ -224,4 +237,27 @@ test('private HTTP turns use authenticated NDJSON and return no credential in te
   assert.equal(chunks.length, 2);
   assert.doesNotMatch(chunks[0], /private/);
   assert.equal(JSON.parse(chunks[1]).type, 'result');
+});
+
+test('one-character NDJSON chunks do not spend the response budget on framing', async () => {
+  const turns = { async run(_input, { emit }) {
+    for (let i = 0; i < 50000; i++) await emit({ type: 'text', text: 'x' });
+    await emit({ type: 'result', text: 'x'.repeat(50000), toolCalls: [] });
+  } };
+  const handler = createHandler({ secret: 'private-sidecar', turns });
+  const request = Readable.from([Buffer.from(JSON.stringify(input({ limits: { responseBytes: 65536 } })))]);
+  request.method = 'POST'; request.url = '/turns';
+  request.headers = { authorization: 'Bearer private-sidecar', 'content-type': 'application/json' };
+  const output = new EventEmitter();
+  let last, texts = 0;
+  output.writeHead = () => {};
+  output.write = chunk => {
+    last = JSON.parse(chunk);
+    if (last.type === 'text') texts++;
+    return true;
+  };
+  output.end = () => {};
+  await handler(request, output);
+  assert.equal(texts, 50000);
+  assert.equal(last.type, 'result');
 });

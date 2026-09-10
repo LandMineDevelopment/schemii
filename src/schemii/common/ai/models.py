@@ -36,6 +36,8 @@ class AiProviderStatus(ApiModel):
     available: bool
     authenticated: bool
     privacy: str | None = None
+    catalog_error: str | None = None
+    catalog_checked_at: str | None = None
     auth_methods: list[AiProviderAuthMethod] = Field(default_factory=list, max_length=20)
     models: list["AiModelStatus"] = Field(max_length=1000)
 

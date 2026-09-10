@@ -9,9 +9,17 @@ export function importedDraft(catalog) {
   const root = nodes[0].id;
   const columns = catalog.tables.find(t => t.name === root).columns;
   return { root, nodes, edges: catalog.relationships.map(r => ({ id: r.id, relationshipId: r.id, source: r.sourceTable, target: r.targetTable, enabled: true })),
+    sourceContract: catalogContract(catalog),
     exposedFields: catalog.tables.flatMap(table => table.columns.map(column => ({ table: table.name, column: column.name, aggregate: "none" }))),
     fields: columns.length ? [{ table: root, column: (columns.find(c => c.name === "name") || columns[0]).name, aggregate: "none" }] : [],
     scopes: [], selections: {}, reportFilters: [], limit: 100 };
+}
+
+export function catalogContract(catalog) {
+  return {
+    tables:(catalog.tables || []).map(table=>({name:table.name,primaryKey:[...(table.primaryKey || [])],columns:(table.columns || []).map(column=>({name:column.name,dataType:column.dataType || "",nullable:column.nullable ?? true}))})),
+    relationships:(catalog.relationships || []).map(relationship=>Object.fromEntries(["id","name","sourceTable","sourceColumn","targetTable","targetColumn"].map(key=>[key,relationship[key] || ""]))),
+  };
 }
 
 export function staffingDraft(catalog) {

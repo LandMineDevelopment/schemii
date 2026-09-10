@@ -33,9 +33,10 @@ export class CredentialVault {
 }
 
 export class TurnError extends Error {
-  constructor(code) {
+  constructor(code, limit) {
     const messages = {
       provider_failed: 'The AI provider request failed. Retry or reconnect your account.',
+      provider_request_rejected: 'The provider rejected the AI request format. Reconnecting will not fix a request-format error.',
       credentials_required: 'Connect your own provider account before running this request.',
       model_unavailable: 'The requested provider or model is unavailable.',
       cancelled: 'The AI request was cancelled.',
@@ -53,7 +54,20 @@ export class TurnError extends Error {
     super(messages[code]);
     this.name = 'TurnError';
     this.code = code;
+    this.limit = limit;
   }
+}
+
+// Provider messages may contain private input. Retain only known categories,
+// never their text, parameter values, response bodies or credentials.
+export function rejectionCategory(message) {
+  if (typeof message !== 'string') return 'unknown';
+  if (/verbosity/i.test(message) && /support|invalid/i.test(message)) return 'verbosity';
+  if (/schema|function.*parameters|tools\[/i.test(message)) return 'tool_schema';
+  if (/model/i.test(message) && /not supported|not found|does not exist|do not have access/i.test(message)) return 'model_unavailable';
+  if (/reasoning/i.test(message) && /support|invalid/i.test(message)) return 'reasoning';
+  if (/call_id|function_call_output|tool.*call/i.test(message)) return 'tool_history';
+  return 'unknown';
 }
 
 export const providers = {
@@ -65,6 +79,12 @@ const noAmbientAuth = Object.freeze({
   env: async () => undefined,
   fileExists: async () => false,
 });
+
+function enforceSize(value, maximum, name, source) {
+  const observed = typeof value === 'number' ? value : Buffer.byteLength(JSON.stringify(value));
+  if (observed > maximum) throw new TurnError(name === 'context_bytes' ? 'context_too_large' : 'response_too_large',
+    { name, configured: maximum, observed, source });
+}
 
 export class TurnRunner {
   #active = 0;
@@ -88,8 +108,13 @@ export class TurnRunner {
       if (!Number.isSafeInteger(value) || value < 1) throw new TurnError('invalid_request');
     }
     const ownerActive = this.#owners.get(owner) ?? 0;
-    if (this.#active >= policy.maxConcurrent || ownerActive >= policy.maxPerOwner) {
-      throw new TurnError('busy');
+    if (this.#active >= policy.maxConcurrent) {
+      throw new TurnError('busy', { name: 'maximum_concurrent_turns',
+        configured: policy.maxConcurrent, observed: this.#active });
+    }
+    if (ownerActive >= policy.maxPerOwner) {
+      throw new TurnError('busy', { name: 'maximum_concurrent_turns_per_user',
+        configured: policy.maxPerOwner, observed: ownerActive });
     }
     this.#active++;
     this.#owners.set(owner, ownerActive + 1);
@@ -103,9 +128,7 @@ export class TurnRunner {
       controller.signal.throwIfAborted();
       if (!await isAuthorized()) throw new TurnError('permission_changed');
       const snapshot = structuredClone(context);
-      if (Buffer.byteLength(JSON.stringify(snapshot)) > policy.contextBytes) {
-        throw new TurnError('context_too_large');
-      }
+      enforceSize(snapshot, policy.contextBytes, 'context_bytes', 'request_context');
       if (!Array.isArray(snapshot.messages) || !snapshot.messages.length
         || snapshot.messages.some(message => !message || !['user', 'assistant', 'toolResult'].includes(message.role))) {
         throw new TurnError('invalid_request');
@@ -120,18 +143,34 @@ export class TurnRunner {
       models.setProvider(factory());
       const model = models.getModel(providerId, modelId);
       if (!model) throw new TurnError('model_unavailable');
+      let providerStatus;
       const stream = models.stream(model, snapshot, {
         signal: controller.signal,
         transport: 'sse',
         cacheRetention: 'none',
+        // Codex's SDK turns HTTP failures into friendly text and drops the
+        // status from errorMessage. Capture only the numeric status at the
+        // transport boundary; never log headers, bodies, tokens or chat text.
+        onResponse: response => { providerStatus = response.status; },
       });
       let bytes = 0;
+      let thinkingBytes = 0;
       for await (const event of stream) {
         controller.signal.throwIfAborted();
         // Never forward SDK error/thinking/raw events or diagnostic payloads.
-        if (event.type === 'text_delta' || event.type === 'toolcall_delta' || event.type === 'thinking_delta') {
+        if (event.type === 'text_delta' || event.type === 'toolcall_delta') {
           bytes += Buffer.byteLength(event.delta ?? '');
-          if (bytes > policy.responseBytes) throw new TurnError('response_too_large');
+          enforceSize(bytes, policy.responseBytes, 'response_bytes', 'response_stream');
+        }
+        // Reasoning and encrypted replay signatures are private provider context,
+        // not the user's answer/tool arguments. Keep them bounded without charging
+        // them against the response budget or discarding required signatures.
+        if (event.type === 'thinking_delta') {
+          thinkingBytes += Buffer.byteLength(event.delta ?? '');
+          enforceSize(thinkingBytes, policy.contextBytes, 'context_bytes', 'native_response');
+        }
+        if (event.type.endsWith('_end') && event.partial) {
+          enforceSize(event.partial, policy.contextBytes, 'context_bytes', 'native_response');
         }
         if (event.type === 'text_delta') await onText(event.delta);
       }
@@ -140,13 +179,17 @@ export class TurnRunner {
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') {
         // Only classify a leading HTTP status; never expose provider text, which
         // may contain private diagnostics or credentials.
-        const status = typeof reply.errorMessage === 'string'
+        const status = providerStatus ?? (typeof reply.errorMessage === 'string'
           ? /^(?:OpenAI API error \()?(401|402|429)(?:\):|\b)/.exec(reply.errorMessage)?.[1]
-          : undefined;
+          : undefined);
+        const category = Number(status) === 400 ? rejectionCategory(reply.errorMessage) : undefined;
+        console.warn(JSON.stringify({ event: 'ai_provider_failure', provider: providerId,
+          httpStatus: status === undefined ? null : Number(status), ...(category ? { category } : {}) }));
         throw new TurnError({ '401': 'credentials_required', '402': 'billing_required',
+          '400': category === 'model_unavailable' ? 'model_unavailable' : 'provider_request_rejected',
           '429': 'rate_limited' }[status] ?? 'provider_failed');
       }
-      if (Buffer.byteLength(JSON.stringify(reply)) > policy.responseBytes) throw new TurnError('response_too_large');
+      enforceSize(reply, policy.contextBytes, 'context_bytes', 'native_response');
       // This callback represents the existing Schemii revision/permission check.
       // The real application still validates argument schemas and every apply.
       if (!await isAuthorized()) throw new TurnError('permission_changed');
@@ -160,9 +203,13 @@ export class TurnRunner {
         || new Set(toolCalls.map(call => call.id)).size !== toolCalls.length) {
         throw new TurnError('provider_failed');
       }
+      const text = reply.content.filter(part => part.type === 'text').map(part => part.text).join('');
+      const calls = toolCalls.map(({ id, name, arguments: args }) => ({ id, name, arguments: args }));
+      enforceSize(Buffer.byteLength(text) + Buffer.byteLength(JSON.stringify(calls)),
+        policy.responseBytes, 'response_bytes', 'response_content');
       return {
-        text: reply.content.filter(part => part.type === 'text').map(part => part.text).join(''),
-        toolCalls: toolCalls.map(({ id, name, arguments: args }) => ({ id, name, arguments: args })),
+        text,
+        toolCalls: calls,
         // Keep provider signatures and message metadata for the next inference
         // step. This private payload is transient, never a public UI event.
         assistantMessage: reply,

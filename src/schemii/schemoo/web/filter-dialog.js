@@ -3,6 +3,8 @@ import { createIconButton } from "/assets/common/ui.js";
 import { renderFilterDefinition } from "./filter-controls.js";
 import { disposeSelects } from "./select.js";
 import { helpButton, helpHeading } from "./help.js";
+import { modelFilterIssue } from "./model-filter-links.js";
+export { modelFilterIssue } from "./model-filter-links.js";
 
 const uid = () => crypto.randomUUID();
 const note = text => element("p", { className: "mf-help", text });
@@ -35,39 +37,8 @@ function summary(scope, draft) {
   }
   return box;
 }
-function validation(scope, draft, catalog) {
-  if (!scope.label.trim()) return "Give this filter a name.";
-  if (!scope.alternatives.length) return "Add at least one option.";
-  for (const option of scope.alternatives) {
-    if (!option.label.trim()) return "Give each option a name.";
-    for (const input of option.inputs) {
-      if (!input.label.trim()) return "Give each report input a name.";
-      if (input.domain) {
-        const domain = input.domain;
-        const table = domain.nodeId != null ? draft.nodes.find(n => n.id === domain.nodeId)?.table : domain.table;
-        const columns = catalog.tables.find(t => t.name === table)?.columns || [];
-        if (!columns.some(c => c.name === domain.column) || (domain.labelColumn && !columns.some(c => c.name === domain.labelColumn))) return "Choose a valid domain value column and display label. Its source may have been removed.";
-      }
-      if (!option.conditions.some(c => c.parameterId === input.id)) return `Bind “${input.label}” to a source, or remove that unused input for a fixed rule.`;
-    }
-    for (const c of option.conditions) {
-      if (["in", "not_in"].includes(c.operator) && !c.parameterId && (!Array.isArray(c.value) || !c.value.length)) return "Choose at least one value for IN / NOT IN.";
-      if (c.domain && c.value == null) return "Choose a fixed value from the domain list.";
-      if (c.domain) {
-        const table = c.domain.nodeId != null ? draft.nodes.find(n => n.id === c.domain.nodeId)?.table : c.domain.table;
-        const columns = catalog.tables.find(t => t.name === table)?.columns || [];
-        if (!columns.some(column => column.name === c.domain.column) || (c.domain.labelColumn && !columns.some(column => column.name === c.domain.labelColumn))) return "Choose a valid fixed-value domain source and display label.";
-      }
-      const node = draft.nodes.find(n => n.id === c.table);
-      if (!catalog.tables.find(t => t.name === node?.table)?.columns.some(column => column.name === c.column)) return "Choose a valid source column for every condition.";
-      if (c.parameterId && !option.inputs.some(p => p.id === c.parameterId)) return "A condition refers to a removed input. Choose its value source again.";
-    }
-  }
-  return "";
-}
-
 /** Edits one isolated filter. Cancel/Escape never mutate the model draft. */
-function openFilter(options, existing, returnTarget) {
+export function openModelFilter(options, existing = null, returnTarget = null) {
   const { draft, catalog, onChange } = options;
   const scope = structuredClone(existing || { id: uid(), label: "Model filter", kind: "required", alternatives: [{ id: uid(), label: "Default", inputs: [], conditions: [] }] });
   const local = { ...draft, scopes: [scope], selections: structuredClone(draft.selections || {}) };
@@ -77,7 +48,7 @@ function openFilter(options, existing, returnTarget) {
   const overview = element("aside", { className: "mf-dialog-summary", attrs: { "aria-label": "Filter summary" } });
   const error = element("p", { className: "mf-dialog-error", attrs: { role: "alert" } });
   const apply = button("Apply to model", () => {
-    const message = validation(scope, local, catalog);
+    const message = modelFilterIssue(scope, local, catalog);
     error.textContent = message;
     if (message) return;
     if (existing) draft.scopes[draft.scopes.indexOf(existing)] = scope;
@@ -88,13 +59,14 @@ function openFilter(options, existing, returnTarget) {
     }
     const selection = draft.selections?.[scope.id];
     if (selection && !scope.alternatives.some(a => a.id === selection.alternativeId)) delete draft.selections[scope.id];
-    onChange({ structure: true });
-    options.redraw();
+    onChange?.({ structure: true });
+    options.redraw?.();
     dialog.close();
   }, true);
   const update = () => {
     error.textContent = "";
     overview.replaceChildren(helpHeading("What this enforces", "scopes"), summary(scope, local));
+    options.onSelect?.(scope);
   };
   const render = () => {
     content.replaceChildren(editor, overview);
@@ -110,7 +82,8 @@ function openFilter(options, existing, returnTarget) {
   ]));
   dialog.addEventListener("close", () => {
     disposeSelects(editor); dialog.remove();
-    if (returnTarget?.isConnected) returnTarget.focus({ preventScroll: true });
+    options.onSelect?.(null);
+    if (returnTarget?.isConnected && returnTarget.getClientRects().length) returnTarget.focus({ preventScroll: true });
     else document.querySelector('#model-filters button')?.focus({ preventScroll: true });
   }, { once: true });
   if (existing) render();
@@ -119,7 +92,7 @@ function openFilter(options, existing, returnTarget) {
     const choose = parameterized => {
       const option = scope.alternatives[0];
       if (parameterized) option.inputs.push({ id: uid(), label: "Parameter", type: "text", defaultValue: "" });
-      option.conditions.push({ table: "", column: "", operator: parameterized ? "eq" : "not_null", ...(parameterized ? { parameterId: option.inputs[0].id } : {}) });
+      option.conditions.push({ table: options.sourceId || "", column: "", operator: parameterized ? "eq" : "not_null", ...(parameterized ? { parameterId: option.inputs[0].id } : {}) });
       render();
       editor.querySelector("input")?.focus();
     };
@@ -130,22 +103,32 @@ function openFilter(options, existing, returnTarget) {
     content.append(element("div", { className: "mf-rule-choices" }, [element("h3", { text: "Where does the filter value come from?" }), fixed, parameter, note("Both can be required or conditional. You can combine fixed conditions and report inputs in the editor.")]));
   }
   document.body.append(dialog); dialog.showModal();
+  options.onSelect?.(scope);
+  return dialog;
 }
 
 export function renderModelFilters(host, options) {
   const redraw = () => renderModelFilters(host, options);
   host.replaceChildren(helpHeading("Model filters", "scopes"), note("Required rules, fixed conditions, and report parameters. Open a filter to edit its inputs and source bindings."));
+  if (!options.draft.scopes?.length) host.append(note("No model filters yet. Add a fixed rule or a report parameter to control which records contribute to queries."));
   for (const scope of options.draft.scopes || []) {
-    const edit = icon("edit", `Edit filter ${scope.label}`, () => openFilter({ ...options, redraw }, scope, edit));
+    const title = button(scope.label, () => openModelFilter({ ...options, redraw }, scope, title));
+    title.classList.add("mf-filter-title");
+    title.setAttribute("aria-label", `Open filter ${scope.label}`);
+    const edit = icon("edit", `Edit filter ${scope.label}`, () => openModelFilter({ ...options, redraw }, scope, edit));
     const remove = icon("delete", `Delete scope ${scope.label}`, () => {
       if (!confirm(`Remove “${scope.label}”? This removes its restrictions from the model draft, not data from the database.`)) return;
       options.draft.scopes = options.draft.scopes.filter(s => s !== scope);
       delete options.draft.selections?.[scope.id];
-      options.onChange({ structure: true }); redraw();
+      options.onSelect?.(null);
+      options.onChange?.({ structure: true }); redraw();
     });
-    host.append(element("section", { className: "mf-filter-card" }, [element("header", {}, [element("strong", { text: scope.label }), edit, remove]), summary(scope, options.draft)]));
+    const card = element("section", { className: "mf-filter-card", attrs: { "data-filter-id": scope.id } }, [element("header", {}, [title, edit, remove]), summary(scope, options.draft)]);
+    const issue = modelFilterIssue(scope, options.draft, options.catalog);
+    if (issue) card.append(element("p", { className: "warning mf-filter-issue", text: issue, attrs: {role: "status"} }));
+    host.append(card);
   }
-  const add = button("Add model filter", () => openFilter({ ...options, redraw }, null, add), true);
+  const add = button("Add model filter", () => openModelFilter({ ...options, redraw }, null, add), true);
   add.setAttribute("aria-label", "Add model filter scope");
   host.append(add);
 }

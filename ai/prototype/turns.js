@@ -1,4 +1,5 @@
 import { CredentialVault, TurnRunner, TurnError, providers } from './runtime.js';
+import { discoverModels } from './model-discovery.js';
 
 const identity = (owner, id) => JSON.stringify([owner, id]);
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 128;
@@ -17,10 +18,51 @@ export class TurnService {
   #turns = new Map();
   #identities = new Map();
 
-  constructor({ vault = new CredentialVault(), runner, providerIds = supported } = {}) {
+  constructor({ vault = new CredentialVault(), runner, providerIds = supported,
+    discover = discoverModels } = {}) {
     this.vault = vault;
     this.runner = runner ?? new TurnRunner({ vault });
     this.providerIds = providerIds;
+    this.discover = discover;
+  }
+
+  async refreshModels(input, { signal } = {}) {
+    const { owner, credentialId, providerId, credential, generation } = input;
+    if (![owner, credentialId].every(validId) || !['openai-codex', 'openai'].includes(providerId)
+      || !credential || typeof credential !== 'object' || Array.isArray(credential)
+      || !Number.isSafeInteger(generation) || generation < 1
+      || Buffer.byteLength(JSON.stringify(credential)) > 64 * 1024) throw new TurnError('invalid_request');
+    const key = identity(owner, credentialId);
+    if (this.#identities.has(key)) throw new TurnError('busy');
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    this.#identities.set(key, controller);
+    let terminal;
+    let updated;
+    try {
+      await this.vault.put(owner, credentialId, providerId, credential);
+      const models = await this.discover({ vault: this.vault, owner, credentialId,
+        providerId, signal: controller.signal });
+      controller.signal.throwIfAborted();
+      terminal = { type: 'result', models };
+    } catch (error) {
+      const safe = controller.signal.aborted ? new TurnError('cancelled')
+        : error instanceof TurnError ? error : new TurnError('provider_failed');
+      terminal = { type: 'error', code: safe.code, message: safe.message };
+    } finally {
+      // Discovery may rotate OAuth even when the catalog request fails. Return
+      // that credential to the app's generation fence before forgetting it.
+      try { updated = await this.vault.read(owner, credentialId, providerId); }
+      finally {
+        this.vault.clearIdentity(owner, credentialId);
+        this.#identities.delete(key);
+        signal?.removeEventListener('abort', abort);
+        controller.abort();
+      }
+    }
+    return { ...terminal, generation, credential: updated };
   }
 
   async run(input, { signal, emit }) {
@@ -38,7 +80,9 @@ export class TurnService {
     }
     const key = identity(owner, turnId);
     const credentialKey = identity(owner, credentialId);
-    if (this.#turns.has(key) || this.#identities.has(credentialKey)) throw new TurnError('busy');
+    if (this.#turns.has(key) || this.#identities.has(credentialKey)) {
+      throw new TurnError('busy', { name: 'credential_overlap_guard', configured: 1, observed: 1 });
+    }
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
@@ -53,7 +97,7 @@ export class TurnService {
       terminal = { type: 'result', ...result };
     } catch (error) {
       const safe = error instanceof TurnError ? error : new TurnError('provider_failed');
-      terminal = { type: 'error', code: safe.code, message: safe.message };
+      terminal = { type: 'error', code: safe.code, message: safe.message, limit: safe.limit };
     } finally {
       // OAuth refresh can occur before a failed or cancelled inference. Persist its
       // replacement through the private terminal event, then forget the entire scope.

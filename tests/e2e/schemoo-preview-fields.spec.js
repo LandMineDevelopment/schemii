@@ -33,6 +33,33 @@ async function addOutput(page, column, aggregate = "Plain field") {
   await page.getByRole("button", { name: "Add preview output", exact: true }).click();
 }
 
+test("add by table appends exposed columns once and preserves model rules and measures", async ({ page, request }, testInfo) => {
+  const before = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  await page.goto(`/schemoo?model=${modelId}`);
+  await page.getByRole("button", { name: "Explore model", exact: true }).click();
+  await addOutput(page, "name", "Count");
+  await addOutput(page, "id");
+  const button = page.getByRole("button", { name: "Add table columns to preview", exact: true });
+  await expect(page.getByRole("combobox", { name: "Preview table", exact: true })).toHaveValue(/personnel_dim/);
+  await button.click();
+  await expect(button).toBeDisabled();
+  await expect(page.locator(".preview-table-section")).toContainText("already included");
+  await page.locator(".preview-table-section").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `artifacts/preview-add-table-${testInfo.project.name}.png` });
+  await page.getByRole("button", { name: "Save model", exact: true }).click();
+  await expect(page.locator("#draft-status")).toContainText("Saved");
+  const saved = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  expect(saved.definition).toEqual(before.definition);
+  expect(saved.explore.fields[0]).toEqual({ table: "personnel_dim", column: "name", aggregate: "count" });
+  const details = saved.explore.fields.filter(field => field.aggregate === "none");
+  expect(details.length).toBeGreaterThan(2);
+  expect(new Set(details.map(field => field.column)).size).toBe(details.length);
+  expect(details.every(field => field.table === "personnel_dim")).toBe(true);
+  await page.reload();
+  await page.getByRole("button", { name: "Explore model", exact: true }).click();
+  await expect(page.locator("#fields .preview-output")).toHaveCount(saved.explore.fields.length);
+});
+
 test("ordered preview measures are independent of exposure and persist without a model revision", async ({ page, request }, testInfo) => {
   test.setTimeout(90_000);
   const before = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
@@ -43,11 +70,29 @@ test("ordered preview measures are independent of exposure and persist without a
   await addOutput(page, "name", "Count distinct");
   await expect(page.getByRole("button", { name: "Add preview output", exact: true })).toBeDisabled();
   await addOutput(page, "pay_band_class_id");
-  await page.getByRole("button", { name: "Move preview column 3 earlier", exact: true }).click();
-  await page.getByRole("button", { name: "Move preview column 2 earlier", exact: true }).click();
+  const handles = page.locator("#fields [data-sort-handle]");
+  await handles.nth(2).scrollIntoViewIfNeeded();
+  const from = await handles.nth(2).boundingBox();
+  const to = await handles.nth(1).boundingBox();
+  const x = from.x + from.width / 2;
+  if (testInfo.project.name === "android-chromium") {
+    const session = await page.context().newCDPSession(page);
+    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: from.y + from.height / 2 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: to.y + 2 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await session.detach();
+  } else {
+    await page.mouse.move(x, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(x, to.y + 2, { steps: 12 });
+    await page.mouse.up();
+  }
   await expect(page.locator("#fields .preview-output .field-name")).toHaveText([
-    "personnel_dim · pay_band_class_id", "personnel_dim · name", "personnel_dim · name",
+    "personnel_dim · name", "personnel_dim · pay_band_class_id", "personnel_dim · name",
   ]);
+  await handles.nth(1).focus();
+  await page.keyboard.press("ArrowUp");
+  await expect(handles.nth(0)).toBeFocused();
   await expect(page.getByRole("button", { name: "Run preview", exact: true })).toBeEnabled();
   await page.getByRole("combobox", { name: "Preview source field", exact: true }).scrollIntoViewIfNeeded();
   await page.mouse.move(0, 0);
@@ -97,4 +142,15 @@ test("exposure toggles constrain preview options without adding outputs and alia
   expect(saved.explore.fields).toEqual([]);
   expect(saved.definition.exposedFields.some(field => field.table === alias.id && field.column === "name")).toBe(false);
   expect(saved.definition.exposedFields.some(field => field.table === alias.id && field.column === "id")).toBe(true);
+  const tablePicker = page.getByRole("combobox", { name: "Preview table", exact: true });
+  await tablePicker.click();
+  await tablePicker.fill("Preview people alias");
+  await page.locator(`#${await tablePicker.getAttribute("aria-controls")}`).getByRole("option", { name: /Preview people alias/ }).click();
+  await page.getByRole("button", { name: "Add table columns to preview", exact: true }).click();
+  await page.getByRole("button", { name: "Save model", exact: true }).click();
+  await expect(page.locator("#draft-status")).toContainText("Saved");
+  const withColumns = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  expect(withColumns.definition).toEqual(saved.definition);
+  expect(withColumns.explore.fields.length).toBeGreaterThan(0);
+  expect(withColumns.explore.fields.every(field => field.table === alias.id && field.column !== "name")).toBe(true);
 });

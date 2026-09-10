@@ -21,14 +21,14 @@ def tool_reply(name="schemii_read_query", arguments=None):
 def setup(approval=False, replies=None):
     capabilities = AiCapabilities(raw_sql_read=True, structured_data_read=True,
                                   read_approval_required=approval)
-    chat = NS(id="chat", revision=1, provider_id="test", model_id="test", capabilities=capabilities)
+    chat = NS(id="chat", workspace_id="workspace", revision=1, provider_id="test", model_id="test", capabilities=capabilities)
     turn = NS(id="turn")
     repository = Mock()
     repository.continuation.return_value = None
     repository.list_operations.return_value = []
     repository.list_proposals.return_value = []
     repository.proposal_action.return_value = {"queries": [{"sql": "select 1"}]}
-    service = NS(repository=repository, policy=NS(context_bytes=50_000, maximum_tool_rounds=8,
+    service = NS(repository=repository, services=NS(metadata=NS(limit_events=Mock())), policy=NS(context_bytes=50_000, maximum_tool_rounds=8,
                                                 tool_timeout_seconds=300), runtime=Mock(),
                  _save_tool_proposal=Mock(return_value=NS(id="proposal", revision=1, digest="digest", status="pending", action_type="data_read")),
                  execute=Mock(return_value=NS(id="operation", status="succeeded", proposal_id="proposal", kind="data_read")),
@@ -95,10 +95,12 @@ def test_approval_resumes_native_tool_result_without_storing_rows_or_provider_tr
     assert result.reply.text == "Two results compared."
     assert service.runtime.run.call_args.args[6] == []
     messages = service.runtime.run.call_args.kwargs["messages"]
-    assert [message["role"] for message in messages] == ["user", "assistant", "toolResult"]
-    assert messages[1]["content"][0]["id"] == messages[2]["toolCallId"] == "call1"
-    assert messages[1]["content"][0]["arguments"]["queries"][1]["sql"] == "select 2"
-    assert len(json.loads(messages[2]["content"][0]["text"])["results"]) == 2
+    assert [message["role"] for message in messages] == ["user", "user"]
+    evidence = json.loads(messages[1]["content"])
+    assert "call1" in evidence["receipts"]
+    assert len(json.loads(evidence["results"][0]["content"][0]["text"])["results"]) == 2
+    assert all(value not in json.dumps(messages) for value in
+               ("private reasoning", "private-signature", "must-not-persist"))
     service.execute.assert_not_called()
 
 
@@ -114,6 +116,24 @@ def test_resume_includes_approved_result_and_previous_result_without_persisting_
     assert [call.args[-1] for call in service._operation_read_context.call_args_list] == ["older", "operation"]
     prompt = service.runtime.run.call_args.kwargs["messages"][0]["content"]
     assert "resumed read results" in prompt
+    service.execute.assert_not_called()
+
+
+def test_oversized_approval_resume_bounds_synthetic_results_not_user_request():
+    service, chat, turn = setup(approval=True, replies=[PiReply("I need a narrower result page.", ())])
+    service.repository.continuation.return_value = {
+        "pendingProposalIds": ["proposal"], "usedOperationIds": ["older"], "toolRounds": 1}
+    service.repository.list_proposals.return_value = [NS(id="proposal", status="succeeded")]
+    service.repository.list_operations.return_value = [NS(id="older", proposal_id="oldprop", status="succeeded", kind="data_read"),
+                                                       NS(id="operation", proposal_id="proposal", status="succeeded", kind="data_read")]
+    service._operation_read_context.return_value = {"rows": [["private-value" * 10000]], "runId": "run1"}
+    result = run(service, chat, turn)
+    assert result.used_rows and not result.paused
+    prompt = service.runtime.run.call_args.kwargs["messages"][0]["content"]
+    assert prompt.startswith("Compare the results")
+    assert "private-value" not in prompt
+    assert "older" in prompt and "operation" in prompt and "run1" in prompt
+    assert "row data was discarded" in prompt
     service.execute.assert_not_called()
 
 
@@ -163,13 +183,16 @@ def test_result_replay_can_pause_for_approval():
     assert service.repository.save_continuation.call_args.args[-1]["pendingProposalIds"] == ["replay"]
 
 
-def test_multiple_result_context_is_bounded_and_limit_event_contains_no_rows():
+def test_oversized_tool_results_compact_without_losing_original_request_or_repeating_actions():
     service, chat, turn = setup()
     service._operation_read_context.return_value = {"rows": [["private-value" * 10_000]]}
-    with pytest.raises(PiError) as caught:
-        run(service, chat, turn)
-    assert caught.value.code == "ai_tool_context_limit"
-    service.runtime.run.assert_called_once()
+    run(service, chat, turn)
+    assert service.runtime.run.call_count == 2
+    service.execute.assert_called_once()
+    messages = service.runtime.run.call_args.kwargs["messages"]
+    assert messages[0]["content"] == "Compare the results"
+    assert "row data were discarded" in messages[-1]["content"]
+    assert "private-value" not in json.dumps(messages)
     assert "private-value" not in str(service.repository.add_event.call_args)
 
 
@@ -184,8 +207,8 @@ def test_last_tool_round_gets_one_tools_disabled_summary_with_all_results():
     assert request.args[6] == []
     assert "Answer the user's original question now" in request.args[4]
     assert "incomplete checks" in request.args[4]
-    returned = [m for m in request.kwargs["messages"] if m["role"] == "toolResult"]
-    assert json.loads(returned[0]["content"][0]["text"])["results"][1]["rows"] == [[2]]
+    evidence = json.loads(request.kwargs["messages"][-1]["content"])
+    assert json.loads(evidence["results"][0]["content"][0]["text"])["results"][1]["rows"] == [[2]]
     service.execute.assert_called_once()
     assert "rows" not in str(service.repository.add_event.call_args_list)
 

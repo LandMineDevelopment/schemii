@@ -7,6 +7,54 @@ async function workspace(request) {
   return body.workspaces.find(item => item.name === "Test design") || body.workspaces[0];
 }
 
+test("header and settings model pickers refresh availability without changing conversation or draft selections", async ({ page, request }) => {
+  const activeWorkspace = await workspace(request);
+  const chat = { id: "chat_model_picker_fixture", workspaceId: activeWorkspace.id, providerId: "openai", modelId: "old-model", title: "Retained conversation", status: "idle", capabilities: {}, revision: 1 };
+  const writes = [];
+  let checks = 0;
+  await page.route("**/api/v1/ai/status*", route => {
+    const refresh = new URL(route.request().url()).searchParams.get("refresh") === "true";
+    if (refresh) checks += 1;
+    return route.fulfill({ json: { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: true, authenticated: true,
+      models: [...(refresh ? [] : [{ id: "old-model", name: "Old model", status: "active" }]), { id: "new-model", name: "New model", status: "active" }] }] } });
+  });
+  await page.route("**/api/v1/schemii/ai/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== "GET") writes.push(path);
+    const json = path.endsWith("/settings") ? { defaultProviderId: "openai", defaultModelId: "old-model", defaultCapabilities: {}, permissionActions: [], revision: 1 }
+      : path.endsWith("/chats") ? { chats: [chat] }
+      : path.endsWith("/messages") ? { messages: [] }
+      : path.endsWith("/proposals") ? { proposals: [] }
+      : path.endsWith("/operations") ? { operations: [] }
+      : path.endsWith("/activity") ? { events: [], nextSequence: 0 }
+      : path.endsWith("/transient-responses") ? { responses: [] } : chat;
+    return route.fulfill({ json });
+  });
+  await page.goto(`/?workspace=${activeWorkspace.id}`);
+  await page.getByRole("button", { name: "AI schema assistant" }).click();
+  const headerPicker = page.getByRole("complementary", { name: "Schemii AI" }).getByRole("combobox", { name: "AI model" });
+  await expect(headerPicker).toHaveValue("Old model · OpenAI");
+  await headerPicker.click();
+  await expect(page.getByRole("option", { name: "New model · OpenAI" })).toBeVisible();
+  await expect(headerPicker).toHaveValue(/old-model · unavailable/);
+  expect(checks).toBe(1);
+  await headerPicker.press("Escape");
+  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Model & permissions" });
+  const settingsPicker = settings.getByRole("combobox", { name: "AI model", exact: true });
+  await settingsPicker.click();
+  await expect(page.getByRole("option", { name: "New model · OpenAI" })).toBeVisible();
+  await expect.poll(() => checks).toBe(2);
+  await page.getByRole("option", { name: "New model · OpenAI" }).click();
+  await expect(settingsPicker).toHaveValue("New model · OpenAI");
+  await settingsPicker.press("ArrowDown");
+  await expect.poll(() => checks).toBe(3);
+  await expect(page.getByRole("option", { name: "New model · OpenAI" })).toBeVisible();
+  await expect(settingsPicker).toHaveValue("New model · OpenAI");
+  await expect(page.locator("#ai-assistant-model")).toHaveValue("openai\u0000old-model");
+  expect(writes).toHaveLength(0);
+});
+
 test("assistant keeps proposals and outcomes with the turn that created them", async ({ page, request }) => {
   const activeWorkspace = await workspace(request);
   const chatId = `chat_${"a".repeat(32)}`;
@@ -102,6 +150,13 @@ test("assistant keeps proposals and outcomes with the turn that created them", a
   await page.getByRole("button", { name: "AI schema assistant" }).click();
   const turns = page.locator("#ai-assistant-messages > .ai-turn");
   await expect(turns).toHaveCount(2);
+  for (const turn of await turns.all()) {
+    expect(await turn.evaluate(node => {
+      const prompt = node.querySelector('.ai-message.user'), tracker = node.querySelector('.ai-turn__activity'), answer = node.querySelector('.ai-message.assistant');
+      return Boolean(prompt.compareDocumentPosition(tracker) & Node.DOCUMENT_POSITION_FOLLOWING)
+        && Boolean(tracker.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+  }
   await expect(turns.nth(0)).toContainText("Create the archive table");
   await expect(turns.nth(0)).toContainText("READ COMPLETED");
   await expect(turns.nth(0)).toContainText("DRAFT READY");

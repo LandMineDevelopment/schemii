@@ -50,7 +50,7 @@ function section(title, children = [], open = true) {
   return node;
 }
 function fields(draft, catalog) {
-  return draft.nodes.flatMap(node => (catalog.tables.find(t => t.name === node.table)?.columns || []).map(column => ({
+  return draft.nodes.filter(node => !node.derivation).flatMap(node => (catalog.tables.find(t => t.name === node.table)?.columns || []).map(column => ({
     table: node.id, column: column.name, label: `${node.label || node.table} · ${column.name}`,
   })));
 }
@@ -60,7 +60,7 @@ function newCondition(draft, catalog) {
 }
 function domainControls(domain, { draft, catalog, prefix, refresh }) {
   const host = element("div", { className: "mf-wide" });
-  const sources = draft.nodes.map(n => ({ id: n.id, table: n.table, label: n.label || n.table }));
+  const sources = draft.nodes.filter(n => !n.derivation).map(n => ({ id: n.id, table: n.table, label: n.label || n.table }));
   const choices = sources.flatMap(n => (catalog.tables.find(t => t.name === n.table)?.columns || []).map(c => [JSON.stringify([n.id,n.table,c.name]), `${n.label} · ${c.name}`]));
   for (const t of catalog.tables.filter(t => !sources.some(n => n.id === t.name && n.table === t.name))) for (const c of t.columns) choices.push([JSON.stringify([null,t.name,c.name]), `${t.name} · ${c.name} (source table)`]);
   const selectedNode = domain.nodeId ?? sources.find(n => n.id === domain.table && n.table === domain.table)?.id ?? null;
@@ -74,20 +74,26 @@ function domainControls(domain, { draft, catalog, prefix, refresh }) {
   return host;
 }
 
-function conditionsEditor(conditions, { draft, catalog, onChange, refresh, inputs = [], prefix, onLoadDomain, exposedOnly = false }) {
+export function conditionsEditor(conditions, { draft, catalog, onChange, refresh, inputs = [], prefix, onLoadDomain, exposedOnly = false, allowedSources = null, defaultSource = null, allowToday = false, fixedField = null, singleCondition = false, compact = false }) {
   const allowed = new Set(exposedFields(draft, catalog).map(f => JSON.stringify([f.table, f.column])));
-  const choices = fields(draft, catalog).filter(f => !exposedOnly || allowed.has(JSON.stringify([f.table, f.column])));
+  const choices = fields(draft, catalog).filter(f => (!allowedSources || allowedSources.has(f.table)) && (!exposedOnly || allowed.has(JSON.stringify([f.table, f.column]))));
   const body = element("div", { className: "mf-conditions" });
   conditions.forEach((condition, index) => {
     if (condition.domain) condition.domain = sourceDomain(condition, draft);
     const row = element("div", { className: "mf-condition" });
     const fieldValue = JSON.stringify([condition.table, condition.column]);
-    const field = select(`${prefix} condition ${index + 1} field`, choices.map(f => [JSON.stringify([f.table, f.column]), f.label]), fieldValue, value => {
+    const preselected = !condition.column && draft.nodes.find(n=>n.id===condition.table);
+    const fieldChoices=preselected ? [...choices.filter(f=>f.table===condition.table),...choices.filter(f=>f.table!==condition.table)] : [...choices];
+    const unavailable = condition.column && !choices.some(f => f.table === condition.table && f.column === condition.column);
+    if (unavailable) fieldChoices.unshift({ table: condition.table, column: condition.column,
+      label: `${draft.nodes.find(n => n.id === condition.table)?.label || condition.table} · ${condition.column} (unavailable)` });
+    const field = fixedField ? element("span", {text: `${draft.nodes.find(n => n.id === fixedField.table)?.label || fixedField.table}.${fixedField.column}`}) : select(`${prefix} condition ${index + 1} field`, fieldChoices.map(f => [JSON.stringify([f.table, f.column]), f.label]), fieldValue, value => {
       [condition.table, condition.column] = JSON.parse(value);
+      if (allowToday) { delete condition.valueSource; delete condition.value; delete condition.domain; }
       if (condition.domain) { condition.domain = sourceDomain(condition, draft); condition.value = isList(condition.operator) ? [] : null; }
       refresh();
     });
-    field.querySelector("input").placeholder = "Search source or column";
+    if (!fixedField) field.querySelector("input").placeholder = preselected ? `Choose a column from ${preselected.label}` : "Search source or column";
     const op = select(`${prefix} condition ${index + 1} operator`, operators, condition.operator, value => {
       if (isList(value) !== isList(condition.operator)) {
         condition.value = isList(value) ? (condition.value != null && condition.value !== "" ? [condition.value] : []) : null;
@@ -96,12 +102,16 @@ function conditionsEditor(conditions, { draft, catalog, onChange, refresh, input
       }
       condition.operator = value;
       if (["is_null", "not_null"].includes(value)) {
-        delete condition.parameterId; delete condition.value; delete condition.allowNull; delete condition.domain;
+        delete condition.parameterId; delete condition.value; delete condition.allowNull; delete condition.domain; delete condition.valueSource;
       }
+      if (allowToday && (isList(value) || value === "contains")) delete condition.valueSource;
       refresh();
     });
-    row.append(element("span", { className: "mf-and", text: index ? "AND · also require" : "Condition" }), labeled("Source · column", field), labeled("Comparison", op),
-      action("close", `Remove ${prefix} condition ${index + 1}`, () => { conditions.splice(index, 1); refresh(); }));
+    if (!compact) row.append(element("span", { className: "mf-and", text: index ? "AND · also require" : "Condition" }));
+    if (!compact || !fixedField) row.append(labeled("Source · column", field));
+    if (unavailable) row.append(element("p", { className: "warning mf-wide", text: `${condition.column} is no longer available here. Choose a replacement or explicitly remove this condition; it has not been dropped from the query.`, attrs: { role: "alert" } }));
+    row.append(labeled("Comparison", op));
+    if (!singleCondition) row.append(action("close", `Remove ${prefix} condition ${index + 1}`, () => { conditions.splice(index, 1); refresh(); }));
     if (!["is_null", "not_null"].includes(condition.operator)) {
       const binding = inputs.length ? select(`${prefix} condition ${index + 1} value source`, [["", "Literal value"], ...inputs.map(p => [p.id, p.label || "Unnamed parameter"])], condition.parameterId || "", value => {
         if (value) { condition.parameterId = value; delete condition.value; delete condition.domain; }
@@ -109,7 +119,15 @@ function conditionsEditor(conditions, { draft, catalog, onChange, refresh, input
         refresh();
       }) : null;
       if (binding) { const valueSource = labeled("Compare against", binding, "bindings"); valueSource.classList.add("mf-wide"); row.append(valueSource); }
-      if (!condition.parameterId) {
+      const source = draft.nodes.find(n => n.id === condition.table);
+      const dataType = catalog.tables.find(t => t.name === source?.table)?.columns.find(c => c.name === condition.column)?.dataType || "";
+      if (allowToday && /^(date|timestamp)/.test(dataType) && !isList(condition.operator) && condition.operator !== "contains") {
+        const mode = labeled("Compare against", select(`${prefix} condition ${index + 1} value source`, [["literal", "Fixed value"], ["today", "Today (UTC) · evaluated when run"]], condition.valueSource || "literal", value => {
+          condition.valueSource = value; delete condition.value; delete condition.domain; refresh();
+        })); mode.classList.add("mf-wide"); row.append(mode);
+      }
+      if (allowToday && condition.valueSource === "today") row.append(element("p", { className: "mf-help mf-wide", text: "The server uses today's UTC date for this query. It is recalculated on the next run; no date is frozen into the saved model." }));
+      else if (!condition.parameterId) {
         const label = `${prefix} condition ${index + 1} value`;
         const multiple = isList(condition.operator);
         const literalInput = condition.domain && onLoadDomain
@@ -125,22 +143,25 @@ function conditionsEditor(conditions, { draft, catalog, onChange, refresh, input
             refresh();
           };
           row.append(element("label", { className: "mf-checkbox" }, [toggle, "Choose fixed value from a domain list"]));
-          if (condition.domain) {
+          if (condition.domain && !compact) {
             row.append(element("p", { className: "mf-help mf-wide", text: `Choose ${multiple ? "one or more values" : "a value"} directly from this source column. Search checks the source, not the filtered result. NULL is handled separately below.` }));
           }
         }
         if (multiple && !condition.domain) row.append(element("p", { className: "mf-help mf-wide", text: "Enter one value per line. Commas remain part of a value." }));
       }
-      else row.append(element("p", { className: "mf-binding-summary mf-wide", text: `Bound to parameter: ${inputs.find(p => p.id === condition.parameterId)?.label || "Missing parameter"}. Its Explore value will be inserted here.` }));
+      else if (!compact) row.append(element("p", { className: "mf-binding-summary mf-wide", text: `Bound to parameter: ${inputs.find(p => p.id === condition.parameterId)?.label || "Missing parameter"}. Its Explore value will be inserted here.` }));
       const nullable = element("input", { attrs: { type: "checkbox", "aria-label": `${prefix} condition ${index + 1} also accepts null` } });
       nullable.checked = Boolean(condition.allowNull);
       nullable.addEventListener("change", () => { condition.allowNull = nullable.checked; onChange(); });
-      row.append(element("label", { className: "mf-checkbox" }, [nullable, "Include rows where this source column is NULL"]));
-      row.append(element("p", { className: "mf-help mf-wide", text: "This includes missing database values. It does not make the report input optional; choose a value or set a default." }));
+      row.append(element("label", { className: "mf-checkbox" }, [nullable, compact ? "Include NULL values" : "Include rows where this source column is NULL"]));
+      if (!compact) row.append(element("p", { className: "mf-help mf-wide", text: allowToday ? "Enable this only if NULL means the condition is satisfied—for example, no expiration date means it never expires." : "This includes missing database values. It does not make the report input optional; choose a value or set a default." }));
     }
     body.append(row);
   });
-  body.append(element("div", { className: "mf-add" }, [action("add", `Add ${prefix} condition`, () => { conditions.push(newCondition(draft, catalog)); refresh(); }), "Add AND condition"]));
+  if (!singleCondition) body.append(element("div", { className: "mf-add" }, [action("add", `Add ${prefix} condition`, () => {
+    const first = choices.find(f => f.table === defaultSource) || choices[0];
+    conditions.push({table:first?.table || "",column:first?.column || "",operator:"eq",value:""}); refresh();
+  }), "Add AND condition"]));
   return body;
 }
 
@@ -182,7 +203,7 @@ export function renderFilterDefinition(host, options) {
           ? domainSelect({ label: `${prefix} input ${parameter.id} default`, value: parameter.defaultValue === "" ? null : parameter.defaultValue, multiple,
             loadOptions: search => options.onLoadDomain({ draft, domain: defaultDomain, search }),
             onChange: value => { parameter.defaultValue = value; onChange(); } })
-          : literalControl(`${prefix} input ${parameter.id} default`, parameter.defaultValue, value => { parameter.defaultValue = value; onChange(); }, multiple, parameter.type === "date" ? "YYYY-MM-DD or today" : "Required at run time if blank");
+          : literalControl(`${prefix} input ${parameter.id} default`, parameter.defaultValue, value => { parameter.defaultValue = value; onChange(); }, multiple, parameter.type === "date" ? "YYYY-MM-DD, today, or today - 365" : "Required at run time if blank");
         parameterRow.append(labeled("Input name", input(`${prefix} input ${parameter.id} name`, parameter.label, value => { parameter.label = value; onChange(); })),
           labeled("Type", select(`${prefix} input ${parameter.id} type`, [["source", "Choose from source"], ["text", "Text"], ["uuid", "UUID"], ["integer", "Integer (whole number)"], ["number", "Number (decimal)"], ["boolean", "Boolean (true / false)"], ["date", "Date"]], parameter.type, value => { parameter.type = value; refresh(); })),
           labeled(multiple ? "Default values (optional)" : "Default (optional)", defaultControl, "parameters"),
@@ -308,7 +329,7 @@ export function renderParameterValues(host, options) {
         : parameter.type === "boolean" && !multiple
         ? select(`${scope.label}: ${parameter.label}`, [["", "Choose true or false"], ["true", "True"], ["false", "False"]], String(value), commit)
         : literalControl(`${scope.label}: ${parameter.label}`, value, commit, multiple,
-          defaultValue !== "" ? `Default: ${defaultValue}` : parameter.type === "date" ? "YYYY-MM-DD" : "Required when active");
+          defaultValue !== "" ? `Default: ${defaultValue}` : parameter.type === "date" ? "YYYY-MM-DD, today, or today - 365" : "Required when active");
       const fieldRow = element("div", { className: "mf-heading" }, [labeled(parameter.label, field)]);
       if (domainChoice) fieldRow.append(action("close", `Clear ${parameter.label}`, () => { commit(""); renderParameterValues(host, { ...options, force: true }); }));
       block.append(fieldRow);

@@ -1,26 +1,109 @@
 import { requestJson } from "#common/http.js";
 import { element } from "#common/dom.js";
+import { createIconButton } from "#common/ui.js";
+import { confirmAction } from "#common/confirmation.js";
+import { namedAction } from "#common/named-action.js";
 import { modelSelect, disposeSelects } from "./select.js";
 import { importedDraft } from "./model-draft.js";
 import { splitDraft } from "./model-state.js";
 
 const API = "/api/v1/schemoo";
-export async function openModelLibrary(onOpen) {
+export function confirmModelDeletion(model) {
+  return confirmAction({
+    title: "Delete model?",
+    message: `Are you sure you want to delete “${model.name}”?`,
+    details: "This permanently deletes the saved model, its layout, and saved previews. Your PostgreSQL tables and data are not changed. This cannot be undone.",
+    confirmLabel: "Delete model",
+    onConfirm: async () => {
+      try {
+        await requestJson(`${API}/models/${encodeURIComponent(model.id)}?expected_revision=${model.revision}`, { method: "DELETE" });
+      } catch (error) {
+        if (error.status === 409) error.message = "This model changed after it was loaded. Close this dialog and refresh the model list to review the latest revision before deleting.";
+        else error.message += " Refresh and review the model's current state before trying again.";
+        throw error;
+      }
+    },
+  });
+}
+
+let libraryTicket = 0;
+export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete = () => true } = {}) {
+  const ticket = ++libraryTicket;
   const dialog = document.getElementById("model-library"), content = document.getElementById("library-content");
   disposeSelects(content); content.replaceChildren(element("p", { text: "Loading your models and connections…", attrs: { role: "status" } }));
   if (!dialog.open) dialog.showModal();
   try {
     const [{ models }, { connections }] = await Promise.all([requestJson(`${API}/models`), requestJson("/api/v1/connections")]);
+    if (ticket !== libraryTicket || !dialog.open) return;
     content.replaceChildren();
     const status = element("p", { className: "hint", attrs: { role: "status" } });
-    const choose = async model => { try { await onOpen(model.id); dialog.close(); } catch (error) { status.textContent = error.message; } };
+    const choose = async model => { try { if (await onOpen(model.id) !== false) dialog.close(); } catch (error) { status.textContent = error.message; } };
     if (models.length) {
       const list = element("div", { className: "model-list" });
       for (const model of models) {
         const button = element("button", { type: "button", className: "model-option" }, [element("strong", { text: model.name }), element("small", { text: `${model.database}.${model.namespace} · revision ${model.revision}` })]);
-        button.onclick = () => choose(model); list.append(button);
+        const remove = createIconButton({ icon: "delete", label: `Delete model ${model.name}`, className: "model-option-delete" });
+        remove.title = `Delete model ${model.name}`;
+        remove.disabled = !canDelete(model);
+        const duplicate = createIconButton({ icon: "copy", label: `Duplicate model ${model.name}`, className: "model-option-copy" });
+        duplicate.disabled = !canDelete(model);
+        const row = element("div", { className: "model-list-row" }, [button, duplicate, remove]);
+        let copying = false;
+        duplicate.onclick = async () => {
+          if (copying || !canDelete(model)) return;
+          // Keep the invoking button focusable so closing the naming dialog
+          // restores keyboard focus. The modal and guard prevent re-entry.
+          copying = true;
+          let copied = null;
+          try {
+            const names = new Set(models.map(item => item.name.toLocaleLowerCase()));
+            let initial = `${model.name.slice(0, 123)} copy`;
+            for (let n = 2; names.has(initial.toLocaleLowerCase()); n++) {
+              const suffix = ` copy ${n}`; initial = model.name.slice(0, 128 - suffix.length) + suffix;
+            }
+            await namedAction({ title: "Duplicate model", initial, inputLabel: "New model name", submitLabel: "Create copy", busyLabel: "Copying…", allowRetry: false,
+              description: "Creates an independent copy of the saved model, aliases, filters, calculations, layout, working preview, and saved previews. Save pending edits first. The copy uses the same PostgreSQL connection; database data, credentials, results, and chat history are not copied.",
+              onSave: async name => {
+                if (!canDelete(model)) throw new Error("Wait for the current operation to finish, then reopen this dialog.");
+                try {
+                  copied = await requestJson(`${API}/models/${encodeURIComponent(model.id)}/duplicate`, { method: "POST", body: {
+                    name, expectedRevision: model.revision, expectedLayoutRevision: model.layoutRevision, expectedExploreRevision: model.exploreRevision,
+                  }, timeoutMs: 30000 });
+                } catch (error) {
+                  error.message += " Close this dialog and refresh the model list before trying again, to check whether a copy was created or the source changed.";
+                  throw error;
+                }
+              },
+            });
+            if (copied) {
+              await openModelLibrary(onOpen, { onDeleted, canDelete });
+              if (await onOpen(copied.id) !== false) dialog.close();
+            }
+          } catch (error) {
+            const target = content.querySelector('[role="status"]');
+            if (target) target.textContent = error.message;
+          } finally { copying = false; duplicate.disabled = !canDelete(model); }
+        };
+        let deleting = false;
+        button.onclick = () => choose(model);
+        remove.onclick = async () => {
+          if (!canDelete(model) || remove.disabled || deleting) return;
+          deleting = true;
+          try {
+            if (!await confirmModelDeletion(model)) return;
+            row.remove(); status.textContent = `Deleted “${model.name}”. PostgreSQL data was not changed.`;
+            if (!list.children.length) list.append(element("p", { className: "hint", text: "No saved models remain. Create a model below to get started." }));
+            await onDeleted(model);
+            if (dialog.open) (list.querySelector("button") || refresh).focus();
+          } catch (error) { status.textContent = error.message; }
+          finally { deleting = false; remove.disabled = !canDelete(model); }
+        };
+        list.append(row);
       }
-      content.append(element("h3", { text: "Your saved models" }), list);
+      const refresh = createIconButton({ icon: "refresh", label: "Refresh models" });
+      refresh.title = "Refresh models";
+      refresh.onclick = () => openModelLibrary(onOpen, { onDeleted, canDelete });
+      content.append(element("div", { className: "model-list-heading" }, [element("h3", { text: "Your saved models" }), refresh]), list);
     } else content.append(element("p", { className: "hint", text: "No saved models yet. Create one from an existing PostgreSQL connection. This does not change the database." }));
     if (!connections.length) { content.append(element("p", { text: "Add a PostgreSQL connection in Schemii first." }), element("a", { text: "Open Schemii", attrs: { href: "/" } }), status); return; }
     const form = element("form", { className: "model-create-form" });
@@ -56,5 +139,5 @@ export async function openModelLibrary(onOpen) {
       finally { form.inert = false; }
     };
     content.append(form, status);
-  } catch (error) { content.replaceChildren(element("p", { className: "warning", text: error.message })); }
+  } catch (error) { if (ticket === libraryTicket && dialog.open) content.replaceChildren(element("p", { className: "warning", text: error.message })); }
 }

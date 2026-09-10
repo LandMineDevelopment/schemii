@@ -89,7 +89,7 @@ test("creating and deleting aliases preserves the user's zoom and pan", async ({
   await expect(stage).not.toHaveAttribute("style", view);
 });
 
-test("table inspector owns columns and aliases while Model owns starting table and filters", async ({ page }) => {
+test("table inspector owns columns and aliases while Model and Filters have separate panels", async ({ page }) => {
   await page.goto(`/schemoo?model=${modelId}`);
   await expect(page.locator(".sc-node")).toHaveCount(12);
   if (await page.locator("#inspector").isVisible()) await page.getByRole("button", {name:"Close inspector",exact:true}).click();
@@ -106,6 +106,8 @@ test("table inspector owns columns and aliases while Model owns starting table a
   await expect(page.locator("#explore-pane #root")).toHaveCount(0);
   await page.getByRole("button",{name:"Edit model",exact:true}).click();
   await expect(page.getByRole("combobox",{name:"Starting model object",exact:true})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Add model filter scope",exact:true})).toBeHidden();
+  await page.getByRole("button",{name:"Model filters",exact:true}).click();
   await expect(page.getByRole("button",{name:"Add model filter scope",exact:true})).toBeVisible();
   await page.getByRole("button",{name:"Inspect table",exact:true}).click();
   await expect(toggle).toBeChecked();
@@ -186,7 +188,7 @@ test("deleting a bound alias invalidates its binding instead of silently deletin
   for (const name of connections) await page.getByRole("checkbox", { name, exact: true }).uncheck();
   await expect(page.getByRole("button", { name: "Run preview", exact: true })).toBeEnabled();
   await createAlias(page);
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Report parameter/ }).click();
   await chooseModelOption(page, "Model filter / Default condition 1 field", "Personnel credentials · name", "credentials");
@@ -194,7 +196,7 @@ test("deleting a bound alias invalidates its binding instead of silently deletin
   await selectAlias(page);
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Delete alias Personnel credentials", exact: true }).click();
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Edit filter Model filter", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "Model filter / Default condition 1 field", exact: true })).toHaveValue("");
   await expect(page.getByRole("button", { name: "Bind source to Parameter", exact: true })).toBeVisible();
@@ -203,7 +205,7 @@ test("deleting a bound alias invalidates its binding instead of silently deletin
   await page.getByRole("button", { name: "Save model", exact: true }).click();
   await expect(page.locator("#draft-status")).toContainText("Saved");
   await page.reload();
-  await page.getByRole("button", { name: "Edit model", exact: true }).click();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Edit filter Model filter", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "Model filter / Default condition 1 field", exact: true })).toHaveValue("");
 });

@@ -27,14 +27,15 @@ export function createHandler({ secret, service = createLoginService(), turns = 
       if (request.method === 'GET' && request.url === '/health') return send(200, { status: 'ok' });
       if (request.method === 'GET' && request.url === '/models') return send(200, supportedModels());
       const route = { '/logins': 'start', '/logins/status': 'status', '/logins/cancel': 'cancel' };
-      const turnRoutes = ['/turns', '/turns/cancel', '/credentials/remove'];
+      const turnRoutes = ['/turns', '/turns/cancel', '/credentials/remove', '/models/refresh'];
       if (request.method !== 'POST' || (!Object.hasOwn(route, request.url) && !turnRoutes.includes(request.url))) throw new LoginError('not_found');
       if (request.headers['content-type']?.split(';')[0].trim() !== 'application/json') throw new LoginError('invalid_request');
       const chunks = [];
       let size = 0;
       for await (const chunk of request) {
         size += Buffer.byteLength(chunk);
-        if (size > (request.url === '/turns' ? 10 * 1024 * 1024 : 16 * 1024)) throw new LoginError('body_too_large');
+        if (size > (request.url === '/turns' ? 10 * 1024 * 1024
+          : request.url === '/models/refresh' ? 96 * 1024 : 16 * 1024)) throw new LoginError('body_too_large');
         chunks.push(Buffer.from(chunk));
       }
       let input;
@@ -43,6 +44,13 @@ export function createHandler({ secret, service = createLoginService(), turns = 
       if (!input || Array.isArray(input) || typeof input !== 'object') throw new LoginError('invalid_request');
       if (request.url === '/turns/cancel') return send(200, turns.cancel(input));
       if (request.url === '/credentials/remove') return send(200, turns.remove(input));
+      if (request.url === '/models/refresh') {
+        const controller = new AbortController();
+        const disconnected = () => controller.abort();
+        response.on('close', disconnected);
+        try { return send(200, await turns.refreshModels(input, { signal: controller.signal })); }
+        finally { response.off('close', disconnected); }
+      }
       if (request.url === '/turns') {
         const controller = new AbortController();
         const disconnected = () => controller.abort();
@@ -51,7 +59,9 @@ export function createHandler({ secret, service = createLoginService(), turns = 
           'X-Accel-Buffering': 'no' });
         let textWireBytes = 0;
         const configuredBytes = input.limits?.responseBytes;
-        const wireBudget = 4 * (Number.isSafeInteger(configuredBytes) && configuredBytes > 0
+        // A one-byte text delta has a 26-byte NDJSON envelope. Allow framing and
+        // JSON escaping without lowering the actual text budget for fine streams.
+        const wireBudget = 32 * (Number.isSafeInteger(configuredBytes) && configuredBytes > 0
           ? Math.min(configuredBytes, 8 * 1024 * 1024) : 256 * 1024) + 65536;
         const emit = async event => {
           if (response.destroyed) return;
@@ -70,7 +80,7 @@ export function createHandler({ secret, service = createLoginService(), turns = 
           await turns.run(input, { signal: controller.signal, emit });
         } catch (error) {
           const safe = error instanceof TurnError ? error : new TurnError('provider_failed');
-          await emit({ type: 'error', code: safe.code, message: safe.message });
+          await emit({ type: 'error', code: safe.code, message: safe.message, limit: safe.limit });
         } finally {
           response.off('close', disconnected);
           response.end();

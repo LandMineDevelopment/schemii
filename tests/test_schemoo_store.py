@@ -2,16 +2,23 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+from typing import get_type_hints
 
 import pytest
 from pydantic import ValidationError
 
 from schemii.schemoo.models import (
-    ExploreUpdate, LayoutUpdate, ModelCreate, ModelDefinition, ModelUpdate,
+    ExploreUpdate, LayoutUpdate, ModelCreate, ModelDefinition, ModelUpdate, PreviewCreate, PreviewUpdate,
 )
 from schemii.schemoo.store import (
-    InMemoryModelRepository, PostgresModelRepository, ModelConflictError, ModelLimitError, ModelNotFoundError, ModelDocumentLimitError,
+    InMemoryModelRepository, PostgresModelRepository, ModelConflictError, ModelLimitError, ModelNotFoundError, ModelDocumentLimitError, PreviewNameConflictError,
 )
+
+
+def test_repository_annotations_resolve_despite_list_method_name():
+    from schemii.schemoo.models import SavedPreview
+    from schemii.schemoo.store import ModelRepository
+    assert get_type_hints(ModelRepository.list_previews)["return"] == list[SavedPreview]
 
 
 def request(**changes):
@@ -145,3 +152,104 @@ def test_invalid_drafts_can_be_saved_for_repair_but_duplicate_ids_cannot():
     assert InMemoryModelRepository().create("alice", request(definition=definition))
     with pytest.raises(ValidationError, match="Duplicate node"):
         request(definition={"nodes": [{"id": "a", "table": "t", "label": "A"}] * 2})
+
+
+def test_named_previews_have_independent_revisions_and_only_store_query_inputs():
+    store = InMemoryModelRepository()
+    model = store.create("alice", request())
+    first = store.create_preview("alice", model.id, PreviewCreate(name="  Current  ", explore={
+        "root": "people", "fields": [{"table": "people", "column": "name"}],
+        "selections": {"date": {"values": {"asOf": "today"}}}}))
+    second = store.create_preview("alice", model.id, PreviewCreate(name="Historical", explore={}))
+    assert first.name == "Current" and first.id != second.id
+    assert set(first.model_dump(by_alias=True)) == {"id", "modelId", "name", "explore", "revision", "createdAt", "updatedAt"}
+    first.explore.fields.clear()
+    assert store.list_previews("alice", model.id)[0].explore.fields
+    changed = store.update_preview("alice", model.id, first.id, PreviewUpdate(
+        expected_revision=1, name="Current count", explore={"fields": [{"table": "people", "column": "id", "aggregate": "count"}]}))
+    assert changed.revision == 2 and store.list_previews("alice", model.id)[1].revision == 1
+    assert store.get("alice", model.id) == model
+    for action in (
+        lambda: store.update_preview("alice", model.id, first.id, PreviewUpdate(expected_revision=1, name="Stale", explore={})),
+        lambda: store.delete_preview("alice", model.id, first.id, 1),
+    ):
+        with pytest.raises(ModelConflictError, match="saved preview"):
+            action()
+    store.delete_preview("alice", model.id, first.id, 2)
+    assert [p.id for p in store.list_previews("alice", model.id)] == [second.id]
+
+
+def test_named_previews_are_owner_and_model_scoped_and_cascade():
+    store = InMemoryModelRepository()
+    model = store.create("alice", request())
+    other = store.create("alice", request())
+    preview = store.create_preview("alice", model.id, PreviewCreate(name="Test", explore={}))
+    for action in (
+        lambda: store.list_previews("bob", model.id),
+        lambda: store.create_preview("bob", model.id, PreviewCreate(name="No", explore={})),
+        lambda: store.update_preview("bob", model.id, preview.id, PreviewUpdate(expected_revision=1, name="No", explore={})),
+        lambda: store.delete_preview("bob", model.id, preview.id, 1),
+        lambda: store.update_preview("alice", other.id, preview.id, PreviewUpdate(expected_revision=1, name="No", explore={})),
+        lambda: store.delete_preview("alice", other.id, preview.id, 1),
+    ):
+        with pytest.raises(ModelNotFoundError):
+            action()
+    store.delete("alice", model.id, 1)
+    assert ("alice", model.id) not in store._previews
+    with pytest.raises(ModelNotFoundError):
+        store.list_previews("alice", model.id)
+
+
+def test_named_preview_total_budget_is_atomic_for_create_and_update():
+    store = InMemoryModelRepository(maximum_document_bytes=1300)
+    model = store.create("alice", request())
+    body = PreviewCreate(name="Preview", explore={"selections": {"s": {"values": {"p": "x" * 350}}}})
+    def create(_):
+        try:
+            return store.create_preview("alice", model.id, body.model_copy(update={"name": f"Preview {_}"}))
+        except ModelDocumentLimitError:
+            return None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(create, range(8)))
+    assert sum(item is not None for item in results) == 1
+    saved = store.list_previews("alice", model.id)[0]
+    with pytest.raises(ModelDocumentLimitError, match="saved previews"):
+        store.update_preview("alice", model.id, saved.id, PreviewUpdate(expected_revision=1,
+            name="Large", explore={"selections": {"s": {"values": {"p": "é" * 1000}}}}))
+    assert store.list_previews("alice", model.id) == [saved]
+    store.delete_preview("alice", model.id, saved.id, 1)
+    assert store.create_preview("alice", model.id, body)
+
+
+def test_named_preview_names_are_trimmed_case_insensitive_and_atomic():
+    store = InMemoryModelRepository()
+    model = store.create("alice", request())
+    other = store.create("alice", request())
+    body = PreviewCreate(name="  Current ", explore={})
+    def create(_):
+        try:
+            return store.create_preview("alice", model.id, body)
+        except PreviewNameConflictError:
+            return None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(create, range(8)))
+    assert sum(item is not None for item in results) == 1
+    first = store.list_previews("alice", model.id)[0]
+    second = store.create_preview("alice", model.id, PreviewCreate(name="History", explore={}))
+    with pytest.raises(PreviewNameConflictError):
+        store.create_preview("alice", model.id, PreviewCreate(name="CURRENT", explore={}))
+    with pytest.raises(PreviewNameConflictError):
+        store.update_preview("alice", model.id, second.id, PreviewUpdate(expected_revision=1, name=" current ", explore={}))
+    assert store.list_previews("alice", model.id) == [first, second]
+    renamed = store.update_preview("alice", model.id, first.id, PreviewUpdate(expected_revision=1, name="CURRENT", explore={}))
+    assert renamed.revision == 2
+    assert store.create_preview("alice", other.id, body)
+
+
+@pytest.mark.parametrize("body", [
+    {"name": " ", "explore": {}}, {"name": "Rows", "explore": {"rows": [["private"]]}},
+    {"name": "Model", "explore": {}, "definition": {}},
+])
+def test_named_preview_rejects_empty_names_rows_and_model_copies(body):
+    with pytest.raises(ValidationError):
+        PreviewCreate.model_validate(body)

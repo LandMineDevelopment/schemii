@@ -15,8 +15,10 @@ class ApiCredentialCreate(BaseModel):
 
 
 @router.get("/status", response_model=AiStatusResponse)
-def status(request: Request, principal: Principal = Depends(get_current_principal)):
-    return AiStatusResponse.model_validate(request.app.state.ai_service.status(principal.user_id))
+def status(request: Request, refresh: bool = False, principal: Principal = Depends(get_current_principal)):
+    service = request.app.state.ai_service
+    result = service.status(principal.user_id, refresh=True) if refresh else service.status(principal.user_id)
+    return AiStatusResponse.model_validate(result)
 
 
 @router.post("/credentials/{provider_id}")

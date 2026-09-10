@@ -8,7 +8,7 @@ test("switch providers in the current conversation without losing history", asyn
     providerId: "first", modelId: "one", capabilities: {}, status: "idle", createdAt, updatedAt: createdAt };
   let settings = { revision: 1, defaultProviderId: "first", defaultModelId: "one", defaultCapabilities: {} };
   let switches = 0;
-  await page.route("**/api/v1/ai/status", route => route.fulfill({ json: { healthy: true, enabled: true,
+  await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, enabled: true,
     providers: ["first", "second"].map((id, i) => ({ id, name: id, available: true,
       models: [{ id: i ? "two" : "one", name: i ? "Second model" : "First model", status: "active" }] })) } }));
   await page.route("**/api/v1/schemii/ai/**", async route => {
@@ -35,7 +35,8 @@ test("switch providers in the current conversation without losing history", asyn
   await page.goto(`/?workspace=${workspace.id}`);
   await page.getByRole("button", { name: "AI schema assistant" }).click();
   await expect(page.locator("#ai-assistant-messages")).toContainText("Keep this conversation");
-  await page.locator("#ai-assistant-model").selectOption({ label: "Second model · second" });
+  await page.getByRole("combobox", { name: "AI model", exact: true }).click();
+  await page.getByRole("option", { name: "Second model · second" }).click();
   await expect(page.locator("#ai-assistant-model option:checked")).toHaveText("Second model · second");
   await expect(page.locator("#ai-assistant-messages")).toContainText("Keep this conversation");
   await expect.poll(() => switches).toBe(1);

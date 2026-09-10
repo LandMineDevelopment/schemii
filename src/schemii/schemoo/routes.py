@@ -10,11 +10,12 @@ from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.metadata.limit_events import LimitEventNotice
 from schemii.common.postgres.errors import PostgresGatewayError
 from schemii.common.query_executions.errors import ConsoleServiceError
-from .catalog import initial_positions
-from .models import (Contract, ModelCreate, ModelUpdate, LayoutUpdate, ExploreUpdate,
-                     ModelDefinition, ExploreState, SchemooModel, ModelSummary, DomainValues)
-from .store import (ModelNotFoundError, ModelConflictError, ModelStorageUnavailableError, ModelLimitError, ModelDocumentLimitError)
-from .service import load_model, model_catalog, plan_query, execute_query, domain_query, domain_values_plan, document
+from .catalog import initial_positions, catalog_contract
+from .models import (Contract, ModelCreate, ModelDuplicate, ModelUpdate, ModelPatch, LayoutUpdate, ExploreUpdate,
+                     ModelDefinition, ExploreState, SchemooModel, ModelSummary, DomainValues,
+                     PreviewCreate, PreviewUpdate, SavedPreview)
+from .store import (ModelNotFoundError, ModelConflictError, ModelStorageUnavailableError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError)
+from .service import load_model, model_catalog, plan_query, execute_query, domain_query, domain_values_plan, document, patch_model_definition
 from .domain import domain_table
 
 router = APIRouter(prefix="/api/v1/schemoo", tags=["schemoo"])
@@ -26,6 +27,10 @@ class CreateRequest(ModelCreate):
 
 class ModelList(Contract):
     models: list[ModelSummary]
+
+
+class PreviewList(Contract):
+    previews: list[SavedPreview]
 
 
 class PlanRequest(Contract):
@@ -66,6 +71,8 @@ def api_errors():
         raise ApiProblem(404, "model_source_not_found", str(error)) from error
     except ModelConflictError as error:
         raise ApiProblem(409, "model_revision_conflict", str(error), details={"currentRevision": error.current_revision}) from error
+    except PreviewNameConflictError as error:
+        raise ApiProblem(409, "preview_name_conflict", str(error)) from error
     except ModelLimitError as error:
         raise ApiProblem(409, "model_limit_reached", str(error), limit_event=LimitEventNotice(
             resource="semantic_models", limit_name="resources.maximum_models_per_user", configured_limit=error.limit)) from error
@@ -102,7 +109,10 @@ def create_model(body: CreateRequest, request: Request, principal: Principal = D
     with api_errors():
         services = request.app.state.services
         catalog = services.model_catalogs.get(services, principal.user_id, body.connection_id, body.namespace, fresh=True)
-        record = ModelCreate.model_validate({**body.model_dump(), "database": catalog["database"],
+        definition = ModelDefinition.model_validate({**body.definition.model_dump(mode="json", by_alias=True),
+                                                     "sourceContract": catalog_contract(catalog)})
+        record = ModelCreate.model_validate({**body.model_dump(), "definition": definition,
+                                             "database": catalog["database"],
                                              "catalog_fingerprint": catalog["fingerprint"]})
         return services.models.create(principal.user_id, record)
 
@@ -113,16 +123,41 @@ def get_model(model_id: str, request: Request, principal: Principal = Depends(ge
         return load_model(request.app.state.services, principal.user_id, model_id)
 
 
+@router.post("/models/{model_id}/duplicate", response_model=SchemooModel, status_code=201)
+def duplicate_model(model_id: str, body: ModelDuplicate, request: Request,
+                    principal: Principal = Depends(get_current_principal)):
+    with api_errors():
+        services = request.app.state.services
+        source = load_model(services, principal.user_id, model_id)
+        connection = services.connections.get(principal.user_id, source.connection_id)
+        if connection.database != source.database:
+            raise ApiProblem(409, "model_source_changed", "The model's connection now targets a different database.")
+        return services.models.duplicate(principal.user_id, model_id, body)
+
+
 @router.put("/models/{model_id}", response_model=SchemooModel)
 def update_model(model_id: str, body: ModelUpdate, request: Request, principal: Principal = Depends(get_current_principal)):
     with api_errors():
-        return request.app.state.services.models.update(principal.user_id, model_id, body)
+        services = request.app.state.services
+        current = load_model(services, principal.user_id, model_id, body.expected_revision)
+        if body.definition.sourceContract is None:
+            catalog = model_catalog(services, principal.user_id, current, fresh=True)
+            definition = ModelDefinition.model_validate({**body.definition.model_dump(mode="json", by_alias=True),
+                                                         "sourceContract": catalog_contract(catalog)})
+            body = body.model_copy(update={"definition": definition})
+        return services.models.update(principal.user_id, model_id, body)
 
 
 @router.put("/models/{model_id}/layout", response_model=SchemooModel)
 def update_layout(model_id: str, body: LayoutUpdate, request: Request, principal: Principal = Depends(get_current_principal)):
     with api_errors():
         return request.app.state.services.models.update_layout(principal.user_id, model_id, body)
+
+
+@router.patch("/models/{model_id}", response_model=SchemooModel)
+def patch_model(model_id: str, body: ModelPatch, request: Request, principal: Principal = Depends(get_current_principal)):
+    with api_errors():
+        return patch_model_definition(request.app.state.services, principal.user_id, model_id, body)
 
 
 @router.put("/models/{model_id}/explore", response_model=SchemooModel)
@@ -136,6 +171,33 @@ def delete_model(model_id: str, request: Request, expected_revision: int = Query
                  principal: Principal = Depends(get_current_principal)):
     with api_errors():
         request.app.state.services.models.delete(principal.user_id, model_id, expected_revision)
+        return Response(status_code=204)
+
+
+@router.get("/models/{model_id}/previews", response_model=PreviewList)
+def list_previews(model_id: str, request: Request, principal: Principal = Depends(get_current_principal)):
+    with api_errors():
+        return PreviewList(previews=request.app.state.services.models.list_previews(principal.user_id, model_id))
+
+
+@router.post("/models/{model_id}/previews", response_model=SavedPreview, status_code=201)
+def create_preview(model_id: str, body: PreviewCreate, request: Request, principal: Principal = Depends(get_current_principal)):
+    with api_errors():
+        return request.app.state.services.models.create_preview(principal.user_id, model_id, body)
+
+
+@router.put("/models/{model_id}/previews/{preview_id}", response_model=SavedPreview)
+def update_preview(model_id: str, preview_id: str, body: PreviewUpdate, request: Request,
+                   principal: Principal = Depends(get_current_principal)):
+    with api_errors():
+        return request.app.state.services.models.update_preview(principal.user_id, model_id, preview_id, body)
+
+
+@router.delete("/models/{model_id}/previews/{preview_id}", status_code=204)
+def delete_preview(model_id: str, preview_id: str, request: Request, expected_revision: int = Query(ge=1),
+                   principal: Principal = Depends(get_current_principal)):
+    with api_errors():
+        request.app.state.services.models.delete_preview(principal.user_id, model_id, preview_id, expected_revision)
         return Response(status_code=204)
 
 

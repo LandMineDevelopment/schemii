@@ -34,8 +34,11 @@ def execute_write(services, owner, workspace_id, workspace_revision, action, *, 
             ConsoleTransactionCommand(expected_revision=current.revision))
         return {"transactionId": transaction.id, "executionId": execution.id,
                 "commitOutcome": result.status, "liveDatabaseChanged": True if result.status == "committed" else None}
-    except Exception:
+    except Exception as error:
         # Only roll back an open transaction; never retry an uncertain commit.
+        # The shared commit boundary emits this only before COMMIT dispatch.
+        if getattr(error, "code", None) == "postgres_console_cancelled":
+            commit_attempted = False
         if not commit_attempted:
             try:
                 current = console.get_transaction(owner, workspace_id, transaction.id)

@@ -1,7 +1,32 @@
 import pytest
 from sqlglot import parse
 
-from schemii.schemoo.prototype import compile_preview
+from schemii.schemoo.prototype import compile_preview, _parameter_value
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("today -365", "2023-03-02"), (" TODAY - 1 day ", "2024-02-29"),
+    ("today+30 days", "2024-03-31"), ("today", "2024-03-01"),
+    ("2020-01-01", "2020-01-01"), ("today - 0", "2024-03-01"),
+])
+def test_relative_date_parameters(value, expected):
+    assert _parameter_value(value, "date", "History date", "2024-03-01") == expected
+
+
+@pytest.mark.parametrize("value", ["today - 1.5", "today - 1 year", "today -- 2", "today + 9999999", "today; SELECT 1", "2024-02-30", None])
+def test_invalid_relative_dates_are_actionable(value):
+    with pytest.raises(ValueError, match="History date requires YYYY-MM-DD, today"):
+        _parameter_value(value, "date", "History date", "2024-03-01")
+
+
+def test_relative_date_defaults_resolve_each_compilation(catalog):
+    query = request(scopes=[{"id": "history", "kind": "required", "alternatives": [{
+        "id": "default", "inputs": [{"id": "date", "type": "date", "defaultValue": "today - 365"}],
+        "conditions": [{"table": "people", "column": "name", "operator": "gte", "parameterId": "date"}],
+    }]}])
+    assert "2023-03-02" in compile_preview(catalog, query, _today="2024-03-01")["sql"]
+    assert "2023-03-03" in compile_preview(catalog, query, _today="2024-03-02")["sql"]
+    assert query["scopes"][0]["alternatives"][0]["inputs"][0]["defaultValue"] == "today - 365"
 
 
 @pytest.fixture

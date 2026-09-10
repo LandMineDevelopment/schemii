@@ -64,8 +64,10 @@ def test_assistant_exposes_legacy_quality_controls_and_safe_rich_messages() -> N
     assert 'data-ui-icon="history"' in index
     assert 'data-ui-icon="new-chat"' in index
     assert 'data-ui-icon="settings"' in index
-    assert "function renderMarkdown(source)" in source
-    assert "document.createTextNode" in source
+    markdown = files("schemii.common").joinpath("web", "assets", "ai-markdown.js").read_text(encoding="utf-8")
+    assert 'import { renderMarkdown } from "#common/ai-markdown.js"' in source
+    assert "function renderMarkdown(source)" in markdown
+    assert "document.createTextNode" in markdown
     assert 'event.key === "Enter" && !event.shiftKey && !event.isComposing' in source
     assert "elements.form.requestSubmit()" in source
     assert "activity?after=${activitySequence}" in source
@@ -76,10 +78,29 @@ def test_assistant_exposes_legacy_quality_controls_and_safe_rich_messages() -> N
     assert 'acknowledgeProviderDataPolicy: true' in source
     assert 'window.confirm' in source
     assert '/api/v1/schemii/ai/chats/${chatId}/stream' in source
-    assert 'Temporary · not saved' in source
-    assert 'grid-template-areas: "head" "context" "notice" "body" "composer"' in styles
-    assert "@keyframes ai-dot-wave" in styles
-    assert ".ai-markdown-table" in styles
+    shared_presentation = files("schemii.common").joinpath("web", "assets", "ai-presentation.js").read_text(encoding="utf-8")
+    shared_styles = files("schemii.common").joinpath("web", "assets", "ai-chat.css").read_text(encoding="utf-8")
+    assert 'createMessageNode(message' in source
+    assert 'Temporary · not saved' in shared_presentation
+    assert '/assets/common/ai-chat.css' in styles
+    assert 'grid-template-areas: "head" "context" "notice" "body" "composer"' in shared_styles
+    shared_activity = files("schemii.common").joinpath("web", "assets", "ai-activity.js").read_text(encoding="utf-8")
+    model_assistant = files("schemii.common").joinpath("web", "assets", "model-assistant.js").read_text(encoding="utf-8")
+    model_styles = files("schemii.common").joinpath("web", "assets", "model-assistant.css").read_text(encoding="utf-8")
+    assert 'from "#common/ai-activity.js"' in source
+    assert 'from "./ai-activity.js"' in model_assistant
+    assert 'renderAiActivity(activityRun, { existing' in source
+    assert 'renderAiActivity(activityRun, { existing' in model_assistant
+    assert '/assets/common/ai-chat.css' in model_styles
+    assert "index < 25" in shared_activity
+    assert "card.dataset.stages !== signature" in shared_activity
+    assert 'stop.dataset.cancelTurn = run.turnId' in shared_activity
+    for animation in ("ai-dot-wave", "ai-text-shimmer", "ai-stage-pulse"):
+        assert f"@keyframes {animation}" in shared_styles
+        assert f"@keyframes {animation}" not in styles
+        assert f"@keyframes {animation}" not in model_styles
+    assert "prefers-reduced-motion" in shared_styles
+    assert ".ai-markdown-table" in shared_styles
 
 
 def test_index_access_method_uses_the_complete_styled_selector() -> None:
@@ -428,9 +449,34 @@ def test_shared_frontend_entrypoints_use_the_csp_authorized_import_map():
         policy = api.get(path).headers["content-security-policy"]
         assert f"'sha256-{IMPORT_MAP_DIGEST}'" in policy
         assert "script-src 'self' 'unsafe-inline'" not in policy
-    for asset in ("dom.js", "data-grid.js", "graph-viewport.js", "http.js"):
+    for asset in (
+        "dom.js",
+        "data-grid.js",
+        "graph-viewport.js",
+        "http.js",
+        "product-navigation.js",
+    ):
         assert api.get(f"/assets/common/{asset}").status_code == 200
         assert api.get(f"/assets/{asset}").status_code == 404
+
+
+def test_available_products_share_one_navigation_contract() -> None:
+    schemii_web = files("schemii.schemii").joinpath("web")
+    schemoo_web = files("schemii.schemoo").joinpath("web")
+    common_assets = files("schemii.common").joinpath("web", "assets")
+    schemii_html = schemii_web.joinpath("index.html").read_text(encoding="utf-8")
+    schemoo_html = schemoo_web.joinpath("index.html").read_text(encoding="utf-8")
+    schemii_source = schemii_web.joinpath("assets", "app.js").read_text(encoding="utf-8")
+    schemoo_source = schemoo_web.joinpath("prototype.js").read_text(encoding="utf-8")
+    navigation = common_assets.joinpath("product-navigation.js").read_text(encoding="utf-8")
+
+    assert schemii_html.count('id="product-navigation"') == 1
+    assert schemoo_html.count('id="product-navigation"') == 1
+    assert 'activeProduct: "schemii"' in schemii_source
+    assert 'activeProduct: "schemoo"' in schemoo_source
+    assert '{ id: "schemii", name: "Schemii", description: "Schema design", href: "/" }' in navigation
+    assert '{ id: "schemoo", name: "Schemoo", description: "Semantic models", href: "/schemoo" }' in navigation
+    assert '{ id: "schemer", name: "Schemer", description: "Reports · coming later", href: null }' in navigation
 
 
 def test_api_map_uses_only_the_live_same_origin_openapi_contract() -> None:

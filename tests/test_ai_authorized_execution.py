@@ -17,7 +17,7 @@ def batch_fixture():
     repository.get_chat.return_value = chat
     design, workspace = NS(revision=5), NS(revision=2)
     proposals = {
-        name: NS(id=name, revision=1, digest="digest-" + name, status="pending",
+        name: NS(id=name, turn_id="turn", revision=1, digest="digest-" + name, status="pending",
                  expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
                  expected_design_revision=5, expected_workspace_revision=2,
                  capability="raw_sql_write", action_type="console_script")
@@ -157,6 +157,16 @@ def test_permission_revoked_before_commit_rolls_back():
         write(services, is_authorized=authorized)
     authorized.assert_called_once()
     services.console.commit_transaction.assert_not_called()
+    services.console.rollback_transaction.assert_called_once()
+
+
+def test_cancellation_at_commit_gate_rolls_back_ai_owned_transaction():
+    services = write_fixture()
+    services.console.commit_transaction.side_effect = AiServiceError(
+        409, "postgres_console_cancelled", "Stopped before COMMIT dispatch")
+    with pytest.raises(AiServiceError):
+        write(services)
+    services.console.commit_transaction.assert_called_once()
     services.console.rollback_transaction.assert_called_once()
 
 

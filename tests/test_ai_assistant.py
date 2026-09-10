@@ -75,6 +75,36 @@ def test_ai_status_passes_current_owner_without_sharing_availability() -> None:
     assert owners == ["alice", "bob"]
 
 
+def test_shared_status_route_only_refreshes_on_explicit_request():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from schemii.common.ai.routes import router
+    from schemii.common.metadata.models import get_current_principal
+
+    calls = []
+    def status(owner, *, refresh=False):
+        calls.append((owner, refresh))
+        return {"enabled": True, "healthy": True, "providers": [{
+            "id": "openai-codex", "name": "Codex", "available": True, "authenticated": True,
+            "models": [{"id": "model", "name": "Model", "status": "active"}],
+            "catalogError": "Could not refresh", "catalogCheckedAt": "2026-09-08T12:00:00Z",
+        }]}
+    service = AiService(InMemoryAiRepository(), SimpleNamespace(status=status),
+                        SimpleNamespace(admin_config=AdminConfig()))
+    app = FastAPI()
+    app.state.ai_service = service
+    app.dependency_overrides[get_current_principal] = lambda: SimpleNamespace(user_id="alice")
+    app.include_router(router)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/ai/status").status_code == 200
+        result = client.get("/api/v1/ai/status?refresh=true")
+        assert result.status_code == 200
+        assert result.json()["providers"][0]["catalogError"] == "Could not refresh"
+        assert result.json()["providers"][0]["catalogCheckedAt"] == "2026-09-08T12:00:00Z"
+        assert client.get("/api/v1/ai/status?refresh=invalid").status_code == 422
+    assert calls == [("alice", False), ("alice", True)]
+
+
 class ReplayRequired(RuntimeError):
     code = "console_result_replay_required"
 

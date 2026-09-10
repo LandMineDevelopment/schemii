@@ -1,6 +1,6 @@
 // Aliases are model occurrences, never new physical tables or copied database objects.
 export function isAlias(node) {
-  return Boolean(node && node.id !== node.table);
+  return Boolean(node && !node.derivation && node.id !== node.table);
 }
 
 export function suggestedAliasLabel(nodes, source, maximumLength = 100) {
@@ -27,7 +27,7 @@ function stableHash(value) {
 
 export function ensureAliasConnections(draft, catalog) {
   const nodes = draft.nodes || [];
-  const canonical = new Map(nodes.filter(node => !isAlias(node)).map(node => [node.table, node.id]));
+  const canonical = new Map(nodes.filter(node => !node.derivation && !isAlias(node)).map(node => [node.table, node.id]));
   const edges = draft.edges ||= [];
   const tuples = new Set(edges.map(edge => edgeKey(edge.relationshipId, edge.source, edge.target)));
   const ids = new Set(edges.map(edge => edge.id));
@@ -85,6 +85,9 @@ export function removeAlias(draft, id) {
 export function removeModelNode(draft, id) {
   const node = (draft.nodes || []).find(candidate => candidate.id === id);
   if (!node) throw new Error("This model object no longer exists.");
+  if (draft.nodes.some(n => n.derivation && (n.derivation.source === id || n.derivation.connection?.target === id || n.derivation.outputs.some(o => o.nodeId === id || o.conditions?.some(c => c.table === id))))) {
+    throw new Error("Remove or rebind the calculated sources that depend on this object first.");
+  }
   const impact = aliasImpact(draft, id);
   draft.nodes = draft.nodes.filter(candidate => candidate.id !== id);
   draft.edges = (draft.edges || []).filter(edge => edge.source !== id && edge.target !== id);

@@ -1,6 +1,7 @@
 """Assemble the Schemii API application."""
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -374,6 +375,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(application.state.ai_service.recover_interrupted)
+        await asyncio.to_thread(application.state.schemoo_ai.store.prune, True)
+        async def maintain_chats():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await asyncio.to_thread(application.state.schemoo_ai.maintain)
+                except Exception:
+                    logging.getLogger(__name__).exception("Schemoo chat maintenance failed")
+        chat_maintenance=asyncio.create_task(maintain_chats())
         active_services.migrations.set_execution_waker(migration_worker.notify)
         await migration_worker.start()
         credential_worker = CredentialExpiryWorker(
@@ -390,6 +400,11 @@ def create_app(
         try:
             yield
         finally:
+            chat_maintenance.cancel()
+            try:
+                await chat_maintenance
+            except asyncio.CancelledError:
+                pass
             if catalog_worker is not None:
                 await catalog_worker.stop()
             await credential_worker.stop()
@@ -440,6 +455,16 @@ def create_app(
         ai_runtime,
         active_services,
     )
+    from schemii.schemoo.conversation_store import ConversationStore
+    from schemii.schemoo.conversations import Conversations
+    from schemii.schemoo import ai_tools
+    from schemii.schemoo.ai_routes import router as schemoo_ai_router
+    application.state.ai_runtime = ai_runtime
+    application.state.schemoo_ai = Conversations(
+        ConversationStore(active_services.metadata.connection_factory,active_services.admin_config.ai,"schemoo"),
+        ai_runtime,active_services,ai_tools,
+    )
+    application.include_router(schemoo_ai_router)
     application.state.migration_worker = migration_worker
     install_api_middleware(application)
     install_api_error_handlers(application)

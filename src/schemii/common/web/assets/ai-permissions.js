@@ -1,7 +1,11 @@
 export const PERMISSION_MODES = Object.freeze(["disabled", "ask", "automatic"]);
 
 export function permissionMode(capabilities, actionId) {
-  const mode = capabilities?.actionModes?.[actionId];
+  return actionMode(capabilities?.actionModes, actionId);
+}
+
+export function actionMode(modes, actionId) {
+  const mode = modes?.[actionId];
   return PERMISSION_MODES.includes(mode) ? mode : "disabled";
 }
 

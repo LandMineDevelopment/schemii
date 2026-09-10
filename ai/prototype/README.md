@@ -60,6 +60,37 @@ public auth marker rather than another user's stored key. Request/context/output
 sizes, concurrency, deadlines and write backpressure are bounded. Failures have
 fixed, safe error codes.
 
+Provider adapter catalogs describe supported models, not account entitlements.
+An explicit model-access rejection marks only that owner/provider/credential
+generation/model unavailable in the common runtime. Denials are transient,
+contain no provider text, and expire after `[ai] catalog_refresh_seconds`, allowing
+a fresh attempt if access changes. A new credential generation clears old
+denials. Usage limits and malformed-request errors do not disable models. Both
+chat clients refresh availability after a failed turn and preserve the selected
+unavailable model until the user explicitly chooses another; no fallback is run.
+
+Private `POST /models/refresh` accepts the same owner, credential identity,
+generation and credential envelope as a turn. It lists the account's Codex or
+OpenAI models without running inference and intersects the result with installed
+Pi support. Codex entries must have `visibility: "list"`. Discovery uses fixed
+HTTPS URLs, rejects redirects, and bounds the full request to eight seconds and
+the response to four MiB. Its result or safe error returns any refreshed OAuth
+credential with the original generation for application-side fenced persistence.
+Discovery and inference share the credential overlap guard; disconnect cancels
+either operation. Upstream model instructions and arbitrary metadata never leave
+the discovery boundary.
+
+Schemii and Schemoo use the same searchable model picker. Opening it calls
+authenticated `GET /api/v1/ai/status?refresh=true`; ordinary status polling does
+not make account-catalog requests. Connected providers are checked independently
+in parallel. The common runtime retains only model IDs and safe freshness/error
+metadata in memory, scoped to the credential owner and generation, for at most
+`[ai] catalog_max_stale_seconds`. No catalog or query rows are written to metadata.
+The shared Zen worker continues to own periodic public catalog refreshes.
+Loading, unavailable selections and retry states do not change the chat's model;
+a failed check preserves previously listed choices with a warning. An advertised
+model is not a guarantee of remaining quota or successful inference.
+
 ## Free-model discovery and consent
 
 The server refreshes the public Zen registry and models.dev OpenCode price

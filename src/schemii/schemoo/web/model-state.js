@@ -1,17 +1,17 @@
+import { nodeColumns } from "./model-columns.js";
 // Persist semantic rules separately from presentation and ad-hoc exploration.
 // A null allowlist is the existing unrestricted model contract, not a selection
 // of preview outputs. Resolve it only when an author starts restricting fields.
 export function exposedFields(draft, catalog) {
   if (draft.exposedFields != null) return draft.exposedFields;
-  const tables = new Map(catalog.tables.map(table => [table.name, table]));
-  return draft.nodes.flatMap(node => (tables.get(node.table)?.columns || []).map(column => ({
+  return draft.nodes.flatMap(node => nodeColumns(draft, catalog, node).map(column => ({
     table: node.id, column: column.name, aggregate: "none",
   })));
 }
 
 export function setFieldExposure(draft, catalog, table, column, enabled) {
   const node = draft.nodes.find(node => node.id === table);
-  if (!catalog.tables.find(source => source.name === node?.table)?.columns.some(field => field.name === column)) {
+  if (!nodeColumns(draft, catalog, node).some(field => field.name === column)) {
     throw new Error("This source column no longer exists.");
   }
   const fields = exposedFields(draft, catalog);
@@ -44,6 +44,7 @@ export function initializeExposureFromPreview(draft) {
 export function splitDraft(draft) {
   return {
     definition: { root: draft.defaultRoot ?? draft.root, nodes: draft.nodes.map(({ x, y, ...node }) => node), edges: draft.edges, scopes: draft.scopes,
+      ...(draft.sourceContract !== undefined ? {sourceContract:draft.sourceContract} : {}),
       ...(draft.exposedFields !== undefined ? { exposedFields: draft.exposedFields } : {}) },
     layout: { positions: draft.nodes.filter(n => Number.isFinite(n.x) && Number.isFinite(n.y)).map(({ id, x, y }) => ({ id, x, y })) },
     explore: { root: draft.root, fields: draft.fields, selections: draft.selections, reportFilters: draft.reportFilters, limit: draft.limit || 100 },

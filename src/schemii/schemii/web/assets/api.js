@@ -1,6 +1,11 @@
 import { requestJson } from "#common/http.js";
 
 const API_ROOT = "/api/v1";
+const CONSOLE_REQUEST_TIMEOUT_MS = 900_000;
+
+const consoleRequest = (path, options = {}) => (
+  requestJson(path, { timeoutMs: CONSOLE_REQUEST_TIMEOUT_MS, ...options })
+);
 
 function publicConnection(value) {
   return {
@@ -90,31 +95,31 @@ export const api = Object.freeze({
     const response = await requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/migration-executions?limit=${encodeURIComponent(limit)}`, options);
     return response.executions;
   },
-  getConsoleSettings: options => requestJson(`${API_ROOT}/schemii/console/settings`, options),
-  updateConsoleSettings: body => requestJson(`${API_ROOT}/schemii/console/settings`, { method: "PUT", body }),
+  getConsoleSettings: options => consoleRequest(`${API_ROOT}/schemii/console/settings`, options),
+  updateConsoleSettings: body => consoleRequest(`${API_ROOT}/schemii/console/settings`, { method: "PUT", body }),
   async listConsoleHistory(workspaceId, { limit = 10, ...options } = {}) {
-    const response = await requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/history?limit=${encodeURIComponent(limit)}`, options);
+    const response = await consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/history?limit=${encodeURIComponent(limit)}`, options);
     return response.queries;
   },
   async listConsoleSavedQueries(workspaceId, options) {
-    const response = await requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries`, options);
+    const response = await consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries`, options);
     return response.queries;
   },
-  createConsoleSavedQuery: (workspaceId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries`, { ...options, method: "POST", body }),
-  updateConsoleSavedQuery: (workspaceId, queryId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries/${encodeURIComponent(queryId)}`, { ...options, method: "PATCH", body }),
-  deleteConsoleSavedQuery: (workspaceId, queryId, expectedRevision, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries/${encodeURIComponent(queryId)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
-  createConsoleExecution: (workspaceId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions`, { ...options, method: "POST", body }),
-  getConsoleExecution: (workspaceId, executionId, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, options),
-  cancelConsoleExecution: (workspaceId, executionId, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, { ...options, method: "DELETE" }),
+  createConsoleSavedQuery: (workspaceId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries`, { ...options, method: "POST", body }),
+  updateConsoleSavedQuery: (workspaceId, queryId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries/${encodeURIComponent(queryId)}`, { ...options, method: "PATCH", body }),
+  deleteConsoleSavedQuery: (workspaceId, queryId, expectedRevision, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries/${encodeURIComponent(queryId)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
+  createConsoleExecution: (workspaceId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions`, { ...options, method: "POST", body }),
+  getConsoleExecution: (workspaceId, executionId, options) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, options),
+  cancelConsoleExecution: (workspaceId, executionId, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, { ...options, method: "DELETE" }),
   getConsoleResultPage(workspaceId, executionId, resultId, { cursor = null, ...options } = {}) {
     const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-    return requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}/results/${encodeURIComponent(resultId)}${query}`, options);
+    return consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}/results/${encodeURIComponent(resultId)}${query}`, options);
   },
-  closeConsoleResult: (workspaceId, executionId, resultId, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}/results/${encodeURIComponent(resultId)}`, { ...options, method: "DELETE" }),
+  closeConsoleResult: (workspaceId, executionId, resultId, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}/results/${encodeURIComponent(resultId)}`, { ...options, method: "DELETE" }),
   consoleResultExportUrl: (workspaceId, executionId, resultId) => `${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}/results/${encodeURIComponent(resultId)}/export.csv`,
-  createConsoleTransaction: (workspaceId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions`, { ...options, method: "POST", body }),
-  getConsoleTransaction: (workspaceId, transactionId, options) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}`, options),
-  createConsoleTransactionExecution: (workspaceId, transactionId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}/executions`, { ...options, method: "POST", body }),
-  commitConsoleTransaction: (workspaceId, transactionId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}/commit`, { ...options, method: "POST", body }),
-  rollbackConsoleTransaction: (workspaceId, transactionId, body, options = {}) => requestJson(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}/rollback`, { ...options, method: "POST", body }),
+  createConsoleTransaction: (workspaceId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions`, { ...options, method: "POST", body }),
+  getConsoleTransaction: (workspaceId, transactionId, options) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}`, options),
+  createConsoleTransactionExecution: (workspaceId, transactionId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}/executions`, { ...options, method: "POST", body }),
+  commitConsoleTransaction: (workspaceId, transactionId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}/commit`, { ...options, method: "POST", body }),
+  rollbackConsoleTransaction: (workspaceId, transactionId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/transactions/${encodeURIComponent(transactionId)}/rollback`, { ...options, method: "POST", body }),
 });
