@@ -342,7 +342,13 @@ def test_catalog_cache_is_identity_bound_and_refreshes_execution():
         yield profile
     def introspect(connection, namespace):
         counts.append(namespace)
-        return SimpleNamespace(tables=[], relationships=[], fingerprint="one")
+        return SimpleNamespace(
+            tables=[],
+            views=[SimpleNamespace(name="personnel_summary", columns=[], query_definition="SELECT 1")],
+            materialized_views=[SimpleNamespace(name="personnel_summary_reporting_mv", columns=[], query_definition="SELECT 1", populated=True)],
+            relationships=[],
+            fingerprint="one",
+        )
     services = SimpleNamespace(connections=SimpleNamespace(get=lambda *args: profile, use=use), postgres=SimpleNamespace(introspect=introspect))
     cache = ModelCatalogs(maximum_entries=2)
     cache.get(services, "one", "connection", "public")
@@ -350,9 +356,13 @@ def test_catalog_cache_is_identity_bound_and_refreshes_execution():
     cache.get(services, "two", "connection", "public")
     cache.get(services, "one", "connection", "public", fresh=True)
     profile.revision = 2
-    cache.get(services, "one", "connection", "public")
+    catalog = cache.get(services, "one", "connection", "public")
     assert len(counts) == 4
     assert len(cache._cache) == 2
+    assert [table["name"] for table in catalog["tables"]] == [
+        "personnel_summary",
+        "personnel_summary_reporting_mv",
+    ]
 
 
 def test_document_limits_are_actionable_logged_and_do_not_save(setup):

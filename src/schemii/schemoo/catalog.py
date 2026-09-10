@@ -26,10 +26,24 @@ class ModelCatalogs:
         with services.connections.use(owner, connection_id) as connection:
             live = services.postgres.introspect(connection, namespace)
             database = connection.database
-        tables = [{"name": table.name, "columns": [c.model_dump(by_alias=True) for c in table.columns],
-                   "primaryKey": list(table.primary_key.columns) if table.primary_key and table.primary_key.validated else [],
-                   "uniqueKeys": [list(key.columns) for key in table.unique_constraints if key.validated]}
-                  for table in live.tables]
+        # Schemoo sources are read-only relations. Keep the existing `tables`
+        # response key for API compatibility, but include views and materialized
+        # views so they can be used as semantic-model sources as well.
+        relations = [
+            *live.tables,
+            *getattr(live, "views", ()),
+            *getattr(live, "materialized_views", ()),
+        ]
+        tables = []
+        for relation in relations:
+            primary_key = getattr(relation, "primary_key", None)
+            unique_constraints = getattr(relation, "unique_constraints", ())
+            tables.append({
+                "name": relation.name,
+                "columns": [c.model_dump(by_alias=True) for c in relation.columns],
+                "primaryKey": list(primary_key.columns) if primary_key and primary_key.validated else [],
+                "uniqueKeys": [list(key.columns) for key in unique_constraints if key.validated],
+            })
         names = {table["name"] for table in tables}
         relationships, omitted = [], 0
         for rel in live.relationships:
