@@ -570,6 +570,9 @@ def _create_index(namespace: str, table: DesignTable, index: DesignIndex, column
         f"CREATE {unique}INDEX {_quote(index.name)} ON {_qualified(namespace, table.name)} "
         f"USING {_quote(index.method)} ({', '.join(entries)})"
     )
+    if index.include_column_ids:
+        included = ", ".join(_quote(columns[item].name) for item in index.include_column_ids)
+        sql += f" INCLUDE ({included})"
     if index.predicate:
         sql += f" WHERE {index.predicate.strip()}"
     return sql + ";"

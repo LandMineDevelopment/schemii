@@ -10,12 +10,15 @@ import io
 import logging
 import threading
 import secrets
+from contextlib import contextmanager, nullcontext
+import time
 from typing import Callable, Iterator
 
 from schemii.common.connections.models import ResolvedPostgresConnection
 from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.query_executions.errors import ConsoleServiceError
+from schemii.common.query_executions.activity import report_progress
 from schemii.common.metadata.limit_events import (
     LimitEventNotice,
     LimitEventRecorder,
@@ -107,6 +110,7 @@ class _TransientConsoleResult:
     expires_at: datetime
     read_session: PostgresConsoleReadSession | None = None
     active_exports: int = 0
+    pending_close: bool = False
 
 
 @dataclass(slots=True)
@@ -116,6 +120,7 @@ class _ActiveConsoleReadSession:
     connection_id: str
     connection_revision: int
     postgres: PostgresConsoleReadSession
+    target: ResolvedPostgresConnection | None = None
 
 
 class ConsoleService:
@@ -179,6 +184,7 @@ class ConsoleService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._active_targets: dict[str, ResolvedPostgresConnection] = {}
         self._active_targets_lock = threading.RLock()
+        self._activity: dict[str, dict] = {}
         self._active_transactions: dict[str, _ActiveConsoleTransaction] = {}
         self._active_transactions_lock = threading.RLock()
         self._transient_results: dict[str, _TransientConsoleResult] = {}
@@ -193,6 +199,9 @@ class ConsoleService:
             self._clock() - self._result_ttl
         )
         self._repository.prune_history(self._query_history_limit)
+        register_reclaimer = getattr(self._postgres, "register_retained_connection_reclaimer", None)
+        if callable(register_reclaimer):
+            register_reclaimer(self._reclaim_read_session)
 
     def settings(self, owner_id: str) -> ConsoleSettings:
         try:
@@ -462,6 +471,8 @@ class ConsoleService:
                 try:
 
                     def publish(backend_pid: int) -> bool:
+                        with self._active_targets_lock:
+                            self._activity.setdefault(execution_id, {})["backendObservedAt"] = self._clock()
                         accepted = self._repository.publish_backend(
                             owner_id,
                             execution_id,
@@ -478,21 +489,23 @@ class ConsoleService:
                     read_session: PostgresConsoleReadSession | None = None
                     if callable(open_read_session):
                         self._make_read_session_capacity(record.target)
-                        read_session = open_read_session(
-                            target,
-                            record.target.namespace,
-                            record.statements,
-                            on_started=publish,
-                            page_memory_bytes=self._page_memory_bytes,
-                        )
+                        with self._operation(execution_id, "preparing"):
+                            read_session = open_read_session(
+                                target,
+                                record.target.namespace,
+                                record.statements,
+                                on_started=publish,
+                                page_memory_bytes=self._page_memory_bytes,
+                            )
                         results = read_session.results
                     else:
-                        results = self._postgres.execute_console(
-                            target,
-                            record.target.namespace,
-                            record.statements,
-                            on_started=publish,
-                        )
+                        with self._operation(execution_id, "executing"):
+                            results = self._postgres.execute_console(
+                                target,
+                                record.target.namespace,
+                                record.statements,
+                                on_started=publish,
+                            )
                 finally:
                     with self._active_targets_lock:
                         self._active_targets.pop(execution_id, None)
@@ -510,6 +523,7 @@ class ConsoleService:
                 results,
                 expires_at,
                 read_session=read_session,
+                read_target=target,
             )
         except Exception as error:
             if "read_session" in locals() and read_session is not None:
@@ -733,7 +747,8 @@ class ConsoleService:
                 with self._active_targets_lock:
                     self._active_targets[execution_id] = session.target
                 try:
-                    results = session.postgres.execute(record.statements)
+                    with self._operation(execution_id, "executing"):
+                        results = session.postgres.execute(record.statements)
                 finally:
                     with self._active_targets_lock:
                         self._active_targets.pop(execution_id, None)
@@ -845,6 +860,14 @@ class ConsoleService:
             )
         except ConsoleRepositoryError as error:
             raise self._repository_error(error) from error
+        with self._transient_results_lock:
+            retained = self._active_read_sessions.get(execution_id)
+        if retained is not None:
+            cancel_read = getattr(retained.postgres, "cancel", None)
+            if callable(cancel_read):
+                cancel_read()
+            elif retained.target is not None:
+                self._postgres.cancel_console(retained.target, retained.postgres.backend_pid)
         if record.execution.status == "running" and record.backend_pid is not None:
             try:
                 with self._active_targets_lock:
@@ -855,82 +878,123 @@ class ConsoleService:
                 pass
         return self._repository.get(owner_id, execution_id).execution
 
-    def page(self, owner_id, workspace_id, execution_id, result_id, cursor) -> ConsoleResultPage:
+    @contextmanager
+    def _operation(self, execution_id: str, phase: str, statement_index=None):
+        started = time.monotonic()
+        with self._active_targets_lock:
+            state = self._activity.setdefault(execution_id, {})
+            if phase in {"preparing", "executing"}:
+                state["completedStatementIndexes"] = []
+            state.update(phase=phase, statementIndex=statement_index, started=started,
+                         active=state.get("active", 0) + 1)
+        def progress(index, completed):
+            with self._active_targets_lock:
+                state["statementIndex"] = index
+                if completed:
+                    indexes = state.setdefault("completedStatementIndexes", [])
+                    if index not in indexes:
+                        indexes.append(index)
         try:
-            receipt = self._repository.get(owner_id, execution_id)
-        except ConsoleRepositoryError as error:
-            raise self._repository_error(error) from error
-        if receipt.execution.workspace_id != workspace_id:
-            raise ConsoleServiceError(
-                404, "console_execution_not_found", "Console execution was not found"
-            )
+            with (report_progress(progress) if phase != "exporting" else nullcontext()):
+                yield state
+        except Exception as error:
+            with self._active_targets_lock:
+                state["phase"] = "cancelled" if isinstance(error, PostgresConsoleCancelledError) else "failed"
+            raise
+        finally:
+            with self._active_targets_lock:
+                state["active"] -= 1
+                state["elapsedMs"] = int((time.monotonic() - started) * 1000)
+                if state["active"] == 0 and state["phase"] == phase:
+                    state["phase"] = "ready"
+
+    def activity(self, owner_id: str, execution_id: str) -> dict:
+        receipt = self.get_owned(owner_id, execution_id)
+        with self._active_targets_lock:
+            state = dict(self._activity.get(execution_id, {}))
+            target = self._active_targets.get(execution_id)
+        with self._transient_results_lock:
+            retained = self._active_read_sessions.get(execution_id)
+            if retained is not None:
+                target = retained.target
+        active = bool(state.get("active")) or receipt.status == "running"
+        record = self._repository.get(owner_id, execution_id)
+        result = {
+            "executionId": execution_id,
+            "phase": state.get("phase", receipt.status),
+            "statementIndex": state.get("statementIndex"),
+            "completedStatementIndexes": state.get("completedStatementIndexes", receipt.completed_statement_indexes),
+            "fetchedRows": state.get("fetchedRows", 0),
+            "elapsedMs": int((time.monotonic() - state["started"]) * 1000) if active and "started" in state else state.get("elapsedMs", 0),
+            "cancellable": active,
+            "transactionStatus": None,
+            "databaseState": None, "waitEventType": None, "waitEvent": None,
+            "blockerPids": [], "monitoringAvailable": False,
+            "monitoringMessage": None, "statementTimeoutMs": None, "lockTimeoutMs": None,
+        }
+        if receipt.status in {"failed", "cancelled"}:
+            result["phase"] = receipt.status
+        if receipt.transaction_id:
+            result["transactionStatus"] = self.get_transaction(owner_id, receipt.workspace_id, receipt.transaction_id).status
+        monitor = getattr(self._postgres, "console_activity", None)
+        backend_pid = retained.postgres.backend_pid if retained is not None else record.backend_pid
+        if active and target is not None and backend_pid and callable(monitor):
+            try:
+                result.update(monitor(target, backend_pid, started_before=state.get("backendObservedAt", receipt.created_at)))
+            except Exception:
+                result["monitoringMessage"] = "Database activity is temporarily unavailable; execution continues."
+        return result
+
+    def page(self, owner_id, workspace_id, execution_id, result_id, cursor) -> ConsoleResultPage:
+        receipt = self.get(owner_id, workspace_id, execution_id)
         now = self._clock()
         with self._transient_results_lock:
             self._purge_transient_results(now)
             result = self._transient_results.get(result_id)
-            if (
-                result is None
-                or result.owner_id != owner_id
-                or result.workspace_id != workspace_id
-                or result.execution_id != execution_id
-            ):
-                raise ConsoleServiceError(
-                    410,
-                    "console_result_replay_required",
-                    "This result is no longer in transient memory; run the query again",
-                )
+            if result is None or result.pending_close or result.owner_id != owner_id or result.execution_id != receipt.id:
+                raise ConsoleServiceError(410, "console_result_replay_required", "This result is no longer available; run the query again")
             offset = 0
             if cursor is not None:
-                cursor_value = self._result_cursors.pop(cursor, None)
-                if (
-                    cursor_value is None
-                    or cursor_value[0] != result_id
-                    or cursor_value[2] <= now
-                ):
-                    raise ConsoleServiceError(
-                        410,
-                        "console_result_gone",
-                        "This result page cursor has expired or was already used",
-                    )
-                offset = cursor_value[1]
-            if result.read_session is None:
-                rows = result.query.rows[offset : offset + result.page_size]
-            else:
-                try:
-                    if execution_id in self._active_read_sessions:
-                        self._active_read_sessions.move_to_end(execution_id)
-                    fetched = result.read_session.page(
-                        result.query.statement_index, offset, result.page_size
-                    )
-                    rows = fetched
-                except PostgresGatewayError as error:
-                    if isinstance(error, PostgresConsoleCancelledError):
-                        self._discard_read_snapshot(execution_id)
-                    raise self._postgres_error(error) from error
+                value = self._result_cursors.pop(cursor, None)
+                if value is None or value[0] != result_id or value[2] <= now:
+                    raise ConsoleServiceError(410, "console_result_gone", "This result page cursor has expired or was already used")
+                offset = value[1]
+            result.active_exports += 1  # A lease also protects in-flight page fetches.
+            if execution_id in self._active_read_sessions:
+                self._active_read_sessions.move_to_end(execution_id)
+        try:
+            with self._operation(execution_id, "fetching", result.query.statement_index) as state:
+                rows = result.query.rows[offset:offset + result.page_size] if result.read_session is None else result.read_session.page(result.query.statement_index, offset, result.page_size)
+                buffered = getattr(result.read_session, "has_buffered_rows", lambda _: False)(result.query.statement_index)
+                with self._active_targets_lock:
+                    state["fetchedRows"] = state.get("fetchedRows", 0) + len(rows)
             next_offset = offset + len(rows)
+            count = result.query.row_count
+            has_more = (len(rows) == result.page_size or buffered) if result.read_session is not None and count is None else next_offset < (count if count is not None else len(result.query.rows))
+            if not has_more:
+                with self._active_targets_lock:
+                    indexes = state.setdefault("completedStatementIndexes", [])
+                    if result.query.statement_index not in indexes:
+                        indexes.append(result.query.statement_index)
             next_cursor = None
-            row_count = result.query.row_count
-            buffered_rows = False
-            if result.read_session is not None:
-                has_buffered_rows = getattr(result.read_session, "has_buffered_rows", None)
-                if callable(has_buffered_rows):
-                    buffered_rows = has_buffered_rows(result.query.statement_index)
-            has_more = (len(fetched) == result.page_size or buffered_rows) if result.read_session is not None and result.query.row_count is None else (
-                next_offset < (row_count if row_count is not None else len(result.query.rows)))
-            if has_more:
-                next_cursor = f"crc_{secrets.token_hex(16)}"
-                self._result_cursors[next_cursor] = (
-                    result_id, next_offset, result.expires_at
-                )
-            return ConsoleResultPage(
-                execution_id=execution_id,
-                result_id=result_id,
-                columns=list(result.query.columns),
-                rows=[list(row) for row in rows],
-                next_cursor=next_cursor,
-                truncated=result.query.truncated,
-                expires_at=result.expires_at,
-            )
+            with self._transient_results_lock:
+                if has_more and not result.pending_close:
+                    next_cursor = f"crc_{secrets.token_hex(16)}"
+                    self._result_cursors[next_cursor] = (result_id, next_offset, result.expires_at)
+            return ConsoleResultPage(execution_id=execution_id, result_id=result_id,
+                columns=list(result.query.columns), rows=[list(row) for row in rows],
+                next_cursor=next_cursor, truncated=result.query.truncated, expires_at=result.expires_at)
+        except PostgresGatewayError as error:
+            if isinstance(error, (PostgresConsoleCancelledError, PostgresConsoleQueryError)):
+                with self._transient_results_lock:
+                    for item in self._transient_results.values():
+                        if item.execution_id == execution_id:
+                            item.pending_close = True
+            raise self._postgres_error(error) from error
+        finally:
+            with self._transient_results_lock:
+                result.active_exports -= 1
+                self._purge_transient_results(self._clock())
 
     def close_result(self, owner_id, workspace_id, execution_id, result_id) -> None:
         try:
@@ -940,7 +1004,11 @@ class ConsoleService:
         except ConsoleRepositoryError as error:
             raise self._repository_error(error) from error
         with self._transient_results_lock:
-            self._transient_results.pop(result_id, None)
+            current = self._transient_results.get(result_id)
+            if current is not None and current.active_exports:
+                current.pending_close = True
+            else:
+                self._transient_results.pop(result_id, None)
             self._result_cursors = {
                 token: value for token, value in self._result_cursors.items()
                 if value[0] != result_id
@@ -970,6 +1038,7 @@ class ConsoleService:
             result = self._transient_results.get(result_id)
             if (
                 result is None
+                or result.pending_close
                 or result.owner_id != owner_id
                 or result.workspace_id != workspace_id
                 or result.execution_id != execution_id
@@ -982,63 +1051,54 @@ class ConsoleService:
             result.active_exports += 1
 
         def stream() -> Iterator[bytes]:
-            offset = 0
-            try:
-                buffer = io.StringIO(newline="")
-                writer = csv.writer(buffer)
-                writer.writerow([column.name for column in result.query.columns])
-                yield buffer.getvalue().encode("utf-8")
-                row_count = result.query.row_count
-                while row_count is None or offset < row_count:
-                    if result.read_session is None:
-                        rows = result.query.rows[
-                            offset : offset + result.page_size
-                        ]
-                    else:
-                        export_page = getattr(
-                            result.read_session, "export_page", result.read_session.page
-                        )
-                        rows = export_page(
-                            result.query.statement_index, offset, result.page_size
-                        )
-                    if not rows:
-                        break
+            with self._operation(execution_id, "exporting", result.query.statement_index) as state:
+                offset = 0
+                try:
                     buffer = io.StringIO(newline="")
                     writer = csv.writer(buffer)
-                    writer.writerows(rows)
+                    writer.writerow([column.name for column in result.query.columns])
                     yield buffer.getvalue().encode("utf-8")
-                    offset += len(rows)
-            except PostgresConsoleCancelledError:
-                with self._transient_results_lock:
-                    self._discard_read_snapshot(execution_id)
-                raise
-            finally:
-                with self._transient_results_lock:
-                    current = self._transient_results.get(result_id)
-                    if current is not None:
-                        current.active_exports = max(0, current.active_exports - 1)
+                    row_count = result.query.row_count
+                    while row_count is None or offset < row_count:
+                        if result.read_session is None:
+                            rows = result.query.rows[
+                                offset : offset + result.page_size
+                            ]
+                        else:
+                            export_page = getattr(
+                                result.read_session, "export_page", result.read_session.page
+                            )
+                            rows = export_page(
+                                result.query.statement_index, offset, result.page_size
+                            )
+                            with self._active_targets_lock:
+                                state["fetchedRows"] = state.get("fetchedRows", 0) + len(rows)
+                        if not rows:
+                            break
+                        buffer = io.StringIO(newline="")
+                        writer = csv.writer(buffer)
+                        writer.writerows(rows)
+                        yield buffer.getvalue().encode("utf-8")
+                        offset += len(rows)
+                    with self._active_targets_lock:
+                        indexes = state.setdefault("completedStatementIndexes", [])
+                        if result.query.statement_index not in indexes:
+                            indexes.append(result.query.statement_index)
+                except (PostgresConsoleCancelledError, PostgresConsoleQueryError):
+                    with self._transient_results_lock:
+                        for item in self._transient_results.values():
+                            if item.execution_id == execution_id:
+                                item.pending_close = True
+                    raise
+                finally:
+                    with self._transient_results_lock:
+                        current = self._transient_results.get(result_id)
+                        if current is not None:
+                            current.active_exports = max(0, current.active_exports - 1)
+                        self._purge_transient_results(self._clock())
+
 
         return stream()
-
-    def _discard_read_snapshot(self, execution_id: str) -> None:
-        """A cancelled FETCH aborts its transaction; release it for replay.
-
-        Caller holds the transient-results lock. Do not label a user-requested
-        cancellation as a capacity eviction or discard another execution.
-        """
-        active = self._active_read_sessions.pop(execution_id, None)
-        result_ids = {
-            result_id for result_id, result in self._transient_results.items()
-            if result.execution_id == execution_id
-        }
-        for result_id in result_ids:
-            self._transient_results.pop(result_id, None)
-        self._result_cursors = {
-            token: value for token, value in self._result_cursors.items()
-            if value[0] not in result_ids
-        }
-        if active is not None:
-            active.postgres.close()
 
     def _record_history(self, record: ConsoleExecutionRecord) -> None:
         if self._query_history_limit == 0 or record.execution.workspace_id is None:
@@ -1066,6 +1126,7 @@ class ConsoleService:
         expires_at: datetime,
         *,
         read_session: PostgresConsoleReadSession | None = None,
+        read_target: ResolvedPostgresConnection | None = None,
     ) -> None:
         summaries = {item.statement_index: item for item in execution.results}
         with self._transient_results_lock:
@@ -1091,6 +1152,7 @@ class ConsoleService:
                     connection_id=record.target.connection_id,
                     connection_revision=record.target.connection_revision,
                     postgres=read_session,
+                    target=read_target,
                 )
                 self._active_read_sessions.move_to_end(execution.id)
                 while (
@@ -1111,9 +1173,13 @@ class ConsoleService:
                     self._evict_read_session(evicted_execution, evicted)
 
     def _purge_transient_results(self, now: datetime) -> None:
+        with self._active_targets_lock:
+            for key, value in list(self._activity.items()):
+                if not value.get("active") and time.monotonic() - value.get("started", 0) > self._result_ttl.total_seconds():
+                    self._activity.pop(key, None)
         expired = {
             result_id for result_id, result in self._transient_results.items()
-            if result.expires_at <= now and result.active_exports == 0
+            if (result.expires_at <= now or result.pending_close) and result.active_exports == 0
         }
         for result_id in expired:
             self._transient_results.pop(result_id, None)
@@ -1132,6 +1198,23 @@ class ConsoleService:
             if execution_id in referenced:
                 continue
             self._active_read_sessions.pop(execution_id).postgres.close()
+
+    def _reclaim_read_session(self, connection_id, connection_revision, global_capacity=False):
+        """Release one inactive read cursor for shared retained-session admission."""
+        with self._transient_results_lock:
+            candidate = next(((execution_id, active)
+                for execution_id, active in self._active_read_sessions.items()
+                if (global_capacity or (active.connection_id == connection_id
+                    and active.connection_revision == connection_revision))
+                and not any(result.execution_id == execution_id and result.active_exports > 0
+                            for result in self._transient_results.values())), None)
+            if candidate is None:
+                return False
+            execution_id, active = candidate
+            self._active_read_sessions.pop(execution_id)
+            self._evict_read_session(execution_id, active,
+                limit_name="postgres.connections.maximum_total" if global_capacity else "postgres.connections.maximum_per_identity")
+            return True
 
     def _make_read_session_capacity(self, target: ConsoleTarget) -> None:
         """Release the oldest inactive cursor before gateway admission blocks."""
@@ -1519,6 +1602,11 @@ class ConsoleService:
                     observed_value=error.observed,
                 ),
             )
+        if isinstance(error, PostgresConsoleQueryError):
+            return ConsoleServiceError(502, error.code, str(error), details={
+                "sqlstate": error.sqlstate, "statementIndex": error.statement_index,
+                "timeoutReason": "statement_timeout" if "statement timeout" in str(error).lower() else "lock_timeout" if "lock timeout" in str(error).lower() else None,
+            })
         return ConsoleServiceError(502, error.code, str(error))
 
     def _workspace(self, owner_id: str, workspace_id: str):

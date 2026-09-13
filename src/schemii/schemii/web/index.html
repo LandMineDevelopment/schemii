@@ -83,7 +83,7 @@
           <button id="new-query-tool" type="button" data-tool-layers="sql" data-ui-icon="new-query" title="New query" aria-label="New query"></button>
           <button id="saved-queries-tool" type="button" data-tool-layers="sql" data-ui-icon="history" title="Saved queries and history" aria-label="Open saved queries and history" aria-expanded="false"></button>
           <button id="save-query-tool" type="button" data-tool-layers="sql" data-ui-icon="save" title="Save current query" aria-label="Save current query"></button>
-          <button id="write-mode-tool" type="button" data-tool-layers="sql" data-ui-icon="write" title="Use write transaction" aria-label="Use write transaction" aria-pressed="false" disabled></button>
+          <button id="write-mode-tool" type="button" data-tool-layers="sql" data-ui-icon="write" title="Use write mode" aria-label="Use write mode" aria-pressed="false" disabled></button>
           <button id="run-sql-button" type="button" data-tool-layers="sql" data-ui-icon="run" title="Run current statement" aria-label="Run current statement" disabled></button>
           <button id="run-all-sql-button" type="button" data-tool-layers="sql" data-ui-icon="run-all" title="Run all statements" aria-label="Run all statements" disabled></button>
           <button class="stop" id="cancel-sql-button" type="button" data-tool-layers="sql" data-ui-icon="stop" title="Stop query" aria-label="Stop query" disabled hidden></button>
@@ -230,7 +230,7 @@
 
         <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" data-change-scope="sql" aria-label="SQL workspace" hidden>
           <header class="sql-head">
-            <div><small>Bounded PostgreSQL access</small><h1>SQL Console</h1></div>
+            <div><small>PostgreSQL</small><h1>SQL Console</h1></div>
             <dl aria-label="Current PostgreSQL target">
               <div><dt>Connection</dt><dd id="sql-target-connection">No workspace open</dd></div>
               <div><dt>Database</dt><dd id="sql-target-database">No workspace open</dd></div>
@@ -241,8 +241,8 @@
             <strong>WRITE MODE</strong>
             <div class="sql-transaction-controls">
               <span id="sql-transaction-status">No write transaction open</span>
-              <button class="ui-button compact" id="rollback-sql-button" type="button" hidden>Roll back</button>
-              <button class="ui-button compact primary" id="commit-sql-button" type="button" hidden>Commit</button>
+              <button class="ui-icon-button compact" id="rollback-sql-button" type="button" data-ui-icon="undo" aria-label="Roll back" hidden></button>
+              <button class="ui-icon-button compact" id="commit-sql-button" type="button" data-ui-icon="check" aria-label="Commit" hidden></button>
             </div>
           </section>
           <aside class="sql-query-drawer" id="sql-query-drawer" aria-label="Saved queries and recent history" hidden>
@@ -634,6 +634,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       </header>
       <section class="ai-assistant__context" aria-label="Assistant context">
         <label><span>Model</span><select id="ai-assistant-model" aria-label="AI model"></select></label>
+        <label><span>Reasoning</span><select id="ai-assistant-reasoning" aria-label="AI reasoning level"></select></label>
         <button class="ai-permissions-summary" id="ai-assistant-permissions" type="button"><span>Permissions</span><strong id="ai-assistant-permissions-copy">Explain only</strong></button>
         <p id="ai-assistant-disclosure">The assistant sees the saved workspace design. Every proposed change still requires your review.</p>
       </section>
@@ -657,10 +658,13 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <div class="ai-settings-body">
           <form class="ai-settings-preferences" id="ai-settings-form">
             <label class="ai-settings-model"><span>Model</span><select id="ai-settings-model" required></select><small>Switch between available providers between messages. The next model receives this conversation’s retained history; earlier answers remain unchanged.</small></label>
-            <fieldset class="ai-permission-list">
+            <label class="ai-settings-model"><span>Reasoning level</span><select id="ai-settings-reasoning" aria-label="Reasoning level"></select><small>Higher levels can take longer. Model default keeps the provider’s default behavior.</small></label>
+            <fieldset class="ai-permission-list" data-context-permissions>
               <legend>Context access</legend>
+              <label><span><strong>Enable all context access</strong><small>Or choose individual context permissions below. Changes take effect when you save settings.</small></span><input type="checkbox" data-context-select-all aria-label="Enable all context access"></label>
               <label><span><strong>Inspect live catalog</strong><small>Allow access to PostgreSQL object metadata. This does not grant query or migration execution.</small></span><input type="checkbox" name="liveCatalog"></label>
-              <label><span><strong>Analyze query results</strong><small>Allow the model to inspect temporary rows and compare query results. Executing queries has its own permissions below.</small></span><input type="checkbox" name="structuredDataRead"></label>
+              <label><span><strong>Analyze query results</strong><small>Allow the model to inspect temporary rows and query plans, and compare results. Running queries or obtaining plans requires its own permission below.</small></span><input type="checkbox" name="structuredDataRead"></label>
+              <label><span><strong>Monitor live queries</strong><small>Allow the model to inspect query status, waits, blockers, and transaction state in this workspace. This does not allow running or cancelling queries.</small></span><input type="checkbox" name="monitorQueries"></label>
             </fieldset>
             <p class="ai-permission-help">Choose each action independently. Related “Ask per batch” actions share one approval; Disabled actions remain blocked.</p>
             <div id="ai-permission-actions" class="ai-permission-actions"></div>

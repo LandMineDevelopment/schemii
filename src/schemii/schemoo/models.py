@@ -17,10 +17,23 @@ class Contract(ApiModel):
 
 class ModelEdge(Contract):
     id: Identifier
-    relationshipId: Identifier
+    relationshipId: Identifier | None = None
+    kind: Literal["foreign_key", "logical"] = "foreign_key"
+    sourceColumn: Identifier | None = None
+    targetColumn: Identifier | None = None
+    cardinality: Literal["many_to_many", "many_to_one", "one_to_many", "one_to_one"] = "many_to_many"
     source: Identifier
     target: Identifier
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def relationship_definition(self):
+        if self.kind == "logical":
+            if self.relationshipId or not self.sourceColumn or not self.targetColumn:
+                raise ValueError("Logical relationships require two columns and no foreign-key ID.")
+        elif not self.relationshipId or self.sourceColumn or self.targetColumn:
+            raise ValueError("Foreign-key relationships require a live relationship ID and cannot override columns.")
+        return self
 
 
 class SourceColumnContract(Contract):
@@ -68,7 +81,7 @@ class Condition(Contract):
     domain: DomainValues | None = Field(default=None, description="Optional value-picker lookup only; it does not bind the condition. Always set table and column separately.")
     table: str = Field(default="", max_length=200, description="Stable model node ID whose column is filtered, including the exact alias ID. Not a physical table name unless that is also its node ID.")
     column: str = Field(default="", max_length=200, description="Source column name on the bound model node. Required for every usable condition, including parameter comparisons.")
-    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "not_in", "is_null", "not_null"] = "eq"
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "range_contains_date", "in", "not_in", "is_null", "not_null"] = "eq"
     parameterId: str | None = Field(default=None, max_length=200)
     value: FilterValue = None
     allowNull: bool = False
@@ -139,6 +152,7 @@ class ModelScope(Contract):
     id: Identifier
     label: str = Field(default="", max_length=200)
     kind: Literal["required", "conditional"]
+    rowBehavior: Literal["keep_unmatched", "require_matching"] | None = None
     alternatives: list[ScopeAlternative] = Field(default_factory=list, max_length=12)
 
 

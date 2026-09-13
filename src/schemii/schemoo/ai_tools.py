@@ -93,21 +93,49 @@ or modify PostgreSQL tables. There are no raw SQL, schema-write, filesystem or
 shell tools. Query planning compiles saved model rules and exploration inputs;
 execution cannot replace those rules. Preserve exposed-field restrictions and
 repair source drift explicitly without inventing a replacement catalog contract.
+Model edges may use kind=logical with source/target node IDs and sourceColumn/
+targetColumn for an equality join without a database foreign key. Omit
+relationshipId for these edges. Inspect current catalog column types before
+proposing a connection: both columns must have comparable types without casts.
+Casting expressions and configurable join types are not supported. Unknown or
+unsupported types require clarification, not an invented cast or schema change.
+Connections follow the existing starting-table model: the saved default root or
+current Explore root controls traversal and join direction, not the order of
+source/target endpoints. Preserve the user's root and existing filter behavior
+unless explicitly asked to change them. Plan the saved model after editing a
+connection and report any cycle, type, or aggregate-grain validation error.
+Cardinality documents the intended relationship;
+it does not prove uniqueness or override aggregate safety checks. For a closure
+table, connect fact.org_id directly to hierarchy.child_id and filter parent_id
+through a required scope or EXISTS filter. Disable alternate paths that create
+cycles. Retain organization aliases and date predicates when their fields or
+semantics are needed. Never claim a faster plan without measurement. Logical
+relationships use the same model-create/update/patch permissions as other edges.
 Enabled alias/relationship paths must remain acyclic. Use distinct occurrences
 of a physical table when separate roles require them; do not assume disabling
 every cycle edge implements the user's intended model.
 
-Required scopes force paths into queries and restrict returned details even when
-their fields are not selected. Conditional scopes prefilter participating sources,
-including intermediate paths, while preserving unmatched parents of optional
-joins. Alternatives are OR choices whose conditions are ANDed. Report row filters
+For a PostgreSQL daterange column, use operator=range_contains_date to test whether
+the range contains a date. Bind a date input with defaultValue=today for a dynamic
+as-of filter, or supply a YYYY-MM-DD literal. This generates column @> DATE value;
+it does not create columns or indexes. Inspect the live catalog first. Do not
+silently replace paired date predicates unless the range's bounds and null
+semantics are known to match. Keep the existing scope kind and rowBehavior.
+Text contains is a separate operator and must not be used for date ranges.
+Scope kind controls activation: required always includes its paths; conditional
+only applies to participating sources, including intermediate paths. Independently,
+rowBehavior=require_matching restricts returned details and excludes unmatched
+parents; keep_unmatched prefilters sources before optional joins. Omitted/null
+rowBehavior preserves legacy behavior: required requires matches, conditional
+keeps unmatched parents. Alternatives are OR choices whose conditions are ANDed. Report row filters
 differ from EXISTS/NOT EXISTS groups: conditions within one existence group apply
 to the same related record. Use separate groups for independent existence tests.
 Ask for consequential ambiguities in role, scope or timing. Explain inclusive
 date boundaries and null end-date behavior when authoring time rules. Today is
 resolved once per compilation; do not claim latest-row or recursive hierarchy
-semantics the model does not support. Check fanout warnings before interpreting
-aggregates; one-to-many joins can multiply sums.
+semantics the model does not support. The compiler rejects counts, sums and averages when joins can multiply their
+source records. Create separate aggregate sources at each measure's grain instead.
+Min, max and count-distinct tolerate repeated input values.
 
 Execution receipts describe actual status. Reserved or running is not succeeded.
 After a preview, inspect its execution/result IDs, fetch an authorized bounded
@@ -182,6 +210,8 @@ ACTIONS = {
         description="List owned source IDs, names and databases without credentials or network details."),
     "catalog": _descriptor("Inspect source catalog", "/catalog", "GET", group="Sources"),
     "list_models": _descriptor("List semantic models", "/models", "GET"),
+    "export_model": _descriptor("Download model JSON", "/models/{model_id}", "GET", description="Prepare a browser download of this owned model; never exports database rows."),
+    "export_result": _descriptor("Download result CSV", "/query-executions/{execution_id}/results/{result_id}/export.csv", "GET", group="Results", description="Prepare a browser CSV download of an existing owned result. Does not send row values to the AI."),
     "get_model": _descriptor("Read semantic model", "/models/{model_id}", "GET"),
     "create_model": _descriptor("Create semantic model", "/models", "POST", mutates=True),
     "duplicate_model": _descriptor("Duplicate semantic model", "/models/{model_id}/duplicate", "POST", mutates=True,
@@ -207,6 +237,9 @@ ACTIONS = {
     "plan_model": _descriptor("Plan model query", "/models/{model_id}/plan", "POST"),
     "execute_model": _descriptor("Run model preview", "/models/{model_id}/executions", "POST", group="Queries",
         description="Execute the saved model's compiled read query. Returns a completed receipt; read rows separately."),
+    "explain_model": _descriptor("Explain query plans", "/models/{model_id}/explain", "POST", group="Queries"),
+    "analyze_model": _descriptor("Run & analyze query plans", "/models/{model_id}/explain", "POST", group="Queries"),
+    "get_activity": _descriptor("Monitor live queries", "/query-executions/{execution_id}/activity", "GET", group="Results"),
     "parameter_values": _descriptor("Browse parameter values", "/models/{model_id}/parameter-values", "POST", group="Queries"),
     "domain_values": _descriptor("Browse draft domain values", "/models/{model_id}/domain-values", "POST", group="Queries"),
     "get_execution": _descriptor("Inspect query execution", "/query-executions/{execution_id}", "GET", group="Results"),
@@ -218,6 +251,8 @@ ACTIONS = {
 for _key, _value in ACTIONS.items():
     _value.update(id=_key, modes=["disabled", "ask", "automatic"],
                   apiPath=("/api/v1/common" if _value["group"] == "Results" else "/api/v1/schemoo") + _value["path"])
+for _key in ("explain_model", "analyze_model", "get_activity", "export_model", "export_result"):
+    ACTIONS[_key]["defaultMode"] = "disabled"
 ACTIONS["list_connections"]["apiPath"] = "/api/v1/connections"
 ACTIONS["delete_preview"]["destructive"] = True
 
@@ -228,6 +263,7 @@ _BODIES = {
     "update_layout": LayoutUpdate, "update_explore": ExploreUpdate,
     "create_preview": PreviewCreate, "update_preview": PreviewUpdate,
     "validate_model": routes.ValidateRequest, "plan_model": routes.PlanRequest,
+    "explain_model": routes.ExecutionRequest, "analyze_model": routes.ExecutionRequest,
     "execute_model": routes.ExecutionRequest, "parameter_values": routes.ParameterValuesRequest,
     "domain_values": routes.AuthorDomainRequest,
 }
@@ -235,8 +271,9 @@ _ARGUMENTS = {
     **{name: _bound(model) for name, model in _BODIES.items() if name != "create_model"},
     "create_model": routes.CreateRequest, "catalog": CatalogArguments,
     "list_models": Contract, "list_connections": Contract,
-    "get_model": ModelReference, "delete_model": DeleteArguments,
+    "get_model": ModelReference, "export_model": ModelReference, "export_result": ResultReference, "delete_model": DeleteArguments,
     "list_previews": ModelReference, "delete_preview": DeletePreviewArguments,
+    "get_activity": ExecutionReference,
     "get_execution": ExecutionReference, "get_result_page": PageArguments,
     "cancel_execution": ExecutionReference, "close_result": ResultReference,
 }
@@ -333,6 +370,18 @@ def execute_action(services, owner, current_model_id, action):
     name, args = parsed.operation, parsed.args
     if name == "list_connections":
         return {"connections": _connections(services, owner)}
+    if name == "export_model":
+        if not (args.model_id or current_model_id):
+            raise ApiProblem(422, "ai_model_required", "Choose a semantic model or provide modelId.")
+        with routes.api_errors():
+            model = services.models.get(owner, args.model_id or current_model_id)
+        return {"effect": "browser_download", "url": f"/api/v1/schemoo/models/{model.id}", "filename": "semantic-model.json"}
+    if name == "export_result":
+        with routes.api_errors():
+            execution = services.console.get_owned(owner, args.execution_id)
+        if not any(item.id == args.result_id for item in execution.results):
+            raise ApiProblem(404, "console_result_not_found", "The result does not belong to this execution.")
+        return {"effect": "browser_download", "url": f"/api/v1/common/query-executions/{args.execution_id}/results/{args.result_id}/export.csv", "filename": "query-result.csv"}
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(services=services)))
     principal = Principal(user_id=owner, authentication_source="local_prototype")
     kwargs = {"request": request, "principal": principal}
@@ -349,15 +398,17 @@ def execute_action(services, owner, current_model_id, action):
         kwargs["expected_revision"] = args.expected_revision
     elif name == "delete_preview":
         kwargs["expected_revision"] = args.expected_revision
-    elif name in {"get_execution", "cancel_execution", "get_result_page", "close_result"}:
+    elif name in {"get_execution", "get_activity", "cancel_execution", "get_result_page", "close_result"}:
         kwargs.update(args.model_dump())
     if name in {"update_preview", "delete_preview"}:
         kwargs["preview_id"] = args.preview_id
-    handler = {"catalog": routes.get_catalog, "domain_values": routes.author_domain_values}.get(name)
+    if name in {"explain_model", "analyze_model"}:
+        kwargs["body"] = routes.ExplainRequest(**kwargs["body"].model_dump(), analyze=name == "analyze_model")
+    handler = {"get_activity": query_routes.get_execution_activity, "analyze_model": routes.explain_model, "catalog": routes.get_catalog, "domain_values": routes.author_domain_values}.get(name)
     if handler is None:
         handler = getattr(query_routes if ACTIONS[name]["group"] == "Results" else routes, name)
     tasks = None
-    if name in {"execute_model", "parameter_values", "domain_values"}:
+    if name in {"execute_model", "explain_model", "analyze_model", "parameter_values", "domain_values"}:
         tasks = BackgroundTasks()
         kwargs["background_tasks"] = tasks
     if name == "update_model":

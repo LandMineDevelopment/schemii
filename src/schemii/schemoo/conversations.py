@@ -38,24 +38,41 @@ class Conversations:
     def modes(self, modes):
         if set(modes) - self.adapter.ACTIONS.keys() or any(v not in {"disabled","ask","automatic"} for v in modes.values()):
             raise ApiProblem(422,"ai_permission_invalid","Unknown action or permission mode.")
-        return {key:modes.get(key,"ask" if value["mutates"] or value.get("readsRows") or value.get("group") == "Queries" else "automatic") for key,value in self.adapter.ACTIONS.items()}
+        return {key:modes.get(key,value.get("defaultMode", "ask" if value["mutates"] or value.get("readsRows") or value.get("group") == "Queries" else "automatic")) for key,value in self.adapter.ACTIONS.items()}
+
+    def _require_reasoning(self, owner, provider, model, effort):
+        if effort == "default":
+            return
+        if self.runtime is None:
+            raise ApiProblem(422, "reasoning_unsupported", "Choose Default until a reasoning-capable model is available.")
+        try:
+            self.runtime.require_reasoning_effort(owner, provider, model, effort)
+        except PiError as error:
+            raise ApiProblem(error.status, error.code, str(error)) from error
 
     def settings(self, owner, value=None):
         if value is not None:
+            previous = self.store.settings(owner)
+            value = {**previous, **value, "reasoningEffort": value.get("reasoningEffort") or previous.get("reasoningEffort", "default")}
+            if (previous.get("providerId"), previous.get("aiModelId"), previous.get("reasoningEffort", "default")) != (value.get("providerId"), value.get("aiModelId"), value["reasoningEffort"]):
+                self._require_reasoning(owner, value.get("providerId"), value.get("aiModelId"), value["reasoningEffort"])
             value = {**value,"modes":self.modes(value.get("modes",{}))}
         saved=self.store.settings(owner,value)
-        return {"providerId":None,"aiModelId":None,**saved,"modes":self.modes(saved.get("modes",{})),"actions":list(self.adapter.ACTIONS.values())}
+        return {"providerId":None,"aiModelId":None,"reasoningEffort":"default",**saved,"modes":self.modes(saved.get("modes",{})),"actions":list(self.adapter.ACTIONS.values())}
 
     def create(self, owner, body):
         # Ownership checked before any conversation gets stored.
         self.adapter.context(self.services,owner,body["modelId"])
-        value={"id":uid("chat"),"modelId":body["modelId"],"providerId":body["providerId"],"aiModelId":body["aiModelId"],
+        effort = body.get("reasoningEffort") or "default"
+        self._require_reasoning(owner, body["providerId"], body["aiModelId"], effort)
+        value={"reasoningEffort":effort,"id":uid("chat"),"modelId":body["modelId"],"providerId":body["providerId"],"aiModelId":body["aiModelId"],
                "modes":self.modes(body.get("modes",{})),"revision":1,"status":"idle","title":"New conversation",
                "messages":[],"activity":[],"pending":None,"error":None,"createdAt":now(),"updatedAt":now(),"modelRevision":None}
         return self.store.create(owner,value)
 
     def snapshot(self, owner, chat_id):
         value=self.store.get(owner,chat_id)
+        value.setdefault("reasoningEffort", "default")
         value["modes"]=self.modes(value["modes"])
         with self.lock:
             self._prune_transient()
@@ -137,6 +154,7 @@ class Conversations:
             raise ApiProblem(503,"ai_unavailable","The AI sidecar is unavailable or disabled.")
         try:
             self.runtime.require_available_model(owner,chat["providerId"],chat["aiModelId"])
+            self._require_reasoning(owner, chat["providerId"], chat["aiModelId"], chat.get("reasoningEffort", "default"))
         except PiError as error:
             raise ApiProblem(error.status,error.code,str(error)) from error
 
@@ -158,11 +176,14 @@ class Conversations:
         return value
 
     def preferences(self, owner, chat_id, body):
-        modes=self.modes(body["modes"])
         with self.lock:
             value=self.store.get(owner,chat_id)
+            modes=self.modes(body.get("modes", value["modes"]))
+            effort = body.get("reasoningEffort") or value.get("reasoningEffort", "default")
+            if (value["providerId"], value["aiModelId"], value.get("reasoningEffort", "default")) != (body["providerId"], body["aiModelId"], effort):
+                self._require_reasoning(owner, body["providerId"], body["aiModelId"], effort)
             def change(current):
-                current.update(modes=modes,providerId=body["providerId"],aiModelId=body["aiModelId"])
+                current.update(modes=modes,providerId=body["providerId"],aiModelId=body["aiModelId"],reasoningEffort=effort)
                 if current["status"] in {"working","waiting_approval"}:
                     current.update(status="idle",pending=None,error="Permissions or model changed. Send a message to continue with the new settings.")
                 self._message(current,"system","Assistant model or permissions changed. Current permissions apply immediately.")
@@ -254,10 +275,12 @@ class Conversations:
                     receipt={"id":uid("act"),"operation":operation,"status":status,"createdAt":now(),"modelId":action.get("args",{}).get("modelId") or chat["modelId"]}
                     # Keep replayable query definitions and small reference receipts,
                     # never pages, model snapshots or arbitrary provider text.
-                    if operation in {"execute_model","parameter_values","domain_values","get_execution","get_result_page"}:
+                    if operation in {"execute_model","explain_model","analyze_model","parameter_values","domain_values","get_execution","get_result_page"}:
                         receipt["action"]=action
                         execution=result.get("execution",{}) if isinstance(result,dict) else {}
                         receipt["executionId"]=execution.get("id")
+                    if status == "succeeded" and operation in {"export_model", "export_result"}:
+                        receipt["result"] = {key: result[key] for key in ("effect", "url", "filename")}
                     value["activity"].append(receipt)
                     if status == "succeeded" and self.adapter.ACTIONS[operation]["mutates"]:
                         value["modelRevision"]=(value.get("modelRevision") or 0)+1
@@ -342,7 +365,7 @@ class Conversations:
                     record_ai_limit(self.services.metadata.limit_events,limit,self.policy,owner,"schemoo_ai")
                 messages=(final_response_messages(request_system,messages,self.policy.context_bytes) if finalizing else
                     compact_tool_context(request_system,messages,tools,self.policy.context_bytes))
-                reply=self.runtime.run(owner,turn_id,chat["providerId"],chat["aiModelId"],request_system,"",tools,on_text=on_text,is_authorized=lambda:self._authorized(owner,chat_id,turn_id),messages=messages)
+                reply=self.runtime.run(owner,turn_id,chat["providerId"],chat["aiModelId"],request_system,"",tools,on_text=on_text,is_authorized=lambda:self._authorized(owner,chat_id,turn_id),messages=messages,reasoning_effort=chat.get("reasoningEffort", "default"))
                 if not self._authorized(owner,chat_id,turn_id): return
                 if finalizing and reply.tool_calls:
                     raise PiError("invalid_response","The model requested more tools after the action budget. Completed actions remain saved; inspect their receipts before continuing.")

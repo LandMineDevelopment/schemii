@@ -103,7 +103,9 @@ def test_advertised_schema_is_derived_and_only_authorized_tools_are_present():
     full = tool_definitions(AiCapabilities(design_changes=True, raw_sql_read=True,
                                           raw_sql_write=True, structured_data_read=True,
                                           structured_query=True, design_history=True,
-                                          migration_apply=True, sql_write_execute=True))
+                                          migration_apply=True, sql_write_execute=True,
+                                          explain_queries=True, analyze_queries=True,
+                                          monitor_queries=True, raw_console=True, app_actions=True))
     assert {tool["name"] for tool in full} == set(TOOL_CAPABILITIES)
     derived = DESIGN_ACTION.json_schema()
     design = next(tool for tool in full if tool["name"] == "schemii_design_change")["parameters"]

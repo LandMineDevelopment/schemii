@@ -17,6 +17,7 @@ from schemii.common.postgres.console import (
     ConsoleTransactionExecutionCreate,
 )
 from .models import (
+    ConsoleExplainCreate,
     ConsoleHistoryList,
     ConsoleSavedQuery,
     ConsoleSavedQueryCreate,
@@ -24,6 +25,8 @@ from .models import (
     ConsoleSavedQueryUpdate,
 )
 from .service import ConsoleService, ConsoleServiceError
+from schemii.common.postgres.query_plans import build_explain_sql
+from schemii.common.postgres.console.execution import ConsoleStatementValidationError
 
 
 router = APIRouter(tags=["schemii-sql-console"])
@@ -212,6 +215,42 @@ def create_console_execution(
         principal.user_id,
         execution.id,
     )
+    return execution
+
+
+@router.post(
+    "/workspaces/{workspace_id}/console/explain",
+    response_model=ConsoleExecution,
+    status_code=status.HTTP_201_CREATED,
+)
+def explain_console_query(
+    workspace_id: str,
+    body: ConsoleExplainCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    principal: Principal = Depends(get_current_principal),
+) -> ConsoleExecution:
+    """Explain a full read statement; analyze explicitly executes it read-only.
+
+    Uses the same owner, target revision, capacity, result retention, cancellation,
+    and timeout boundaries as a normal console read. Never joins a write session.
+    """
+    try:
+        sql = build_explain_sql(body.sql, body.analyze)
+        execution = _service(request).reserve(
+            principal.user_id, workspace_id,
+            ConsoleExecutionCreate(
+                console_id=body.console_id,
+                expected_workspace_revision=body.expected_workspace_revision,
+                expected_settings_revision=body.expected_settings_revision,
+                mode="managed_read", statements=[sql],
+            ),
+        )
+    except ConsoleStatementValidationError as error:
+        raise ApiProblem(422, error.code, str(error)) from error
+    except ConsoleServiceError as error:
+        raise _problem(error) from error
+    background_tasks.add_task(_service(request).run, principal.user_id, execution.id)
     return execution
 
 

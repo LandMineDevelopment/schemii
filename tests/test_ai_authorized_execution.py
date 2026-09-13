@@ -160,6 +160,27 @@ def test_permission_revoked_before_commit_rolls_back():
     services.console.rollback_transaction.assert_called_once()
 
 
+@pytest.mark.parametrize("sql", [
+    "UPDATE things SET active = true; COMMIT",
+    "ROLLBACK", "BEGIN", "PREPARE TRANSACTION 'escape'",
+    "COPY things FROM STDIN", "COPY things TO '/tmp/things.csv'",
+])
+def test_ai_managed_write_cannot_inherit_human_session_transaction_access(sql):
+    from test_console import console_client, target_workspace
+    from schemii.schemii.console.service import ConsoleServiceError
+
+    api, postgres = console_client()
+    workspace = target_workspace(api)
+    with pytest.raises(ConsoleServiceError):
+        execute_write(api.app.state.services, "user_local_prototype", workspace["id"],
+                      workspace["revision"], {"statements": [sql]})
+    assert len(postgres.transactions) == 1
+    transaction = postgres.transactions[0]
+    assert transaction.executed == []
+    assert transaction.rolled_back
+    assert not transaction.committed
+
+
 def test_cancellation_at_commit_gate_rolls_back_ai_owned_transaction():
     services = write_fixture()
     services.console.commit_transaction.side_effect = AiServiceError(

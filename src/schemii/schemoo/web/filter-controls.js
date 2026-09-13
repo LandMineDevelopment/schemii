@@ -5,7 +5,7 @@ import { modelSelect, domainSelect, disposeSelects } from "./select.js";
 import { exposedFields } from "./model-state.js";
 
 const id = () => crypto.randomUUID();
-const operators = [["eq", "Equals"], ["ne", "Does not equal"], ["in", "Is one of (IN)"], ["not_in", "Is not one of (NOT IN)"], ["gt", ">"], ["gte", "≥"], ["lt", "<"], ["lte", "≤"], ["contains", "Contains"], ["is_null", "Is null"], ["not_null", "Is not null"]];
+const operators = [["eq", "Equals"], ["ne", "Does not equal"], ["in", "Is one of (IN)"], ["not_in", "Is not one of (NOT IN)"], ["gt", ">"], ["gte", "≥"], ["lt", "<"], ["lte", "≤"], ["contains", "Contains"], ["range_contains_date", "Contains date"], ["is_null", "Is null"], ["not_null", "Is not null"]];
 const isList = operator => ["in", "not_in"].includes(operator);
 const listParameter = (alternative, parameter) => alternative.conditions.some(c => c.parameterId === parameter.id && isList(c.operator));
 const asList = value => Array.isArray(value) ? value : value == null || value === "" ? [] : [value];
@@ -94,13 +94,16 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
       refresh();
     });
     if (!fixedField) field.querySelector("input").placeholder = preselected ? `Choose a column from ${preselected.label}` : "Search source or column";
-    const op = select(`${prefix} condition ${index + 1} operator`, operators, condition.operator, value => {
+    const sourceType = catalog.tables.find(t => t.name === draft.nodes.find(n => n.id === condition.table)?.table)?.columns.find(c => c.name === condition.column)?.dataType;
+    const operatorChoices = operators.filter(([value]) => value !== "range_contains_date" || (!allowToday && sourceType === "daterange") || condition.operator === value);
+    const op = select(`${prefix} condition ${index + 1} operator`, operatorChoices, condition.operator, value => {
       if (isList(value) !== isList(condition.operator)) {
         condition.value = isList(value) ? (condition.value != null && condition.value !== "" ? [condition.value] : []) : null;
         const parameter = inputs.find(p => p.id === condition.parameterId);
         if (parameter) parameter.defaultValue = isList(value) ? asList(parameter.defaultValue) : asSingle(parameter.defaultValue);
       }
       condition.operator = value;
+      if (value === "range_contains_date") delete condition.domain;
       if (["is_null", "not_null"].includes(value)) {
         delete condition.parameterId; delete condition.value; delete condition.allowNull; delete condition.domain; delete condition.valueSource;
       }
@@ -133,8 +136,9 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
         const literalInput = condition.domain && onLoadDomain
           ? domainSelect({ label, multiple, value: condition.value, loadOptions: search => onLoadDomain({ draft, domain: sourceDomain(condition, draft), search }), onChange: value => { condition.value = value; onChange(); } })
           : literalControl(label, condition.value, value => { condition.value = value; onChange(); }, multiple, "Enter a fixed value");
+        if (condition.operator === "range_contains_date") literalInput.type = "date";
         const literal = labeled(multiple ? "Fixed values" : "Fixed value", literalInput); literal.classList.add("mf-wide"); row.append(literal);
-        if (onLoadDomain) {
+        if (onLoadDomain && condition.operator !== "range_contains_date") {
           const toggle = element("input", { attrs: { type: "checkbox", "aria-label": `${prefix} condition ${index + 1} choose fixed value from domain` } });
           toggle.checked = !!condition.domain;
           toggle.onchange = () => {
@@ -178,8 +182,11 @@ export function renderFilterDefinition(host, options) {
     content.append(element("div", { className: "mf-heading" }, [
       labeled("Name", input(`Scope ${scope.id} name`, scope.label, value => { scope.label = value; onChange(); })),
     ]));
-    content.append(labeled("Requirement", select(`Requirement for ${scope.label}`, [["required", "Required model scope"], ["conditional", "Conditional model parameter"]], scope.kind, value => { scope.kind = value; refresh(); }), "scopes"));
+    content.append(labeled("Requirement", select(`Requirement for ${scope.label}`, [["required", "Required model scope"], ["conditional", "Conditional model parameter"]], scope.kind, value => { scope.rowBehavior ||= scope.kind === "required" ? "require_matching" : "keep_unmatched"; scope.kind = value; refresh(); }), "scopes"));
     content.append(note(scope.kind === "required" ? "Applies to every query. Schemoo includes the related source even when none of its columns are selected." : "Applies only when a query uses or traverses a bound source. It does not force that source into the query."));
+    const rowBehavior = scope.rowBehavior || (scope.kind === "required" ? "require_matching" : "keep_unmatched");
+    content.append(labeled("Matching rows", select(`Matching rows for ${scope.label}`, [["keep_unmatched", "Keep unmatched parent rows"], ["require_matching", "Require matching rows"]], rowBehavior, value => { scope.rowBehavior = value; refresh(); })));
+    content.append(note(rowBehavior === "keep_unmatched" ? "Filters the bound source before joining. Parent rows remain when related records do not match; their related columns are empty. A filter on the starting source still removes its nonmatching rows." : "Removes returned rows that do not satisfy the active filter, including unmatched parents. Activation above independently controls when this filter applies."));
     for (const [alternativeIndex, alternative] of scope.alternatives.entries()) {
       const prefix = `${scope.label || "Scope"} / ${alternative.label || "Alternative"}`;
       const alternativeBody = element("div", { className: "mf-content" });

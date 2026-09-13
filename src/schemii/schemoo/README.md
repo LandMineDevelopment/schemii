@@ -70,11 +70,12 @@ The **Model** inspector authors scopes with named OR alternatives containing
 AND conditions, typed parameters, and defaults. **Explore** supplies values and
 report filters:
 
-- Required scopes force their paths into every query and restrict returned
-  details, even when their fields are not selected.
-- Conditional scopes apply only to sources participating in a query, including
-  intermediate paths and report-filter dependencies. They prefilter those
-  sources without eliminating unmatched parents of optional joins.
+- Required scopes force their paths into every query, even when their fields
+  are not selected. Conditional scopes activate only for participating sources,
+  including intermediate paths and report-filter dependencies.
+- Matching rows is independent: require matching returned records or prefilter
+  sources while keeping unmatched parents. Existing required scopes require
+  matches and existing conditional scopes keep unmatched parents by default.
 - Report filters either restrict returned rows or test for matching/nonmatching
   related records using EXISTS/NOT EXISTS. Conditions in one existence group
   must hold on the same related record; separate groups are independent.
@@ -263,12 +264,50 @@ author-facing labels; exposure and preview selections remain independent.
   conditions reference the grouping source or sources on that output's existing path;
   they cannot silently add a multiplying join. Use model filters for parameters
   that should affect all fields, rather than per-field fixed conditions.
-- This first slice deliberately excludes nested calculations, filters/domain
-  lookups on calculated fields, and reaggregation of summary fields. The server
-  reports unsupported requests. Ordinary raw-field measures still require the
-  author to account for one-to-many fanout.
+- Nested calculations and filters/domain lookups on calculated fields remain
+  unsupported. Ordinary COUNT, SUM and AVG measures, including reaggregation of
+  calculated fields, are rejected when a participating join can multiply their
+  source records. Use separate grouped summaries at each measure's grain.
+  Many-to-one lookups and reverse foreign keys proven unique preserve grain;
+  MIN, MAX and COUNT DISTINCT are safe with repeated input values.
 
 Create a separate demonstration against an existing `organization.public`
 connection with `python dev/schemoo/derived-demo.py CONNECTION_ID`. It leaves
 warehouse tables and existing models untouched. Its numeric calculation is an
 illustrative minimum-pay × level expression, not a defined business metric.
+
+### Independent filter activation and row matching
+
+A scope's `kind` controls activation: `required` always includes its source paths;
+`conditional` applies only when its bound sources participate. The separate
+`rowBehavior` setting chooses `keep_unmatched` (prefilter sources before LEFT
+JOIN, retaining unmatched parents) or `require_matching` (restrict returned rows
+and exclude unmatched parents). A filter on the starting source always removes
+nonmatching starting rows. Required scopes that keep unmatched parents include
+the filtered source even if its fields are unselected, so their joins can change
+result grain. The compiler applies the same aggregate safeguards to these joins.
+
+Existing models with absent/null `rowBehavior` retain their prior behavior:
+required scopes require matches; conditional scopes keep unmatched parents.
+The filter editor exposes both choices and preserves row matching when activation
+is changed. Saved models and AI model edits use the same contract.
+
+Model-defined equality relationships use `kind: logical`, `source` and `target`
+node IDs, and `sourceColumn` / `targetColumn`. They have no `relationshipId` and
+never create database constraints. The API, editor and assistant persist these
+through the existing model write operations and permissions. Columns are checked
+against the live catalog, including on execution and source refresh. Cardinality
+is authored documentation; aggregate safety relies on catalog uniqueness.
+
+For closure hierarchies, a direct fact organization → hierarchy child connection
+allows a required ancestor filter to compile as EXISTS without an intermediary
+dimension join. Filter-only paths preserve fact grain. Selecting hierarchy fields
+can return multiple ancestor rows; unsafe SUM/COUNT/AVG joins are rejected. Keep
+needed dimension date predicates and separate role aliases when changing paths.
+
+Date-range columns support the filter comparison **Contains date**
+(`range_contains_date`). Bind a Date parameter with default `today` to generate
+`active_range @> DATE 'YYYY-MM-DD'` using the date resolved on each run. Fixed
+dates are also supported. The server validates the `daterange` source and date
+value. Existing scope activation, unmatched-row behavior, and AI model-edit
+permissions apply. Adding a range filter does not create columns or indexes.

@@ -377,3 +377,35 @@ test('personal credentials missing a key cannot borrow an ambient key', async (t
   await assert.rejects(new TurnRunner({ vault }).run(turn('alice')), { code: 'provider_failed' });
   assert.equal(fetch.mock.callCount(), 0);
 });
+
+test('selected reasoning effort reaches actual provider wire without fallback', async t => {
+  const runner = await setup('alice');
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (input, init) => { requests.push(await requestDetails(input, init)); return textResponse('done'); });
+  await runner.run(turn('alice', { modelId: 'gpt-5.5', reasoningEffort: 'high' }));
+  assert.equal(requests[0].body.reasoning.effort, 'high');
+  await runner.run(turn('alice', { modelId: 'gpt-5.5', reasoningEffort: 'off' }));
+  assert.equal(requests[1].body.reasoning.effort, 'none');
+  await assert.rejects(runner.run(turn('alice', { reasoningEffort: 'high' })), error => error.code === 'reasoning_unsupported');
+  assert.equal(requests.length, 2);
+});
+
+test('explicit off disables Codex and OpenCode through their native provider payloads', async t => {
+  const vault = new CredentialVault();
+  const token = ['e30', Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } })).toString('base64url'), 'signature'].join('.');
+  await vault.put('alice', 'personal', 'openai-codex', { type: 'oauth', access: token, refresh: 'fake-refresh', expires: Date.now() + 3600000 });
+  await vault.put('alice', 'personal', 'opencode', { type: 'api_key', key: 'synthetic-key' });
+  const runner = new TurnRunner({ vault });
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (input, init) => {
+    const request = await requestDetails(input, init); requests.push(request);
+    if (request.url.includes('anthropic')) return new Response('failure', { status: 400 });
+    return textResponse('done');
+  });
+  await runner.run(turn('alice', { providerId: 'openai-codex', modelId: 'gpt-5.5', reasoningEffort: 'off' }));
+  assert.equal(requests[0].body.reasoning.effort, 'none');
+  // A deliberately rejected response still lets us assert the actual request
+  // before SDK parsing; no external provider is contacted.
+  await runner.run(turn('alice', { providerId: 'opencode', modelId: 'claude-sonnet-4-5', reasoningEffort: 'off' })).catch(() => {});
+  assert.equal(requests[1].body.thinking?.type, 'disabled');
+});

@@ -48,6 +48,7 @@ class AiModelStatus(ApiModel):
     id: Annotated[str, Field(min_length=1, max_length=256)]
     name: Annotated[str, Field(min_length=1, max_length=256)]
     status: Literal["active", "deprecated", "unavailable"] = "active"
+    reasoning_levels: list[Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]] = Field(default_factory=lambda: ["default"], max_length=8)
 
 
 class AiStatusResponse(ApiModel):

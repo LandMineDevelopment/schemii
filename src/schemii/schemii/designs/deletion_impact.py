@@ -170,6 +170,7 @@ def _inventory(content: SchemiiDesignContent) -> _Inventory:
             inventory.link(table.id, index.id)
             for column_id in {
                 *index.column_ids,
+                *index.include_column_ids,
                 *index.expression_source_column_ids,
                 *index.predicate_column_ids,
             }:

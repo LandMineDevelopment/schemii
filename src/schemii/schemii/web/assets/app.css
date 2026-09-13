@@ -1,3 +1,4 @@
+@import url("/assets/common/query-plan.css");
 :root { --card-width: 270px; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body { min-width: 0; color: var(--text); background: var(--bg); }
@@ -381,16 +382,14 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .sql-head dl > div { min-width: 0; padding: 6px 8px; border: 1px solid #293440; border-radius: 5px; background: #0d141b; }
 .sql-head dt { color: #5f6c7b; font-size: 6px; text-transform: uppercase; letter-spacing: .09em; }
 .sql-head dd { margin: 3px 0 0; overflow: hidden; color: #c2ccd6; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.sql-transaction-bar { display: flex; min-height: 42px; align-items: center; gap: 12px; padding: 6px 8px 6px 12px; border-color: #71333a; background: #29171b; box-shadow: inset 3px 0 #ec6572, 0 12px 30px rgba(0, 0, 0, .25); }
+.sql-transaction-bar { display: flex; height: 38px; min-height: 38px; align-items: center; gap: 10px; padding: 2px 6px 2px 10px; border-color: #583039; background: #15191f; box-shadow: inset 2px 0 #ec6572; grid-row: 2; }
 .sql-transaction-bar[hidden] { display: none; }
-.sql-transaction-bar > strong { flex: none; color: #ff929c; font-size: 7px; letter-spacing: .12em; }
-.sql-transaction-controls { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 6px; }
-.sql-transaction-controls { flex: 1; }
-.sql-transaction-controls > span { min-width: 0; margin-right: auto; overflow: hidden; color: #d89aa0; font: 8px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.sql-transaction-bar > strong { flex: none; color: #e99aa3; font-size: 7px; letter-spacing: .1em; }
+.sql-transaction-controls { display: flex; flex: 1; min-width: 0; align-items: center; gap: 5px; }
+.sql-transaction-controls > span { flex: 1; min-width: 0; overflow: hidden; color: #b1a1aa; font: 9px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .sql-transaction-controls > button { flex: none; }
-.sql-transaction-bar { grid-row: 2; }
-.sql-transaction-bar .ui-button { border-color: #71333a; color: #e5b2b7; background: #351d22; }
-.sql-transaction-bar .ui-button.primary { border-color: #a44b55; color: #24090c; background: #ef7b86; }
+.sql-transaction-bar .ui-icon-button.compact { width: 30px; height: 30px; min-width: 30px; min-height: 30px; border-color: #303a46; color: #b7c1cd; background: #171e27; }
+.sql-transaction-bar .ui-icon-button.compact:hover { border-color: #98606b; color: #f0b3bc; }
 .sql-workspace[data-write-mode="true"] .sql-head,
 .sql-workspace[data-write-mode="true"] .sql-editor-panel,
 .sql-workspace[data-write-mode="true"] .sql-results-panel { border-color: #583039; }
@@ -975,8 +974,8 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .sql-head { grid-template-columns: 1fr; gap: 7px; padding: 8px; }
   .sql-head > div:first-child { display: flex; align-items: baseline; gap: 8px; }
   .sql-head > div:first-child h1 { font-size: 12px; }
-  .sql-transaction-controls { min-height: 36px; padding: 0 3px; }
-  .sql-transaction-controls > span { margin-right: auto; }
+
+
   .sql-body { min-height: 0; }
   .sql-results { min-height: 0; }
   .sql-result-viewport { overflow-x: auto; }
@@ -1054,4 +1053,75 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+.sql-query-activity {
+  padding: 12px 16px;
+  border: 1px solid #303a46;
+  border-radius: 8px;
+  background: #10151c;
+  overflow-wrap: anywhere;
+}
+.sql-query-activity { margin-bottom: 8px; font-size: 12px; }
+.sql-query-activity summary { cursor: pointer; font-weight: 650; }
+.sql-query-activity > div { padding-top: 8px; line-height: 1.65; }
+.query-plan-actions { display: flex; gap: 8px; padding: 8px 12px; flex: none; flex-wrap: wrap; }
+.query-plan-actions button { border: 1px solid #303a46; border-radius: 6px; padding: 6px 12px; background: #10151c; color: #cbd3dd; cursor: pointer; }
+.query-plan-actions button:disabled { opacity: .45; cursor: default; }
+
+.sql-query-elapsed { margin: 6px 12px; font-variant-numeric: tabular-nums; color: var(--text); font-size: 12px; }
+.bulk-jobs-dialog { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
+.bulk-jobs-body { display: grid; gap: 12px; padding: 16px; font-size: 12px; line-height: 1.5; }
+.bulk-jobs-body label { display: grid; gap: 6px; }
+.bulk-jobs-body input, .bulk-jobs-body select, .bulk-jobs-body textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px 10px; color: #d9e1eb; background: #090e14; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.bulk-jobs-body input:focus-visible, .bulk-jobs-body select:focus-visible, .bulk-jobs-body textarea:focus-visible { outline: 2px solid #6e9fe8; outline-offset: 2px; }
+.bulk-jobs-body summary { cursor: pointer; padding-block: 6px; }
+.bulk-jobs-dialog .ui-button { min-height: 36px; font-size: 11px; }
+.bulk-job-batches { display: grid; gap: 10px; margin-block: 12px; }
+.bulk-job-batches fieldset { min-width: 0; border: 1px solid var(--line); border-radius: 6px; }
+.bulk-job-batches textarea { min-height: 100px; resize: vertical; font-family: monospace; }
+.bulk-jobs-body pre { overflow: auto; max-height: 240px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bulk-jobs-body [role="alert"] { color: #f39b91; }
+.sql-commit-choice { display: flex; flex: none; align-items: center; gap: 6px; font-size: 10px; }
+.sql-commit-choice label { display: flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
+.sql-commit-choice input { width: 14px; height: 14px; margin: 0; accent-color: #91bde8; }
+.sql-commit-choice select { width: 116px; height: 28px; min-height: 28px; padding: 2px 4px; border: 1px solid #303a46; border-radius: 5px; background: #171e27; color: #c2ccd6; font: inherit; }
+.sql-commit-choice select:disabled { opacity: .45; }
+@media (max-width: 600px) {
+  .sql-transaction-bar { padding-inline: 6px; gap: 4px; }
+  .sql-transaction-bar > strong { display: none; }
+  .sql-transaction-controls { gap: 4px; }
+  #sql-transaction-status { font-size: 0; }
+  #sql-transaction-status::after { content: attr(data-compact); font: 9px ui-monospace, monospace; color: #e99aa3; }
+  .sql-commit-choice { gap: 4px; font-size: 10px; }
+  .sql-commit-choice select { width: 108px; }
+}
+
+.sql-query-notices { margin: 8px 12px; font-size: 12px; }
+.sql-query-notices pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.console-transactions-dialog { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
+.console-transactions-body { padding: 16px; font-size: 12px; line-height: 1.5; }
+.console-transactions-list { display: grid; gap: 12px; }
+.console-transactions-list article { padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+.console-transactions-list pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
+.console-transactions-list summary { cursor: pointer; padding-block: 8px; }
+.console-transactions-dialog .ui-dialog__actions { flex-wrap: wrap; }
+.console-transactions-dialog .ui-button { min-height: 36px; font-size: 11px; }
+.console-transactions-body [role="alert"] { white-space: pre-wrap; color: #f39b91; }
+.has-open-transactions { border-color: #e5ae65 !important; color: #f5c986 !important; }
+
+.console-copy-dialog { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
+.console-copy-dialog .ui-dialog__body { padding: 16px; font-size: 12px; line-height: 1.5; }
+.console-copy-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
+.console-copy-dialog input[type="file"] { display: block; max-width: 100%; margin-top: 8px; }
+.console-copy-dialog .ui-button { min-height: 36px; font-size: 11px; }
+.console-copy-dialog .ui-dialog__actions { flex-wrap: wrap; }
+.console-transactions-dialog .ui-dialog__actions { position: sticky; bottom: 0; background: #10151c; }
+
+.sql-pane-actions .ui-icon-button { position: relative; }
+.sql-transaction-count { position: absolute; top: -3px; right: -3px; min-width: 12px; padding: 1px 3px; border-radius: 8px; background: #e2b75f; color: #17120a; font: 700 8px ui-monospace, monospace; }
+@media (max-width: 600px) {
+  .sql-editor-panel .sql-pane-heading small, .sql-editor-panel .sql-pane-heading em { display: none; }
+  .sql-editor-panel .sql-pane-heading { padding-inline: 8px; }
+  .sql-editor-panel .sql-pane-actions { gap: 3px; padding-right: 6px; }
 }

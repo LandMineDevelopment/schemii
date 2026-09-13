@@ -110,3 +110,15 @@ def export_result(
             "Cache-Control": "no-store",
         },
     )
+
+
+@router.get("/query-executions/{execution_id}/activity")
+def get_execution_activity(
+    execution_id: str, request: Request,
+    principal: Principal = Depends(get_current_principal),
+) -> dict:
+    """Inspect only this owner's execution, using bounded independent monitoring."""
+    try:
+        return _service(request).activity(principal.user_id, execution_id)
+    except ConsoleServiceError as error:
+        raise _problem(error) from error

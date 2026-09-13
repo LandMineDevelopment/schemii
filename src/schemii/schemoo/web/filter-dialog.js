@@ -18,7 +18,7 @@ function icon(name, label, callback) {
   control.onclick = callback;
   return control;
 }
-const comparisons = { eq: "equals", ne: "does not equal", in: "is one of", not_in: "is not one of", gt: ">", gte: "≥", lt: "<", lte: "≤", contains: "contains", is_null: "is null", not_null: "is not null" };
+const comparisons = { eq: "equals", ne: "does not equal", in: "is one of", not_in: "is not one of", gt: ">", gte: "≥", lt: "<", lte: "≤", contains: "contains", range_contains_date: "contains date", is_null: "is null", not_null: "is not null" };
 function conditionText(condition, alternative, draft) {
   const source = draft.nodes.find(node => node.id === condition.table);
   const parameter = alternative.inputs.find(input => input.id === condition.parameterId);
@@ -29,6 +29,7 @@ function conditionText(condition, alternative, draft) {
 function summary(scope, draft) {
   const box = element("div", { className: "mf-rule-summary" });
   box.append(note(scope.kind === "required" ? "Required · every query" : "Conditional · only when its sources participate"));
+  box.append(note((scope.rowBehavior || (scope.kind === "required" ? "require_matching" : "keep_unmatched")) === "keep_unmatched" ? "Keep unmatched parent rows" : "Require matching rows"));
   for (const [index, option] of scope.alternatives.entries()) {
     if (scope.alternatives.length > 1) box.append(element("strong", { text: `${index ? "OR · " : ""}${option.label}` }));
     if (!option.conditions.length) box.append(element("p", { className: "warning", text: "No conditions: this option allows unrestricted results." }));

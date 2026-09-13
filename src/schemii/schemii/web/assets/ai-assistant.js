@@ -1,3 +1,7 @@
+import { populateReasoningOptions, reasoningForModel } from "#common/ai-reasoning.js";
+import { designExportReceipt, workspaceReceiptUrl } from "./ai-app-receipts.js";
+import { downloadContent, createIconElement } from "#common/ui.js";
+import { validateCopyHandoff, openCopyHandoff } from "./ai-copy-handoff.js";
 import { requestJson } from "#common/http.js";
 import { renderMarkdown } from "#common/ai-markdown.js";
 import { createMessageNode, formatDate, modelValue, availableModels, populateModelOptions } from "#common/ai-presentation.js";
@@ -5,7 +9,7 @@ import { renderAiActivity } from "#common/ai-activity.js";
 import { enhanceModelPicker } from "#common/ai-model-picker.js";
 import { placeTurnActivity } from "#common/ai-timeline.js";
 import { createIconButton } from "./ui.js";
-import { PERMISSION_MODES, permissionMode, permissionValues, permissionSummary } from "#common/ai-permissions.js";
+import { permissionMode, permissionValues, permissionSummary, renderPermissionBundles, bindContextSelection } from "#common/ai-permissions.js";
 
 const elements = {
   button: document.querySelector("#ai-assistant-button"),
@@ -16,6 +20,8 @@ const elements = {
   settingsButton: document.querySelector("#ai-assistant-settings"),
   status: document.querySelector("#ai-assistant-status"),
   model: document.querySelector("#ai-assistant-model"),
+  reasoning: document.querySelector("#ai-assistant-reasoning"),
+  settingsReasoning: document.querySelector("#ai-settings-reasoning"),
   permissions: document.querySelector("#ai-assistant-permissions"),
   permissionsCopy: document.querySelector("#ai-assistant-permissions-copy"),
   disclosure: document.querySelector("#ai-assistant-disclosure"),
@@ -117,6 +123,7 @@ function updateContextControls() {
   elements.permissionsCopy.textContent = permissionSummary(chat?.capabilities || settings?.defaultCapabilities, settings?.permissionActions || []);
   const working = chat?.status === "working";
   elements.model.disabled = working;
+  populateReasoningOptions(elements.reasoning, selectedModel(), chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", working);
   elements.newButton.disabled = !models.length || working;
   elements.settingsButton.disabled = false;
   elements.permissions.disabled = false;
@@ -236,6 +243,27 @@ function renderTimeline(messages = timelineMessages, proposals = timelineProposa
   }
   elements.messages.replaceChildren(...(nodes.length ? nodes : [emptyTranscript()]));
   for (const card of elements.messages.querySelectorAll("[data-operation-id]")) {
+    const operation = operations.find(item => item.id === card.dataset.operationId);
+    if (operation?.kind === "app_action" && operation.status === "succeeded") {
+      const exported = designExportReceipt(operation.resultSummary);
+      if (exported) {
+        const download = createIconButton({ icon: "download", label: `Download ${exported.fileName}`, className: "compact" });
+        download.addEventListener("click", () => downloadContent(exported.content, exported.fileName, exported.mediaType));
+        card.append(download);
+      }
+      const proposal = proposals.find(item => item.id === operation.proposalId);
+      const url = workspaceReceiptUrl(operation.resultSummary, proposal?.details?.operation);
+      if (url) {
+        const link = document.createElement("a"); link.href = url; link.className = "ui-icon-button compact";
+        link.title = "Open workspace"; link.setAttribute("aria-label", "Open workspace"); link.append(createIconElement("workspaces")); card.append(link);
+      }
+    }
+    const handoff = operation?.status === "succeeded" && validateCopyHandoff(operation.resultSummary, chat?.workspaceId);
+    if (handoff) {
+      const button = createIconButton({ icon: handoff.direction === "upload" ? "upload" : "download", label: handoff.direction === "upload" ? "Upload COPY file" : "Download COPY file", className: "compact" });
+      button.addEventListener("click", () => openCopyHandoff(handoff, chat.workspaceId));
+      const footer = document.createElement("footer"); footer.append(button); card.insertBefore(footer, card.querySelector(".ai-operation__result"));
+    }
     const retained = loadedResults.get(card.dataset.operationId);
     if (retained?.childNodes.length) card.querySelector(".ai-operation__result").replaceWith(retained);
   }
@@ -264,7 +292,10 @@ function applyActivityEvent(event) {
     activityRun.stages.set(event.payload.stage, { label: event.payload.label || event.payload.stage, state: event.payload.state || "running" });
     if (event.payload.state === "cancelled") activityRun.state = "cancelled";
   }
-  if (event.kind === "error") {
+  if (event.kind === "error" && event.payload?.tool) {
+    if (!activityRun) beginActivity(event.payload?.turnId);
+    activityRun.stages.set("actionError", { label: "An action failed; the assistant is continuing", state: "failed" });
+  } else if (event.kind === "error") {
     if (!activityRun) beginActivity(event.payload?.turnId);
     if (event.payload?.turnId) activityRun.turnId = event.payload.turnId;
     activityRun.state = "failed";
@@ -486,7 +517,7 @@ function defaultModel() {
 }
 
 function defaultCapabilities() {
-  return { liveCatalog: false, structuredDataRead: false, ...permissionValues({}, settings?.permissionActions || []), ...(settings?.defaultCapabilities || {}) };
+  return { liveCatalog: false, structuredDataRead: false, monitorQueries: false, ...permissionValues({}, settings?.permissionActions || []), ...(settings?.defaultCapabilities || {}) };
 }
 
 function safeExternalUrl(value) {
@@ -612,6 +643,7 @@ async function refreshProviderStatus({ refresh = false } = {}) {
   runtime = await requestJson(`/api/v1/ai/status${refresh ? "?refresh=true" : ""}`, { timeoutMs: refresh ? 20_000 : 10_000 }); models = availableModels(runtime);
   loadModelOptions(elements.model, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
   loadModelOptions(elements.settingsModel, settingsSelection[0] || chat?.providerId || settings?.defaultProviderId, settingsSelection[1] || chat?.modelId || settings?.defaultModelId);
+  populateReasoningOptions(elements.settingsReasoning, selectedModel(elements.settingsModel), elements.settingsReasoning.value || chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
   renderProviders(); updateContextControls();
   modelPickers.forEach(picker => picker.sync());
   if (refresh && (runtime.healthy === false || runtime.providers?.some(provider => provider.catalogError))) {
@@ -619,9 +651,9 @@ async function refreshProviderStatus({ refresh = false } = {}) {
   }
 }
 
-async function createConversation({ model = defaultModel(), capabilities = defaultCapabilities(), title = "New conversation" } = {}) {
+async function createConversation({ model = defaultModel(), capabilities = defaultCapabilities(), reasoningEffort = chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", title = "New conversation" } = {}) {
   if (!model) throw new Error("No AI model is configured for this deployment.");
-  chat = await requestJson(`/api/v1/schemii/workspaces/${workspaceId()}/ai/chats`, { method: "POST", body: { providerId: model.providerId, modelId: model.id, title, capabilities } });
+  chat = await requestJson(`/api/v1/schemii/workspaces/${workspaceId()}/ai/chats`, { method: "POST", body: { providerId: model.providerId, modelId: model.id, title, capabilities, reasoningEffort: reasoningForModel(model, reasoningEffort) } });
   chats = [chat, ...chats.filter(item => item.id !== chat.id)];
   activitySequence = 0; timelineSignature = ""; resultContextOperationId = null;
   updateContextControls(); renderAttachment(); renderTimeline([], [], []); return chat;
@@ -650,11 +682,22 @@ function applyActivityPage(activity, currentChat, { initial = false } = {}) {
     if (currentTurnStart >= 0) activityEvents = activityEvents.slice(currentTurnStart);
   }
   for (const event of activityEvents) applyActivityEvent(event);
+  if (activityRun && currentChat.status === "working") {
+    activityRun.state = "working";
+    delete activityRun.finishedAt;
+  }
 }
 
+let progressPollFailures = 0;
 function scheduleProgressPoll() {
   globalThis.clearTimeout(pollTimer);
-  pollTimer = globalThis.setTimeout(() => void pollProgress().catch(showError), 700);
+  const delay = progressPollFailures ? Math.min(10000, 1000 * 2 ** progressPollFailures) : 700;
+  pollTimer = globalThis.setTimeout(() => void pollProgress().catch(error => {
+    showError(error);
+    updateContextControls();
+    progressPollFailures += 1;
+    if (chat?.status === "working" && elements.panel.classList.contains("open")) scheduleProgressPoll();
+  }), delay);
 }
 
 async function pollProgress() {
@@ -666,6 +709,7 @@ async function pollProgress() {
     requestJson(`/api/v1/schemii/ai/chats/${chatId}/stream`),
   ]);
   if (chat?.id !== chatId) return;
+  progressPollFailures = 0;
   chat = currentChat; applyActivityPage(activity, currentChat); updateContextControls();
   if (chat.status === "working") {
     streamingResponse = stream?.turnId && stream.text ? { ...stream, createdAt: streamingResponse?.createdAt || new Date().toISOString() } : null;
@@ -696,6 +740,8 @@ async function refresh({ includeChat = true } = {}) {
   // final message is committed, while working status keeps polling active.
   const currentChat = includeChat ? await requestJson(`/api/v1/schemii/ai/chats/${chatId}`) : chat;
   if (chat?.id !== chatId) return;
+  chat = currentChat; updateContextControls();
+  if (chat.status === "working") scheduleProgressPoll();
   const [history, proposalList, operationList, activity, transient] = await Promise.all([
     requestJson(`/api/v1/schemii/ai/chats/${chatId}/messages`), requestJson(`/api/v1/schemii/ai/chats/${chatId}/proposals`),
     requestJson(`/api/v1/schemii/ai/chats/${chatId}/operations`), requestJson(`/api/v1/schemii/ai/chats/${chatId}/activity?after=${activitySequence}`),
@@ -703,6 +749,7 @@ async function refresh({ includeChat = true } = {}) {
   ]);
   if (chat?.id !== chatId) return;
   chat = currentChat;
+  updateContextControls();
   await refreshChangedDesign(chatId, operationList.operations);
   if (chat?.id !== chatId) return;
   streamingResponse = null;
@@ -745,29 +792,18 @@ function closeAssistant() {
 function openDialog(dialog) { if (!dialog.open) dialog.showModal(); }
 function closeDialog(dialog) { if (dialog.open) dialog.close(); }
 
+let permissionEditor = null;
+let settingsSaving = false;
+const refreshContextSelection = bindContextSelection(elements.settingsForm.querySelector("[data-context-permissions]"));
+
 function fillSettings() {
   loadModelOptions(elements.settingsModel, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
   elements.settingsModel.disabled = chat?.status === "working";
+  populateReasoningOptions(elements.settingsReasoning, selectedModel(elements.settingsModel), chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
   const capabilities = chat?.capabilities || defaultCapabilities();
-  elements.permissionActions.replaceChildren();
-  const groups = new Map();
-  for (const action of settings?.permissionActions || []) {
-    let group = groups.get(action.group);
-    if (!group) {
-      group = document.createElement("fieldset"); group.className = "ai-permission-list";
-      const legend = document.createElement("legend"); legend.textContent = action.group;
-      group.append(legend); groups.set(action.group, group); elements.permissionActions.append(group);
-    }
-    const label = document.createElement("label");
-    if (action.destructive) label.className = "danger";
-    const copy = document.createElement("span");
-    const title = document.createElement("strong"); title.textContent = action.label; copy.append(title);
-    if (action.description) { const note = document.createElement("small"); note.textContent = action.description; copy.append(note); }
-    const select = document.createElement("select"); select.name = action.id; select.dataset.permissionAction = action.id;
-    for (const mode of PERMISSION_MODES) { const option = document.createElement("option"); option.value = mode; option.textContent = { disabled: "Disabled", ask: "Ask per batch", automatic: "Automatic" }[mode]; select.append(option); }
-    select.value = permissionMode(capabilities, action.id); label.append(copy, select); group.append(label);
-  }
-  for (const name of ["liveCatalog", "structuredDataRead"]) elements.settingsForm.elements[name].checked = Boolean(capabilities[name]);
+  permissionEditor = renderPermissionBundles(elements.permissionActions, settings?.permissionActions || [], capabilities.actionModes);
+  for (const name of ["liveCatalog", "structuredDataRead", "monitorQueries"]) elements.settingsForm.elements[name].checked = Boolean(capabilities[name]);
+  refreshContextSelection();
   elements.settingsStatus.textContent = "Permission changes apply to this conversation and become the default for new ones.";
   renderProviders();
 }
@@ -869,12 +905,31 @@ elements.model?.addEventListener("change", async () => {
   try {
     if (!chat) await createConversation({ model, capabilities: defaultCapabilities() });
     else {
-      const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities: chat.capabilities } });
+      const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities: chat.capabilities, reasoningEffort: reasoningForModel(model, chat.reasoningEffort) } });
       settings = result.settings; chat = result.chat;
     }
     setNotice(`Switched to ${model.name}. Conversation retained.`); await refresh(); elements.input.focus();
   }
   catch (error) { showError(error); updateContextControls(); }
+});
+
+elements.settingsModel?.addEventListener("change", () => {
+  const model = selectedModel(elements.settingsModel);
+  populateReasoningOptions(elements.settingsReasoning, model, reasoningForModel(model, elements.settingsReasoning.value));
+});
+elements.reasoning?.addEventListener("change", async () => {
+  const reasoningEffort = elements.reasoning.value;
+  const model = selectedModel(); if (!model) return;
+  elements.reasoning.disabled = true;
+  try {
+    if (!chat) await createConversation({ model, reasoningEffort });
+    else {
+      const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities: chat.capabilities, reasoningEffort } });
+      settings = result.settings; chat = result.chat;
+    }
+    setNotice("Reasoning level saved for your next message."); await refresh();
+  } catch (error) { showError(error); }
+  finally { updateContextControls(); }
 });
 
 elements.input?.addEventListener("keydown", event => {
@@ -897,18 +952,24 @@ elements.form?.addEventListener("submit", async event => {
 });
 
 elements.settingsForm?.addEventListener("submit", async event => {
-  event.preventDefault(); const model = selectedModel(elements.settingsModel); if (!model) return;
+  event.preventDefault(); if (settingsSaving) return; const model = selectedModel(elements.settingsModel); if (!model) return;
   const capabilities = {
-    ...Object.fromEntries(["liveCatalog", "structuredDataRead"].map(name => [name, elements.settingsForm.elements[name].checked])),
+    ...Object.fromEntries(["liveCatalog", "structuredDataRead", "monitorQueries"].map(name => [name, elements.settingsForm.elements[name].checked])),
     ...permissionValues(Object.fromEntries([...elements.permissionActions.querySelectorAll("select[data-permission-action]")].map(control => [control.dataset.permissionAction, control.value])), settings?.permissionActions || []),
   };
+  settingsSaving = true;
+  const controls = [...elements.settingsDialog.querySelectorAll("input, select, button")];
+  const disabled = controls.map(control => control.disabled);
+  controls.forEach(control => { control.disabled = true; });
+  permissionEditor?.setBusy(true);
   elements.settingsStatus.textContent = "Saving…";
   try {
     const modelChanged = model.providerId !== chat.providerId || model.id !== chat.modelId;
-    const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities } });
+    const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities, reasoningEffort: elements.settingsReasoning.value } });
     settings = result.settings; chat = result.chat;
     updateContextControls(); closeDialog(elements.settingsDialog); setNotice(modelChanged ? `Switched to ${model.name}. Conversation retained; permissions saved.` : "Assistant permissions saved."); await refresh();
   } catch (error) { elements.settingsStatus.textContent = error.message; }
+  finally { settingsSaving = false; controls.forEach((control, index) => { control.disabled = disabled[index]; }); permissionEditor?.setBusy(false); }
 });
 
 for (const control of document.querySelectorAll("[data-ai-settings-close]")) control.addEventListener("click", () => closeDialog(elements.settingsDialog));

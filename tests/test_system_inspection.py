@@ -35,6 +35,116 @@ def test_runtime_binding_resolves_nested_installed_services_without_name_special
     assert index.resolve(unknown.func, callable_subject=record_activity).subject is None
 
 
+def _installed_state_provider(request):
+    raise AssertionError("Inspection must never execute a provider")
+    return request.app.state.arbitrary_component
+
+
+def _aliased_state_provider(request):
+    component = request.app.state.arbitrary_component
+    return component
+
+
+def _ambiguous_state_provider(request):
+    if request:
+        return request.app.state.arbitrary_component
+    return request.app.state.services
+
+
+@pytest.mark.parametrize("expression, method", [
+    ("request.app.state.arbitrary_component.settings(owner)", "settings"),
+    ("_installed_state_provider(request).settings(owner)", "settings"),
+    ("_aliased_state_provider(request).settings(owner)", "settings"),
+    ("_installed_state_provider(request).store.list(owner, model)", "list"),
+])
+def test_runtime_binding_resolves_application_state_receivers_without_executing_helpers(
+    expression, method,
+):
+    from schemii.common.source_inspection import SourceRegistry
+
+    application = create_app()
+    component = application.state.schemoo_ai
+    index = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state={"arbitrary_component": component},
+    )
+    call = ast.parse(expression).body[0].value
+    resolved = index.resolve(call.func, callable_subject=test_runtime_binding_resolves_application_state_receivers_without_executing_helpers)
+    owner = component.store if method == "list" else component
+    assert resolved.subject is getattr(type(owner), method)
+    assert resolved.resolution == "runtime-receiver"
+
+
+def test_runtime_binding_does_not_guess_unknown_or_ambiguous_state_receivers():
+    from schemii.common.source_inspection import SourceRegistry
+
+    application = create_app()
+    index = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state={"arbitrary_component": application.state.schemoo_ai},
+    )
+    for expression in (
+        "request.app.state.missing.settings(owner)",
+        "_ambiguous_state_provider(request).settings(owner)",
+        "_installed_state_provider(request).missing.settings(owner)",
+    ):
+        call = ast.parse(expression).body[0].value
+        assert index.resolve(
+            call.func, callable_subject=test_runtime_binding_does_not_guess_unknown_or_ambiguous_state_receivers,
+        ).subject is None
+
+
+def test_runtime_binding_does_not_confuse_untyped_cursor_with_installed_ai_service():
+    from schemii.common.source_inspection import SourceRegistry
+
+    application = create_app()
+    index = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state=application.state._state,
+    )
+    call = ast.parse("cursor.execute(sql)").body[0].value
+    assert index.resolve(
+        call.func, callable_subject=PsycopgPostgresGateway.validate_column_conversion,
+    ).subject is None
+
+
+def test_system_inspection_with_installed_pi_runtime_resolves_catalog_snapshot_without_io(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from schemii.common.ai.prototype import PiClient
+    from schemii.common.ai.pi import PiRuntime
+    from schemii.common.ai.model_catalog import ZenModelCatalog
+    from schemii.common.source_inspection import SourceRegistry
+
+    client = PiClient("http://unused.invalid", "runtime-only-pi-secret-9f70")
+    monkeypatch.setattr(PiClient, "from_env", classmethod(lambda cls: client))
+
+    def unexpected_io(*args, **kwargs):
+        raise AssertionError("Source inspection must not call the model runtime")
+
+    monkeypatch.setattr(client, "call", unexpected_io)
+    application = create_app()
+    catalog = application.state.ai_model_catalog
+    assert isinstance(catalog, ZenModelCatalog)
+    monkeypatch.setattr(catalog, "_fetch", unexpected_io)
+    index = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state=application.state._state,
+    )
+    expression = ast.parse("self.catalog.snapshot().get('error')").body[0].value
+    resolved = index.resolve(expression.func, callable_subject=PiRuntime.status)
+    assert resolved.subject is dict.get
+    assert resolved.resolution == "literal-return"
+
+    document = build_developer_system_document(application)
+    assert not any(document["analysis"]["truncated"].values())
+    assert all(route["journey"]["status"] == "complete" for route in document["routes"]), {
+        route["id"]: route["journey"]["issues"]
+        for route in document["routes"] if route["journey"]["status"] != "complete"
+    }
+    assert "runtime-only-pi-secret-9f70" not in json.dumps(document)
+
+
 def test_developer_system_inspection_is_opt_in_and_hidden_from_openapi() -> None:
     disabled = TestClient(create_app(), base_url="http://localhost")
     enabled = TestClient(
@@ -237,7 +347,10 @@ def test_every_route_journey_is_derived_from_live_source_relationships() -> None
     assert document["analysis"]["journeyClassification"] == (
         "runtime-bindings-and-source-control-flow"
     )
-    assert all(route["journey"]["status"] == "complete" for route in document["routes"])
+    assert all(route["journey"]["status"] == "complete" for route in document["routes"]), {
+        route["id"]: route["journey"]["issues"]
+        for route in document["routes"] if route["journey"]["status"] != "complete"
+    }
     for route in document["routes"]:
         journey = route["journey"]
         assert journey["issues"] == []
@@ -365,3 +478,56 @@ def test_system_inspection_derives_data_shapes_and_call_argument_flow() -> None:
     } >= {"id", "revision", "credentialStored", "createdAt", "updatedAt"}
 
     assert " at 0x" not in json.dumps(document)
+
+
+def test_runtime_return_contract_uses_exact_installed_repository_binding():
+    from schemii.common.source_inspection import SourceRegistry
+    from schemii.schemii.ai.repository import InMemoryAiRepository
+    from schemii.schemii.ai.models import SchemiiTurn
+
+    application = create_app()
+    index = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state=application.state._state,
+    )
+    expression = ast.parse("self.get_turn(owner, chat, turn).model_copy(update=changes)").body[0].value
+    resolved = index.resolve(expression.func, callable_subject=InMemoryAiRepository.finish_turn)
+    assert resolved.subject is SchemiiTurn.model_copy
+    assert resolved.resolution == "return-contract"
+
+
+def test_raw_console_api_map_exposes_routes_and_deferred_execution():
+    application = create_app()
+    prefix = "/api/v1/schemii/workspaces/{workspace_id}/console/sessions"
+    expected = {
+        ("get", ""), ("post", ""),
+        ("get", "/{session_id}"), ("delete", "/{session_id}"),
+        ("get", "/{session_id}/activity"), ("post", "/{session_id}/cancel"),
+        ("post", "/{session_id}/executions"),
+        ("get", "/{session_id}/executions/{execution_id}"),
+        ("post", "/{session_id}/explain"),
+        ("post", "/{session_id}/copy/uploads"),
+        ("put", "/{session_id}/copy/uploads/{ticket_id}"),
+        ("post", "/{session_id}/copy/download"),
+        ("post", "/{session_id}/copy/downloads"),
+        ("get", "/{session_id}/copy/downloads/{ticket_id}"),
+        ("get", "/{session_id}/copy/downloads/{ticket_id}/status"),
+    }
+    schema = application.openapi()
+    routes = route_inspection.build_developer_route_document(application)
+    exposed = {(route["method"], route["path"]) for route in routes["routes"]}
+    for method, suffix in expected:
+        assert method in schema["paths"][prefix + suffix]
+        assert (method, prefix + suffix) in exposed
+
+    document = build_developer_system_document(application)
+    execution = next(route for route in document["routes"]
+                     if route["id"] == "post:" + prefix + "/{session_id}/executions")
+    assert execution["journey"]["status"] == "complete"
+    worker = "python:schemii.schemii.console.raw_session:RawSessionService.run"
+    assert worker in {node["objectId"] for node in execution["journey"]["nodes"]}
+    endpoint = next(item for item in document["callables"] if item["objectId"] == execution["endpointObjectId"])
+    deferred = next(call for call in endpoint["calls"] if call["objectId"] == worker)
+    assert deferred["resolution"] == "background-task"
+    assert [argument["expression"] for argument in deferred["arguments"]] == ["session", "execution", "body"]
+    assert not any(document["analysis"]["truncated"].values())

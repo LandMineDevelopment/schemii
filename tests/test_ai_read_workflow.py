@@ -438,3 +438,38 @@ def test_direct_inspection_mixed_with_approval_replays_request_not_stored_result
     assert service._read_tool_result.call_count == 2
     assert service._read_tool_result.call_args_list[0] == service._read_tool_result.call_args_list[1]
     service.execute.assert_not_called()
+
+
+def test_explain_analyze_uses_approval_workflow_without_execution():
+    service, chat, turn = setup(approval=True, replies=[tool_reply(
+        "schemii_explain_query", {"sql": "SELECT 1", "analyze": True})])
+    chat.capabilities = AiCapabilities(analyze_queries=True)
+    service.repository.proposal_action.return_value = {"queries": [{"sql": "EXPLAIN ANALYZE SELECT 1"}]}
+    result = run(service, chat, turn)
+    assert result.paused
+    service.execute.assert_not_called()
+    saved = service.repository.save_continuation.call_args.args[-1]
+    assert saved["pendingCalls"][0]["name"] == "schemii_explain_query"
+    assert saved["pendingProposalIds"] == ["proposal"]
+
+
+@pytest.mark.parametrize("tool,kind,action,permission", [
+    ("schemii_raw_console", "raw_console", {"operation":"create"}, "console.create"),
+    ("schemii_app_action", "app_action", {"operation":"list_saved_queries","args":{}}, "query.saved.read"),
+])
+def test_non_design_action_returns_success_without_reopening_catalog(tool,kind,action,permission):
+    service, chat, turn = setup(replies=[tool_reply(tool, action), PiReply("Action completed.", ())])
+    chat.capabilities = AiCapabilities(action_modes={permission:"automatic"})
+    service.repository.proposal_action.return_value = action
+    service._save_tool_proposal.return_value.action_type = kind
+    operation = design_operation()
+    operation.kind = kind
+    operation.result_summary = {"id":"raw_"+"a"*32,"status":"open"}
+    service.execute.return_value = operation
+    service._refresh_tool_context.side_effect = AssertionError("Session/library actions do not change saved design")
+    result = run(service, chat, turn)
+    assert not result.paused
+    returned = json.loads(service.runtime.run.call_args.kwargs['messages'][-1]['content'][0]['text'])
+    assert returned['outcome'] == operation.result_summary
+    assert not returned.get('error')
+    service._refresh_tool_context.assert_not_called()

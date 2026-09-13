@@ -57,3 +57,21 @@ def test_history_and_migration_are_independent():
     assert disabled_action_ids(caps, "design_history", {"reset": True}) == ("history.reset",)
     assert requires_approval(caps, "migration_review", {})
     assert disabled_action_ids(caps, "migration_apply", {}) == ("migration.apply",)
+
+
+@pytest.mark.parametrize("saved", [
+    {"rawSqlRead": True, "structuredDataRead": True},
+    {"actionModes": {"query.read": "automatic", "query.browse": "automatic"}},
+])
+def test_existing_saved_policies_do_not_gain_diagnostics(saved):
+    caps = AiCapabilities.model_validate(saved)
+    assert caps.action_modes["query.explain"] == "disabled"
+    assert caps.action_modes["query.analyze"] == "disabled"
+    assert not caps.explain_queries and not caps.analyze_queries and not caps.monitor_queries
+
+
+def test_mixed_raw_and_plan_batch_uses_strictest_independent_policy():
+    caps = AiCapabilities(action_modes={"query.read": "automatic", "query.explain": "automatic", "query.analyze": "ask"})
+    action = {"queries": [{"sql": "SELECT 1"}, {"sql": "EXPLAIN SELECT 2"}, {"sql": "EXPLAIN ANALYZE SELECT 3"}]}
+    assert not disabled_action_ids(caps, "data_read", action)
+    assert requires_approval(caps, "data_read", action)

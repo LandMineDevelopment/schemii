@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
-from pydantic import Field
+from pydantic import Field, StrictBool
 from schemii.common.api.errors import ApiProblem
 from schemii.common.api.postgres import postgres_api_problem
 from schemii.common.connections.store import ConnectionNotFoundError
@@ -17,6 +17,7 @@ from .models import (Contract, ModelCreate, ModelDuplicate, ModelUpdate, ModelPa
 from .store import (ModelNotFoundError, ModelConflictError, ModelStorageUnavailableError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError)
 from .service import load_model, model_catalog, plan_query, execute_query, domain_query, domain_values_plan, document, patch_model_definition
 from .domain import domain_table
+from .prototype import analyze_model
 
 router = APIRouter(prefix="/api/v1/schemoo", tags=["schemoo"])
 
@@ -44,6 +45,10 @@ class ValidateRequest(PlanRequest):
 
 class ExecutionRequest(PlanRequest):
     console_id: str = Field(pattern=r"^con_[0-9a-f]{32}$")
+
+
+class ExplainRequest(ExecutionRequest):
+    analyze: StrictBool = False
 
 
 class ParameterValuesRequest(Contract):
@@ -88,6 +93,13 @@ def api_errors():
                          retryable=error.retryable, limit_event=error.limit_event) from error
 
 
+def _validate_connections(catalog, definition):
+    try:
+        analyze_model(catalog, document(definition))
+    except ValueError as error:
+        raise ApiProblem(422, "invalid_model_connection", str(error)) from error
+
+
 @router.get("/catalog")
 def get_catalog(request: Request, connection_id: str = Query(pattern=r"^pg_[0-9a-f]{32}$"),
                 namespace: str = Query(min_length=1, max_length=63),
@@ -114,6 +126,8 @@ def create_model(body: CreateRequest, request: Request, principal: Principal = D
         record = ModelCreate.model_validate({**body.model_dump(), "definition": definition,
                                              "database": catalog["database"],
                                              "catalog_fingerprint": catalog["fingerprint"]})
+        if any(edge.kind == "logical" for edge in record.definition.edges):
+            _validate_connections(catalog, record.definition)
         return services.models.create(principal.user_id, record)
 
 
@@ -145,6 +159,8 @@ def update_model(model_id: str, body: ModelUpdate, request: Request, principal: 
             definition = ModelDefinition.model_validate({**body.definition.model_dump(mode="json", by_alias=True),
                                                          "sourceContract": catalog_contract(catalog)})
             body = body.model_copy(update={"definition": definition})
+        if any(edge.kind == "logical" for edge in body.definition.edges):
+            _validate_connections(model_catalog(services, principal.user_id, current, fresh=True), body.definition)
         return services.models.update(principal.user_id, model_id, body)
 
 
@@ -226,6 +242,21 @@ def execute_model(model_id: str, body: ExecutionRequest, request: Request, backg
         model = load_model(services, principal.user_id, model_id, body.expected_revision)
         plan = plan_query(model_catalog(services, principal.user_id, model, fresh=True), model.definition, body.explore, model.catalog_fingerprint)
         return execute_query(services, principal.user_id, model, body.console_id, plan, background_tasks)
+
+
+@router.post("/models/{model_id}/explain", status_code=201)
+def explain_model(model_id: str, body: ExplainRequest, request: Request, background_tasks: BackgroundTasks,
+                  principal: Principal = Depends(get_current_principal)) -> dict:
+    """Explain an owned saved model on a fresh read-only snapshot."""
+    from schemii.common.postgres.query_plans import build_explain_sql
+    with api_errors():
+        services = request.app.state.services
+        model = load_model(services, principal.user_id, model_id, body.expected_revision)
+        plan = plan_query(model_catalog(services, principal.user_id, model, fresh=True), model.definition, body.explore, model.catalog_fingerprint)
+        response = execute_query(services, principal.user_id, model, body.console_id,
+                                 {**plan, "sql": build_explain_sql(plan["sql"], body.analyze)}, background_tasks)
+        response["plan"] = plan
+        return response
 
 
 @router.post("/models/{model_id}/parameter-values", status_code=201)

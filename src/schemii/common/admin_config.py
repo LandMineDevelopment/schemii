@@ -204,9 +204,9 @@ class AiPolicy:
     credential_inactivity_days: int = 30
     message_history_limit: int = 200
     activity_history_limit: int = 1_000
-    maximum_proposals_per_turn: int = 10
+    maximum_proposals_per_turn: int = 100
     maximum_read_queries_per_batch: int = 8
-    maximum_tool_rounds: int = 8
+    maximum_tool_rounds: int = 80
     tool_timeout_seconds: int = 300
     prompt_bytes: int = 64 * 1024
     response_bytes: int = 256 * 1024
@@ -242,7 +242,7 @@ class AiPolicy:
         _integer("ai.activity_history_limit", self.activity_history_limit, 10, 100_000)
         _integer("ai.maximum_proposals_per_turn", self.maximum_proposals_per_turn, 1, 100)
         _integer("ai.maximum_read_queries_per_batch", self.maximum_read_queries_per_batch, 1, 32)
-        _integer("ai.maximum_tool_rounds", self.maximum_tool_rounds, 1, 32)
+        _integer("ai.maximum_tool_rounds", self.maximum_tool_rounds, 1, 320)
         _integer("ai.tool_timeout_seconds", self.tool_timeout_seconds, 10, 3600)
         _integer("ai.prompt_bytes", self.prompt_bytes, 1_024, 1024 * 1024)
         _integer("ai.response_bytes", self.response_bytes, 1_024, 8 * 1024 * 1024)

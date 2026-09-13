@@ -120,3 +120,21 @@ def test_read_preparation_preserves_postgres_diagnostic_and_closes_connection():
         PsycopgConsoleReadSession(connection, 1, ["SELECT 1"], page_memory_bytes=4096)
     assert caught.value.sqlstate == "57014"
     assert closed == [True]
+
+
+def test_mixed_read_progress_retains_outer_statement_index():
+    from schemii.common.query_executions.activity import report_progress
+
+    class Cursor:
+        description = ()
+        statusmessage = "SHOW"
+        def execute(self, _sql): pass
+        def close(self): pass
+
+    connection = SimpleNamespace(cursor=lambda **kwargs: Cursor(), close=lambda: None)
+    progress = []
+    with report_progress(lambda index, completed: progress.append((index, completed))):
+        session = PsycopgConsoleReadSession(connection, 1,
+            ["SELECT 1", "SHOW timezone", "SHOW statement_timeout"], page_memory_bytes=4096)
+    assert progress == [(0, False), (1, False), (1, True), (2, False), (2, True)]
+    session.close()

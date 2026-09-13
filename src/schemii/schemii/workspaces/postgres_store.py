@@ -687,9 +687,13 @@ class PostgresWorkspaceRepository:
                           AND sync.status IN ('pending', 'failed')
                       )
                   )
+            ) OR EXISTS (
+                SELECT 1 FROM schemii.bulk_jobs
+                WHERE owner_id = %s AND workspace_id = %s
+                  AND document->>'status' IN ('queued', 'running', 'cancelling', 'reconciliation_required')
             ) AS active
             """,
-            (owner_id, workspace_id),
+            (owner_id, workspace_id, owner_id, workspace_id),
         )
         if bool(cursor.fetchone()["active"]):
             raise WorkspaceMutationBlockedError(operation)
@@ -742,6 +746,10 @@ class PostgresWorkspaceRepository:
                                          AND sync.status IN ('pending', 'failed')
                                      )
                                  )
+                           ) OR EXISTS (
+                               SELECT 1 FROM schemii.bulk_jobs AS job
+                               WHERE job.owner_id = workspace.owner_id AND job.workspace_id = workspace.id
+                                 AND job.document->>'status' IN ('queued', 'running', 'cancelling', 'reconciliation_required')
                            ) AS deletion_blocked
                     FROM schemii.workspace_targets AS target
                     JOIN schemii.workspaces AS workspace
@@ -763,7 +771,7 @@ class PostgresWorkspaceRepository:
                         target=f'{row["database_name"]}.{row["namespace"]}',
                         deletion_blocked=bool(row["deletion_blocked"]),
                         blocking_reason=(
-                            "An active or unreconciled migration must finish first."
+                            "An active or unreconciled migration or bulk job must finish first."
                             if row["deletion_blocked"]
                             else None
                         ),

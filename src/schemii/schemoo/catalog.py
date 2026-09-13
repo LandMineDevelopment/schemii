@@ -117,6 +117,9 @@ def source_drift(catalog, definition):
             nodes_by_table.setdefault(node["table"], []).append(node["id"])
     unrestricted = definition.get("exposedFields") is None
     referenced = {(field.get("table"), field.get("column")) for field in definition.get("exposedFields") or []}
+    for edge in definition.get("edges", []):
+        if edge.get("kind") == "logical":
+            referenced.update((edge.get(side), edge.get(f"{side}Column")) for side in ("source", "target"))
     for scope in definition.get("scopes", []):
         for option in scope.get("alternatives", []):
             referenced.update((condition.get("table"), condition.get("column")) for condition in option.get("conditions", []))
@@ -175,7 +178,8 @@ def source_drift(catalog, definition):
     live_relationships = {relationship["id"]: relationship for relationship in catalog.get("relationships", [])}
     used_edges = {}
     for edge in definition.get("edges", []):
-        used_edges.setdefault(edge["relationshipId"], []).append(edge)
+        if edge.get("kind") != "logical":
+            used_edges.setdefault(edge["relationshipId"], []).append(edge)
     signature = lambda relationship: tuple(relationship.get(key, "") for key in
         ("name", "sourceTable", "sourceColumn", "targetTable", "targetColumn"))
     for expected in contract.get("relationships", []):
@@ -205,6 +209,14 @@ def source_issues(catalog, definition):
             issues.append({"kind": "missing_table", "nodeId": node, "table": table,
                            "message": f"Source table {table} is no longer available."})
     for edge in definition.get("edges", []):
+        if edge.get("kind") == "logical":
+            for side in ("source", "target"):
+                table = nodes.get(edge.get(side))
+                column = edge.get(f"{side}Column")
+                if column not in tables.get(table, set()):
+                    issues.append({"kind": "missing_column", "edgeId": edge["id"], "table": table,
+                                   "column": column, "message": f"Logical relationship column {table}.{column} is no longer available."})
+            continue
         if edge["relationshipId"] not in relationships:
             issues.append({"kind": "missing_relationship", "edgeId": edge["id"],
                            "message": f"Relationship {edge['id']} is no longer available; rebind or remove it."})

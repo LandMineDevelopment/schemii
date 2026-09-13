@@ -1,13 +1,15 @@
+import { populateReasoningOptions, reasoningForModel } from "./ai-reasoning.js";
+import { assistantDownloadLink } from "./ai-download.js";
 import { requestJson } from "./http.js";
 import { element } from "./dom.js";
 import { createIconButton } from "./ui.js";
 import { createMessageNode, availableModels, populateModelOptions, modelValue } from "./ai-presentation.js";
-import { PERMISSION_MODES as modes, actionMode } from "./ai-permissions.js";
+import { renderPermissionBundles } from "./ai-permissions.js";
 import { renderAiActivity } from "./ai-activity.js";
 import { enhanceModelPicker } from "./ai-model-picker.js";
 import { placeTurnActivity } from "./ai-timeline.js";
 
-const modeLabels = { disabled: "Disabled", ask: "Ask per batch", automatic: "Automatic" };
+
 const active = chat => ["working", "waiting_approval"].includes(chat?.status);
 const el = (tag, text, className) => element(tag, { text, className });
 function button(label, action, icon) {
@@ -31,6 +33,8 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   const panel = element("aside", { className: "model-ai", attrs: { id: "model-ai", "aria-label": "Model assistant", "aria-hidden": "true", inert: "" } });
   const status = element("span", { className: "model-ai-status", text: "Ready", attrs: { role: "status" } });
   const modelSelect = element("select", { attrs: { "aria-label": "Assistant model" } });
+  const reasoningSelect = element("select", { attrs: { "aria-label": "Assistant reasoning level" } });
+  const settingsReasoning = element("select", { attrs: { "aria-label": "Reasoning level" } });
   const notice = element("p", { className: "model-ai-notice", hidden: true, attrs: { role: "status" } });
   const disclosure = el("p", "", "model-ai-disclosure");
   const messages = element("div", { className: "model-ai-messages", attrs: { role: "log", "aria-label": "Conversation", "aria-live": "polite" } });
@@ -48,14 +52,14 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   }), "new-chat");
   const retry = button("Refresh", () => void guard(async () => { if (chat) await refresh(); else await load(); }));
   const form = element("form", { className: "model-ai-composer" }, [input, element("div", {}, [el("small", "Enter to send · Shift + Enter for a new line"), cancel, send])]);
-  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", "SCHEMOO / AI"), el("h2", "Model assistant")]), status, history, fresh, permissions, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [modelSelect, disclosure]), notice, scroll, form);
+  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", "SCHEMOO / AI"), el("h2", "Model assistant")]), status, history, fresh, permissions, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [element("div", { className: "model-ai-model-options" }, [modelSelect, element("label", { className: "model-ai-reasoning" }, [el("span", "Reasoning"), reasoningSelect])]), disclosure]), notice, scroll, form);
   document.body.append(panel);
   const modelPicker = enhanceModelPicker(modelSelect, { refresh: () => refreshProviders({ refresh: true }) });
   const settingsDialog = dialog("Assistant settings"), historyDialog = dialog("Conversation history");
   const settingsBody = el("div", "", "model-ai-settings"), settingsStatus = element("p", { attrs: { role: "status" } });
   const providers = el("div", "", "model-ai-providers"), permissionList = el("div", "", "model-ai-permissions");
   const saveSettings = button("Save settings", () => void persistSettings());
-  settingsBody.append(el("h3", "Providers"), providers, el("h3", "Action permissions"), el("p", "Permissions apply to this conversation and become defaults for new conversations.", "model-ai-muted"), permissionList, settingsStatus, saveSettings);
+  settingsBody.append(element("label", { className: "model-ai-reasoning" }, [el("span", "Reasoning level"), settingsReasoning]), el("p", "Higher levels can take longer. Model default keeps the provider’s default behavior.", "model-ai-muted"), el("h3", "Providers"), providers, el("h3", "Action permissions"), el("p", "Permissions apply to this conversation and become defaults for new conversations.", "model-ai-muted"), permissionList, settingsStatus, saveSettings);
   settingsDialog.append(settingsBody);
   const historyBody = el("div", "", "model-ai-history"); historyDialog.append(historyBody);
   trigger.setAttribute("aria-controls", "model-ai"); trigger.setAttribute("aria-expanded", "false");
@@ -71,8 +75,10 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     const selectedId = chat?.aiModelId || settings?.aiModelId || settings?.modelId;
     available = availableModels(runtime);
     populateModelOptions(modelSelect, available, selectedProvider, selectedId);
+    populateReasoningOptions(reasoningSelect, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", busy || active(chat));
     controls();
   }
+  let permissionEditor = null;
   function controls() {
     const running = active(chat);
     status.textContent = busy ? "Loading" : ({ working: "Working", waiting_approval: "Review batch", failed: "Needs attention" }[chat?.status] || "Ready");
@@ -81,9 +87,11 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     send.hidden = running;
     cancel.hidden = !running; cancel.disabled = busy;
     modelSelect.disabled = busy;
+    reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1;
+    settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1;
     fresh.disabled = busy || running || !getModelId() || !selected(); history.disabled = busy || !getModelId();
     saveSettings.disabled = busy;
-    permissionList.querySelectorAll("select").forEach(control => { control.disabled = busy; });
+    permissionEditor?.setBusy(busy);
     messages.querySelectorAll(".model-ai-approval button").forEach(control => { control.disabled = busy; });
     const automatic = Object.values(chat?.modes || settings?.modes || {}).includes("automatic");
     const provider = runtime?.providers?.find(item => item.id === (chat?.providerId || selected()?.providerId));
@@ -129,9 +137,10 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
       const card = element("article", { className: "model-ai-operation" }, [el("strong", title), el("small", payload.status || activity.status || "")]);
       card.dataset.timestamp = activity.createdAt || payload.createdAt || "";
       if (payload.message && payload.message !== title) card.append(el("p", payload.message));
-      const result = payload.result || activity.result || payload.summary;
+      const result = payload.result || activity.receipt?.result || payload.receipt?.result || activity.result || payload.summary;
       if (result) {
         card.append(details("Result summary", result));
+        if (["succeeded", "completed"].includes(payload.status || activity.status)) { const download = assistantDownloadLink(result); if (download) card.append(download); }
       }
       if (["execute_model", "get_execution", "get_result_page", "parameter_values", "domain_values"].includes(operation) && ["succeeded", "completed"].includes(payload.status || activity.status)) card.append(button("Ask about this result", () => {
         const executionId = payload.executionId || payload.action?.args?.executionId;
@@ -207,7 +216,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   }
   async function newChat() {
     const choice = selected(); if (!choice || !getModelId()) throw new Error("Choose a saved model and connect an AI provider first.");
-    const next = await requestJson(`${api}/chats`, { method: "POST", body: { modelId: getModelId(), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {} } });
+    const next = await requestJson(`${api}/chats`, { method: "POST", body: { modelId: getModelId(), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForModel(choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
     generation++; input.value = ""; transcriptKey = ""; await accept(next); tell("Started a new conversation. Previous conversations remain in history.");
   }
   async function load() {
@@ -263,36 +272,41 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     const wasActive = active(chat);
     busy = true; controls();
     try {
-      const body = { providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, expectedRevision: chat?.revision };
+      const body = { providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForModel(choice, chat?.reasoningEffort || settings?.reasoningEffort), expectedRevision: chat?.revision };
       if (chat) await accept(await requestJson(`${api}/chats/${encodeURIComponent(chat.id)}/preferences`, { method: "PUT", body }));
-      settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes } });
+      settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes, reasoningEffort: body.reasoningEffort } });
       tell(`Switched to ${choice.name}.${wasActive ? " The current turn was stopped. Send a follow-up to continue." : " Conversation retained."}`);
+    } finally { busy = false; populateModels(); }
+  });
+
+  reasoningSelect.onchange = () => void guard(async () => {
+    const reasoningEffort = reasoningSelect.value, choice = selected();
+    if (!choice || busy || active(chat)) return;
+    busy = true; controls();
+    try {
+      const body = { providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort, expectedRevision: chat?.revision };
+      if (chat) await accept(await requestJson(`${api}/chats/${encodeURIComponent(chat.id)}/preferences`, { method: "PUT", body }));
+      settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes, reasoningEffort } });
+      tell("Reasoning level saved for your next message.");
     } finally { busy = false; populateModels(); }
   });
 
   async function showSettings() {
     settingsDialog.showModal(); settingsStatus.textContent = "Loading settings…";
-    try { if (!settings || !runtime) await load(); else runtime = await requestJson("/api/v1/ai/status"); populateModels(); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
+    try { if (!settings || !runtime) await load(); else runtime = await requestJson("/api/v1/ai/status"); populateModels(); populateReasoningOptions(settingsReasoning, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", active(chat)); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
     catch (error) { settingsStatus.textContent = error.message; }
   }
   function renderPermissions() {
-    permissionList.replaceChildren(); const groups = new Map();
-    for (const action of settings?.actions || []) {
-      const groupName = action.group || "Model actions";
-      if (!groups.has(groupName)) { const group = element("fieldset", {}, [el("legend", groupName)]); groups.set(groupName, group); permissionList.append(group); }
-      const select = element("select", { attrs: { "aria-label": action.label, "data-action": action.id } }, modes.map(mode => element("option", { text: modeLabels[mode], attrs: { value: mode } })));
-      select.value = actionMode(chat?.modes || settings?.modes, action.id);
-      groups.get(groupName).append(element("label", {}, [element("span", {}, [el("strong", action.label), el("small", action.description || "")]), select]));
-    }
+    permissionEditor = renderPermissionBundles(permissionList, settings?.actions || [], chat?.modes || settings?.modes, { attribute: "data-action" });
     controls();
   }
   async function persistSettings() {
     if (busy) return; busy = true; controls(); settingsStatus.textContent = "Saving…";
     try {
-      const values = Object.fromEntries([...permissionList.querySelectorAll("select")].map(control => [control.dataset.action, control.value]));
-      const body = { modes: values, providerId: chat?.providerId || selected()?.providerId, aiModelId: chat?.aiModelId || selected()?.id, expectedRevision: chat?.revision };
+      const values = Object.fromEntries([...permissionList.querySelectorAll("select[data-action]")].map(control => [control.dataset.action, control.value]));
+      const body = { modes: values, providerId: chat?.providerId || selected()?.providerId, aiModelId: chat?.aiModelId || selected()?.id, reasoningEffort: settingsReasoning.value, expectedRevision: chat?.revision };
       if (chat) await accept(await requestJson(`${api}/chats/${encodeURIComponent(chat.id)}/preferences`, { method: "PUT", body }));
-      settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes } });
+      settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes, reasoningEffort: body.reasoningEffort } });
       settingsDialog.close(); tell("Assistant settings saved.");
     } catch (error) { settingsStatus.textContent = error.message; }
     finally { busy = false; render(); }

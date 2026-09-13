@@ -1,3 +1,4 @@
+import { reasoningLevels } from './reasoning.js';
 import { CredentialVault, TurnRunner, TurnError, providers } from './runtime.js';
 import { discoverModels } from './model-discovery.js';
 
@@ -10,7 +11,7 @@ const maxima = { maxConcurrent: 1000, maxPerOwner: 1000, timeoutMs: 3600000,
 export function supportedModels() {
   return { models: supported.flatMap(providerId => providers[providerId]().getModels().map(model => ({
     providerId, id: model.id, name: model.name, contextWindow: model.contextWindow,
-    maxOutputTokens: model.maxTokens,
+    maxOutputTokens: model.maxTokens, reasoningLevels: reasoningLevels(model),
   }))) };
 }
 

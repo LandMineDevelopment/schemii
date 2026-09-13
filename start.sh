@@ -25,7 +25,7 @@ SCHEMII_LOG_SERVICE=
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -62,6 +62,10 @@ if (( $# > 0 )); then
       (( $# == 1 )) || { usage >&2; exit 2; }
       list_demo_scenarios
       exit 0
+      ;;
+    --test-ai-metadata)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION=test-ai-metadata
       ;;
     --test-ai-prototype)
       (( $# == 1 )) || { usage >&2; exit 2; }
@@ -372,6 +376,11 @@ export SCHEMII_DEMO_SOURCE_REVISION
 
 if [[ "$SCHEMII_LAUNCH_ACTION" == "logs" ]]; then
   exec docker "${compose_args[@]}" logs --no-color --tail 200 "$SCHEMII_LOG_SERVICE"
+fi
+
+if [[ "$SCHEMII_LAUNCH_ACTION" == "test-ai-metadata" ]]; then
+  printf 'Verifying AI authority records against local PostgreSQL with an isolated test owner...\n'
+  exec docker "${compose_args[@]}" exec -T schemii python - < "$ROOT_DIR/tests/integration/ai_operation_contract.py"
 fi
 
 printf 'Building the current Schemii application image...\n'

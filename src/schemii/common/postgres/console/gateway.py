@@ -10,6 +10,7 @@ import threading
 from typing import Any, Protocol, runtime_checkable
 
 from pglast import parse_sql
+from schemii.common.query_executions.activity import report_progress, statement_progress
 from schemii.common.query_executions.cancellation import (
     cancellable_connection,
     check_query_authority,
@@ -17,6 +18,7 @@ from schemii.common.query_executions.cancellation import (
 
 from schemii.common.postgres.errors import (
     PostgresCommitUncertainError,
+    PostgresConsoleCancelledError,
     PostgresConsoleLimitError,
     PostgresConsoleQueryError,
     PostgresGatewayError,
@@ -100,6 +102,7 @@ class PsycopgConsoleReadSession:
         self._page_memory_bytes = page_memory_bytes
         self._maximum_cell_bytes = maximum_cell_bytes
         self._closed = False
+        self._cancelled = threading.Event()
         self._lock = threading.RLock()
         self._readers: dict[int, _ReadCursor] = {}
         self._results = self._prepare(statements)
@@ -122,15 +125,19 @@ class PsycopgConsoleReadSession:
         try:
             for statement_index, statement in enumerate(statements):
                 check_query_authority()
+                statement_progress(statement_index)
                 parsed = parse_sql(statement)
                 node_name = type(parsed[0].stmt).__name__ if parsed else ""
                 if node_name != "SelectStmt":
-                    materialized = execute_console_statements(
-                        self._database_connection,
-                        (statement,),
-                        maximum_result_bytes=self._page_memory_bytes,
-                        maximum_cell_bytes=self._maximum_cell_bytes,
-                    )[0]
+                    # The nested single-statement executor numbers from zero;
+                    # only this outer script owns progress statement indexes.
+                    with report_progress(None):
+                        materialized = execute_console_statements(
+                            self._database_connection,
+                            (statement,),
+                            maximum_result_bytes=self._page_memory_bytes,
+                            maximum_cell_bytes=self._maximum_cell_bytes,
+                        )[0]
                     result = ConsoleQueryResult(
                         statement_index=statement_index,
                         command=materialized.command,
@@ -144,6 +151,7 @@ class PsycopgConsoleReadSession:
                         cursor=None, rows=materialized.rows
                     )
                     results.append(result)
+                    statement_progress(statement_index, True)
                     continue
 
                 query = statement.rstrip().removesuffix(";")
@@ -271,6 +279,8 @@ class PsycopgConsoleReadSession:
 
     def page(self, statement_index, offset, page_size):
         with self._lock, cancellable_connection(self._database_connection):
+            if self._cancelled.is_set():
+                raise PostgresConsoleCancelledError()
             return self._page(statement_index, offset, page_size)
 
     def _page(self, statement_index, offset, page_size):
@@ -291,6 +301,8 @@ class PsycopgConsoleReadSession:
             except PostgresGatewayError:
                 raise
             except Exception as error:
+                if self._cancelled.is_set():
+                    raise PostgresConsoleCancelledError() from None
                 diagnostic = getattr(error, "diag", None)
                 message = getattr(diagnostic, "message_primary", None)
                 sqlstate = getattr(error, "sqlstate", None)
@@ -305,6 +317,8 @@ class PsycopgConsoleReadSession:
         """Read a separate forward-only portal so export cannot disturb UI paging."""
 
         with self._lock, cancellable_connection(self._database_connection):
+            if self._cancelled.is_set():
+                raise PostgresConsoleCancelledError()
             return self._export_page(statement_index, offset, page_size)
 
     def _export_page(self, statement_index, offset, page_size):
@@ -327,6 +341,8 @@ class PsycopgConsoleReadSession:
             except PostgresGatewayError:
                 raise
             except Exception as error:
+                if self._cancelled.is_set():
+                    raise PostgresConsoleCancelledError() from None
                 diagnostic = getattr(error, "diag", None)
                 message = getattr(diagnostic, "message_primary", None)
                 sqlstate = getattr(error, "sqlstate", None)
@@ -343,6 +359,17 @@ class PsycopgConsoleReadSession:
         with self._lock:
             reader = self._readers.get(statement_index)
             return bool(reader is not None and reader.pending)
+
+    def cancel(self) -> None:
+        """Cancel the owned connection without waiting for its blocked fetch lock."""
+        if self._closed:
+            return
+        self._cancelled.set()
+        cancel_safe = getattr(self._database_connection, "cancel_safe", None)
+        if callable(cancel_safe):
+            cancel_safe(timeout=1.0)
+        else:
+            self._database_connection.cancel()
 
     def close(self) -> None:
         with self._lock:
@@ -450,6 +477,7 @@ def _execute_console_statements(
     try:
         for statement_index, statement in enumerate(statements):
             check_query_authority()
+            statement_progress(statement_index)
             cursor: Any | None = None
             try:
                 cursor = database_connection.cursor(
@@ -510,6 +538,7 @@ def _execute_console_statements(
                         truncated=truncated,
                     )
                 )
+                statement_progress(statement_index, True)
             finally:
                 _safe_close(cursor)
         return tuple(results)

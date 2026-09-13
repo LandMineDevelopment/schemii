@@ -9,13 +9,25 @@ from schemii.common.api.models import ApiModel
 from .action_policy import PERMISSIONS, action_modes, permission_descriptors, policy_descriptors
 
 
+ReasoningEffort = Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
 class AiCapabilities(ApiModel):
     """Independent authority switches; broad access never implies write access."""
 
+    raw_console: bool = False
+    raw_console_approval_required: bool = True
+    app_actions: bool = False
+    app_approval_required: bool = True
     design_changes: bool = False
     live_catalog: bool = False
     structured_data_read: bool = False
     raw_sql_read: bool = False
+    explain_queries: bool = False
+    analyze_queries: bool = False
+    monitor_queries: bool = False
+    explain_approval_required: bool = True
+    analyze_approval_required: bool = True
     raw_sql_write: bool = False
     read_approval_required: bool = True
     design_approval_required: bool = True
@@ -46,6 +58,7 @@ class AiCapabilities(ApiModel):
 
 
 class SchemiiAiSettings(ApiModel):
+    default_reasoning_effort: ReasoningEffort = "default"
     permission_actions: list[dict[str, Any]] = Field(default_factory=permission_descriptors)
     action_policies: list[dict[str, Any]] = Field(default_factory=policy_descriptors)
     revision: Annotated[int, Field(strict=True, ge=1)]
@@ -56,6 +69,7 @@ class SchemiiAiSettings(ApiModel):
 
 
 class SchemiiAiSettingsUpdate(ApiModel):
+    default_reasoning_effort: ReasoningEffort | None = None
     expected_revision: Annotated[int, Field(strict=True, ge=1)]
     enabled: bool
     default_provider_id: str | None = Field(default=None, max_length=128)
@@ -64,6 +78,7 @@ class SchemiiAiSettingsUpdate(ApiModel):
 
 
 class SchemiiAiPreferencesUpdate(ApiModel):
+    reasoning_effort: ReasoningEffort | None = None
     expected_settings_revision: Annotated[int, Field(strict=True, ge=1)]
     expected_chat_revision: Annotated[int, Field(strict=True, ge=1)]
     provider_id: Annotated[str, Field(min_length=1, max_length=128)]
@@ -72,6 +87,7 @@ class SchemiiAiPreferencesUpdate(ApiModel):
 
 
 class SchemiiChatCreate(ApiModel):
+    reasoning_effort: ReasoningEffort = "default"
     provider_id: Annotated[str, Field(min_length=1, max_length=128)]
     model_id: Annotated[str, Field(min_length=1, max_length=256)]
     capabilities: AiCapabilities = Field(default_factory=AiCapabilities)
@@ -84,6 +100,7 @@ class SchemiiChatUpdate(ApiModel):
 
 
 class SchemiiChat(ApiModel):
+    reasoning_effort: ReasoningEffort = "default"
     id: str = Field(pattern=r"^chat_[0-9a-f]{32}$")
     workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
     revision: Annotated[int, Field(strict=True, ge=1)]
@@ -219,7 +236,7 @@ class SchemiiAiOperation(ApiModel):
     chat_id: str = Field(pattern=r"^chat_[0-9a-f]{32}$")
     proposal_id: str = Field(pattern=r"^prop_[0-9a-f]{32}$")
     revision: Annotated[int, Field(strict=True, ge=1)]
-    kind: Literal["design_change", "migration_review", "migration_apply", "migration_resolve", "migration_reconcile", "design_history", "sql_write", "data_read", "console_script", "navigation"]
+    kind: Literal["raw_console", "app_action", "design_change", "migration_review", "migration_apply", "migration_resolve", "migration_reconcile", "design_history", "sql_write", "data_read", "console_script", "navigation"]
     status: Literal["running", "succeeded", "failed", "cancelled", "uncertain"]
     resource_kind: str | None = Field(default=None, max_length=128)
     resource_id: str | None = Field(default=None, max_length=256)

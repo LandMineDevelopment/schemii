@@ -30,6 +30,26 @@ TABLE_ID = "table_" + "a" * 32
 COLUMN_ID = "column_" + "b" * 32
 
 
+@pytest.mark.parametrize("sql", [
+    "BEGIN; UPDATE things SET active = true; COMMIT;",
+    "CREATE INDEX CONCURRENTLY things_idx ON things (id);",
+    "SET search_path TO other_schema; VACUUM ANALYZE things;",
+    "COPY things TO STDOUT WITH (FORMAT CSV);",
+])
+def test_human_console_drafts_preserve_raw_sql_without_granting_execution(sql):
+    from schemii.schemii.ai.action_policy import disabled_action_ids
+    from schemii.schemii.ai.tools import tool_enabled
+
+    caps = AiCapabilities(action_modes={"query.draft": "automatic"})
+    proposal = normalize_tool_call("schemii_open_console", {"sql": sql})
+    assert proposal.action == {"sql": sql}
+    assert proposal.action_type == "console_script"
+    assert not disabled_action_ids(caps, proposal.action_type, proposal.action)
+    assert tool_enabled("schemii_open_console", caps)
+    assert not tool_enabled("schemii_execute_write", caps)
+    assert not tool_enabled("schemii_read_query", caps)
+
+
 def normalize(action):
     return normalize_tool_call("schemii_design_change", {"action": action}).action
 
@@ -263,3 +283,40 @@ def test_batch_validates_dependencies_after_all_changes():
     assert changed.revision == with_index.revision + 1
     assert [column.name for column in changed.content.tables[0].columns] == ["description"]
     assert changed.content.tables[0].indexes == []
+
+
+@pytest.mark.parametrize("sql", ["DELETE FROM items", "SELECT 1; SELECT 2", "WITH deleted AS (DELETE FROM items RETURNING *) SELECT * FROM deleted"])
+def test_explain_tool_rejects_writes_and_scripts(sql):
+    from schemii.common.postgres.console.execution import ConsoleStatementValidationError
+    with pytest.raises(ConsoleStatementValidationError):
+        normalize_tool_call("schemii_explain_query", {"sql": sql, "analyze": True})
+
+
+def test_diagnostic_tools_require_independent_permissions():
+    def names(capabilities):
+        return {item["name"] for item in tool_definitions(capabilities)}
+    disabled = names(AiCapabilities())
+    assert "schemii_explain_query" not in disabled
+    assert "schemii_query_activity" not in disabled
+    read = names(AiCapabilities(raw_sql_read=True))
+    assert "schemii_explain_query" not in read
+    assert "schemii_query_activity" not in read
+    analyze = names(AiCapabilities(structured_data_read=True))
+    assert "schemii_query_activity" not in analyze
+    assert "schemii_explain_query" not in analyze
+    assert "schemii_explain_query" in names(AiCapabilities(explain_queries=True))
+    assert "schemii_explain_query" in names(AiCapabilities(analyze_queries=True))
+    assert "schemii_query_activity" in names(AiCapabilities(monitor_queries=True))
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0, None])
+def test_explain_tool_requires_an_explicit_boolean_analyze_option(value):
+    with pytest.raises(ValidationError):
+        normalize_tool_call("schemii_explain_query", {"sql": "SELECT 1", "analyze": value})
+
+
+def test_explain_tool_schema_matches_the_sql_size_limit():
+    from schemii.schemii.ai.tools import ExplainQuery
+    assert ExplainQuery.model_json_schema()["properties"]["sql"]["maxLength"] == 256 * 1024
+    with pytest.raises(ValidationError):
+        ExplainQuery(sql="x" * (256 * 1024 + 1))

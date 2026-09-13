@@ -105,3 +105,26 @@ def test_postgres_switch_updates_existing_row_or_rejects_busy_before_writes(busy
     assert not any("ai_proposals" in statement for statement in statements)
     if busy:
         assert not any(statement.startswith(("UPDATE", "INSERT")) for statement in statements)
+
+
+def test_diagnostic_preferences_roundtrip_chat_and_defaults_independently():
+    from schemii.schemii.ai.models import SchemiiAiPreferencesUpdate, SchemiiAiSettings, SchemiiChat
+    repo, chat, turn, _ = conversation()
+    request = SchemiiAiPreferencesUpdate.model_validate({
+        "expectedSettingsRevision": 1, "expectedChatRevision": chat.revision,
+        "providerId": chat.provider_id, "modelId": chat.model_id,
+        "capabilities": {"monitorQueries": True, "structuredDataRead": False,
+            "actionModes": {"query.explain": "automatic", "query.analyze": "ask", "query.read": "disabled"}},
+    })
+    repo.save_preferences("owner", chat.id, request.expected_settings_revision,
+        request.expected_chat_revision, request.provider_id, request.model_id, request.capabilities)
+    settings = SchemiiAiSettings.model_validate_json(repo.settings("owner").model_dump_json(by_alias=True))
+    current = SchemiiChat.model_validate_json(repo.get_chat("owner", chat.id).model_dump_json(by_alias=True))
+    assert current.capabilities == settings.default_capabilities == request.capabilities
+    for caps in [current.capabilities, settings.default_capabilities]:
+        assert caps.explain_queries and not caps.explain_approval_required
+        assert caps.analyze_queries and caps.analyze_approval_required
+        assert caps.monitor_queries and not caps.structured_data_read
+        assert not caps.raw_sql_read and caps.action_modes["query.read"] == "disabled"
+    actions = {item["id"] for item in settings.permission_actions}
+    assert {"query.explain", "query.analyze"} <= actions

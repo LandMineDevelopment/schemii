@@ -104,6 +104,28 @@ def test_safe_type_change_preserves_postgresql_managed_checks_and_indexes() -> N
     assert steps[0].data_movement is True
 
 
+def test_index_include_columns_are_preserved_in_compiled_sql() -> None:
+    key = _column("a", "organization_id", "uuid")
+    included = _column("b", "personnel_id", "uuid")
+    table = _table("c", "slate_fact", [key, included])
+    desired = SchemiiDesignContent(tables=[table.model_copy(update={
+        "indexes": [DesignIndex(
+            id=_id("index", "d"),
+            name="slate_fact_org_idx",
+            column_ids=[key.id],
+            include_column_ids=[included.id],
+        )],
+    })])
+
+    steps, blockers = compile_migration_steps("public", SchemiiDesignContent(), desired)
+
+    assert blockers == []
+    assert steps[1].sql == (
+        'CREATE INDEX "slate_fact_org_idx" ON "public"."slate_fact" '
+        'USING "btree" ("organization_id") INCLUDE ("personnel_id");'
+    )
+
+
 def test_ambiguous_or_narrowing_type_change_is_blocked() -> None:
     table = _table("a", "events", [_column("b", "payload", "jsonb")])
     live = SchemiiDesignContent(tables=[table])

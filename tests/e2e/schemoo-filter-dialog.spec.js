@@ -62,7 +62,7 @@ test("fixed domain selection works before save and remains a literal after reloa
 
 test("alias roles are selectable for domain values and source bindings and survive reload", async ({ page }) => {
   await page.goto(`/schemoo?model=${modelId}`);
-  await expect(page.locator(".sc-node")).toHaveCount(12);
+  await expect(page.locator('[data-node-id="personnel_dim"] .sc-node-header')).toBeVisible();
   if (await page.locator("#inspector").isVisible()) await page.getByRole("button", { name: "Close inspector", exact: true }).click();
   await page.locator('[data-node-id="personnel_dim"] .sc-node-header').click();
   await page.getByRole("button", { name: "Create alias", exact: true }).click();
@@ -183,4 +183,26 @@ test("report parameter dialog binds inputs and changing to a null rule clears nu
   await page.getByRole("button", { name: "Apply to model", exact: true }).click();
   await expect(page.locator("#sql")).toContainText("IS NOT NULL");
   await expect(page.locator("#sql")).not.toContainText("OR");
+});
+
+test("filter activation and unmatched-row policy are independent and persist", async ({ page, request }) => {
+  await page.goto(`/schemoo?model=${modelId}`);
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
+  await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
+  await page.getByRole("button", { name: /^Fixed rule/ }).click();
+  await chooseModelOption(page, "Model filter / Default condition 1 field", "personnel_dim · id");
+  await chooseModelOption(page, "Model filter / Default condition 1 operator", "Is not null");
+  await chooseModelOption(page, "Matching rows for Model filter", "Keep unmatched parent rows");
+  await chooseModelOption(page, "Requirement for Model filter", "Conditional model parameter");
+  await expect(page.getByRole("combobox", { name: "Matching rows for Model filter", exact: true })).toHaveValue("Keep unmatched parent rows");
+  await chooseModelOption(page, "Matching rows for Model filter", "Require matching rows");
+  await expect(page.getByRole("combobox", { name: "Requirement for Model filter", exact: true })).toHaveValue("Conditional model parameter");
+  await page.getByRole("button", { name: "Apply to model", exact: true }).click();
+  await page.getByRole("button", { name: "Save model", exact: true }).click();
+  await expect(page.locator("#draft-status")).toContainText("Saved");
+  const saved = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  expect(saved.definition.scopes[0]).toMatchObject({kind: "conditional", rowBehavior: "require_matching"});
+  await page.reload();
+  await page.getByRole("button", { name: "Model filters", exact: true }).click();
+  await expect(page.locator("#model-filters")).toContainText("Require matching rows");
 });

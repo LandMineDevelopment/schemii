@@ -7,9 +7,10 @@ import hashlib
 import inspect
 import textwrap
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, get_args, get_type_hints
+from starlette.background import BackgroundTasks
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -31,15 +32,16 @@ from schemii.common.source_inspection import (
 
 DEVELOPER_SYSTEM_PATH = "/_developer/system"
 _MAX_ROUTES = 200
-# The registered application includes more than 512 callables and its migration
-# journey has over 600 nodes. Keep the developer map bounded with modest headroom.
-_MAX_CALLABLES = 768
+# Installed application-state AI components bring the graph above 1,000 objects.
+# Keep the developer map bounded with modest headroom.
+# Include deferred background execution, beyond the response/reservation path.
+_MAX_CALLABLES = 1024
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96
 # Keep the whole registered application visible as implemented route families grow.
 # This remains a hard bound; it is not a pagination or runtime discovery setting.
-_MAX_OBJECTS = 1024
+_MAX_OBJECTS = 1536
 _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 768
@@ -113,11 +115,16 @@ class ResolvedCall:
 class RuntimeBindingIndex:
     """Index installed component types without serializing their runtime values."""
 
-    def __init__(self, services: object, registry: SourceRegistry) -> None:
+    def __init__(
+        self, services: object, registry: SourceRegistry,
+        *, application_state: Mapping[str, object] | None = None,
+    ) -> None:
         self.registry = registry
         self.services = services
         self.top_level = dict(vars(services))
+        self.application_state = {"services": services, **(application_state or {})}
         self.field_types: dict[tuple[type[object], str], tuple[type[object], ...]] = {}
+        self.contracts_by_type: dict[type[object], set[type[object]]] = {}
         self.instances_by_type: dict[type[object], object] = {}
         self.database_types: set[type[object]] = set()
         self.bindings: list[dict[str, Any]] = []
@@ -126,6 +133,8 @@ class RuntimeBindingIndex:
         self._binding_keys: set[tuple[str, str, tuple[str, ...]]] = set()
         self._source_trees: dict[object, ast.AST | None] = {}
         self._visit(services, path="services", depth=0)
+        for name, instance in self.application_state.items():
+            self._visit(instance, path=f"state.{name}", depth=0)
 
     def _source_tree(self, subject: object) -> ast.AST | None:
         if subject not in self._source_trees:
@@ -175,6 +184,12 @@ class RuntimeBindingIndex:
                 continue
             child_types = tuple(dict.fromkeys(type(child) for child in children))
             self.field_types[(instance_type, attribute)] = child_types
+            contracts = tuple(
+                contract for contract in _annotation_types(annotations.get(attribute))
+                if is_first_party(contract) and getattr(contract, "_is_protocol", False)
+            )
+            for child_type in child_types:
+                self.contracts_by_type.setdefault(child_type, set()).update(contracts)
             implementation_ids = tuple(
                 item
                 for item in (
@@ -232,16 +247,6 @@ class RuntimeBindingIndex:
                         break
         return list(dict.fromkeys(matches))
 
-    def method_candidates(self, name: str) -> list[object]:
-        return list(
-            dict.fromkeys(
-                method
-                for candidate_type in self.instances_by_type
-                if (method := getattr(candidate_type, name, None)) is not None
-                and is_first_party(method)
-            )
-        )
-
     def call_boundary(self, subject: object) -> dict[str, str] | None:
         """Classify installed callable ownership from runtime object bindings."""
 
@@ -285,16 +290,82 @@ class RuntimeBindingIndex:
                 node.value.func,
                 callable_subject=callable_subject,
             )
-            # A chained call on a scalar can share a method name with an
-            # installed first-party component (for example ``str.replace`` and
-            # a repository's ``replace`` method). A name-only match is not
-            # evidence that the scalar call crossed an application boundary.
-            return (
-                provider.resolution != "unique-runtime-method"
-                and provider.subject is not None
-                and is_first_party(provider.subject)
-            )
+            return provider.subject is not None and is_first_party(provider.subject)
         return False
+
+    def _runtime_types(
+        self, node: ast.AST, *, callable_subject: object, depth: int = 0,
+    ) -> tuple[type[object], ...]:
+        """Follow installed receivers and simple helper returns without running code."""
+        if depth > _MAX_BINDING_DEPTH:
+            return ()
+        parts = attribute_parts(node)
+        if parts and len(parts) >= 4 and parts[1:3] == ["app", "state"]:
+            instance = self.application_state.get(parts[3])
+            if instance is not None and is_first_party(type(instance)):
+                candidates = (type(instance),)
+                for field in parts[4:]:
+                    candidates = tuple(dict.fromkeys(
+                        child for candidate in candidates
+                        for child in self.field_types.get((candidate, field), ())
+                    ))
+                return candidates
+        if isinstance(node, ast.Name) and node.id in {"self", "cls"}:
+            owner = self._owner_type(inspect.unwrap(callable_subject))
+            return (owner,) if owner is not None else ()
+        if isinstance(node, ast.Attribute):
+            return tuple(dict.fromkeys(
+                child
+                for candidate in self._runtime_types(
+                    node.value, callable_subject=callable_subject, depth=depth + 1,
+                )
+                for child in self.field_types.get((candidate, node.attr), ())
+            ))
+        if not isinstance(node, ast.Call):
+            return ()
+        # Module helpers are sufficient here; recursive/dynamic providers remain
+        # unresolved rather than being executed or guessed from method names.
+        if not isinstance(node.func, ast.Name):
+            return ()
+        provider = getattr(inspect.unwrap(callable_subject), "__globals__", {}).get(node.func.id)
+        if provider is None or not inspect.isfunction(provider):
+            return ()
+        value = self._returned_expression(provider)
+        if value is None:
+            return ()
+        return self._runtime_types(value, callable_subject=provider, depth=depth + 1)
+
+    def _returned_expression(self, subject: object) -> ast.AST | None:
+        """Read a single return, optionally through one local assignment."""
+        tree = self._source_tree(subject)
+        if tree is None or not tree.body:
+            return None
+        root = tree.body[0]
+        if not isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+        nodes = []
+        pending = list(root.body)
+        while pending:
+            item = pending.pop()
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            nodes.append(item)
+            pending.extend(ast.iter_child_nodes(item))
+        returned = [item.value for item in nodes if isinstance(item, ast.Return)]
+        if len(returned) != 1 or returned[0] is None:
+            return None
+        value = returned[0]
+        if isinstance(value, ast.Name):
+            assignments = [
+                item.value for item in nodes
+                if (isinstance(item, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == value.id
+                    for target in item.targets
+                )) or (isinstance(item, ast.AnnAssign)
+                       and isinstance(item.target, ast.Name) and item.target.id == value.id)
+            ]
+            value = assignments[0] if len(assignments) == 1 else None
+        return value
 
     def resolve(
         self,
@@ -347,6 +418,14 @@ class RuntimeBindingIndex:
                 if len(candidates) == 1:
                     return ResolvedCall(candidates[0], "runtime-field")
 
+        candidates = self._runtime_types(node.value, callable_subject=callable_subject)
+        methods = list(dict.fromkeys(
+            method for candidate in candidates
+            if (method := getattr(candidate, node.attr, None)) is not None
+        ))
+        if len(methods) == 1:
+            return ResolvedCall(methods[0], "runtime-receiver")
+
         if isinstance(node.value, ast.Call):
             provider = self.resolve(
                 node.value.func,
@@ -357,24 +436,34 @@ class RuntimeBindingIndex:
                     method = getattr(provider, node.attr, None)
                     if method is not None:
                         return ResolvedCall(method, "constructed-instance")
-                # Helpers may return a locally named runtime service without a
-                # product type annotation. Follow only a single unambiguous
-                # assignment; never execute the provider to discover its type.
-                provider_tree = self._source_tree(provider)
-                if provider_tree is not None:
-                    returned = [item.value for item in ast.walk(provider_tree) if isinstance(item, ast.Return)]
-                    if len(returned) == 1:
-                        value = returned[0]
-                        if isinstance(value, ast.Name):
-                            assignments = [item.value for item in ast.walk(provider_tree)
-                                if isinstance(item, ast.Assign) and any(isinstance(target, ast.Name) and target.id == value.id for target in item.targets)]
-                            value = assignments[0] if len(assignments) == 1 else None
-                        parts = attribute_parts(value) if value is not None else None
-                        if parts and "services" in parts:
-                            bound = self.resolve(ast.Attribute(value=value, attr=node.attr), callable_subject=provider)
-                            if bound.subject is not None:
-                                return ResolvedCall(bound.subject, "returned-runtime-service")
+                # An unannotated helper can still prove a built-in receiver
+                # by returning a literal. Resolve its terminal method without
+                # invoking the helper or inventing an application boundary.
+                returned = self._returned_expression(provider)
+                literal_type = {
+                    ast.Dict: dict, ast.List: list, ast.Tuple: tuple, ast.Set: set,
+                    ast.DictComp: dict, ast.ListComp: list, ast.SetComp: set,
+                }.get(type(returned))
+                if isinstance(returned, ast.Constant):
+                    literal_type = type(returned.value)
+                if literal_type is not None:
+                    method = getattr(literal_type, node.attr, None)
+                    if method is not None:
+                        return ResolvedCall(method, "literal-return")
                 return_annotation = _type_hints(provider).get("return")
+                if return_annotation is None:
+                    # A proven installed implementation can inherit its return
+                    # shape from the protocol on that exact runtime binding.
+                    # Never infer contracts from a coincidentally named method.
+                    owner = self._owner_type(inspect.unwrap(provider))
+                    annotations = {
+                        annotation
+                        for contract in self.contracts_by_type.get(owner, ())
+                        if (method := getattr(contract, getattr(provider, "__name__", ""), None)) is not None
+                        if (annotation := _type_hints(method).get("return")) is not None
+                    }
+                    if len(annotations) == 1:
+                        return_annotation = annotations.pop()
                 candidate_types = self.matching_types(return_annotation)
                 methods = [
                     getattr(candidate_type, node.attr, None)
@@ -400,9 +489,8 @@ class RuntimeBindingIndex:
                 # component merely because one component exposes a method with
                 # the same common name (for example ``str.replace``).
                 return ResolvedCall(None, "typed-local")
-            candidates = self.method_candidates(node.attr)
-            if len(candidates) == 1:
-                return ResolvedCall(candidates[0], "unique-runtime-method")
+            # A method name alone is not receiver evidence: e.g. a database
+            # cursor's execute must never resolve to an installed AI service.
 
         return ResolvedCall(None, "unresolved")
 
@@ -770,7 +858,9 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
             total_source_limit=2_048_000,
         )
     )
-    runtime = RuntimeBindingIndex(application.state.services, registry)
+    runtime = RuntimeBindingIndex(
+        application.state.services, registry, application_state=application.state._state,
+    )
     services: list[dict[str, Any]] = []
     queued: deque[tuple[object, int]] = deque()
 
@@ -910,21 +1000,33 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
         calls: list[dict[str, Any]] = []
         unresolved_calls: list[dict[str, Any]] = []
         calls_truncated = False
-        resolved_sites = (
-            (site, resolved)
-            for site in direct_call_sites(subject)
-            for resolved in runtime.resolve_all(site.node.func, callable_subject=subject)
-        )
-        for site, resolved in resolved_sites:
+        resolved_sites = []
+        for site in direct_call_sites(subject):
+            expressions = [(site.node.func, False)]
+            target = site.node.func
+            if (isinstance(target, ast.Attribute) and target.attr == "add_task"
+                    and isinstance(target.value, ast.Name) and site.node.args):
+                receiver_type = _type_hints(subject).get(target.value.id)
+                if inspect.isclass(receiver_type) and issubclass(receiver_type, BackgroundTasks):
+                    # This framework contract executes its first argument after
+                    # returning the response. Follow the proven callback rather
+                    # than stopping the execution journey at reservation.
+                    expressions.append((site.node.args[0], True))
+            for expression, deferred in expressions:
+                for resolved in runtime.resolve_all(expression, callable_subject=subject):
+                    if deferred and resolved.subject is not None:
+                        resolved = ResolvedCall(resolved.subject, "background-task")
+                    resolved_sites.append((site, expression, resolved))
+        for site, expression, resolved in resolved_sites:
             called = resolved.subject
             if called is None:
                 if runtime.is_material_unresolved_call(
-                    site.node.func,
+                    expression,
                     callable_subject=subject,
                 ):
                     unresolved_calls.append(
                         {
-                            "expression": ast.unparse(site.node.func),
+                            "expression": ast.unparse(expression),
                             "line": source_start_line + site.node.lineno - 1
                             if source_start_line is not None
                             else None,
@@ -943,9 +1045,14 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
             called_id = registry.register(called)
             if called_id is None:
                 continue
+            call_node = site.node
+            if resolved.resolution == "background-task":
+                call_node = ast.copy_location(ast.Call(
+                    func=expression, args=site.node.args[1:], keywords=site.node.keywords,
+                ), site.node)
             record = {
                 "sequence": len(calls) + 1,
-                "expression": ast.unparse(site.node.func),
+                "expression": ast.unparse(expression),
                 "objectId": called_id,
                 "resolution": resolved.resolution,
                 "line": source_start_line + site.node.lineno - 1
@@ -960,9 +1067,9 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
                     source_start_line=source_start_line,
                 ),
                 "targetCallable": callable(called) and not inspect.isclass(called),
-                "arguments": call_argument_bindings(site.node, called),
+                "arguments": call_argument_bindings(call_node, called),
                 "targetSignature": _signature_contract(called, registry),
-                **_call_details(site.node, called),
+                **_call_details(call_node, called),
             }
             boundary = runtime.call_boundary(called)
             if boundary is not None:

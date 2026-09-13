@@ -62,7 +62,7 @@ def _call(function, *args):
 @router.get("/ai/settings", response_model=SchemiiAiSettings)
 def settings(request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.settings, principal.user_id)
 @router.put("/ai/settings", response_model=SchemiiAiSettings)
-def update_settings(body: SchemiiAiSettingsUpdate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).repository.update_settings, principal.user_id, body.expected_revision, body.enabled, body.default_provider_id, body.default_model_id, body.default_capabilities)
+def update_settings(body: SchemiiAiSettingsUpdate, request: Request, principal: Principal = Depends(get_current_principal)): return _call(_service(request).update_settings, principal.user_id, body)
 @router.put("/ai/chats/{chat_id}/preferences", response_model=SchemiiAiPreferencesResult)
 def save_preferences(chat_id: str, body: SchemiiAiPreferencesUpdate, tasks: BackgroundTasks, request: Request, principal: Principal = Depends(get_current_principal)):
     result = _call(_service(request).save_preferences, principal.user_id, chat_id, body)

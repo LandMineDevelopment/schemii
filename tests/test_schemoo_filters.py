@@ -385,3 +385,74 @@ def test_required_scope_activates_conditional_temporal_filter(catalog):
 def test_no_enabled_path_for_mandatory_filter_rejected(catalog):
     with pytest.raises(ValueError, match="Starting object.*cannot reach"):
         compile_preview(catalog, query(relationships=[], scopes=[scope()]))
+
+
+@pytest.mark.parametrize("kind", ["required", "conditional"])
+@pytest.mark.parametrize("behavior,expected", [("keep_unmatched", [("Alice", "42"), ("Bob", None)]), ("require_matching", [("Alice", "42")])])
+def test_filter_activation_independent_of_unmatched_rows(catalog, kind, behavior, expected):
+    rule = scope(kind, "assignment", "org_id")
+    rule["rowBehavior"] = behavior
+    sql = compile_preview(catalog, query(fields=[{"table": "people", "column": "name"}, {"table": "assignment", "column": "org_id"}], scopes=[rule]))["sql"]
+    with sqlite3.connect(":memory:") as db:
+        db.executescript("ATTACH DATABASE ':memory:' AS public; CREATE TABLE public.people(id TEXT, name TEXT); CREATE TABLE public.assignment(person_id TEXT, org_id TEXT, start TEXT, end TEXT); INSERT INTO public.people VALUES ('a','Alice'),('b','Bob'); INSERT INTO public.assignment VALUES ('a','42',NULL,NULL),('b','43',NULL,NULL);")
+        assert sorted(db.execute(parse_one(sql, dialect="postgres").sql(dialect="sqlite")).fetchall()) == expected
+
+
+def test_conditional_matching_filter_does_not_force_source(catalog):
+    rule = {**scope("conditional"), "rowBehavior": "require_matching"}
+    result = compile_preview(catalog, query(scopes=[rule]))
+    assert result["activeScopes"] == []
+    assert result["requiredNodes"] == ["people"]
+
+
+@pytest.mark.parametrize("aggregate", ["sum", "count", "avg"])
+def test_parent_measures_reject_child_fanout(catalog, aggregate):
+    with pytest.raises(ModelValidationError, match="separate aggregate source"):
+        compile_preview(catalog, query(fields=[{"table": "people", "column": "id", "aggregate": aggregate}, {"table": "assignment", "column": "org_id"}]))
+
+
+@pytest.mark.parametrize("aggregate", ["min", "max", "count_distinct"])
+def test_duplicate_invariant_aggregates_allow_child_fanout(catalog, aggregate):
+    compile_preview(catalog, query(fields=[{"table": "people", "column": "id", "aggregate": aggregate}, {"table": "assignment", "column": "org_id"}]))
+
+
+def test_child_measure_with_parent_lookup_preserves_grain(catalog):
+    compile_preview(catalog, query(fields=[{"table": "people", "column": "name"}, {"table": "assignment", "column": "org_id", "aggregate": "count"}]))
+
+
+def test_unique_reverse_foreign_key_preserves_measure_grain(catalog):
+    catalog["tables"][1]["primaryKey"] = ["person_id"]
+    compile_preview(catalog, query(fields=[{"table": "people", "column": "id", "aggregate": "count"}, {"table": "assignment", "column": "org_id"}]))
+
+
+def test_multiple_child_branches_cannot_multiply_a_child_measure(catalog):
+    catalog["tables"].append({"name": "phone", "columns": [{"name": "person_id"}, {"name": "number"}]})
+    catalog["relationships"].append({"id": "phone_fk", "sourceTable": "phone", "sourceColumn": "person_id", "targetTable": "people", "targetColumn": "id"})
+    with pytest.raises(ModelValidationError, match="inflated"):
+        compile_preview(catalog, query(relationships=["person_fk", "phone_fk"], fields=[{"table": "assignment", "column": "org_id", "aggregate": "count"}, {"table": "phone", "column": "number"}]))
+
+
+def test_filter_row_behavior_persists_and_legacy_default_is_explicitly_unspecified():
+    from schemii.schemoo.models import ModelScope
+    assert ModelScope.model_validate(scope()).rowBehavior is None
+    value = ModelScope.model_validate({**scope(), "rowBehavior": "keep_unmatched"})
+    assert value.model_dump()["rowBehavior"] == "keep_unmatched"
+
+
+def test_required_keep_unmatched_joins_unselected_bound_source(catalog):
+    rule = {**scope("required", "assignment", "org_id"), "rowBehavior": "keep_unmatched"}
+    result = compile_preview(catalog, query(scopes=[rule]))
+    assert result["activeScopes"] == ["scope"]
+    assert 'LEFT JOIN (SELECT * FROM "public"."assignment"' in result["sql"]
+    with sqlite3.connect(":memory:") as db:
+        db.executescript("ATTACH DATABASE ':memory:' AS public; CREATE TABLE public.people(id TEXT, name TEXT); CREATE TABLE public.assignment(person_id TEXT, org_id TEXT, start TEXT, end TEXT); INSERT INTO public.people VALUES ('a','Alice'),('b','Bob'); INSERT INTO public.assignment VALUES ('a','42',NULL,NULL),('a','43',NULL,NULL),('b','43',NULL,NULL);")
+        assert sorted(db.execute(parse_one(result["sql"], dialect="postgres").sql(dialect="sqlite")).fetchall()) == [("Alice",), ("Bob",)]
+    with pytest.raises(ModelValidationError, match="inflated"):
+        compile_preview(catalog, query(scopes=[rule], fields=[{"table": "people", "column": "id", "aggregate": "count"}]))
+
+
+def test_alias_branches_do_not_bypass_measure_grain_validation(catalog):
+    nodes = [{"id": "people", "table": "people"}, {"id": "a", "table": "assignment"}, {"id": "b", "table": "assignment"}]
+    edges = [{"id": alias, "relationshipId": "person_fk", "source": alias, "target": "people"} for alias in ("a", "b")]
+    with pytest.raises(ModelValidationError, match="inflated"):
+        compile_preview(catalog, query(nodes=nodes, edges=edges, fields=[{"table": "a", "column": "org_id", "aggregate": "count"}, {"table": "b", "column": "org_id"}]))

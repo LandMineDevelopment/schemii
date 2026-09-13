@@ -219,6 +219,9 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         29,
         30,
         31,
+        32,
+        33,
+        34,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -252,6 +255,9 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0029_unknown_ai_read_counts.sql": "25242c625e8bb12f8f4eca8d1aefebf6af94b0afd4cfca1e80377f40b97fd779",
         "0030_product_ai_conversations.sql": "59583b8179e9162855fc4128147334de9520d71949b2aa615697cfe623d6007f",
         "0031_saved_model_previews.sql": "54efa0f765ee57d70eea7ae20f51a9f61cccafb942e283e9392d59315ae5fad5",
+        "0032_bulk_jobs.sql": "60240b99fd85c7073863157105206e2377c24b0d6546bbb890d05afea49d92f2",
+        "0033_ai_reasoning_effort.sql": "867493b096db1afea53f650f683a1277480e9b6268be7e34b98168d3dc7f146d",
+        "0034_ai_console_app_actions.sql": "507abfedba95dbfcede1f994af7823a7b596edd9a2973cbfd4927c50cbd0eff0",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"
     assert "CREATE TABLE schemii.workspaces" in migrations[1].sql
@@ -329,3 +335,15 @@ def test_migration_composition_rejects_duplicate_and_gapped_versions() -> None:
         packaged_migrations((SCHEMII_MIGRATION_PACKAGE,))
     with pytest.raises(MetadataMigrationError, match="versions must be unique"):
         MetadataMigrator(lambda: None, (common[0], common[0]))
+
+
+def test_durable_ai_operation_constraint_matches_application_kinds():
+    import re
+    from typing import get_args
+    from importlib.resources import files
+    from schemii.schemii.ai.models import SchemiiAiOperation
+    from schemii.schemii.metadata import MIGRATION_PACKAGE
+    revisions = sorted((file for file in files(MIGRATION_PACKAGE).iterdir() if file.name.endswith('.sql')), key=lambda file: file.name)
+    constraints = [file.read_text() for file in revisions if 'ADD CONSTRAINT ai_operations_kind_check' in file.read_text()]
+    allowed = set(re.findall(r"'([a-z_]+)'", constraints[-1]))
+    assert allowed == set(get_args(SchemiiAiOperation.model_fields['kind'].annotation))

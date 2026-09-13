@@ -150,6 +150,15 @@ def test_ingress_terminates_local_https_and_private_keys_never_enter_the_image()
     assert "ssl_protocols TLSv1.2 TLSv1.3;" in nginx
     assert "proxy_set_header Host localhost;" in nginx
     assert "proxy_set_header X-Forwarded-Host localhost;" in nginx
+    assert "proxy_http_version 1.1;" in nginx
+    assert "proxy_buffering off;" in nginx
+    assert "proxy_request_buffering off;" in nginx
+    assert "client_max_body_size 20m;" in nginx
+    assert 'location ~ "^/api/v1/schemii/workspaces/[^/]+/console/sessions/[^/]+/copy/uploads/[^/]+$"' in nginx
+    assert "client_max_body_size 0;" in nginx
+    copy_location = nginx.split('location ~ "^/api/v1/schemii/workspaces/', 1)[1]
+    assert "client_max_body_size 0;" in copy_location
+    assert "proxy_pass http://schemii_backend;" in copy_location
     assert ".schemii" in dockerignore
 
 

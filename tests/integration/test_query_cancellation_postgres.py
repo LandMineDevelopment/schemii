@@ -61,3 +61,30 @@ def test_stop_interrupts_real_pg_sleep(postgres_metadata, paging):
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1 AS healthy")
             assert cursor.fetchone()["healthy"] == 1
+
+
+def test_console_cancel_interrupts_retained_fetch_without_chat_scope(postgres_metadata):
+    with postgres_metadata.connection_factory() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SET statement_timeout = '5s'")
+        session = PsycopgConsoleReadSession(connection, connection.info.backend_pid,
+            ["SELECT pg_sleep(10)"], page_memory_bytes=4096)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(session.page, 0, 0, 1)
+            with postgres_metadata.connection_factory() as observer:
+                observer.autocommit = True
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    with observer.cursor() as cursor:
+                        cursor.execute("SELECT wait_event FROM pg_stat_activity WHERE pid = %s", (connection.info.backend_pid,))
+                        row = cursor.fetchone()
+                    if row and row["wait_event"] == "PgSleep":
+                        break
+                    time.sleep(0.01)
+                else:
+                    pytest.fail("fetch never entered pg_sleep")
+            session.cancel()
+            with pytest.raises(PostgresConsoleCancelledError):
+                future.result(timeout=2)
+            with pytest.raises(PostgresConsoleCancelledError):
+                session.page(0, 0, 1)

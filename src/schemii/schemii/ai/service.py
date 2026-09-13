@@ -100,6 +100,7 @@ class AiService:
         self.repository = repository
         self.runtime = runtime
         self.services = services
+        self.raw_console = None
         self.policy = services.admin_config.ai
         self._streams: dict[tuple[str, str], dict[str, str]] = {}
         self._transient_lock = threading.RLock()
@@ -255,9 +256,28 @@ class AiService:
                 "The selected AI model is unavailable. Connect its provider or choose another model; your conversation is retained.",
             )
 
+    def _require_reasoning(self, owner, provider_id, model_id, effort):
+        if effort == "default":
+            return
+        status = self.status(owner)
+        levels = next((model.get("reasoningLevels", []) for provider in status.get("providers", [])
+                       if provider["id"] == provider_id and provider.get("available")
+                       for model in provider.get("models", []) if model["id"] == model_id and model.get("status") == "active"), [])
+        if effort not in levels:
+            raise AiServiceError(422, "ai_reasoning_unavailable", "Choose a supported reasoning level for this model, or Default.")
+
+    def update_settings(self, owner, body):
+        current = self.repository.settings(owner)
+        effort = body.default_reasoning_effort or current.default_reasoning_effort
+        if (current.default_provider_id, current.default_model_id, current.default_reasoning_effort) != (body.default_provider_id, body.default_model_id, effort):
+            self._require_reasoning(owner, body.default_provider_id, body.default_model_id, effort)
+        return self.repository.update_settings(owner, body.expected_revision, body.enabled,
+            body.default_provider_id, body.default_model_id, body.default_capabilities, effort)
+
     def create_chat(self, owner: str, workspace_id: str, body: Any) -> Any:
         self.services.workspaces.get(owner, workspace_id)
         self._require_available_model(owner, body.provider_id, body.model_id)
+        self._require_reasoning(owner, body.provider_id, body.model_id, getattr(body, "reasoning_effort", "default"))
         return self.repository.create_chat(
             owner,
             workspace_id,
@@ -265,6 +285,7 @@ class AiService:
             body.provider_id,
             body.model_id,
             body.capabilities,
+            getattr(body, "reasoning_effort", None),
         )
 
     def save_preferences(self, owner: str, chat_id: str, body: Any) -> SchemiiAiPreferencesResult:
@@ -273,6 +294,9 @@ class AiService:
         self.services.workspaces.get(owner, current_chat.workspace_id)
         if (current_chat.provider_id, current_chat.model_id) != (body.provider_id, body.model_id):
             self._require_available_model(owner, body.provider_id, body.model_id)
+        effort = getattr(body, "reasoning_effort", None) or current_chat.reasoning_effort
+        if (current_chat.provider_id, current_chat.model_id, current_chat.reasoning_effort) != (body.provider_id, body.model_id, effort):
+            self._require_reasoning(owner, body.provider_id, body.model_id, effort)
         settings, saved_chat, started_new = self.repository.save_preferences(
             owner,
             chat_id,
@@ -281,6 +305,7 @@ class AiService:
             body.provider_id,
             body.model_id,
             body.capabilities,
+            getattr(body, "reasoning_effort", None),
         )
         self._stop_chat_work(owner, chat_id, session_id)
         return SchemiiAiPreferencesResult(
@@ -321,6 +346,7 @@ class AiService:
                 "This conversation is not allowed to send query rows to the model",
             )
         self._require_available_model(owner, chat.provider_id, chat.model_id)
+        self._require_reasoning(owner, chat.provider_id, chat.model_id, chat.reasoning_effort)
         if chat.provider_id == "opencode" and not getattr(body, "acknowledge_provider_data_policy", False):
             raise AiServiceError(422, "ai_provider_consent_required",
                                  "Free Zen models may use prompts for training. Do not send personal or confidential data. Confirm the provider notice before sending.")
@@ -515,7 +541,9 @@ class AiService:
             except Exception:
                 pass
             code = getattr(error, "code", "ai_turn_failed")
-            message = str(error) if isinstance(error, (PiError, AiServiceError)) else "The assistant turn could not be completed. Try again; no unvalidated action was applied."
+            message = ("Database connection slots are in use. Close unused console sessions or wait for active queries to finish, then retry."
+                       if code == "postgres_connection_capacity_reached" else str(error) if isinstance(error, (PiError, AiServiceError))
+                       else "The assistant turn could not be completed. Try again; no unvalidated action was applied.")
             try:
                 record_stage("response", "failed", "Assistant turn stopped")
             except Exception:
@@ -552,9 +580,9 @@ class AiService:
             # accepts this marker, and its contents participate in the digest.
             origins = sorted(set(replay_capabilities))
             if (not rerun_of or proposed.action_type != "data_read" or not origins
-                    or not set(origins) <= {"structured_query", "raw_sql_read"}):
+                    or not set(origins) <= {"structured_query", "raw_sql_read", "explain_queries", "analyze_queries"}):
                 raise AiServiceError(422, "ai_invalid_read_replay", "The saved read origins are invalid")
-            proposed = replace(proposed, capability="structured_query" if origins == ["structured_query"] else "raw_sql_read",
+            proposed = replace(proposed, capability=origins[0],
                 action={**proposed.action, "replayCapabilities": origins})
         if proposed.action_type == "data_read":
             if len(proposed.action.get("queries", proposed.action.get("structuredQueries", []))) > self.policy.maximum_read_queries_per_batch:
@@ -627,6 +655,15 @@ class AiService:
         from .tools import DIRECT_TOOLS
         if name in DIRECT_TOOLS and not tool_enabled(name, chat.capabilities, arguments):
             raise AiServiceError(403, "ai_permission_required", f"Enable the action for {name} in Assistant settings")
+        if name == "schemii_raw_results":
+            from .raw_actions import results
+            return results(self, owner, chat, arguments)
+        if name == "schemii_query_activity":
+            from .tools import QueryActivity
+            request = QueryActivity.model_validate(arguments)
+            # Resolve through the chat workspace before inspecting the shared execution.
+            self.services.console.get(owner, chat.workspace_id, request.executionId)
+            return self.services.console.activity(owner, request.executionId)
         if name == "schemii_get_migration_plan":
             return actions.migration_plan(self.services, owner, chat.workspace_id,
                 actions.MigrationPlanReference.model_validate(arguments)).model_dump(mode="json", by_alias=True)
@@ -755,7 +792,17 @@ class AiService:
             resource_kind = None
             resource_id = None
             summary = None
-            if proposal.action_type == "design_change":
+            if proposal.action_type == "raw_console":
+                from .raw_actions import execute as execute_raw
+                summary = execute_raw(self, owner, chat, action, lambda: self._query_authorized(owner, chat_id, proposal.turn_id, chat.revision))
+                resource_kind = "rawConsoleSession"
+                resource_id = summary.get("sessionId") or summary.get("id")
+            elif proposal.action_type == "app_action":
+                from .app_actions import execute_action
+                if not self._query_authorized(owner, chat_id, proposal.turn_id, chat.revision):
+                    raise AiServiceError(409, "ai_request_cancelled", "The request was stopped or its permissions changed")
+                summary = execute_action(self.services, owner, chat.workspace_id, action)
+            elif proposal.action_type == "design_change":
                 saved = self._apply_design(
                     owner, chat.workspace_id, design, action, candidate=candidate
                 )

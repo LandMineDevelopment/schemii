@@ -140,7 +140,7 @@ def test_refresh_intersects_static_sdk_support_and_is_not_called_by_passive_stat
     runtime.status("alice")
     assert all(path != "/models/refresh" for path, _ in runtime.client.calls)
     assert runtime.status("alice", refresh=True)["providers"][0]["models"] == [
-        {"id": "model", "name": "Model", "status": "active"}]
+        {"id": "model", "name": "Model", "status": "active", "reasoningLevels": ["default"]}]
     assert runtime._identities == set()
 
 
@@ -429,3 +429,18 @@ def test_fine_grained_text_stream_does_not_exhaust_answer_budget_on_envelopes():
                             {"type": "result", "text": text, "toolCalls": []}])
     runtime.policy = replace(runtime.policy, response_bytes=65536)
     assert run(runtime).text == text
+
+
+def test_reasoning_effort_catalog_validation_and_transport():
+    runtime, _, requests = setup([{"type": "result", "text": "ok", "toolCalls": [], "generation": 1}])
+    runtime._supported = [{"providerId": "openai-codex", "id": "model", "reasoningLevels": ["default", "off", "high"]}]
+    runtime._supported_until = float("inf")
+    assert runtime.status("alice")["providers"][0]["models"][0]["reasoningLevels"] == ["default", "off", "high"]
+    run(runtime, reasoning_effort="high")
+    assert requests[-1]["reasoningEffort"] == "high"
+    run(runtime)
+    assert "reasoningEffort" not in requests[-1]
+    with pytest.raises(PiError) as error:
+        run(runtime, reasoning_effort="max")
+    assert error.value.code == "reasoning_unsupported"
+    assert len(requests) == 2

@@ -1,8 +1,10 @@
 """Catalog-validated prototype compiler; explicit FK roles, scopes and filters.
 
 This is deliberately not a cost optimizer. ``today`` defaults use one UTC date
-per compilation. Conditional predicates prefilter sources, preserving LEFT JOINs.
+per compilation. Filter activation and unmatched-row handling are independent.
 """
+
+from .join_types import validate_join_types
 
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -152,18 +154,32 @@ class _Model:
         for item in _list(raw_edges, "Edges", 200):
             key = _id(item.get("id"), "Edge ID")
             relationship = item.get("relationshipId")
-            if key in self.edges or not isinstance(relationship, str) or relationship not in catalog_edges:
-                raise ValueError("Edges need unique IDs and a known foreign key.")
-            edge = {**catalog_edges[relationship], **item}
             if item.get("source") in self.derived or item.get("target") in self.derived:
-                raise ValueError("Derived sources connect through their owner; do not attach ordinary foreign keys to them.")
-            for side in ("source", "target"):
-                node = item.get(side)
-                if not isinstance(node, str) or node not in self.nodes or self.nodes[node]["table"] != catalog_edges[relationship][f"{side}Table"]:
-                    raise ValueError("Relationship aliases must match the foreign key's source and target tables.")
-                self.validate({"table": node, "column": catalog_edges[relationship][f"{side}Column"]})
-                # Never accept caller overrides of physical join columns.
-                edge[f"{side}Column"] = catalog_edges[relationship][f"{side}Column"]
+                raise ValueError("Derived sources connect through their owner; do not attach ordinary relationships to them.")
+            logical = item.get("kind", "foreign_key") == "logical"
+            if key in self.edges:
+                raise ValueError("Edges need unique IDs.")
+            if logical:
+                if relationship:
+                    raise ValueError("Logical relationships cannot reference a foreign key.")
+                edge = dict(item)
+                for side in ("source", "target"):
+                    node = item.get(side)
+                    self.validate({"table": node, "column": item.get(f"{side}Column")})
+                    edge[f"{side}Table"] = self.nodes[node]["table"]
+                validate_join_types(*(self.column_details[edge[f"{side}Table"]][edge[f"{side}Column"]].get("dataType", "")
+                                      for side in ("source", "target")))
+            else:
+                if item.get("kind", "foreign_key") != "foreign_key" or not isinstance(relationship, str) or relationship not in catalog_edges:
+                    raise ValueError("Edges need a known foreign key or a logical column relationship.")
+                edge = {**catalog_edges[relationship], **item}
+                for side in ("source", "target"):
+                    node = item.get(side)
+                    if not isinstance(node, str) or node not in self.nodes or self.nodes[node]["table"] != catalog_edges[relationship][f"{side}Table"]:
+                        raise ValueError("Relationship aliases must match the foreign key's source and target tables.")
+                    self.validate({"table": node, "column": catalog_edges[relationship][f"{side}Column"]})
+                    # Physical FK columns are always owned by the live catalog.
+                    edge[f"{side}Column"] = catalog_edges[relationship][f"{side}Column"]
             if type(item.get("enabled", True)) is not bool:
                 raise ValueError("Relationship enabled must be a boolean.")
             self.edges[key] = edge
@@ -180,6 +196,10 @@ class _Model:
             raise ValueError("Choose a source column for each field or filter condition.")
         if not isinstance(node, str) or node not in self.nodes or not isinstance(column, str) or column not in self.columns[node]:
             raise ValueError(f"Unknown model field: {node}.{column}.")
+        if item.get("operator") == "range_contains_date":
+            details = self.column_details[self.nodes[node]["table"]].get(column, {})
+            if node in self.derived or details.get("dataType", "").lower() != "daterange":
+                raise ValueError("Contains date requires a PostgreSQL daterange source column.")
         return node
 
     def cycles(self):
@@ -344,6 +364,8 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
         scope_id = _id(scope.get("id"), "Scope ID")
         if scope_id in seen or scope.get("kind") not in ("required", "conditional"):
             raise ValueError("Scopes need unique IDs and a required or conditional kind.")
+        if scope.get("rowBehavior") not in (None, "keep_unmatched", "require_matching"):
+            raise ValueError("Filter row behavior must be keep_unmatched or require_matching.")
         seen.add(scope_id)
         alternatives = _list(scope.get("alternatives", []), "Alternatives", 12)
         if not alternatives:
@@ -365,6 +387,7 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
     participating = path(participating)
     active_ids = [scope["id"] for scope, _, _, items in selected if scope["kind"] == "required" or any(item["table"] in participating for item in items)]
     active, parameter_values, source_filters = [], {}, {node: [] for node in participating}
+    preserved_required_nodes = set()
     today = _today or datetime.now(timezone.utc).date().isoformat()
     for scope, alternative, selection, items in selected:
         applicable = items if scope["kind"] == "required" else [item for item in items if item["table"] in participating]
@@ -415,11 +438,14 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
                 raise ValueError("A condition references an undefined parameter.")
             resolved.append({**condition, "value": values[parameter_id] if parameter_id is not None else condition.get("value")})
         parameter_values[scope_id] = values
-        if scope["kind"] == "required" and resolved:
+        row_behavior = scope.get("rowBehavior") or ("require_matching" if scope["kind"] == "required" else "keep_unmatched")
+        if row_behavior == "require_matching" and resolved:
             existence.append(("required", resolved))
-        elif scope["kind"] == "conditional":
+        else:
             for item in resolved:
                 source_filters[item["table"]].append(item)
+                if scope["kind"] == "required":
+                    preserved_required_nodes.add(item["table"])
 
     def predicate(item, aliases):
         expression = (aliases[item["table"]] + "." if aliases else "") + _identifier(item["column"])
@@ -430,6 +456,16 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
         elif operator in ("in", "not_in"):
             members = ", ".join(_literal(value) for value in _filter_values(item.get("value")))
             result = f"{expression} {'NOT IN' if operator == 'not_in' else 'IN'} ({members})"
+        elif operator == "range_contains_date":
+            model.validate(item)
+            value = item.get("value")
+            try:
+                if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    raise ValueError()
+                date.fromisoformat(value)
+            except ValueError:
+                raise ValueError("Contains date requires a valid date in YYYY-MM-DD format.") from None
+            result = f"{expression} @> DATE {_literal(value)}"
         elif operator == "contains":
             if not isinstance(item.get("value"), str):
                 raise ValueError("Contains filters require text.")
@@ -515,7 +551,7 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
         clauses = source_filters.get(node, [])
         return "(SELECT * FROM " + physical + " WHERE " + " AND ".join(predicate(item, None) for item in clauses) + ")" if clauses else physical
 
-    outer = path({root, *(field["table"] for field in fields), *(item["table"] for item in row_filters)})
+    outer = path({root, *preserved_required_nodes, *(field["table"] for field in fields), *(item["table"] for item in row_filters)})
     aliases = {node: f"t{index}" for index, node in enumerate(node for node in parents if node in outer)}
     for node in outer:
         if node in model.derived and model.derived[node]["kind"] == "row":
@@ -545,9 +581,34 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
                 result.append(f"{join_kind} JOIN {relation(node)} AS {names[node]} ON " + " AND ".join(equalities))
                 continue
             result.append(f"{join_kind} JOIN {relation(node)} AS {names[node]} ON {names[edge['source']]}.{_identifier(edge['sourceColumn'])} = {names[edge['target']]}.{_identifier(edge['targetColumn'])}")
-            if join_kind == "LEFT" and previous == edge["target"]:
+            if join_kind == "LEFT" and (previous == edge["target"] or edge.get("kind") == "logical"):
                 warnings.append(f"Joining {previous} to {node} can repeat {previous} rows and multiply totals.")
         return result
+
+    # Evaluate multiplicity from each measure's own source, not the query root.
+    # A foreign-key traversal to its parent preserves grain; the reverse may
+    # duplicate a measure even when only one child branch is selected.
+    outer_graph = {node: [] for node in outer}
+    for node in outer - {root}:
+        previous, key = parents[node]
+        outer_graph[node].append((previous, key))
+        outer_graph[previous].append((node, key))
+
+    def multiplying_relationship(contributor):
+        visited, queue = {contributor}, deque([contributor])
+        while queue:
+            previous = queue.popleft()
+            for node, key in outer_graph[previous]:
+                if node in visited:
+                    continue
+                visited.add(node)
+                edge = model.edges[key]
+                if not edge.get("derived") and (node == edge["source"] or edge.get("kind") == "logical"):
+                    column = edge["sourceColumn"] if node == edge["source"] else edge["targetColumn"]
+                    if not any(set(unique) <= {column} for unique in derived.unique_keys(model, node)):
+                        return key
+                queue.append(node)
+        return None
 
     expressions, grouping, labels, aggregated = [], [], set(), _output_labels is not None
     for field_index, field in enumerate(fields):
@@ -583,6 +644,11 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
             if expression not in grouping:
                 grouping.append(expression)
         elif isinstance(aggregate, str) and aggregate in {"count", "count_distinct", "sum", "avg", "min", "max"}:
+            if aggregate in {"count", "sum", "avg"} and (relationship := multiplying_relationship(node)):
+                raise ModelValidationError(
+                    f"{aggregate.upper()} of {label} can be inflated by joined records. Create a separate aggregate source grouped at this measure's grain, then connect its summary. COUNT DISTINCT is appropriate only when you intend to count distinct values.",
+                    fieldIndex=field_index, relationshipId=relationship,
+                )
             aggregated = True
             label = f"{aggregate}({label})"
             expression = f"COUNT(DISTINCT {expression})" if aggregate == "count_distinct" else f"{aggregate.upper()}({expression})"

@@ -1,3 +1,5 @@
+import { createQueryPlanView, parseQueryPlan, downloadArtifact } from "#common/query-plan.js";
+import { createElapsedTimer, formatElapsed } from "#common/elapsed-time.js";
 import { ApiError } from "#common/http.js";
 import { element, replace } from "#common/dom.js";
 import {
@@ -6,11 +8,12 @@ import {
   formatDataCell,
   installAutoPageLoader,
 } from "#common/data-grid.js";
-import { sqlForRun, sqlStatementRanges, transactionTerminalAction } from "./sql-statements.js";
+import { sqlForRun, sqlStatementRanges } from "./sql-statements.js";
 import { createIconButton } from "./ui.js";
+import { openConsoleCopy } from "./console-copy.js";
+import { openConsoleTransactions } from "./console-transactions.js";
 
-const TERMINAL_EXECUTION_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
-const ACTIVE_TRANSACTION_STATUSES = new Set(["open", "failed"]);
+const TERMINAL_EXECUTION_STATUSES = new Set(["succeeded", "failed", "cancelled", "uncertain"]);
 const POLL_INTERVAL_MS = 350;
 
 export function formatConsoleCell(value) {
@@ -68,8 +71,10 @@ function statePanel(mark, title, message, { error = false } = {}) {
 }
 
 function transactionOpen(transaction) {
-  return Boolean(transaction && ACTIVE_TRANSACTION_STATUSES.has(transaction.status));
+  return Boolean(transaction && ["intrans", "inerror"].includes(transaction.transactionStatus));
 }
+
+function sessionOpen(session) { return Boolean(session && session.status !== "closed"); }
 
 function executionActive(execution) {
   return Boolean(execution && !TERMINAL_EXECUTION_STATUSES.has(execution.status));
@@ -147,8 +152,152 @@ export function createSqlConsole({
   let generation = 0;
   let pollTimer = null;
   let busy = false;
+  let operationExecutionId = null;
+  let cancelling = false;
+  let exportWatch = null;
+  let activityTimer = null;
+  let activityGeneration = 0;
+  let explainRequest = null;
+  let comparisonPlan = null;
+  let elapsedLabel = "Elapsed";
+  const elapsedDisplay = element("p", { className: "sql-query-elapsed", hidden: true, attrs: { "aria-label": "Query duration" } });
+  const elapsedTimer = createElapsedTimer({ onTick: milliseconds => {
+    elapsedDisplay.textContent = `${elapsedLabel}: ${formatElapsed(milliseconds)}`;
+  } });
+  results.before(elapsedDisplay);
+  function finishElapsed(label) {
+    elapsedLabel = label;
+    return elapsedTimer.stop();
+  }
+  const activityPanel = element("details", { className: "sql-query-activity", hidden: true, attrs: { open: "" } });
+  const activitySummary = element("summary", { text: "Query activity" });
+  const activityBody = element("div", { attrs: { role: "status", "aria-live": "polite" } });
+  activityPanel.append(activitySummary, activityBody);
+  results.before(activityPanel);
+  const noticesPanel = element("details", { hidden: true, className: "sql-query-notices" });
+  noticesPanel.append(element("summary", { text: "PostgreSQL notices" }));
+  const noticesBody = element("pre");
+  noticesPanel.append(noticesBody); results.before(noticesPanel);
+  const explainButton = createIconButton({ icon: "explain", label: "Explain", tooltip: "Explain query plan", className: "compact" });
+  const analyzeButton = createIconButton({ icon: "analyze", label: "Run & Analyze", tooltip: "Run and analyze query plan", className: "compact" });
+  const planActions = element("div", { className: "query-plan-actions" }, [explainButton, analyzeButton]);
+  const transactionCount = element("span", { className: "sql-transaction-count", hidden: true, attrs: { "aria-hidden": "true" } });
+  const transactionsButton = createIconButton({ icon: "transactions", label: "Open transactions", className: "compact" });
+  transactionsButton.append(transactionCount);
+  if (supportsWrite) planActions.append(transactionsButton);
+  async function refreshOpenTransactions() {
+    const current = workspace();
+    if (!supportsWrite || !available(current) || !api.listRawSessions) return;
+    try {
+      const response = await api.listRawSessions(current.id);
+      if (workspace()?.id !== current.id) return;
+      const count = response.sessions.filter(session => transactionOpen(session) || (session.status === "running" && session.transactionStartedAt)).length;
+      transactionCount.textContent = count ? String(count) : "";
+      transactionCount.hidden = !count;
+      transactionsButton.dataset.uiTooltip = count ? `Open transactions (${count})` : "Open transactions";
+      transactionsButton.classList.toggle("has-open-transactions", count > 0);
+    } catch { transactionCount.textContent = "?"; transactionCount.hidden = false; }
+  }
+  transactionsButton.onclick = () => {
+    if (!available()) return;
+    void openConsoleTransactions({ workspaceId, currentSessionId: transaction?.id,
+      onChange: async () => { await refreshTransaction(workspace(), generation); await refreshOpenTransactions(); updateControls(); } });
+  };
+  if (supportsWrite) globalThis.addEventListener("focus", () => void refreshOpenTransactions());
+  const beginButton = createIconButton({ icon: "begin", label: "Begin", tooltip: "Begin transaction", className: "compact" });
+  const autoCommit = element("input", { type: "checkbox", attrs: { "aria-label": "Auto-commit" } });
+  const commitTiming = element("select", { attrs: { "aria-label": "Auto-commit timing" } }, [
+    element("option", { text: "Each statement", attrs: { value: "each_statement" } }),
+    element("option", { text: "Whole run", attrs: { value: "whole_run" } }),
+  ]);
+  const commitChoice = element("div", { className: "sql-commit-choice" }, [element("label", {}, [autoCommit, "Auto-commit"]), commitTiming]);
+  if (supportsWrite) transactionBar?.querySelector(".sql-transaction-controls")?.append(commitChoice, beginButton, rollbackButton, commitButton);
+  autoCommit.onchange = () => updateControls();
+  commitTiming.onchange = () => updateControls();
+  const selectedCommitMode = () => autoCommit.checked ? commitTiming.value : "manual";
+  const copyButton = createIconButton({ icon: "copy-file", label: "COPY file", tooltip: "Upload or download a COPY file", className: "compact" });
+  if (supportsWrite) planActions.append(copyButton);
+  beginButton.onclick = () => void executeControl("BEGIN");
+  copyButton.onclick = async () => {
+    if (busy || operationActive() || mode !== "explicit") return;
+    const current = workspace();
+    busy = true; updateControls();
+    try {
+      const policy = await loadSettings(generation);
+      const session = await ensureTransaction(current, policy, generation);
+      await openConsoleCopy({ workspaceId: current.id, sessionId: session.id, sql: selectedSource(draft), commitMode: selectedCommitMode(),
+        onError, onStatus: async () => { await refreshTransaction(current, generation); updateControls(); } });
+    } catch (error) { onError(error); }
+    finally { busy = false; updateControls(); }
+  };
+  if (api.explainConsoleQuery) {
+    const editorActions = draft.closest(".sql-editor-panel")?.querySelector(".sql-pane-actions");
+    if (editorActions) editorActions.prepend(...planActions.children);
+    else draft.before(planActions);
+  }
+
+  function operationActive() { return executionActive(execution) || Boolean(operationExecutionId); }
+
+  async function monitor(runGeneration, executionId, monitorGeneration) {
+    if (!api.getConsoleActivity || (runGeneration !== generation || monitorGeneration !== activityGeneration)) return;
+    activityPanel.hidden = false;
+    try {
+      const activity = execution?.sessionId && execution.id === executionId
+        ? await api.getRawActivity(workspaceId, execution.sessionId)
+        : await api.getConsoleActivity(executionId);
+      if ((runGeneration !== generation || monitorGeneration !== activityGeneration)) return;
+      if (exportWatch?.id === executionId) {
+        if (activity.phase === "exporting") exportWatch.started = true;
+        operationExecutionId = activity.cancellable ? executionId : null;
+        if ((exportWatch.started && activity.phase !== "exporting") || (!exportWatch.started && Date.now() > exportWatch.deadline)) exportWatch = null;
+        updateControls();
+      }
+      activitySummary.textContent = `${activity.phase} · ${(activity.elapsedMs / 1000).toFixed(1)} s · Query activity`;
+      const parts = [
+        activity.statementIndex == null ? null : `Statement ${activity.statementIndex + 1}`,
+        `${activity.completedStatementIndexes?.length || 0} statements completed`,
+        `${activity.fetchedRows ?? 0} rows fetched`,
+        activity.transactionStatus ? `Transaction: ${activity.transactionStatus}` : null,
+        activity.databaseState,
+        activity.waitEvent ? `Waiting: ${activity.waitEventType || "database"} / ${activity.waitEvent}` : null,
+        activity.blockerPids?.length ? `Blocked by PID: ${activity.blockerPids.join(", ")}` : null,
+        activity.statementTimeoutMs == null
+          ? (activity.configuredStatementTimeoutMs == null ? null : `Configured statement timeout: ${activity.configuredStatementTimeoutMs === 0 ? "unlimited" : `${activity.configuredStatementTimeoutMs} ms`}`)
+          : `Statement timeout: ${activity.statementTimeoutMs === 0 ? "unlimited" : `${activity.statementTimeoutMs} ms`}`,
+        activity.lockTimeoutMs == null
+          ? (activity.configuredLockTimeoutMs == null ? null : `Configured lock timeout: ${activity.configuredLockTimeoutMs === 0 ? "unlimited" : `${activity.configuredLockTimeoutMs} ms`}`)
+          : `Lock timeout: ${activity.lockTimeoutMs === 0 ? "unlimited" : `${activity.lockTimeoutMs} ms`}`,
+        activity.monitoringMessage,
+      ].filter(Boolean);
+      activityBody.textContent = parts.join(" · ");
+    } catch (error) {
+      if ((runGeneration !== generation || monitorGeneration !== activityGeneration)) return;
+      activityBody.textContent = `Live monitoring unavailable: ${error.message}. Query execution is independent of monitoring.`;
+    }
+    if (runGeneration === generation && monitorGeneration === activityGeneration && (operationActive() || exportWatch)) activityTimer = globalThis.setTimeout(() => monitor(runGeneration, executionId, monitorGeneration), 750);
+  }
+
+  function startMonitoring(executionId) {
+    globalThis.clearTimeout(activityTimer);
+    void monitor(generation, executionId, ++activityGeneration);
+  }
+
+  async function duringOperation(executionId, callback) {
+    const operationGeneration = generation;
+    operationExecutionId = executionId;
+    updateControls();
+    startMonitoring(executionId);
+    try { return await callback(); }
+    finally {
+      if (operationGeneration === generation) {
+        operationExecutionId = null;
+        updateControls();
+        startMonitoring(executionId);
+      }
+    }
+  }
+
   let mode = "managed_read";
-  let pendingTerminalAction = null;
   let pendingInitialDraft = typeof initialDraft === "string" && initialDraft.trim()
     ? initialDraft
     : null;
@@ -260,12 +409,14 @@ export function createSqlConsole({
   function stopPolling() {
     globalThis.clearTimeout(pollTimer);
     pollTimer = null;
+    globalThis.clearTimeout(activityTimer);
+    elapsedTimer.stop();
   }
 
   function updateModeControls() {
     if (!supportsWrite) return;
     const isWrite = mode === "explicit";
-    const active = executionActive(execution);
+    const active = operationActive();
     readModeButton?.classList.toggle("active", !isWrite);
     writeModeButton?.classList.toggle("active", isWrite);
     readModeButton?.setAttribute("aria-pressed", String(!isWrite));
@@ -276,7 +427,7 @@ export function createSqlConsole({
       writeModeToggleButton.disabled = busy || active || !available();
       writeModeToggleButton.classList.toggle("active", isWrite);
       writeModeToggleButton.setAttribute("aria-pressed", String(isWrite));
-      const label = isWrite ? "Safe read" : "Write transaction";
+      const label = isWrite ? "Read-only" : "Write";
       writeModeToggleButton.setAttribute("aria-label", label);
       writeModeToggleButton.dataset.uiTooltip = label;
     }
@@ -284,31 +435,38 @@ export function createSqlConsole({
     if (modeRoot) modeRoot.dataset.writeMode = String(isWrite);
     if (transactionBar) transactionBar.hidden = !isWrite;
 
+    transactionStatus.title = transaction?.idleTimeoutSeconds
+      ? `Idle sessions close after ${transaction.idleTimeoutSeconds / 60} minutes; uncommitted changes roll back. See Open transactions for the remaining time.` : "";
     const open = transactionOpen(transaction);
-    commitButton.hidden = !open;
-    rollbackButton.hidden = !open;
-    commitButton.disabled = busy || active || transaction?.status !== "open";
-    rollbackButton.disabled = busy || active;
-    if (!isWrite) transactionStatus.textContent = "Safe read · every run is rolled back";
-    else if (transaction?.status === "failed") {
-      transactionStatus.textContent = "Transaction aborted · roll back required";
-    } else if (transaction?.status === "open") {
-      const count = transaction.executionIds?.length || 0;
-      transactionStatus.textContent = `Open transaction · ${count} run${count === 1 ? "" : "s"} · changes uncommitted`;
-    } else if (transaction?.status === "committed") {
-      transactionStatus.textContent = "Last transaction committed · next run starts a new one";
-    } else if (transaction?.status === "rolled_back") {
-      transactionStatus.textContent = "Last transaction rolled back · next run starts a new one";
-    } else if (transaction?.status === "expired") {
-      transactionStatus.textContent = "Transaction expired and was rolled back";
-    } else if (transaction?.status === "uncertain") {
-      transactionStatus.textContent = "Commit outcome uncertain · verify PostgreSQL before continuing";
-    } else transactionStatus.textContent = "A transaction starts with the first write-mode run";
+    commitButton.hidden = !isWrite;
+    rollbackButton.hidden = !isWrite;
+    beginButton.hidden = !isWrite;
+    commitButton.disabled = busy || active || !open;
+    rollbackButton.disabled = busy || active || !open;
+    beginButton.disabled = busy || active || open;
+    autoCommit.disabled = busy || active || open;
+    commitTiming.disabled = busy || active || open || !autoCommit.checked;
+    if (!isWrite) transactionStatus.textContent = "Read-only · database changes are not permitted";
+    else if (transaction?.status === "running" && transaction.transactionStartedAt) {
+      transactionStatus.textContent = "Transaction open · statement running";
+    } else if (transaction?.transactionStatus === "inerror") {
+      transactionStatus.textContent = "Transaction aborted · use ROLLBACK or ROLLBACK TO SAVEPOINT";
+    } else if (transaction?.transactionStatus === "intrans") {
+      transactionStatus.textContent = "Transaction open · changes uncommitted";
+    } else if (transaction?.transactionStatus === "unknown") {
+      transactionStatus.textContent = "Connection state unknown · verify PostgreSQL before retrying writes";
+    } else transactionStatus.textContent = autoCommit.checked
+      ? `No transaction open · auto-commit ${commitTiming.value === "whole_run" ? "after the whole run" : "after each statement"}`
+      : "No transaction open · next Run starts a transaction";
+    transactionStatus.dataset.compact = transaction?.transactionStatus === "inerror" ? "Aborted"
+      : transaction?.status === "running" ? "Running" : open ? "Open"
+      : transaction?.transactionStatus === "unknown" ? "Unknown" : "Idle";
+    transactionStatus.title = `${transactionStatus.textContent}${transaction?.idleTimeoutSeconds ? ` · Idle sessions close after ${transaction.idleTimeoutSeconds / 60} minutes; uncommitted changes roll back.` : ""}`;
   }
 
   function updateControls() {
     const current = workspace();
-    const active = executionActive(execution);
+    const active = operationActive();
     const runnable = Boolean(selectedSource(draft));
     const runDisabled = busy || active || !available(current) || !runnable;
     const runLabel = draft.selectionStart !== draft.selectionEnd ? "Run selection" : "Run current statement";
@@ -321,7 +479,11 @@ export function createSqlConsole({
       runAllButton.disabled = busy || active || !available(current) || !draft.value.trim();
     }
     cancelButton.hidden = !active;
-    cancelButton.disabled = busy;
+    cancelButton.disabled = cancelling;
+    explainButton.disabled = runDisabled;
+    analyzeButton.disabled = explainButton.disabled;
+    copyButton.disabled = !available() || active || busy || mode !== "explicit" || !runnable;
+    transactionsButton.disabled = !available();
     draft.readOnly = active;
     for (const button of saveQueryButtons) {
       if (button) button.disabled = active || !draft.value.trim();
@@ -329,13 +491,13 @@ export function createSqlConsole({
     if (editorSummary) editorSummary.textContent = targetDescription(draft);
 
     if (active) {
-      editorStatus.textContent = `${execution.status === "reserved" ? "Queued" : "Running"} · ${mode === "explicit" ? "inside the open transaction" : "read-only"}`;
+      editorStatus.textContent = `${operationExecutionId ? "Fetching / exporting" : execution.status === "reserved" ? "Queued" : "Running"} · ${mode === "explicit" ? (transactionOpen(transaction) ? "transaction" : "write session") : "read-only"}`;
     } else if (!available(current)) {
       editorStatus.textContent = "A database-backed workspace is required to run SQL.";
-    } else if (transaction?.status === "failed") {
-      editorStatus.textContent = "PostgreSQL aborted this transaction. Roll it back before running more SQL.";
+    } else if (transaction?.transactionStatus === "inerror") {
+      editorStatus.textContent = "PostgreSQL aborted this transaction. Run ROLLBACK or recover with ROLLBACK TO SAVEPOINT.";
     } else if (mode === "explicit" && transactionOpen(transaction)) {
-      editorStatus.textContent = "Changes remain private to this transaction until Commit is confirmed.";
+      editorStatus.textContent = "Changes are uncommitted. Typed transaction commands and the buttons act on this same session.";
     } else {
       editorStatus.textContent = "Selection runs exactly; otherwise the statement at the cursor runs.";
     }
@@ -397,7 +559,7 @@ export function createSqlConsole({
   }
 
   function switchQuery(queryId) {
-    if (queryId === activeQueryId || busy || executionActive(execution)) return;
+    if (queryId === activeQueryId || busy || operationActive()) return;
     persistDraft();
     activeQueryId = queryId;
     draft.value = activeQuery()?.sql || "";
@@ -409,7 +571,7 @@ export function createSqlConsole({
   }
 
   function addQuery() {
-    if (busy || executionActive(execution)) return;
+    if (busy || operationActive()) return;
     persistDraft();
     const query = {
       id: browserIdentifier("qry"),
@@ -430,7 +592,7 @@ export function createSqlConsole({
   }
 
   function closeQuery(queryId) {
-    if (busy || executionActive(execution)) return;
+    if (busy || operationActive()) return;
     const index = queries.findIndex(item => item.id === queryId);
     if (index < 0) return;
     const [removed] = queries.splice(index, 1);
@@ -681,7 +843,7 @@ export function createSqlConsole({
     setResultsSummary(cancelled ? "Cancelled" : "Query failed");
     replace(results, statePanel(
       cancelled ? "CANCELLED" : "QUERY ERROR",
-      cancelled ? "Execution cancelled" : "PostgreSQL rejected the query",
+      cancelled ? "Execution cancelled" : execution.status === "uncertain" ? "Outcome uncertain · verify before retrying" : "PostgreSQL rejected the query",
       `${statement}${execution.errorMessage || "The query did not produce a retained result."}`,
       { error: !cancelled },
     ));
@@ -697,9 +859,17 @@ export function createSqlConsole({
     }
     const tab = query.resultTabs.find(item => item.id === query.activeResultTabId) || query.resultTabs.at(-1);
     query.activeResultTabId = tab.id;
-    setResultsSummary(tab.meta);
+    setResultsSummary(tab.elapsedMs == null ? tab.meta : `${tab.meta} · First results in ${formatElapsed(tab.elapsedMs)}`);
     if (tab.kind === "error") {
       replace(results, statePanel("QUERY ERROR", "PostgreSQL rejected the query", tab.message, { error: true }));
+      return;
+    }
+    if (tab.plan) {
+      replace(results, createQueryPlanView(tab.plan, { comparison: comparisonPlan, onCompare: record => {
+        comparisonPlan = record;
+        showToast("Plan kept for comparison with the next plan.");
+        renderResults();
+      } }));
       return;
     }
     const { summary, page } = tab;
@@ -708,7 +878,11 @@ export function createSqlConsole({
       element("div", {}, [element("small", { text: `STATEMENT ${summary.statementIndex + 1}` }), element("strong", { text: summary.command })]),
       element("span", { text: summary.rowCount == null ? "Paged result" : `${summary.rowCount} ${summary.rowCount === 1 ? "row" : "rows"}` }),
     ]));
-    if (!page) card.append(statePanel("…", "Loading retained result", "Reading the first result page from the server."));
+    if (tab.pageError) {
+      const retry = element("button", { type: "button", text: "Retry result page" });
+      retry.addEventListener("click", () => { if (!operationActive()) void loadTabFirstPage(tab, generation); });
+      card.append(statePanel("FETCH ERROR", "Could not fetch result page", tab.pageError.message, { error: true }), retry);
+    } else if (!page) card.append(statePanel("…", "Loading retained result", "Reading the first result page from the server."));
     else if (!page.rows.length) card.append(statePanel("0", "No rows returned", "PostgreSQL returned the column shape without any records."));
     else card.append(createDataGrid({ columns: page.columns, rows: page.rows, className: "sql-result-viewport" }));
     if (page) {
@@ -720,8 +894,8 @@ export function createSqlConsole({
       const actions = element("div", { className: "sql-result-actions" });
       const exportButton = createIconButton({
         icon: "download",
-        label: "Export complete result as CSV",
-        tooltip: "Export CSV",
+        label: tab.rawSessionId ? "Export displayed rows as CSV" : "Export complete result as CSV",
+        tooltip: tab.rawSessionId ? "Export displayed rows; use COPY for a full download" : "Export CSV",
         className: "compact",
       });
       exportButton.addEventListener("click", () => exportResult(tab));
@@ -735,7 +909,9 @@ export function createSqlConsole({
   function resultProgressText(summary, page) {
     const count = page.rows.length;
     if (page.nextCursor) return summary.rowCount == null ? `${count} rows loaded · scroll for more` : `${count} of ${summary.rowCount} rows loaded · scroll for more`;
-    if (page.truncated) return `${count} rows loaded · result reached the server retention limit`;
+    if (page.truncated) return page.rawPreview
+      ? `${count} rows displayed · use COPY TO STDOUT to download the full result`
+      : `${count} rows loaded · result reached the server retention limit`;
     return summary.rowCount == null ? `${count} rows loaded · end of result` : `${count} of ${summary.rowCount} rows loaded`;
   }
 
@@ -764,7 +940,7 @@ export function createSqlConsole({
     const feedback = element("small", { attrs: { role: "status" } });
     const form = element("form", { className: "sql-console-preferences-form" }, [
       element("label", {}, ["Rows per page", pageSize]), save,
-      element("small", { text: "Applies to future queries in all consoles. Scrolling still loads every row." }), feedback,
+      element("small", { text: "Sets read-only page size and write-session preview size. Use COPY for full write-session output." }), feedback,
     ]);
     preferences.append(form);
     results.before(preferences);
@@ -813,41 +989,67 @@ export function createSqlConsole({
     if (!current || runGeneration !== generation) return;
     const query = activeQuery();
     if (!query) return;
-    const labels = execution.results.map((_, index) => resultTabLabel(query, `Result ${index + 1}`));
-    const newTabs = execution.results.map((summary, index) => ({
+    const summaries = execution.results.map((summary, index) => ({ ...summary, id: summary.id || `${execution.id}_${index}`, statementIndex: summary.statementIndex ?? index }));
+    const labels = summaries.map((_, index) => resultTabLabel(query, `Result ${index + 1}`));
+    const newTabs = summaries.map((summary, index) => ({
       id: browserIdentifier("rtab"),
       label: labels[index],
       meta: `${summary.command} · ${summary.rowCount == null ? "paged result" : `${summary.rowCount} ${summary.rowCount === 1 ? "row" : "rows"}`}`,
       kind: "result",
       pinned: false,
       executionId: execution.id,
+      rawSessionId: execution.sessionId || null,
+      explainRequest: explainRequest ? { ...explainRequest } : null,
       summary,
       page: null,
     }));
     query.resultTabs.push(...newTabs);
     query.activeResultTabId = newTabs[0]?.id || query.activeResultTabId;
     renderResults();
-    for (const tab of newTabs) {
-      const summary = tab.summary;
-      const page = await api.getConsoleResultPage(current.id, execution.id, summary.id);
-      if (runGeneration !== generation || workspace()?.id !== current.id) return;
-      tab.page = page;
+    for (const tab of newTabs) await loadTabFirstPage(tab, runGeneration);
+    if (runGeneration === generation) {
+      const elapsed = finishElapsed(newTabs.some(tab => tab.pageError) ? "Stopped after" : newTabs.length ? "Time to first results" : "Finished in");
+      for (const tab of newTabs) tab.elapsedMs = elapsed;
       renderResults();
     }
     await refreshLibrary(current.id, runGeneration);
   }
 
+  async function loadTabFirstPage(tab, runGeneration) {
+    const current = workspace();
+    if (!current || runGeneration !== generation) return;
+    tab.pageError = null;
+    renderResults();
+    try {
+      const page = tab.rawSessionId
+        ? { columns: tab.summary.columns, rows: tab.summary.rows, truncated: tab.summary.truncated, nextCursor: null, rawPreview: true }
+        : await duringOperation(tab.executionId, () => api.getConsoleResultPage(current.id, tab.executionId, tab.summary.id));
+      if (runGeneration !== generation || workspace()?.id !== current.id) return;
+      tab.page = page;
+      if (tab.explainRequest) {
+        tab.plan = { ...tab.explainRequest, sessionContext: Boolean(tab.rawSessionId), plan: parseQueryPlan(page.rows[0]?.[0]), executionId: tab.executionId, capturedAt: new Date().toISOString() };
+        tab.label = tab.explainRequest.analyze ? "Analyzed plan" : "Estimated plan";
+        tab.meta = tab.explainRequest.analyze ? "Measured execution plan" : "Estimated execution plan";
+      }
+    } catch (error) {
+      if (runGeneration !== generation) return;
+      tab.pageError = error;
+      onError(error);
+    }
+    if (runGeneration === generation) renderResults();
+  }
+
   async function refreshTransaction(current, expectedGeneration) {
     if (!transaction?.id || !current || expectedGeneration !== generation) return;
     try {
-      transaction = await api.getConsoleTransaction(current.id, transaction.id);
+      transaction = await api.getRawSession(current.id, transaction.id);
     } catch (error) {
       if (!(error instanceof ApiError && [404, 410].includes(error.status))) throw error;
       transaction = null;
     }
     storeValue(
-      consoleStorageKey(current.id, "transaction-id"),
-      transactionOpen(transaction) ? transaction.id : null,
+      consoleStorageKey(current.id, "raw-session-id"),
+      sessionOpen(transaction) ? transaction.id : null,
     );
   }
 
@@ -855,30 +1057,36 @@ export function createSqlConsole({
     const current = workspace();
     if (!current || runGeneration !== generation || !execution) return;
     try {
-      execution = await api.getConsoleExecution(current.id, execution.id);
+      execution = execution.sessionId
+        ? await api.getRawExecution(current.id, execution.sessionId, execution.id)
+        : await api.getConsoleExecution(current.id, execution.id);
       if (runGeneration !== generation) return;
+      if (mode === "explicit") await refreshTransaction(current, runGeneration);
       if (!TERMINAL_EXECUTION_STATUSES.has(execution.status)) {
         renderExecutionState();
         pollTimer = globalThis.setTimeout(() => poll(runGeneration), POLL_INTERVAL_MS);
         return;
       }
 
-      if (mode === "explicit") await refreshTransaction(current, runGeneration);
+      void refreshOpenTransactions();
+      noticesBody.textContent = (execution.notices || []).map(notice => typeof notice === "string" ? notice : notice.message || JSON.stringify(notice)).join("\n");
+      noticesPanel.hidden = !noticesBody.textContent;
       if (execution.status === "succeeded") {
         await loadFirstPages(runGeneration);
-        const terminalAction = pendingTerminalAction;
-        pendingTerminalAction = null;
-        if (terminalAction && runGeneration === generation) {
-          await finishTransaction(terminalAction, { typed: true });
-        }
       } else {
-        pendingTerminalAction = null;
+            if (execution.sessionId && execution.results?.length) await loadFirstPages(runGeneration);
+        finishElapsed(execution.status === "cancelled" ? "Cancelled after" : "Failed after");
         renderFailure();
       }
     } catch (error) {
       if (runGeneration !== generation) return;
       setResultsSummary("Status unavailable");
       replace(results, statePanel("ERROR", "Execution status unavailable", error.message, { error: true }));
+      if (executionActive(execution)) {
+        const reconnect = element("button", { type: "button", text: "Reconnect to execution" });
+        reconnect.addEventListener("click", () => { reconnect.disabled = true; void poll(runGeneration); });
+        results.append(reconnect);
+      }
       onError(error);
     } finally {
       if (runGeneration === generation) {
@@ -889,17 +1097,15 @@ export function createSqlConsole({
   }
 
   async function ensureTransaction(current, policy, runGeneration) {
-    if (transactionOpen(transaction)) return transaction;
-    transaction = await api.createConsoleTransaction(current.id, {
+    if (sessionOpen(transaction)) return transaction;
+    const session = await api.createRawSession(current.id, {
       consoleId: consoleIdentifier,
       expectedWorkspaceRevision: current.revision,
       expectedSettingsRevision: policy.revision,
     });
-    if (runGeneration !== generation) return null;
-    storeValue(consoleStorageKey(current.id, "transaction-id"), transaction.id);
-    showToast(transaction.executionIds?.length
-      ? "Existing write transaction resumed."
-      : "Write transaction opened. Changes are not committed yet.");
+    if (runGeneration !== generation) { await api.closeRawSession(current.id, session.id); return null; }
+    transaction = session;
+    storeValue(consoleStorageKey(current.id, "raw-session-id"), transaction.id);
     return transaction;
   }
 
@@ -914,34 +1120,19 @@ export function createSqlConsole({
     return runGeneration === generation;
   }
 
-  async function submitTransaction(current, policy, source, terminalAction, runGeneration) {
-    if (!transactionOpen(transaction) && !source && terminalAction) {
-      throw new Error(`There is no open transaction to ${terminalAction}.`);
-    }
-    const activeTransaction = await ensureTransaction(current, policy, runGeneration);
-    if (!activeTransaction || runGeneration !== generation) return false;
-    if (!source) {
-      busy = false;
-      updateControls();
-      await finishTransaction(terminalAction, { typed: true });
-      return false;
-    }
-    if (activeTransaction.status === "failed") {
-      throw new Error("This transaction is aborted. Roll it back before running more SQL.");
-    }
-    pendingTerminalAction = terminalAction;
-    execution = await api.createConsoleTransactionExecution(current.id, activeTransaction.id, {
-      expectedRevision: activeTransaction.revision,
-      statements: [source],
-    });
-    await refreshTransaction(current, runGeneration);
+  async function submitTransaction(current, policy, source, runGeneration, explain = null, commitMode = selectedCommitMode()) {
+    const session = await ensureTransaction(current, policy, runGeneration);
+    if (!session || runGeneration !== generation) return false;
+    execution = explain === null
+      ? await api.runRawSql(current.id, session.id, source, commitMode)
+      : await api.explainRawSql(current.id, session.id, source, explain, commitMode);
     return runGeneration === generation;
   }
 
-  async function run(all = false) {
+  async function run(all = false, explain = null, controlSql = null) {
     const current = workspace();
-    const source = selectedSource(draft, all);
-    if (!available(current) || busy || executionActive(execution) || !source) return;
+    const source = controlSql ?? selectedSource(draft, all);
+    if (!available(current) || busy || operationActive() || !source) return;
     if (typeof onRunStart === "function") onRunStart();
     stopPolling();
     const query = activeQuery();
@@ -951,9 +1142,12 @@ export function createSqlConsole({
       query.activeResultTabId = query.resultTabs.at(-1)?.id || null;
     }
     const runGeneration = ++generation;
+    elapsedLabel = "Elapsed";
+    elapsedDisplay.hidden = false;
+    elapsedTimer.start();
     busy = true;
     execution = null;
-    pendingTerminalAction = null;
+    explainRequest = explain === null ? null : { sql: source, analyze: explain };
     void releaseResultTabs(current.id, replacedTabs);
     updateControls();
     setResultsSummary("Submitting");
@@ -963,24 +1157,32 @@ export function createSqlConsole({
       if (!policy || runGeneration !== generation) return;
       let submitted = false;
       if (mode === "explicit") {
-        const script = transactionTerminalAction(source);
-        submitted = await submitTransaction(current, policy, script.sql, script.action, runGeneration);
+        submitted = await submitTransaction(current, policy, source, runGeneration, explain, controlSql ? "manual" : selectedCommitMode());
+      } else if (explain !== null) {
+        explainRequest.settings = policy;
+        execution = await api.explainConsoleQuery(current.id, {
+          consoleId: consoleIdentifier, expectedWorkspaceRevision: current.revision,
+          expectedSettingsRevision: policy.revision, sql: source, analyze: explain,
+        });
+        submitted = true;
       } else {
-        const script = transactionTerminalAction(source);
-        if (script.action) throw new Error("Switch to Write transaction before running COMMIT or ROLLBACK.");
         submitted = await submitRead(current, policy, source, runGeneration);
       }
-      if (!submitted || runGeneration !== generation) return;
+      if (!submitted || runGeneration !== generation) {
+        if (runGeneration === generation) finishElapsed("Finished in");
+        return;
+      }
       busy = false;
+      startMonitoring(execution.id);
       renderExecutionState();
       updateControls();
       pollTimer = globalThis.setTimeout(() => poll(runGeneration), POLL_INTERVAL_MS);
     } catch (error) {
       if (runGeneration !== generation) return;
       if (error instanceof ApiError && error.code === "console_settings_changed") settings = null;
-      pendingTerminalAction = null;
-      busy = false;
+        busy = false;
       execution = null;
+      finishElapsed("Could not start after");
       setResultsSummary("Could not start");
       replace(results, statePanel("QUERY ERROR", "Query could not start", error.message, { error: true }));
       updateControls();
@@ -990,56 +1192,36 @@ export function createSqlConsole({
 
   async function cancel() {
     const current = workspace();
-    if (!current || !executionActive(execution) || busy) return;
-    busy = true;
-    pendingTerminalAction = null;
+    if (!current || !operationActive() || cancelling) return;
+    cancelling = true;
     updateControls();
     try {
-      execution = await api.cancelConsoleExecution(current.id, execution.id);
-      if (execution.status === "cancelled") renderFailure();
-      else renderExecutionState();
+      const cancellingOperation = Boolean(operationExecutionId);
+      const executionId = operationExecutionId || execution.id;
+      const cancelledExecution = execution?.sessionId && execution.id === executionId
+        ? (await api.cancelRawSession(current.id, execution.sessionId), await api.getRawExecution(current.id, execution.sessionId, executionId))
+        : await api.cancelConsoleExecution(current.id, executionId);
+      if (execution?.id === executionId) execution = cancelledExecution;
+      if (!cancellingOperation) {
+        if (execution.status === "cancelled") renderFailure();
+        else renderExecutionState();
+      }
       showToast("Console cancellation requested.");
     } catch (error) {
       onError(error);
     } finally {
-      busy = false;
+      cancelling = false;
       updateControls();
     }
   }
 
-  async function finishTransaction(action, { typed = false } = {}) {
-    const current = workspace();
-    if (!current || !transactionOpen(transaction) || executionActive(execution) || busy) return;
-    busy = true;
-    updateControls();
-    try {
-      transaction = action === "commit"
-        ? await api.commitConsoleTransaction(current.id, transaction.id, { expectedRevision: transaction.revision })
-        : await api.rollbackConsoleTransaction(current.id, transaction.id, { expectedRevision: transaction.revision });
-      storeValue(consoleStorageKey(current.id, "transaction-id"), null);
-      showToast(action === "commit" ? "Transaction committed." : "Transaction rolled back.");
-      if (action === "commit" && typeof onCommit === "function") await onCommit();
-      if (typed && !execution) {
-        setResultsSummary(action === "commit" ? "Committed" : "Rolled back");
-        replace(results, statePanel(
-          action === "commit" ? "COMMIT" : "ROLLBACK",
-          action === "commit" ? "Transaction committed" : "Transaction rolled back",
-          action === "commit" ? "PostgreSQL made the transaction durable." : "PostgreSQL discarded the transaction changes.",
-        ));
-      }
-    } catch (error) {
-      onError(error);
-      setResultsSummary("Transaction action failed");
-      replace(results, statePanel("TRANSACTION ERROR", `Could not ${action}`, error.message, { error: true }));
-      try {
-        await refreshTransaction(current, generation);
-      } catch {
-        // The original transaction error is the useful message.
-      }
-    } finally {
-      busy = false;
-      updateControls();
-    }
+  async function executeControl(sql) {
+    if (mode !== "explicit" || busy || operationActive()) return;
+    await run(false, null, sql);
+  }
+
+  async function finishTransaction(action) {
+    await executeControl(action.toUpperCase());
   }
 
   function requestFinish(action) {
@@ -1074,7 +1256,7 @@ export function createSqlConsole({
     busy = true;
     updateControls();
     try {
-      const next = await api.getConsoleResultPage(current.id, tab.executionId, tab.summary.id, { cursor: requestedCursor });
+      const next = await duringOperation(tab.executionId, () => api.getConsoleResultPage(current.id, tab.executionId, tab.summary.id, { cursor: requestedCursor }));
       if (generation !== requestedGeneration || workspace()?.id !== requestedWorkspaceId) return;
       const stillActive = activeQueryId === requestedQueryId && activeQuery()?.activeResultTabId === requestedTabId;
       const viewport = stillActive ? results.querySelector(".sql-result-viewport") : null;
@@ -1097,22 +1279,32 @@ export function createSqlConsole({
 
   async function releaseResultTabs(previousWorkspaceId, tabs) {
     if (!previousWorkspaceId || !tabs?.length) return;
-    await Promise.allSettled(tabs.filter(tab => tab.kind === "result").map(tab => (
+    await Promise.allSettled(tabs.filter(tab => tab.kind === "result" && !tab.rawSessionId).map(tab => (
       api.closeConsoleResult(previousWorkspaceId, tab.executionId, tab.summary.id)
     )));
   }
 
   function exportResult(tab) {
     const current = workspace();
-    if (!current || !tab?.executionId || !tab?.summary?.id) return;
-    const link = document.createElement("a");
-    link.href = api.consoleResultExportUrl(current.id, tab.executionId, tab.summary.id);
-    link.download = `${tab.label.replace(/[^a-z0-9_-]+/gi, "-").toLocaleLowerCase() || "result"}.csv`;
+    if (tab?.rawSessionId && tab.page) {
+      const csvCell = value => `"${String(value == null ? "" : typeof value === "object" ? JSON.stringify(value) : value).replaceAll('"', '""')}"`;
+      const lines = [tab.page.columns.map(column => csvCell(column.name)), ...tab.page.rows.map(row => row.map(csvCell))].map(row => row.join(",")).join("\r\n");
+      downloadArtifact("displayed-result.csv", new Blob([lines], { type: "text/csv" }));
+      return;
+    }
+    if (!current || !tab?.executionId || !tab?.summary?.id || busy || operationActive()) return;
+    const link = element("a", { attrs: {
+      href: api.consoleResultExportUrl(current.id, tab.executionId, tab.summary.id),
+      download: `${tab.label.replace(/[^a-z0-9_-]+/gi, "-") || "result"}.csv`,
+    } });
+    exportWatch = { id: tab.executionId, started: false, deadline: Date.now() + 15000 };
     link.click();
+    startMonitoring(tab.executionId);
   }
 
   async function releaseExecution(previousWorkspaceId, previousExecution) {
     if (!previousWorkspaceId || !previousExecution) return;
+    if (previousExecution.sessionId) return;
     try {
       if (!TERMINAL_EXECUTION_STATUSES.has(previousExecution.status)) {
         await api.cancelConsoleExecution(previousWorkspaceId, previousExecution.id);
@@ -1126,13 +1318,10 @@ export function createSqlConsole({
   }
 
   async function rollbackAbandonedTransaction(previousWorkspaceId, previousTransaction) {
-    if (!previousWorkspaceId || !transactionOpen(previousTransaction)) return;
+    if (!previousWorkspaceId || !sessionOpen(previousTransaction)) return;
     try {
-      await api.rollbackConsoleTransaction(previousWorkspaceId, previousTransaction.id, {
-        expectedRevision: previousTransaction.revision,
-      });
-      storeValue(consoleStorageKey(previousWorkspaceId, "transaction-id"), null);
-      showToast("The open SQL transaction was rolled back when its workspace changed.");
+      await api.closeRawSession(previousWorkspaceId, previousTransaction.id);
+      storeValue(consoleStorageKey(previousWorkspaceId, "raw-session-id"), null);
     } catch (error) {
       onError(error);
     }
@@ -1140,23 +1329,23 @@ export function createSqlConsole({
 
   async function restoreTransaction(current, expectedGeneration) {
     if (!supportsWrite || !current?.id) return;
-    const transactionId = storedValue(consoleStorageKey(current.id, "transaction-id"));
-    if (!/^ctx_[0-9a-f]{32}$/.test(transactionId || "")) return;
+    const transactionId = storedValue(consoleStorageKey(current.id, "raw-session-id"));
+    if (!/^raw_[0-9a-f]{32}$/.test(transactionId || "")) return;
     busy = true;
     updateControls();
     try {
-      const restored = await api.getConsoleTransaction(current.id, transactionId);
+      const restored = await api.getRawSession(current.id, transactionId);
       if (expectedGeneration !== generation || workspace()?.id !== current.id) return;
       transaction = restored;
-      if (transactionOpen(restored)) {
+      if (sessionOpen(restored)) {
         mode = "explicit";
-        showToast("Open write transaction restored for this tab.");
+        showToast("PostgreSQL session restored for this tab.");
       } else {
-        storeValue(consoleStorageKey(current.id, "transaction-id"), null);
+        storeValue(consoleStorageKey(current.id, "raw-session-id"), null);
       }
     } catch (error) {
       if (expectedGeneration !== generation) return;
-      storeValue(consoleStorageKey(current.id, "transaction-id"), null);
+      storeValue(consoleStorageKey(current.id, "raw-session-id"), null);
       if (!(error instanceof ApiError && [404, 410].includes(error.status))) onError(error);
     } finally {
       if (expectedGeneration === generation) {
@@ -1167,29 +1356,25 @@ export function createSqlConsole({
   }
 
   function setMode(nextMode) {
-    if (!supportsWrite || !available() || executionActive(execution) || busy) return;
+    if (!supportsWrite || !available() || operationActive() || busy) return;
     const next = nextMode === "explicit" ? "explicit" : "managed_read";
     if (next === mode) return;
+    const leave = async () => {
+      busy = true; updateControls();
+      try {
+        if (sessionOpen(transaction)) await api.closeRawSession(workspaceId, transaction.id);
+        transaction = null;
+        storeValue(consoleStorageKey(workspaceId, "raw-session-id"), null);
+        mode = next;
+      } catch (error) { onError(error); }
+      finally { busy = false; updateControls(); }
+    };
     if (next === "managed_read" && transactionOpen(transaction)) {
-      if (typeof confirm === "function") {
-        confirm({
-          title: "Leave write transaction",
-          message: "Switching to Safe read will roll back every uncommitted change in the open transaction.",
-          label: "Roll back and switch",
-          tone: "danger",
-          callback: async () => {
-            await finishTransaction("rollback");
-            if (!transactionOpen(transaction)) {
-              mode = "managed_read";
-              updateControls();
-            }
-          },
-        });
-      }
+      if (typeof confirm === "function") confirm({ title: "Leave write session", message: "Closing this session rolls back its uncommitted transaction. Previously committed changes remain.", label: "Roll back and switch", tone: "danger", callback: leave });
       return;
     }
-    mode = next;
-    updateControls();
+    if (next === "managed_read") void leave();
+    else { mode = next; updateControls(); }
   }
 
   function syncWorkspace(current) {
@@ -1232,15 +1417,20 @@ export function createSqlConsole({
         activeQueryId = queries[0]?.id || null;
       }
       execution = null;
+      operationExecutionId = null;
+      comparisonPlan = null;
+      exportWatch = null;
+      activityPanel.hidden = true;
+      elapsedDisplay.hidden = true;
       transaction = null;
-      pendingTerminalAction = null;
-      busy = false;
+        busy = false;
       mode = "managed_read";
       void releaseExecution(previousWorkspaceId, previousExecution);
       void Promise.all(previousQueries.map(query => releaseResultTabs(previousWorkspaceId, query.resultTabs)));
       void rollbackAbandonedTransaction(previousWorkspaceId, previousTransaction);
       renderIdle();
       if (current) void restoreTransaction(current, generation);
+      void refreshOpenTransactions();
     }
     updateControls();
   }
@@ -1309,7 +1499,6 @@ export function createSqlConsole({
     stopPolling();
     execution = null;
     transaction = null;
-    pendingTerminalAction = null;
     busy = false;
     mode = "managed_read";
     for (const query of queries) void releaseResultTabs(workspaceId, query.resultTabs);
@@ -1324,6 +1513,16 @@ export function createSqlConsole({
     updateControls();
   }
 
+  explainButton.addEventListener("click", () => void run(false, false));
+  analyzeButton.addEventListener("click", () => {
+    if (typeof confirm === "function") confirm({
+      title: "Run & Analyze", message: mode === "explicit"
+        ? "Execute the selected statement in your current PostgreSQL session to measure its plan? ANALYZE executes writes too, using the session's transaction state."
+        : "Execute the full selected read-only statement to measure its PostgreSQL plan? This can take as long as the query itself. The analysis uses a fresh read-only snapshot.",
+      label: "Run & Analyze", tone: "primary", callback: () => run(false, true),
+    });
+    else void run(false, true);
+  });
   runButton.addEventListener("click", () => void run(false));
   runAllButton?.addEventListener("click", () => void run(true));
   cancelButton.addEventListener("click", cancel);

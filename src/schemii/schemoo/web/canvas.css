@@ -56,3 +56,11 @@
 .derived-lookup .hint { margin-bottom: 0; }
 .derived-keys { display: flex; flex-wrap: wrap; gap: 12px; border: 1px solid #354153; border-radius: 7px; padding: 12px; }
 .derived-keys label { display: flex; align-items: center; gap: 6px; }
+.sc-connection-tools { position: absolute; z-index: 4; bottom: 36px; left: 14px; right: 14px; display: flex; align-items: center; gap: 10px; pointer-events: none; }
+.sc-connection-status { color: #d6dce6; font-size: 11px; background: #10151df5; border-radius: 5px; }
+.sc-connection-status:not(:empty) { padding: 6px 8px; }
+.sc-column.sc-connection-source { background: #ad8def40; outline: 1px solid #ad8def; outline-offset: -1px; }
+.sc-column.sc-connection-target { background: #65a9ff25; }
+.sc-column.sc-connection-invalid { opacity: .4; cursor: not-allowed; }
+.sc-column[role="button"]:focus-visible { outline: 2px solid #ad8def; outline-offset: -2px; }
+@media (max-width: 600px) { .sc-connection-tools { align-items: flex-start; flex-direction: column; } }

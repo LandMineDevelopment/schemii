@@ -249,34 +249,41 @@ class _ConnectionCapacity:
         self._maximum_per_identity = maximum_per_identity
         self._total = 0
         self._by_identity: dict[str, int] = {}
+        self._retained_total = 0
+        self._retained_by_identity: dict[str, int] = {}
         self._condition = threading.Condition()
 
-    def acquire(self, identity: str, timeout: float) -> tuple[str, int, int] | None:
+    def acquire(self, identity: str, timeout: float, *, retained: bool = False) -> tuple[str, int, int] | None:
         deadline = time.monotonic() + timeout
         with self._condition:
-            while (
-                self._total >= self._maximum_total
-                or self._by_identity.get(identity, 0) >= self._maximum_per_identity
-            ):
+            while True:
+                identity_count = self._by_identity.get(identity, 0)
+                retained_identity = self._retained_by_identity.get(identity, 0)
+                # All long-lived session types share this quota. Keep one of
+                # the existing slots for catalog, validation and ordinary work.
+                retained_per_identity = max(1, self._maximum_per_identity - 1)
+                retained_total = max(1, self._maximum_total - 1)
+                reached = None
+                if identity_count >= self._maximum_per_identity:
+                    reached = ("postgres.connections.maximum_per_identity", self._maximum_per_identity, identity_count)
+                elif self._total >= self._maximum_total:
+                    reached = ("postgres.connections.maximum_total", self._maximum_total, self._total)
+                elif retained and retained_identity >= retained_per_identity:
+                    reached = ("postgres.connections.maximum_per_identity", retained_per_identity, retained_identity)
+                elif retained and self._retained_total >= retained_total:
+                    reached = ("postgres.connections.maximum_total", retained_total, self._retained_total)
+                if reached is None:
+                    self._total += 1
+                    self._by_identity[identity] = identity_count + 1
+                    if retained:
+                        self._retained_total += 1
+                        self._retained_by_identity[identity] = retained_identity + 1
+                    return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not self._condition.wait(remaining):
-                    identity_count = self._by_identity.get(identity, 0)
-                    if identity_count >= self._maximum_per_identity:
-                        return (
-                            "postgres.connections.maximum_per_identity",
-                            self._maximum_per_identity,
-                            identity_count,
-                        )
-                    return (
-                        "postgres.connections.maximum_total",
-                        self._maximum_total,
-                        self._total,
-                    )
-            self._total += 1
-            self._by_identity[identity] = self._by_identity.get(identity, 0) + 1
-            return None
+                    return reached
 
-    def release(self, identity: str) -> None:
+    def release(self, identity: str, *, retained: bool = False) -> None:
         with self._condition:
             count = self._by_identity.get(identity, 0)
             if count <= 0:
@@ -286,14 +293,22 @@ class _ConnectionCapacity:
                 self._by_identity.pop(identity, None)
             else:
                 self._by_identity[identity] = count - 1
+            if retained:
+                self._retained_total -= 1
+                retained_count = self._retained_by_identity.get(identity, 0)
+                if retained_count <= 1:
+                    self._retained_by_identity.pop(identity, None)
+                else:
+                    self._retained_by_identity[identity] = retained_count - 1
             self._condition.notify_all()
 
 
 class _LeasedConnection:
-    def __init__(self, connection: Any, capacity: _ConnectionCapacity, identity: str) -> None:
+    def __init__(self, connection: Any, capacity: _ConnectionCapacity, identity: str, *, retained: bool = False) -> None:
         self._connection = connection
         self._capacity = capacity
         self._identity = identity
+        self._retained = retained
         self._closed = False
 
     def __getattr__(self, name: str) -> Any:
@@ -306,7 +321,7 @@ class _LeasedConnection:
         try:
             self._connection.close()
         finally:
-            self._capacity.release(self._identity)
+            self._capacity.release(self._identity, retained=self._retained)
 
 
 class PsycopgPostgresGateway:
@@ -343,6 +358,9 @@ class PsycopgPostgresGateway:
         self._connection_capacity = _ConnectionCapacity(
             maximum_connections, maximum_connections_per_identity
         )
+        self._retained_connection_reclaimers = []
+        self._monitor_capacity = _ConnectionCapacity(2, 1)
+        self._control_capacity = _ConnectionCapacity(2, 1)
         self._connection_acquire_timeout = connection_acquire_timeout
         self._maximum_console_statements = maximum_console_statements
         self._console_page_memory_bytes = console_page_memory_bytes
@@ -684,7 +702,7 @@ class PsycopgPostgresGateway:
         )
         database_connection: Any | None = None
         try:
-            database_connection = self._connect(connection)
+            database_connection = self._connect(connection, retained=True)
             self._begin_read_only(
                 database_connection,
                 repeatable_read=True,
@@ -734,7 +752,7 @@ class PsycopgPostgresGateway:
         namespace = self._validated_namespace(namespace)
         database_connection: Any | None = None
         try:
-            database_connection = self._connect(connection)
+            database_connection = self._connect(connection, retained=True)
             self._begin_console_write(database_connection)
             self._set_console_namespace(database_connection, namespace)
             identity = self._one(
@@ -773,7 +791,7 @@ class PsycopgPostgresGateway:
             raise PostgresQueryError()
         database_connection: Any | None = None
         try:
-            database_connection = self._connect(connection)
+            database_connection = self._connect(connection, control=True)
             self._begin_read_only(database_connection)
             row = self._one(
                 self._execute_rows(
@@ -785,6 +803,35 @@ class PsycopgPostgresGateway:
             if type(row.get("cancelled")) is not bool:
                 raise PostgresQueryError()
             return row["cancelled"]
+        finally:
+            self._cleanup(database_connection)
+
+    def console_activity(self, connection: ResolvedPostgresConnection, backend_pid: int, *, started_before: datetime) -> dict:
+        """Use a small independent admission pool so saturated query slots remain observable."""
+        database_connection = None
+        try:
+            database_connection = self._connect(connection, monitoring=True)
+            self._begin_read_only(database_connection)
+            self._set_timeout_ceiling(database_connection, "statement_timeout", 1000)
+            rows = self._execute_rows(database_connection,
+                "SELECT state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blockers "
+                "FROM pg_stat_activity WHERE pid = %s AND datname = current_database() "
+                "AND usename = current_user AND application_name = 'schemii' AND backend_start <= %s",
+                (backend_pid, started_before))
+            row = rows[0] if rows else {}
+            visible = bool(row.get("state"))
+            return {
+                "databaseState": row.get("state"),
+                "waitEventType": row.get("wait_event_type"),
+                "waitEvent": row.get("wait_event"),
+                "blockerPids": list(row.get("blockers") or [])[:32],
+                "monitoringAvailable": visible,
+                "monitoringMessage": None if visible else "Database session ended or activity visibility is restricted.",
+                "statementTimeoutMs": None,
+                "lockTimeoutMs": None,
+                "configuredStatementTimeoutMs": self._catalog_statement_timeout_ms,
+                "configuredLockTimeoutMs": self._lock_timeout_ms,
+            }
         finally:
             self._cleanup(database_connection)
 
@@ -982,7 +1029,12 @@ class PsycopgPostgresGateway:
             raise PostgresCatalogValidationError()
         return identity
 
-    def _connect(self, connection: ResolvedPostgresConnection) -> Any:
+    def register_retained_connection_reclaimer(self, reclaimer) -> None:
+        """Register each owner of evictable inactive cursor sessions."""
+        if reclaimer not in self._retained_connection_reclaimers:
+            self._retained_connection_reclaimers.append(reclaimer)
+
+    def _connect(self, connection: ResolvedPostgresConnection, *, monitoring: bool = False, control: bool = False, retained: bool = False) -> Any:
         factory = self._connect_factory
         row_factory = _portable_dict_row
         if factory is None:
@@ -1011,20 +1063,34 @@ class PsycopgPostgresGateway:
         if connection.password is not None:
             parameters["password"] = connection.password.get_secret_value()
         identity = f"{connection.id}:{connection.revision}"
-        reached = self._connection_capacity.acquire(
-            identity, self._connection_acquire_timeout
-        )
+        capacity = self._control_capacity if control else self._monitor_capacity if monitoring else self._connection_capacity
+        if monitoring or control:
+            parameters["connect_timeout"] = min(2, parameters["connect_timeout"])
+        reached = capacity.acquire(identity, 0, retained=retained)
+        # Reclaim only idle, replayable managed cursors. Callback runs outside
+        # the capacity condition; raw sessions and user transactions are never
+        # candidates. Admission is rechecked atomically after each reclamation.
+        while reached and retained and self._retained_connection_reclaimers:
+            if not any(reclaimer(connection.id, connection.revision,
+                    reached[0] == "postgres.connections.maximum_total")
+                    for reclaimer in tuple(self._retained_connection_reclaimers)):
+                break
+            reached = capacity.acquire(identity, 0, retained=retained)
+        if reached:
+            reached = capacity.acquire(identity,
+                0.05 if monitoring or control else self._connection_acquire_timeout,
+                retained=retained)
         if reached is not None:
             limit_name, limit, observed = reached
             raise PostgresConnectionCapacityError(limit_name, limit, observed)
         try:
             opened = factory(**parameters)
-            return _LeasedConnection(opened, self._connection_capacity, identity)
+            return _LeasedConnection(opened, capacity, identity, retained=retained)
         except PostgresGatewayError:
-            self._connection_capacity.release(identity)
+            capacity.release(identity, retained=retained)
             raise
         except Exception:
-            self._connection_capacity.release(identity)
+            capacity.release(identity, retained=retained)
             raise PostgresConnectionError() from None
 
     @staticmethod

@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { installConsoleCleanup } from "./helpers/console-cleanup.js";
+
+installConsoleCleanup(test);
 
 const SQL_CONSOLE_DEMO = readFileSync(
   new URL("../../dev/postgres/sql-console-demo.sql", import.meta.url),
@@ -104,11 +107,11 @@ test("a SQL deep link preloads one browser-local workspace draft", async ({ page
     node.setSelectionRange(selection.start, selection.end);
     node.dispatchEvent(new Event("select", { bubbles: true }));
   }, { start: writeStart, end: SQL_CONSOLE_DEMO.length });
-  await page.getByRole("button", { name: /Write transaction/ }).click();
+  await page.getByRole("button", { name: "Write", exact: true }).click();
   await page.getByRole("button", { name: "Run selection" }).click();
   await page.getByRole("tab", { name: /^Result 3 SELECT/ }).click();
   await expect(page.locator(".sql-result-card tbody")).toContainText("This row exists only inside");
-  await expect(page.locator("#sql-transaction-status")).toContainText("Last transaction rolled back");
+  await expect(page.locator("#sql-transaction-status")).toContainText("No transaction open");
 });
 
 test("selection, cursor, and Run all target the intended statements", async ({ page, request }) => {
@@ -227,7 +230,7 @@ test("large query results append cursor pages automatically near the scroll boun
     container.dispatchEvent(new Event("scroll"));
   });
   await expect(rows).toHaveCount(250);
-  await expect(page.locator("[data-result-progress]")).toHaveText("250 of 250 rows loaded");
+  await expect(page.locator("[data-result-progress]")).toHaveText("250 rows loaded · end of result");
 });
 
 test("write mode retains changes until a confirmed rollback", async ({ page, request }) => {
@@ -235,65 +238,75 @@ test("write mode retains changes until a confirmed rollback", async ({ page, req
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);
 
   await expect(page.locator(".sql-mode-switch")).toHaveCount(0);
-  await page.getByRole("button", { name: /Write transaction/ }).click();
+  await page.getByRole("button", { name: "Write", exact: true }).click();
   await expect(page.locator("#sql-workspace")).toHaveAttribute("data-write-mode", "true");
   await expect(page.locator("#sql-transaction-bar")).toBeVisible();
   await expect(page.locator("#sql-transaction-bar")).toContainText("WRITE MODE");
   const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
+  await page.getByRole("button", { name: "Begin", exact: true }).click();
+  await expect(page.locator("#sql-transaction-status")).toContainText("Transaction open");
+  if (await page.locator("#show-sql-editor").getAttribute("aria-expanded") !== "true") await page.locator("#show-sql-editor").click();
   await editor.fill("CREATE TEMP TABLE console_probe(value integer); INSERT INTO console_probe VALUES (7); SELECT value FROM console_probe;");
   await page.getByRole("button", { name: "Run all" }).click();
   await page.getByRole("tab", { name: /^Result 3 SELECT/ }).click();
   await expect(page.locator(".sql-result-card tbody")).toContainText("7");
-  await expect(page.locator("#sql-transaction-status")).toContainText("Open transaction");
+  await expect(page.locator("#sql-transaction-status")).toContainText("Transaction open");
 
   await page.getByRole("button", { name: "Roll back" }).click();
   await expect(page.getByRole("dialog", { name: "Roll back write transaction" })).toBeVisible();
   await page.getByRole("dialog", { name: "Roll back write transaction" }).getByRole("button", { name: "Roll back" }).click();
-  await expect(page.locator("#sql-transaction-status")).toContainText("Last transaction rolled back");
+  await expect(page.locator("#sql-transaction-status")).toContainText("No transaction open");
 });
 
 test("write transactions commit from either the confirmed button or typed SQL", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);
 
-  await page.getByRole("button", { name: /Write transaction/ }).click();
+  await page.getByRole("button", { name: "Write", exact: true }).click();
   const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
+  await page.getByRole("button", { name: "Begin", exact: true }).click();
+  await expect(page.locator("#sql-transaction-status")).toContainText("Transaction open");
+  if (await page.locator("#show-sql-editor").getAttribute("aria-expanded") !== "true") await page.locator("#show-sql-editor").click();
   await editor.fill("SELECT 41 AS pending_value;");
   await page.getByRole("button", { name: "Run current statement" }).click();
-  await expect(page.locator("#sql-transaction-status")).toContainText("Open transaction");
+  await expect(page.locator("#sql-transaction-status")).toContainText("Transaction open");
   await page.getByRole("button", { name: "Commit", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Commit write transaction" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Commit", exact: true }).click();
-  await expect(page.locator("#sql-transaction-status")).toContainText("Last transaction committed");
+  await expect(page.locator("#sql-transaction-status")).toContainText("No transaction open");
 
-  await page.locator("#show-sql-editor").click();
-  await editor.fill("SELECT 42 AS typed_value; COMMIT;");
+  if (await page.locator("#show-sql-editor").getAttribute("aria-expanded") !== "true") await page.locator("#show-sql-editor").click();
+  await editor.fill("BEGIN; SELECT 42 AS typed_value; COMMIT;");
   await page.getByRole("button", { name: "Run all" }).click();
+  await page.getByRole("tab", { name: /^Result 2 SELECT/ }).click();
   await expect(page.locator(".sql-result-card tbody")).toContainText("42");
-  await expect(page.locator("#sql-transaction-status")).toContainText("Last transaction committed");
+  await expect(page.locator("#sql-transaction-status")).toContainText("No transaction open");
 });
 
 test("a browser-local draft and its open transaction survive a same-tab refresh", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);
 
-  await page.getByRole("button", { name: /Write transaction/ }).click();
+  await page.getByRole("button", { name: "Write", exact: true }).click();
   const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
   const draft = "SELECT 73 AS refresh_probe;";
+  await page.getByRole("button", { name: "Begin", exact: true }).click();
+  await expect(page.locator("#sql-transaction-status")).toContainText("Transaction open");
+  if (await page.locator("#show-sql-editor").getAttribute("aria-expanded") !== "true") await page.locator("#show-sql-editor").click();
   await editor.fill(draft);
   await page.getByRole("button", { name: "Run current statement" }).click();
-  await expect(page.locator("#sql-transaction-status")).toContainText("Open transaction");
+  await expect(page.locator("#sql-transaction-status")).toContainText("Transaction open");
 
   page.once("dialog", dialog => dialog.accept());
   await page.reload();
 
   await expect(editor).toHaveValue(draft);
   await expect(page.locator("#write-mode-tool")).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#sql-transaction-status")).toContainText("Open transaction");
+  await expect(page.locator("#sql-transaction-status")).toContainText("Transaction open");
 
   await page.getByRole("button", { name: "Roll back" }).click();
   const dialog = page.getByRole("dialog", { name: "Roll back write transaction" });
   await dialog.getByRole("button", { name: "Roll back" }).click();
-  await expect(page.locator("#sql-transaction-status")).toContainText("Last transaction rolled back");
+  await expect(page.locator("#sql-transaction-status")).toContainText("No transaction open");
 });

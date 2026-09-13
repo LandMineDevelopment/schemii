@@ -735,11 +735,19 @@ export function saveDesignIndex(content, values, randomUUID = () => crypto.rando
   const name = validatedName(values.name, "index name");
   const method = validatedName(values.method || "btree", "index method");
   const columnIds = Array.isArray(values.columnIds) ? [...values.columnIds] : [];
+  const includeColumnIds = Array.isArray(values.includeColumnIds)
+    ? [...values.includeColumnIds]
+    : [...(existing?.includeColumnIds || [])];
   const ownedColumnIds = new Set(table.columns.map(column => column.id));
   if (columnIds.some(columnId => !ownedColumnIds.has(columnId))) {
     throw new Error("Index columns must come from their own table.");
   }
   if (new Set(columnIds).size !== columnIds.length) throw new Error("Each column can appear only once in an index.");
+  if (includeColumnIds.some(columnId => !ownedColumnIds.has(columnId))
+    || new Set(includeColumnIds).size !== includeColumnIds.length
+    || includeColumnIds.some(columnId => columnIds.includes(columnId))) {
+    throw new Error("Included index columns must be unique columns from this table and cannot be key columns.");
+  }
   const expression = optionalExpression(values.expression);
   const predicate = optionalExpression(values.predicate);
   if (!columnIds.length && !expression) throw new Error("Select a column or enter an index expression.");
@@ -753,6 +761,7 @@ export function saveDesignIndex(content, values, randomUUID = () => crypto.rando
     && index.method === method
     && index.unique === Boolean(values.unique)
     && index.columnIds.join("\u0000") === columnIds.join("\u0000")
+    && (index.includeColumnIds || []).join("\u0000") === includeColumnIds.join("\u0000")
     && (index.expression || "") === (expression || "")
     && (index.predicate || "") === (predicate || "")
   ));
@@ -762,6 +771,7 @@ export function saveDesignIndex(content, values, randomUUID = () => crypto.rando
     name,
     method,
     columnIds,
+    includeColumnIds,
     expression,
     expressionSourceColumnIds: expressionColumnIds(expression || "", table.columns),
     predicate,

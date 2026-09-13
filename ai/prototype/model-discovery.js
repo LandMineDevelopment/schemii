@@ -1,3 +1,4 @@
+import { reasoningLevels } from './reasoning.js';
 import { createModels } from '@earendil-works/pi-ai';
 import { providers, TurnError } from './runtime.js';
 
@@ -84,7 +85,7 @@ export async function discoverModels({ vault, owner, credentialId, providerId, s
     // models. Inference capability is owned by the installed SDK registry.
     return models.getModels(providerId).filter(model => ids.has(model.id)).map(model => ({
       providerId, id: model.id, name: model.name, contextWindow: model.contextWindow,
-      maxOutputTokens: model.maxTokens,
+      maxOutputTokens: model.maxTokens, reasoningLevels: reasoningLevels(model),
     }));
   } catch (error) {
     if (signal?.aborted) throw new TurnError('cancelled');

@@ -112,6 +112,17 @@ def catalog():
                         valid=True,
                         predicate="name IS NOT NULL",
                     ),
+                    PostgresIndex(
+                        name="customers_name_covering_idx",
+                        table="customers",
+                        definition=(
+                            "CREATE INDEX customers_name_covering_idx ON public.customers "
+                            "USING btree (name) INCLUDE (id, normalized_name)"
+                        ),
+                        method="btree",
+                        unique=False,
+                        valid=True,
+                    ),
                 ),
                 triggers=(
                     PostgresTrigger(
@@ -196,7 +207,7 @@ def test_catalog_import_derives_a_editable_design_and_stable_layout() -> None:
         "columns": 5,
         "keys": 3,
         "checks": 1,
-        "indexes": 1,
+        "indexes": 2,
         "relationships": 1,
         "functions": 1,
         "views": 1,
@@ -213,6 +224,8 @@ def test_catalog_import_derives_a_editable_design_and_stable_layout() -> None:
     assert customers.checks[0].column_ids == [columns["name"].id]
     assert customers.indexes[0].expression == "(lower(name))"
     assert customers.indexes[0].predicate == "name IS NOT NULL"
+    covering = next(item for item in customers.indexes if item.name == "customers_name_covering_idx")
+    assert covering.include_column_ids == [columns["id"].id, columns["normalized_name"].id]
     assert imported.content.functions[0].definition.startswith(
         "CREATE FUNCTION touch_customer()"
     )
@@ -315,9 +328,11 @@ def test_catalog_import_reports_unrepresentable_source_state() -> None:
     imported = import_postgres_catalog(source)
 
     assert imported.summary.complete is False
-    assert {issue.category for issue in imported.summary.issues} == {"index", "table"}
-    assert imported.summary.imported_objects["indexes"] == 1
-    assert all(index.name != "customers_covering_idx" for index in imported.content.tables[0].indexes)
+    assert {issue.category for issue in imported.summary.issues} == {"table"}
+    covering = next(item for item in imported.content.tables[0].indexes if item.name == "customers_covering_idx")
+    columns = {column.name: column.id for column in imported.content.tables[0].columns}
+    assert covering.include_column_ids == [columns["normalized_name"]]
+    assert imported.summary.imported_objects["indexes"] == 3
 
 
 def test_catalog_import_preserves_constraint_names_scoped_to_source_tables() -> None:

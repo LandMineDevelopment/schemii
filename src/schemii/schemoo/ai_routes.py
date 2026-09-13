@@ -9,6 +9,7 @@ router=APIRouter(prefix="/api/v1/schemoo/ai",tags=["schemoo-ai"])
 Mode=Literal["disabled","ask","automatic"]
 
 class Preferences(BaseModel):
+    reasoningEffort: Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     model_config=ConfigDict(extra="forbid")
     modes: dict[str,Mode]=Field(default_factory=dict)
     providerId: str | None=Field(default=None,max_length=128)
@@ -45,7 +46,7 @@ def settings(request: Request, principal: Principal=Depends(get_current_principa
 
 @router.put("/settings")
 def put_settings(body: Preferences, request: Request, principal: Principal=Depends(get_current_principal)):
-    return service(request).settings(principal.user_id,body.model_dump())
+    return service(request).settings(principal.user_id,body.model_dump(exclude_unset=True))
 
 @router.get("/chats")
 def chats(request: Request, model_id: str | None=None, principal: Principal=Depends(get_current_principal)):
@@ -53,7 +54,7 @@ def chats(request: Request, model_id: str | None=None, principal: Principal=Depe
 
 @router.post("/chats",status_code=201)
 def create(body: ChatCreate,request: Request,principal: Principal=Depends(get_current_principal)):
-    with api_errors(): return service(request).create(principal.user_id,body.model_dump())
+    with api_errors(): return service(request).create(principal.user_id,body.model_dump(exclude_unset=True))
 
 @router.get("/chats/{chat_id}")
 def get(chat_id: str,request: Request,principal: Principal=Depends(get_current_principal)):
@@ -61,17 +62,17 @@ def get(chat_id: str,request: Request,principal: Principal=Depends(get_current_p
 
 @router.post("/chats/{chat_id}/messages",status_code=202)
 def send(chat_id: str,body: Message,request: Request,background_tasks: BackgroundTasks,principal: Principal=Depends(get_current_principal)):
-    value=service(request).send(principal.user_id,chat_id,body.model_dump())
+    value=service(request).send(principal.user_id,chat_id,body.model_dump(exclude_unset=True))
     background_tasks.add_task(service(request).run,principal.user_id,chat_id,value["turnId"])
     return value
 
 @router.put("/chats/{chat_id}/preferences")
 def preferences(chat_id: str,body: ChatPreferences,request: Request,principal: Principal=Depends(get_current_principal)):
-    return service(request).preferences(principal.user_id,chat_id,body.model_dump())
+    return service(request).preferences(principal.user_id,chat_id,body.model_dump(exclude_unset=True))
 
 @router.post("/chats/{chat_id}/approval",status_code=202)
 def approval(chat_id: str,body: Approval,request: Request,background_tasks: BackgroundTasks,principal: Principal=Depends(get_current_principal)):
-    value,actions,rejected=service(request).approval(principal.user_id,chat_id,body.model_dump())
+    value,actions,rejected=service(request).approval(principal.user_id,chat_id,body.model_dump(exclude_unset=True))
     background_tasks.add_task(service(request).run,principal.user_id,chat_id,value["turnId"],actions,rejected)
     return value
 

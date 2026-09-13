@@ -1,3 +1,4 @@
+import { reasoningLevels } from './reasoning.js';
 import { createModels, InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
@@ -38,6 +39,7 @@ export class TurnError extends Error {
       provider_failed: 'The AI provider request failed. Retry or reconnect your account.',
       provider_request_rejected: 'The provider rejected the AI request format. Reconnecting will not fix a request-format error.',
       credentials_required: 'Connect your own provider account before running this request.',
+      reasoning_unsupported: 'The selected model does not support this reasoning effort.',
       model_unavailable: 'The requested provider or model is unavailable.',
       cancelled: 'The AI request was cancelled.',
       timeout: 'The AI request exceeded its time limit.',
@@ -102,7 +104,7 @@ export class TurnRunner {
   }
 
   async run({ owner, credentialId, providerId, modelId, context, signal,
-    onText = () => {}, isAuthorized = async () => true, limits = {} }) {
+    onText = () => {}, isAuthorized = async () => true, limits = {}, reasoningEffort = 'default' }) {
     const policy = { ...this.limits, ...limits };
     for (const value of Object.values(policy)) {
       if (!Number.isSafeInteger(value) || value < 1) throw new TurnError('invalid_request');
@@ -143,8 +145,11 @@ export class TurnRunner {
       models.setProvider(factory());
       const model = models.getModel(providerId, modelId);
       if (!model) throw new TurnError('model_unavailable');
+      if (!reasoningLevels(model).includes(reasoningEffort)) throw new TurnError('reasoning_unsupported');
       let providerStatus;
-      const stream = models.stream(model, snapshot, {
+      const codexOff = reasoningEffort === 'off' && model.api === 'openai-codex-responses';
+      const stream = (reasoningEffort === 'default' || codexOff ? models.stream.bind(models) : models.streamSimple.bind(models))(model, snapshot, {
+        ...(codexOff ? { reasoningEffort: 'none' } : reasoningEffort === 'default' ? {} : { reasoning: reasoningEffort === 'off' ? undefined : reasoningEffort }),
         signal: controller.signal,
         transport: 'sse',
         cacheRetention: 'none',

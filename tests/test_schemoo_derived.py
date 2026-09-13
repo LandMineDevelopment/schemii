@@ -424,3 +424,15 @@ def test_unused_output_conditions_are_not_executed_and_drift_detects_their_sourc
     assert "FILTER" not in sql and "expires" not in sql
     definition = ModelDefinition(nodes=query["nodes"], root="people")
     assert source_issues(CATALOG, definition.model_dump(exclude_none=True))
+
+
+@pytest.mark.parametrize("kind,column", [("row", "total"), ("aggregate", "n")])
+def test_reaggregating_calculated_values_rejects_outer_branch_multiplication(kind, column):
+    query = request(kind, fields=[{"table": "derived", "column": column, "aggregate": "sum"}, {"table": "assignment", "column": "name"}])
+    with pytest.raises(ValueError, match="inflated"):
+        compile_preview(CATALOG, query)
+
+
+def test_summary_values_can_be_summed_without_a_multiplying_branch():
+    query = request(fields=[{"table": "derived", "column": "n", "aggregate": "sum"}])
+    assert execute(compile_preview(CATALOG, query)["sql"]) == [(3,)]

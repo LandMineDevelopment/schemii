@@ -116,7 +116,7 @@ test('model discovery exposes only supported model metadata without auth', () =>
   assert.ok(result.models.some(model => model.providerId === 'openai-codex'));
   assert.ok(result.models.some(model => model.providerId === 'openai'));
   assert.ok(result.models.some(model => model.providerId === 'opencode'));
-  assert.ok(result.models.every(model => Object.keys(model).sort().join(',') === 'contextWindow,id,maxOutputTokens,name,providerId'));
+  assert.ok(result.models.every(model => Object.keys(model).sort().join(',') === 'contextWindow,id,maxOutputTokens,name,providerId,reasoningLevels'));
 });
 
 test('default production service supports OpenAI API keys', async t => {

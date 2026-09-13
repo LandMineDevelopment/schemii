@@ -386,3 +386,50 @@ def test_catalog_layout_is_only_an_initial_seed():
         get_layout=lambda *args: SimpleNamespace(content=SimpleNamespace(objects=[SimpleNamespace(object_id="t1", layer="tables", x=10, y=20), SimpleNamespace(object_id="t2", layer="tables", x=0, y=0)]))))
     result = initial_positions(services, "owner", {**deepcopy(CATALOG), "connectionId": "pg_one"})
     assert result["positions"] == [{"name": "people", "x": 10, "y": 20}]
+
+
+@pytest.mark.parametrize("analyze", [False, True])
+def test_physical_explain_uses_owned_saved_model_and_read_target(setup, analyze):
+    api, model, _, calls = setup
+    reservations = []
+    receipt = SimpleNamespace(id="exec_test", model_dump=lambda **kwargs: {"id": "exec_test"})
+    api.app.state.services = replace(api.app.state.services, console=SimpleNamespace(
+        reserve_read_target=lambda owner, **kwargs: (reservations.append((owner, kwargs)) or receipt), run=lambda *args: None))
+    body = {"expectedRevision": 1, "explore": EXPLORE, "consoleId": "con_" + "a"*32, "analyze": analyze}
+    response = api.post(f"/api/v1/schemoo/models/{model['id']}/explain", json=body)
+    assert response.status_code == 201, response.text
+    assert calls[-1] is True
+    sql = reservations[0][1]["statements"][0]
+    assert sql.startswith("EXPLAIN (ANALYZE " + ("TRUE" if analyze else "FALSE"))
+    assert "FORMAT JSON" in sql
+    assert response.json()["plan"]["sql"].startswith("SELECT")
+    assert api.post(f"/api/v1/schemoo/models/{model['id']}/explain", json={**body, "analyze": "true"}).status_code == 422
+    assert api.post(f"/api/v1/schemoo/models/{model['id']}/explain", json={**body, "expectedRevision": 999}).status_code == 409
+
+
+def test_logical_connection_types_checked_before_save_and_on_execute(setup):
+    api, model, catalog, calls = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    definition = deepcopy(DEFINITION)
+    definition['nodes'].append({'id': 'other', 'table': 'people', 'label': 'Other'})
+    edge = {'id': 'drawn', 'kind': 'logical', 'source': 'people', 'target': 'other',
+            'sourceColumn': 'id', 'targetColumn': 'name'}
+    definition['edges'] = [edge]
+    body = {'expectedRevision': 1, 'name': model['name'], 'definition': definition}
+    rejected = api.put(url, json=body)
+    assert rejected.status_code == 422, rejected.text
+    assert 'comparable types' in rejected.text
+    assert api.get(url).json()['revision'] == 1
+    create = api.post('/api/v1/schemoo/models', json={'name': 'Invalid', 'connectionId': model['connectionId'],
+                     'namespace': 'public', 'definition': definition})
+    assert create.status_code == 422, create.text
+    edge['targetColumn'] = 'id'
+    saved = api.put(url, json=body)
+    assert saved.status_code == 200, saved.text
+    planned = api.post(url + '/plan', json={'expectedRevision': 2, 'explore': {
+        'root': 'other', 'fields': [{'table': 'people', 'column': 'name'}]}})
+    assert planned.status_code == 200, planned.text
+    assert 'LEFT JOIN' in planned.json()['sql']
+    catalog['tables'][0]['columns'][0]['dataType'] = 'json'
+    rejected = api.post(url + '/plan', json={'expectedRevision': 2, 'explore': EXPLORE})
+    assert rejected.status_code == 422, rejected.text

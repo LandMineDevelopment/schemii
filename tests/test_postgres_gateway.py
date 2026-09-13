@@ -715,3 +715,45 @@ def test_catalog_text_is_rejected_before_an_oversized_value_is_materialized() ->
         if "schemii_catalog_functions" in query
     )
     assert function_query[1][:4] == (128, 128, 128, 128)
+
+
+def test_console_monitor_has_independent_bounded_capacity_and_original_backend_filter():
+    factory = FakeConnectFactory({"FROM pg_stat_activity": [{
+        "state": "active", "wait_event_type": "Lock", "wait_event": "transactionid", "blockers": [42],
+    }]})
+    gateway = PsycopgPostgresGateway(connect_factory=factory,
+        maximum_connections=1, maximum_connections_per_identity=1)
+    target = resolved_connection()
+    occupied = gateway._connect(target)
+    observed_at = datetime.now(timezone.utc)
+    try:
+        activity = gateway.console_activity(target, 123, started_before=observed_at)
+        assert activity["monitoringAvailable"] is True
+        assert activity["blockerPids"] == [42]
+        assert activity["statementTimeoutMs"] is None
+        assert activity["configuredStatementTimeoutMs"] == 15000
+        assert factory.parameters[-1]["connect_timeout"] == 2
+        observer = factory.connections[-1]
+        query, params = next(item for item in observer.executed if "pg_stat_activity" in item[0])
+        assert "backend_start <= %s" in query
+        assert "usename = current_user" in query
+        assert params == (123, observed_at)
+        assert observer.closed
+        assert not occupied.closed
+    finally:
+        occupied.close()
+
+
+def test_console_cancel_is_admitted_when_query_and_monitor_slots_are_occupied():
+    factory = FakeConnectFactory({"pg_cancel_backend": [{"cancelled": True}]})
+    gateway = PsycopgPostgresGateway(connect_factory=factory,
+        maximum_connections=1, maximum_connections_per_identity=1)
+    target = resolved_connection()
+    query = gateway._connect(target)
+    observer = gateway._connect(target, monitoring=True)
+    try:
+        assert gateway.cancel_console(target, 123)
+        assert factory.connections[-1].closed
+    finally:
+        observer.close()
+        query.close()

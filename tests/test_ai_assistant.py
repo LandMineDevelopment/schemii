@@ -86,7 +86,7 @@ def test_shared_status_route_only_refreshes_on_explicit_request():
         calls.append((owner, refresh))
         return {"enabled": True, "healthy": True, "providers": [{
             "id": "openai-codex", "name": "Codex", "available": True, "authenticated": True,
-            "models": [{"id": "model", "name": "Model", "status": "active"}],
+            "models": [{"id": "model", "name": "Model", "status": "active", "reasoningLevels": ["default", "low", "high", "max"]}],
             "catalogError": "Could not refresh", "catalogCheckedAt": "2026-09-08T12:00:00Z",
         }]}
     service = AiService(InMemoryAiRepository(), SimpleNamespace(status=status),
@@ -99,6 +99,7 @@ def test_shared_status_route_only_refreshes_on_explicit_request():
         assert client.get("/api/v1/ai/status").status_code == 200
         result = client.get("/api/v1/ai/status?refresh=true")
         assert result.status_code == 200
+        assert result.json()["providers"][0]["models"][0]["reasoningLevels"] == ["default", "low", "high", "max"]
         assert result.json()["providers"][0]["catalogError"] == "Could not refresh"
         assert result.json()["providers"][0]["catalogCheckedAt"] == "2026-09-08T12:00:00Z"
         assert client.get("/api/v1/ai/status?refresh=invalid").status_code == 422

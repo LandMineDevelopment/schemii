@@ -117,20 +117,35 @@ def validate_read_only_statements(
                     "Read-only Console accepts SELECT, WITH, VALUES, EXPLAIN, and SHOW",
                     statement_index,
                 )
-            select = node.query if type(node).__name__ == "ExplainStmt" else node
-            if type(select).__name__ not in {"SelectStmt", "VariableShowStmt"}:
+            is_explain = type(node).__name__ == "ExplainStmt"
+            # EXPLAIN without execution can plan writes in a read-only session.
+            # Treat unrecognized ANALYZE values conservatively; PostgreSQL will
+            # still validate its options and enforce the read-only transaction.
+            analyze = is_explain and any(
+                option.defname == "analyze"
+                and str(getattr(option.arg, "sval", getattr(option.arg, "ival", None))).lower()
+                not in {"false", "off", "no", "0", "f", "n", "of"}
+                for option in node.options or ()
+            )
+            select = node.query if is_explain else node
+            planning_only = is_explain and not analyze
+            if not planning_only and type(select).__name__ not in {"SelectStmt", "VariableShowStmt"}:
                 raise ConsoleStatementValidationError(
                     "console_statement_not_read_only",
-                    "EXPLAIN is limited to read-only queries",
+                    "EXPLAIN ANALYZE in read-only mode is limited to read-only queries",
                     statement_index,
                 )
-            if type(select).__name__ == "SelectStmt" and getattr(select, "intoClause", None):
+            if not planning_only and type(select).__name__ == "SelectStmt" and getattr(select, "intoClause", None):
                 raise ConsoleStatementValidationError(
                     "console_select_into_blocked",
                     "Read-only Console does not allow SELECT INTO",
                     statement_index,
                 )
-            validated.append(RawStream()(node))
+            # pglast exposes character offsets (including Unicode). Keep the
+            # submitted spelling, literals, and comments rather than rewriting
+            # executable SQL through the AST pretty-printer.
+            end = raw.stmt_location + raw.stmt_len if raw.stmt_len else len(text)
+            validated.append(text[raw.stmt_location:end].strip())
             if len(validated) > statement_limit:
                 raise ConsoleStatementValidationError(
                     "console_statement_limit",

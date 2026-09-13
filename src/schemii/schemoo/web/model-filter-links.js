@@ -22,7 +22,7 @@ export function describeFilterCondition(condition, alternative, draft, context =
     ? (condition.column === context.column ? "" : condition.column || "column")
     : `${node?.label || node?.table || condition.table || "Choose source"}.${condition.column || "column"}`;
   const prefix = field ? `${field} ` : "";
-  const operators = {eq: "equals", ne: "does not equal", in: "IN", not_in: "NOT IN", gt: ">", gte: "≥", lt: "<", lte: "≤", contains: "contains", is_null: "IS NULL", not_null: "IS NOT NULL"};
+  const operators = {eq: "equals", ne: "does not equal", in: "IN", not_in: "NOT IN", gt: ">", gte: "≥", lt: "<", lte: "≤", contains: "contains", range_contains_date: "contains date", is_null: "IS NULL", not_null: "IS NOT NULL"};
   const comparison = operators[condition.operator] || condition.operator;
   if (["is_null", "not_null"].includes(condition.operator)) return `${prefix}${comparison}`;
   const literal = value => value === undefined ? "Choose value" : value === null ? "NULL" : JSON.stringify(value);

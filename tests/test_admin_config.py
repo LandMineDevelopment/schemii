@@ -58,6 +58,10 @@ def test_admin_config_loads_all_resource_policy_groups() -> None:
             "metadata": {
                 "limit_events": {"retention_days": 7, "maximum_events": 500}
             },
+            "ai": {
+                "maximum_proposals_per_turn": 100,
+                "maximum_tool_rounds": 80,
+            },
         }
     )
 
@@ -68,6 +72,8 @@ def test_admin_config_loads_all_resource_policy_groups() -> None:
     assert config.migrations.review_ttl_seconds == 600
     assert config.resources.maximum_workspaces_per_user == 20
     assert config.limit_events.maximum_events == 500
+    assert config.ai.maximum_proposals_per_turn == 100
+    assert config.ai.maximum_tool_rounds == 80
 
 
 def test_admin_config_rejects_cross_policy_capacity_that_starves_requests() -> None:

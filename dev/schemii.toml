@@ -73,12 +73,12 @@ credential_expiration_enabled = true
 credential_inactivity_days = 30
 message_history_limit = 200
 activity_history_limit = 1000
-maximum_proposals_per_turn = 10
+maximum_proposals_per_turn = 100
 # Bound autonomous work without storing any query rows in metadata.
 maximum_read_queries_per_batch = 8
 # Tool-enabled model rounds; one tools-disabled summary follows at the limit.
 # The summary still respects workflow timeout and context/memory limits.
-maximum_tool_rounds = 8
+maximum_tool_rounds = 80
 tool_timeout_seconds = 300
 prompt_bytes = 65536
 # Public answer text and tool-call arguments per provider response; private

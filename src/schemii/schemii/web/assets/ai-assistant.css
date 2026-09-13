@@ -1,10 +1,11 @@
+@import url("/assets/common/ai-permissions.css");
 @import url("/assets/common/ai-chat.css");
 
 .ai-assistant__context {
   grid-area: context;
   display: grid;
   padding: 10px 13px;
-  grid-template-columns: minmax(0, 1.3fr) minmax(130px, .8fr);
+  grid-template-columns: minmax(0, 1.3fr) minmax(90px, .65fr) minmax(90px, .7fr);
   gap: 8px;
   border-bottom: 1px solid #272e3a;
   background: #11161d;
@@ -184,7 +185,7 @@
 
 
 @media (max-width: 640px) {
-  .ai-assistant__context { grid-template-columns: minmax(0, 1fr) minmax(115px, .72fr); }
+  .ai-assistant__context { grid-template-columns: minmax(0, 1fr) 90px 90px; }
   .ai-assistant__body { padding: 13px; }
   .ai-settings-body { padding: 14px; }
   .ai-history-item { grid-template-columns: minmax(0, 1fr) auto auto; }

@@ -1,0 +1,16 @@
+.permission-bundles { display:grid; gap:12px; min-width:0; }
+.permission-bundles .permission-bulk { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px; background:#11171e; border:1px solid #303946; border-radius:8px; }
+.permission-bundles .permission-selection { display:flex; align-items:center; gap:8px; margin:0; padding:0; min-height:0; border:0; background:transparent; color:#c9c0e2; font-size:12px; cursor:pointer; }
+.permission-bundles input[type=checkbox] { width:18px; height:18px; margin:0; flex:none; accent-color:#8d78da; }
+.permission-bundles .permission-selection-count { color:#98a4b3; font-size:11px; margin-right:auto; }
+.permission-bundles select { width:140px; max-width:100%; height:36px; padding:0 8px; color:#dce2e9; background:#0c1117; border:1px solid #35404d; border-radius:6px; font-size:12px; }
+.permission-bundles .permission-bundle { min-width:0; margin:0; padding:8px 12px; border:1px solid #303946; border-radius:8px; }
+.permission-bundles .permission-bundle legend { padding:0 6px; }
+.permission-bundles .permission-row { display:flex; align-items:center; gap:10px; padding:10px 0; }
+.permission-bundles .permission-row + .permission-row { border-top:1px solid #293440; }
+.permission-bundles .permission-row-check span { display:none; }
+.permission-bundles .permission-copy { display:grid; grid-template-columns:minmax(0,1fr) 140px; align-items:center; gap:12px; flex:1; min-width:0; margin:0; padding:0; border:0; background:transparent; }
+.permission-bundles strong { display:block; color:#d7dde5; font-size:12px; font-weight:600; }
+.permission-bundles small, .permission-bundle-help { display:block; margin:4px 0 0; color:#98a4b3; font-size:11px; line-height:1.5; }
+.permission-bundles .danger strong { color:#e5afb9; }
+@media(max-width:540px) { .permission-bundles .permission-copy { grid-template-columns:minmax(0,1fr); gap:6px; } .permission-bundles .permission-copy select { width:100%; } .permission-bundles .permission-row { align-items:flex-start; } .permission-bundles .permission-row-check { padding-top:3px; } }

@@ -1,3 +1,4 @@
+import { edgeRelationship, validateLogicalRelationship } from "./logical-relationships.js";
 import { requestJson } from "#common/http.js";
 import { element } from "#common/dom.js";
 import { createDataGrid } from "#common/data-grid.js";
@@ -13,6 +14,9 @@ import { createColumnFilterEditor } from "./column-filter-editor.js";
 import { importedDraft, staffingDraft } from "./model-draft.js";
 import { splitDraft, joinModel, changedParts, exposedFields, setFieldExposure, inheritAliasExposure, initializeExposureFromPreview } from "./model-state.js";
 import { renderPreviewFields } from "./preview-fields.js";
+import { createQueryPlanView, parseQueryPlan } from "#common/query-plan.js";
+import { confirmAction } from "#common/confirmation.js";
+import { formatElapsed } from "#common/elapsed-time.js";
 import { readExecution } from "/assets/common/query-execution.js";
 import { openModelLibrary, confirmModelDeletion } from "./model-library.js";
 import { createPreviewLibrary } from "./preview-library.js";
@@ -81,7 +85,7 @@ function renderObjectSourceIssues(){
   const edge=draft.edges.find(candidate=>candidate.id===selected.edge);
   const relevant=currentSourceIssues().filter(issue=>
     (node&&(issue.nodeId===node.id||(issue.nodeIds||[]).includes(node.id)||issue.table===node.table))||
-    (edge&&(issue.edgeId===edge.id||(issue.edgeIds||[]).includes(edge.id)||issue.relationshipId===edge.relationshipId)));
+    (edge&&(issue.edgeId===edge.id||(issue.edgeIds||[]).includes(edge.id)||(issue.relationshipId && issue.relationshipId===edge.relationshipId))));
   if(!relevant.length)return;
   const section=element("section",{className:"editor-section source-change-section",attrs:{id:"object-source-issues"}},[helpHeading("Source changes","drift"),...relevant.map(sourceIssueNotice)]);
   $("selection-inspector").prepend(section);
@@ -170,11 +174,35 @@ function renderFields() {
   $("field-count").textContent = draft.fields.length;
   renderPreviewFields($("fields"), { draft, catalog, onChange: changed });
 }
+function editLogicalRelationship(existing, source) {
+  const nodes = draft.nodes.filter(node => !node.derivation && catalog.tables.some(table => table.name === node.table));
+  if (!nodes.length) return;
+  const value = existing ? {...existing} : {id:`logical_${crypto.randomUUID().replaceAll("-", "")}`,kind:"logical",relationshipId:null,source:source || nodes[0].id,target:nodes.find(node => node.id !== source)?.id || nodes[0].id,sourceColumn:"",targetColumn:"",cardinality:"many_to_many",enabled:true};
+  const host = $("selection-inspector");
+  selected = existing ? {edge:existing.id} : null;
+  maximizeQuery(false); $("inspector").hidden=true; $("table-inspector").hidden=false; $("alias-tools").hidden=true;
+  $("table-inspector-title").textContent="Logical relationship"; $("table-inspector-kind").textContent="MODEL CONNECTION";syncInspectorTools();
+  const render = () => {
+    disposeSelects(host); host.replaceChildren(element("h3",{text:existing ? "Edit logical relationship" : "Add logical relationship"}),element("p",{className:"hint",text:"Join two columns by equality. This relationship belongs to the model and does not create a database constraint. Query traversal follows the model’s starting object."}));
+    for (const side of ["source","target"]) {
+      host.append(labeled(side === "source" ? "From object" : "To object", modelSelect(`${side} object`,nodes.map(node=>[node.id,node.label]),value[side],id=>{value[side]=id;value[`${side}Column`]="";render();})));
+      host.append(labeled("Column",modelSelect(`${side} column`,[["","Choose column"],...columns(value[side]).map(column=>[column.name,column.name])],value[`${side}Column`],column=>{value[`${side}Column`]=column;})));
+    }
+    const error=element("p",{className:"warning",attrs:{role:"alert"}});
+    const save=element("button",{type:"button",className:"ui-button primary",text:existing ? "Save relationship" : "Add relationship"});
+    save.onclick=()=>{error.textContent=validateLogicalRelationship(value,draft,catalog);if(error.textContent)return;if(existing)Object.assign(existing,value);else draft.edges.push(value);selected={edge:value.id};refreshForms();changed();inspectSelection();};
+    const cancel=element("button",{type:"button",className:"ui-button",text:"Cancel"});cancel.onclick=()=>{refreshForms();if(!existing)panel("model");};
+    host.append(error,element("div",{className:"actions"},[save,cancel]));
+  };
+  render(); host.scrollIntoView({block:"nearest"});
+}
 function renderRelationships() {
   const cycles = new Set(diagnostics.cycleEdges || []);
   $("relationship-count").textContent = `${draft.edges.filter(e => e.enabled).length} / ${draft.edges.length}`;
-  $("relationships").replaceChildren(...draft.edges.map(e => {
-    const r = catalog.relationships.find(r => r.id === e.relationshipId);
+  const add = element("button",{type:"button",className:"ui-button",text:"Add logical relationship"});
+  add.onclick=()=>{canvas.startConnection();$("inspector").hidden=true;$("table-inspector").hidden=true;syncInspectorTools();};
+  $("relationships").replaceChildren(add,...draft.edges.map(e => {
+    const r = edgeRelationship(e, catalog);
     const checkbox = element("input", { attrs: { type: "checkbox", "aria-label": `Enable ${e.id}` } }); checkbox.checked = e.enabled;
     checkbox.onchange = () => { e.enabled = checkbox.checked; changed(); };
     const label = element("button", { className: "edge-name", type: "button", text: `${name(e.source)}.${r?.sourceColumn || "missing FK"} → ${name(e.target)}.${r?.targetColumn || "missing FK"}${cycles.has(e.id) ? " · CYCLE" : ""}` });
@@ -189,7 +217,7 @@ function renderNodeConnections() {
   const edges=draft.edges.filter(e=>e.source===selected.node || e.target===selected.node);
   host.replaceChildren(element("h3",{text:`Connections · ${edges.length}`}),element("p",{className:"hint",text:"Toggle each connection independently. Dashed lines are disabled; red lines belong to a cycle."}));
   for(const edge of edges) {
-    const relation=catalog.relationships.find(r=>r.id===edge.relationshipId);
+    const relation=edgeRelationship(edge, catalog);
     const text=`${name(edge.source)}.${relation?.sourceColumn || "missing FK"} → ${name(edge.target)}.${relation?.targetColumn || "missing FK"}`;
     const enabled=element("input",{attrs:{type:"checkbox","aria-label":`Enable connection ${text}`}}); enabled.checked=edge.enabled;
     enabled.onchange=()=>{edge.enabled=enabled.checked;changed();};
@@ -272,7 +300,12 @@ function renderSelection() {
     host.append(calculation,element("section",{attrs:{id:"table-columns"}}), element("div",{attrs:{id:"node-connections"}})); renderTableColumns(); renderNodeConnections();
   } else if (selected?.edge) {
     const edge = draft.edges.find(e => e.id === selected.edge); if (!edge) return;
-    const r = catalog.relationships.find(r => r.id === edge.relationshipId);
+    const r = edgeRelationship(edge, catalog);
+    if (edge.kind === "logical") {
+      host.append(element("h3",{text:"Logical relationship"}),element("p",{className:"hint",text:`${name(edge.source)}.${edge.sourceColumn} = ${name(edge.target)}.${edge.targetColumn}`}),element("p",{className:"hint",text:"Model equality join; no database constraint is created."}),icon("edit","Edit logical relationship",()=>editLogicalRelationship(edge)),icon("delete","Delete logical relationship",()=>{if(!confirm("Remove this logical relationship from the model?"))return;draft.edges=draft.edges.filter(other=>other.id!==edge.id);selected=null;refreshForms();changed();}));
+      const enabled=element("input",{attrs:{type:"checkbox","aria-label":"Relationship enabled"}});enabled.checked=edge.enabled;enabled.onchange=()=>{edge.enabled=enabled.checked;changed();};host.append(labeled("Enabled",enabled));
+      return;
+    }
     if (!r) {
       const source=draft.nodes.find(n=>n.id===edge.source),target=draft.nodes.find(n=>n.id===edge.target);
       const replacements=catalog.relationships.filter(relation=>relation.sourceTable===source?.table && relation.targetTable===target?.table && !draft.edges.some(other=>other.id!==edge.id && other.relationshipId===relation.id && other.source===edge.source && other.target===edge.target));
@@ -446,22 +479,57 @@ async function compile(ticket) {
   renderObjectSourceIssues();
   canvas.render({cycleEdges:diagnostics.cycleEdges || [],usedEdges:plan?.usedRelationships || [],sourceIssues:diagnostics.issues || diagnostics.sourceIssues || []});
 }
-async function execute() {
-  const response = await requestJson(`${API}/models/${model.id}/executions`,{method:"POST",body:{expectedRevision:model.revision,explore:splitDraft(draft).explore,consoleId},timeoutMs:MODEL_EXECUTION_TIMEOUT_MS});
-  return readExecution(response);
-}
-async function run() {
+let queryController = null, comparisonPlan = null;
+const stopQuery = element("button", { type: "button", className: "ui-button", text: "Stop", attrs: { hidden: "" } });
+const explainQuery = element("button", { type: "button", className: "ui-button", text: "Explain" });
+const analyzeQuery = element("button", { type: "button", className: "ui-button", text: "Run & Analyze" });
+$("run").before(explainQuery, analyzeQuery, stopQuery);
+stopQuery.onclick = () => { queryController?.abort(); stopQuery.disabled = true; };
+explainQuery.onclick = () => void run(false);
+analyzeQuery.onclick = () => void confirmAction({
+  title: "Run & Analyze", message: "Execute the full read-only query on a fresh snapshot to measure its plan? This can take as long as the query itself.",
+  confirmLabel: "Run & Analyze", onConfirm: () => { void run(true); },
+});
+async function run(analyze = null) {
   if (!plan || busy || saving) return;
-  busy = true; $("workbench").inert = true; $("run").disabled = true; showError(); dock("results");
-  $("result-status").textContent = "Running read-only preview…";
+  // A click event is not an analysis request.
+  if (typeof analyze !== "boolean") analyze = null;
+  busy = true; $("model-shell").inert = true; document.querySelector(".topbar").inert = true; $("run").disabled = true; explainQuery.disabled = true; analyzeQuery.disabled = true;
+  queryController = new AbortController(); stopQuery.hidden = false; stopQuery.disabled = false;
+  showError(); dock("results");
+  const started = Date.now();
+  const progress = activity => {
+    const waits = activity.waitEvent ? ` · waiting: ${activity.waitEvent}` : "";
+    const blockers = activity.blockerPids?.length ? ` · blocked by ${activity.blockerPids.join(", ")}` : "";
+    $("result-status").textContent = `${activity.phase || "Preparing query"} · ${formatElapsed(Date.now() - started)}${waits}${blockers}${activity.monitorUnavailable || activity.monitoringAvailable === false ? " · live details unavailable" : ""}`;
+  };
+  progress({});
+  const timer = setInterval(() => { if (!receiptReceived) progress({}); }, 100);
+  let receiptReceived = false;
   try {
     if (changedParts(model, draft, $("model-name").value.trim()).definition) throw new Error("Save model changes before running. Preview executes the saved server model.");
-    const result = await execute(); $("results").replaceChildren(createDataGrid(result));
-    if (!result.rows.length) $("results").append(element("p",{className:"empty",text:"No matching rows. The chosen scope or dates may exclude all records."}));
-    $("result-status").textContent = `${result.rows.length} rows · ${result.rows.length===100 ? "preview limit" : "read-only"}`;
+    const response = await requestJson(`${API}/models/${model.id}/${analyze === null ? "executions" : "explain"}`, {
+      method: "POST", body: { expectedRevision: model.revision, explore: splitDraft(draft).explore, consoleId, ...(analyze === null ? {} : { analyze }) }, timeoutMs: MODEL_EXECUTION_TIMEOUT_MS,
+    });
+    receiptReceived = true;
+    const result = await readExecution(response, { signal: queryController.signal, onActivity: progress });
+    if (analyze === null) {
+      $("results").replaceChildren(createDataGrid(result));
+      if (!result.rows.length) $("results").append(element("p", {className:"empty",text:"No matching rows. The chosen scope or dates may exclude all records."}));
+    } else {
+      const record = { plan: parseQueryPlan(result.rows[0]?.[0]), sql: result.plan.sql, analyze, capturedAt: new Date().toISOString() };
+      $("results").replaceChildren(createQueryPlanView(record, { comparison: comparisonPlan, onCompare: value => { comparisonPlan = value; } }));
+    }
+    $("result-status").textContent = `${analyze === null ? `${result.rows.length} rows · preview` : analyze ? "Analyzed plan" : "Estimated plan"} · ${formatElapsed(Date.now() - started)}`;
     $("sql").textContent = result.plan.sql;
-  } catch (error) { showError(error.message); $("result-status").textContent = "Preview failed"; $("results").replaceChildren(element("p",{className:"empty",text:error.message})); }
-  finally { busy = false; $("workbench").inert = false; $("run").disabled = !plan; }
+    if (result.cleanupWarning) showError(result.cleanupWarning);
+  } catch (error) {
+    showError(error.message); $("result-status").textContent = `${queryController.signal.aborted && error.message === "Query cancelled." ? "Cancelled" : "Query failed"} · ${formatElapsed(Date.now() - started)}`;
+    $("results").replaceChildren(element("p", {className:"empty",text:error.message}));
+  } finally {
+    clearInterval(timer); $("model-shell").inert = false; document.querySelector(".topbar").inert = false; busy = false; queryController = null; stopQuery.hidden = true;
+    $("run").disabled = !plan; explainQuery.disabled = !plan; analyzeQuery.disabled = !plan;
+  }
 }
 async function loadDomainOptions(context) {
   const authoring = !!context.draft;
@@ -574,9 +642,10 @@ async function loadModel(id) {
   $("import-browser").onclick=()=>replaceDraft(()=>{const imported=structuredClone(saved.draft);initializeExposureFromPreview(imported);return imported;});
   $("example").hidden=!catalog.tables.some(t=>t.name==="org_hier");
   canvas?.destroy();
-  canvas=createModelCanvas({host:$("canvas-host"),catalog,getDraft:()=>draft,onChange:changed,
+  canvas=createModelCanvas({host:$("canvas-host"),connectionButton:$("draw-connection"),catalog,getDraft:()=>draft,onChange:changed,
     onSelectNode:id=>{selected={node:id};inspectSelection();},
-    onSelectEdge:id=>{selected={edge:id};inspectSelection();}});
+    onSelectEdge:id=>{selected={edge:id};inspectSelection();},
+    onCreateConnection:edge=>{draft.edges.push(edge);selected={edge:edge.id};refreshForms();changed();inspectSelection();}});
   const url=new URL(location.href); url.searchParams.set("model",model.id); history.replaceState(null,"",url);
   $("results").replaceChildren(element("p", {className:"empty",text:"Run a read-only preview."})); $("result-status").textContent="Nothing run yet";
   refreshForms();changed();$("workbench").inert=false;

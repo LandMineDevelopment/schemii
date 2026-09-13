@@ -18,7 +18,7 @@ def _error(status, code, message):
 def execute_batch(service, owner, chat, proposal, operation, action):
     from .actions import RelationRead, relation_read_query
     from .action_policy import read_capabilities, requires_approval
-    required = read_capabilities(action, proposal.capability)
+    required = read_capabilities(action)
     current = service.repository.get_chat(owner, chat.id)
     if current.revision != chat.revision or any(not getattr(current.capabilities, capability, False) for capability in required):
         raise _error(403, "ai_permission_changed", "Read permissions changed; no queries were run")
@@ -66,15 +66,52 @@ def execute_batch(service, owner, chat, proposal, operation, action):
     }}
 
 
+def _plan_sample(service, page):
+    """Keep useful node evidence when a single JSON plan exceeds the cell budget."""
+    if len(page.columns) != 1 or page.columns[0].name != "QUERY PLAN" or not page.rows:
+        return None
+    document = page.rows[0][0]
+    if isinstance(document, str):
+        try:
+            document = json.loads(document)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(document, list) or not document or not isinstance(document[0], dict):
+        return None
+    root = document[0]
+    if not isinstance(root.get("Plan"), dict):
+        return None
+    fields = ("Node Type", "Relation Name", "Index Name", "Join Type", "Startup Cost",
+              "Total Cost", "Plan Rows", "Actual Startup Time", "Actual Total Time",
+              "Actual Rows", "Actual Loops", "Rows Removed by Filter",
+              "Shared Hit Blocks", "Shared Read Blocks", "Temp Read Blocks", "Temp Written Blocks")
+    rows = [[{"summary": {key: root[key] for key in ("Planning Time", "Execution Time") if key in root}}]]
+    stack = [(root["Plan"], None, 0)]
+    while stack and len(rows) < service.policy.result_context_rows:
+        node, parent, depth = stack.pop()
+        node_id = len(rows)
+        rows.append([{"node": node_id, "parent": parent, "depth": depth,
+                      **{key: node[key] for key in fields if key in node}}])
+        stack.extend((child, node_id, depth + 1) for child in reversed(node.get("Plans", [])) if isinstance(child, dict))
+    return service._bounded_rows(rows)
+
+
 def _page(service, owner, chat, run):
     page = service.services.console.page(owner, chat.workspace_id, run.execution_id, run.result_id, None)
     rows = service._bounded_rows(page.rows)
+    compact_plan = not rows and bool(page.rows)
+    if compact_plan:
+        sampled_plan = _plan_sample(service, page)
+        compact_plan = sampled_plan is not None
+        if sampled_plan is not None:
+            rows = sampled_plan
     operation = service.repository.get_operation(owner, chat.id, run.operation_id)
     return {"runId": run.id, "operationId": run.operation_id, "label": run.label, "sql": run.sql,
             "authorization": (operation.result_summary or {}).get("authorization"),
             "executedAt": run.executed_at.isoformat(), "columns": [c.model_dump(by_alias=True) for c in page.columns],
             "rows": rows, "rowCount": run.row_count, "hasMore": run.has_more or bool(page.next_cursor),
-            "sampled": bool(page.next_cursor) or len(rows) < len(page.rows),
+            "sampled": compact_plan or bool(page.next_cursor) or len(rows) < len(page.rows),
+            "planNotice": "Plan exceeded the context budget. These are bounded node summaries with parent references; omitted fields and nodes are not evidence of absence." if compact_plan else None,
             "rerun": run.rerun_of is not None, "rerunOf": run.rerun_of,
             "freshnessNotice": "This is a new execution of an earlier query; data may have changed. It is not the original snapshot." if run.rerun_of else None}
 
@@ -160,7 +197,7 @@ def tool_result(service, owner, chat_id, name, arguments, turn_id):
         for run in released:
             original = service.repository.get_proposal(owner, chat_id,
                 service.repository.get_operation(owner, chat_id, run.operation_id).proposal_id)
-            origins.update(read_capabilities(service.repository.proposal_action(owner, chat_id, original.id), original.capability))
+            origins.update(read_capabilities(service.repository.proposal_action(owner, chat_id, original.id)))
         missing = next((capability for capability in sorted(origins) if not getattr(chat.capabilities, capability, False)), None)
         if missing:
             return {**_bounded_bundle(service, results),

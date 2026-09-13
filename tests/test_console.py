@@ -332,9 +332,12 @@ def test_console_rejects_mutation_before_postgresql_execution() -> None:
     assert postgres.executed == []
 
 
-def test_read_only_validation_blocks_write_explain_and_comment_only_scripts() -> None:
+def test_read_only_validation_blocks_write_analysis_and_comment_only_scripts() -> None:
     for sql, code in (
-        ("EXPLAIN INSERT INTO events VALUES (1)", "console_statement_not_read_only"),
+        ("EXPLAIN ANALYZE INSERT INTO events VALUES (1)", "console_statement_not_read_only"),
+        ("EXPLAIN (ANALYZE TRUE) DELETE FROM events", "console_statement_not_read_only"),
+        ("SET transaction_read_only = off", "console_statement_not_read_only"),
+        ("COMMIT; SELECT 1", "console_statement_not_read_only"),
         ("-- no query", "console_statement_empty"),
         ("SELECT 1 INTO temporary_result", "console_select_into_blocked"),
     ):
@@ -345,6 +348,22 @@ def test_read_only_validation_blocks_write_explain_and_comment_only_scripts() ->
         else:
             raise AssertionError(f"{sql!r} should have been rejected")
 
+
+
+def test_read_only_validation_preserves_source_spelling_and_unicode_offsets() -> None:
+    first = "/* planner hint stays */ select 'é;中' AS \"MixedCase\""
+    second = "-- preserve this comment\nselect $$literal;value$$ as value"
+    assert validate_read_only_statements([f"{first}; {second};"]) == (first, second)
+
+
+def test_read_only_validation_allows_planning_writes_without_execution() -> None:
+    for sql in (
+        "EXPLAIN INSERT INTO events VALUES (1)",
+        "EXPLAIN (ANALYZE FALSE) DELETE FROM events",
+        "EXPLAIN (ANALYZE OFF, FORMAT JSON) UPDATE events SET value = 2",
+        "EXPLAIN SELECT 1 INTO temporary_result",
+    ):
+        assert validate_read_only_statements([sql]) == (sql,)
 
 def test_cancellation_uses_the_active_target_without_waiting_for_its_use_lock() -> None:
     postgres = BlockingConsolePostgresGateway()
@@ -543,3 +562,128 @@ def test_console_history_limit_prunes_oldest_replay_queries_per_workspace() -> N
         entry.sql
         for entry in repository.list_history("user-1", "workspace-1", 10)
     ] == ["SELECT 2", "SELECT 1"]
+
+
+class BlockingReadSession:
+    backend_pid = 4321
+
+    def __init__(self):
+        self.started = threading.Event()
+        self.cancelled = threading.Event()
+        self.closed = False
+        self.results = (ConsoleQueryResult(
+            statement_index=0, command="SELECT",
+            columns=(ConsoleResultColumn(name="value", data_type="integer"),),
+            rows=(), truncated=False, row_count=None, replayable=True,
+        ),)
+
+    def page(self, *args):
+        self.started.set()
+        assert self.cancelled.wait(2), "fetch was not cancelled"
+        raise PostgresConsoleCancelledError()
+
+    export_page = page
+
+    def cancel(self):
+        self.cancelled.set()
+
+    def close(self):
+        self.closed = True
+
+
+class RetainedReadGateway(ConsolePostgresGateway):
+    def __init__(self):
+        super().__init__()
+        self.sessions = []
+
+    def open_console_read_session(self, connection, namespace, statements, *, on_started, page_memory_bytes):
+        assert on_started(4321)
+        session = BlockingReadSession()
+        self.sessions.append(session)
+        return session
+
+    def console_activity(self, target, backend_pid, **kwargs):
+        return {"monitoringAvailable": True, "databaseState": "active", "waitEvent": "PgSleep"}
+
+
+def test_live_fetch_does_not_hold_global_lock_and_can_be_cancelled_after_success():
+    from concurrent.futures import ThreadPoolExecutor
+    from schemii.common.query_executions.errors import ConsoleServiceError
+    import pytest
+
+    gateway = RetainedReadGateway()
+    api, _ = console_client(gateway)
+    workspace = target_workspace(api)
+    service = api.app.state.services.console
+    owner = "user_local_prototype"
+    receipt = service.reserve(owner, workspace["id"], ConsoleExecutionCreate.model_validate(execution_body(workspace, "SELECT pg_sleep(10)")))
+    service.run(owner, receipt.id)
+    receipt = service.get_owned(owner, receipt.id)
+    assert receipt.status == "succeeded"
+    result_id = receipt.results[0].id
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fetching = pool.submit(service.page, owner, workspace["id"], receipt.id, result_id, None)
+        assert gateway.sessions[0].started.wait(1)
+        assert service._transient_results_lock.acquire(timeout=0.1)
+        service._transient_results_lock.release()
+        activity = api.get(f"/api/v1/common/query-executions/{receipt.id}/activity")
+        assert activity.status_code == 200
+        assert activity.json()["phase"] == "fetching"
+        assert activity.json()["completedStatementIndexes"] == []
+        assert activity.json()["cancellable"] is True
+        assert activity.json()["waitEvent"] == "PgSleep"
+        service.close_result(owner, workspace["id"], receipt.id, result_id)
+        assert not gateway.sessions[0].closed, "close must defer until fetch releases its lease"
+        service.cancel(owner, workspace["id"], receipt.id)
+        with pytest.raises(ConsoleServiceError) as error:
+            fetching.result(timeout=1)
+        assert error.value.code == "postgres_console_cancelled"
+    assert gateway.sessions[0].closed
+    assert service.activity(owner, receipt.id)["phase"] == "cancelled"
+    with pytest.raises(ConsoleServiceError) as error:
+        service.activity("another-owner", receipt.id)
+    assert error.value.status == 404
+
+
+def test_streaming_export_is_visible_and_cancellable_after_receipt_success():
+    from concurrent.futures import ThreadPoolExecutor
+    import pytest
+
+    gateway = RetainedReadGateway()
+    api, _ = console_client(gateway)
+    workspace = target_workspace(api)
+    service = api.app.state.services.console
+    owner = "user_local_prototype"
+    receipt = service.reserve(owner, workspace["id"], ConsoleExecutionCreate.model_validate(execution_body(workspace, "SELECT 1")))
+    service.run(owner, receipt.id)
+    receipt = service.get_owned(owner, receipt.id)
+    stream = service.export_csv(owner, workspace["id"], receipt.id, receipt.results[0].id)
+    assert next(stream) == b"value\r\n"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        exporting = pool.submit(next, stream)
+        assert gateway.sessions[0].started.wait(1)
+        assert service.activity(owner, receipt.id)["phase"] == "exporting"
+        service.cancel(owner, workspace["id"], receipt.id)
+        with pytest.raises(PostgresConsoleCancelledError):
+            exporting.result(timeout=1)
+    assert gateway.sessions[0].closed
+
+
+def test_lazy_read_progress_completes_only_after_last_page():
+    gateway = RetainedReadGateway()
+    api, _ = console_client(gateway)
+    workspace = target_workspace(api)
+    service = api.app.state.services.console
+    owner = "user_local_prototype"
+    receipt = service.reserve(owner, workspace["id"], ConsoleExecutionCreate.model_validate(execution_body(workspace, "SELECT 1")))
+    service.run(owner, receipt.id)
+    receipt = service.get_owned(owner, receipt.id)
+    assert receipt.completed_statement_indexes == [0]
+    assert service.activity(owner, receipt.id)["completedStatementIndexes"] == []
+    gateway.sessions[0].page = lambda index, offset, size: tuple((row,) for row in range(offset, min(offset + size, 101)))
+    first = service.page(owner, workspace["id"], receipt.id, receipt.results[0].id, None)
+    assert first.next_cursor
+    assert service.activity(owner, receipt.id)["completedStatementIndexes"] == []
+    last = service.page(owner, workspace["id"], receipt.id, receipt.results[0].id, first.next_cursor)
+    assert last.next_cursor is None
+    assert service.activity(owner, receipt.id)["completedStatementIndexes"] == [0]

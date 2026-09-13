@@ -236,3 +236,173 @@ def test_model_cannot_inject_internal_replay_capabilities():
         "replayCapabilities": ["structured_query"], "structuredRead": True})
     assert proposal.capability == "raw_sql_read"
     assert "replayCapabilities" not in proposal.action and "structuredRead" not in proposal.action
+
+
+@pytest.mark.parametrize("analyze", [False, True])
+def test_explain_uses_existing_approval_and_managed_read_boundary(reads, analyze):
+    from schemii.schemii.ai.action_policy import requires_approval
+    from schemii.schemii.ai.tools import proposal_tool_arguments
+    reads.chat = reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(explain_queries=not analyze, analyze_queries=analyze))
+    arguments = {"sql": "SELECT 1", "analyze": analyze, "summary": "Inspect plan"}
+    item = reads.service._save_tool_proposal("owner", reads.chat, reads.turn.id,
+        "schemii_explain_query", arguments)
+    action = reads.repo.proposal_action("owner", reads.chat.id, item.id)
+    assert requires_approval(reads.chat.capabilities, item.action_type, action)
+    assert reads.console.requests == []
+    assert proposal_tool_arguments("schemii_explain_query", item.summary, action) == arguments
+    operation = approve(reads, item)
+    assert operation.status == "succeeded"
+    assert reads.console.requests[0].mode == "managed_read"
+    sql = reads.console.requests[0].statements[0]
+    assert sql.startswith("EXPLAIN (") and "FORMAT JSON" in sql
+    assert ("ANALYZE TRUE" in sql) == analyze
+
+
+def test_explain_cannot_bypass_disabled_read_permission(reads):
+    from schemii.schemii.ai.service import AiServiceError
+    reads.chat = reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(raw_sql_read=False, structured_data_read=True))
+    with pytest.raises(AiServiceError):
+        reads.service._save_tool_proposal("owner", reads.chat, reads.turn.id,
+            "schemii_explain_query", {"sql": "SELECT 1", "analyze": True})
+    assert reads.console.requests == []
+
+
+def test_activity_checks_workspace_scope_and_monitor_permission(reads):
+    reads.chat = reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(monitor_queries=True))
+    from unittest.mock import Mock
+    execution_id = "cex_" + "1" * 32
+    reads.console.get = Mock(return_value=SimpleNamespace(id=execution_id))
+    reads.console.activity = Mock(return_value={"executionId": execution_id, "state": "active"})
+    result = reads.service._read_tool_result("owner", reads.chat.id,
+        "schemii_query_activity", {"executionId": execution_id}, reads.turn.id)
+    assert result["state"] == "active"
+    reads.console.get.assert_called_once_with("owner", reads.chat.workspace_id, execution_id)
+    reads.console.activity.assert_called_once_with("owner", execution_id)
+    reads.console.activity.reset_mock()
+    reads.console.get.side_effect = ReleasedResult()
+    with pytest.raises(ReleasedResult):
+        reads.service._read_tool_result("owner", reads.chat.id,
+            "schemii_query_activity", {"executionId": execution_id}, reads.turn.id)
+    reads.console.activity.assert_not_called()
+
+
+def test_oversized_plan_retains_bounded_node_evidence(reads):
+    from schemii.schemii.ai.reads import _plan_sample
+    plan = [{"Plan": {"Node Type": "Seq Scan", "Plan Rows": 200,
+        "Filter": "large private expression" * 5000, "Plans": [
+            {"Node Type": "Index Scan", "Actual Rows": 7}]}, "Execution Time": 1.25}]
+    page = SimpleNamespace(columns=[SimpleNamespace(name="QUERY PLAN")], rows=[[plan]])
+    rows = _plan_sample(reads.service, page)
+    assert rows[0][0]["summary"]["Execution Time"] == 1.25
+    assert rows[1][0]["Plan Rows"] == 200
+    assert rows[2][0]["parent"] == rows[1][0]["node"]
+    assert rows[2][0]["Actual Rows"] == 7
+    assert "Filter" not in rows[1][0]
+    assert len(json.dumps(rows).encode()) <= reads.service.policy.result_context_bytes
+
+
+def test_activity_denied_without_monitor_permission(reads):
+    from unittest.mock import Mock
+    from schemii.schemii.ai.service import AiServiceError
+    reads.console.activity = Mock()
+    reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(raw_sql_read=True, structured_data_read=True))
+    with pytest.raises(AiServiceError) as error:
+        reads.service._read_tool_result("owner", reads.chat.id, "schemii_query_activity",
+            {"executionId": "cex_" + "1" * 32}, reads.turn.id)
+    assert error.value.code == "ai_permission_required"
+    reads.console.activity.assert_not_called()
+
+
+@pytest.mark.parametrize("sql,permission", [
+    ("EXPLAIN SELECT 1", "query.explain"),
+    ("EXPLAIN (ANALYZE FALSE) SELECT 1", "query.explain"),
+    ("EXPLAIN (ANALYZE 'off') SELECT 1", "query.explain"),
+    ("EXPLAIN (ANALYZE 0) SELECT 1", "query.explain"),
+    ("EXPLAIN ANALYZE SELECT 1", "query.analyze"),
+    ("/* diagnostic */ EXPLAIN (ANALYZE TRUE) SELECT 1", "query.analyze"),
+    ("EXPLAIN (ANALYZE 'on') SELECT 1", "query.analyze"),
+    ("EXPLAIN (ANALYZE FALSE, ANALYZE TRUE) SELECT 1", "query.analyze"),
+])
+def test_raw_read_tool_cannot_bypass_diagnostic_permission(reads, sql, permission):
+    from schemii.schemii.ai.service import AiServiceError
+    with pytest.raises(AiServiceError) as error:
+        reads.service._save_tool_proposal("owner", reads.chat, reads.turn.id,
+            "schemii_read_query", {"sql": sql})
+    assert permission in str(error.value)
+    assert reads.console.requests == []
+
+
+@pytest.mark.parametrize("analyze", [False, True])
+@pytest.mark.parametrize("replay", [False, True])
+def test_legacy_pending_plans_are_reclassified_at_execution(reads, analyze, replay):
+    from schemii.schemii.ai.service import AiServiceError
+    sql = "EXPLAIN " + ("ANALYZE " if analyze else "") + "SELECT 1"
+    action = {"queries": [{"label": "Legacy plan", "sql": sql}]}
+    if replay:
+        action["replayCapabilities"] = ["raw_sql_read"]
+    item = reads.repo.create_proposal("owner", reads.chat.id, reads.turn.id,
+        "raw_sql_read", "data_read", "Legacy plan", action, "a" * 64, 1, 0, False,
+        datetime.now(timezone.utc) + timedelta(minutes=5), reads.chat.revision)
+    with pytest.raises(AiServiceError) as error:
+        approve(reads, item)
+    assert ("query.analyze" if analyze else "query.explain") in str(error.value)
+    assert reads.console.requests == []
+
+
+@pytest.mark.parametrize("analyze", [False, True])
+def test_diagnostic_authority_is_rechecked_after_policy_change(reads, analyze):
+    reads.chat = reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(explain_queries=True, analyze_queries=True))
+    item = reads.service._save_tool_proposal("owner", reads.chat, reads.turn.id,
+        "schemii_explain_query", {"sql": "SELECT 1", "analyze": analyze})
+    reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(raw_sql_read=True))
+    with pytest.raises(Exception) as error:
+        approve(reads, item)
+    assert error.value.code == "ai_permission_required"
+    assert reads.console.requests == []
+
+
+@pytest.mark.parametrize("analyze", [False, True])
+def test_plan_replay_keeps_diagnostic_approval_without_raw_read(reads, analyze):
+    from schemii.schemii.ai.action_policy import required_action_ids
+    reads.chat = reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(explain_queries=not analyze, analyze_queries=analyze, structured_data_read=True))
+    item = reads.service._save_tool_proposal("owner", reads.chat, reads.turn.id,
+        "schemii_explain_query", {"sql": "SELECT 1", "analyze": analyze})
+    operation = approve(reads, item)
+    for repeat in range(2):
+        entry = operation.result_summary["results"][0]
+        reads.console.released.add(entry["executionId"])
+        response = reads.service._read_tool_result("owner", reads.chat.id, "schemii_get_read_results",
+            {"runIds": [entry["runId"]]}, reads.turn.id)
+        assert response["approvalRequired"]
+        pending = reads.repo.get_proposal("owner", reads.chat.id, response["proposalId"])
+        action = reads.repo.proposal_action("owner", reads.chat.id, pending.id)
+        assert action["replayCapabilities"] == ["analyze_queries" if analyze else "explain_queries"]
+        assert required_action_ids("data_read", action) == ("query.analyze" if analyze else "query.explain",)
+        assert len(reads.console.requests) == repeat + 1
+        operation = approve(reads, pending)
+    reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
+        AiCapabilities(raw_sql_read=True, structured_data_read=True, read_approval_required=False))
+    entry = operation.result_summary["results"][0]
+    reads.console.released.add(entry["executionId"])
+    response = reads.service._read_tool_result("owner", reads.chat.id, "schemii_get_read_results",
+        {"runIds": [entry["runId"]]}, reads.turn.id)
+    assert response["permissionRequired"] == ("Run & analyze query plans" if analyze else "Explain query plans")
+    assert len(reads.console.requests) == 3
+
+
+def test_internal_batch_cannot_execute_plan_with_stale_raw_replay_origin(reads):
+    from schemii.schemii.ai.reads import execute_batch
+    with pytest.raises(Exception) as error:
+        execute_batch(reads.service, "owner", reads.chat,
+            SimpleNamespace(capability="raw_sql_read", turn_id=reads.turn.id), SimpleNamespace(id="unused"),
+            {"queries": [{"sql": "EXPLAIN ANALYZE SELECT 1", "label": "plan"}],
+             "replayCapabilities": ["raw_sql_read"]})
+    assert error.value.code == "ai_permission_changed"
+    assert reads.console.requests == []

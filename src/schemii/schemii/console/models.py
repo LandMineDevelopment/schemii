@@ -74,3 +74,13 @@ class ConsoleHistoryList(ApiModel):
     """Newest-first bounded query history for one workspace."""
 
     queries: list[ConsoleHistoryEntry]
+
+
+class ConsoleExplainCreate(ApiModel):
+    """Explicit read-only analysis, using the console's existing execution limits."""
+
+    console_id: str = Field(pattern=r"^con_[0-9a-f]{32}$")
+    expected_workspace_revision: Annotated[int, Field(strict=True, ge=1)]
+    expected_settings_revision: Annotated[int, Field(strict=True, ge=1)]
+    sql: Annotated[str, Field(min_length=1, max_length=256 * 1024)]
+    analyze: Annotated[bool, Field(strict=True)] = False

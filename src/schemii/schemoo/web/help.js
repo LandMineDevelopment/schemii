@@ -44,6 +44,7 @@ export const helpTopics = Object.freeze({
     sections: [
       ["Required model scope", "Always applies and brings its required connection paths into the query. For example, require a parent organization even when the report only returns people’s names."],
       ["Conditional model parameter", "Applies only when a bound source is needed by the query, including a source used along a connection path or by another filter. For example, apply an as-of date to assignments only when assignments participate."],
+      ["Matching rows", "Choose independently whether to keep unmatched parent rows with empty related columns, or require matching rows and exclude unmatched parents. Filtering the starting source itself always removes its nonmatching rows."],
     ],
     note: "These are query-building rules, not a replacement for database permissions or a published security policy.",
   },
@@ -55,15 +56,15 @@ export const helpTopics = Object.freeze({
   },
   required: {
     title: "Required model scope",
-    intro: "This rule applies to every query, even when the user does not select a field from the filtered source. Schemoo includes the connection path needed to enforce it.",
-    sections: [["Organization example", "Bind Ancestor organization · id to a Parent organization input. A report returning only personnel names must still meet that organization restriction."], ["Returned details stay in scope", "If the report also returns assignments, those returned assignment details must meet the restriction too. Merely having some other qualifying assignment is not enough."]],
+    intro: "This rule activates for every query, even when the user does not select a field from the filtered source. Choose Require matching rows to enforce its restriction on returned records.",
+    sections: [["Organization example", "Bind Ancestor organization · id to a Parent organization input. With Require matching rows selected, a report returning only personnel names must still meet that organization restriction."], ["Returned details stay in scope", "With Require matching rows, returned assignment details must meet the restriction too. Merely having some other qualifying assignment is not enough."]],
     note: "A required input needs a value or a default before the query can run. An alternative with no source bindings is unrestricted, so only add that alternative if users should be allowed to bypass this restriction.",
   },
   conditional: {
     title: "Conditional model parameter",
     intro: "This rule filters only bound sources that are already needed by the query. It does not add a source just because the rule mentions it.",
-    sections: [["When it becomes active", "Selecting a field, traversing a connection path, enforcing a required scope, or adding a report filter can make a source participate. Its conditional bindings then apply and their inputs need values or defaults."], ["Preserving optional matches", "The participating source is filtered before the join. A person with no assignment at the chosen date can remain in a people report, with empty assignment details."]],
-    note: "Use a report filter for ‘has a matching assignment’ if the person must be excluded when no assignment matches.",
+    sections: [["When it becomes active", "Selecting a field, traversing a connection path, enforcing a required scope, or adding a report filter can make a source participate. Its conditional bindings then apply and their inputs need values or defaults."], ["Matching rows", "Keep unmatched parent rows filters the source before joining, so a person with no matching assignment can remain with empty assignment details. Require matching rows excludes that person when the assignment source participates."]],
+    note: "Activation and matching rows are independent. Existing conditional filters keep unmatched parents until you change their matching-row policy.",
   },
   alternatives: {
     title: "Filter alternatives",

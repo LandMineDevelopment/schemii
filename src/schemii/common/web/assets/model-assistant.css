@@ -1,3 +1,4 @@
+@import url("/assets/common/ai-permissions.css");
 @import url("/assets/common/ai-chat.css");
 
 .model-ai-context { grid-area:context; }
@@ -71,3 +72,7 @@
 .model-ai-history article > div > button { max-width:100%; height:auto; text-align:left; white-space:normal; }
 .model-ai-history small { display:block; color:#99a8bd; font-size:10px; margin-top:7px; overflow-wrap:anywhere; }
 @media (max-width:640px) { .model-ai-messages { padding:13px; } .model-ai-permissions label { grid-template-columns:minmax(0,1fr) 115px; } }
+
+.model-ai-model-options { display:grid; grid-template-columns:minmax(0,1fr) 112px; gap:8px; align-items:end; }
+.model-ai-reasoning { display:grid; gap:4px; color:#98a4b3; font-size:10px; }
+.model-ai-reasoning select { min-width:0; height:36px; padding:0 9px; color:#ccd4df; background:#090e14; border:1px solid #343e4c; border-radius:6px; }

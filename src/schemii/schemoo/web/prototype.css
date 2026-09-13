@@ -1,3 +1,4 @@
+@import url("/assets/common/query-plan.css");
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; background: var(--bg); color: var(--text); font-size: 13px; }
@@ -142,3 +143,14 @@ summary { cursor: pointer; font-weight: 600; }
 #node-connections { margin-top: 16px; }
 .selected-alias-form { margin-top: 10px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--canvas); }
 .selected-alias-form .actions { justify-content: flex-end; flex-wrap: wrap; }
+
+.query-plan-actions { display: flex; gap: 8px; padding: 8px 12px; flex: none; flex-wrap: wrap; }
+.query-plan-actions button { border: 1px solid #303a46; border-radius: 6px; padding: 6px 12px; background: #10151c; color: #cbd3dd; cursor: pointer; }
+.query-plan-actions button:disabled { opacity: .45; cursor: default; }
+
+.toolbar { flex-wrap: wrap; }
+.toolbar > button { flex: none; }
+@media (max-width: 850px) {
+  .toolbar .tools { flex-basis: 100%; }
+  .toolbar > button { font-size: 11px; padding-inline: 8px; }
+}

@@ -63,10 +63,10 @@ def _require_row_free_metadata(value: Any) -> None:
 
 class AiRepository(Protocol):
     def settings(self, owner_id: str) -> SchemiiAiSettings: ...
-    def update_settings(self, owner_id: str, expected_revision: int, enabled: bool, provider_id: str | None, model_id: str | None, capabilities: AiCapabilities) -> SchemiiAiSettings: ...
-    def save_preferences(self, owner_id: str, chat_id: str, expected_settings_revision: int, expected_chat_revision: int, provider_id: str, model_id: str, capabilities: AiCapabilities) -> tuple[SchemiiAiSettings, SchemiiChat, bool]: ...
+    def update_settings(self, owner_id: str, expected_revision: int, enabled: bool, provider_id: str | None, model_id: str | None, capabilities: AiCapabilities, reasoning_effort: str | None = None) -> SchemiiAiSettings: ...
+    def save_preferences(self, owner_id: str, chat_id: str, expected_settings_revision: int, expected_chat_revision: int, provider_id: str, model_id: str, capabilities: AiCapabilities, reasoning_effort: str | None = None) -> tuple[SchemiiAiSettings, SchemiiChat, bool]: ...
     def list_chats(self, owner_id: str, workspace_id: str | None = None) -> list[SchemiiChat]: ...
-    def create_chat(self, owner_id: str, workspace_id: str, title: str, provider_id: str, model_id: str, capabilities: AiCapabilities) -> SchemiiChat: ...
+    def create_chat(self, owner_id: str, workspace_id: str, title: str, provider_id: str, model_id: str, capabilities: AiCapabilities, reasoning_effort: str | None = None) -> SchemiiChat: ...
     def get_chat(self, owner_id: str, chat_id: str, *, include_deleted: bool = False) -> SchemiiChat: ...
     def update_chat(self, owner_id: str, chat_id: str, expected_revision: int, title: str) -> SchemiiChat: ...
     def update_chat_policy(self, owner_id: str, chat_id: str, expected_revision: int, capabilities: AiCapabilities) -> SchemiiChat: ...
@@ -129,16 +129,16 @@ class InMemoryAiRepository:
         with self._lock:
             return self._settings.get(owner_id, SchemiiAiSettings(revision=1, enabled=True)).model_copy(deep=True)
 
-    def update_settings(self, owner_id, expected_revision, enabled, provider_id, model_id, capabilities):
+    def update_settings(self, owner_id, expected_revision, enabled, provider_id, model_id, capabilities, reasoning_effort=None):
         with self._lock:
             current = self.settings(owner_id)
             if current.revision != expected_revision:
                 raise AiConflictError("Assistant settings changed")
-            saved = SchemiiAiSettings(revision=current.revision + 1, enabled=enabled, default_provider_id=provider_id, default_model_id=model_id, default_capabilities=capabilities)
+            saved = SchemiiAiSettings(default_reasoning_effort=reasoning_effort or current.default_reasoning_effort, revision=current.revision + 1, enabled=enabled, default_provider_id=provider_id, default_model_id=model_id, default_capabilities=capabilities)
             self._settings[owner_id] = saved
             return saved.model_copy(deep=True)
 
-    def save_preferences(self, owner_id, chat_id, expected_settings_revision, expected_chat_revision, provider_id, model_id, capabilities):
+    def save_preferences(self, owner_id, chat_id, expected_settings_revision, expected_chat_revision, provider_id, model_id, capabilities, reasoning_effort=None):
         with self._lock:
             current_settings = self.settings(owner_id)
             current_chat = self.get_chat(owner_id, chat_id)
@@ -146,11 +146,13 @@ class InMemoryAiRepository:
                 raise AiConflictError("Assistant settings changed")
             if current_chat.revision != expected_chat_revision:
                 raise AiConflictError("Chat changed")
+            reasoning_effort = reasoning_effort or current_chat.reasoning_effort
+            reasoning_changed = reasoning_effort != current_chat.reasoning_effort
             model_changed = current_chat.provider_id != provider_id or current_chat.model_id != model_id
-            if model_changed and current_chat.status == "working":
-                raise AiConflictError("Wait for the current response to finish before changing models")
+            if (model_changed or reasoning_changed) and current_chat.status == "working":
+                raise AiConflictError("Wait for the current response to finish before changing models or reasoning levels")
             policy_changed = current_chat.capabilities != capabilities
-            if model_changed or policy_changed:
+            if model_changed or reasoning_changed or policy_changed:
                 saved_chat = self._replace_chat(
                     owner_id,
                     chat_id,
@@ -160,6 +162,7 @@ class InMemoryAiRepository:
                             "capabilities": capabilities,
                             "provider_id": provider_id,
                             "model_id": model_id,
+                            "reasoning_effort": reasoning_effort,
                             "updated_at": _now(),
                         }
                     ),
@@ -178,6 +181,7 @@ class InMemoryAiRepository:
                 enabled=True,
                 default_provider_id=provider_id,
                 default_model_id=model_id,
+                default_reasoning_effort=reasoning_effort,
                 default_capabilities=capabilities,
             )
             self._settings[owner_id] = saved_settings
@@ -187,8 +191,8 @@ class InMemoryAiRepository:
         with self._lock:
             return [chat.model_copy(deep=True) for owner, chat, _ in self._chats.values() if owner == owner_id and chat.status != "deleted" and (workspace_id is None or chat.workspace_id == workspace_id)]
 
-    def create_chat(self, owner_id, workspace_id, title, provider_id, model_id, capabilities):
-        now = _now(); chat = SchemiiChat(id=f"chat_{secrets.token_hex(16)}", workspace_id=workspace_id, revision=1, title=title, provider_id=provider_id, model_id=model_id, capabilities=capabilities, status="idle", created_at=now, updated_at=now)
+    def create_chat(self, owner_id, workspace_id, title, provider_id, model_id, capabilities, reasoning_effort=None):
+        now = _now(); chat = SchemiiChat(reasoning_effort=reasoning_effort or "default",id=f"chat_{secrets.token_hex(16)}", workspace_id=workspace_id, revision=1, title=title, provider_id=provider_id, model_id=model_id, capabilities=capabilities, status="idle", created_at=now, updated_at=now)
         with self._lock:
             self._cleanup_locked(now)
             count = sum(
@@ -610,7 +614,7 @@ class PostgresAiRepository:
 
     @staticmethod
     def _chat(row) -> SchemiiChat:
-        return SchemiiChat(id=row["id"], workspace_id=row["workspace_id"], revision=row["revision"], title=row["title"], provider_id=row["provider_id"], model_id=row["model_id"], capabilities=AiCapabilities.model_validate(row["capabilities"]), status=row["status"], created_at=row["created_at"], updated_at=row["updated_at"])
+        return SchemiiChat(reasoning_effort=row.get("reasoning_effort", "default"), id=row["id"], workspace_id=row["workspace_id"], revision=row["revision"], title=row["title"], provider_id=row["provider_id"], model_id=row["model_id"], capabilities=AiCapabilities.model_validate(row["capabilities"]), status=row["status"], created_at=row["created_at"], updated_at=row["updated_at"])
 
     @staticmethod
     def _turn(row) -> SchemiiTurn:
@@ -632,17 +636,18 @@ class PostgresAiRepository:
         with self._transaction() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT * FROM schemii.ai_settings WHERE owner_id = %s", (owner_id,)); row = cursor.fetchone()
             if row is None: return SchemiiAiSettings(revision=1, enabled=True)
-            return SchemiiAiSettings(revision=row["revision"], enabled=row["enabled"], default_provider_id=row["default_provider_id"], default_model_id=row["default_model_id"], default_capabilities=AiCapabilities.model_validate(row["capabilities"]))
+            return SchemiiAiSettings(default_reasoning_effort=row.get("default_reasoning_effort", "default"), revision=row["revision"], enabled=row["enabled"], default_provider_id=row["default_provider_id"], default_model_id=row["default_model_id"], default_capabilities=AiCapabilities.model_validate(row["capabilities"]))
 
-    def update_settings(self, owner_id, expected_revision, enabled, provider_id, model_id, capabilities):
+    def update_settings(self, owner_id, expected_revision, enabled, provider_id, model_id, capabilities, reasoning_effort=None):
         with self._transaction() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"ai-settings:{owner_id}",))
-            cursor.execute("SELECT revision FROM schemii.ai_settings WHERE owner_id=%s FOR UPDATE", (owner_id,)); row = cursor.fetchone(); current = row["revision"] if row else 1
+            cursor.execute("SELECT * FROM schemii.ai_settings WHERE owner_id=%s FOR UPDATE", (owner_id,)); row = cursor.fetchone(); current = row["revision"] if row else 1
             if current != expected_revision: raise AiConflictError("Assistant settings changed")
-            cursor.execute("INSERT INTO schemii.ai_settings (owner_id, revision, enabled, default_provider_id, default_model_id, capabilities) VALUES (%s,%s,%s,%s,%s,%s::jsonb) ON CONFLICT (owner_id) DO UPDATE SET revision=EXCLUDED.revision, enabled=EXCLUDED.enabled, default_provider_id=EXCLUDED.default_provider_id, default_model_id=EXCLUDED.default_model_id, capabilities=EXCLUDED.capabilities, updated_at=clock_timestamp() RETURNING *", (owner_id, current + 1, enabled, provider_id, model_id, capabilities.model_dump_json(by_alias=True))); saved = cursor.fetchone()
-        return SchemiiAiSettings(revision=saved["revision"], enabled=saved["enabled"], default_provider_id=saved["default_provider_id"], default_model_id=saved["default_model_id"], default_capabilities=AiCapabilities.model_validate(saved["capabilities"]))
+            reasoning_effort = reasoning_effort or (row.get("default_reasoning_effort", "default") if row else "default")
+            cursor.execute("INSERT INTO schemii.ai_settings (owner_id, revision, enabled, default_provider_id, default_model_id, capabilities, default_reasoning_effort) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s) ON CONFLICT (owner_id) DO UPDATE SET revision=EXCLUDED.revision, enabled=EXCLUDED.enabled, default_provider_id=EXCLUDED.default_provider_id, default_model_id=EXCLUDED.default_model_id, default_reasoning_effort=EXCLUDED.default_reasoning_effort, capabilities=EXCLUDED.capabilities, updated_at=clock_timestamp() RETURNING *", (owner_id, current + 1, enabled, provider_id, model_id, capabilities.model_dump_json(by_alias=True), reasoning_effort)); saved = cursor.fetchone()
+        return SchemiiAiSettings(default_reasoning_effort=saved.get("default_reasoning_effort", "default"), revision=saved["revision"], enabled=saved["enabled"], default_provider_id=saved["default_provider_id"], default_model_id=saved["default_model_id"], default_capabilities=AiCapabilities.model_validate(saved["capabilities"]))
 
-    def save_preferences(self, owner_id, chat_id, expected_settings_revision, expected_chat_revision, provider_id, model_id, capabilities):
+    def save_preferences(self, owner_id, chat_id, expected_settings_revision, expected_chat_revision, provider_id, model_id, capabilities, reasoning_effort=None):
         with self._transaction() as connection, connection.cursor() as cursor:
             self._cleanup(cursor)
             cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"ai-settings:{owner_id}",))
@@ -656,14 +661,16 @@ class PostgresAiRepository:
             if chat_row is None or chat_row["revision"] != expected_chat_revision:
                 raise AiConflictError("Chat changed or was deleted")
             current_chat = self._chat(chat_row)
+            reasoning_effort = reasoning_effort or current_chat.reasoning_effort
+            reasoning_changed = reasoning_effort != current_chat.reasoning_effort
             model_changed = current_chat.provider_id != provider_id or current_chat.model_id != model_id
-            if model_changed and current_chat.status == "working":
-                raise AiConflictError("Wait for the current response to finish before changing models")
+            if (model_changed or reasoning_changed) and current_chat.status == "working":
+                raise AiConflictError("Wait for the current response to finish before changing models or reasoning levels")
             policy_changed = current_chat.capabilities != capabilities
-            if model_changed or policy_changed:
+            if model_changed or reasoning_changed or policy_changed:
                 cursor.execute(
-                    "UPDATE schemii.ai_chats SET revision=revision+1,provider_id=%s,model_id=%s,capabilities=%s::jsonb,updated_at=clock_timestamp() WHERE owner_id=%s AND id=%s AND revision=%s RETURNING *",
-                    (provider_id, model_id, capabilities.model_dump_json(by_alias=True), owner_id, chat_id, expected_chat_revision),
+                    "UPDATE schemii.ai_chats SET revision=revision+1,provider_id=%s,model_id=%s,reasoning_effort=%s,capabilities=%s::jsonb,updated_at=clock_timestamp() WHERE owner_id=%s AND id=%s AND revision=%s RETURNING *",
+                    (provider_id, model_id, reasoning_effort, capabilities.model_dump_json(by_alias=True), owner_id, chat_id, expected_chat_revision),
                 )
                 saved_chat = self._chat(cursor.fetchone())
                 if policy_changed:
@@ -671,8 +678,8 @@ class PostgresAiRepository:
             else:
                 saved_chat = current_chat
             cursor.execute(
-                "INSERT INTO schemii.ai_settings (owner_id,revision,enabled,default_provider_id,default_model_id,capabilities) VALUES (%s,%s,TRUE,%s,%s,%s::jsonb) ON CONFLICT (owner_id) DO UPDATE SET revision=EXCLUDED.revision,enabled=TRUE,default_provider_id=EXCLUDED.default_provider_id,default_model_id=EXCLUDED.default_model_id,capabilities=EXCLUDED.capabilities,updated_at=clock_timestamp() RETURNING *",
-                (owner_id, settings_revision + 1, provider_id, model_id, capabilities.model_dump_json(by_alias=True)),
+                "INSERT INTO schemii.ai_settings (owner_id,revision,enabled,default_provider_id,default_model_id,capabilities,default_reasoning_effort) VALUES (%s,%s,TRUE,%s,%s,%s::jsonb,%s) ON CONFLICT (owner_id) DO UPDATE SET revision=EXCLUDED.revision,enabled=TRUE,default_provider_id=EXCLUDED.default_provider_id,default_model_id=EXCLUDED.default_model_id,default_reasoning_effort=EXCLUDED.default_reasoning_effort,capabilities=EXCLUDED.capabilities,updated_at=clock_timestamp() RETURNING *",
+                (owner_id, settings_revision + 1, provider_id, model_id, capabilities.model_dump_json(by_alias=True), reasoning_effort),
             )
             saved_settings_row = cursor.fetchone()
         saved_settings = SchemiiAiSettings(
@@ -680,6 +687,7 @@ class PostgresAiRepository:
             enabled=saved_settings_row["enabled"],
             default_provider_id=saved_settings_row["default_provider_id"],
             default_model_id=saved_settings_row["default_model_id"],
+            default_reasoning_effort=saved_settings_row.get("default_reasoning_effort", "default"),
             default_capabilities=AiCapabilities.model_validate(saved_settings_row["capabilities"]),
         )
         return saved_settings, saved_chat, False
@@ -688,7 +696,7 @@ class PostgresAiRepository:
         with self._transaction() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT * FROM schemii.ai_chats WHERE owner_id=%s AND status<>'deleted' AND (%s::text IS NULL OR workspace_id=%s) ORDER BY updated_at DESC", (owner_id, workspace_id, workspace_id)); return [self._chat(row) for row in cursor.fetchall()]
 
-    def create_chat(self, owner_id, workspace_id, title, provider_id, model_id, capabilities):
+    def create_chat(self, owner_id, workspace_id, title, provider_id, model_id, capabilities, reasoning_effort=None):
         chat_id=f"chat_{secrets.token_hex(16)}"
         with self._transaction() as connection, connection.cursor() as cursor:
             self._cleanup(cursor)
@@ -704,7 +712,7 @@ class PostgresAiRepository:
                     configured_limit=self._policy.maximum_chats_per_workspace,
                     observed_value=self._policy.maximum_chats_per_workspace,
                 )
-            cursor.execute("INSERT INTO schemii.ai_chats (id,owner_id,workspace_id,title,provider_id,model_id,capabilities) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING *", (chat_id,owner_id,workspace_id,title,provider_id,model_id,capabilities.model_dump_json(by_alias=True))); return self._chat(cursor.fetchone())
+            cursor.execute("INSERT INTO schemii.ai_chats (id,owner_id,workspace_id,title,provider_id,model_id,capabilities,reasoning_effort) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING *", (chat_id,owner_id,workspace_id,title,provider_id,model_id,capabilities.model_dump_json(by_alias=True),reasoning_effort or "default")); return self._chat(cursor.fetchone())
 
     def get_chat(self, owner_id, chat_id, *, include_deleted=False):
         with self._transaction() as connection, connection.cursor() as cursor:

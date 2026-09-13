@@ -1,3 +1,4 @@
+import { edgeRelationship, comparableTypes, validateLogicalRelationship } from "./logical-relationships.js";
 import { GraphViewport } from "#common/graph-viewport.js";
 import { isAlias } from "./alias-model.js";
 import { exposedFields, setFieldExposure } from "./model-state.js";
@@ -19,7 +20,7 @@ const el = (tag, className, text) => {
 };
 
 /** A model-specific rendering surface backed by the shared product viewport. */
-export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectNode, onSelectEdge }) {
+export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectNode, onSelectEdge, onCreateConnection, connectionButton }) {
   host.classList.add("sc-canvas");
   host.tabIndex = 0;
   host.setAttribute("aria-label", "Semantic model canvas. Drag background to pan; scroll to zoom.");
@@ -27,8 +28,21 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
   const edges = svgNode("svg", { class: "sc-edges", "aria-label": "Model relationships" });
   stage.append(edges, cards);
   host.append(stage);
+  let connecting=false, connectionSource=null;
+  const controls=el("div","sc-connection-tools"), connect=connectionButton, notice=el("span","sc-connection-status");
+  connect.disabled=false;notice.setAttribute("role","status");
+  controls.append(notice);host.append(controls);
+  function connectionMode(enabled) {connecting=enabled;connectionSource=null;connect.title=enabled?"Cancel connection":"Draw connection";connect.setAttribute("aria-label",connect.title);connect.setAttribute("aria-pressed",String(enabled));notice.textContent=enabled?"Choose the first column, then a compatible column. Query direction follows the starting object.":"";render();}
+  connect.onclick=()=>connectionMode(!connecting);
+  function chooseColumn(node,column) {
+    if(!connectionSource){connectionSource={node,column};notice.textContent=`${node.label}.${column.name} selected. Choose a highlighted column.`;render();return;}
+    const edge={id:`logical_${crypto.randomUUID().replaceAll("-","")}`,kind:"logical",source:connectionSource.node.id,sourceColumn:connectionSource.column.name,target:node.id,targetColumn:column.name,enabled:true};
+    const error=validateLogicalRelationship(edge,getDraft(),catalog);
+    if(error){notice.textContent=error;return;}
+    connectionMode(false);onCreateConnection?.(edge);
+  }
   const viewport = new GraphViewport({ host, stage, minZoom: 0.08, maxZoom: 1.8,
-    canStartPan: event => !event.target.closest(".sc-node, .sc-edge") });
+    canStartPan: event => !event.target.closest(".sc-node, .sc-edge, .sc-connection-tools") });
   viewport.handleWheel = event => {
     if (event.target.closest(".sc-node") && event.shiftKey) return;
     event.preventDefault();
@@ -38,7 +52,6 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
   let cycleEdges = new Set(), usedEdges = new Set(), selectedNode = null, selectedEdge = null;
   let filterNodes = new Set(), sourceIssueNodes = new Set(), sourceIssueEdges = new Set();
   let destroyed = false, initialFit = true, fitFrame;
-  const relationships = new Map(catalog.relationships.map(edge => [edge.id, edge]));
   const columns = node => nodeColumns(getDraft(), catalog, node);
   const height = node => HEADER + columns(node).length * ROW + 2;
   const position = node => viewport.dragPosition(node.id) || { x: node.x, y: node.y };
@@ -77,7 +90,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
     for (const edge of getDraft().edges) {
       const source = nodes.get(edge.source), target = nodes.get(edge.target);
       if (!source || !target) continue;
-      const relation = relationships.get(edge.relationshipId);
+      const relation = edgeRelationship(edge, catalog);
       if (!relation) continue;
       const a = position(source), b = position(target);
       const self = source.id === target.id;
@@ -91,7 +104,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
         : `M ${x1} ${y1} C ${x1 + (right ? bend : -bend)} ${y1}, ${x2 + (right ? -bend : bend)} ${y2}, ${x2} ${y2}`;
       const cycle = edge.enabled && cycleEdges.has(edge.id), sourceChanged=sourceIssueEdges.has(edge.id);
       const state = !edge.enabled ? "disabled" : cycle ? "cycle" : usedEdges.has(edge.id) ? "current preview path" : "enabled · not in current preview";
-      const label = `${source.label || source.table}.${relation.sourceColumn} to ${target.label || target.table}.${relation.targetColumn} · ${state}`;
+      const label = `${source.label || source.table}.${relation.sourceColumn} to ${target.label || target.table}.${relation.targetColumn}${edge.kind === "logical" ? " · logical relationship" : ""} · ${state}`;
       const group = svgNode("g", { class: `sc-edge${!edge.enabled ? " sc-disabled" : ""}${cycle ? " sc-cycle" : ""}${sourceChanged ? " sc-source-changed" : ""}${usedEdges.has(edge.id) ? " sc-used" : ""}${selectedEdge === edge.id ? " sc-selected" : ""}`, tabindex: "0", role: "button", "aria-label": label, "data-edge-id": edge.id });
       const title = svgNode("title"); title.textContent = label;
       group.append(title, svgNode("path", { d, class: "sc-edge-hit" }), svgNode("path", { d, class: "sc-edge-line" }));
@@ -166,8 +179,17 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       });
       card.append(header);
       for (const column of columns(node)) {
-        const row = el("label", "sc-column"), input = document.createElement("input");
+        const row = el(connecting ? "div" : "label", "sc-column"), input = document.createElement("input");
         input.type = "checkbox";
+        if(connecting) {
+          input.disabled=true;
+          const chosen=connectionSource?.node.id===node.id && connectionSource?.column.name===column.name;
+          const compatible=!node.derivation && (connectionSource ? comparableTypes(connectionSource.column.dataType,column.dataType) : comparableTypes(column.dataType,column.dataType));
+          row.classList.toggle("sc-connection-source",Boolean(chosen));row.classList.toggle("sc-connection-target",Boolean(connectionSource && compatible && !chosen));row.classList.toggle("sc-connection-invalid",!compatible);
+          row.tabIndex=0;row.setAttribute("role","button");row.setAttribute("aria-disabled",String(!compatible));row.setAttribute("aria-pressed",String(Boolean(chosen)));row.setAttribute("aria-label",`Connect ${node.label}.${column.name}${compatible ? "" : " · incompatible type"}`);
+          const choose=event=>{event.preventDefault();event.stopPropagation();if(compatible)chooseColumn(node,column);};
+          row.addEventListener("click",choose);row.addEventListener("keydown",event=>{if(["Enter"," "].includes(event.key))choose(event);});
+        }
         input.checked = exposed.has(JSON.stringify([node.id, column.name]));
         input.setAttribute("aria-label", `Expose ${node.label || node.table}.${column.name}`);
         input.addEventListener("change", () => {
@@ -203,12 +225,13 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       maxX: Math.max(...nodes.map(n => n.x + WIDTH)) + 120, maxY: Math.max(...nodes.map(n => n.y + height(n))) }, { maxZoom: 1 });
   }
   const keyboard = event => {
+    if(event.key === "Escape" && connecting){event.preventDefault();connectionMode(false);return;}
     if (event.target === host && event.key.toLowerCase() === "f") { event.preventDefault(); fit(); }
   };
   host.addEventListener("keydown", keyboard);
-  return { render, fit, highlightFilters(ids) {
+  return { render, fit, startConnection:()=>connectionMode(true), highlightFilters(ids) {
       filterNodes=new Set(ids);
       for(const card of cards.children)card.classList.toggle("sc-filter-bound",filterNodes.has(card.dataset.nodeId));
     }, zoomBy: factor => viewport.zoomBy(viewport.getView().zoom * (factor - 1)),
-    destroy() { destroyed = true; cancelAnimationFrame(fitFrame); viewport.destroy(); host.removeEventListener("keydown", keyboard); stage.remove(); } };
+    destroy() { connect.onclick=null;connect.disabled=true;connect.setAttribute("aria-pressed","false");connect.title="Draw connection";connect.setAttribute("aria-label","Draw connection"); destroyed = true; cancelAnimationFrame(fitFrame); viewport.destroy(); host.removeEventListener("keydown", keyboard); stage.remove(); controls.remove(); } };
 }

@@ -25,6 +25,7 @@ class IndexSource:
     method: str
     unique: bool
     columns: tuple[str, ...]
+    included_columns: tuple[str, ...]
     expression: str | None
     predicate: str | None
 
@@ -76,8 +77,6 @@ def index_source(definition: str) -> IndexSource:
     statement = statements[0].stmt
     if not statement.idxname or not statement.relation.relname:
         raise SchemaSourceError("The PostgreSQL index identity could not be derived")
-    if statement.indexIncludingParams:
-        raise SchemaSourceError("INCLUDE columns are not represented by the design index model")
     if statement.options:
         raise SchemaSourceError("Index storage parameters are not represented by the design index model")
     if statement.tableSpace:
@@ -86,6 +85,7 @@ def index_source(definition: str) -> IndexSource:
         raise SchemaSourceError("NULLS NOT DISTINCT is not represented by the design index model")
 
     parameters = tuple(statement.indexParams or ())
+    included_parameters = tuple(statement.indexIncludingParams or ())
     simple = all(
         parameter.name
         and parameter.expr is None
@@ -97,6 +97,9 @@ def index_source(definition: str) -> IndexSource:
         for parameter in parameters
     )
     columns = tuple(parameter.name for parameter in parameters) if simple else ()
+    included_columns = tuple(parameter.name for parameter in included_parameters)
+    if any(not name for name in included_columns):
+        raise SchemaSourceError("INCLUDE index entries must be columns")
     expression = None if simple else ", ".join(
         RawStream()(parameter).strip() for parameter in parameters
     )
@@ -111,6 +114,7 @@ def index_source(definition: str) -> IndexSource:
         method=statement.accessMethod or "btree",
         unique=statement.unique,
         columns=columns,
+        included_columns=included_columns,
         expression=expression,
         predicate=predicate,
     )

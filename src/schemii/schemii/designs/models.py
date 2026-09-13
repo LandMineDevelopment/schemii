@@ -159,6 +159,7 @@ class DesignIndex(ApiModel):
     name: DesignIdentifier
     method: DesignIdentifier = "btree"
     column_ids: list[DesignObjectId] = Field(default_factory=list, max_length=1600)
+    include_column_ids: list[DesignObjectId] = Field(default_factory=list, max_length=1600)
     expression: DesignExpression | None = None
     expression_source_column_ids: list[DesignObjectId] = Field(
         default_factory=list,

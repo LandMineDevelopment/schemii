@@ -296,6 +296,10 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 direct_ids = [
                     column_ids[(source_table.name, name)] for name in parsed.columns
                 ]
+                include_ids = [
+                    column_ids[(source_table.name, name)]
+                    for name in parsed.included_columns
+                ]
                 expression_ids = [
                     column_ids[(source_table.name, name)]
                     for name in _ordered_expression_column_names(
@@ -329,6 +333,7 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     name=parsed.name,
                     method=parsed.method,
                     column_ids=direct_ids,
+                    include_column_ids=include_ids,
                     expression=parsed.expression,
                     expression_source_column_ids=expression_ids,
                     predicate=parsed.predicate,

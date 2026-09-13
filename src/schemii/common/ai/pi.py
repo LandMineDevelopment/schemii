@@ -28,6 +28,7 @@ _MESSAGES = {
     "billing_required": "The selected provider requires billing or credits. Check that provider account or explicitly select another model. No fallback model was used.",
     "credentials_required": "Connect your own provider account before running this request.",
     "credentials_changed": "Your AI credentials were disconnected, replaced, or expired. Reconnect and try again.",
+    "reasoning_unsupported": "The selected model does not support this reasoning effort. Choose an available level or Model default.",
     "model_unavailable": "This model is not available through the connected provider account. Choose another model; your conversation is kept. No fallback model was used.",
     "cancelled": "The AI request was cancelled.",
     "timeout": "The AI request exceeded the configured time limit. Ask a narrower question and retry.",
@@ -192,6 +193,7 @@ class PiRuntime:
                 if time.monotonic() - account.get("success", 0) >= self.policy.catalog_max_stale_seconds:
                     ids = None
                 models = [{"id": item["id"], "name": item.get("name", item["id"]),
+                           "reasoningLevels": item.get("reasoningLevels", ["default"]),
                            "status": "unavailable" if (provider_id, item["id"]) in denied
                                or (ids is not None and item["id"] not in ids) else "active"}
                           for item in supported if item.get("providerId") == provider_id
@@ -231,6 +233,14 @@ class PiRuntime:
         }:
             raise PiError("model_unavailable", status=409)
 
+    def require_reasoning_effort(self, owner, provider_id, model_id, reasoning_effort="default"):
+        if reasoning_effort == "default":
+            return
+        provider = next((item for item in self.status(owner)["providers"] if item["id"] == provider_id), {})
+        model = next((item for item in provider.get("models", []) if item["id"] == model_id), {})
+        if reasoning_effort not in model.get("reasoningLevels", ["default"]):
+            raise PiError("reasoning_unsupported", status=422)
+
     def disconnect(self, owner, credential_id="codex-prototype"):
         self.store.delete(owner, credential_id)
         self._denied_models(owner, self.store.list(owner))
@@ -243,7 +253,7 @@ class PiRuntime:
             pass  # Persisted generation fencing still rejects every late completion.
 
     def run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
-            on_text=lambda text: None, is_authorized=lambda: True, messages=None):
+            on_text=lambda text: None, is_authorized=lambda: True, messages=None, reasoning_effort="default"):
         identity = (owner, self.credential_id(provider_id))
         # TODO(multi-replica-ai): Before enabling multiple API workers/replicas,
         # acquire a durable owner/credential lease and read credentials AFTER it
@@ -258,15 +268,16 @@ class PiRuntime:
                 self._identities.add(identity)
         try:
             return self._run(owner, turn_id, provider_id, model_id, system, prompt,
-                             tools, on_text, is_authorized, messages)
+                             tools, on_text, is_authorized, messages, reasoning_effort)
         finally:
             with self._identity_lock:
                 if identity[1]:
                     self._identities.discard(identity)
 
     def _run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
-             on_text, is_authorized, messages):
+             on_text, is_authorized, messages, reasoning_effort="default"):
         self.require_available_model(owner, provider_id, model_id)
+        self.require_reasoning_effort(owner, provider_id, model_id, reasoning_effort)
         credential_id = self.credential_id(provider_id)
         record = self.store.get(owner, credential_id) if credential_id else None
         if credential_id and record is None:
@@ -292,6 +303,8 @@ class PiRuntime:
                            "timeoutMs": self.policy.provider_timeout_seconds * 1000,
                            "contextBytes": self.policy.context_bytes,
                            "responseBytes": self.policy.response_bytes}}
+        if reasoning_effort != "default":
+            body["reasoningEffort"] = reasoning_effort
         if record:
             body.update(credentialId=credential_id, generation=record["generation"], credential=record["credential"])
         elif provider_id == "opencode":

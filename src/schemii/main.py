@@ -7,6 +7,9 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import AsyncIterator
 
+from schemii.schemii.bulk_jobs.repository import JobRepository
+from schemii.schemii.bulk_jobs.service import BulkJobService
+from schemii.schemii.bulk_jobs.routes import router as bulk_jobs_router
 from fastapi import APIRouter, FastAPI
 
 from schemii.common.api import (
@@ -374,6 +377,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        await asyncio.to_thread(application.state.bulk_jobs.repository.recover)
         await asyncio.to_thread(application.state.ai_service.recover_interrupted)
         await asyncio.to_thread(application.state.schemoo_ai.store.prune, True)
         async def maintain_chats():
@@ -409,6 +413,8 @@ def create_app(
                 await catalog_worker.stop()
             await credential_worker.stop()
             assert active_services.console is not None
+            await asyncio.to_thread(application.state.bulk_jobs.close)
+            await asyncio.to_thread(application.state.raw_console.close)
             active_services.console.close()
             active_services.migrations.set_execution_waker(None)
             await migration_worker.stop()
@@ -440,6 +446,23 @@ def create_app(
         if active_services.admin_config.ai.enabled and application.state.pi_client is not None
         else None
     )
+    from schemii.schemii.console.raw_session import RawSessionService, router as raw_console_router
+    application.state.raw_console = RawSessionService(active_services.console, active_services.connections, active_services.postgres)
+    application.include_router(raw_console_router)
+    application.state.bulk_jobs = BulkJobService(
+        JobRepository(active_services.metadata.connection_factory),
+        active_services.console, active_services.connections, active_services.postgres,
+    )
+    workspace_bulk_guard = getattr(active_services.workspaces, "set_mutation_guard", None)
+    if callable(workspace_bulk_guard):
+        previous_guard = active_services.workspaces._mutation_guard
+        def has_active_workspace_work(owner, workspace):
+            return bool(previous_guard and previous_guard(owner, workspace)) or any(
+                job["status"] in {"queued", "running", "cancelling", "reconciliation_required"}
+                for job in application.state.bulk_jobs.repository.list(owner, workspace)
+            )
+        workspace_bulk_guard(has_active_workspace_work)
+    application.include_router(bulk_jobs_router)
     application.include_router(pi_router)
     application.include_router(activity_router)
     application.include_router(query_executions_router, prefix="/api/v1/common")
@@ -455,6 +478,7 @@ def create_app(
         ai_runtime,
         active_services,
     )
+    application.state.ai_service.raw_console = application.state.raw_console
     from schemii.schemoo.conversation_store import ConversationStore
     from schemii.schemoo.conversations import Conversations
     from schemii.schemoo import ai_tools

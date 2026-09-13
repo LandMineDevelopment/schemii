@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model, mo
 from schemii.common.api.models import ApiModel
 from . import actions
 from .write_actions import WriteBatch
-from .action_policy import ACTION_POLICIES, action_modes, permission_descriptors
+from .action_policy import ACTION_POLICIES, action_modes, permission_descriptors, read_capabilities
 from schemii.schemii.designs.models import (
     DesignCheckConstraint,
     DesignColumn,
@@ -31,6 +31,16 @@ from schemii.schemii.designs.models import (
 
 class ToolModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ExplainQuery(ToolModel):
+    summary: str = Field(default="Explain query", max_length=2048)
+    sql: str = Field(min_length=1, max_length=256 * 1024)
+    analyze: bool = Field(default=False, strict=True)
+
+
+class QueryActivity(ToolModel):
+    executionId: str = Field(pattern=r"^cex_[0-9a-f]{32}$")
 
 
 class ReadQuery(ToolModel):
@@ -186,6 +196,7 @@ class ToolProposal:
 TOOLS = {
     "schemii_design_change": True,
     "schemii_read_query": True,
+    "schemii_explain_query": True,
     "schemii_list_read_runs": True,
     "schemii_get_read_results": True,
     "schemii_open_console": True,
@@ -204,7 +215,12 @@ TOOLS = {
     "task": False,
 }
 
+from .raw_actions import RawConsoleAction, RawResults, OPERATIONS
+from .app_actions import AppAction
+
 ADAPTER_TOOLS = {
+    "schemii_raw_console": ("raw_console", "raw_console", RawConsoleAction, "Use the same PostgreSQL sessions as the user console. Discover sessions and revisions first. Execute exact SQL under explicit commitMode; manual leaves transactions pending. Explain analyze executes SQL. COPY returns a browser file handoff, never file contents. Check receipt status; never replay uncertain SQL."),
+    "schemii_app_action": ("app_actions", "app_action", AppAction, "Use existing application features under the exact action permission. Discover IDs and current revisions before mutation. Never change AI permissions or approve proposals."),
     "schemii_resolve_migration": ("migration_apply", "migration_resolve", actions.MigrationResolveAction, "Resolve every conflict in one exact migration review using pull_live or keep_design choices. Saves design/baseline only; obtain a fresh plan afterward. Do not guess user intent for conflicting edits."),
     "schemii_reconcile_migration": ("migration_apply", "migration_reconcile", actions.MigrationReconcileAction, "Check an uncertain migration using its current execution revision. Never replays SQL. Report commitOutcome, syncStatus and reconcileRequired truthfully; a completed check may still be uncertain."),
     "schemii_browse_rows": ("structured_query", "data_read", None, "Read several relations using typed columns, filters, ordering or counts. Prefer this over raw SQL."),
@@ -214,6 +230,8 @@ ADAPTER_TOOLS = {
     "schemii_execute_write": ("sql_write_execute", "sql_write", WriteBatch, "Execute a reviewed SQL batch in one transaction and commit on success. Prefer structured design tools. No BEGIN, COMMIT, COPY or concurrent index commands; transaction ownership belongs to the server."),
 }
 DIRECT_TOOLS = {
+    "schemii_raw_results": ("structured_data_read", RawResults, "Inspect bounded transient rows from an exact raw console session execution. Never reruns SQL; expired results stay expired. Requires Analyze query results."),
+    "schemii_query_activity": ("monitor_queries", QueryActivity, "Inspect an exact known console execution ID in this workspace. Returns current query activity, waits and transaction state; never reruns SQL. Do not invent IDs or interpret unavailable monitoring as idle."),
     "schemii_get_migration_plan": ("migration_apply", actions.MigrationPlanReference, "Read the exact existing migration plan, conflict IDs, allowed choices, digest and design revision before resolving conflicts. Never invent IDs or choices."),
     "schemii_list_relations": ("structured_query", actions.RelationListAction, "Discover live relations and their stable references before structured reads."),
     "schemii_preview_reset": ("design_history", None, "Get the exact reset-to-baseline review and digest before requesting reset."),
@@ -224,6 +242,7 @@ TOOLS.update({name: True for name in (*ADAPTER_TOOLS, *DIRECT_TOOLS)})
 TOOL_CAPABILITIES = {
     "schemii_design_change": "design_changes",
     "schemii_read_query": "raw_sql_read",
+    "schemii_explain_query": "explain_queries",
     "schemii_list_read_runs": "structured_data_read",
     "schemii_get_read_results": "structured_data_read",
     "schemii_open_console": "raw_sql_write",
@@ -236,6 +255,9 @@ CAPABILITY_LABELS = {
     "live_catalog": "Inspect live catalog",
     "structured_data_read": "Analyze query results",
     "raw_sql_read": "Run read queries",
+    "explain_queries": "Explain query plans",
+    "analyze_queries": "Run & analyze query plans",
+    "monitor_queries": "Monitor live queries",
     "raw_sql_write": "Prepare write SQL",
 }
 CAPABILITY_LABELS.update({policy.capability: policy.label for policy in ACTION_POLICIES.values()})
@@ -243,6 +265,7 @@ CAPABILITY_LABELS["design_changes"] = "Edit workspace design"
 
 TOOL_ACTIONS = {
     "schemii_read_query": ("query.read",),
+    "schemii_explain_query": ("query.explain", "query.analyze"),
     "schemii_browse_rows": ("query.browse",),
     "schemii_list_relations": ("query.browse",),
     "schemii_open_console": ("query.draft",),
@@ -260,6 +283,14 @@ TOOL_ACTIONS = {
 
 
 def tool_action_ids(name, arguments=None):
+    if name == "schemii_raw_console":
+        from .raw_actions import required_actions
+        return required_actions(arguments) if arguments else tuple(f"console.{op}" for op in OPERATIONS)
+    if name == "schemii_app_action":
+        from .app_actions import APP_PERMISSIONS, permission_id
+        return (permission_id(arguments),) if arguments else tuple(APP_PERMISSIONS)
+    if name == "schemii_explain_query" and arguments is not None:
+        return ("query.analyze" if arguments.get("analyze") is True else "query.explain",)
     if name == "schemii_design_change":
         return tuple(item["id"] for item in permission_descriptors()
                      if item["id"].rsplit(".", 1)[-1] in {"create", "update", "delete"})
@@ -274,7 +305,9 @@ def tool_enabled(name, capabilities, arguments=None):
     This is availability, not execution authorization: design payloads are checked
     against actual object changes by the design service before saving/executing.
     """
-    if name in {"schemii_list_read_runs", "schemii_get_read_results"}:
+    if name == "schemii_query_activity":
+        return bool(getattr(capabilities, "monitor_queries", False))
+    if name in {"schemii_list_read_runs", "schemii_get_read_results", "schemii_raw_results"}:
         return bool(getattr(capabilities, "structured_data_read", False))
     modes = action_modes(capabilities)
     return any(modes.get(action_id, "disabled") != "disabled"
@@ -304,6 +337,10 @@ def tool_definitions(capabilities: Any) -> list[dict[str, Any]]:
     definitions = action.pop("$defs", {})
     summary = {"type": "string", "maxLength": 2048, "description": "A short, user-readable explanation of the proposed action."}
     schemas = {
+        "schemii_explain_query": {
+            "description": "Explain one read-only SELECT using PostgreSQL JSON plans. Defaults to estimates only. Set analyze true only when actual execution is requested: it runs the entire query in a fresh read-only transaction and may be expensive. Independent query.explain or query.analyze permission and approval policy applies; raw read permission does not grant either. Analyze query results separately controls result disclosure. Results are bounded evidence; estimates are not measurements, and equal row counts do not prove equivalence. This explains the full statement, not an existing cursor snapshot.",
+            "parameters": ExplainQuery.model_json_schema(),
+        },
         "schemii_design_change": {
             "description": "Save desired-schema changes under individual action permissions. Automatic actions execute directly; Ask actions pause as one batch. A disabled action blocks the batch. For related changes use action type batch with an actions array: saves atomically as one design revision, not a live migration. Batches cannot nest. Use existing IDs from CONTEXT.design for references and replacements. add_table/add_column generate new IDs on the server. For put operations omit the object's id to create, or supply an existing id to replace. Prefer add_table when creating tables with new columns and keys; full table replacements must retain existing child IDs. update_column changes only supplied fields; omit fields you do not want to change.",
             "parameters": {"type": "object", "properties": {"summary": summary, "action": action},
@@ -416,14 +453,28 @@ def _normalized_design_action(parsed: BaseModel) -> dict[str, Any]:
 def normalize_tool_call(name: str, value: dict[str, Any]) -> ToolProposal:
     """Convert untrusted model arguments into a typed proposal envelope."""
 
+    if name == "schemii_explain_query":
+        from schemii.common.postgres.query_plans import build_explain_sql
+        request = ExplainQuery.model_validate(value)
+        sql = build_explain_sql(request.sql, analyze=request.analyze)
+        return ToolProposal("analyze_queries" if request.analyze else "explain_queries", "data_read", request.summary, {
+            "queries": [{"label": "Measured PostgreSQL plan" if request.analyze else "Estimated PostgreSQL plan", "sql": sql}],
+            "explainRequest": request.model_dump(),
+        })
     if name in ADAPTER_TOOLS:
         capability, kind, model, description = ADAPTER_TOOLS[name]
         action = ({"structuredQueries": [item.model_dump() for item in TypeAdapter(list[actions.RelationRead]).validate_python(value.get("queries"))]}
-                  if model is None else model.model_validate(value).model_dump())
+                  if model is None else model.model_validate(value).model_dump(exclude_unset=name == "schemii_app_action"))
         if name == "schemii_browse_rows" and not action["structuredQueries"]:
             raise ValueError("At least one structured query is required")
         if name == "schemii_reset_design":
             action["reset"] = True
+        if name == "schemii_app_action":
+            from .app_actions import OPERATIONS as APP_OPERATIONS
+            operation = AppAction.model_validate(value).root.operation
+            return ToolProposal(capability, kind, APP_OPERATIONS[operation].label, action, operation.startswith("delete_"))
+        if name == "schemii_raw_console":
+            return ToolProposal(capability, kind, "Console: " + action["operation"].replace("_", " "), action, action["operation"] in {"execute", "commit", "rollback", "close", "copy_upload"} or bool(action.get("analyze")))
         return ToolProposal(capability, kind, description, action, kind in {"sql_write", "migration_apply", "design_history", "migration_resolve"})
     if name == "schemii_design_change":
         raw_action = value.get("action")
@@ -454,11 +505,12 @@ def normalize_tool_call(name: str, value: dict[str, Any]) -> ToolProposal:
         queries = TypeAdapter(list[ReadQuery]).validate_python(raw_queries)
         if not queries:
             raise ValueError("At least one read query is required")
+        action = {"queries": [query.model_dump() for query in queries]}
         return ToolProposal(
-            "raw_sql_read",
+            read_capabilities(action)[0],
             "data_read",
             str(value.get("summary") or "Run read-only query")[:2048],
-            {"queries": [query.model_dump() for query in queries]},
+            action,
         )
     if name == "schemii_open_console":
         sql = str(value.get("sql", "")).strip()
@@ -482,6 +534,8 @@ def normalize_tool_call(name: str, value: dict[str, Any]) -> ToolProposal:
 
 
 def proposal_tool_arguments(name, summary, action):
+    if name == "schemii_explain_query":
+        return action["explainRequest"]
     if name == "schemii_read_query":
         return {"summary": summary, **{key: action[key] for key in ("queries", "sql") if key in action}}
     if name == "schemii_design_change":

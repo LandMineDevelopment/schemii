@@ -251,11 +251,12 @@ def test_result_owner_check_precedes_page_or_cancel(services):
         page=lambda *args: pytest.fail("must not page another owner's results"),
         cancel=lambda *args: pytest.fail("must not cancel another owner's execution"))
     for operation, args in [("get_result_page", {"executionId": EXECUTION_ID, "resultId": RESULT_ID}),
-                             ("cancel_execution", {"executionId": EXECUTION_ID})]:
+                             ("cancel_execution", {"executionId": EXECUTION_ID}),
+                             ("export_result", {"executionId": EXECUTION_ID, "resultId": RESULT_ID})]:
         with pytest.raises(ApiProblem) as error:
             run(services, operation, args, owner="bob")
         assert error.value.status_code == 404
-    assert calls == [("bob", EXECUTION_ID), ("bob", EXECUTION_ID)]
+    assert calls == [("bob", EXECUTION_ID)] * 3
 
 
 def test_result_sampling_enforces_rows_bytes_and_discloses_skipped_page_rows(services):
@@ -284,3 +285,74 @@ def test_provider_schema_uses_portable_discriminated_unions():
     assert '"oneOf"' not in schema
     assert '"discriminator"' not in schema
     assert '"anyOf"' in schema
+
+
+def test_new_diagnostics_default_disabled_and_analysis_cannot_be_smuggled():
+    from schemii.schemoo.conversations import Conversations
+    service = object.__new__(Conversations)
+    service.adapter = ai_tools
+    modes = service.modes({"execute_model": "automatic"})
+    for action in ("explain_model", "analyze_model", "get_activity"):
+        assert modes[action] == "disabled"
+        assert service.modes({action: "automatic"})[action] == "automatic"
+    assert modes["execute_model"] == "automatic"
+    with pytest.raises(ValidationError):
+        ai_tools._ARGUMENTS["explain_model"].model_validate({
+            "expectedRevision": 1, "explore": EXPLORE, "analyze": True,
+        })
+
+
+def test_download_handoffs_are_owned_disabled_and_do_not_disclose_rows(services, model):
+    result = run(services, "export_model", model=model["id"])
+    assert result == {"effect": "browser_download", "url": f'/api/v1/schemoo/models/{model["id"]}',
+                      "filename": "semantic-model.json"}
+    with pytest.raises(ApiProblem):
+        run(services, "export_model", model=model["id"], owner="bob")
+    calls = []
+    def owned(owner, execution_id):
+        calls.append((owner, execution_id))
+        return SimpleNamespace(results=[SimpleNamespace(id=RESULT_ID, rows=[["private"]])])
+    services.console = SimpleNamespace(get_owned=owned)
+    result = run(services, "export_result", {"executionId": EXECUTION_ID, "resultId": RESULT_ID})
+    assert calls == [("alice", EXECUTION_ID)]
+    assert result["url"].endswith(f"/{RESULT_ID}/export.csv")
+    assert "private" not in str(result)
+    with pytest.raises(ApiProblem):
+        run(services, "export_result", {"executionId": EXECUTION_ID, "resultId": "res_" + "e" * 32})
+    for name in ("export_model", "export_result"):
+        assert ai_tools.ACTIONS[name]["defaultMode"] == "disabled"
+
+
+def test_logical_connections_use_existing_model_write_permissions(services, model):
+    action = {"operation": "patch_model", "args": {"expectedRevision": 1,
+        "nodes": {"upsert": [{"id": "manager", "table": "people", "label": "Manager"}]},
+        "edges": {"upsert": [{"id": "logical_manager", "kind": "logical", "source": "people",
+            "target": "manager", "sourceColumn": "id", "targetColumn": "id"}]}}}
+    assert ai_tools.permission_id(action) == "patch_model"
+    saved = run(services, "patch_model", action["args"], model["id"])
+    assert saved["revision"] == 2
+    edge = run(services, "get_model", model=model["id"])["definition"]["edges"][0]
+    assert edge["kind"] == "logical" and edge["sourceColumn"] == "id"
+    with pytest.raises(ApiProblem) as forbidden:
+        run(services, "patch_model", {**action["args"], "expectedRevision": 2}, model["id"], owner="bob")
+    assert forbidden.value.status_code == 404
+
+
+def test_ai_logical_connection_rejects_types_and_preserves_starting_table(services, model):
+    args = {"expectedRevision": 1,
+        "nodes": {"upsert": [{"id": "manager", "table": "people", "label": "Manager"}]},
+        "edges": {"upsert": [{"id": "drawn", "kind": "logical", "source": "manager",
+            "target": "people", "sourceColumn": "id", "targetColumn": "name"}]}}
+    with pytest.raises(ApiProblem) as rejected:
+        run(services, "patch_model", args, model["id"])
+    assert rejected.value.status_code == 422
+    assert "comparable types" in str(rejected.value)
+    assert services.models.get("alice", model["id"]).revision == 1
+    args["edges"]["upsert"][0]["targetColumn"] = "id"
+    run(services, "patch_model", args, model["id"])
+    saved = run(services, "get_model", model=model["id"])
+    assert saved["definition"]["root"] == "people"
+    planned = run(services, "plan_model", {"expectedRevision": 2, "explore": {
+        "fields": [{"table": "people", "column": "name"}, {"table": "manager", "column": "name"}]}}, model["id"])
+    assert 'FROM "public"."people" AS t0' in planned["sql"]
+    assert 't0."name" AS "People.name"' in planned["sql"]

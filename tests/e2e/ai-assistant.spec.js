@@ -369,7 +369,10 @@ test("assistant provides formatted messages, model, permissions, and history", a
   await assistant.getByRole("button", { name: "Assistant settings" }).click();
   const settings = page.getByRole("dialog", { name: "Model & permissions" });
   await expect(settings).toBeVisible();
-  await expect(settings.getByRole("checkbox")).toHaveCount(2);
+  for (const name of ["liveCatalog", "structuredDataRead", "monitorQueries"]) {
+    await expect(settings.locator(`input[type="checkbox"][name="${name}"]`)).toBeVisible();
+  }
+  await expect(settings.getByRole("checkbox", { name: "Select all actions", exact: true })).toBeVisible();
   const permissionResponse = await request.get("/api/v1/schemii/ai/settings");
   expect(permissionResponse.ok()).toBe(true);
   const descriptors = (await permissionResponse.json()).permissionActions;
@@ -403,7 +406,7 @@ test("assistant provides formatted messages, model, permissions, and history", a
   const preferenceRequest = page.waitForRequest(request => request.method() === "PUT" && request.url().endsWith("/preferences"));
   await saveSettings.click();
   const savedCapabilities = (await preferenceRequest).postDataJSON().capabilities;
-  expect(Object.keys(savedCapabilities).sort()).toEqual(["actionModes", "liveCatalog", "structuredDataRead"]);
+  expect(Object.keys(savedCapabilities).sort()).toEqual(["actionModes", "liveCatalog", "monitorQueries", "structuredDataRead"]);
   expect(savedCapabilities.actionModes["indexes.create"]).toBe("automatic");
   expect(savedCapabilities.actionModes["tables.delete"]).toBe("disabled");
   await expect(settings).toBeHidden();

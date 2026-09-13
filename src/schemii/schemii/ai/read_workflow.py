@@ -74,7 +74,7 @@ def run_read_workflow(service, owner, chat, turn, system, prompt,
 
     def observe(value):
         nonlocal used_rows, rerun
-        used_rows |= _contains(value, "rows")
+        used_rows |= _contains(value, "rows") or _contains(value, "transientData")
         rerun |= _contains(value, "rerun") or _contains(value, "rerunOf")
         if isinstance(value, dict) and value.get("approvalRequired"):
             pending.extend(_references(value, "proposalId"))
@@ -220,7 +220,8 @@ def run_read_workflow(service, owner, chat, turn, system, prompt,
         rounds += 1
         reply = service.runtime.run(owner, turn.id, chat.provider_id, chat.model_id,
                                     request_system, prompt, tools,
-                                    on_text=on_text, is_authorized=is_authorized, messages=messages)
+                                    on_text=on_text, is_authorized=is_authorized, messages=messages,
+                                    reasoning_effort=getattr(chat, "reasoning_effort", "default"))
         check()
         if finalizing and (reply.tool_calls or not reply.text.strip()):
             raise round_limit_error
@@ -297,7 +298,7 @@ def run_read_workflow(service, owner, chat, turn, system, prompt,
                                 proposal_digest=proposal.digest, confirmed=True))
                             check()
                             result = operation_context(operation)
-                            if operation.kind != "data_read" and operation.status == "succeeded":
+                            if operation.kind not in {"data_read", "raw_console", "app_action"} and operation.status == "succeeded":
                                 system = service._refresh_tool_context(owner, chat, system)
                             record_stage("query" if name == "schemii_read_query" else "action", "completed", "Action result available")
                         if name == "schemii_design_change":

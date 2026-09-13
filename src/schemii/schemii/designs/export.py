@@ -118,6 +118,12 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
                 f"CREATE {unique}INDEX {_quote(index.name)} ON {_quote(table.name)} "
                 f"USING {_quote(index.method)} ({', '.join(entries)})"
             )
+            if index.include_column_ids:
+                included = ", ".join(
+                    _quote(column_by_id[column_id].name)
+                    for column_id in index.include_column_ids
+                )
+                statement += f" INCLUDE ({included})"
             if index.predicate:
                 statement += f" WHERE {index.predicate.strip()}"
             lines.extend([statement + ";", ""])

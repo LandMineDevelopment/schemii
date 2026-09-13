@@ -336,6 +336,15 @@ def validate_design_content(content: SchemiiDesignContent) -> None:
                     "Indexes may reference unique columns on their own table only",
                     details={"table": table.name, "index": index.name},
                 )
+            if (
+                len(index.include_column_ids) != len(set(index.include_column_ids))
+                or not set(index.include_column_ids) <= column_ids
+                or set(index.include_column_ids) & set(index.column_ids)
+            ):
+                raise DesignValidationError(
+                    "Included index columns must be unique local columns and cannot be key columns",
+                    details={"table": table.name, "index": index.name},
+                )
             if index.expression is not None:
                 if not index.expression.strip():
                     raise DesignValidationError(

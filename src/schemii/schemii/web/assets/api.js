@@ -25,6 +25,15 @@ function publicConnection(value) {
 }
 
 export const api = Object.freeze({
+  listRawSessions: workspaceId => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions`),
+  createRawSession: (workspaceId, body) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions`, { method: "POST", body }),
+  getRawSession: (workspaceId, id) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions/${encodeURIComponent(id)}`),
+  closeRawSession: (workspaceId, id) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runRawSql: (workspaceId, id, sql, commitMode = "manual") => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions/${encodeURIComponent(id)}/executions`, { method: "POST", body: { sql, commitMode } }),
+  explainRawSql: (workspaceId, id, sql, analyze, commitMode = "manual") => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions/${encodeURIComponent(id)}/explain`, { method: "POST", body: { sql, analyze, commitMode } }),
+  getRawExecution: (workspaceId, sessionId, id) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions/${encodeURIComponent(sessionId)}/executions/${encodeURIComponent(id)}`),
+  getRawActivity: (workspaceId, id) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions/${encodeURIComponent(id)}/activity`, { timeoutMs: 10000 }),
+  cancelRawSession: (workspaceId, id) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/sessions/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} }),
   session: options => requestJson(`${API_ROOT}/session`, options),
   readiness: options => requestJson(`${API_ROOT}/readiness`, options),
   async listConnections(options) {
@@ -108,6 +117,8 @@ export const api = Object.freeze({
   createConsoleSavedQuery: (workspaceId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries`, { ...options, method: "POST", body }),
   updateConsoleSavedQuery: (workspaceId, queryId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries/${encodeURIComponent(queryId)}`, { ...options, method: "PATCH", body }),
   deleteConsoleSavedQuery: (workspaceId, queryId, expectedRevision, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/saved-queries/${encodeURIComponent(queryId)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
+  explainConsoleQuery: (workspaceId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/explain`, { ...options, method: "POST", body }),
+  getConsoleActivity: executionId => consoleRequest(`${API_ROOT}/common/query-executions/${encodeURIComponent(executionId)}/activity`, { timeoutMs: 10000 }),
   createConsoleExecution: (workspaceId, body, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions`, { ...options, method: "POST", body }),
   getConsoleExecution: (workspaceId, executionId, options) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, options),
   cancelConsoleExecution: (workspaceId, executionId, options = {}) => consoleRequest(`${API_ROOT}/schemii/workspaces/${encodeURIComponent(workspaceId)}/console/executions/${encodeURIComponent(executionId)}`, { ...options, method: "DELETE" }),
