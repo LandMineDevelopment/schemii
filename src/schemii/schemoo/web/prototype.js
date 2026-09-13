@@ -288,9 +288,9 @@ function renderSelection() {
     };
     host.append(labeled("Business label",label),alias,aliasForm,element("p",{className:"hint",text:"Aliases have their own available foreign-key connections. Enable only the paths needed for this role."}));
     const missingSource=!catalog.tables.some(t=>t.name===node.table);
-    if(isAlias(node)||missingSource) host.append(icon("delete",`${missingSource ? "Remove missing object" : "Delete alias"} ${node.label}`,()=>{
+    if(!node.derivation) host.append(icon("delete",`${missingSource ? "Remove missing object" : "Remove from model"} ${node.label}`,()=>{
       const impact=aliasImpact(draft,node.id);
-      if(!confirm(`Remove model object “${node.label}”? This removes ${impact.connections} connections and ${impact.fields} selected output fields. ${impact.bindings} filter conditions will need a new source binding. ${impact.isRoot?"Another available object becomes the starting object. ":""}The physical table and its data are not deleted.`))return;
+      if(!confirm(`Remove model object “${node.label}”? This removes ${impact.connections} connections and ${impact.fields} selected output fields. ${impact.bindings} filter conditions will need a new source binding. ${impact.isRoot?"Another available object becomes the starting object. ":""}The physical table or view and its data are not deleted.`))return;
       try {removeModelNode(draft,node.id);} catch(error) {showError(error.message);return;}
       selected=null;diagnostics={};refreshForms();changed();
       showError(impact.bindings ? "Object removed. Rebind its affected filter conditions before running the model." : "");
@@ -408,8 +408,48 @@ function addAlias(table, label, source = draft.nodes.find(n => n.table === table
   inspectSelection();
   $("table-pane").scrollTop=0;
 }
+function addTable(table) {
+  if (draft.nodes.some(node => !node.derivation && node.id === table && node.table === table)) {
+    showError(`“${table}” is already in this model.`); return;
+  }
+  const source = catalog.tables.find(candidate => candidate.name === table);
+  if (!source) { showError(`“${table}” is not available from this source.`); return; }
+  const position = catalog.positions?.find(candidate => candidate.name === table);
+  const node = { id: table, table, label: table,
+    ...(Number.isFinite(position?.x) && Number.isFinite(position?.y) ? { x: position.x, y: position.y } : {}) };
+  draft.nodes.push(node);
+  const canonical = new Map(draft.nodes.filter(candidate => !candidate.derivation && candidate.id === candidate.table)
+    .map(candidate => [candidate.table, candidate.id]));
+  const tuples = new Set(draft.edges.map(edge => JSON.stringify([edge.relationshipId, edge.source, edge.target])));
+  const ids = new Set(draft.edges.map(edge => edge.id));
+  for (const relationship of catalog.relationships) {
+    const sourceId = canonical.get(relationship.sourceTable), targetId = canonical.get(relationship.targetTable);
+    if (!sourceId || !targetId) continue;
+    const tuple = JSON.stringify([relationship.id, sourceId, targetId]);
+    if (tuples.has(tuple)) continue;
+    let id = `source_fk_${relationship.id}`, suffix = 2;
+    while (ids.has(id)) id = `source_fk_${relationship.id}_${suffix++}`;
+    draft.edges.push({ id, relationshipId: relationship.id, source: sourceId, target: targetId, enabled: false });
+    ids.add(id); tuples.add(tuple);
+  }
+  ensureAliasConnections(draft, catalog);
+  selected = { node: node.id }; diagnostics = {}; refreshForms(); changed({ structure: true }); inspectSelection();
+  $("table-pane").scrollTop = 0;
+}
 function renderAliasTools() {
-  const host=$("alias-tools"); disposeSelects(host); host.replaceChildren(helpHeading("Table aliases", "aliases"));
+  const host=$("alias-tools"); disposeSelects(host); host.replaceChildren(helpHeading("Model tables", "model"));
+  const present = new Set(draft.nodes.filter(node => !node.derivation && node.id === node.table).map(node => node.table));
+  let tableToAdd = "";
+  const tableSource = modelSelect("Table to add", [["", "Choose a table or view"], ...catalog.tables
+    .filter(candidate => !present.has(candidate.name)).map(candidate => [candidate.name, candidate.name])], tableToAdd, value => {
+    tableToAdd = value; addTableButton.disabled = !tableToAdd;
+  });
+  const addTableButton = element("button", { type:"button", className:"ui-button", text:"Add table to model" });
+  addTableButton.disabled = true;
+  addTableButton.onclick = () => addTable(tableToAdd);
+  host.append(labeled("Available database object", tableSource), addTableButton,
+    element("p", { className:"hint", text:"Adds this table or materialized view to this model only. Its available foreign-key connections start disabled so you can choose the query paths." }),
+    helpHeading("Table aliases", "aliases"));
   const open=element("button", {type:"button",className:"ui-button",text:"Add alias",attrs:{"data-ui-tooltip":"Create another named role for an existing table; no database table is copied."}});
   const form=element("div", {attrs:{hidden:""}});
   const selectedSource=draft.nodes.find(node=>node.id===selected?.node && catalog.tables.some(table=>table.name===node.table));
