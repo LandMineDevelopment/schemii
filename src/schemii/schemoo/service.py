@@ -83,7 +83,8 @@ def patch_model_definition(services, owner, model_id, body):
         definition=definition, catalog_fingerprint=current.catalog_fingerprint))
 
 
-def plan_query(catalog, definition, explore, fingerprint=""):
+def plan_query(catalog, definition, explore, fingerprint="", *, _bounded=True,
+               _participation_fields=None, _scope_outer_nodes=None):
     rules, query = document(definition), document(explore)
     if not query.get("root"):
         query["root"] = rules.get("root", "")
@@ -107,7 +108,9 @@ def plan_query(catalog, definition, explore, fingerprint=""):
     try:
         combined = {**rules, **query}
         diagnostics = analyze_model(catalog, combined)
-        result = compile_preview(catalog, combined)
+        result = compile_preview(catalog, combined, _bounded=_bounded,
+                                 _participation_fields=_participation_fields,
+                                 _scope_outer_nodes=_scope_outer_nodes)
     except ValueError as error:
         raise ApiProblem(422, "invalid_model_query", str(error),
                          details={**diagnostics, **getattr(error, "details", {})}) from error
@@ -117,12 +120,13 @@ def plan_query(catalog, definition, explore, fingerprint=""):
     return {**diagnostics, **result, "sourceIssues": issues, "catalogFingerprint": catalog["fingerprint"]}
 
 
-def execute_query(services, owner, model, console_id, plan, tasks):
+def execute_query(services, owner, model, console_id, plan, tasks, *, row_page_size=None):
     if services.console is None:
         raise ApiProblem(503, "console_unavailable", "Read preview execution is unavailable.")
+    options = {} if row_page_size is None else {"row_page_size": row_page_size}
     receipt = services.console.reserve_read_target(
         owner, connection_id=model.connection_id, database=model.database,
-        namespace=model.namespace, console_id=console_id, statements=[plan["sql"]])
+        namespace=model.namespace, console_id=console_id, statements=[plan["sql"]], **options)
     tasks.add_task(services.console.run, owner, receipt.id)
     return {"plan": plan, "execution": document(receipt),
             "executionUrl": f"/api/v1/common/query-executions/{receipt.id}"}

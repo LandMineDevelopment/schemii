@@ -476,7 +476,7 @@ def test_available_products_share_one_navigation_contract() -> None:
     assert 'activeProduct: "schemoo"' in schemoo_source
     assert '{ id: "schemii", name: "Schemii", description: "Schema design", href: "/" }' in navigation
     assert '{ id: "schemoo", name: "Schemoo", description: "Semantic models", href: "/schemoo" }' in navigation
-    assert '{ id: "schemer", name: "Schemer", description: "Reports · coming later", href: null }' in navigation
+    assert '{ id: "schemer", name: "Schemer", description: "Analytics dashboards", href: "/schemer" }' in navigation
 
 
 def test_api_map_uses_only_the_live_same_origin_openapi_contract() -> None:
@@ -624,3 +624,17 @@ def test_frontends_use_explicit_shared_state_and_text_action_contracts() -> None
     assert map_html.count('class="ui-state__mark"') == 2
     assert 'className: "swagger-link ui-button compact"' in map_source
     assert index.count("ui-button compact") >= 20
+
+
+def test_schemer_frontend_serves_modules_with_authorized_import_map():
+    from schemii.schemer.frontend import SCHEMER_IMPORT_MAP
+    from schemii.common.api.middleware import SCHEMER_IMPORT_MAP_DIGEST
+
+    api = TestClient(create_app(), base_url="http://localhost")
+    page = api.get("/schemer")
+    assert page.status_code == 200
+    assert re.findall(r'<script type="importmap">(.*?)</script>', page.text) == [SCHEMER_IMPORT_MAP]
+    assert f"'sha256-{SCHEMER_IMPORT_MAP_DIGEST}'" in page.headers["content-security-policy"]
+    assert api.head("/schemer").status_code == 200
+    for name in ("studio.js", "studio.css", "report-state.js"):
+        assert api.get(f"/schemer-assets/{name}").status_code == 200

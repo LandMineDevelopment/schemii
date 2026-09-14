@@ -122,8 +122,11 @@ it does not create columns or indexes. Inspect the live catalog first. Do not
 silently replace paired date predicates unless the range's bounds and null
 semantics are known to match. Keep the existing scope kind and rowBehavior.
 Text contains is a separate operator and must not be used for date ranges.
-Scope kind controls activation: required always includes its paths; conditional
-only applies to participating sources, including intermediate paths. Independently,
+Scope kind controls evaluation reach: required always includes its paths; conditional
+only evaluates participating sources, including intermediate paths. The independent
+requirement facet may be required or optional. Required scopes apply according to their
+reach; optional scopes do nothing unless Schemer exposes them and the query selection
+explicitly marks them active. Independently,
 rowBehavior=require_matching restricts returned details and excludes unmatched
 parents; keep_unmatched prefilters sources before optional joins. Omitted/null
 rowBehavior preserves legacy behavior: required requires matches, conditional

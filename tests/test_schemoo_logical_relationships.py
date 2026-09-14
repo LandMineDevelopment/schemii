@@ -113,10 +113,11 @@ def test_claimed_many_to_one_cannot_bypass_actual_hierarchy_multiplicity(catalog
     request = query(fields=[{"table": "facts", "column": "amount", "aggregate": aggregate},
                             {"table": "hierarchy", "column": "parent_id"}])
     request["edges"][0]["cardinality"] = "many_to_one"
-    with pytest.raises(ModelValidationError, match="separate aggregate source"):
-        compile_preview(catalog, request)
+    result = compile_preview(catalog, request)
+    assert any("repeated rows from joins" in warning for warning in result["warnings"])
     catalog["tables"][1]["uniqueKeys"] = [["child_id"]]
-    compile_preview(catalog, request)
+    result = compile_preview(catalog, request)
+    assert not any("repeated rows from joins" in warning for warning in result["warnings"])
 
 
 @pytest.mark.parametrize("side,column", [("source", "org_id"), ("target", "child_id")])

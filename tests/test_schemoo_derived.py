@@ -427,10 +427,10 @@ def test_unused_output_conditions_are_not_executed_and_drift_detects_their_sourc
 
 
 @pytest.mark.parametrize("kind,column", [("row", "total"), ("aggregate", "n")])
-def test_reaggregating_calculated_values_rejects_outer_branch_multiplication(kind, column):
+def test_reaggregating_calculated_values_warns_about_outer_branch_multiplication(kind, column):
     query = request(kind, fields=[{"table": "derived", "column": column, "aggregate": "sum"}, {"table": "assignment", "column": "name"}])
-    with pytest.raises(ValueError, match="inflated"):
-        compile_preview(CATALOG, query)
+    result = compile_preview(CATALOG, query)
+    assert any("repeated rows from joins" in warning for warning in result["warnings"])
 
 
 def test_summary_values_can_be_summed_without_a_multiplying_branch():

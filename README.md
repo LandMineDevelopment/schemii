@@ -4,6 +4,30 @@ The previous Schemii and Schemer implementation is preserved under [`archive/`](
 
 New unified-backend and Schemii, Schemoo, and Schemer frontend architecture work belongs at the repository root. Archived code should remain unchanged unless an explicit archival correction is required.
 
+## Scope
+
+Schemii is a local, self-hosted PostgreSQL design and analytics workbench made up of three connected products:
+
+- **Schemii** manages saved PostgreSQL connection profiles, editable schema designs, live catalog inspection, Console queries, and migration review.
+- **Schemoo** defines durable semantic models over an explicit saved connection and schema, including relationships, derived fields, and required or optional model scopes.
+- **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore tiles, and drill into retained result sets.
+
+The repository is intentionally a local-development deployment: it has one local prototype principal and no application authentication or public ingress. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
+
+## Installation
+
+Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
+
+```bash
+git clone git@github.com:LandMineDevelopment/schemii.git
+cd schemii
+./start.sh
+```
+
+Open <https://localhost:8001/> after the launcher reports healthy services. `./start.sh` is the supported lifecycle command: it builds current source, starts or refreshes the stack, creates the local TLS certificate and private metadata secrets, and performs health checks. Do not run Compose directly or commit/copy `.schemii/`; it contains local TLS material, database secrets, and the encryption key required to read saved connection passwords.
+
+For a Tailscale-connected device, use the configured private preview at <https://omarchy.taile4f57f.ts.net/>. It remains tailnet-only and is not a public deployment boundary.
+
 ## Application structure
 
 The application uses one composition root and an independent package for each product API. Schemii also owns its packaged, buildless frontend:
@@ -45,6 +69,8 @@ The current API deliberately uses one local application user while product workf
 - `PATCH /api/v1/schemii/workspaces/{id}` renames the owner's saved workspace with a revision check, without renaming its PostgreSQL database/schema or changing its saved design.
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
 - `/schemoo` opens the durable semantic-model editor; `/api/v1/schemoo/models` manages owner-private models over an explicit saved connection and schema.
+- `/schemer` opens saved, model-bound analytics dashboards; `/api/v1/schemer/dashboards` manages dashboard and tile configuration.
+- `POST /api/v1/schemer/dashboards/{id}/executions` compiles tiles into one retained session with independent forward-only cursors. Tile `/executions` starts an individual refresh or drill-through.
 - `/api/v1/common/query-executions/{id}` provides shared read-result paging, cancellation, release, and export without requiring a Schemii workspace.
 - Interactive OpenAPI documentation is available at `/docs`.
 
@@ -53,8 +79,16 @@ Explore inputs in metadata—not query rows or copied credentials. Existing brow
 prototype drafts are imported explicitly and left intact. See the
 [Schemoo architecture and API guide](src/schemii/schemoo/README.md) for source-drift
 handling, configuration limits, shared execution, and the remaining semantic-engine
-limitations. Schemer can consume saved-model plans through the same boundary; model
-publishing, ETL and materialization remain separate future work.
+limitations. Schemer uses the same model root, exposure, relationships, and scope rules.
+Dashboards persist configuration only. Detail reports, aggregate reports, and drill-through grids automatically append
+rows on scroll using the same page loader as Schemii; charts append fetched groups
+on scroll. Short row batches fill the visible viewport automatically. Each cursor advances once, and going back uses
+the cache. Changing slicers, refreshing, or leaving a dashboard releases its cursors.
+Grouped dashboard cursors are protected from LRU eviction until closed or expired;
+full protected capacity rejects new reads. A dashboard supports up to 20 tiles,
+or the configured statement limit if lower. Database execution errors follow the
+shared session transaction contract; cached rows remain available. Model publishing,
+ETL and materialization remain separate future work.
 
 This phase has no application authentication, so the packaged local deployment is explicitly `local-development` and its Compose ingress remains bound to loopback. The configured Tailscale Serve route exposes that loopback listener only to the tailnet and must be protected by tailnet ACLs. It is a preview route, not a public deployment boundary. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures. The server currently rejects an authenticated/public deployment mode instead of silently starting without its future identity adapter.
 

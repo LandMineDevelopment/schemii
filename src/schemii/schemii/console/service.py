@@ -190,6 +190,7 @@ class ConsoleService:
         self._transient_results: dict[str, _TransientConsoleResult] = {}
         self._result_cursors: dict[str, tuple[str, int, datetime]] = {}
         self._transient_results_lock = threading.RLock()
+        self._protected_results: dict[str, datetime] = {}
         self._active_read_sessions: OrderedDict[
             str, _ActiveConsoleReadSession
         ] = OrderedDict()
@@ -370,6 +371,8 @@ class ConsoleService:
         namespace: str,
         console_id: str,
         statements: list[str],
+        row_page_size: int | None = None,
+        protect_result: bool = False,
     ) -> ConsoleExecution:
         """Reserve product-compiled reads without manufacturing a Schemii workspace.
 
@@ -397,12 +400,21 @@ class ConsoleService:
             statements=statements,
         )
         target = ConsoleTarget(profile.id, profile.revision, database, namespace)
-        return self._reserve_read(owner_id, None, None, target, request)
+        receipt = self._reserve_read(owner_id, None, None, target, request, row_page_size=row_page_size)
+        if protect_result:
+            with self._transient_results_lock:
+                self._purge_transient_results(self._clock())
+                self._protected_results[receipt.id] = self._clock() + self._result_ttl
+        return receipt
 
     def _reserve_read(
         self, owner_id: str, workspace_id: str | None, workspace_revision: int | None,
-        target: ConsoleTarget, request: ManagedReadCreate,
+        target: ConsoleTarget, request: ManagedReadCreate, *, row_page_size: int | None = None,
     ) -> ConsoleExecution:
+        if row_page_size is not None and (type(row_page_size) is not int or not 1 <= row_page_size <= self._row_page_size):
+            raise ConsoleServiceError(422, "console_page_size_limit",
+                                      f"Rows per batch must be between 1 and {self._row_page_size}",
+                                      details={"maximumRowPageSize": self._row_page_size})
         try:
             self._repository.prune_operational_receipts(
                 self._clock() - self._result_ttl
@@ -437,7 +449,7 @@ class ConsoleService:
                 workspace_revision,
                 target,
                 statements,
-                preferences.row_page_size,
+                row_page_size if row_page_size is not None else preferences.row_page_size,
                 self._clock(),
             )
         except ConsoleRepositoryError as error:
@@ -829,6 +841,7 @@ class ConsoleService:
                 active.postgres for active in self._active_read_sessions.values()
             ]
             self._active_read_sessions.clear()
+            self._protected_results.clear()
             self._transient_results.clear()
             self._result_cursors.clear()
         for read_session in read_sessions:
@@ -862,6 +875,7 @@ class ConsoleService:
             raise self._repository_error(error) from error
         with self._transient_results_lock:
             retained = self._active_read_sessions.get(execution_id)
+            self._protected_results.pop(execution_id, None)
         if retained is not None:
             cancel_read = getattr(retained.postgres, "cancel", None)
             if callable(cancel_read):
@@ -945,7 +959,7 @@ class ConsoleService:
                 result["monitoringMessage"] = "Database activity is temporarily unavailable; execution continues."
         return result
 
-    def page(self, owner_id, workspace_id, execution_id, result_id, cursor) -> ConsoleResultPage:
+    def page(self, owner_id, workspace_id, execution_id, result_id, cursor, *, page_size=None) -> ConsoleResultPage:
         receipt = self.get(owner_id, workspace_id, execution_id)
         now = self._clock()
         with self._transient_results_lock:
@@ -953,6 +967,10 @@ class ConsoleService:
             result = self._transient_results.get(result_id)
             if result is None or result.pending_close or result.owner_id != owner_id or result.execution_id != receipt.id:
                 raise ConsoleServiceError(410, "console_result_replay_required", "This result is no longer available; run the query again")
+            batch_size = result.page_size if page_size is None else page_size
+            if type(batch_size) is not int or not 1 <= batch_size <= min(result.page_size, self._row_page_size):
+                raise ConsoleServiceError(422, "console_page_size_limit",
+                    f"Rows per batch must be between 1 and {min(result.page_size, self._row_page_size)}")
             offset = 0
             if cursor is not None:
                 value = self._result_cursors.pop(cursor, None)
@@ -964,13 +982,13 @@ class ConsoleService:
                 self._active_read_sessions.move_to_end(execution_id)
         try:
             with self._operation(execution_id, "fetching", result.query.statement_index) as state:
-                rows = result.query.rows[offset:offset + result.page_size] if result.read_session is None else result.read_session.page(result.query.statement_index, offset, result.page_size)
+                rows = result.query.rows[offset:offset + batch_size] if result.read_session is None else result.read_session.page(result.query.statement_index, offset, batch_size)
                 buffered = getattr(result.read_session, "has_buffered_rows", lambda _: False)(result.query.statement_index)
                 with self._active_targets_lock:
                     state["fetchedRows"] = state.get("fetchedRows", 0) + len(rows)
             next_offset = offset + len(rows)
             count = result.query.row_count
-            has_more = (len(rows) == result.page_size or buffered) if result.read_session is not None and count is None else next_offset < (count if count is not None else len(result.query.rows))
+            has_more = (len(rows) == batch_size or buffered) if result.read_session is not None and count is None else next_offset < (count if count is not None else len(result.query.rows))
             if not has_more:
                 with self._active_targets_lock:
                     indexes = state.setdefault("completedStatementIndexes", [])
@@ -1014,6 +1032,8 @@ class ConsoleService:
                 if value[0] != result_id
             }
             self._close_unreferenced_read_sessions()
+            if not any(item.execution_id == execution_id for item in self._transient_results.values()):
+                self._protected_results.pop(execution_id, None)
 
     def export_csv(
         self,
@@ -1131,6 +1151,10 @@ class ConsoleService:
         summaries = {item.statement_index: item for item in execution.results}
         with self._transient_results_lock:
             self._purge_transient_results(self._clock())
+            if execution.id in self._protected_results:
+                self._protected_results[execution.id] = expires_at
+            if not summaries:
+                self._protected_results.pop(execution.id, None)
             for query in results:
                 summary = summaries.get(query.statement_index)
                 if summary is None:
@@ -1159,20 +1183,24 @@ class ConsoleService:
                     len(self._active_read_sessions)
                     > self._maximum_live_read_sessions
                 ):
-                    evicted_execution, evicted = self._active_read_sessions.popitem(
-                        last=False
-                    )
-                    if any(
-                        transient.execution_id == evicted_execution
-                        and transient.active_exports > 0
-                        for transient in self._transient_results.values()
-                    ):
-                        self._active_read_sessions[evicted_execution] = evicted
-                        self._active_read_sessions.move_to_end(evicted_execution)
-                        break
+                    candidate = next(((key, value) for key, value in self._active_read_sessions.items()
+                        if key != execution.id and self._read_session_evictable(key)), None)
+                    if candidate is None:
+                        # Concurrent admissions may fill capacity after the preflight.
+                        # Release this newly admitted result, never an existing lease.
+                        self._active_read_sessions.pop(execution.id)
+                        self._protected_results.pop(execution.id, None)
+                        for key in [key for key, value in self._transient_results.items() if value.execution_id == execution.id]:
+                            self._transient_results.pop(key)
+                        read_session.close()
+                        raise PostgresConnectionCapacityError("console.results.maximum_live_read_sessions",
+                            self._maximum_live_read_sessions, len(self._active_read_sessions) + 1)
+                    evicted_execution, evicted = candidate
+                    self._active_read_sessions.pop(evicted_execution)
                     self._evict_read_session(evicted_execution, evicted)
 
     def _purge_transient_results(self, now: datetime) -> None:
+        self._protected_results = {key: expires for key, expires in self._protected_results.items() if expires > now}
         with self._active_targets_lock:
             for key, value in list(self._activity.items()):
                 if not value.get("active") and time.monotonic() - value.get("started", 0) > self._result_ttl.total_seconds():
@@ -1181,8 +1209,12 @@ class ConsoleService:
             result_id for result_id, result in self._transient_results.items()
             if (result.expires_at <= now or result.pending_close) and result.active_exports == 0
         }
+        released_executions = {self._transient_results[result_id].execution_id for result_id in expired}
         for result_id in expired:
             self._transient_results.pop(result_id, None)
+        remaining_executions = {result.execution_id for result in self._transient_results.values()}
+        for execution_id in released_executions - remaining_executions:
+            self._protected_results.pop(execution_id, None)
         self._result_cursors = {
             token: value for token, value in self._result_cursors.items()
             if value[0] not in expired and value[2] > now
@@ -1198,16 +1230,17 @@ class ConsoleService:
             if execution_id in referenced:
                 continue
             self._active_read_sessions.pop(execution_id).postgres.close()
+            self._protected_results.pop(execution_id, None)
 
     def _reclaim_read_session(self, connection_id, connection_revision, global_capacity=False):
         """Release one inactive read cursor for shared retained-session admission."""
         with self._transient_results_lock:
+            self._purge_transient_results(self._clock())
             candidate = next(((execution_id, active)
                 for execution_id, active in self._active_read_sessions.items()
                 if (global_capacity or (active.connection_id == connection_id
                     and active.connection_revision == connection_revision))
-                and not any(result.execution_id == execution_id and result.active_exports > 0
-                            for result in self._transient_results.values())), None)
+                and self._read_session_evictable(execution_id)), None)
             if candidate is None:
                 return False
             execution_id, active = candidate
@@ -1216,39 +1249,30 @@ class ConsoleService:
                 limit_name="postgres.connections.maximum_total" if global_capacity else "postgres.connections.maximum_per_identity")
             return True
 
-    def _make_read_session_capacity(self, target: ConsoleTarget) -> None:
-        """Release the oldest inactive cursor before gateway admission blocks."""
+    def _read_session_evictable(self, execution_id):
+        return execution_id not in self._protected_results and not any(
+            result.execution_id == execution_id and result.active_exports > 0
+            for result in self._transient_results.values())
 
+    def _make_read_session_capacity(self, target: ConsoleTarget) -> None:
+        """Admit new reads without discarding protected dashboard cursors."""
         with self._transient_results_lock:
-            matching = [
-                (execution_id, active)
-                for execution_id, active in self._active_read_sessions.items()
-                if active.connection_id == target.connection_id
-                and active.connection_revision == target.connection_revision
-            ]
-            while len(matching) >= self._maximum_live_read_sessions_per_identity:
-                candidate = next(
-                    (
-                        value for value in matching
-                        if not any(
-                            transient.execution_id == value[0]
-                            and transient.active_exports > 0
-                            for transient in self._transient_results.values()
-                        )
-                    ),
-                    None,
-                )
-                if candidate is None:
-                    return
-                execution_id, active = candidate
-                self._active_read_sessions.pop(execution_id, None)
-                self._evict_read_session(
-                    execution_id,
-                    active,
-                    limit_name="console.results.maximum_live_read_sessions_per_identity",
-                    limit=self._maximum_live_read_sessions_per_identity,
-                )
-                matching = [value for value in matching if value[0] != execution_id]
+            self._purge_transient_results(self._clock())
+            for global_capacity, limit, limit_name in (
+                (False, self._maximum_live_read_sessions_per_identity, "console.results.maximum_live_read_sessions_per_identity"),
+                (True, self._maximum_live_read_sessions, "console.results.maximum_live_read_sessions"),
+            ):
+                matching = [(key, value) for key, value in self._active_read_sessions.items()
+                    if global_capacity or (value.connection_id == target.connection_id
+                    and value.connection_revision == target.connection_revision)]
+                while len(matching) >= limit:
+                    candidate = next((value for value in matching if self._read_session_evictable(value[0])), None)
+                    if candidate is None:
+                        raise PostgresConnectionCapacityError(limit_name, limit, len(matching) + 1)
+                    execution_id, active = candidate
+                    self._active_read_sessions.pop(execution_id)
+                    self._evict_read_session(execution_id, active, limit_name=limit_name, limit=limit)
+                    matching = [value for value in matching if value[0] != execution_id]
 
     def _evict_read_session(
         self,
@@ -1616,6 +1640,8 @@ class ConsoleService:
             raise ConsoleServiceError(404, "workspace_not_found", str(error)) from error
 
     def _record_run_failure(self, owner_id: str, execution_id: str, error: Exception) -> None:
+        with self._transient_results_lock:
+            self._protected_results.pop(execution_id, None)
         try:
             current = self._repository.get(owner_id, execution_id)
             cancelled = current.cancel_requested or isinstance(

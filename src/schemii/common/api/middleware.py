@@ -9,6 +9,7 @@ import time
 from fastapi import FastAPI, Request, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from schemii.common.frontend import COMMON_IMPORT_MAP
+from schemii.schemer.frontend import SCHEMER_IMPORT_MAP
 
 from .observability import (
     REQUEST_ID_PATTERN,
@@ -19,8 +20,9 @@ from .observability import (
 
 
 LOCAL_PROTOTYPE_HOSTS = ("127.0.0.1", "localhost")
-FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map", "/ai-prototype", "/schemoo"))
+FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map", "/ai-prototype", "/schemoo", "/schemer"))
 IMPORT_MAP_DIGEST = base64.b64encode(hashlib.sha256(COMMON_IMPORT_MAP.encode()).digest()).decode()
+SCHEMER_IMPORT_MAP_DIGEST = base64.b64encode(hashlib.sha256(SCHEMER_IMPORT_MAP.encode()).digest()).decode()
 
 
 FRONTEND_CONTENT_SECURITY_POLICY = "; ".join(
@@ -33,7 +35,7 @@ FRONTEND_CONTENT_SECURITY_POLICY = "; ".join(
         "frame-ancestors 'none'",
         "img-src 'self' data:",
         "object-src 'none'",
-        f"script-src 'self' 'sha256-{IMPORT_MAP_DIGEST}'",
+        f"script-src 'self' 'sha256-{IMPORT_MAP_DIGEST}' 'sha256-{SCHEMER_IMPORT_MAP_DIGEST}'",
         "style-src 'self' 'unsafe-inline'",
     )
 )

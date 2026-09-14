@@ -182,11 +182,17 @@ export function renderFilterDefinition(host, options) {
     content.append(element("div", { className: "mf-heading" }, [
       labeled("Name", input(`Scope ${scope.id} name`, scope.label, value => { scope.label = value; onChange(); })),
     ]));
-    content.append(labeled("Requirement", select(`Requirement for ${scope.label}`, [["required", "Required model scope"], ["conditional", "Conditional model parameter"]], scope.kind, value => { scope.rowBehavior ||= scope.kind === "required" ? "require_matching" : "keep_unmatched"; scope.kind = value; refresh(); }), "scopes"));
-    content.append(note(scope.kind === "required" ? "Applies to every query. Schemoo includes the related source even when none of its columns are selected." : "Applies only when a query uses or traverses a bound source. It does not force that source into the query."));
+    content.append(labeled("Evaluation reach", select(`Evaluation reach for ${scope.label}`, [["required", "Always evaluate"], ["conditional", "When its source participates"]], scope.kind, value => { scope.rowBehavior ||= scope.kind === "required" ? "require_matching" : "keep_unmatched"; scope.kind = value; refresh(); }), "scopes"));
+    content.append(note(scope.kind === "required" ? "Includes the related source even when none of its columns are selected." : "Evaluates only when a query uses or traverses a bound source. It does not force that source into the query."));
+    content.append(labeled("Requirement", select(`Requirement for ${scope.label}`, [["required", "Required"], ["optional", "Optional"]], scope.requirement || "required", value => {
+      scope.requirement = value;
+      if (value === "required" && draft.selections?.[scope.id]) draft.selections[scope.id].active = false;
+      refresh();
+    }), "scopes"));
+    content.append(note(scope.requirement === "optional" ? "A Schemer creator may expose this filter on a dashboard. Until then it does not affect reports." : "Applies whenever its evaluation reach calls for it."));
     const rowBehavior = scope.rowBehavior || (scope.kind === "required" ? "require_matching" : "keep_unmatched");
     content.append(labeled("Matching rows", select(`Matching rows for ${scope.label}`, [["keep_unmatched", "Keep unmatched parent rows"], ["require_matching", "Require matching rows"]], rowBehavior, value => { scope.rowBehavior = value; refresh(); })));
-    content.append(note(rowBehavior === "keep_unmatched" ? "Filters the bound source before joining. Parent rows remain when related records do not match; their related columns are empty. A filter on the starting source still removes its nonmatching rows." : "Removes returned rows that do not satisfy the active filter, including unmatched parents. Activation above independently controls when this filter applies."));
+    content.append(note(rowBehavior === "keep_unmatched" ? "Filters the bound source before joining. Parent rows remain when related records do not match; their related columns are empty. A filter on the starting source still removes its nonmatching rows." : "Removes returned rows that do not satisfy the filter, including unmatched parents. Requirement above independently controls whether the filter is always used or offered to a dashboard."));
     for (const [alternativeIndex, alternative] of scope.alternatives.entries()) {
       const prefix = `${scope.label || "Scope"} / ${alternative.label || "Alternative"}`;
       const alternativeBody = element("div", { className: "mf-content" });
@@ -287,9 +293,10 @@ export function renderParameterValues(host, options) {
     for (const block of host.querySelectorAll("[data-scope-id]")) {
       const scope = draft.scopes.find(s => s.id === block.dataset.scopeId);
       if (!scope) continue;
-      const active = scope.kind === "required" || activeScopes?.includes(scope.id);
+      const enabled = scope.requirement !== "optional" || draft.selections?.[scope.id]?.active === true;
+      const active = enabled && (scope.kind === "required" || activeScopes?.includes(scope.id));
       block.classList.toggle("active", Boolean(active));
-      block.querySelector(".mf-scope-status").textContent = scopeStatus(scope, active, activeScopes);
+      block.querySelector(".mf-scope-status").textContent = scopeStatus(scope, active, activeScopes, enabled);
     }
     return;
   }
@@ -298,12 +305,23 @@ export function renderParameterValues(host, options) {
   host.replaceChildren(helpHeading("Model parameter values", "parameters"));
   if (!draft.scopes?.length) { host.append(note("No model parameters configured. Add them in Model filters.")); return; }
   for (const scope of draft.scopes) {
-    const active = scope.kind === "required" || activeScopes?.includes(scope.id);
-    const status = scopeStatus(scope, active, activeScopes);
     const selection = draft.selections[scope.id] || { alternativeId: scope.alternatives[0]?.id || "", values: {} };
+    const enabled = scope.requirement !== "optional" || selection.active === true;
+    const active = enabled && (scope.kind === "required" || activeScopes?.includes(scope.id));
+    const status = scopeStatus(scope, active, activeScopes, enabled);
     const alternative = scope.alternatives.find(a => a.id === selection.alternativeId) || scope.alternatives[0];
     const block = element("div", { className: `mf-parameter-block${active ? " active" : ""}`, dataset: { scopeId: scope.id } });
     block.append(element("strong", { text: scope.label }), helpButton(scope.kind), element("p", { className: "mf-help mf-scope-status", text: status }));
+    if (scope.requirement === "optional") {
+      const optionalSelectionLabel = options.optionalSelectionLabel || "Include in preview";
+      const toggle = element("input", { attrs: { type: "checkbox", "aria-label": `${optionalSelectionLabel} ${scope.label}`, "data-scope-toggle": "" } });
+      toggle.checked = enabled;
+      toggle.onchange = () => {
+        draft.selections[scope.id] = { ...selection, ...draft.selections[scope.id], active: toggle.checked };
+        renderParameterValues(host, { ...options, force: true }); onChange();
+      };
+      block.append(element("label", { className: "mf-checkbox mf-scope-toggle" }, [toggle, optionalSelectionLabel]));
+    }
     if (scope.alternatives.length > 1) {
       const choose = select(`Alternative for ${scope.label}`, scope.alternatives.map(a => [a.id, a.label]), alternative?.id, value => {
       draft.selections[scope.id] = { ...(draft.selections[scope.id] || selection), alternativeId: value };
@@ -323,7 +341,7 @@ export function renderParameterValues(host, options) {
       const defaultValue = parameter.defaultValue ?? "";
       const value = selection.values?.[parameter.id] ?? "";
       const commit = entered => {
-        draft.selections[scope.id] = { alternativeId: alternative.id, values: { ...selection.values, ...draft.selections[scope.id]?.values, [parameter.id]: entered } };
+        draft.selections[scope.id] = { ...selection, ...draft.selections[scope.id], alternativeId: alternative.id, values: { ...selection.values, ...draft.selections[scope.id]?.values, [parameter.id]: entered } };
         onChange();
       };
       const domainChoice = !!parameter.domain || parameter.type === "source";
@@ -344,12 +362,14 @@ export function renderParameterValues(host, options) {
       if (multiple) block.append(note(domainChoice ? "Select one or more values. Remove a selected value to exclude it from the list." : "Enter one value per line. Commas remain part of a value."));
     }
     if (!alternative?.conditions.length) block.append(note("This alternative adds no restriction."));
+    if (!enabled) for (const control of block.querySelectorAll("input,button,select,textarea")) if (!control.hasAttribute("data-scope-toggle")) control.disabled = true;
     host.append(block);
   }
 }
 
-function scopeStatus(scope, active, activeScopes) {
-  return scope.kind === "required" ? "Required for every query" : activeScopes === undefined ? "Conditional · checked when compiling" : active ? "Conditional · active for this query" : "Conditional · not needed by this query";
+function scopeStatus(scope, active, activeScopes, enabled = true) {
+  if (!enabled) return "Optional · inactive";
+  return scope.kind === "required" ? "Always evaluated · active" : activeScopes === undefined ? "Source-conditional · checked when compiling" : active ? "Source-conditional · active for this query" : "Source-conditional · not needed by this query";
 }
 
 export function renderReportFilters(host, options) {

@@ -276,10 +276,14 @@ connection with `python dev/schemoo/derived-demo.py CONNECTION_ID`. It leaves
 warehouse tables and existing models untouched. Its numeric calculation is an
 illustrative minimum-pay × level expression, not a defined business metric.
 
-### Independent filter activation and row matching
+### Independent filter reach, requirement, and row matching
 
-A scope's `kind` controls activation: `required` always includes its source paths;
-`conditional` applies only when its bound sources participate. The separate
+A scope's `kind` controls evaluation reach: `required` always includes its source
+paths; `conditional` evaluates only when its bound sources participate. The
+separate `requirement` facet is `required` by default or `optional`. Optional
+scopes have no query effect until Schemer exposes one and a selection explicitly sets `active: true`.
+Schemer dashboard creators choose which optional scopes viewers may activate.
+The separate
 `rowBehavior` setting chooses `keep_unmatched` (prefilter sources before LEFT
 JOIN, retaining unmatched parents) or `require_matching` (restrict returned rows
 and exclude unmatched parents). A filter on the starting source always removes
@@ -289,8 +293,8 @@ result grain. The compiler applies the same aggregate safeguards to these joins.
 
 Existing models with absent/null `rowBehavior` retain their prior behavior:
 required scopes require matches; conditional scopes keep unmatched parents.
-The filter editor exposes both choices and preserves row matching when activation
-is changed. Saved models and AI model edits use the same contract.
+The filter editor exposes all three choices and preserves row matching when reach
+or requirement changes. Saved models and AI model edits use the same contract.
 
 Model-defined equality relationships use `kind: logical`, `source` and `target`
 node IDs, and `sourceColumn` / `targetColumn`. They have no `relationshipId` and
@@ -309,5 +313,5 @@ Date-range columns support the filter comparison **Contains date**
 (`range_contains_date`). Bind a Date parameter with default `today` to generate
 `active_range @> DATE 'YYYY-MM-DD'` using the date resolved on each run. Fixed
 dates are also supported. The server validates the `daterange` source and date
-value. Existing scope activation, unmatched-row behavior, and AI model-edit
+value. Existing scope requirement, unmatched-row behavior, and AI model-edit
 permissions apply. Adding a range filter does not create columns or indexes.

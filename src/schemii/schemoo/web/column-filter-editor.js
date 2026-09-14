@@ -109,7 +109,7 @@ export function createColumnFilterEditor({ draft, catalog, nodeId, column, bindi
       return;
     }
     if (!editing && scope.alternatives.length > 1) host.append(labeled("Filter option", modelSelect("Filter option for column", scope.alternatives.map(item => [item.id, item.label]), alternative.id, value => choose(scope.id, value))));
-    host.append(note(`${editing ? `${scope.label} · ` : ""}${alternative.label} · ${scope.kind === "required" ? "Required" : "Conditional"} · AND`),
+    host.append(note(`${editing ? `${scope.label} · ` : ""}${alternative.label} · ${scope.kind === "required" ? "Always evaluate" : "Source-conditional"} · ${scope.requirement === "optional" ? "Optional" : "Required"} · AND`),
       conditionsEditor([condition], { draft, catalog, inputs: alternative.inputs || [], prefix: "Column binding", fixedField: { table: nodeId, column: columnName }, singleCondition: true, compact: true,
         onChange: () => { error.textContent = ""; }, refresh: render, onLoadDomain }), error,
       element("div", { className: "column-filter-editor__actions" }, [

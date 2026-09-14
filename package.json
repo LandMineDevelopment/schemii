@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "imports": {
+    "#model/*": "./src/schemii/schemoo/web/*",
     "#common/*": "./src/schemii/common/web/assets/*"
   },
   "scripts": {

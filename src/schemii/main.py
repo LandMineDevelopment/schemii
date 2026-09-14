@@ -68,9 +68,13 @@ from schemii.schemii.workspaces.store import (
 from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepository
 from schemii.schemoo.routes import router as schemoo_router
 from schemii.schemoo.frontend import install_schemoo_frontend
+from schemii.schemer.frontend import install_schemer_frontend
 from schemii.schemoo.catalog import ModelCatalogs
 from schemii.schemoo.store import ModelRepository, InMemoryModelRepository, PostgresModelRepository
 from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO_METADATA_MIGRATION_PACKAGE
+from schemii.schemer.metadata.migrations import MIGRATION_PACKAGE as SCHEMER_METADATA_MIGRATION_PACKAGE
+from schemii.schemer.dashboard_store import InMemoryDashboardRepository, PostgresDashboardRepository
+from schemii.schemer.dashboard_routes import router as dashboard_router
 from schemii.common.query_executions.routes import router as query_executions_router
 
 
@@ -87,6 +91,7 @@ class ApplicationServices:
     ai_repository: AiRepository | None = None
     models: ModelRepository | None = None
     model_catalogs: ModelCatalogs | None = None
+    dashboards: InMemoryDashboardRepository | PostgresDashboardRepository | None = None
 
 
 def create_services(
@@ -100,6 +105,7 @@ def create_services(
             COMMON_METADATA_MIGRATION_PACKAGE,
             SCHEMII_METADATA_MIGRATION_PACKAGE,
             SCHEMOO_METADATA_MIGRATION_PACKAGE,
+            SCHEMER_METADATA_MIGRATION_PACKAGE,
         ),
         maximum_connections_per_owner=(
             selected_admin.resources.maximum_connections_per_user
@@ -274,6 +280,8 @@ def create_services(
         admin_config=selected_admin,
         ai_repository=ai_repository,
         models=models,
+        dashboards=(PostgresDashboardRepository(metadata.connection_factory)
+                    if metadata.connection_factory is not None else InMemoryDashboardRepository()),
         model_catalogs=ModelCatalogs(maximum_entries=selected_admin.schemoo.maximum_cached_catalogs,
                                     refresh_seconds=selected_admin.schemoo.catalog_refresh_seconds),
     )
@@ -290,6 +298,7 @@ PRODUCT_ROUTERS: tuple[APIRouter, ...] = (
     schemii_router,
     schemoo_router,
     schemer_router,
+    dashboard_router,
 )
 
 
@@ -504,6 +513,7 @@ def create_app(
     install_common_frontend(application)
     install_schemii_frontend(application)
     install_schemoo_frontend(application)
+    install_schemer_frontend(application)
 
     return application
 

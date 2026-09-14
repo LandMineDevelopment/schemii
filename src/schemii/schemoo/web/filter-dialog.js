@@ -28,7 +28,7 @@ function conditionText(condition, alternative, draft) {
 }
 function summary(scope, draft) {
   const box = element("div", { className: "mf-rule-summary" });
-  box.append(note(scope.kind === "required" ? "Required · every query" : "Conditional · only when its sources participate"));
+  box.append(note(`${scope.kind === "required" ? "Always evaluate" : "When its sources participate"} · ${scope.requirement === "optional" ? "Optional" : "Required"}`));
   box.append(note((scope.rowBehavior || (scope.kind === "required" ? "require_matching" : "keep_unmatched")) === "keep_unmatched" ? "Keep unmatched parent rows" : "Require matching rows"));
   for (const [index, option] of scope.alternatives.entries()) {
     if (scope.alternatives.length > 1) box.append(element("strong", { text: `${index ? "OR · " : ""}${option.label}` }));
@@ -101,7 +101,7 @@ export function openModelFilter(options, existing = null, returnTarget = null) {
     fixed.append(note("Always enforce a condition, such as column is not null or status equals Active. No report input."));
     const parameter = button("Report parameter", () => choose(true));
     parameter.append(note("Ask for a date, ID, or other value. Bind it to one or more source columns; defaults are optional."));
-    content.append(element("div", { className: "mf-rule-choices" }, [element("h3", { text: "Where does the filter value come from?" }), fixed, parameter, note("Both can be required or conditional. You can combine fixed conditions and report inputs in the editor.")]));
+    content.append(element("div", { className: "mf-rule-choices" }, [element("h3", { text: "Where does the filter value come from?" }), fixed, parameter, note("Both can always evaluate or depend on source participation. Choose Required or Optional separately in the editor.")]));
   }
   document.body.append(dialog); dialog.showModal();
   options.onSelect?.(scope);

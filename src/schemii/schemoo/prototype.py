@@ -1,7 +1,7 @@
 """Catalog-validated prototype compiler; explicit FK roles, scopes and filters.
 
 This is deliberately not a cost optimizer. ``today`` defaults use one UTC date
-per compilation. Filter activation and unmatched-row handling are independent.
+per compilation. Filter requirement and unmatched-row handling are independent.
 """
 
 from .join_types import validate_join_types
@@ -273,7 +273,7 @@ def validate_definition(catalog: dict, definition: dict) -> dict:
     return {"cycleEdges": cycles}
 
 
-def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labels=None, _bounded=True, _today=None) -> dict:
+def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labels=None, _bounded=True, _today=None, _participation_fields=None, _scope_outer_nodes=None) -> dict:
     model = _Model(catalog, request)
     cycle_edges = model.cycles()
     if cycle_edges:
@@ -341,7 +341,13 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
     legacy_filters = conditions(request.get("filters", []))
     report_groups = _list(request.get("reportFilters", []), "Report filters", 32)
     row_filters, existence = list(legacy_filters), []
-    participating = {root, *(model.validate(field) for field in fields)}
+    # A drill may project extra related detail without changing the scopes
+    # that selected the original aggregate population. Still validate every
+    # projected field; this private option only freezes scope participation.
+    for field in fields:
+        model.validate(field)
+    participation_fields = fields if _participation_fields is None else _participation_fields
+    participating = {root, *(model.validate(field) for field in participation_fields)}
     for group in report_groups:
         mode = group.get("mode")
         items = conditions(group.get("conditions", []))
@@ -363,7 +369,13 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
     for scope in scopes:
         scope_id = _id(scope.get("id"), "Scope ID")
         if scope_id in seen or scope.get("kind") not in ("required", "conditional"):
-            raise ValueError("Scopes need unique IDs and a required or conditional kind.")
+            raise ValueError("Scopes need unique IDs and an always-evaluated or source-conditional reach.")
+        requirement = scope.get("requirement")
+        if requirement is None:  # Compatibility with drafts saved by the earlier contract.
+            requirement = {"automatic": "required", "optional": "optional"}.get(
+                scope.get("activation", "automatic"), scope.get("activation"))
+        if requirement not in ("required", "optional"):
+            raise ValueError("Scope requirement must be required or optional.")
         if scope.get("rowBehavior") not in (None, "keep_unmatched", "require_matching"):
             raise ValueError("Filter row behavior must be keep_unmatched or require_matching.")
         seen.add(scope_id)
@@ -381,15 +393,18 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
         if alternative is None:
             raise ValueError(f"Unknown alternative for {scope.get('label', scope_id)}.")
         items = conditions(alternative.get("conditions", []))
-        selected.append((scope, alternative, selection, items))
-        if scope["kind"] == "required":
+        enabled = requirement == "required" or selection.get("active") is True
+        selected.append((scope, alternative, selection, items, enabled))
+        if enabled and scope["kind"] == "required":
             participating.update(item["table"] for item in items)
     participating = path(participating)
-    active_ids = [scope["id"] for scope, _, _, items in selected if scope["kind"] == "required" or any(item["table"] in participating for item in items)]
+    active_ids = [scope["id"] for scope, _, _, items, enabled in selected if enabled and (scope["kind"] == "required" or any(item["table"] in participating for item in items))]
     active, parameter_values, source_filters = [], {}, {node: [] for node in participating}
     preserved_required_nodes = set()
     today = _today or datetime.now(timezone.utc).date().isoformat()
-    for scope, alternative, selection, items in selected:
+    for scope, alternative, selection, items, enabled in selected:
+        if not enabled:
+            continue
         applicable = items if scope["kind"] == "required" else [item for item in items if item["table"] in participating]
         if scope["kind"] == "conditional" and not applicable:
             continue
@@ -644,10 +659,9 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
             if expression not in grouping:
                 grouping.append(expression)
         elif isinstance(aggregate, str) and aggregate in {"count", "count_distinct", "sum", "avg", "min", "max"}:
-            if aggregate in {"count", "sum", "avg"} and (relationship := multiplying_relationship(node)):
-                raise ModelValidationError(
-                    f"{aggregate.upper()} of {label} can be inflated by joined records. Create a separate aggregate source grouped at this measure's grain, then connect its summary. COUNT DISTINCT is appropriate only when you intend to count distinct values.",
-                    fieldIndex=field_index, relationshipId=relationship,
+            if aggregate in {"count", "sum", "avg"} and multiplying_relationship(node):
+                warnings.append(
+                    f"{aggregate.upper()} of {label} may be affected by repeated rows from joins. The selected aggregation runs as configured. Consider a separate aggregate source grouped at this measure's grain; use COUNT DISTINCT only when you intend to count distinct values."
                 )
             aggregated = True
             label = f"{aggregate}({label})"
@@ -667,15 +681,16 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
             # Mandatory scope constrains the actual returned detail, not merely
             # some other matching child of the root. Reuse every shared outer
             # alias, and introduce only scope-only branches inside EXISTS.
-            names.update({node: aliases[node] for node in nodes & outer})
-            nodes = nodes - outer
+            scope_outer = outer if _scope_outer_nodes is None else outer & set(_scope_outer_nodes)
+            names.update({node: aliases[node] for node in nodes & scope_outer})
+            nodes = nodes - scope_outer
             if not nodes:
                 where.extend(predicate(item, names) for item in items)
                 continue
         # Keep outer references in WHERE so PostgreSQL can pull up EXISTS into
         # a semi/anti join. An outer reference in JOIN ON prevents that rewrite
         # and can force a separate subtree traversal for every outer row.
-        local_nodes = nodes - outer if mode == "required" else nodes - {root}
+        local_nodes = nodes if mode == "required" else nodes - {root}
         body, correlations = ["SELECT 1"], []
         for node in parents:
             if node not in local_nodes:
@@ -700,13 +715,14 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
         lines.append(f"LIMIT {limit}")
     if any(item["table"] != root for item in row_filters):
         warnings.append("Filters apply to joined results; a filter on a related table may remove unmatched root rows.")
-    warnings.append(f"Preview is limited to {limit} rows; row order is not guaranteed.")
+    if _bounded:
+        warnings.append(f"Preview is limited to {limit} rows; row order is not guaranteed.")
     grain = "One summary row" if aggregated and not grouping else ("Grouped by " + ", ".join(f"{field['table']}.{field['column']}" for field in fields if field.get("aggregate", "none") == "none") if aggregated else "Joined detail rows (related records can repeat root rows)")
-    used_relationships = [parents[node][1] for node in parents if node != root and node in participating]
+    used_relationships = [parents[node][1] for node in parents if node != root and node in participating | outer]
     required_nodes = [node for node in parents if node in participating]
     for plan in aggregate_plans:
         used_relationships.extend(plan["usedRelationships"])
         required_nodes.extend(plan["requiredNodes"])
         active.extend(plan["activeScopes"])
         parameter_values.update(plan["parameterValues"])
-    return {"sql": "\n".join(lines) + ";", "usedRelationships": list(dict.fromkeys(used_relationships)), "requiredNodes": list(dict.fromkeys(required_nodes)), "activeScopes": list(dict.fromkeys(active)), "parameterValues": parameter_values, "warnings": warnings, "grain": grain}
+    return {"sql": "\n".join(lines) + ";", "outerNodes": [node for node in parents if node in outer], "usedRelationships": list(dict.fromkeys(used_relationships)), "requiredNodes": list(dict.fromkeys(required_nodes)), "activeScopes": list(dict.fromkeys(active)), "parameterValues": parameter_values, "warnings": warnings, "grain": grain}

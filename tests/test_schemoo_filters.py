@@ -127,6 +127,27 @@ def test_required_scope_forces_path_without_outer_fanout(catalog):
     assert parse_one(result["sql"], dialect="postgres").key == "select"
 
 
+def test_optional_scope_is_orthogonal_to_evaluation_reach_and_only_runs_when_activated(catalog):
+    configured = {**scope(), "requirement": "optional"}
+    inactive = compile_preview(catalog, query(scopes=[configured]))
+    assert inactive["activeScopes"] == []
+    assert inactive["usedRelationships"] == []
+    assert "42" not in inactive["sql"]
+
+    active = compile_preview(catalog, query(scopes=[configured], selections={"scope": {"active": True}}))
+    assert active["activeScopes"] == ["scope"]
+    assert active["usedRelationships"] == ["person_fk", "org_fk"]
+    assert "42" in active["sql"]
+
+
+def test_legacy_scope_activation_migrates_to_requirement():
+    from schemii.schemoo.models import ModelScope
+
+    migrated = ModelScope.model_validate({**scope(), "activation": "optional"})
+    assert migrated.requirement == "optional"
+    assert "activation" not in migrated.model_dump(mode="json", by_alias=True)
+
+
 @pytest.mark.parametrize("operator", ["not_null", "is_null"])
 def test_fixed_null_scope_needs_no_inputs_and_ignores_stale_allow_null(catalog, operator):
     rule = {"id": "fixed", "label": "Fixed rule", "kind": "required", "alternatives": [
@@ -406,9 +427,9 @@ def test_conditional_matching_filter_does_not_force_source(catalog):
 
 
 @pytest.mark.parametrize("aggregate", ["sum", "count", "avg"])
-def test_parent_measures_reject_child_fanout(catalog, aggregate):
-    with pytest.raises(ModelValidationError, match="separate aggregate source"):
-        compile_preview(catalog, query(fields=[{"table": "people", "column": "id", "aggregate": aggregate}, {"table": "assignment", "column": "org_id"}]))
+def test_parent_measures_warn_about_child_fanout(catalog, aggregate):
+    result = compile_preview(catalog, query(fields=[{"table": "people", "column": "id", "aggregate": aggregate}, {"table": "assignment", "column": "org_id"}]))
+    assert any("repeated rows from joins" in warning for warning in result["warnings"])
 
 
 @pytest.mark.parametrize("aggregate", ["min", "max", "count_distinct"])
@@ -425,11 +446,11 @@ def test_unique_reverse_foreign_key_preserves_measure_grain(catalog):
     compile_preview(catalog, query(fields=[{"table": "people", "column": "id", "aggregate": "count"}, {"table": "assignment", "column": "org_id"}]))
 
 
-def test_multiple_child_branches_cannot_multiply_a_child_measure(catalog):
+def test_multiple_child_branches_warn_about_measure_multiplication(catalog):
     catalog["tables"].append({"name": "phone", "columns": [{"name": "person_id"}, {"name": "number"}]})
     catalog["relationships"].append({"id": "phone_fk", "sourceTable": "phone", "sourceColumn": "person_id", "targetTable": "people", "targetColumn": "id"})
-    with pytest.raises(ModelValidationError, match="inflated"):
-        compile_preview(catalog, query(relationships=["person_fk", "phone_fk"], fields=[{"table": "assignment", "column": "org_id", "aggregate": "count"}, {"table": "phone", "column": "number"}]))
+    result = compile_preview(catalog, query(relationships=["person_fk", "phone_fk"], fields=[{"table": "assignment", "column": "org_id", "aggregate": "count"}, {"table": "phone", "column": "number"}]))
+    assert any("repeated rows from joins" in warning for warning in result["warnings"])
 
 
 def test_filter_row_behavior_persists_and_legacy_default_is_explicitly_unspecified():
@@ -447,12 +468,23 @@ def test_required_keep_unmatched_joins_unselected_bound_source(catalog):
     with sqlite3.connect(":memory:") as db:
         db.executescript("ATTACH DATABASE ':memory:' AS public; CREATE TABLE public.people(id TEXT, name TEXT); CREATE TABLE public.assignment(person_id TEXT, org_id TEXT, start TEXT, end TEXT); INSERT INTO public.people VALUES ('a','Alice'),('b','Bob'); INSERT INTO public.assignment VALUES ('a','42',NULL,NULL),('a','43',NULL,NULL),('b','43',NULL,NULL);")
         assert sorted(db.execute(parse_one(result["sql"], dialect="postgres").sql(dialect="sqlite")).fetchall()) == [("Alice",), ("Bob",)]
-    with pytest.raises(ModelValidationError, match="inflated"):
-        compile_preview(catalog, query(scopes=[rule], fields=[{"table": "people", "column": "id", "aggregate": "count"}]))
+    result = compile_preview(catalog, query(scopes=[rule], fields=[{"table": "people", "column": "id", "aggregate": "count"}]))
+    assert any("repeated rows from joins" in warning for warning in result["warnings"])
 
 
 def test_alias_branches_do_not_bypass_measure_grain_validation(catalog):
     nodes = [{"id": "people", "table": "people"}, {"id": "a", "table": "assignment"}, {"id": "b", "table": "assignment"}]
     edges = [{"id": alias, "relationshipId": "person_fk", "source": alias, "target": "people"} for alias in ("a", "b")]
-    with pytest.raises(ModelValidationError, match="inflated"):
-        compile_preview(catalog, query(nodes=nodes, edges=edges, fields=[{"table": "a", "column": "org_id", "aggregate": "count"}, {"table": "b", "column": "org_id"}]))
+    result = compile_preview(catalog, query(nodes=nodes, edges=edges, fields=[{"table": "a", "column": "org_id", "aggregate": "count"}, {"table": "b", "column": "org_id"}]))
+    assert any("repeated rows from joins" in warning for warning in result["warnings"])
+
+def test_fanout_warning_preserves_requested_count_and_duplicate_rows(catalog):
+    result = compile_preview(catalog, query(fields=[
+        {"table": "people", "column": "id", "aggregate": "count"},
+        {"table": "assignment", "column": "org_id"},
+    ]))
+    assert any("repeated rows from joins" in warning for warning in result["warnings"])
+    assert "COUNT(DISTINCT" not in result["sql"]
+    with sqlite3.connect(":memory:") as db:
+        db.executescript("ATTACH DATABASE ':memory:' AS public; CREATE TABLE public.people(id TEXT, name TEXT); CREATE TABLE public.assignment(person_id TEXT, org_id TEXT); INSERT INTO public.people VALUES ('a','Alice'); INSERT INTO public.assignment VALUES ('a','42'),('a','42');")
+        assert db.execute(parse_one(result["sql"], dialect="postgres").sql(dialect="sqlite")).fetchall() == [(2, "42")]

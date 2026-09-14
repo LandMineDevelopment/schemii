@@ -19,6 +19,7 @@ def test_common_and_product_namespaces_are_independent() -> None:
         ("/api/v1/schemii", ["schemii"]),
         ("/api/v1/schemoo", ["schemoo"]),
         ("/api/v1/schemer", ["schemer"]),
+        ("/api/v1/schemer/dashboards", ["schemer"]),
     ]
 
 

@@ -35,15 +35,15 @@ export const helpTopics = Object.freeze({
   overview: {
     title: "Building and exploring a model",
     intro: "A model describes which data can be combined and which filters should be applied. It does not copy or change your warehouse tables.",
-    steps: ["Model: choose the starting table and connections; use table inspectors to create aliases and expose fields.", "Filters: use the funnel toolbar button to author required and conditional rules. Table and summary inspectors link to their relevant filters.", "Preview: pick output fields, supply parameter values, add report filters, and run a read-only query. Red cycle connections must be resolved first."],
+    steps: ["Model: choose the starting table and connections; use table inspectors to create aliases and expose fields.", "Filters: use the funnel toolbar button to define evaluation reach, requirement, and row matching. Table and summary inspectors link to their relevant filters.", "Preview: pick output fields, supply parameter values, add report filters, and run a read-only query. Red cycle connections must be resolved first."],
     note: "Save stores model rules, layout, and Explore choices on the server, independently of PostgreSQL. Save changed model rules before running previews or browsing configured parameter values. Existing browser prototypes can be imported explicitly without being erased.",
   },
   scopes: {
     title: "Model filters",
     intro: "A model filter is a rule defined by the model author. Create rules on the Filters page. In a table inspector, use the plus beside a column to bind it to an existing rule and its parameter; expand the chevron to see its conditions and AND/OR context. Click a rule name to edit its full definition. Blue funnel icons identify bound columns on the canvas.",
     sections: [
-      ["Required model scope", "Always applies and brings its required connection paths into the query. For example, require a parent organization even when the report only returns people’s names."],
-      ["Conditional model parameter", "Applies only when a bound source is needed by the query, including a source used along a connection path or by another filter. For example, apply an as-of date to assignments only when assignments participate."],
+      ["Evaluation reach", "Always evaluate brings the filter’s connection paths into the query. When its source participates evaluates only when a bound source is already needed."],
+      ["Requirement", "Required filters follow their evaluation reach. Optional filters do nothing until a Schemer creator exposes them and a dashboard viewer selects them."],
       ["Matching rows", "Choose independently whether to keep unmatched parent rows with empty related columns, or require matching rows and exclude unmatched parents. Filtering the starting source itself always removes its nonmatching rows."],
     ],
     note: "These are query-building rules, not a replacement for database permissions or a published security policy.",
@@ -55,16 +55,16 @@ export const helpTopics = Object.freeze({
     note:"Refreshing or accepting source metadata never changes PostgreSQL. Save the model to keep the reconciled source contract and newly available objects between sessions.",
   },
   required: {
-    title: "Required model scope",
-    intro: "This rule activates for every query, even when the user does not select a field from the filtered source. Choose Require matching rows to enforce its restriction on returned records.",
+    title: "Always-evaluated model filter",
+    intro: "When active, this rule evaluates for every query, even when the user does not select a field from the filtered source. Choose Require matching rows to enforce its restriction on returned records.",
     sections: [["Organization example", "Bind Ancestor organization · id to a Parent organization input. With Require matching rows selected, a report returning only personnel names must still meet that organization restriction."], ["Returned details stay in scope", "With Require matching rows, returned assignment details must meet the restriction too. Merely having some other qualifying assignment is not enough."]],
     note: "A required input needs a value or a default before the query can run. An alternative with no source bindings is unrestricted, so only add that alternative if users should be allowed to bypass this restriction.",
   },
   conditional: {
-    title: "Conditional model parameter",
-    intro: "This rule filters only bound sources that are already needed by the query. It does not add a source just because the rule mentions it.",
+    title: "Source-conditional model filter",
+    intro: "When active, this rule filters only bound sources that are already needed by the query. It does not add a source just because the rule mentions it.",
     sections: [["When it becomes active", "Selecting a field, traversing a connection path, enforcing a required scope, or adding a report filter can make a source participate. Its conditional bindings then apply and their inputs need values or defaults."], ["Matching rows", "Keep unmatched parent rows filters the source before joining, so a person with no matching assignment can remain with empty assignment details. Require matching rows excludes that person when the assignment source participates."]],
-    note: "Activation and matching rows are independent. Existing conditional filters keep unmatched parents until you change their matching-row policy.",
+    note: "Requirement and matching rows are independent. Existing conditional filters keep unmatched parents until you change their matching-row policy.",
   },
   alternatives: {
     title: "Filter alternatives",

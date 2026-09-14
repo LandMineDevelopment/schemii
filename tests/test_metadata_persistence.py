@@ -21,6 +21,7 @@ from schemii.common.metadata.secrets import read_encryption_key, read_secret_fil
 from schemii.schemii.metadata import (
     MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
 )
+from schemii.schemer.metadata.migrations import MIGRATION_PACKAGE as SCHEMER_MIGRATION_PACKAGE
 from schemii.schemoo.metadata.migrations import (
     MIGRATION_PACKAGE as SCHEMOO_MIGRATION_PACKAGE,
 )
@@ -85,6 +86,7 @@ def test_postgres_factory_composes_encrypted_ai_credentials(monkeypatch, tmp_pat
             COMMON_MIGRATION_PACKAGE,
             SCHEMII_MIGRATION_PACKAGE,
             SCHEMOO_MIGRATION_PACKAGE,
+            SCHEMER_MIGRATION_PACKAGE,
         ),
     )
 
@@ -184,6 +186,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
             COMMON_MIGRATION_PACKAGE,
             SCHEMII_MIGRATION_PACKAGE,
             SCHEMOO_MIGRATION_PACKAGE,
+            SCHEMER_MIGRATION_PACKAGE,
         )
     )
 
@@ -222,6 +225,8 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         32,
         33,
         34,
+        35,
+        36,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -257,6 +262,8 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0031_saved_model_previews.sql": "54efa0f765ee57d70eea7ae20f51a9f61cccafb942e283e9392d59315ae5fad5",
         "0032_bulk_jobs.sql": "60240b99fd85c7073863157105206e2377c24b0d6546bbb890d05afea49d92f2",
         "0033_ai_reasoning_effort.sql": "867493b096db1afea53f650f683a1277480e9b6268be7e34b98168d3dc7f146d",
+        "0035_schemer_dashboards.sql": "491218070718c6e1f9b71d7af18d5b67b7ee2c972b91191cb5188b62638945e8",
+        "0036_optional_dashboard_filters.sql": "4ac962febf95b1b3f1bc48a8c40fc27ecb95b0127837fdd6e442088a7c2085ec",
         "0034_ai_console_app_actions.sql": "507abfedba95dbfcede1f994af7823a7b596edd9a2973cbfd4927c50cbd0eff0",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"

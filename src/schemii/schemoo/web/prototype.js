@@ -155,7 +155,7 @@ function renderObjectFilters() {
   for(const {scope,direct} of relevant){
     const link=element("button",{type:"button",className:"ui-button object-filter-link",text:scope.label});
     link.onclick=()=>openContextFilter(scope,null,link);
-    section.append(link,element("small",{className:"hint",text:`${scope.kind==="required"?"Required":"Conditional"} · ${direct?"bound to this source or its calculation inputs":"applies to every model query"}`}));
+    section.append(link,element("small",{className:"hint",text:`${scope.kind==="required"?"Always evaluate":"Source-conditional"} · ${scope.requirement==="optional"?"Optional":"Required"} · ${direct?"bound to this source or its calculation inputs":"applies across the model"}`}));
   }
   if($("table-columns"))$("table-columns").before(section);else $("table-pane").append(section);
 }
@@ -245,6 +245,7 @@ function editDerived(owner, existing) {
   }});
 }
 function renderSelection() {
+  $("selection-inspector").hidden = false;
   const host = $("selection-inspector"); disposeSelects(host); host.replaceChildren();
   const selectedNode = draft.nodes.find(n => n.id === selected?.node);
   $("table-inspector-title").textContent = selectedNode?.label || (selected?.edge ? "Relationship" : "Select a table");
@@ -437,44 +438,53 @@ function addTable(table) {
   $("table-pane").scrollTop = 0;
 }
 function renderAliasTools() {
-  const host=$("alias-tools"); disposeSelects(host); host.replaceChildren(helpHeading("Model tables", "model"));
-  const present = new Set(draft.nodes.filter(node => !node.derivation && node.id === node.table).map(node => node.table));
-  let tableToAdd = "";
-  const tableSource = modelSelect("Table to add", [["", "Choose a table or view"], ...catalog.tables
-    .filter(candidate => !present.has(candidate.name)).map(candidate => [candidate.name, candidate.name])], tableToAdd, value => {
-    tableToAdd = value; addTableButton.disabled = !tableToAdd;
+  const host = $("alias-tools"); disposeSelects(host);
+  host.replaceChildren(element("h3", { text: "Add table or view" }));
+  let table = "";
+  const existingSource = () => draft.nodes.find(node => !node.derivation && node.table === table);
+  const alias = element("input", { attrs: { type: "checkbox", "aria-label": "Add as alias" } });
+  const aliasName = element("input", { attrs: { "aria-label": "Alias name", maxlength: 100 } });
+  const nameField = labeled("Alias name", aliasName);
+  const hint = element("p", { className: "hint" });
+  const create = element("button", { type: "button", className: "ui-button primary", text: "Add table to model" });
+  const update = () => {
+    const existing = existingSource();
+    alias.disabled = Boolean(existing) || !table;
+    const asAlias = Boolean(existing) || alias.checked;
+    nameField.hidden = !asAlias;
+    create.textContent = asAlias ? "Add alias to model" : "Add table to model";
+    create.disabled = !table || (asAlias && !aliasName.value.trim());
+    hint.textContent = existing ? "This source is already in the model, so it will be added as an alias."
+      : "Choose Add as alias to give this source a separate role, even when it is not yet in the model.";
+  };
+  const source = modelSelect("Table to add", [["", "Choose a table or view"], ...catalog.tables.map(t => [t.name, t.name])], table, value => {
+    table = value;
+    alias.checked = Boolean(existingSource());
+    aliasName.value = nextAliasLabel(existingSource() || { table, label: table });
+    update();
   });
-  const addTableButton = element("button", { type:"button", className:"ui-button", text:"Add table to model" });
-  addTableButton.disabled = true;
-  addTableButton.onclick = () => addTable(tableToAdd);
-  host.append(labeled("Available database object", tableSource), addTableButton,
-    element("p", { className:"hint", text:"Adds this table or materialized view to this model only. Its available foreign-key connections start disabled so you can choose the query paths." }),
-    helpHeading("Table aliases", "aliases"));
-  const open=element("button", {type:"button",className:"ui-button",text:"Add alias",attrs:{"data-ui-tooltip":"Create another named role for an existing table; no database table is copied."}});
-  const form=element("div", {attrs:{hidden:""}});
-  const selectedSource=draft.nodes.find(node=>node.id===selected?.node && catalog.tables.some(table=>table.name===node.table));
-  let table=selectedSource?.table || "";
-  const nameInput=element("input",{attrs:{"aria-label":"Alias name",placeholder:"e.g. Job certification requirement",maxlength:100}});
-  nameInput.value=selectedSource ? nextAliasLabel(selectedSource) : "";
-  const create=element("button",{type:"button",className:"ui-button",text:"Create alias table"}); create.disabled=true;
-  let nameTouched=false;
-  const validate=()=>{create.disabled=!table || !nameInput.value.trim();};
-  nameInput.oninput=()=>{nameTouched=true;validate();};
-  const source=modelSelect("Alias source",catalog.tables.map(t=>[t.name,t.name]),table,value=>{
-    table=value;
-    if(!nameTouched) {
-      const node=draft.nodes.find(node=>node.id===value) || {table:value,label:value};
-      nameInput.value=nextAliasLabel(node);
-    }
-    validate();
-  });
-  form.append(labeled("Existing source table",source),labeled("Alias / role name",nameInput),create,
-    element("p",{className:"hint",text:"The alias gets its own available incoming and outgoing connections, initially disabled. Select its table header to toggle them. Its columns also appear in source bindings and return-field choices."}));
-  create.onclick=()=>addAlias(table,nameInput.value.trim());
-  open.onclick=()=>{form.hidden=!form.hidden;if(!form.hidden)(table ? nameInput : source.querySelector("input")).focus();};
-  validate();
-  host.append(open,form);
+  alias.onchange = update;
+  aliasName.oninput = update;
+  create.onclick = () => {
+    if (create.disabled) return;
+    if (existingSource() || alias.checked) addAlias(table, aliasName.value.trim(), existingSource());
+    else addTable(table);
+  };
+  host.append(labeled("Database table or view", source), labeled("Add as alias", alias), nameField, hint, create);
+  if (!catalog.tables.length) hint.textContent = "No tables or views are available in this schema.";
+  update();
 }
+function openAddTable() {
+  if (!draft) return;
+  selected = null;
+  inspectSelection();
+  $("table-inspector-title").textContent = "Add table";
+  $("table-inspector-kind").textContent = "MODEL SOURCE";
+  $("selection-inspector").hidden = true;
+  $("alias-tools").hidden = false;
+  $("alias-tools").querySelector("input")?.focus();
+}
+
 function changed(event = {}) {
   if (event?.layoutOnly) { save(); return; }
   version++; plan = null; diagnostics = { ...diagnostics, activeScopes: undefined }; clearTimeout(timer); $("run").disabled = true;
@@ -587,7 +597,7 @@ document.querySelector(".top-actions").prepend(helpButton("overview"));
 $("graph-status").after(helpButton("connectionColors"));
 $("table-pane").append(element("section",{className:"editor-section",attrs:{id:"alias-tools"}}), $("selection-inspector"));
 $("model-pane").prepend($("root").parentElement);
-$("show-model").before(icon("tables", "Inspect table", () => { if (draft) inspectSelection(); }));
+$("show-model").before(icon("add", "Add table", openAddTable));
 const filtersTool=icon("filter","Model filters",()=>panel("filters"));filtersTool.id="show-filters";$("show-model").after(filtersTool);
 document.querySelector("#relationships").before(helpHeading("Relationship paths", "cycles"));
 $("root").parentElement.before(helpHeading("Starting object", "root"));

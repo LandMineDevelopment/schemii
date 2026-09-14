@@ -152,8 +152,20 @@ class ModelScope(Contract):
     id: Identifier
     label: str = Field(default="", max_length=200)
     kind: Literal["required", "conditional"]
+    requirement: Literal["required", "optional"] = "required"
     rowBehavior: Literal["keep_unmatched", "require_matching"] | None = None
     alternatives: list[ScopeAlternative] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_activation(cls, value):
+        """Read drafts written before requirement replaced model-time activation."""
+        if isinstance(value, dict) and "requirement" not in value and "activation" in value:
+            value = dict(value)
+            activation = value.pop("activation")
+            value["requirement"] = {"automatic": "required", "optional": "optional"}.get(
+                activation, activation)
+        return value
 
 
 class SelectedField(Contract):
@@ -191,6 +203,7 @@ class ModelLayout(Contract):
 class ScopeSelection(Contract):
     alternativeId: str | None = Field(default=None, max_length=200)
     values: dict[str, FilterValue] = Field(default_factory=dict, max_length=32)
+    active: bool = False
 
 
 class ReportFilter(Contract):

@@ -3,7 +3,7 @@ import { createIconElement } from "./ui.js";
 const PRODUCTS = Object.freeze([
   { id: "schemii", name: "Schemii", description: "Schema design", href: "/" },
   { id: "schemoo", name: "Schemoo", description: "Semantic models", href: "/schemoo" },
-  { id: "schemer", name: "Schemer", description: "Reports · coming later", href: null },
+  { id: "schemer", name: "Schemer", description: "Analytics dashboards", href: "/schemer" },
 ]);
 
 /** Install the common product switcher without advertising unavailable routes. */

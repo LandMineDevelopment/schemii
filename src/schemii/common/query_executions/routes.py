@@ -63,6 +63,7 @@ def cancel_execution(
 def get_result_page(
     execution_id: str, result_id: str, request: Request,
     cursor: str | None = Query(default=None, min_length=1, max_length=512),
+    page_size: int | None = Query(default=None, ge=1),
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleResultPage:
     """Page a transient result with the shared cursor and memory-limit policy."""
@@ -70,7 +71,8 @@ def get_result_page(
     try:
         receipt = service.get_owned(principal.user_id, execution_id)
         return service.page(
-            principal.user_id, receipt.workspace_id, execution_id, result_id, cursor
+            principal.user_id, receipt.workspace_id, execution_id, result_id, cursor,
+            **({"page_size": page_size} if page_size is not None else {}),
         )
     except ConsoleServiceError as error:
         raise _problem(error) from error

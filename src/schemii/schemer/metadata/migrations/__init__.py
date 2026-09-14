@@ -1,0 +1,1 @@
+MIGRATION_PACKAGE = __name__
