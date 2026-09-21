@@ -1,6 +1,7 @@
 """Retained console types share admission while preserving ordinary query capacity."""
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 import threading
@@ -8,19 +9,31 @@ import pytest
 from schemii.common.postgres.gateway import _ConnectionCapacity, PsycopgPostgresGateway
 from schemii.common.postgres.errors import PostgresConnectionCapacityError
 from schemii.schemii.console.service import ConsoleService
+from schemii.schemii.console.repository import InMemoryConsoleRepository
 from test_postgres_gateway import FakeConnectFactory, resolved_connection
 
 
 def reclaimer(gateway, target, leases, busy=()):
-    console = ConsoleService.__new__(ConsoleService)
-    console._transient_results_lock = threading.RLock()
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    console = ConsoleService(
+        repository=InMemoryConsoleRepository(),
+        connections=Mock(),
+        postgres=gateway,
+        workspaces=Mock(),
+        clock=lambda: now,
+    )
     console._active_read_sessions = OrderedDict((str(index),SimpleNamespace(postgres=lease,
         connection_id=target.id,connection_revision=target.revision,owner_id='owner',workspace_id='workspace')) for index,lease in enumerate(leases))
-    console._transient_results = {str(index):SimpleNamespace(execution_id=str(index),active_exports=int(index in busy)) for index in range(len(leases))}
-    console._result_cursors = {}
-    console._maximum_live_read_sessions = 12
-    console._record_limit_event = Mock()
-    gateway.register_retained_connection_reclaimer(console._reclaim_read_session)
+    console._transient_results = {
+        str(index): SimpleNamespace(
+            execution_id=str(index),
+            active_exports=int(index in busy),
+            expires_at=now + timedelta(minutes=15),
+            pending_close=False,
+            read_session=lease,
+        )
+        for index, lease in enumerate(leases)
+    }
     return console
 
 

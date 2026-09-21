@@ -216,3 +216,21 @@ def test_protected_global_capacity_expiry_and_cancellation_cleanup():
         service._purge_transient_results(service._clock())
     assert third.id not in service._protected_results
     assert gateway.sessions[-1].closed
+
+
+def test_native_result_route_defaults_are_values_for_direct_ai_calls():
+    from types import SimpleNamespace
+    from schemii.common.query_executions.routes import get_result_page
+
+    api, _, service, args = setup_target()
+    receipt = service.reserve_read_target(LOCAL_PROTOTYPE_USER_ID, **args)
+    service.run(LOCAL_PROTOTYPE_USER_ID, receipt.id)
+    result = service.get_owned(LOCAL_PROTOTYPE_USER_ID, receipt.id).results[0]
+    principal = Principal(user_id=LOCAL_PROTOTYPE_USER_ID, authentication_source="local_prototype")
+    page = get_result_page(receipt.id, result.id, SimpleNamespace(app=api.app), principal=principal)
+    assert len(page.rows) == 100
+    path = f"/shared-test/query-executions/{receipt.id}/results/{result.id}"
+    # Moving validation into Annotated keeps the HTTP contract unchanged.
+    for query in ({"cursor": ""}, {"page_size": 0}, {"page_size": -1}):
+        assert api.get(path, params=query).status_code == 422
+    service.close_result(LOCAL_PROTOTYPE_USER_ID, None, receipt.id, result.id)
