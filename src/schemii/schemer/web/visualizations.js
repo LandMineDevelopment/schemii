@@ -1,5 +1,6 @@
 import { element } from '#common/dom.js';
-import { createDataGrid } from '#common/data-grid.js';
+import { createResultGrid } from './scroll-results.js';
+import { chartPreview } from './chart-preview.js';
 import { markSelection } from './dashboard-state.js';
 const colors = ['#f4b942', '#65a9ff', '#9b82f4', '#71d49a', '#f36b74', '#55c5c2'];
 const label = value => value === null ? 'NULL' : String(value);
@@ -18,6 +19,7 @@ function actionable(node, text, callback) {
   node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); callback(); } };
 }
 export function renderVisualization(host, tile, result, { onDrill, compact = false } = {}) {
+  result = chartPreview(tile, result);
   host.replaceChildren();
   const warnings = (result?.plan?.warnings || []).filter(text => text.includes('repeated rows from joins'));
   if (warnings.length) {
@@ -29,17 +31,16 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     notice.onkeydown = event => event.stopPropagation();
     host.append(notice);
   }
-  if (!result?.rows.length) { host.append(element('p', { className: 'empty-state', text: 'No matching rows for these slicers and filters.' })); return; }
+  if (result.visualTruncated) host.append(element('p', { className: 'chart-partial-notice', text: `Chart shows the first ${result.rows.length} of ${result.cachedRows} cached groups. Export cached rows or download full results to see more.` }));
+  if (!['detail', 'aggregate', 'kpi'].includes(tile.kind) && (result?.loading || result?.limitReached || result?.error || result?.visualTruncated)) host.append(element('p', { className: 'chart-partial-notice', text: tile.kind === 'donut' ? 'Partial result · percentages reflect displayed groups only.' : 'Partial result · showing received groups.' }));
+  if (!result?.rows.length) { host.append(element('p', { className: 'empty-state', text: result?.loading ? 'Waiting for the first rows…' : result?.error ? 'The query did not complete.' : 'No matching rows for these slicers and filters.' })); return; }
   const drill = (row, index) => onDrill ? () => onDrill(markSelection(tile, row, index)) : null;
   if (tile.kind === 'detail' || tile.kind === 'aggregate') {
-    const grid = createDataGrid({ ...result, rowOffset: result.pageOffset || 0 });
-    if (onDrill && tile.kind === 'aggregate') {
-      [...grid.querySelectorAll('tbody tr')].forEach((tr, rowIndex) => {
-        [...tr.querySelectorAll('td')].forEach((td, columnIndex) => {
-          if (columnIndex >= tile.dimensions.length) actionable(td, `View records for ${td.textContent}`, drill(result.rows[rowIndex], columnIndex - tile.dimensions.length));
-        });
+    const grid = createResultGrid(result, (tr, rowIndex) => {
+      if (onDrill && tile.kind === 'aggregate') [...tr.querySelectorAll('td')].forEach((td, columnIndex) => {
+        if (columnIndex >= tile.dimensions.length) actionable(td, `View records for ${td.textContent}`, drill(result.rows[rowIndex], columnIndex - tile.dimensions.length));
       });
-    }
+    });
     host.append(grid); return;
   }
   if (tile.kind === 'kpi') {
@@ -57,7 +58,7 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
   if (tile.kind === 'bar') {
     const chart = element('div', { className: 'bar-chart' });
     const values = result.rows.flatMap(row => tile.measures.map((_, index) => Number(row[1 + index] ?? 0)));
-    const min = Math.min(0, ...values), max = Math.max(0, ...values), span = max - min || 1;
+    const min = values.reduce((a, b) => Math.min(a, b), 0), max = values.reduce((a, b) => Math.max(a, b), 0), span = max - min || 1;
     for (const row of result.rows) {
       const group = element('div', { className: 'bar-group' }, [element('div', { className: 'bar-label', text: label(row[0]) })]);
       tile.measures.forEach((_, index) => {
@@ -76,7 +77,7 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
   if (tile.kind === 'line') {
     const width = compact ? Math.max(360, result.rows.length * 28) : Math.max(760, result.rows.length * 40), height = compact ? 270 : 450, pad = compact ? 34 : 52;
     const values = result.rows.flatMap(row => tile.measures.map((_, index) => row[index + 1])).filter(numeric).map(Number);
-    const low = Math.min(0, ...values), high = Math.max(1, ...values), span = high - low || 1;
+    const low = values.reduce((a, b) => Math.min(a, b), 0), high = values.reduce((a, b) => Math.max(a, b), 1), span = high - low || 1;
     const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, class: 'line-chart', role: 'img', 'aria-label': tile.title });
     chart.style.minWidth = `${width}px`;
     const x = index => pad + index / Math.max(1, result.rows.length - 1) * (width - pad * 2);

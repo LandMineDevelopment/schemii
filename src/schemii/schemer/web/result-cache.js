@@ -1,132 +1,87 @@
-import { requestJson } from '#common/http.js';
-
-/** One SQL execution, one forward-only stream, a browser-memory cache of fetched rows. */
-export class ResultCache {
-  constructor({ start, pageSize = 100, request = requestJson, onChange = () => {}, wait = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
-    this.start = start; this.pageSize = pageSize; this.request = request; this.onChange = onChange; this.wait = wait;
-    this.rows = []; this.columns = []; this.plan = null; this.nextCursor = null; this.hasMore = true;
-    this.started = false; this.closed = false; this.loading = false; this.error = ''; this.cleanupWarning = '';
-    this.controller = new AbortController(); this.startedAt = 0; this.elapsedMs = 0;
-  }
-  async initialize() {
-    if (this.initializing) return this.initializing;
-    this.initializing = this._initialize(); return this.initializing;
-  }
-  async _initialize() {
-    if (this.closed) throw new Error('This result is closed. Refresh to run a new query.');
-    this.startedAt = Date.now();
-    // Do not abort admission: retain its receipt even if the user closes the view
-    // during this request, so the admitted execution can be cancelled explicitly.
-    const response = await this.start();
-    this.ownsExecution = response.ownsExecution !== false; this.resultIndex = response.resultIndex;
-    this.plan = response.plan; this.base = response.executionUrl || `/api/v1/common/query-executions/${response.execution.id}`;
-    this.execution = response.execution;
-    if (this.resultIndex !== undefined) this.resultRecord = this.execution.results.find(result => result.statementIndex === this.resultIndex);
-    if (this.closed) { await this.release(true); throw new Error('Query cancelled.'); }
-    while (['reserved', 'running'].includes(this.execution.status)) {
-      await this.wait(250);
-      this.execution = await this.request(this.base, { signal: this.controller.signal, timeoutMs: 900000 });
+/** Parse NDJSON incrementally, including split UTF-8 characters and partial lines. */
+export async function readResultStream(url, body, onFrame, signal, fetcher = fetch) {
+  const response = await fetcher(url, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' }, body: JSON.stringify(body), signal });
+  if (!response.ok) { const text = await response.text(); let message = text; try { const data = JSON.parse(text); message = data.error?.message || data.detail?.message || data.detail || data.message || text; } catch {} throw new Error(typeof message === 'string' ? message : JSON.stringify(message)); }
+  if (!response.body) throw new Error('Streaming responses are unavailable in this browser.');
+  const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '', ended = false;
+  const consume = line => { if (!line.trim()) return; const frame = JSON.parse(line); if (ended) throw new Error('Unexpected data after stream completion.'); onFrame(frame); if (frame.type === 'end') ended = true; };
+  try {
+    while (true) {
+      const { value, done } = await reader.read(); buffer += decoder.decode(value, { stream: !done });
+      let newline; while ((newline = buffer.indexOf('\n')) >= 0) { consume(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); }
+      if (buffer.length > 20 * 1024 * 1024) throw new Error('A result batch exceeded the browser safety limit.');
+      if (done) break;
     }
-    if (this.execution.status !== 'succeeded') throw new Error(this.execution.errorMessage || `Query ${this.execution.status}`);
-    this.resultRecord = this.resultIndex !== undefined ? this.execution.results.find(result => result.statementIndex === this.resultIndex) : this.execution.results.length === 1 ? this.execution.results[0] : null;
-    if (!this.resultRecord) throw new Error('This tile did not return its result set.');
-    this.resultUrl = `${this.base}/results/${this.resultRecord.id}`;
-    this.started = true;
+    if (buffer.trim()) consume(buffer);
+    if (!ended) throw new Error('The result stream ended unexpectedly. Refresh to run again.');
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
+
+/** Shared across main results and drills; accounts conservatively for parsed JS values. */
+export class CacheBudget {
+  constructor({ bytes = 64 * 1024 * 1024, rows = 50000 } = {}) { this.limit = bytes; this.rowLimit = rows; this.bytes = 0; this.rows = 0; }
+  take(row) { const bytes = JSON.stringify(row).length * 2 + row.length * 32 + 64; if (this.bytes + bytes > this.limit || this.rows >= this.rowLimit) return 0; this.bytes += bytes; this.rows++; return bytes; }
+  release(bytes, rows) { this.bytes = Math.max(0, this.bytes - bytes); this.rows = Math.max(0, this.rows - rows); }
+}
+
+/** One eager stream; navigation only reads its bounded browser cache. */
+export class ResultCache {
+  constructor({ start, pageSize = 100, onChange = () => {}, budget = new CacheBudget() }) {
+    Object.assign(this, { start, pageSize, onChange, budget, rows: [], columns: [], plan: null, started: false, closed: false, loading: false, hasMore: true, error: '', elapsedMs: 0, bytes: 0, limitReached: false });
+    this.controller = new AbortController(); this.listeners = new Set();
+  }
+  subscribe(callback) { this.listeners.add(callback); return () => this.listeners.delete(callback); }
+  notify() { this.onChange(); for (const listener of this.listeners) listener(); }
+  accept(frame) {
+    if (this.closed) return;
+    if (frame.type === 'start') { this.started = true; this.plan = frame.plan || {}; this.snapshotAt = frame.snapshotAt; }
+    if (frame.type === 'rows' && !this.limitReached) {
+      this.columns = frame.columns.map((column, index) => ({ ...column, name: this.plan?.outputLabels?.[index] || column.name }));
+      for (const row of frame.rows) {
+        const bytes = this.rows.length < 10000 && this.bytes < 24 * 1024 * 1024 ? this.budget.take(row) : 0;
+        if (!bytes) { this.limitReached = true; this.reason = 'browser_budget'; this.loading = false; this.hasMore = false; this.controller.abort(); break; }
+        this.bytes += bytes; this.rows.push(row);
+      }
+    }
+    if (frame.type === 'complete') { this.complete = true; this.limitReached ||= frame.limitReached; this.reason ||= frame.reason; this.hasMore = false; this.loading = false; }
+    if (frame.type === 'error') { this.error = frame.message; this.hasMore = false; this.loading = false; }
+    this.elapsedMs = Date.now() - this.startedAt; this.notify();
   }
   loadMore() {
     if (this.pending) return this.pending;
     if (this.closed || !this.hasMore) return Promise.resolve(this.snapshot());
-    this.pending = this._loadMore().finally(() => { this.pending = null; });
-    return this.pending;
+    this.loading = true; this.startedAt = Date.now(); this.notify();
+    this.pending = this.run(); return this.pending;
   }
-  async _loadMore() {
-    const batchStarted = Date.now();
-    this.loading = true; this.onChange();
+  async run() {
     try {
-      await this.initialize();
-      const params = new URLSearchParams({ page_size: String(this.pageSize) });
-      if (this.nextCursor) params.set('cursor', this.nextCursor);
-      const suffix = `?${params}`;
-      const page = await this.request(this.resultUrl + suffix, { signal: this.controller.signal, timeoutMs: 900000 });
-      if (this.closed) return this.snapshot();
-      const labels = this.plan?.outputLabels || [];
-      this.columns = page.columns.map((column, index) => ({ ...column, name: labels[index] || column.name }));
-      this.rows.push(...page.rows); this.nextCursor = page.nextCursor;
-      this.hasMore = Boolean(page.nextCursor); this.expiresAt = page.expiresAt;
-      this.elapsedMs += Date.now() - batchStarted;
-      if (page.truncated) this.error = 'The query reached a database result limit. Cached rows remain available.';
-      if (!this.hasMore) await this.release(false);
-      return this.snapshot();
-    } catch (error) {
-      // A cursor token is consumed once. A lost response must not retry the token
-      // or re-run SQL behind the user's back. Already cached rows stay readable.
-      this.error = this.closed ? 'Query cancelled. Cached rows remain available.' : `${error.message} Cached rows remain available; refresh explicitly to run again.`;
-      this.hasMore = false;
-      await this.release(true);
-      throw new Error(this.error);
-    } finally { this.loading = false; this.onChange(); }
+      await this.start(frame => this.accept(frame), this.controller.signal);
+      if (!this.closed && !this.complete && !this.error && !this.limitReached) throw new Error('The result stream did not complete.');
+      if (this.error) throw new Error(this.error);
+    } catch (error) { if (!this.closed && !this.limitReached) this.error = `${error.message} Cached rows remain available; refresh to run again.`; }
+    finally { this.loading = false; this.hasMore = false; this.elapsedMs = Date.now() - this.startedAt; this.notify(); }
+    return this.snapshot();
   }
-  async page(index) {
-    const offset = index * this.pageSize;
-    while (this.rows.length < offset + this.pageSize && this.hasMore && !this.closed) await this.loadMore();
-    return { ...this.snapshot(), rows: this.rows.slice(offset, offset + this.pageSize), pageOffset: offset,
-      hasMore: this.rows.length > offset + this.pageSize || this.hasMore };
-  }
-  snapshot() {
-    return { plan: this.plan, columns: this.columns, rows: this.rows, elapsedMs: this.elapsedMs, rowLimit: this.pageSize,
-      pageOffset: 0, hasMore: this.hasMore, warnings: [...(this.plan?.warnings || []), ...(this.cleanupWarning ? [this.cleanupWarning] : [])], cachedRows: this.rows.length, error: this.error };
-  }
-  async release(cancel) {
-    if (!this.base) return;
-    if (cancel && this.ownsExecution !== false) {
-      try { await this.request(this.base, { method: 'DELETE' }); }
-      catch { this.cleanupWarning = 'Server cancellation could not be confirmed. Check live queries before running again.'; }
-    }
-    for (const result of this.ownsExecution === false ? (this.resultRecord ? [this.resultRecord] : []) : this.execution?.results || []) {
-      try { await this.request(`${this.base}/results/${result.id}`, { method: 'DELETE' }); }
-      catch { this.cleanupWarning = 'Closing the database cursor could not be confirmed.'; }
-    }
-  }
-  async close() {
-    if (this.closed) return;
-    this.closed = true; this.hasMore = false; this.controller.abort();
-    await this.release(true);
-    this.onChange();
-  }
+  async page(index) { await this.loadMore(); const offset = index * this.pageSize; return { ...this.snapshot(), rows: this.rows.slice(offset, offset + this.pageSize), pageOffset: offset }; }
+  snapshot() { return { plan: this.plan, columns: this.columns, rows: this.rows, elapsedMs: this.elapsedMs, pageOffset: 0, hasMore: this.hasMore, loading: this.loading, limitReached: this.limitReached, reason: this.reason, snapshotAt: this.snapshotAt, warnings: this.plan?.warnings || [], cachedRows: this.rows.length, error: this.error }; }
+  async close() { if (this.closed) return; this.closed = true; if (this.loading) this.error = 'Query stopped. Cached rows remain available; refresh to run again.'; this.controller.abort(); this.loading = false; this.hasMore = false; this.notify(); }
+  dispose() { if (this.disposed) return; this.disposed = true; void this.close(); this.budget.release(this.bytes, this.rows.length); this.bytes = 0; this.rows.length = 0; this.listeners.clear(); }
 }
 
-/** Dashboard tiles share one admitted database session with independent cursors. */
+/** Fans one eager dashboard stream into independently browsable tile caches. */
 export class DashboardResultGroup {
-  constructor({ start, request = requestJson, wait = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
-    this.start = start; this.request = request; this.wait = wait; this.closed = false;
-    this.controller = new AbortController();
+  constructor({ start }) { this.start = start; this.listeners = new Map(); this.controller = new AbortController(); }
+  tile(tileId, callback) {
+    this.listeners.set(tileId, callback);
+    this.pending ||= Promise.resolve().then(() => this.start(frame => this.accept(frame), this.controller.signal));
+    return this.pending;
   }
-  ready() { this.pending ||= this._ready(); return this.pending; }
-  async _ready() {
-    const response = await this.start(); this.response = response; this.base = response.executionUrl;
-    if (this.closed) { await this.closeReceipt(); throw new Error('Dashboard query cancelled.'); }
-    if (!response.execution) return response;
-    try {
-      while (['reserved', 'running'].includes(response.execution.status)) {
-        await this.wait(250);
-        response.execution = await this.request(this.base, { signal: this.controller.signal, timeoutMs: 900000 });
-      }
-      if (response.execution.status !== 'succeeded') throw new Error(response.execution.errorMessage || `Dashboard query ${response.execution.status}`);
-      return response;
-    } catch (error) { await this.closeReceipt(); throw error; }
+  accept(frame) {
+    if (frame.type === 'start') {
+      for (const tile of frame.tiles) this.listeners.get(tile.tileId)?.({ ...frame, plan: tile.plan });
+      for (const error of frame.tileErrors || []) this.listeners.get(error.tileId)?.({ ...error, type: 'error' });
+    } else if (frame.tileId) this.listeners.get(frame.tileId)?.(frame);
+    else if (frame.type === 'error') for (const callback of this.listeners.values()) callback(frame);
   }
-  async tile(tileId) {
-    const response = await this.ready();
-    const tile = response.tiles.find(item => item.tileId === tileId);
-    if (!tile) throw new Error(response.tileErrors.find(item => item.tileId === tileId)?.message || 'This tile could not be compiled. Edit its configuration and try again.');
-    return { execution: response.execution, executionUrl: response.executionUrl, plan: tile.plan,
-      resultIndex: tile.statementIndex, ownsExecution: false };
-  }
-  async closeReceipt() {
-    if (!this.base || this.released) return;
-    this.released = true;
-    try { await this.request(this.base, { method: 'DELETE' }); }
-    catch { this.cleanupWarning = 'Dashboard cursor cancellation could not be confirmed.'; }
-  }
-  async close() { this.closed = true; this.controller.abort(); await this.closeReceipt(); }
+  async close() { this.controller.abort(); }
 }

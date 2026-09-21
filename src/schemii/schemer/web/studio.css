@@ -36,3 +36,17 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
 .aggregation-warning { color:#e0c88f; background:#211b10; border:1px solid #685226; border-radius:6px; padding:8px 10px; margin-bottom:10px; font-size:12px; line-height:1.5; }
 .aggregation-warning summary { cursor:pointer; }
 .aggregation-warning p { margin:8px 0 0; }
+
+/* Streaming previews keep both browser memory and row DOM bounded. */
+.virtual-result-grid { flex:1 1 auto; min-height:0; overflow-anchor:none; }
+.virtual-result-grid .data-grid tbody tr:not(.result-spacer) { height:34px; }
+.virtual-result-grid .data-grid tbody tr:not(.result-spacer)>* { height:34px; padding-top:0; padding-bottom:0; box-sizing:border-box; }
+.virtual-result-grid .data-grid .result-spacer>td { padding:0; border:0; min-width:0; }
+.stream-progress { padding:12px; text-align:center; color:var(--muted); font-size:12px; flex:none; }
+.stream-progress.is-loading::before { content:''; display:inline-block; vertical-align:middle; width:14px; height:14px; margin-right:8px; border:2px solid var(--line-strong); border-top-color:var(--accent); border-radius:50%; animation:stream-spin .8s linear infinite; }
+.stream-progress.is-error { color:var(--danger); overflow-wrap:anywhere; }
+.chart-partial-notice { color:var(--accent-bright); font-size:11px; margin:0 0 10px; }
+.export-snapshot-note { color:var(--muted); font-size:10px; }
+.viewer-footer { flex-wrap:wrap; }
+@keyframes stream-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .stream-progress.is-loading::before { animation:none; } }

@@ -13,12 +13,12 @@ from schemii.common.api.errors import ApiProblem
 from schemii.schemoo.service import document, load_model, model_catalog, plan_query
 
 
-def report_plan(services, owner, body, *, fresh=False):
+def report_plan(services, owner, body, *, fresh=False, bounded=True):
     model = load_model(services, owner, body.model_id, body.expected_revision)
     if body.explore.root and body.explore.root != model.definition.root:
         raise ApiProblem(422, "report_root_changed", "Reports must use the model's starting table.")
     plan = plan_query(model_catalog(services, owner, model, fresh=fresh),
-                      model.definition, body.explore, model.catalog_fingerprint)
+                      model.definition, body.explore, model.catalog_fingerprint, _bounded=bounded)
     return model, plan
 
 
