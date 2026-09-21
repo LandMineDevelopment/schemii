@@ -10,7 +10,7 @@ Schemii is a local, self-hosted PostgreSQL design and analytics workbench made u
 
 - **Schemii** manages saved PostgreSQL connection profiles, editable schema designs, live catalog inspection, Console queries, and migration review.
 - **Schemoo** defines durable semantic models over an explicit saved connection and schema, including relationships, derived fields, and required or optional model scopes.
-- **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore tiles, and drill into retained result sets.
+- **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore streamed results, and drill into contributing rows cached in their browser.
 
 The repository is intentionally a local-development deployment: it has one local prototype principal and no application authentication or public ingress. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
 
@@ -70,7 +70,7 @@ The current API deliberately uses one local application user while product workf
 - `/api/v1/schemii/workspaces/{id}/catalog` returns a live PostgreSQL catalog snapshot.
 - `/schemoo` opens the durable semantic-model editor; `/api/v1/schemoo/models` manages owner-private models over an explicit saved connection and schema.
 - `/schemer` opens saved, model-bound analytics dashboards; `/api/v1/schemer/dashboards` manages dashboard and tile configuration.
-- `POST /api/v1/schemer/dashboards/{id}/executions` compiles tiles into one retained session with independent forward-only cursors. Tile `/executions` starts an individual refresh or drill-through.
+- `POST /api/v1/schemer/dashboards/{id}/executions/stream` streams dashboard results from one consistent database snapshot. Tile `/executions/stream` starts an individual refresh or drill-through; tile `/export` downloads a fresh full result as CSV.
 - `/api/v1/common/query-executions/{id}` provides shared read-result paging, cancellation, release, and export without requiring a Schemii workspace.
 - Interactive OpenAPI documentation is available at `/docs`.
 
@@ -80,15 +80,35 @@ prototype drafts are imported explicitly and left intact. See the
 [Schemoo architecture and API guide](src/schemii/schemoo/README.md) for source-drift
 handling, configuration limits, shared execution, and the remaining semantic-engine
 limitations. Schemer uses the same model root, exposure, relationships, and scope rules.
-Dashboards persist configuration only. Detail reports, aggregate reports, and drill-through grids automatically append
-rows on scroll using the same page loader as Schemii; charts append fetched groups
-on scroll. Short row batches fill the visible viewport automatically. Each cursor advances once, and going back uses
-the cache. Changing slicers, refreshing, or leaving a dashboard releases its cursors.
-Grouped dashboard cursors are protected from LRU eviction until closed or expired;
-full protected capacity rejects new reads. A dashboard supports up to 20 tiles,
-or the configured statement limit if lower. Database execution errors follow the
-shared session transaction contract; cached rows remain available. Model publishing,
-ETL and materialization remain separate future work.
+Dashboards persist configuration only. Detail reports, aggregate reports, charts,
+KPIs, and drill-through results stream in bounded batches immediately, without
+waiting for scrolling. The browser caches the received rows until refresh and
+shares each result between the dashboard card and expanded view. Scrollable row
+views expose arriving results and show a loading indicator until streaming ends.
+Preview row and byte limits bound each query; a shared browser budget also bounds
+cached tiles and drill selections. Capped and interrupted results remain readable
+and are explicitly marked incomplete.
+
+The source connection stays open only while the stream executes and transfers
+its bounded preview, and is released on completion, cap, cancellation, or failure.
+Dashboard refreshes share one repeatable-read transaction; individual tile refreshes
+and newly opened drill queries take new snapshots. Full CSV downloads execute a
+fresh query and stream directly to a file without the browser preview cap; they
+may differ from the cached preview. They still consume source capacity while
+running. Existing shared admission limits bound concurrent source sessions, and
+full capacity rejects new reads. A dashboard supports up to 20 tiles, or the
+configured statement limit if lower. Model publishing, ETL and materialization
+remain separate future work.
+
+Schemer preview defaults are 10,000 rows and 8 MiB of serialized row data per
+query, with a 50,000-row/32 MiB dashboard stream budget. Deployment environment overrides
+are `SCHEMER_PREVIEW_ROWS`, `SCHEMER_PREVIEW_BYTES`, and
+`SCHEMER_DASHBOARD_PREVIEW_ROWS`, and `SCHEMER_DASHBOARD_PREVIEW_BYTES`.
+`SCHEMER_STREAM_SECONDS` defaults to 120
+seconds and `SCHEMER_EXPORT_SECONDS` to 900 seconds. Browser cache limits also
+account for parsed values and row overhead; a browser may stop retaining rows
+before the server byte limit. These are preview/transfer limits, not promises
+that joins or aggregates can execute without scanning their source data.
 
 This phase has no application authentication, so the packaged local deployment is explicitly `local-development` and its Compose ingress remains bound to loopback. The configured Tailscale Serve route exposes that loopback listener only to the tailnet and must be protected by tailnet ACLs. It is a preview route, not a public deployment boundary. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures. The server currently rejects an authenticated/public deployment mode instead of silently starting without its future identity adapter.
 

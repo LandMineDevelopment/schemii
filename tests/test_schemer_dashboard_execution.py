@@ -1,4 +1,5 @@
 """Saved dashboard execution authority, SQL transparency and page boundaries."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -17,13 +18,11 @@ def dashboard(setup):
                    "measures": [{"table": "people", "column": "name", "aggregate": "count_distinct"}],
                    "detailFields": [{"table": "people", "column": "name"}], "limit": 3}]})
     assert response.status_code == 201, response.text
-    from datetime import datetime, timezone
-    from schemii.common.postgres.console import ConsoleExecution
-    now = datetime.now(timezone.utc)
-    console.receipt = ConsoleExecution(id="cex_" + "a" * 32, console_id="con_" + "a" * 32,
-        revision=1, status="reserved", completed_statement_indexes=[], results=[], created_at=now, updated_at=now)
     console.runs = []
-    console.run = lambda owner, identifier: console.runs.append(identifier)
+    def run(owner, identifier):
+        console.runs.append(identifier)
+        console.receipt.results = [SimpleNamespace(id=f"result-{i}") for i in range(len(console.target["statements"]))]
+    console.run = run
     dashboard = response.json()
     return client, f'/api/v1/schemer/dashboards/{dashboard["id"]}/tiles/people', console, fresh_calls
 
@@ -39,20 +38,19 @@ def test_tile_sql_route_uses_saved_configuration_without_execution(dashboard):
     assert not hasattr(console, "target")
 
 
-def test_tile_execution_retains_results_for_shared_forward_cursor(dashboard):
+def test_tile_execution_streams_and_releases_results(dashboard):
     client, url, console, fresh = dashboard
     result = client.post(url + "/executions", json={"expectedRevision": 1})
     assert result.status_code == 200, result.text
-    payload = result.json()
-    assert payload["execution"]["id"] == console.receipt.id
-    assert payload["executionUrl"] == f"/api/v1/common/query-executions/{console.receipt.id}"
-    assert "rows" not in payload
-    assert console.closed == [] and console.pages == []
+    events = [json.loads(line) for line in result.text.splitlines()]
+    plan = events[0]["tiles"][0]["plan"]
+    assert events[1]["executionId"] == console.receipt.id
+    assert console.closed == ["result-0"] and console.pages == [None, "next"]
+    assert events[-2]["rowCount"] == 4 and events[-1]["type"] == "end"
     assert console.runs == [console.receipt.id]
     assert fresh[-1] is True
-    assert console.target["statements"] == [payload["plan"]["sql"]]
-    assert console.target["row_page_size"] == 3
-    assert "LIMIT" not in payload["plan"]["sql"] and "OFFSET" not in payload["plan"]["sql"]
+    assert console.target["statements"] == [plan["sql"]]
+    assert "LIMIT" not in plan["sql"] and "OFFSET" not in plan["sql"]
 
 
 def test_offset_and_old_rerun_query_route_are_unavailable(dashboard):
@@ -79,7 +77,7 @@ def test_drill_selection_reaches_compiler_and_cannot_inject_fields(dashboard, ac
     body = {"expectedRevision": 1, "selection": {"dimensions": [{"table": "people", "column": "name", "value": "Alice"}], "measureIndex": 0}}
     result = client.post(url + "/" + action, json=body)
     assert result.status_code == 200, result.text
-    plan = result.json() if action == "plan" else result.json()["plan"]
+    plan = result.json() if action == "plan" else json.loads(result.text.splitlines()[0])["tiles"][0]["plan"]
     assert plan["drill"] is True
     assert '"contributors"."People.name" = ' in plan["sql"]
     assert 'GROUP BY' not in plan["sql"]
@@ -105,16 +103,13 @@ def test_five_tiles_share_one_protected_retained_execution(dashboard):
     url, revision = configure_tiles(client, tile_url, 5)
     response = client.post(url + "/executions", json={"expectedRevision": revision})
     assert response.status_code == 200, response.text
-    payload = response.json()
+    payload = json.loads(response.text.splitlines()[0])
     assert len(payload["tiles"]) == 5 and payload["tileErrors"] == []
-    assert [tile["statementIndex"] for tile in payload["tiles"]] == list(range(5))
     assert [tile["tileId"] for tile in payload["tiles"]] == [f"tile-{i}" for i in range(5)]
     assert console.runs == [console.receipt.id]
     assert len(console.target["statements"]) == 5
     assert console.target["protect_result"] is True
-    assert console.target["row_page_size"] == 3
-    assert console.closed == [] and console.pages == []
-    assert payload["executionUrl"].endswith(console.receipt.id)
+    assert len(console.closed) == 5 and len(console.pages) == 10
 
 
 def test_compile_failure_does_not_prevent_other_tiles_running(dashboard, monkeypatch):
@@ -130,9 +125,8 @@ def test_compile_failure_does_not_prevent_other_tiles_running(dashboard, monkeyp
     monkeypatch.setattr(routes, "tile_plan", compile_tile)
     response = client.post(url + "/executions", json={"expectedRevision": revision})
     assert response.status_code == 200, response.text
-    payload = response.json()
+    payload = json.loads(response.text.splitlines()[0])
     assert [tile["tileId"] for tile in payload["tiles"]] == ["tile-0", "tile-2", "tile-3", "tile-4"]
-    assert [tile["statementIndex"] for tile in payload["tiles"]] == list(range(4))
     assert payload["tileErrors"] == [{"tileId": "tile-1", "code": "invalid_model_query", "message": "Choose a required filter value."}]
     assert len(console.target["statements"]) == 4
 
@@ -191,11 +185,9 @@ def test_cancel_during_group_reservation_releases_protected_execution(monkeypatc
     console = SimpleNamespace(reserve_read_target=reserve,
         cancel=lambda *args: cancelled.append(args), run=lambda *args: pytest.fail("Cancelled admission cannot execute"))
     services = SimpleNamespace(console=console, admin_config=SimpleNamespace(console=SimpleNamespace(maximum_statements_per_run=20)))
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(services=services)))
-    tasks = BackgroundTasks()
+    from schemii.schemer.streaming import reserve as reserve_stream
     async def scenario():
-        work = asyncio.create_task(routes.execute_dashboard("dashboard", routes.DashboardExecutionRequest(expectedRevision=1),
-            request, tasks, Principal(user_id="owner", authentication_source="local_prototype")))
+        work = asyncio.create_task(reserve_stream(services, "owner", model, [{"plan": {"sql": "SELECT 1"}}]))
         while not entered.is_set():
             await asyncio.sleep(0.001)
         work.cancel()
@@ -204,4 +196,25 @@ def test_cancel_during_group_reservation_releases_protected_execution(monkeypatc
             await work
     asyncio.run(scenario())
     assert cancelled == [("owner", None, "retained")]
-    assert tasks.tasks == []
+
+
+def test_native_form_export_streams_fresh_full_csv(dashboard):
+    client, url, console, fresh = dashboard
+    response = client.post(url + "/export", data={"payload": json.dumps({"expectedRevision": 1})})
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/csv")
+    assert response.headers["x-schemer-snapshot"] == "fresh"
+    assert "attachment" in response.headers["content-disposition"]
+    assert "People.name" in response.text.splitlines()[0]
+    assert response.text.splitlines()[1:] == ["A", "B", "C", "D"]
+    assert console.closed == ["result-0"]
+    assert fresh[-1] is True
+    assert "LIMIT" not in console.target["statements"][0]
+
+
+def test_stream_and_export_revision_checks(dashboard):
+    client, url, console, _ = dashboard
+    for action in ["executions/stream", "export"]:
+        response = client.post(url + "/" + action, json={"expectedRevision": 99})
+        assert response.status_code == 409
+    assert not hasattr(console, "target")

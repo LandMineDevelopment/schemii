@@ -1,4 +1,4 @@
-import { scrollPosition, restoreScroll, autoLoadRows } from './scroll-results.js';
+import { scrollPosition, restoreScroll, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { requestJson } from '#common/http.js';
 import { initializeUi, createIconButton, createIconElement } from '#common/ui.js';
@@ -8,7 +8,7 @@ import { readExecution } from '#common/query-execution.js';
 import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderParameterValues } from '#model/filter-controls.js';
 import { newTile, dashboardUpdate, TILE_TYPES } from './dashboard-state.js';
-import { ResultCache, DashboardResultGroup } from './result-cache.js';
+import { ResultCache, DashboardResultGroup, CacheBudget, readResultStream } from './result-cache.js';
 import { renderVisualization } from './visualizations.js';
 import { openTileEditor } from './tile-editor.js';
 import { openExpanded, openSql } from './result-viewer.js';
@@ -17,6 +17,8 @@ const $ = id => document.getElementById(id), API = '/api/v1/schemer/dashboards';
 let dashboard, model, catalog, library = [], modelList = [], slicerDraft, slicersDirty = false, saving = false, epoch = 0;
 const runs = new Map(), tileStates = new Map(), streams = new Map();
 let closing = Promise.resolve(), dashboardGroup;
+const browserBudget = new CacheBudget();
+const scheduledCards = new WeakSet();
 const message = text => { $('notice').textContent = text; };
 function icon(name, label, callback, disabled = false) { const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.disabled = disabled; button.onclick = event => { event.stopPropagation(); callback(); }; return button; }
 function requiredSelections(source, values = {}) { return Object.fromEntries(source.definition.scopes.filter(s => s.kind === 'required' && s.requirement !== 'optional' && values[s.id]).map(s => [s.id, structuredClone(values[s.id])])); }
@@ -30,31 +32,43 @@ function missingSlicers() {
     }).map(input => `${scope.label}: ${input.label}`);
   });
 }
-function stopRuns() {
+function stopRuns({ keepCache = false } = {}) {
   for (const [id, state] of tileStates) if (state.loading) tileStates.set(id, { error: 'Query stopped. Refresh to run again.' });
   ++epoch;
   const old = [...streams.values()].flatMap(group => [group.main, ...group.drills.values()]);
-  streams.clear(); runs.clear(); $('stop-dashboard').hidden = true;
-  closing = Promise.all([closing, ...(dashboardGroup ? [dashboardGroup.close()] : []), ...old.map(cache => cache.close())]);
+  if (!keepCache) { streams.clear(); tileStates.clear(); }
+  runs.clear(); $('stop-dashboard').hidden = true;
+  closing = Promise.all([closing, ...(dashboardGroup ? [dashboardGroup.close()] : []), ...old.map(cache => keepCache ? cache.close() : cache.dispose())]);
   dashboardGroup = null;
   return closing;
 }
 async function closeTileStreams(id) {
   const group = streams.get(id); streams.delete(id);
-  if (group) await Promise.all([group.main, ...group.drills.values()].map(cache => cache.close()));
+  if (group) await Promise.all([group.main, ...group.drills.values()].map(cache => cache.dispose()));
 }
 function getStream(tile, selection = null) {
   let group = streams.get(tile.id);
   const create = selected => {
     const origin = dashboard;
     const currentGroup = dashboardGroup;
-    const cache = new ResultCache({ pageSize: tile.limit, start: () => !selected && currentGroup ? currentGroup.tile(tile.id) : requestJson(`${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/executions`, {
-      method: 'POST', body: { expectedRevision: origin.revision, selection: selected }, timeoutMs: 900000 }), onChange: () => {
+    const cache = new ResultCache({ pageSize: tile.limit, budget: browserBudget, start: (onFrame, signal) => !selected && currentGroup ? currentGroup.tile(tile.id, onFrame) : readResultStream(`${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/executions/stream`,
+      { expectedRevision: origin.revision, selection: selected }, frame => {
+        if (frame.type === 'start') onFrame({ ...frame, plan: frame.tiles.find(item => item.tileId === tile.id)?.plan });
+        else onFrame(frame);
+      }, signal), onChange: () => {
       if (selected || streams.get(tile.id)?.main !== cache) return;
-      if (cache.started) tileStates.set(tile.id, { result: cache.snapshot() });
+      if (cache.started || cache.error) tileStates.set(tile.id, { result: cache.snapshot() });
       const card = [...$('tile-grid').querySelectorAll('.analytics-tile')].find(card => card.dataset.tileId === tile.id);
-      if (card) renderTile(card, tile);
+      if (card && !scheduledCards.has(card)) {
+        scheduledCards.add(card); requestAnimationFrame(() => { scheduledCards.delete(card); if (card.isConnected) renderTile(card, tile); });
+      }
     } });
+    cache.download = () => {
+      if (dashboard?.id !== origin.id) { message('Reopen this dashboard before downloading its results.'); return; }
+      const form = document.createElement('form'); form.method = 'POST'; form.action = `${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/export`; form.target = '_blank';
+      const input = document.createElement('input'); input.type = 'hidden'; input.name = 'payload'; input.value = JSON.stringify({ expectedRevision: dashboard.revision, selection: selected });
+      form.append(input); document.body.append(form); form.submit(); form.remove();
+    };
     return cache;
   };
   if (!group) { group = { main: create(null), drills: new Map() }; streams.set(tile.id, group); }
@@ -137,11 +151,9 @@ function renderTile(card, tile) {
     const chart = !['detail', 'aggregate'].includes(tile.kind);
     const data = state.result;
     renderVisualization(body, tile, data, { compact: true });
-    if (chart && cache?.hasMore) { const more = element('button', { type: 'button', className: 'ui-button load-chart-more', text: cache.loading ? 'Loading…' : 'Load more groups' }); more.disabled = cache.loading; more.onclick = event => { event.stopPropagation(); void cache.loadMore().catch(error => message(error.message)); }; body.append(more); }
+    appendStreamStatus(body, data);
     restoreScroll(body, position);
-    if (!chart && cache) autoLoadRows(body, cache, () => cache.loadMore().catch(error => message(error.message)));
-    body.onscroll = () => { if (chart && cache?.hasMore && !cache.loading && (body.scrollHeight - body.scrollTop - body.clientHeight < 60 || body.scrollWidth > body.clientWidth && body.scrollWidth - body.scrollLeft - body.clientWidth < 60)) void cache.loadMore().catch(error => message(error.message)); };
-    status.textContent = `${state.result.rows.length} ${tile.kind === 'detail' ? 'rows' : 'groups'} cached${cache?.loading ? ' · loading…' : ''}${state.result.hasMore ? ' · scroll for more' : ''}${state.result.error ? ' · fetch stopped' : ''}`;
+    status.textContent = `${data.rows.length} ${tile.kind === 'detail' ? 'rows' : 'groups'} cached${cache?.loading ? ' · loading…' : data.limitReached ? ' · preview limit' : data.error ? ' · interrupted' : ' · complete'}`;
   } else { body.replaceChildren(element('p', { className: 'empty-state', text: slicersDirty ? 'Apply dashboard slicers to load this tile.' : missingSlicers().length ? 'Set the dashboard slicers to load this tile.' : 'Open or refresh to load this tile.' })); status.textContent = 'Not run'; }
 }
 function renderTiles() {
@@ -181,7 +193,7 @@ async function runTile(tile, useGroup = false) {
   const cache = getStream(tile); dashboardGroup = group; runs.set(tile.id, cache); $('stop-dashboard').hidden = false;
   tileStates.set(tile.id, { loading: true });
   const card = [...$('tile-grid').querySelectorAll('.analytics-tile')].find(card => card.dataset.tileId === tile.id); if (card) renderTile(card, tile);
-  const started = Date.now(), timer = setInterval(() => { if (card?.isConnected && cache.loading) card.querySelector('.tile-status').textContent = `Fetching · ${((Date.now() - started) / 1000).toFixed(1)} s`; }, 100);
+  const started = Date.now(), timer = setInterval(() => { if (card?.isConnected && cache.loading && !cache.rows.length) card.querySelector('.tile-status').textContent = `Fetching · ${((Date.now() - started) / 1000).toFixed(1)} s`; }, 100);
   try { await cache.loadMore(); if (version === epoch && streams.get(tile.id)?.main === cache) tileStates.set(tile.id, { result: cache.snapshot() }); }
   catch (error) { if (version === epoch && streams.get(tile.id)?.main === cache) tileStates.set(tile.id, { error: error.message }); }
   finally { clearInterval(timer); if (runs.get(tile.id) === cache) runs.delete(tile.id); if (version === epoch && card?.isConnected) renderTile(card, tile); $('stop-dashboard').hidden = runs.size === 0; }
@@ -190,9 +202,8 @@ async function runTile(tile, useGroup = false) {
 async function runAll() {
   if (!readyToRun()) return;
   await stopRuns(); const version = epoch, queue = [...dashboard.tiles], origin = dashboard;
-  dashboardGroup = new DashboardResultGroup({ start: () => requestJson(`${API}/${origin.id}/executions`, { method: 'POST', body: { expectedRevision: origin.revision }, timeoutMs: 900000 }) });
-  const worker = async () => { while (queue.length && epoch === version) await runTile(queue.shift(), true); };
-  await Promise.all([worker(), worker()]);
+  dashboardGroup = new DashboardResultGroup({ start: (onFrame, signal) => readResultStream(`${API}/${origin.id}/executions/stream`, { expectedRevision: origin.revision }, onFrame, signal) });
+  await Promise.all(queue.map(tile => runTile(tile, true)));
 }
 function expand(tile) {
   if (!readyToRun()) return;
@@ -201,7 +212,7 @@ function expand(tile) {
 
 async function showTileSql(tile) {
   const result = tileStates.get(tile.id)?.result;
-  if (result) { openSql(result.plan, `${tile.title} · executed SQL`); return; }
+  if (result?.plan?.sql) { openSql(result.plan, `${tile.title} · executed SQL`); return; }
   if (!readyToRun()) return;
   try { const plan = await requestJson(tileUrl(tile, 'plan'), { method: 'POST', body: { expectedRevision: dashboard.revision } }); openSql(plan, `${tile.title} · generated SQL`); }
   catch (error) { message(error.message); }
@@ -362,7 +373,7 @@ $('rename-dashboard').onclick = () => dashboardDialog('rename'); $('duplicate-da
 $('add-tile').onclick = () => editTile(newTile()); $('refresh-dashboard').onclick = () => { void refreshDashboard(); };
 $('manage-dashboard-filters').onclick = manageDashboardFilters;
 $('update-dashboard-model').onclick = () => { void updateDashboardModel(); };
-$('stop-dashboard').onclick = () => { stopRuns(); for (const [id, state] of tileStates) if (state.loading) tileStates.set(id, { error: 'Query cancelled.' }); renderTiles(); };
+$('stop-dashboard').onclick = () => { stopRuns({ keepCache: true }); for (const [id, state] of tileStates) if (state.loading) tileStates.set(id, { error: 'Query cancelled.' }); renderTiles(); };
 $('apply-slicers').onclick = async () => {
   const missing = missingSlicers(); if (missing.length) { $('slicer-status').textContent = `Choose ${missing.join(', ')}.`; return; }
   try { await update({ selections: slicerDraft.selections }); slicersDirty = false; renderSlicers(); message(''); await runAll(); }
@@ -375,7 +386,7 @@ $('delete-dashboard').onclick = async () => {
     if (library.length) await openDashboard(library[0].id); else { $('dashboard-content').hidden = true; $('empty-dashboard').hidden = false; history.replaceState(null, '', '/schemer'); }
   } });
 };
-window.addEventListener('pagehide', () => { if (dashboardGroup?.base) void fetch(dashboardGroup.base, { method: 'DELETE', credentials: 'same-origin', keepalive: true }).catch(() => {}); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) if (cache.base) void fetch(cache.base, { method: 'DELETE', credentials: 'same-origin', keepalive: true }).catch(() => {}); });
+window.addEventListener('pagehide', () => { void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
 window.addEventListener('beforeunload', event => { if (slicersDirty) { event.preventDefault(); event.returnValue = ''; } });
 initializeUi(); installProductNavigation($('product-navigation'), { activeProduct: 'schemer' });
 async function initialize() {

@@ -197,3 +197,18 @@ def test_cancel_during_reservation_releases_admitted_lease(monkeypatch):
             await work
     asyncio.run(scenario())
     assert console.cancelled
+
+
+def test_standalone_stream_and_export_are_unbounded_plans_with_short_lived_results(setup):
+    import json
+    client, body, console, _ = setup
+    response = client.post("/api/v1/schemer/query/stream", json=body)
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert response.status_code == 200
+    assert events[-2]["rowCount"] == 4
+    assert "LIMIT" not in console.target["statements"][0]
+    assert console.closed == ["result"]
+    response = client.post("/api/v1/schemer/query/export", json=body)
+    assert response.status_code == 200
+    assert response.text.splitlines() == ["name", "A", "B", "C", "D"]
+    assert console.closed == ["result", "result"]
