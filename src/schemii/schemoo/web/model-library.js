@@ -1,34 +1,24 @@
 import { requestJson } from "#common/http.js";
 import { element } from "#common/dom.js";
 import { createIconButton } from "#common/ui.js";
-import { confirmAction } from "#common/confirmation.js";
+import { confirmModelDeletion } from "./model-deletion.js";
+export { confirmModelDeletion } from "./model-deletion.js";
 import { namedAction } from "#common/named-action.js";
 import { modelSelect, disposeSelects } from "./select.js";
 import { importedDraft } from "./model-draft.js";
 import { splitDraft } from "./model-state.js";
 
 const API = "/api/v1/schemoo";
-export function confirmModelDeletion(model) {
-  return confirmAction({
-    title: "Delete model?",
-    message: `Are you sure you want to delete “${model.name}”?`,
-    details: "This permanently deletes the saved model, its layout, and saved previews. Your PostgreSQL tables and data are not changed. This cannot be undone.",
-    confirmLabel: "Delete model",
-    onConfirm: async () => {
-      try {
-        await requestJson(`${API}/models/${encodeURIComponent(model.id)}?expected_revision=${model.revision}`, { method: "DELETE" });
-      } catch (error) {
-        if (error.status === 409) error.message = "This model changed after it was loaded. Close this dialog and refresh the model list to review the latest revision before deleting.";
-        else error.message += " Refresh and review the model's current state before trying again.";
-        throw error;
-      }
-    },
-  });
-}
 
 let libraryTicket = 0;
+let refreshActions = [];
+export function refreshModelLibraryActions() {
+  if (!document.getElementById("model-library")?.open) return;
+  for (const refresh of refreshActions) refresh();
+}
 export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete = () => true } = {}) {
   const ticket = ++libraryTicket;
+  refreshActions = [];
   const dialog = document.getElementById("model-library"), content = document.getElementById("library-content");
   disposeSelects(content); content.replaceChildren(element("p", { text: "Loading your models and connections…", attrs: { role: "status" } }));
   if (!dialog.open) dialog.showModal();
@@ -47,6 +37,10 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
         remove.disabled = !canDelete(model);
         const duplicate = createIconButton({ icon: "copy", label: `Duplicate model ${model.name}`, className: "model-option-copy" });
         duplicate.disabled = !canDelete(model);
+        refreshActions.push(() => {
+          remove.disabled = !canDelete(model);
+          duplicate.disabled = !canDelete(model);
+        });
         const row = element("div", { className: "model-list-row" }, [button, duplicate, remove]);
         let copying = false;
         duplicate.onclick = async () => {

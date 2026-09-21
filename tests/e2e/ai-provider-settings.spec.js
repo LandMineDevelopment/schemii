@@ -90,7 +90,8 @@ test("Codex device connection can cancel, reconnect, complete, and disconnect", 
 test("transient stream text is replaced by one completed response", async ({ page, request }) => {
   const state = await setup(page, request, { working: true });
   await expect(page.locator("#ai-assistant-model")).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Assistant settings", exact: true })).toBeDisabled();
+  // Settings remain available to inspect permissions while a turn runs.
+  await expect(page.getByRole("button", { name: "Assistant settings", exact: true })).toBeEnabled();
   await expect(page.locator(".ai-message.assistant")).toContainText("Partial streamed answer");
   await expect(page.locator(".ai-message.assistant")).toContainText("Temporary · not saved");
   state.final = true; state.working = false;

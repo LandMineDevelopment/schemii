@@ -1,10 +1,18 @@
 import { test, expect } from "@playwright/test";
+import { createOrganizationModel, deleteModel } from "./helpers/schemoo-model.js";
 
-test("mobile native touch pinch zooms the canvas without editing the model", async ({ page, request, context }, testInfo) => {
+let modelId;
+test.beforeEach(async ({ request }, testInfo) => {
   test.skip(testInfo.project.name !== "android-chromium", "Native mobile touch gesture");
-  const { models } = await (await request.get("/api/v1/schemoo/models")).json();
-  expect(models.length).toBeGreaterThan(0);
-  await page.goto(`/schemoo?model=${models[0].id}`);
+  modelId = await createOrganizationModel(request, "E2E mobile pinch");
+});
+test.afterEach(async ({ request }) => {
+  await deleteModel(request, modelId);
+  modelId = null;
+});
+
+test("mobile native touch pinch zooms the canvas without editing the model", async ({ page, context }) => {
+  await page.goto(`/schemoo?model=${modelId}`);
   await expect(page.locator(".sc-node").first()).toBeVisible();
   if (await page.locator("#inspector").isVisible()) await page.getByRole("button", {name:"Close inspector",exact:true}).click();
   await page.getByRole("button", {name:"Fit model",exact:true}).click();

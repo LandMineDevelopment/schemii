@@ -65,9 +65,13 @@ jobs:
         run: python -m pytest -q tests/integration
 
   browser-smoke:
-    name: Assembled browser smoke
+    name: Assembled browser smoke (${{ matrix.project }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop-chromium, android-chromium]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -78,5 +82,17 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - name: Start the canonical application stack
         run: ./start.sh
-      - name: Exercise desktop and Android-sized browser flows
-        run: npm run test:e2e
+      - name: Exercise browser flows
+        timeout-minutes: 18
+        env:
+          SCHEMII_E2E_BOOTSTRAP: "1"
+        run: npm run test:e2e -- --project=${{ matrix.project }}
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-evidence-${{ matrix.project }}
+          path: |
+            artifacts/playwright-results
+            artifacts/playwright-report
+          retention-days: 7

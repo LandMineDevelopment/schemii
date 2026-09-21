@@ -1,10 +1,11 @@
+import { findOrganizationConnection } from "./helpers/database-fixtures.js";
 import { expect, test } from "@playwright/test";
 import { chooseModelOption } from "./helpers/schemoo-select.js";
 
 let modelId;
 test.beforeEach(async ({request})=>{
   const {connections}=await (await request.get("/api/v1/connections")).json();
-  const connection=connections.find(c=>c.database==="organization");expect(connection).toBeTruthy();
+  const connection=findOrganizationConnection(connections);expect(connection).toBeTruthy();
   const response=await request.post("/api/v1/schemoo/models",{data:{name:`E2E calculations ${Date.now()}`,connectionId:connection.id,namespace:"public",
     definition:{root:"pay_band_class_dim",nodes:[{id:"pay_band_class_dim",table:"pay_band_class_dim",label:"Pay bands"}],edges:[],scopes:[],exposedFields:null},
     layout:{positions:[{id:"pay_band_class_dim",x:40,y:40}]},

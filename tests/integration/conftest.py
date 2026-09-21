@@ -16,6 +16,7 @@ from schemii.schemii.metadata import (
     MIGRATION_PACKAGE as SCHEMII_MIGRATION_PACKAGE,
 )
 from tests.integration.postgres_fixture import PostgresMetadataHarness
+from schemii.schemer.metadata.migrations import MIGRATION_PACKAGE as SCHEMER_MIGRATION_PACKAGE
 from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO_MIGRATION_PACKAGE
 
 
@@ -53,7 +54,7 @@ def postgres_metadata(tmp_path: Path) -> Iterator[PostgresMetadataHarness]:
     owner_id = f"integration_{uuid.uuid4().hex}"
     repositories = create_metadata_repositories(
         environment,
-        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE, SCHEMOO_MIGRATION_PACKAGE),
+        migration_packages=(COMMON_MIGRATION_PACKAGE, SCHEMII_MIGRATION_PACKAGE, SCHEMOO_MIGRATION_PACKAGE, SCHEMER_MIGRATION_PACKAGE),
     )
     harness = PostgresMetadataHarness(
         owner_id=owner_id,

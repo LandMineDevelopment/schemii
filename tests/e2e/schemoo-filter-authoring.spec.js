@@ -23,7 +23,7 @@ test("model author binds a conditional parameter; report paths activate it and r
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Report parameter/ }).click();
   await page.getByRole("textbox", { name: /^Scope .+ name$/ }).fill("Certification date");
-  await chooseModelOption(page, "Requirement for Model filter", "Conditional model parameter");
+  await chooseModelOption(page, "Evaluation reach for Model filter", "When its source participates");
   await page.getByRole("textbox", { name: /^Certification date \/ Default input .+ name$/ }).fill("As of date");
   await chooseModelOption(page, /^Certification date \/ Default input .+ type$/, "Date");
   const filterDialog=page.getByRole("dialog",{name:"Add model filter",exact:true});
@@ -37,7 +37,7 @@ test("model author binds a conditional parameter; report paths activate it and r
   await expect(page.locator("#model-filters")).toContainText("personnel_certification_fact.effective_date ≤ [As of date]");
 
   await page.getByRole("button", { name: "Explore model", exact: true }).click();
-  await expect(page.locator("#parameter-values")).toContainText("Conditional · not needed by this query");
+  await expect(page.locator("#parameter-values")).toContainText("Source-conditional · not needed by this query");
   await expect(page.locator("#run")).toBeEnabled();
   await expect(page.locator("#sql")).not.toContainText('"personnel_certification_fact"');
 
@@ -45,7 +45,7 @@ test("model author binds a conditional parameter; report paths activate it and r
   await chooseModelOption(page, "Report filter 1 behavior", "Has a matching related record");
   await chooseModelOption(page, "Report filter 1 condition 1 field", "personnel_certification_fact · personnel_id");
   await chooseModelOption(page, "Report filter 1 condition 1 operator", "Is not null");
-  await expect(page.locator("#parameter-values")).toContainText("Conditional · active for this query");
+  await expect(page.locator("#parameter-values")).toContainText("Source-conditional · active for this query");
   await expect(page.locator("#plan-status")).toContainText("Certification date requires As of date");
   await expect(page.locator("#run")).toBeDisabled();
 
@@ -59,15 +59,15 @@ test("model author binds a conditional parameter; report paths activate it and r
   await expect(page.locator("#sql")).not.toContainText("EXISTS");
   await expect(page.locator("#sql")).toContainText("2025-01-01");
   await page.getByRole("button", { name: "Delete Report filter 1", exact: true }).click();
-  await expect(page.locator("#parameter-values")).toContainText("Conditional · not needed by this query");
+  await expect(page.locator("#parameter-values")).toContainText("Source-conditional · not needed by this query");
   await expect(page.locator("#sql")).not.toContainText('"personnel_certification_fact"');
 
   await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Edit filter Certification date", exact: true }).click();
-  await chooseModelOption(page, "Requirement for Certification date", "Required model scope");
+  await chooseModelOption(page, "Evaluation reach for Certification date", "Always evaluate");
   await page.getByRole("button", { name: "Apply to model", exact: true }).click();
   await page.getByRole("button", { name: "Explore model", exact: true }).click();
-  await expect(page.locator("#parameter-values")).toContainText("Required for every query");
+  await expect(page.locator("#parameter-values")).toContainText("Always evaluated · active");
   await expect(page.locator("#sql")).toContainText("EXISTS");
   await expect(page.locator("#sql")).toContainText('"personnel_certification_fact"');
   await expect(page.locator("#sql")).toContainText("2025-01-01");

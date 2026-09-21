@@ -1,3 +1,4 @@
+import { findOrganizationConnection } from "./helpers/database-fixtures.js";
 import {expect,test} from "@playwright/test";
 import {importedDraft} from "../../src/schemii/schemoo/web/model-draft.js";
 import {splitDraft} from "../../src/schemii/schemoo/web/model-state.js";
@@ -7,7 +8,7 @@ let modelId;
 let edgeId;
 test.beforeEach(async({request})=>{
   const {connections}=await(await request.get("/api/v1/connections")).json();
-  const connection=connections.find(item=>item.database==="organization");
+  const connection=findOrganizationConnection(connections);
   expect(connection).toBeTruthy();
   const catalog=await(await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`)).json();
   const draft=importedDraft(catalog),parts=splitDraft(draft);
@@ -74,8 +75,14 @@ test("changed keys and types are labeled, reviewed, and changed foreign keys bec
   await expect(page.locator("#graph-status")).toContainText("1 source change needs review");
   if(await page.locator("#table-inspector").isVisible())await page.getByRole("button",{name:"Close table inspector",exact:true}).click();
   const changedEdge=page.locator(".sc-edge.sc-source-changed").first();
-  await changedEdge.click();
+  // A curved edge's bounding-box center can lie underneath an unrelated card.
+  // Exercise its supported keyboard interaction instead of that empty midpoint.
+  await expect(changedEdge).toHaveAttribute("role", "button");
+  await changedEdge.focus();
+  await expect(changedEdge).toBeFocused();
+  await changedEdge.press("Enter");
   await expect(sourcePanel).toContainText("Foreign key");
+  await page.screenshot({path:`artifacts/source-reconciliation-${test.info().project.name}.png`});
   page.once("dialog",dialog=>dialog.accept());
   await sourcePanel.getByRole("button",{name:"Accept current source",exact:true}).click();
   await expect(page.locator("#graph-status")).not.toContainText("source change");
