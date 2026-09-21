@@ -1286,6 +1286,24 @@ def test_plan_creation_rejects_an_imported_workspace_without_its_atomic_baseline
             id="routine-kind",
         ),
         pytest.param(
+            "function",
+            {"definition": (
+                "CREATE FUNCTION echo(renamed integer) RETURNS integer "
+                "LANGUAGE sql AS $$ SELECT renamed $$"
+            )},
+            "routine_parameter_change_unsupported",
+            id="routine-input-name",
+        ),
+        pytest.param(
+            "function_out",
+            {"definition": (
+                "CREATE FUNCTION echo(OUT value bigint, OUT label text) RETURNS record "
+                "LANGUAGE sql AS $$ SELECT 1::bigint, 'x'::text $$"
+            )},
+            "routine_parameter_change_unsupported",
+            id="routine-output-type",
+        ),
+        pytest.param(
             "view",
             {"name": "renamed"},
             "view_identity_change_unsupported",
@@ -1329,6 +1347,20 @@ def test_unsupported_object_transition_cannot_reserve_execution(
             "LANGUAGE sql AS $$ SELECT value $$"
         ),
     )
+    if object_kind == "function_out":
+        routine = PostgresFunction(
+            namespace="public",
+            name="echo",
+            kind="function",
+            identity_arguments="",
+            arguments="OUT value integer, OUT label text",
+            return_type="record",
+            language="sql",
+            definition=(
+                "CREATE FUNCTION public.echo(OUT value integer, OUT label text) "
+                "RETURNS record LANGUAGE sql AS $$ SELECT 1, 'x'::text $$"
+            ),
+        )
     view_fields = {
         "namespace": "public",
         "name": "constant_value",
@@ -1345,7 +1377,7 @@ def test_unsupported_object_transition_cannot_reserve_execution(
         server_timezone="UTC",
         tables=(),
         relationships=(),
-        functions=(routine,) if object_kind == "function" else (),
+        functions=(routine,) if object_kind in {"function", "function_out"} else (),
         views=(PostgresView(**view_fields),) if object_kind == "view" else (),
         materialized_views=(
             (PostgresMaterializedView(**view_fields, populated=True),)
@@ -1357,7 +1389,7 @@ def test_unsupported_object_transition_cannot_reserve_execution(
     assert imported.summary.complete
     baseline = imported.content
     desired = baseline.model_copy(deep=True)
-    if object_kind == "function":
+    if object_kind in {"function", "function_out"}:
         desired.functions[0] = DesignFunction.model_validate(
             {**desired.functions[0].model_dump(), **changes}
         )

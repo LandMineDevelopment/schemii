@@ -10,6 +10,10 @@ import secrets
 from dataclasses import dataclass
 from typing import AbstractSet, Any, Iterable, Literal, Mapping
 
+from pglast import parse_sql
+from pglast.enums import FunctionParameterMode
+from pglast.stream import RawStream
+
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.common.postgres.query_analysis import referenced_relations
 from schemii.schemii.designs.importer import import_postgres_catalog
@@ -67,6 +71,34 @@ def _qualified(namespace: str, name: str) -> str:
 
 def _statement(source: str) -> str:
     return source.strip().rstrip(";") + ";"
+
+
+def _routine_parameters_require_migration(before: DesignFunction, after: DesignFunction) -> bool:
+    """Check declarations omitted from the routine's identity/return metadata.
+
+    In particular, RETURNS record hides the shape of OUT parameters. PostgreSQL
+    also forbids changing existing input names and removing argument defaults.
+    Body edits, changed default expressions, and naming unnamed inputs are safe
+    with respect to this check.
+    """
+    old_parameters = parse_sql(before.definition)[0].stmt.parameters or ()
+    new_parameters = parse_sql(after.definition)[0].stmt.parameters or ()
+    if len(old_parameters) != len(new_parameters):
+        return True
+    input_modes = {
+        FunctionParameterMode.FUNC_PARAM_DEFAULT,
+        FunctionParameterMode.FUNC_PARAM_IN,
+    }
+    for old, new in zip(old_parameters, new_parameters):
+        old_mode = FunctionParameterMode.FUNC_PARAM_IN if old.mode in input_modes else old.mode
+        new_mode = FunctionParameterMode.FUNC_PARAM_IN if new.mode in input_modes else new.mode
+        if old_mode != new_mode or RawStream()(old.argType) != RawStream()(new.argType):
+            return True
+        if old.name != new.name and (old.name is not None or old_mode not in input_modes):
+            return True
+        if old.defexpr is not None and new.defexpr is None:
+            return True
+    return False
 
 
 def _kind(path: str) -> Literal[
@@ -1380,6 +1412,15 @@ def compile_migration_steps(
                     message=(f"Changing the return type of {before.name} requires a "
                              "dependency-aware drop and recreation; restore the original "
                              "return type before applying this design."),
+                    object_path=f"functions.{after.name}({after.identity_arguments})",
+                ))
+                continue
+            if _routine_parameters_require_migration(before, after):
+                blocking.append(MigrationWarning(
+                    code="routine_parameter_change_unsupported",
+                    message=(f"Changing parameter declarations of {before.name} requires "
+                             "a dependency-aware routine migration; restore the original "
+                             "parameter declarations before applying this design."),
                     object_path=f"functions.{after.name}({after.identity_arguments})",
                 ))
                 continue

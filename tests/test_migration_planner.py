@@ -115,6 +115,53 @@ def test_same_identity_routine_body_edits_remain_replaceable(kind: str, prefix: 
 
 
 @pytest.mark.parametrize(
+    ("before_args", "after_args", "returns"),
+    [
+        ("value integer", "renamed integer", "integer"),
+        ("value integer", "integer", "integer"),
+        ("value integer DEFAULT 1", "value integer", "integer"),
+        ("OUT value integer, OUT label text", "OUT value bigint, OUT label text", "record"),
+        ("OUT value integer, OUT label text", "OUT renamed integer, OUT label text", "record"),
+        ("OUT value integer, OUT label text", "OUT value integer", "record"),
+    ],
+)
+def test_incompatible_parameter_declarations_are_blocked(
+    before_args: str, after_args: str, returns: str,
+) -> None:
+    def content(arguments: str) -> SchemiiDesignContent:
+        return SchemiiDesignContent(functions=[_routine(
+            f"CREATE FUNCTION measure({arguments}) RETURNS {returns} LANGUAGE sql AS $$ SELECT 1 $$"
+        )])
+
+    steps, blockers = compile_migration_steps("public", content(before_args), content(after_args))
+
+    assert steps == []
+    assert [warning.code for warning in blockers] == ["routine_parameter_change_unsupported"]
+
+
+@pytest.mark.parametrize(
+    ("before_args", "after_args"),
+    [
+        ("integer", "value integer"),
+        ("value integer", "IN value integer"),
+        ("value integer", "value integer DEFAULT 1"),
+        ("value integer DEFAULT 1", "value integer DEFAULT 2"),
+    ],
+)
+def test_compatible_parameter_declarations_remain_replaceable(before_args: str, after_args: str) -> None:
+    def content(arguments: str) -> SchemiiDesignContent:
+        return SchemiiDesignContent(functions=[_routine(
+            f"CREATE FUNCTION measure({arguments}) RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$"
+        )])
+
+    steps, blockers = compile_migration_steps("public", content(before_args), content(after_args))
+
+    assert blockers == []
+    assert len(steps) == 1
+    assert steps[0].operation == "replace"
+
+
+@pytest.mark.parametrize(
     ("before_kind", "after_kind", "name"),
     [
         ("view", "view", "renamed"),

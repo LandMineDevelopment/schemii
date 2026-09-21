@@ -112,6 +112,8 @@ Desired designs support durable schema authoring independently of a backing data
 
 Migration review blocks edits that change an existing routine's name, kind, input
 argument types, or return type, and edits that rename a view or change its kind.
+It also blocks incompatible parameter changes, including renamed inputs, changed
+output fields, and removed defaults, even when the routine identity is unchanged.
 These transitions need dependency-aware migrations that the planner does not yet
 provide. Restore the original identity/return contract to apply other changes;
 routine body edits and ordinary view query edits retain their replacement path.
