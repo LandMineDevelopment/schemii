@@ -17,9 +17,14 @@ function nameDialog({ title, initial, onSave }) {
 }
 
 /** Named query setups are independent records; the canvas/model remains shared. */
-export function createPreviewLibrary({ host, getContext, applyExplore, isBlocked }) {
+export function createPreviewLibrary({ host, getContext, applyExplore, isBlocked, onPendingChange = () => {} }) {
   let modelId = null, records = [], activeId = "", baseline = null, working = null;
   let pending = false, loaded = false, ticket = 0, notice = "", error = "";
+  function setPending(value) {
+    if (pending === value) return;
+    pending = value;
+    onPendingChange(value);
+  }
   const path = () => `/api/v1/schemoo/models/${encodeURIComponent(modelId)}/previews`;
   const current = () => getContext().draft ? previewState(getContext().draft) : null;
   const active = () => records.find(preview => preview.id === activeId);
@@ -49,21 +54,21 @@ export function createPreviewLibrary({ host, getContext, applyExplore, isBlocked
     for (let n = 2; names.has(initial.toLocaleLowerCase()); n++) initial = `Preview ${n}`;
     await nameDialog({ title: "Save preview as", initial, onSave: async name => {
       checkSave(); if (modelId !== origin) throw new Error("The selected model changed. Close this dialog and try again.");
-      pending = true; render();
+      setPending(true); render();
       try {
         const saved = await requestJson(path(), { method: "POST", body: { name, explore } });
         records.push(saved); activeId = saved.id; baseline = structuredClone(saved.explore); error = ""; notice = "Preview saved";
-      } finally { pending = false; render(); }
+      } finally { setPending(false); render(); }
     } });
   }
   async function saveSelected() {
     try {
       checkSave(); const selected = active(); if (!selected) return;
-      pending = true; render();
+      setPending(true); render();
       const saved = await requestJson(`${path()}/${selected.id}`, { method: "PUT", body: { expectedRevision: selected.revision, name: selected.name, explore: current() } });
       records = records.map(record => record.id === saved.id ? saved : record); baseline = structuredClone(saved.explore); notice = "Preview saved"; error = "";
     } catch (failure) { error = `${failure.message} Your preview edits are kept. Refresh the saved preview list to review newer changes before retrying.`; }
-    finally { pending = false; render(); }
+    finally { setPending(false); render(); }
   }
   async function removeSelected() {
     if (blocked() || !active()) return;
@@ -72,18 +77,18 @@ export function createPreviewLibrary({ host, getContext, applyExplore, isBlocked
       details: "Only this saved query setup is removed. The model, other previews, and PostgreSQL data remain unchanged. Your current choices stay available as a working preview.",
       confirmLabel: "Delete preview", busyLabel: "Deleting…", onConfirm: async () => {
         if (modelId !== origin || blocked()) throw new Error("The model changed or is busy. Close this dialog and try again.");
-        pending = true; render();
+        setPending(true); render();
         try { await requestJson(`${path()}/${selected.id}?expected_revision=${selected.revision}`, { method: "DELETE" }); }
-        finally { pending = false; render(); }
+        finally { setPending(false); render(); }
       } });
     if (deleted) { records = records.filter(record => record.id !== selected.id); activeId = ""; working = current(); baseline = current(); notice = "Saved preview deleted; current choices kept"; error = ""; render(); }
   }
   async function load(id, reset = true) {
     const version = ++ticket;
-    modelId = id; pending = true; loaded = false; error = "";
+    modelId = id; setPending(true); loaded = false; error = "";
     if (reset) { records = []; activeId = ""; baseline = current(); working = current(); notice = ""; }
     render();
-    if (!id) { pending = false; render(); return; }
+    if (!id) { setPending(false); render(); return; }
     try {
       const response = await requestJson(path());
       if (version !== ticket) return;
@@ -94,7 +99,7 @@ export function createPreviewLibrary({ host, getContext, applyExplore, isBlocked
         notice = "List refreshed. Current choices kept as a working preview; open a saved preview to review its latest version.";
       }
     } catch (failure) { if (version === ticket) error = failure.message; }
-    finally { if (version === ticket) { pending = false; render(); } }
+    finally { if (version === ticket) { setPending(false); render(); } }
   }
   function render() {
     disposeSelects(host); host.replaceChildren();

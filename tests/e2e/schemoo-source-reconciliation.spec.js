@@ -75,8 +75,14 @@ test("changed keys and types are labeled, reviewed, and changed foreign keys bec
   await expect(page.locator("#graph-status")).toContainText("1 source change needs review");
   if(await page.locator("#table-inspector").isVisible())await page.getByRole("button",{name:"Close table inspector",exact:true}).click();
   const changedEdge=page.locator(".sc-edge.sc-source-changed").first();
-  await changedEdge.click();
+  // A curved edge's bounding-box center can lie underneath an unrelated card.
+  // Exercise its supported keyboard interaction instead of that empty midpoint.
+  await expect(changedEdge).toHaveAttribute("role", "button");
+  await changedEdge.focus();
+  await expect(changedEdge).toBeFocused();
+  await changedEdge.press("Enter");
   await expect(sourcePanel).toContainText("Foreign key");
+  await page.screenshot({path:`artifacts/source-reconciliation-${test.info().project.name}.png`});
   page.once("dialog",dialog=>dialog.accept());
   await sourcePanel.getByRole("button",{name:"Accept current source",exact:true}).click();
   await expect(page.locator("#graph-status")).not.toContainText("source change");

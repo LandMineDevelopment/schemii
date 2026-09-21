@@ -11,8 +11,14 @@ import { splitDraft } from "./model-state.js";
 const API = "/api/v1/schemoo";
 
 let libraryTicket = 0;
+let refreshActions = [];
+export function refreshModelLibraryActions() {
+  if (!document.getElementById("model-library")?.open) return;
+  for (const refresh of refreshActions) refresh();
+}
 export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete = () => true } = {}) {
   const ticket = ++libraryTicket;
+  refreshActions = [];
   const dialog = document.getElementById("model-library"), content = document.getElementById("library-content");
   disposeSelects(content); content.replaceChildren(element("p", { text: "Loading your models and connections…", attrs: { role: "status" } }));
   if (!dialog.open) dialog.showModal();
@@ -31,6 +37,10 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
         remove.disabled = !canDelete(model);
         const duplicate = createIconButton({ icon: "copy", label: `Duplicate model ${model.name}`, className: "model-option-copy" });
         duplicate.disabled = !canDelete(model);
+        refreshActions.push(() => {
+          remove.disabled = !canDelete(model);
+          duplicate.disabled = !canDelete(model);
+        });
         const row = element("div", { className: "model-list-row" }, [button, duplicate, remove]);
         let copying = false;
         duplicate.onclick = async () => {
