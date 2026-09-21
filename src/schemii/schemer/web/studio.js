@@ -212,7 +212,7 @@ function expand(tile) {
 
 async function showTileSql(tile) {
   const result = tileStates.get(tile.id)?.result;
-  if (result) { openSql(result.plan, `${tile.title} · executed SQL`); return; }
+  if (result?.plan?.sql) { openSql(result.plan, `${tile.title} · executed SQL`); return; }
   if (!readyToRun()) return;
   try { const plan = await requestJson(tileUrl(tile, 'plan'), { method: 'POST', body: { expectedRevision: dashboard.revision } }); openSql(plan, `${tile.title} · generated SQL`); }
   catch (error) { message(error.message); }

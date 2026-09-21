@@ -335,6 +335,19 @@ test('a failed stream preserves partial rows and refresh replaces the browser ca
   expect(errors).toEqual([]);
 });
 
+test('SQL inspection generates a plan after a stream fails before returning one', async ({ page }) => {
+  const { requests, errors } = await mock(page);
+  await page.context().route(`**/api/v1/schemer/dashboards/${dashboardId}/executions/stream`, route =>
+    route.fulfill({ status: 503, json: { error: { message: 'Report execution unavailable' } } }));
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile')).toContainText('Report execution unavailable');
+  await page.getByRole('button', { name: 'SQL for Positions by org', exact: true }).click();
+  const sql = page.getByRole('dialog', { name: 'Positions by org · generated SQL' });
+  await expect(sql.locator('code')).toContainText('SELECT org, COUNT(id)');
+  expect(requests.some(request => request.path.endsWith('/plan'))).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test('an empty stream completes without a perpetual loading indicator', async ({ page }) => {
   const { requests, errors } = await mock(page, { manyRows: true, emptyRows: true });
   await page.goto('/schemer');
