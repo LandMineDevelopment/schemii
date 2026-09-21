@@ -4,7 +4,8 @@ This is deliberately not a cost optimizer. ``today`` defaults use one UTC date
 per compilation. Filter requirement and unmatched-row handling are independent.
 """
 
-from .join_types import validate_join_types
+from .join_types import comparable_types, validate_join_types
+from .models import Condition
 
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -196,6 +197,19 @@ class _Model:
             raise ValueError("Choose a source column for each field or filter condition.")
         if not isinstance(node, str) or node not in self.nodes or not isinstance(column, str) or column not in self.columns[node]:
             raise ValueError(f"Unknown model field: {node}.{column}.")
+        if item.get("compareColumn") is not None:
+            # Direct compiler callers use dictionaries; enforce the same operand
+            # contract as API and persisted definitions before generating SQL.
+            Condition.model_validate({key: value for key, value in item.items() if key != "valueSource"})
+            if item.get("valueSource") == "today":
+                raise ValueError("Choose either Today or a comparison column, not both.")
+            compare = item["compareColumn"]
+            if self.nodes[node].get("derivation") or compare not in self.tables[self.nodes[node]["table"]]:
+                raise ValueError(f"Unknown physical comparison column on this source: {node}.{compare}.")
+            details = self.column_details[self.nodes[node]["table"]]
+            left_type, right_type = (details[name].get("dataType", "") for name in (column, compare))
+            if not comparable_types(left_type, right_type):
+                raise ValueError(f"Comparison columns must have comparable types without casts ({left_type or 'unknown'} and {right_type or 'unknown'}).")
         if item.get("operator") == "range_contains_date":
             details = self.column_details[self.nodes[node]["table"]].get(column, {})
             if node in self.derived or details.get("dataType", "").lower() != "daterange":
@@ -486,7 +500,9 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
                 raise ValueError("Contains filters require text.")
             result = f"STRPOS(CAST({expression} AS TEXT), {_literal(item['value'])}) > 0"
         elif isinstance(operator, str) and operator in operators:
-            result = f"{expression} {operators[operator]} {_literal(item.get('value'))}"
+            operand = ((aliases[item["table"]] + "." if aliases else "") + _identifier(item["compareColumn"])
+                       if item.get("compareColumn") is not None else _literal(item.get("value")))
+            result = f"{expression} {operators[operator]} {operand}"
         else:
             raise ValueError("Unsupported filter operator.")
         if type(item.get("allowNull", False)) is not bool:

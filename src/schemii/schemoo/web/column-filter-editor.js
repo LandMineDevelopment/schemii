@@ -21,6 +21,7 @@ function conditionKey(condition) {
   const value = Array.isArray(condition.value) ? [...condition.value].map(v => JSON.stringify(v)).sort() : condition.value;
   return JSON.stringify([condition.table, condition.column, condition.operator,
     unary ? null : condition.parameterId || null,
+    unary ? null : condition.compareColumn ?? null,
     unary || condition.parameterId ? null : value,
     unary ? false : !!condition.allowNull]);
 }

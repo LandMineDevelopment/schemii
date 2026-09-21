@@ -43,6 +43,9 @@ def validate_conditions(model, output, owner, kind):
             raise ValueError("A calculated-field condition references an unknown physical model field.")
         if kind == "row" and node != owner:
             raise ValueError("Row calculation conditions must use fields on the owning source.")
+        if condition.get("compareColumn") is not None:
+            model.validate(condition)
+            continue
         details = model.column_details[model.nodes[node]["table"]][column]
         data_type = details.get("dataType", details.get("data_type", "")).lower().split("(")[0].strip()
         if condition.get("valueSource") == "today":
