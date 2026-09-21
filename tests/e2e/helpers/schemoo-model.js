@@ -1,10 +1,12 @@
 import { expect } from "@playwright/test";
+import { findOrganizationConnection } from "./database-fixtures.js";
+export { findOrganizationConnection } from "./database-fixtures.js";
 import { importedDraft } from "../../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../../src/schemii/schemoo/web/model-state.js";
 
 export async function createOrganizationModel(request, label) {
   const connections = await (await request.get("/api/v1/connections")).json();
-  const connection = connections.connections.find(item => item.database === "organization");
+  const connection = findOrganizationConnection(connections.connections);
   expect(connection, "Organization connection is required for the Schemoo browser fixture").toBeTruthy();
   const catalogResponse = await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`);
   expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();

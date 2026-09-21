@@ -1,36 +1,23 @@
 import { expect, test } from "@playwright/test";
 import { chooseModelOption } from "./helpers/schemoo-select.js";
-import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
-import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
+import { createOrganizationModel, deleteModel } from "./helpers/schemoo-model.js";
 
 let modelId;
 test.beforeEach(async ({ request }) => {
-  const connections = await (await request.get("/api/v1/connections")).json();
-  const connection = connections.connections.find(item => item.database === "organization");
-  expect(connection, "Organization connection is required for the Schemoo alias fixture").toBeTruthy();
-  const catalogResponse = await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`);
-  expect(catalogResponse.ok()).toBeTruthy();
-  const catalog = await catalogResponse.json();
-  const response = await request.post("/api/v1/schemoo/models", { data: {
-    name: `E2E aliases ${Date.now()}`,
-    connectionId: connection.id,
-    namespace: "public",
-    catalogFingerprint: catalog.fingerprint,
-    ...splitDraft(importedDraft(catalog)),
-  } });
-  expect(response.ok(), await response.text()).toBeTruthy();
-  modelId = (await response.json()).id;
+  modelId = await createOrganizationModel(request, "E2E aliases");
 });
 
 test.afterEach(async ({ request }) => {
-  if (!modelId) return;
-  const response = await request.get(`/api/v1/schemoo/models/${modelId}`);
-  if (response.ok()) {
-    const model = await response.json();
-    await request.delete(`/api/v1/schemoo/models/${modelId}?expected_revision=${model.revision}`);
-  }
+  await deleteModel(request, modelId);
   modelId = null;
 });
+
+async function inspectCertification(page) {
+  if (await page.locator("#inspector").isVisible()) {
+    await page.getByRole("button", { name: "Close inspector", exact: true }).click();
+  }
+  await page.locator('[data-node-id="certification_dim"] .sc-node-header').click();
+}
 
 async function createAlias(page, label = "Personnel credentials") {
   await page.getByRole("button", { name: "Edit model", exact: true }).click();
@@ -70,7 +57,7 @@ test("creating and deleting aliases preserves the user's zoom and pan", async ({
   await page.mouse.move(box.x + 48, box.y + 160, { steps: 5 });
   await page.mouse.up();
   await expect(stage).not.toHaveAttribute("style", beforePan);
-  await page.getByRole("button", { name: "Inspect table", exact: true }).click();
+  await inspectCertification(page);
   const view = await stage.getAttribute("style");
   for (let index = 0; index < 2; index++) {
     await page.getByRole("button", { name: "Create alias", exact: true }).click();
@@ -81,7 +68,7 @@ test("creating and deleting aliases preserves the user's zoom and pan", async ({
     await expect(stage).toHaveAttribute("style", view);
   }
   page.once("dialog", dialog => dialog.accept());
-  await page.getByRole("button", { name: "Delete alias Viewport alias 1", exact: true }).click();
+  await page.getByRole("button", { name: "Remove from model Viewport alias 1", exact: true }).click();
   await expect(page.locator(".sc-node")).toHaveCount(13);
   await expect(page.locator("#plan-status")).not.toHaveText("Checking model and required parameters…");
   await expect(stage).toHaveAttribute("style", view);
@@ -109,7 +96,7 @@ test("table inspector owns columns and aliases while Model and Filters have sepa
   await expect(page.getByRole("button",{name:"Add model filter scope",exact:true})).toBeHidden();
   await page.getByRole("button",{name:"Model filters",exact:true}).click();
   await expect(page.getByRole("button",{name:"Add model filter scope",exact:true})).toBeVisible();
-  await page.getByRole("button",{name:"Inspect table",exact:true}).click();
+  await inspectCertification(page);
   await expect(toggle).toBeChecked();
   await toggle.uncheck();
   await expect(page.locator('[data-node-id="certification_dim"] input[aria-label="Expose certification_dim.id"]')).not.toBeChecked();
@@ -162,10 +149,10 @@ test("alias connections are independent, persist, show cycles and disappear only
   await page.locator("#node-connections input").last().scrollIntoViewIfNeeded();
   await page.screenshot({ path: `artifacts/schemoo-alias-controls-${testInfo.project.name}.png` });
   page.once("dialog", dialog => dialog.dismiss());
-  await page.getByRole("button", { name: "Delete alias Personnel credentials", exact: true }).click();
+  await page.getByRole("button", { name: "Remove from model Personnel credentials", exact: true }).click();
   await expect(page.locator(".sc-node")).toHaveCount(13);
   page.once("dialog", dialog => dialog.accept());
-  await page.getByRole("button", { name: "Delete alias Personnel credentials", exact: true }).click();
+  await page.getByRole("button", { name: "Remove from model Personnel credentials", exact: true }).click();
   await expect(page.locator(".sc-node")).toHaveCount(12);
   await expect(page.locator(".sc-edge")).toHaveCount(18);
   await expect(page.locator('[data-node-id="certification_dim"]')).toHaveCount(1);
@@ -195,7 +182,7 @@ test("deleting a bound alias invalidates its binding instead of silently deletin
   await page.getByRole("button", { name: "Apply to model", exact: true }).click();
   await selectAlias(page);
   page.once("dialog", dialog => dialog.accept());
-  await page.getByRole("button", { name: "Delete alias Personnel credentials", exact: true }).click();
+  await page.getByRole("button", { name: "Remove from model Personnel credentials", exact: true }).click();
   await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Edit filter Model filter", exact: true }).click();
   await expect(page.getByRole("combobox", { name: "Model filter / Default condition 1 field", exact: true })).toHaveValue("");

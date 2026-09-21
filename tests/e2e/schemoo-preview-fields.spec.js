@@ -1,3 +1,4 @@
+import { findOrganizationConnection } from "./helpers/database-fixtures.js";
 import { expect, test } from "@playwright/test";
 import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
@@ -6,7 +7,7 @@ import { chooseModelOption } from "./helpers/schemoo-select.js";
 let modelId;
 test.beforeEach(async ({ request }) => {
   const { connections } = await (await request.get("/api/v1/connections")).json();
-  const connection = connections.find(item => item.database === "organization");
+  const connection = findOrganizationConnection(connections);
   expect(connection).toBeTruthy();
   const catalog = await (await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`)).json();
   const draft = importedDraft(catalog);

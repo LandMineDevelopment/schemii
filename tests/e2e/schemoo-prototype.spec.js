@@ -1,3 +1,4 @@
+import { findOrganizationConnection } from "./helpers/database-fixtures.js";
 import { expect, test } from "@playwright/test";
 import { chooseModelOption } from "./helpers/schemoo-select.js";
 import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
@@ -6,7 +7,7 @@ import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 let modelId;
 test.beforeEach(async ({ request }) => {
   const response=await request.get("/api/v1/connections");
-  const connection=(await response.json()).connections.find(c=>c.database==="organization");
+  const connection=findOrganizationConnection((await response.json()).connections);
   expect(connection,"Organization connection is required for the Schemoo end-to-end fixture").toBeTruthy();
   const catalogResponse=await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`);
   expect(catalogResponse.ok()).toBeTruthy();
@@ -161,7 +162,7 @@ test("model library creates from an explicit source, persists edits and protects
   page.on("dialog",dialog=>dialog.accept());
   const errors=[];page.on("pageerror",error=>errors.push(error.message));
   const connections=(await (await request.get("/api/v1/connections")).json()).connections;
-  const connection=connections.find(c=>c.database==="organization");
+  const connection=findOrganizationConnection(connections);
   const modelName=`E2E library ${Date.now()}`;
   let createdId;
   try {

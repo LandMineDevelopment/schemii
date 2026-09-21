@@ -1,3 +1,8 @@
+export function findOrganizationConnection(connections) {
+  return connections.find(item => item.database === "organization" &&
+    item.name === "Browser fixture: organization" && ["postgres", "demo-postgres"].includes(item.host));
+}
+
 // The launcher installs target schemas, while application metadata starts empty.
 // Register these fixtures through the same API as the UI without resetting any
 // existing connection, workspace, design, or credential.
@@ -16,7 +21,8 @@ export async function ensureDatabaseFixtures(request, credentials) {
     { database: "schemii_migration_demo", namespace: "public" },
     { database: "organization" },
   ]) {
-    let connection = connections.find(item => item.database === fixture.database);
+    let connection = fixture.database === "organization" ? findOrganizationConnection(connections)
+      : connections.find(item => item.database === fixture.database);
     if (!connection) {
       connection = await json(await request.post("/api/v1/connections", {
         data: {

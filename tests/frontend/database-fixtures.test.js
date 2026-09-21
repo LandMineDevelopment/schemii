@@ -40,8 +40,15 @@ test("browser setup preserves existing connections, credentials and designs", as
   const workspaces = [{ connectionId: "existing-0", namespace: "bookstore", revision: 9 },
     { connectionId: "existing-1", namespace: "public", revision: 5 }];
   const api = fixtureApi(connections, workspaces);
-  await ensureDatabaseFixtures(api, { password: () => { throw new Error("Must not read credentials"); } });
-  assert.deepEqual(api.writes, []);
+  await ensureDatabaseFixtures(api, { username: "fixture-user", password: async () => "fixture-password" });
+  assert.equal(api.writes.length, 1);
+  assert.equal(api.writes[0].path, "/api/v1/connections");
+  assert.equal(api.writes[0].data.name, "Browser fixture: organization");
+  assert.equal(connections[2].host, "user-owned-host");
+  assert.equal(connections[2].revision, 7);
+  assert.equal(workspaces[0].revision, 9);
+  await ensureDatabaseFixtures(api, { password: () => { throw new Error("Must not reread credentials"); } });
+  assert.equal(api.writes.length, 1);
 });
 
 test("browser setup reports fixture failures before running dependent tests", async () => {

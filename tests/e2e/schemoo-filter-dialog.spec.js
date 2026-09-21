@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { chooseModelOption, expectDropdownWithinViewport } from "./helpers/schemoo-select.js";
+import { findOrganizationConnection } from "./helpers/schemoo-model.js";
 import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
 let modelId;
 test.beforeEach(async ({ request }) => {
-  const connection = (await (await request.get("/api/v1/connections")).json()).connections.find(c => c.database === "organization");
+  const connection = findOrganizationConnection((await (await request.get("/api/v1/connections")).json()).connections);
   expect(connection).toBeTruthy();
   const catalog = await (await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`)).json();
   const draft = importedDraft(catalog);
@@ -71,7 +72,7 @@ test("alias roles are selectable for domain values and source bindings and survi
   await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
   await page.getByRole("button", { name: /^Report parameter/ }).click();
-  await chooseModelOption(page, "Requirement for Model filter", "Conditional model parameter");
+  await chooseModelOption(page, "Evaluation reach for Model filter", "When its source participates");
   await chooseModelOption(page, "Model filter / Default condition 1 field", "Domain people · id");
   await page.getByRole("checkbox", { name: "Use searchable domain values for Parameter", exact: true }).check();
   const domain = page.getByRole("combobox", { name: /input .+ domain value column$/ });
@@ -185,7 +186,7 @@ test("report parameter dialog binds inputs and changing to a null rule clears nu
   await expect(page.locator("#sql")).not.toContainText("OR");
 });
 
-test("filter activation and unmatched-row policy are independent and persist", async ({ page, request }) => {
+test("filter evaluation reach and unmatched-row policy are independent and persist", async ({ page, request }) => {
   await page.goto(`/schemoo?model=${modelId}`);
   await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await page.getByRole("button", { name: "Add model filter scope", exact: true }).click();
@@ -193,15 +194,15 @@ test("filter activation and unmatched-row policy are independent and persist", a
   await chooseModelOption(page, "Model filter / Default condition 1 field", "personnel_dim · id");
   await chooseModelOption(page, "Model filter / Default condition 1 operator", "Is not null");
   await chooseModelOption(page, "Matching rows for Model filter", "Keep unmatched parent rows");
-  await chooseModelOption(page, "Requirement for Model filter", "Conditional model parameter");
+  await chooseModelOption(page, "Evaluation reach for Model filter", "When its source participates");
   await expect(page.getByRole("combobox", { name: "Matching rows for Model filter", exact: true })).toHaveValue("Keep unmatched parent rows");
   await chooseModelOption(page, "Matching rows for Model filter", "Require matching rows");
-  await expect(page.getByRole("combobox", { name: "Requirement for Model filter", exact: true })).toHaveValue("Conditional model parameter");
+  await expect(page.getByRole("combobox", { name: "Evaluation reach for Model filter", exact: true })).toHaveValue("When its source participates");
   await page.getByRole("button", { name: "Apply to model", exact: true }).click();
   await page.getByRole("button", { name: "Save model", exact: true }).click();
   await expect(page.locator("#draft-status")).toContainText("Saved");
   const saved = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
-  expect(saved.definition.scopes[0]).toMatchObject({kind: "conditional", rowBehavior: "require_matching"});
+  expect(saved.definition.scopes[0]).toMatchObject({kind: "conditional", requirement: "required", rowBehavior: "require_matching"});
   await page.reload();
   await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await expect(page.locator("#model-filters")).toContainText("Require matching rows");
