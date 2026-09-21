@@ -431,8 +431,14 @@ def test_reaggregating_calculated_values_warns_about_outer_branch_multiplication
     query = request(kind, fields=[{"table": "derived", "column": column, "aggregate": "sum"}, {"table": "assignment", "column": "name"}])
     result = compile_preview(CATALOG, query)
     assert any("repeated rows from joins" in warning for warning in result["warnings"])
+    diagnostic, = result["repetitionDiagnostics"]
+    assert diagnostic["measure"]["table"] == "derived"
+    assert diagnostic["measure"]["column"] == column
+    assert diagnostic["relationships"]
 
 
 def test_summary_values_can_be_summed_without_a_multiplying_branch():
     query = request(fields=[{"table": "derived", "column": "n", "aggregate": "sum"}])
-    assert execute(compile_preview(CATALOG, query)["sql"]) == [(3,)]
+    plan = compile_preview(CATALOG, query)
+    assert plan["repetitionDiagnostics"] == []
+    assert execute(plan["sql"]) == [(3,)]

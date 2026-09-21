@@ -588,6 +588,7 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
         if node in model.derived and model.derived[node]["kind"] == "row":
             aliases[node] = aliases[model.derived[node]["source"]]
     warnings = []
+    repetition_diagnostics = []
     def joins(nodes, names, join_kind):
         result = []
         for node in parents:
@@ -620,15 +621,18 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
     # A foreign-key traversal to its parent preserves grain; the reverse may
     # duplicate a measure even when only one child branch is selected.
     outer_graph = {node: [] for node in outer}
-    for node in outer - {root}:
+    for node in parents:
+        if node == root or node not in outer:
+            continue
         previous, key = parents[node]
         outer_graph[node].append((previous, key))
         outer_graph[previous].append((node, key))
 
-    def multiplying_relationship(contributor):
-        visited, queue = {contributor}, deque([contributor])
+    def multiplying_relationships(contributor):
+        visited, queue = {contributor}, deque([(contributor, [contributor])])
+        relationships = []
         while queue:
-            previous = queue.popleft()
+            previous, path_nodes = queue.popleft()
             for node, key in outer_graph[previous]:
                 if node in visited:
                     continue
@@ -637,9 +641,16 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
                 if not edge.get("derived") and (node == edge["source"] or edge.get("kind") == "logical"):
                     column = edge["sourceColumn"] if node == edge["source"] else edge["targetColumn"]
                     if not any(set(unique) <= {column} for unique in derived.unique_keys(model, node)):
-                        return key
-                queue.append(node)
-        return None
+                        relationships.append({
+                            "id": key,
+                            "fromNode": previous,
+                            "toNode": node,
+                            "source": {"node": edge["source"], "label": model.nodes[edge["source"]]["label"], "column": edge["sourceColumn"]},
+                            "target": {"node": edge["target"], "label": model.nodes[edge["target"]]["label"], "column": edge["targetColumn"]},
+                            "path": [{"node": item, "label": model.nodes[item]["label"]} for item in [*path_nodes, node]],
+                        })
+                queue.append((node, [*path_nodes, node]))
+        return relationships
 
     expressions, grouping, labels, aggregated = [], [], set(), _output_labels is not None
     for field_index, field in enumerate(fields):
@@ -675,10 +686,17 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
             if expression not in grouping:
                 grouping.append(expression)
         elif isinstance(aggregate, str) and aggregate in {"count", "count_distinct", "sum", "avg", "min", "max"}:
-            if aggregate in {"count", "sum", "avg"} and multiplying_relationship(node):
-                warnings.append(
-                    f"{aggregate.upper()} of {label} may be affected by repeated rows from joins. The selected aggregation runs as configured. Consider a separate aggregate source grouped at this measure's grain; use COUNT DISTINCT only when you intend to count distinct values."
-                )
+            relationships = multiplying_relationships(node) if aggregate in {"count", "sum", "avg"} else []
+            if relationships:
+                message = f"{aggregate.upper()} of {label} may be affected by repeated rows from joins. The selected aggregation runs as configured. Consider a separate aggregate source grouped at this measure's grain; use COUNT DISTINCT only when you intend to count distinct values."
+                repetition_diagnostics.append({
+                    "code": "measure_repetition",
+                    "message": message,
+                    "outputIndex": field_index,
+                    "measure": {"table": node, "column": name, "aggregate": aggregate, "label": f"{aggregate.upper()} of {label}"},
+                    "relationships": relationships,
+                })
+                warnings.append(message)
             aggregated = True
             label = f"{aggregate}({label})"
             expression = f"COUNT(DISTINCT {expression})" if aggregate == "count_distinct" else f"{aggregate.upper()}({expression})"
@@ -741,4 +759,4 @@ def compile_preview(catalog: dict, request: dict, *, _outputs=None, _output_labe
         required_nodes.extend(plan["requiredNodes"])
         active.extend(plan["activeScopes"])
         parameter_values.update(plan["parameterValues"])
-    return {"sql": "\n".join(lines) + ";", "outerNodes": [node for node in parents if node in outer], "usedRelationships": list(dict.fromkeys(used_relationships)), "requiredNodes": list(dict.fromkeys(required_nodes)), "activeScopes": list(dict.fromkeys(active)), "parameterValues": parameter_values, "warnings": warnings, "grain": grain}
+    return {"sql": "\n".join(lines) + ";", "outerNodes": [node for node in parents if node in outer], "usedRelationships": list(dict.fromkeys(used_relationships)), "requiredNodes": list(dict.fromkeys(required_nodes)), "activeScopes": list(dict.fromkeys(active)), "parameterValues": parameter_values, "warnings": warnings, "repetitionDiagnostics": repetition_diagnostics, "grain": grain}

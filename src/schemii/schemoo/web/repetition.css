@@ -1,0 +1,13 @@
+.repetition-dialog { width: min(640px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; }
+.repetition-dialog[open] { display: flex; flex-direction: column; }
+.repetition-body { padding: 16px; overflow: auto; min-height: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.repetition-body p { margin: 8px 0; }
+.repetition-body ul { padding-left: 22px; }
+.repetition-body li { margin: 10px 0; }
+.repetition-measure { padding: 12px 0; border-top: 1px solid var(--line, #354153); }
+.repetition-measure h3 { margin: 0; font-size: 14px; }
+.repetition-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.repetition-actions .ui-button { white-space: normal; text-align: left; }
+.aggregation-warning { color: #e0c88f; background: #211b10; border: 1px solid #685226; border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; font-size: 12px; line-height: 1.5; }
+.aggregation-warning summary { cursor: pointer; }
+.aggregation-warning p { margin: 8px 0; }

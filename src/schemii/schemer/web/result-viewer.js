@@ -36,7 +36,7 @@ function gridInteractions(host, result) {
   });
   viewport.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('td:not(.drill-mark)')) { event.preventDefault(); event.target.click(); } });
 }
-export function openExpanded({ tile, cache, createDrillCache, onRefresh }) {
+export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh }) {
   const dialog = element('dialog', { className: 'expanded-dialog', attrs: { 'aria-label': tile.title } });
   const chartPane = element('section', { className: 'expanded-chart-pane' });
   const chartBody = element('div', { className: 'expanded-chart-body' });
@@ -69,7 +69,7 @@ export function openExpanded({ tile, cache, createDrillCache, onRefresh }) {
   function renderMain() {
     if (!dialog.isConnected) return;
     const position = scrollPosition(chartBody), result = cache.snapshot();
-    renderVisualization(chartBody, tile, result, { onDrill: tile.kind === 'detail' ? null : selected => {
+    renderVisualization(chartBody, tile, result, { modelId, onDrill: tile.kind === 'detail' ? null : selected => {
       unsubscribeDrill?.(); detailCache = createDrillCache(selected); unsubscribeDrill = detailCache.subscribe(scheduleDetails);
       chips.replaceChildren(...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
       detailPane.hidden = false; pane('details'); renderDetails(); void detailCache.loadMore();

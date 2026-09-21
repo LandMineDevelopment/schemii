@@ -33,9 +33,6 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
 #slicers>.sm-help-heading { display:none; }#slicers>.mf-parameter-block { padding:0; border:0; background:transparent; }#slicers .mf-scope-status,#slicers>.mf-parameter-block>button { display:none; }#slicers>.mf-parameter-block>strong { display:none; }#slicers .mf-heading { margin:0; }#slicers .mf-label { margin-bottom:0; }#slicers .mf-scope-toggle { margin:0 0 8px; color:var(--accent-bright); }.slicer-panel { padding:12px 16px; }#slicers { gap:14px; }.load-chart-more { flex:none; align-self:center; margin:12px; }.tile-body .line-chart { max-height:none; flex:none; height:240px; }.expanded-chart-body .line-chart { max-height:none; flex:none; height:450px; }.expanded-chart-body .bar-chart { flex:none; }.tile-body .bar-chart { flex:none; }
 .tile-page-actions { flex:none; gap:2px; }.tile-page-actions .ui-button { width:24px; min-width:24px; min-height:24px; height:24px; padding:3px; }.tile-footer:has(.tile-page-actions) .expand-hint { display:none; }
 
-.aggregation-warning { color:#e0c88f; background:#211b10; border:1px solid #685226; border-radius:6px; padding:8px 10px; margin-bottom:10px; font-size:12px; line-height:1.5; }
-.aggregation-warning summary { cursor:pointer; }
-.aggregation-warning p { margin:8px 0 0; }
 
 /* Streaming previews keep both browser memory and row DOM bounded. */
 .virtual-result-grid { flex:1 1 auto; min-height:0; overflow-anchor:none; }

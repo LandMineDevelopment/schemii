@@ -23,6 +23,7 @@ import { createPreviewLibrary } from "./preview-library.js";
 import { installProductNavigation } from "#common/product-navigation.js";
 import { nodeColumns } from "./model-columns.js";
 import { openDerivedSource } from "./derived-dialog.js";
+import { repetitionDiagnostics, repetitionNotice, summarySeed } from "./repetition.js";
 import { conditionSummary } from "./derived-conditions.js";
 import { reconcileSourceCatalog, acceptSourceIssue } from "./source-reconciliation.js";
 import { createModelAssistant } from "#common/model-assistant.js";
@@ -232,8 +233,8 @@ function labeled(text, control) { return element("label", { className: "stack" }
 function nextAliasLabel(node) {
   return suggestedAliasLabel(draft.nodes, node);
 }
-function editDerived(owner, existing) {
-  openDerivedSource({draft,catalog,owner,existing,onLoadDomain:loadDomainOptions,onApply:node=>{
+function editDerived(owner, existing, initial) {
+  openDerivedSource({draft,catalog,owner,existing,initial,onLoadDomain:loadDomainOptions,onApply:node=>{
     const exposure=exposedFields(draft,catalog);
     const previous=new Set(existing?.derivation.outputs.map(output=>output.id) || []);
     if(existing) draft.nodes[draft.nodes.indexOf(existing)]=node;
@@ -502,7 +503,13 @@ async function compile(ticket) {
     const next = await requestJson(`${API}/models/${model.id}/validate`, { method:"POST",body:{expectedRevision:model.revision,definition,explore},timeoutMs:MODEL_EXECUTION_TIMEOUT_MS }); if (ticket !== version) return;
     plan = next; diagnostics = next; $("sql").textContent = next.sql;
     $("plan-status").textContent = `${next.usedRelationships.length} required connections · ${next.grain}`;
-    $("warnings").replaceChildren(...(next.sourceIssues || []).map(sourceIssueNotice),...next.warnings.filter(w=>!(next.sourceIssues || []).some(issue=>issue.message===w)).map(w => element("p",{className:"warning",text:w})));
+    const repetitionMessages = new Set(repetitionDiagnostics(next).map(item => item.message));
+    $("warnings").replaceChildren(...(next.sourceIssues || []).map(sourceIssueNotice),...next.warnings.filter(w=>!repetitionMessages.has(w) && !(next.sourceIssues || []).some(issue=>issue.message===w)).map(w => element("p",{className:"warning",text:w})));
+    const repetition = repetitionNotice(next, { draft,
+      onCreateSummary: measure => { const initial = summarySeed(draft, measure); if (initial) editDerived(null, null, initial); },
+      onEditSummary: summary => editDerived(null, summary),
+    });
+    if (repetition) $("warnings").prepend(repetition);
     $("run").disabled = busy;
   } catch (error) {
     if (ticket !== version) return;

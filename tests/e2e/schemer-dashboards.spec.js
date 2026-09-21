@@ -14,6 +14,12 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   fixture.model.revision = modelRevision;
   if (optionalFilter) fixture.model.definition.scopes.push({ id: 'region', label: 'Region', kind: 'conditional', requirement: 'optional', alternatives: [{ id: 'choose', label: 'Choose region', inputs: [{ id: 'region', label: 'Region', type: 'text', defaultValue: '' }], conditions: [{ table: 'person', column: 'org', operator: 'eq', parameterId: 'region' }] }] });
   const warnings = aggregationWarning ? ["COUNT of Personnel.id may be affected by repeated rows from joins. The selected aggregation runs as configured."] : [];
+  const repetitionDiagnostics = aggregationWarning ? [{ code: 'measure_repetition', outputIndex: 1,
+    measure: { table: 'person', column: 'id', aggregate: 'count', label: 'COUNT of Personnel.id' },
+    relationships: [{ id: 'assignment_person', fromNode: 'person', toNode: 'assignment',
+      source: { node: 'assignment', label: 'Assignments', column: 'person_id' },
+      target: { node: 'person', label: 'Personnel', column: 'id' },
+      path: [{ node: 'person', label: 'Personnel' }, { node: 'assignment', label: 'Assignments' }] }] }] : [];
   if (emptySlicers) fixture.dashboard.selections = {};
   if (chartTypes) fixture.dashboard.tiles = ['bar', 'line', 'donut', 'aggregate', 'kpi', 'detail'].map(kind => ({ ...fixture.dashboard.tiles[0], id: kind, kind, title: `${kind} view`, dimensions: ['kpi', 'detail'].includes(kind) ? [] : [field('org')], measures: kind === 'detail' ? [] : [field('id', 'count')] }));
   if (manyBars) fixture.dashboard.tiles[0].limit = 20;
@@ -23,7 +29,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   }
   function framesFor(tiles, selection) {
     const snapshotAt = '2026-09-20T12:00:00Z';
-    const planFor = tile => ({ sql: selection ? "SELECT id, name FROM personnel WHERE org = 'HQ' AND id IS NOT NULL;" : 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, rowLimit: tile.limit });
+    const planFor = tile => ({ sql: selection ? "SELECT id, name FROM personnel WHERE org = 'HQ' AND id IS NOT NULL;" : 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, repetitionDiagnostics, rowLimit: tile.limit });
     const frames = [{ type: 'start', snapshotAt, tiles: tiles.map(tile => ({ tileId: tile.id, plan: planFor(tile) })), tileErrors: [], limits: { rows: 10000, bytes: 8388608, totalBytes: 33554432 } }];
     for (const tile of tiles) {
       const data = dataFor(tile, selection);

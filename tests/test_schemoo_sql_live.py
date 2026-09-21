@@ -71,6 +71,25 @@ CATALOG = {
     ],
 }
 
+
+@pytest.mark.parametrize("operation,expected", [("sum", 500), ("count", 4), ("avg", 125)])
+def test_optional_repetition_diagnostics_preserve_postgres_values(execute, operation, expected):
+    catalog = {"tables": [
+        {"name": "orders", "primaryKey": ["id"], "columns": [{"name": "id"}, {"name": "amount"}]},
+        {"name": "items", "columns": [{"name": "order_id"}, {"name": "category"}]},
+    ], "relationships": [{"id": "items_fk", "sourceTable": "items", "sourceColumn": "order_id", "targetTable": "orders", "targetColumn": "id"}]}
+    plan = compile_preview(catalog, {"root": "orders", "relationships": ["items_fk"], "fields": [
+        {"table": "orders", "column": "amount", "aggregate": operation}, {"table": "items", "column": "category"}]})
+    assert plan["repetitionDiagnostics"][0]["measure"]["aggregate"] == operation
+    assert "DISTINCT" not in plan["sql"]
+    sql = plan["sql"].replace('"public"."orders"', '"orders"').replace('"public"."items"', '"items"')
+    rows = execute("""WITH orders(id, amount) AS (VALUES
+        (1,100::numeric),(2,100),(3,200),(4,NULL)),
+        items(order_id, category) AS (VALUES (1,'A'::text),(1,'A'),(2,'A'),(3,'A'),(4,'A'))
+    """ + sql)
+    assert float(rows[0][0]) == expected
+    assert rows[0][1] == "A"
+
 @pytest.mark.parametrize("search,expected", [
     ("finance", "Finance North"),
     ("NORTH", "Finance North"),
