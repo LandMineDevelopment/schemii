@@ -4,6 +4,7 @@ const baseURL = process.env.SCHEMII_E2E_BASE_URL || "https://localhost:8001";
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  globalSetup: "./tests/e2e/global-setup.js",
   outputDir: "./artifacts/playwright-results",
   fullyParallel: false,
   workers: 1,

@@ -25,4 +25,13 @@ elif ! psql --username "$SCHEMII_DEMO_ADMIN_USER" --dbname postgres --tuples-onl
     | grep -qx 1; then
   createdb --username "$SCHEMII_DEMO_ADMIN_USER" --owner "$PGUSER" "$demo_database"
 fi
-exec psql --dbname "$demo_database" --set ON_ERROR_STOP=1 --file /seed/migration-demo.sql
+psql --dbname "$demo_database" --set ON_ERROR_STOP=1 --file /seed/migration-demo.sql
+
+# The browser suite owns this synthetic HR source on the isolated demo server.
+# Never connect to or modify an externally configured organization database.
+if ! psql --username "$SCHEMII_DEMO_ADMIN_USER" --dbname postgres --tuples-only --no-align \
+    --command "SELECT 1 FROM pg_database WHERE datname = 'organization'" \
+    | grep -qx 1; then
+  createdb --username "$SCHEMII_DEMO_ADMIN_USER" --owner "$PGUSER" organization
+fi
+exec psql --dbname organization --set ON_ERROR_STOP=1 --file /seed/organization.sql

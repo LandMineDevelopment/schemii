@@ -239,8 +239,14 @@ npm run test:e2e
 ```
 
 Playwright keeps screenshots and traces only for failures under `artifacts/`.
-The browser suite owns and removes uniquely named test workspaces, so repeated
-runs do not depend on prior application state.
+CI runs the complete suite against its disposable stack with
+`SCHEMII_E2E_BOOTSTRAP=1`. This opt-in setup registers the launcher's bookstore,
+migration-demo, and organization fixtures through the HTTPS API, creates missing
+workspaces, and checks that their catalogs are reachable. It preserves existing
+connections and designs. The same flag can initialize a fresh local test stack;
+it is off by default because the complete suite exercises shared settings and
+database contents. Use focused specs when testing against a personal stack.
+CI uploads failure screenshots, traces, and its HTML report for seven days.
 
 ## Seeded Docker test deployment
 

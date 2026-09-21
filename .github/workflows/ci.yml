@@ -79,4 +79,15 @@ jobs:
       - name: Start the canonical application stack
         run: ./start.sh
       - name: Exercise desktop and Android-sized browser flows
+        env:
+          SCHEMII_E2E_BOOTSTRAP: "1"
         run: npm run test:e2e
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-evidence
+          path: |
+            artifacts/playwright-results
+            artifacts/playwright-report
+          retention-days: 7
