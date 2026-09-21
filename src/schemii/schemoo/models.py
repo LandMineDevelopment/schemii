@@ -83,8 +83,18 @@ class Condition(Contract):
     column: str = Field(default="", max_length=200, description="Source column name on the bound model node. Required for every usable condition, including parameter comparisons.")
     operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "range_contains_date", "in", "not_in", "is_null", "not_null"] = "eq"
     parameterId: str | None = Field(default=None, max_length=200)
+    compareColumn: Identifier | None = Field(default=None, description="Compare against a physical column on the same table node/alias and row; cannot combine with a value, parameter, or domain.")
     value: FilterValue = None
     allowNull: bool = False
+
+    @model_validator(mode="after")
+    def column_comparison(self):
+        if self.compareColumn is not None:
+            if self.operator not in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+                raise ValueError("Column comparisons require equals, not equals, or an ordering comparison.")
+            if self.parameterId is not None or self.value is not None or self.domain is not None:
+                raise ValueError("Choose either a comparison column, a fixed value, or a parameter; column comparisons do not use domain values.")
+        return self
 
 
 class DerivedCondition(Condition):
@@ -93,8 +103,10 @@ class DerivedCondition(Condition):
     @model_validator(mode="after")
     def supported_condition(self):
         if self.parameterId is not None:
-            raise ValueError("Calculated-field conditions currently accept fixed values or Today; parameter bindings are not supported.")
+            raise ValueError("Calculated-field conditions accept fixed values, columns, or Today; parameter bindings are not supported.")
         if self.valueSource == "today":
+            if self.compareColumn is not None:
+                raise ValueError("Choose either Today or a comparison column, not both.")
             if self.operator not in {"eq", "ne", "gt", "gte", "lt", "lte"}:
                 raise ValueError("Today requires a single-value date comparison.")
             if self.value not in (None, ""):

@@ -117,7 +117,7 @@ test("fixed filter dialog: searchable bindings, validation, cancel, save and pre
   await page.screenshot({ path: `artifacts/filter-dropdown-${test.info().project.name}.png` });
   await page.getByRole("option", { name: "personnel_dim · name", exact: true }).click();
   await page.getByRole("textbox", { name: /^Scope .+ name$/ }).fill("Named personnel");
-  await expect(dialog.getByRole("complementary", { name: "Filter summary" })).toContainText("personnel_dim.name is not null");
+  await expect(dialog.getByRole("complementary", { name: "Filter summary" })).toContainText("personnel_dim.name IS NOT NULL");
   await expect(dialog.getByRole("textbox", { name: /condition 1 value$/ })).toHaveCount(0);
   await page.screenshot({ path: `artifacts/filter-fixed-${test.info().project.name}.png` });
   await page.getByRole("button", { name: "Apply to model", exact: true }).click();

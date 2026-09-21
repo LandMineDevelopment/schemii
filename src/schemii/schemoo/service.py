@@ -92,6 +92,9 @@ def plan_query(catalog, definition, explore, fingerprint="", *, _bounded=True,
     if exposed is not None:
         allowed = {(f["table"], f["column"]) for f in exposed}
         requested = query["fields"] + [c for group in query["reportFilters"] for c in group["conditions"]]
+        requested += [{"table": condition["table"], "column": condition["compareColumn"]}
+                      for group in query["reportFilters"] for condition in group["conditions"]
+                      if condition.get("compareColumn") is not None]
         hidden = list(dict.fromkeys((f["table"], f["column"]) for f in requested
                                     if (f["table"], f["column"]) not in allowed))
         if hidden:

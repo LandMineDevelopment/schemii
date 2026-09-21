@@ -3,7 +3,7 @@ import { createIconButton } from "/assets/common/ui.js";
 import { renderFilterDefinition } from "./filter-controls.js";
 import { disposeSelects } from "./select.js";
 import { helpButton, helpHeading } from "./help.js";
-import { modelFilterIssue } from "./model-filter-links.js";
+import { modelFilterIssue, describeFilterCondition } from "./model-filter-links.js";
 export { modelFilterIssue } from "./model-filter-links.js";
 
 const uid = () => crypto.randomUUID();
@@ -18,14 +18,6 @@ function icon(name, label, callback) {
   control.onclick = callback;
   return control;
 }
-const comparisons = { eq: "equals", ne: "does not equal", in: "is one of", not_in: "is not one of", gt: ">", gte: "≥", lt: "<", lte: "≤", contains: "contains", range_contains_date: "contains date", is_null: "is null", not_null: "is not null" };
-function conditionText(condition, alternative, draft) {
-  const source = draft.nodes.find(node => node.id === condition.table);
-  const parameter = alternative.inputs.find(input => input.id === condition.parameterId);
-  const unary = ["is_null", "not_null"].includes(condition.operator);
-  const value = unary ? "" : parameter ? ` [${parameter.label}]` : ` ${JSON.stringify(condition.value ?? "")}`;
-  return `${source?.label || "Choose source"}.${condition.column || "column"} ${comparisons[condition.operator] || condition.operator}${value}${!unary && condition.allowNull ? " (or is null)" : ""}`;
-}
 function summary(scope, draft) {
   const box = element("div", { className: "mf-rule-summary" });
   box.append(note(`${scope.kind === "required" ? "Always evaluate" : "When its sources participate"} · ${scope.requirement === "optional" ? "Optional" : "Required"}`));
@@ -33,7 +25,7 @@ function summary(scope, draft) {
   for (const [index, option] of scope.alternatives.entries()) {
     if (scope.alternatives.length > 1) box.append(element("strong", { text: `${index ? "OR · " : ""}${option.label}` }));
     if (!option.conditions.length) box.append(element("p", { className: "warning", text: "No conditions: this option allows unrestricted results." }));
-    for (const [i, condition] of option.conditions.entries()) box.append(element("p", { text: `${i ? "AND · " : ""}${conditionText(condition, option, draft)}` }));
+    for (const [i, condition] of option.conditions.entries()) box.append(element("p", { text: `${i ? "AND · " : ""}${describeFilterCondition(condition, option, draft)}` }));
     box.append(note(option.inputs.length ? `Report inputs: ${option.inputs.map(p => `${p.label}${p.defaultValue !== "" && p.defaultValue != null ? ` (default: ${p.defaultValue})` : ""}`).join(", ")}` : "Fixed rule · no report input required"));
   }
   return box;
@@ -98,7 +90,7 @@ export function openModelFilter(options, existing = null, returnTarget = null) {
       editor.querySelector("input")?.focus();
     };
     const fixed = button("Fixed rule", () => choose(false));
-    fixed.append(note("Always enforce a condition, such as column is not null or status equals Active. No report input."));
+    fixed.append(note("Always enforce a condition, such as delivered date > promised date, column is not null, or status equals Active. No report input."));
     const parameter = button("Report parameter", () => choose(true));
     parameter.append(note("Ask for a date, ID, or other value. Bind it to one or more source columns; defaults are optional."));
     content.append(element("div", { className: "mf-rule-choices" }, [element("h3", { text: "Where does the filter value come from?" }), fixed, parameter, note("Both can always evaluate or depend on source participation. Choose Required or Optional separately in the editor.")]));

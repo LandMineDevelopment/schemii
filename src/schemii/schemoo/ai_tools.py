@@ -70,6 +70,13 @@ update_model is full replacement for exceptional rebuilds, not routine edits.
 Every filter condition must set table to its actual model node/alias ID and
 column to its source column. domain is only a dropdown lookup and never supplies
 a condition's binding. Parameter comparisons still need table and column.
+For same-row column comparisons, set compareColumn to a physical column name on
+that exact same table node/alias, with eq/ne/gt/gte/lt/lte. Omit value, parameterId,
+and domain; calculated conditions cannot combine compareColumn with Today.
+Both columns must have compatible types without casts and report filters require
+both columns exposed. allowNull includes NULLs in the left column only.
+Example: {"table":"orders","column":"delivered_at","operator":"gt","compareColumn":"promised_at"}.
+Cross-source and calculated-output comparisons are unsupported.
 Schema baseline copies are omitted from assistant model reads: use catalog for
 physical columns, types and foreign-key definitions when needed. Layout and
 exploration have separate layoutRevision and exploreRevision values, which their

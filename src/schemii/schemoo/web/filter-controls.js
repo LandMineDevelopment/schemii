@@ -3,6 +3,8 @@ import { createIconButton } from "/assets/common/ui.js";
 import { helpButton, helpHeading } from "./help.js";
 import { modelSelect, domainSelect, disposeSelects } from "./select.js";
 import { exposedFields } from "./model-state.js";
+import { columnComparisonOperators, comparisonColumns } from "./column-comparisons.js";
+import { describeFilterCondition } from "./model-filter-links.js";
 
 const id = () => crypto.randomUUID();
 const operators = [["eq", "Equals"], ["ne", "Does not equal"], ["in", "Is one of (IN)"], ["not_in", "Is not one of (NOT IN)"], ["gt", ">"], ["gte", "≥"], ["lt", "<"], ["lte", "≤"], ["contains", "Contains"], ["range_contains_date", "Contains date"], ["is_null", "Is null"], ["not_null", "Is not null"]];
@@ -88,7 +90,9 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
     if (unavailable) fieldChoices.unshift({ table: condition.table, column: condition.column,
       label: `${draft.nodes.find(n => n.id === condition.table)?.label || condition.table} · ${condition.column} (unavailable)` });
     const field = fixedField ? element("span", {text: `${draft.nodes.find(n => n.id === fixedField.table)?.label || fixedField.table}.${fixedField.column}`}) : select(`${prefix} condition ${index + 1} field`, fieldChoices.map(f => [JSON.stringify([f.table, f.column]), f.label]), fieldValue, value => {
+      const previousSource = condition.table;
       [condition.table, condition.column] = JSON.parse(value);
+      if (condition.compareColumn != null && previousSource !== condition.table) condition.compareColumn = "";
       if (allowToday) { delete condition.valueSource; delete condition.value; delete condition.domain; }
       if (condition.domain) { condition.domain = sourceDomain(condition, draft); condition.value = isList(condition.operator) ? [] : null; }
       refresh();
@@ -103,6 +107,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
         if (parameter) parameter.defaultValue = isList(value) ? asList(parameter.defaultValue) : asSingle(parameter.defaultValue);
       }
       condition.operator = value;
+      if (!columnComparisonOperators.has(value)) delete condition.compareColumn;
       if (value === "range_contains_date") delete condition.domain;
       if (["is_null", "not_null"].includes(value)) {
         delete condition.parameterId; delete condition.value; delete condition.allowNull; delete condition.domain; delete condition.valueSource;
@@ -116,20 +121,40 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
     row.append(labeled("Comparison", op));
     if (!singleCondition) row.append(action("close", `Remove ${prefix} condition ${index + 1}`, () => { conditions.splice(index, 1); refresh(); }));
     if (!["is_null", "not_null"].includes(condition.operator)) {
-      const binding = inputs.length ? select(`${prefix} condition ${index + 1} value source`, [["", "Literal value"], ...inputs.map(p => [p.id, p.label || "Unnamed parameter"])], condition.parameterId || "", value => {
-        if (value) { condition.parameterId = value; delete condition.value; delete condition.domain; }
-        else { delete condition.parameterId; condition.value = isList(condition.operator) ? [] : ""; }
-        refresh();
-      }) : null;
-      if (binding) { const valueSource = labeled("Compare against", binding, "bindings"); valueSource.classList.add("mf-wide"); row.append(valueSource); }
       const source = draft.nodes.find(n => n.id === condition.table);
       const dataType = catalog.tables.find(t => t.name === source?.table)?.columns.find(c => c.name === condition.column)?.dataType || "";
-      if (allowToday && /^(date|timestamp)/.test(dataType) && !isList(condition.operator) && condition.operator !== "contains") {
-        const mode = labeled("Compare against", select(`${prefix} condition ${index + 1} value source`, [["literal", "Fixed value"], ["today", "Today (UTC) · evaluated when run"]], condition.valueSource || "literal", value => {
-          condition.valueSource = value; delete condition.value; delete condition.domain; refresh();
-        })); mode.classList.add("mf-wide"); row.append(mode);
+      const canCompareColumn = columnComparisonOperators.has(condition.operator);
+      const canUseToday = allowToday && /^(date|timestamp)/.test(dataType) && canCompareColumn;
+      // Tagged selector values keep user-authored parameter IDs distinct from operand modes.
+      const mode = condition.compareColumn != null ? ["column"] : condition.parameterId != null ? ["parameter", condition.parameterId] : [condition.valueSource === "today" ? "today" : "literal"];
+      const modes = [[JSON.stringify(["literal"]), allowToday ? "Fixed value" : "Literal value"],
+        ...(canCompareColumn ? [[JSON.stringify(["column"]), "Column"]] : []),
+        ...(canUseToday ? [[JSON.stringify(["today"]), "Today (UTC) · evaluated when run"]] : []),
+        ...inputs.map(p => [JSON.stringify(["parameter", p.id]), p.label || "Unnamed parameter"])];
+      if (modes.length > 1) {
+        const binding = select(`${prefix} condition ${index + 1} value source`, modes, JSON.stringify(mode), value => {
+          const [kind, parameterId] = JSON.parse(value);
+          delete condition.compareColumn; delete condition.parameterId; delete condition.value; delete condition.domain; delete condition.valueSource;
+          if (kind === "column") condition.compareColumn = "";
+          else if (kind === "parameter") condition.parameterId = parameterId;
+          else if (kind === "today") condition.valueSource = "today";
+          else condition.value = isList(condition.operator) ? [] : "";
+          refresh();
+        });
+        const valueSource = labeled("Compare against", binding, "bindings"); valueSource.classList.add("mf-wide"); row.append(valueSource);
       }
-      if (allowToday && condition.valueSource === "today") row.append(element("p", { className: "mf-help mf-wide", text: "The server uses today's UTC date for this query. It is recalculated on the next run; no date is frozen into the saved model." }));
+      if (condition.compareColumn != null) {
+        const columns = comparisonColumns(condition, draft, catalog).filter(column => !exposedOnly || allowed.has(JSON.stringify([condition.table, column.name])));
+        const missing = condition.compareColumn && !columns.some(column => column.name === condition.compareColumn);
+        const options = columns.map(column => [column.name, column.name]);
+        if (missing) options.unshift([condition.compareColumn, `${condition.compareColumn} (unavailable)`]);
+        const picker = select(`${prefix} condition ${index + 1} comparison column`, options, condition.compareColumn, value => { condition.compareColumn = value; refresh(); });
+        picker.querySelector("input").placeholder = "Choose a compatible column";
+        const control = labeled("Second column", picker); control.classList.add("mf-wide"); row.append(control);
+        row.append(element("p", { className: "mf-help mf-wide", text: `Compares both columns on each row of ${source?.label || condition.table}. Only compatible columns from this source are available.` }));
+        if (missing || !columns.length) row.append(element("p", { className: "warning mf-wide", attrs: { role: "alert" }, text: missing ? "The comparison column is no longer available or compatible. Choose a replacement; this condition has not been removed." : "No compatible columns are available here." }));
+      }
+      else if (allowToday && condition.valueSource === "today") row.append(element("p", { className: "mf-help mf-wide", text: "The server uses today's UTC date for this query. It is recalculated on the next run; no date is frozen into the saved model." }));
       else if (!condition.parameterId) {
         const label = `${prefix} condition ${index + 1} value`;
         const multiple = isList(condition.operator);
@@ -158,7 +183,8 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
       nullable.checked = Boolean(condition.allowNull);
       nullable.addEventListener("change", () => { condition.allowNull = nullable.checked; onChange(); });
       row.append(element("label", { className: "mf-checkbox" }, [nullable, compact ? "Include NULL values" : "Include rows where this source column is NULL"]));
-      if (!compact) row.append(element("p", { className: "mf-help mf-wide", text: allowToday ? "Enable this only if NULL means the condition is satisfied—for example, no expiration date means it never expires." : "This includes missing database values. It does not make the report input optional; choose a value or set a default." }));
+      if (condition.compareColumn != null) row.append(element("p", { className: "mf-help mf-wide", text: `NULL comparisons do not match. Include NULL values accepts a missing ${condition.column || "left column"}; it does not accept a missing second column on its own.` }));
+      else if (!compact) row.append(element("p", { className: "mf-help mf-wide", text: allowToday ? "Enable this only if NULL means the condition is satisfied—for example, no expiration date means it never expires." : "This includes missing database values. It does not make the report input optional; choose a value or set a default." }));
     }
     body.append(row);
   });
@@ -274,7 +300,7 @@ export function renderFilterDefinition(host, options) {
         alternative.inputs.push({ id: id(), label: "Parameter", type: "text", defaultValue: "" }); refresh();
       }), "Add parameter input"]));
       if (alternative.inputs.length) alternativeBody.append(inputBody);
-      alternativeBody.append(helpHeading("Source conditions", "bindings"), note("All conditions below must match. Null checks need no value; other comparisons use a fixed value or a report input."), conditionsEditor(alternative.conditions, { draft, catalog, onChange, refresh, inputs: alternative.inputs, prefix, onLoadDomain: options.onLoadDomain }));
+      alternativeBody.append(helpHeading("Source conditions", "bindings"), note("All conditions below must match. Null checks need no value; other comparisons use a fixed value, another column on the same source, or a report input."), conditionsEditor(alternative.conditions, { draft, catalog, onChange, refresh, inputs: alternative.inputs, prefix, onLoadDomain: options.onLoadDomain }));
       if (!alternative.inputs.length) alternativeBody.append(section("Add report inputs (optional)", [inputBody], false));
       content.append(scope.alternatives.length > 1 ? section(`${alternativeIndex ? "OR · " : ""}${alternative.label || "Alternative"}`, [alternativeBody]) : alternativeBody);
     }
@@ -332,9 +358,7 @@ export function renderParameterValues(host, options) {
     if (alternative && !alternative.inputs.length) {
       block.append(note(alternative.conditions.length ? "Fixed model rule · no input required" : "No restriction · no input required"));
       for (const condition of alternative.conditions) {
-        const source = draft.nodes.find(node => node.id === condition.table);
-        const comparison = operators.find(([value]) => value === condition.operator)?.[1] || condition.operator;
-        block.append(note(`${source?.label || condition.table}.${condition.column} · ${comparison}${["is_null", "not_null"].includes(condition.operator) ? "" : ` · ${condition.value ?? ""}`}`));
+        block.append(note(describeFilterCondition(condition, alternative, draft)));
       }
     }
     for (const parameter of alternative?.inputs || []) {

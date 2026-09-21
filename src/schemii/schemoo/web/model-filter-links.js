@@ -1,4 +1,5 @@
 import { conditionSources } from "./derived-conditions.js";
+import { columnComparisonIssue } from "./column-comparisons.js";
 
 /** Model occurrence IDs, never physical table names: aliases have separate rules. */
 export function boundFilterSources(scope) {
@@ -30,7 +31,8 @@ export function describeFilterCondition(condition, alternative, draft, context =
   if (condition.parameterId) {
     const input = (alternative?.inputs || []).find(candidate => candidate.id === condition.parameterId);
     value = `[${input?.label || "Missing report input"}]`;
-  } else if (condition.valueSource === "today") value = "Today (UTC)";
+  } else if (condition.compareColumn != null) value = `${node?.label || node?.table || condition.table}.${condition.compareColumn || "(choose column)"}`;
+  else if (condition.valueSource === "today") value = "Today (UTC)";
   else value = Array.isArray(condition.value) ? `(${condition.value.map(literal).join(", ")})` : literal(condition.value);
   const predicate = `${prefix}${comparison} ${value}`;
   return condition.allowNull ? `(${predicate} OR ${prefix}IS NULL)` : predicate;
@@ -73,6 +75,8 @@ export function modelFilterIssue(scope, draft, catalog) {
       if (!(option.conditions || []).some(c => c.parameterId === input.id)) return `Bind “${input.label}” to a source, or remove that unused input for a fixed rule.`;
     }
     for (const c of option.conditions || []) {
+      const comparisonIssue = columnComparisonIssue(c, draft, catalog);
+      if (comparisonIssue) return comparisonIssue;
       if (["in", "not_in"].includes(c.operator) && !c.parameterId && (!Array.isArray(c.value) || !c.value.length)) return "Choose at least one value for IN / NOT IN.";
       if (c.domain && c.value == null) return "Choose a fixed value from the domain list.";
       if (c.domain) {
