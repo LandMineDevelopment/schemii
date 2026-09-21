@@ -1,3 +1,4 @@
+import { columnComparisonIssue } from "./column-comparisons.js";
 import { element } from "#common/dom.js";
 import { createIconButton } from "/assets/common/ui.js";
 import { modelSelect, disposeSelects } from "./select.js";
@@ -122,10 +123,12 @@ export function openDerivedSource({ draft, catalog, owner, existing, onApply, on
     }
     if(definition.kind === "aggregate" && definition.connection.columns.some(pair=>!pair.target)){error.textContent="Choose the destination column for every summary grouping column.";return;}
     for(const output of definition.outputs) for(const condition of output.conditions || []) {
+      const comparisonIssue = columnComparisonIssue(condition, draft, catalog);
+      if (comparisonIssue) { error.textContent = comparisonIssue; return; }
       const allowed=conditionSources(draft,definition,output);
       if(!allowed.has(condition.table) || !columns(condition.table).some(c=>c.name===condition.column)) {error.textContent="Choose a valid condition column on this field's source or lookup path.";return;}
       if(["in","not_in"].includes(condition.operator) && (!Array.isArray(condition.value) || !condition.value.length)) {error.textContent="Choose at least one value for an IN / NOT IN condition.";return;}
-      if(!["is_null","not_null"].includes(condition.operator) && condition.valueSource!=="today" && condition.value == null) {error.textContent="Choose a comparison value, Today, or a null-check comparison for every condition.";return;}
+      if(!["is_null","not_null"].includes(condition.operator) && condition.valueSource!=="today" && condition.compareColumn == null && condition.value == null) {error.textContent="Choose a comparison value, column, Today, or a null-check comparison for every condition.";return;}
     }
     const parent = physical.find(n => n.id === (definition.kind === "aggregate" ? target : source));
     const savedDefinition=structuredClone(definition);

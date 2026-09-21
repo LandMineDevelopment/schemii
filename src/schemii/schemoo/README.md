@@ -80,6 +80,24 @@ report filters:
   related records using EXISTS/NOT EXISTS. Conditions in one existence group
   must hold on the same related record; separate groups are independent.
 
+Conditions can compare two physical columns on the same source/alias and row:
+`{"table":"orders","column":"delivered_at","operator":"gt","compareColumn":"promised_at"}`.
+Use `eq`, `ne`, `gt`, `gte`, `lt`, or `lte`; the existing column-type compatibility
+rules reject comparisons requiring casts. A column operand cannot also supply a
+literal value, parameter, domain lookup, or Today. Both columns must be exposed
+for report filters. Model scopes and calculated-field conditions may use physical
+source columns independently of report exposure. Standard SQL NULL semantics
+apply; **Include NULL rows** continues to include NULLs in the left column only.
+Optional scopes and named alternatives provide reusable comparison slicers.
+Cross-source comparisons and filtering calculated outputs remain unsupported.
+
+Schemoo owns this operand contract, its validation/compiler, and the reusable
+filter editor and summaries. Schemer consumes those model controls for dashboard
+slicers and tile filters. Schemii continues to own physical schema design; common
+resources supply the existing selectors, UI primitives, and query execution.
+Column comparisons reuse the authored-relationship type compatibility checks;
+they do not add a second expression engine or a separate Schemer filter editor.
+
 Select columns on the canvas, choose aggregates in Explore, inspect generated
 SQL, and run a preview. Unneeded paths are omitted; no path guessing is used.
 

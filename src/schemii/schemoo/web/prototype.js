@@ -18,7 +18,7 @@ import { createQueryPlanView, parseQueryPlan } from "#common/query-plan.js";
 import { confirmAction } from "#common/confirmation.js";
 import { formatElapsed } from "#common/elapsed-time.js";
 import { readExecution } from "/assets/common/query-execution.js";
-import { openModelLibrary, confirmModelDeletion } from "./model-library.js";
+import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions } from "./model-library.js";
 import { createPreviewLibrary } from "./preview-library.js";
 import { installProductNavigation } from "#common/product-navigation.js";
 import { nodeColumns } from "./model-columns.js";
@@ -42,6 +42,7 @@ const previewRootHost = element("div", { className: "stack" });
 previewHost.after(previewRootHost);
 const previewLibrary = createPreviewLibrary({
   host: previewHost,
+  onPendingChange: refreshModelLibraryActions,
   getContext: () => ({ draft, catalog, definitionDirty: !!model && !!draft && changedParts(model, draft, $("model-name").value.trim()).definition }),
   isBlocked: () => busy || saving || conflicted || !model,
   applyExplore: explore => {

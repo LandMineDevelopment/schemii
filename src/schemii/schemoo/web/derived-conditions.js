@@ -20,6 +20,6 @@ export function conditionSummary(condition, draft) {
   const operators = {eq:"=",ne:"≠",gt:">",gte:"≥",lt:"<",lte:"≤",in:"IN",not_in:"NOT IN",contains:"contains",is_null:"IS NULL",not_null:"IS NOT NULL"};
   const source = draft.nodes.find(n => n.id === condition.table)?.label || condition.table;
   const unary = ["is_null","not_null"].includes(condition.operator);
-  const value = unary ? "" : ` ${condition.valueSource === "today" ? "Today (UTC)" : JSON.stringify(condition.value ?? "")}`;
+  const value = unary ? "" : ` ${condition.compareColumn != null ? `${source}.${condition.compareColumn || "(choose column)"}` : condition.valueSource === "today" ? "Today (UTC)" : JSON.stringify(condition.value ?? "")}`;
   return `${source}.${condition.column} ${operators[condition.operator] || condition.operator}${value}${condition.allowNull && !unary ? " OR NULL" : ""}`;
 }

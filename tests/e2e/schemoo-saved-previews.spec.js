@@ -1,3 +1,4 @@
+import { findOrganizationConnection } from "./helpers/database-fixtures.js";
 import { expect, test } from "@playwright/test";
 import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
@@ -7,10 +8,16 @@ import { deleteModel } from "./helpers/schemoo-model.js";
 let modelId, copiedModelId;
 test.beforeEach(async ({ request }) => {
   const { connections } = await (await request.get("/api/v1/connections")).json();
-  const connection = connections.find(item => item.database === "organization");
+  const connection = findOrganizationConnection(connections);
   expect(connection).toBeTruthy();
   const catalog = await (await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`)).json();
   const draft = importedDraft(catalog);
+  // Persist a real layout so opening the model does not generate unsaved
+  // positions and require a discard confirmation when switching to its copy.
+  draft.nodes.forEach((node, index) => {
+    node.x = 50 + (index % 4) * 430;
+    node.y = 50 + Math.floor(index / 4) * 650;
+  });
   draft.root = "personnel_dim"; draft.edges.forEach(edge => { edge.enabled = false; });
   draft.fields = [{ table: "personnel_dim", column: "name", aggregate: "none" }];
   const response = await request.post("/api/v1/schemoo/models", { data: { name: `E2E saved previews ${Date.now()}`,
@@ -18,6 +25,41 @@ test.beforeEach(async ({ request }) => {
   expect(response.ok(), await response.text()).toBeTruthy(); modelId = (await response.json()).id;
 });
 test.afterEach(async ({ request }) => { await deleteModel(request, copiedModelId); copiedModelId = null; await deleteModel(request, modelId); modelId = null; });
+
+for (const failed of [false, true]) {
+  test(`model library actions recover when preview loading ${failed ? "fails" : "finishes"}`, async ({ page, request }) => {
+    const source = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+    let release;
+    const paused = new Promise(resolve => { release = resolve; });
+    await page.route(`**/api/v1/schemoo/models/${modelId}/previews`, async route => {
+      await paused;
+      await route.fulfill(failed
+        ? { status: 503, json: { error: { message: "Preview list unavailable" } } }
+        : { json: { previews: [] } });
+    });
+    try {
+      await page.goto(`/schemoo?model=${modelId}`);
+      await expect(page.locator("#workbench")).not.toHaveAttribute("inert", "");
+      await page.getByRole("button", { name: "Open models", exact: true }).click();
+      const duplicate = page.getByRole("button", { name: `Duplicate model ${source.name}`, exact: true });
+      const remove = page.getByRole("button", { name: `Delete model ${source.name}`, exact: true });
+      await expect(duplicate).toBeDisabled();
+      await expect(remove).toBeDisabled();
+      await page.getByRole("button", { name: "Refresh models", exact: true }).focus();
+      release();
+      await expect(duplicate).toBeEnabled();
+      await expect(remove).toBeEnabled();
+      await expect(page.getByRole("button", { name: "Refresh models", exact: true })).toBeFocused();
+      await duplicate.click();
+      const dialog = page.getByRole("dialog", { name: "Duplicate model", exact: true });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    } finally {
+      release();
+      await page.unrouteAll({ behavior: "wait" });
+    }
+  });
+}
 
 test("duplicate a saved model with independent layout, rules and named previews", async ({ page, request }, info) => {
   const url = `/api/v1/schemoo/models/${modelId}`;

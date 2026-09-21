@@ -272,6 +272,7 @@ services:
       - ./dev/postgres/seed.sh:/seed/seed.sh:ro
       - ./dev/postgres/seed.sql:/seed/seed.sql:ro
       - ./dev/postgres/migration-demo.sql:/seed/migration-demo.sql:ro
+      - ./dev/postgres/organization.sql:/seed/organization.sql:ro
       - "${SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_target_password}:/run/secrets/demo_target_password:ro"
       - "${SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_admin_password}:/run/secrets/demo_admin_password:ro"
     group_add:

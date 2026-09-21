@@ -126,6 +126,7 @@ def test_postgres_plan_retention_preserves_execution_and_reconciliation_records(
             database=target.database,
             namespace="public",
         ),
+        expected_connection_revision=target.revision,
     )
     repository = PostgresMigrationRepository(postgres_metadata.connection_factory)
     baseline = repository.create_baseline(

@@ -4,6 +4,8 @@ There is intentionally no public arbitrary-SQL creation route here. A caller
 must go through its product's source, model, and permission validation first.
 """
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
@@ -62,8 +64,8 @@ def cancel_execution(
 )
 def get_result_page(
     execution_id: str, result_id: str, request: Request,
-    cursor: str | None = Query(default=None, min_length=1, max_length=512),
-    page_size: int | None = Query(default=None, ge=1),
+    cursor: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    page_size: Annotated[int | None, Query(ge=1)] = None,
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleResultPage:
     """Page a transient result with the shared cursor and memory-limit policy."""

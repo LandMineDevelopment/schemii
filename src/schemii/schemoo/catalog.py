@@ -122,7 +122,8 @@ def source_drift(catalog, definition):
             referenced.update((edge.get(side), edge.get(f"{side}Column")) for side in ("source", "target"))
     for scope in definition.get("scopes", []):
         for option in scope.get("alternatives", []):
-            referenced.update((condition.get("table"), condition.get("column")) for condition in option.get("conditions", []))
+            referenced.update((condition.get("table"), condition[key]) for condition in option.get("conditions", [])
+                              for key in ("column", "compareColumn") if condition.get(key))
             for parameter in option.get("inputs", []):
                 domain = parameter.get("domain") or {}
                 if domain.get("nodeId"):
@@ -140,7 +141,8 @@ def source_drift(catalog, definition):
             referenced.add((contributor, output.get("column")))
             if output.get("operand"):
                 referenced.add((contributor, output["operand"]))
-            referenced.update((condition.get("table"), condition.get("column")) for condition in output.get("conditions", []))
+            referenced.update((condition.get("table"), condition[key]) for condition in output.get("conditions", [])
+                              for key in ("column", "compareColumn") if condition.get(key))
     issues = []
     for expected in contract.get("tables", []):
         live = live_tables.get(expected["name"])
@@ -223,7 +225,7 @@ def source_issues(catalog, definition):
     def check(reference, location, physical=False):
         table = reference.get("table") if physical else nodes.get(reference.get("table"))
         columns = derived_columns.get(reference.get("table"), tables.get(table, set())) if not physical else tables.get(table, set())
-        for key in ("column", "labelColumn"):
+        for key in ("column", "compareColumn", "labelColumn"):
             column = reference.get(key)
             if column and column not in columns:
                 issues.append({"kind": "missing_column", "location": location, "table": table,

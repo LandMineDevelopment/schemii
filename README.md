@@ -130,6 +130,15 @@ Promote a frontend implementation into the shared UI layer when multiple real pa
 
 Desired designs support durable schema authoring independently of a backing database. Database-backed designs can be reviewed and applied through server-authoritative migration plans with drift detection, explicit conflict resolution, durable execution recovery, and PostgreSQL-enforced permissions. General SQL execution and the workspace assistant use separate server-authoritative contracts. Example restoration and application shutdown are deliberately excluded from the rewrite API.
 
+Migration review blocks edits that change an existing routine's name, kind, input
+argument types, or return type, and edits that rename a view or change its kind.
+It also blocks incompatible parameter changes, including renamed inputs, changed
+output fields, and removed defaults, even when the routine identity is unchanged.
+These transitions need dependency-aware migrations that the planner does not yet
+provide. Restore the original identity/return contract to apply other changes;
+routine body edits and ordinary view query edits retain their replacement path.
+Existing materialized-view alterations remain blocked pending preservation analysis.
+
 `common/metadata/factory.py` selects its storage boundary from the required `SCHEMII_STORAGE_MODE`. The launcher always selects durable PostgreSQL; in-memory storage must be explicitly selected and remains available for isolated unit tests. Missing or incomplete durable configuration fails startup rather than falling back to process memory. Repository operations require an owner ID so persistent users, sessions, and additional product ownership can be added without changing product route contracts.
 
 Start the local application stack with the repository launcher:
@@ -259,8 +268,14 @@ npm run test:e2e
 ```
 
 Playwright keeps screenshots and traces only for failures under `artifacts/`.
-The browser suite owns and removes uniquely named test workspaces, so repeated
-runs do not depend on prior application state.
+CI runs the complete suite against its disposable stack with
+`SCHEMII_E2E_BOOTSTRAP=1`. This opt-in setup registers the launcher's bookstore,
+migration-demo, and organization fixtures through the HTTPS API, creates missing
+workspaces, and checks that their catalogs are reachable. It preserves existing
+connections and designs. The same flag can initialize a fresh local test stack;
+it is off by default because the complete suite exercises shared settings and
+database contents. Use focused specs when testing against a personal stack.
+CI uploads failure screenshots, traces, and its HTML report for seven days.
 
 ## Seeded Docker test deployment
 

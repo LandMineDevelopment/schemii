@@ -57,6 +57,9 @@ layout requests, use existing positions as the reference and choose nonoverlappi
 coordinates consistent with the user's described arrangement. Do not print full
 model definitions or unchanged source contracts in conversational answers.
 
+Before deleting a model, use model_dependencies to inspect its dependent dashboards.
+Deletion is blocked while dashboards depend on the model. Report their names and
+ask the user to resolve them in Schemer; do not claim deletion succeeded.
 Read the model before editing and use its actual current revision. Prefer
 patch_model: send only changed nodes, edges and scopes as upserts or removals by
 stable ID. It preserves unrelated records and the server-owned schema baseline.
@@ -67,6 +70,13 @@ update_model is full replacement for exceptional rebuilds, not routine edits.
 Every filter condition must set table to its actual model node/alias ID and
 column to its source column. domain is only a dropdown lookup and never supplies
 a condition's binding. Parameter comparisons still need table and column.
+For same-row column comparisons, set compareColumn to a physical column name on
+that exact same table node/alias, with eq/ne/gt/gte/lt/lte. Omit value, parameterId,
+and domain; calculated conditions cannot combine compareColumn with Today.
+Both columns must have compatible types without casts and report filters require
+both columns exposed. allowNull includes NULLs in the left column only.
+Example: {"table":"orders","column":"delivered_at","operator":"gt","compareColumn":"promised_at"}.
+Cross-source and calculated-output comparisons are unsupported.
 Schema baseline copies are omitted from assistant model reads: use catalog for
 physical columns, types and foreign-key definitions when needed. Layout and
 exploration have separate layoutRevision and exploreRevision values, which their
@@ -216,6 +226,8 @@ ACTIONS = {
     "export_model": _descriptor("Download model JSON", "/models/{model_id}", "GET", description="Prepare a browser download of this owned model; never exports database rows."),
     "export_result": _descriptor("Download result CSV", "/query-executions/{execution_id}/results/{result_id}/export.csv", "GET", group="Results", description="Prepare a browser CSV download of an existing owned result. Does not send row values to the AI."),
     "get_model": _descriptor("Read semantic model", "/models/{model_id}", "GET"),
+    "model_dependencies": _descriptor("List dependent dashboards", "/models/{model_id}/dependencies", "GET",
+        description="List owned dashboard IDs and names that prevent model deletion. Does not read source data."),
     "create_model": _descriptor("Create semantic model", "/models", "POST", mutates=True),
     "duplicate_model": _descriptor("Duplicate semantic model", "/models/{model_id}/duplicate", "POST", mutates=True,
         description="Copy the saved model definition, layout, working exploration and all saved previews into an independent model. Supply its current revision, layoutRevision and exploreRevision. Keeps the same source connection; copies no query results or conversation history."),
@@ -274,7 +286,7 @@ _ARGUMENTS = {
     **{name: _bound(model) for name, model in _BODIES.items() if name != "create_model"},
     "create_model": routes.CreateRequest, "catalog": CatalogArguments,
     "list_models": Contract, "list_connections": Contract,
-    "get_model": ModelReference, "export_model": ModelReference, "export_result": ResultReference, "delete_model": DeleteArguments,
+    "get_model": ModelReference, "model_dependencies": ModelReference, "export_model": ModelReference, "export_result": ResultReference, "delete_model": DeleteArguments,
     "list_previews": ModelReference, "delete_preview": DeletePreviewArguments,
     "get_activity": ExecutionReference,
     "get_execution": ExecutionReference, "get_result_page": PageArguments,
