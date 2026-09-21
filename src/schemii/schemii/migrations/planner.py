@@ -1359,6 +1359,30 @@ def compile_migration_steps(
         after: DesignFunction | None = desired_functions.get(identifier)
         if before == after:
             continue
+        if before is not None and after is not None:
+            # A stable design ID does not make a new PostgreSQL identity a
+            # replacement. Do not leave the old routine behind or implicitly
+            # drop it without analyzing dependents and preserving privileges.
+            if (before.kind, before.name, before.identity_arguments) != (
+                after.kind, after.name, after.identity_arguments
+            ):
+                blocking.append(MigrationWarning(
+                    code="routine_identity_change_unsupported",
+                    message=(f"Changing the name, kind, or input types of {before.name} "
+                             "requires a dependency-aware routine migration; restore the "
+                             "original identity before applying this design."),
+                    object_path=f"functions.{after.name}({after.identity_arguments})",
+                ))
+                continue
+            if before.return_type != after.return_type:
+                blocking.append(MigrationWarning(
+                    code="routine_return_type_change_unsupported",
+                    message=(f"Changing the return type of {before.name} requires a "
+                             "dependency-aware drop and recreation; restore the original "
+                             "return type before applying this design."),
+                    object_path=f"functions.{after.name}({after.identity_arguments})",
+                ))
+                continue
         if before is not None and after is None:
             kind = "PROCEDURE" if before.kind == "procedure" else "FUNCTION"
             pending.append(_PendingStep(
@@ -1374,7 +1398,6 @@ def compile_migration_steps(
                 operation = "replace"
             pending.append(_PendingStep(
                 55, after.kind, f"functions.{after.name}({after.identity_arguments})", operation, source,
-                destructive=before is not None and before.return_type != after.return_type,
             ))
 
     live_views = _by_id(live.views)
@@ -1383,6 +1406,17 @@ def compile_migration_steps(
         before: DesignView | None = live_views.get(identifier)
         after: DesignView | None = desired_views.get(identifier)
         if before == after:
+            continue
+        if before is not None and after is not None and (
+            before.kind, before.name
+        ) != (after.kind, after.name):
+            blocking.append(MigrationWarning(
+                code="view_identity_change_unsupported",
+                message=(f"Changing the name or kind of view {before.name} requires a "
+                         "dependency-aware view migration; restore the original name "
+                         "and kind before applying this design."),
+                object_path=f"views.{after.name}",
+            ))
             continue
         if before is not None and after is None:
             kind = "MATERIALIZED VIEW" if before.kind == "materialized_view" else "VIEW"
