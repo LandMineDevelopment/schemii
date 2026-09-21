@@ -433,3 +433,27 @@ def test_logical_connection_types_checked_before_save_and_on_execute(setup):
     catalog['tables'][0]['columns'][0]['dataType'] = 'json'
     rejected = api.post(url + '/plan', json={'expectedRevision': 2, 'explore': EXPLORE})
     assert rejected.status_code == 422, rejected.text
+
+
+def test_model_deletion_reports_dashboards_and_preserves_source_connection(setup):
+    api, model, _, calls = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    assert api.get(url + "/dependencies").json() == {"dashboards": []}
+    created = api.post("/api/v1/schemer/dashboards", json={
+        "name": "People overview", "modelId": model["id"], "modelRevision": 1})
+    assert created.status_code == 201, created.text
+    dashboard = created.json()
+    expected = [{"id": dashboard["id"], "name": dashboard["name"]}]
+    assert api.get(url + "/dependencies").json() == {"dashboards": expected}
+    catalog_calls = len(calls)
+    blocked = api.delete(url, params={"expected_revision": 1})
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "model_in_use"
+    assert blocked.json()["error"]["details"] == {"dashboards": expected}
+    assert api.get(url).status_code == 200
+    assert api.delete(f"/api/v1/schemer/dashboards/{dashboard['id']}",
+                      params={"expectedRevision": 1}).status_code == 204
+    assert api.delete(url, params={"expected_revision": 1}).status_code == 204
+    assert api.get(url + "/dependencies").status_code == 404
+    assert api.get(f"/api/v1/connections/{model['connectionId']}").status_code == 200
+    assert len(calls) == catalog_calls  # Dependency checks/deletion never contact the source database.

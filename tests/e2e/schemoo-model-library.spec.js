@@ -1,13 +1,20 @@
 import { expect, test } from "@playwright/test";
 
-async function fixture(page, { conflict = false, blocked = false, openCancelled = false } = {}) {
+async function fixture(page, { conflict = false, blocked = false, openCancelled = false, dashboards = [], dependencyFailure = false, racedDashboard = null } = {}) {
   let models = [{ id: "model_fixture", name: "Temporary staffing model", database: "organization", namespace: "public", revision: 7, layoutRevision: 3, exploreRevision: 4 }];
   const deletions = [];
   await page.route("**/api/v1/connections", route => route.fulfill({ json: { connections: [] } }));
   await page.route("**/api/v1/schemoo/models", route => route.fulfill({ json: { models } }));
+  await page.route("**/api/v1/schemoo/models/model_fixture/dependencies", route =>
+    route.fulfill(dependencyFailure
+      ? { status: 503, json: { error: { message: "Dependency storage unavailable" } } }
+      : { json: { dashboards } }));
   await page.route("**/api/v1/schemoo/models/model_fixture?*", route => {
     expect(route.request().method()).toBe("DELETE");
     deletions.push(new URL(route.request().url()).searchParams.get("expected_revision"));
+    if (racedDashboard) return route.fulfill({ status: 409, json: { error: {
+      code: "model_in_use", message: "Model has dependent dashboards", details: { dashboards: [racedDashboard] },
+    } } });
     if (conflict && deletions.length === 1) {
       models[0].revision = 8;
       return route.fulfill({ status: 409, json: { error: { code: "model_revision_conflict", message: "Model changed" } } });
@@ -40,6 +47,7 @@ test("model picker confirms exact model, supports cancel and Escape, then delete
   await remove.click(); await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0); expect(deletions).toEqual([]);
   await remove.click();
+  await expect(dialog.getByRole("button", { name: "Delete model", exact: true })).toBeEnabled();
   // Two synchronous activations cannot submit duplicate destructive requests.
   await dialog.getByRole("button", { name: "Delete model", exact: true }).evaluate(button => { button.click(); button.click(); });
   await expect(dialog).toHaveCount(0); await expect(page.locator(".model-list-row")).toHaveCount(0);
@@ -115,4 +123,83 @@ test("failed duplication requires refresh instead of blindly repeating a create"
   expect(await page.evaluate(() => window.openedModels)).toEqual([]);
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(page.locator("#model-library")).toBeVisible();
+});
+
+test("dependent dashboards block deletion, remain readable and link to exact dashboard", async ({ page }) => {
+  const dashboards = Array.from({ length: 20 }, (_, index) => ({ id: `dashboard_${index}`, name: `Current strength dashboard ${index + 1}` }));
+  dashboards[0].name = '<img src=x onerror=alert(1)> Staffing & readiness';
+  const deletions = await fixture(page, { dashboards });
+  const remove = page.getByRole("button", { name: "Delete model Temporary staffing model", exact: true });
+  await remove.click();
+  const dialog = page.getByRole("dialog", { name: "Delete model?", exact: true });
+  await expect(dialog.getByRole("status")).toContainText("20 saved dashboards depend on this model. Deletion is blocked.");
+  await expect(dialog.getByRole("button", { name: "Delete model", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("list", { name: "Dependent dashboards" }).getByRole("listitem")).toHaveCount(20);
+  const first = dialog.getByRole("link").first();
+  await expect(first).toHaveText(dashboards[0].name);
+  await expect(first).toHaveAttribute("href", "/schemer?dashboard=dashboard_0");
+  await expect(first).toHaveAttribute("target", "_blank");
+  await expect(dialog.locator("img")).toHaveCount(0);
+  const box = await dialog.boundingBox(), viewport = page.viewportSize();
+  expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+  expect(box.y).toBeGreaterThanOrEqual(0); expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeInViewport();
+  await first.focus();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("link").nth(1)).toBeFocused();
+  await page.screenshot({ path: `artifacts/model-dependencies-${test.info().project.name}.png` });
+  await dialog.getByRole("link").last().focus();
+  await expect(dialog.getByRole("link").last()).toBeInViewport();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0); await expect(remove).toBeFocused();
+  expect(deletions).toEqual([]);
+  expect(await page.evaluate(() => window.deletedModels)).toEqual([]);
+});
+
+test("failed dependency checks prevent deletion and allow a fresh review", async ({ page }) => {
+  const deletions = await fixture(page, { dependencyFailure: true });
+  const remove = page.getByRole("button", { name: "Delete model Temporary staffing model", exact: true });
+  await remove.click();
+  const dialog = page.getByRole("dialog", { name: "Delete model?", exact: true });
+  await expect(dialog.getByRole("alert")).toContainText("Close and reopen this dialog to try again");
+  await expect(dialog.getByRole("button", { name: "Delete model", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await page.route("**/api/v1/schemoo/models/model_fixture/dependencies", route => route.fulfill({ json: { dashboards: [] } }));
+  await remove.click();
+  await expect(dialog.getByRole("status")).toHaveText("No saved dashboards depend on this model.");
+  await expect(dialog.getByRole("button", { name: "Delete model", exact: true })).toBeEnabled();
+  expect(deletions).toEqual([]);
+});
+
+test("a dashboard created after review is shown without deleting or retrying", async ({ page }) => {
+  const deletions = await fixture(page, { racedDashboard: { id: "dashboard_new", name: "New staffing dashboard" } });
+  await page.getByRole("button", { name: "Delete model Temporary staffing model", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete model?", exact: true });
+  await dialog.getByRole("button", { name: "Delete model", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Nothing was deleted");
+  await expect(dialog.getByRole("status")).toContainText("1 saved dashboard depends on this model");
+  await expect(dialog.getByRole("link", { name: "New staffing dashboard (opens in a new tab)", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Delete model", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+  expect(deletions).toEqual(["7"]);
+  expect(await page.evaluate(() => window.deletedModels)).toEqual([]);
+  await expect(page.locator(".model-list-row")).toHaveCount(1);
+});
+
+test("dependency review can be cancelled while loading without reopening the dialog", async ({ page }) => {
+  const deletions = await fixture(page);
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  await page.route("**/api/v1/schemoo/models/model_fixture/dependencies", async route => {
+    await pending;
+    await route.fulfill({ json: { dashboards: [] } }).catch(() => {});
+  });
+  const remove = page.getByRole("button", { name: "Delete model Temporary staffing model", exact: true });
+  await remove.click();
+  const dialog = page.getByRole("dialog", { name: "Delete model?", exact: true });
+  await expect(dialog.getByRole("status")).toContainText("Checking dependent dashboards");
+  await expect(dialog.getByRole("button", { name: "Delete model", exact: true })).toBeDisabled();
+  await page.keyboard.press("Escape"); release();
+  await expect(dialog).toHaveCount(0); await expect(remove).toBeFocused();
+  expect(deletions).toEqual([]);
 });

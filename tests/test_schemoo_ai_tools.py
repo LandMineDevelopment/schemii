@@ -356,3 +356,27 @@ def test_ai_logical_connection_rejects_types_and_preserves_starting_table(servic
         "fields": [{"table": "people", "column": "name"}, {"table": "manager", "column": "name"}]}}, model["id"])
     assert 'FROM "public"."people" AS t0' in planned["sql"]
     assert 't0."name" AS "People.name"' in planned["sql"]
+
+
+def test_model_dependencies_use_native_owner_scoped_contract_and_block_assistant_delete(services, model):
+    from schemii.schemer.dashboard_models import DashboardCreate
+    from schemii.schemer.dashboard_store import InMemoryDashboardRepository
+
+    dashboards = InMemoryDashboardRepository(models=services.models)
+    assert run(services, "model_dependencies", model=model["id"]) == {"dashboards": []}
+    saved = dashboards.create("alice", DashboardCreate(name="People overview",
+        model_id=model["id"], model_revision=1))
+    expected = {"dashboards": [{"id": saved.id, "name": saved.name}]}
+    assert run(services, "model_dependencies", model=model["id"]) == expected
+    assert run(services, "model_dependencies", {"modelId": model["id"]}) == expected
+    descriptor = ai_tools.ACTIONS["model_dependencies"]
+    assert not descriptor["mutates"] and not descriptor["readsRows"] and not descriptor["destructive"]
+    assert ai_tools.permission_id({"operation": "model_dependencies", "args": {}}) == "model_dependencies"
+    with pytest.raises(ApiProblem) as unauthorized:
+        run(services, "model_dependencies", model=model["id"], owner="bob")
+    assert unauthorized.value.status_code == 404
+    with pytest.raises(ApiProblem) as blocked:
+        run(services, "delete_model", {"expectedRevision": 1}, model=model["id"])
+    assert blocked.value.status_code == 409
+    assert blocked.value.code == "model_in_use"
+    assert blocked.value.details == expected

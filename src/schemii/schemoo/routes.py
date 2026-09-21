@@ -14,7 +14,7 @@ from .catalog import initial_positions, catalog_contract
 from .models import (Contract, ModelCreate, ModelDuplicate, ModelUpdate, ModelPatch, LayoutUpdate, ExploreUpdate,
                      ModelDefinition, ExploreState, SchemooModel, ModelSummary, DomainValues,
                      PreviewCreate, PreviewUpdate, SavedPreview)
-from .store import (ModelNotFoundError, ModelConflictError, ModelStorageUnavailableError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError)
+from .store import (ModelInUseError, ModelNotFoundError, ModelConflictError, ModelStorageUnavailableError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError)
 from .service import load_model, model_catalog, plan_query, execute_query, domain_query, domain_values_plan, document, patch_model_definition
 from .domain import domain_table
 from .prototype import analyze_model
@@ -74,6 +74,8 @@ def api_errors():
         yield
     except (ModelNotFoundError, ConnectionNotFoundError) as error:
         raise ApiProblem(404, "model_source_not_found", str(error)) from error
+    except ModelInUseError as error:
+        raise ApiProblem(409, "model_in_use", str(error), details={"dashboards": error.dashboards}) from error
     except ModelConflictError as error:
         raise ApiProblem(409, "model_revision_conflict", str(error), details={"currentRevision": error.current_revision}) from error
     except PreviewNameConflictError as error:
@@ -180,6 +182,13 @@ def patch_model(model_id: str, body: ModelPatch, request: Request, principal: Pr
 def update_explore(model_id: str, body: ExploreUpdate, request: Request, principal: Principal = Depends(get_current_principal)):
     with api_errors():
         return request.app.state.services.models.update_explore(principal.user_id, model_id, body)
+
+
+@router.get("/models/{model_id}/dependencies")
+def model_dependencies(model_id: str, request: Request,
+                       principal: Principal = Depends(get_current_principal)):
+    with api_errors():
+        return {"dashboards": request.app.state.services.models.dashboard_dependencies(principal.user_id, model_id)}
 
 
 @router.delete("/models/{model_id}", status_code=204)

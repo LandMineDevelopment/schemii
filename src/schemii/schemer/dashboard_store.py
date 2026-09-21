@@ -6,6 +6,7 @@ import json
 import secrets
 from psycopg.types.json import Jsonb
 from schemii.common.errors import MetadataStorageUnavailableError
+from schemii.schemoo.store import ModelNotFoundError
 from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate
 
 
@@ -43,9 +44,13 @@ def _update(current, request):
 
 
 class InMemoryDashboardRepository:
-    def __init__(self):
+    def __init__(self, models=None):
         self._records = {}
-        self._lock = RLock()
+        self._models = models
+        # A composed memory store serializes parent deletion and dashboard insertion.
+        self._lock = models._lock if models is not None else RLock()
+        if models is not None:
+            models._dashboards = self
 
     def list(self, owner):
         with self._lock:
@@ -61,6 +66,8 @@ class InMemoryDashboardRepository:
         request = DashboardCreate.model_validate(request)
         _check(request)
         with self._lock:
+            if self._models is not None:
+                self._models.get(owner, request.model_id)
             if len(self.list(owner)) >= 100:
                 raise DashboardLimitError("Dashboard limit of 100 reached")
             now = datetime.now(timezone.utc)
@@ -95,7 +102,7 @@ class PostgresDashboardRepository:
             with self._factory() as connection:
                 with connection.cursor() as cursor:
                     yield cursor
-        except (DashboardNotFoundError, DashboardConflictError, DashboardLimitError, ValueError):
+        except (DashboardNotFoundError, DashboardConflictError, DashboardLimitError, ModelNotFoundError, ValueError):
             raise
         except Exception as error:
             raise DashboardStorageUnavailableError("Dashboard storage is temporarily unavailable") from error
@@ -123,6 +130,11 @@ class PostgresDashboardRepository:
         _check(request)
         with self._transaction() as cursor:
             cursor.execute("SELECT id FROM metadata.users WHERE id=%s FOR UPDATE", (owner,))
+            # Hold the parent lock through insertion, closing the validation/delete race.
+            cursor.execute("SELECT id FROM schemoo.models WHERE owner_id=%s AND id=%s FOR KEY SHARE",
+                           (owner, request.model_id))
+            if cursor.fetchone() is None:
+                raise ModelNotFoundError("Semantic model was not found")
             cursor.execute("SELECT count(*) AS count FROM schemer.dashboards WHERE owner_id=%s", (owner,))
             if cursor.fetchone()["count"] >= 100:
                 raise DashboardLimitError("Dashboard limit of 100 reached")

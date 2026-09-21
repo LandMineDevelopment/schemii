@@ -154,3 +154,10 @@ summary { cursor: pointer; font-weight: 600; }
   .toolbar .tools { flex-basis: 100%; }
   .toolbar > button { font-size: 11px; padding-inline: 8px; }
 }
+
+.model-deletion { overflow: hidden; }
+.model-deletion[open] { display: flex; flex-direction: column; }
+.model-deletion .ui-confirmation__body { overflow-y: auto; min-height: 0; }
+.model-deletion .ui-dialog__head, .model-deletion .ui-dialog__actions { flex: none; }
+.model-deletion__dashboards { padding-left: 22px; font-size: 13px; }
+.model-deletion__dashboards a { display: inline-block; padding: 10px 0; color: #a8d8fa; }

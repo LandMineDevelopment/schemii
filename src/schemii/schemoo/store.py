@@ -22,6 +22,12 @@ class ModelNotFoundError(RuntimeError):
     pass
 
 
+class ModelInUseError(RuntimeError):
+    def __init__(self, dashboards):
+        self.dashboards = dashboards
+        super().__init__("Delete the dependent dashboards before deleting this model.")
+
+
 class ModelConflictError(RuntimeError):
     def __init__(self, current_revision: int):
         self.current_revision = current_revision
@@ -93,6 +99,7 @@ class ModelRepository(Protocol):
     def create_preview(self, owner_id: str, model_id: str, request: PreviewCreate) -> SavedPreview: ...
     def update_preview(self, owner_id: str, model_id: str, preview_id: str, request: PreviewUpdate) -> SavedPreview: ...
     def delete_preview(self, owner_id: str, model_id: str, preview_id: str, expected_revision: int) -> None: ...
+    def dashboard_dependencies(self, owner_id: str, model_id: str) -> list[dict[str, str]]: ...
     def delete(self, owner_id: str, model_id: str, expected_revision: int) -> None: ...
     def count_for_connection(self, owner_id: str, connection_id: str) -> int: ...
     def dependencies_for_connection(self, owner_id: str, connection_id: str) -> tuple[ConnectionDependentResource, ...]: ...
@@ -137,6 +144,7 @@ class InMemoryModelRepository(_Dependencies):
             raise ValueError("Model limits must be positive")
         self._maximum = maximum_models_per_owner
         self._maximum_document_bytes = maximum_document_bytes
+        self._dashboards = None
         self._records = {}
         self._previews = {}
         self._lock = RLock()
@@ -201,11 +209,21 @@ class InMemoryModelRepository(_Dependencies):
         request = ExploreUpdate.model_validate(request)
         return self._update(owner_id, model_id, request.expected_revision, "explore_revision", {"explore": request.explore.model_dump()})
 
+    def dashboard_dependencies(self, owner_id, model_id):
+        with self._lock:
+            self.get(owner_id, model_id)
+            return ([{"id": dashboard.id, "name": dashboard.name}
+                     for dashboard in self._dashboards.list(owner_id)
+                     if dashboard.model_id == model_id] if self._dashboards is not None else [])
+
     def delete(self, owner_id, model_id, expected_revision):
         with self._lock:
             model = self.get(owner_id, model_id)
             if model.revision != expected_revision:
                 raise ModelConflictError(model.revision)
+            dependencies = self.dashboard_dependencies(owner_id, model_id)
+            if dependencies:
+                raise ModelInUseError(dependencies)
             del self._records[owner_id, model_id]
             self._previews.pop((owner_id, model_id), None)
 
@@ -268,7 +286,7 @@ class PostgresModelRepository(_Dependencies):
             with self._factory() as connection:
                 with connection.cursor() as cursor:
                     yield cursor
-        except (ModelNotFoundError, ModelConflictError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError):
+        except (ModelNotFoundError, ModelConflictError, ModelInUseError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError):
             raise
         except Exception as error:
             raise ModelStorageUnavailableError("Semantic model storage is temporarily unavailable") from error
@@ -375,11 +393,26 @@ class PostgresModelRepository(_Dependencies):
         request = ExploreUpdate.model_validate(request)
         return self._update(owner_id, model_id, request.expected_revision, "explore_revision", {"explore": request.explore.model_dump(mode="json")})
 
+    @staticmethod
+    def _dashboard_dependencies(cursor, owner_id, model_id):
+        cursor.execute("SELECT id,name FROM schemer.dashboards WHERE owner_id=%s AND model_id=%s ORDER BY created_at,id",
+                       (owner_id, model_id))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def dashboard_dependencies(self, owner_id, model_id):
+        with self._transaction() as cursor:
+            self._row(cursor, owner_id, model_id)
+            return self._dashboard_dependencies(cursor, owner_id, model_id)
+
     def delete(self, owner_id, model_id, expected_revision):
         with self._transaction() as cursor:
             model = self._row(cursor, owner_id, model_id, lock=True)
             if model.revision != expected_revision:
                 raise ModelConflictError(model.revision)
+            # Dashboard creation locks this same parent until its insert commits.
+            dependencies = self._dashboard_dependencies(cursor, owner_id, model_id)
+            if dependencies:
+                raise ModelInUseError(dependencies)
             cursor.execute("DELETE FROM schemoo.models WHERE owner_id = %s AND id = %s", (owner_id, model_id))
 
     @staticmethod

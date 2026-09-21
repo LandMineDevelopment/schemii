@@ -281,7 +281,7 @@ def create_services(
         ai_repository=ai_repository,
         models=models,
         dashboards=(PostgresDashboardRepository(metadata.connection_factory)
-                    if metadata.connection_factory is not None else InMemoryDashboardRepository()),
+                    if metadata.connection_factory is not None else InMemoryDashboardRepository(models=models)),
         model_catalogs=ModelCatalogs(maximum_entries=selected_admin.schemoo.maximum_cached_catalogs,
                                     refresh_seconds=selected_admin.schemoo.catalog_refresh_seconds),
     )
