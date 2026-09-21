@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from schemii.common.postgres.models import PostgresColumn, PostgresTable, build_postgres_catalog
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
     DesignCheckConstraint,
     DesignColumn,
+    DesignFunction,
     DesignIndex,
     DesignKeyConstraint,
     DesignRelationship,
@@ -55,6 +58,145 @@ def _table(
         checks=checks or [],
         indexes=indexes or [],
     )
+
+
+def _routine(definition: str) -> DesignFunction:
+    return DesignFunction.model_validate({"id": _id("function", "a"), "definition": definition})
+
+
+@pytest.mark.parametrize(
+    ("definition", "code"),
+    [
+        ("CREATE FUNCTION renamed(integer) RETURNS integer LANGUAGE sql AS $$ SELECT $1 $$",
+         "routine_identity_change_unsupported"),
+        ("CREATE FUNCTION measure(bigint) RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
+         "routine_identity_change_unsupported"),
+        ("CREATE FUNCTION measure(integer, integer) RETURNS integer LANGUAGE sql AS $$ SELECT $1 $$",
+         "routine_identity_change_unsupported"),
+        ("CREATE PROCEDURE measure(integer) LANGUAGE sql AS $$ SELECT 1 $$",
+         "routine_identity_change_unsupported"),
+        ("CREATE FUNCTION measure(integer) RETURNS bigint LANGUAGE sql AS $$ SELECT $1 $$",
+         "routine_return_type_change_unsupported"),
+        ("CREATE FUNCTION measure(integer) RETURNS SETOF integer LANGUAGE sql AS $$ SELECT $1 $$",
+         "routine_return_type_change_unsupported"),
+    ],
+)
+def test_routine_identity_and_return_changes_are_blocked(definition: str, code: str) -> None:
+    live = SchemiiDesignContent(functions=[_routine(
+        "CREATE FUNCTION measure(integer) RETURNS integer LANGUAGE sql AS $$ SELECT $1 $$"
+    )])
+    desired = SchemiiDesignContent(functions=[_routine(definition)])
+
+    steps, blockers = compile_migration_steps("public", live, desired)
+
+    assert steps == []
+    assert [warning.code for warning in blockers] == [code]
+    assert blockers[0].object_path.startswith(f"functions.{desired.functions[0].name}(")
+    assert "restore the original" in blockers[0].message
+
+
+@pytest.mark.parametrize("kind", ["function", "procedure"])
+@pytest.mark.parametrize("prefix", ["CREATE", "CREATE OR REPLACE"])
+def test_same_identity_routine_body_edits_remain_replaceable(kind: str, prefix: str) -> None:
+    returns = "RETURNS integer" if kind == "function" else ""
+    original = f"{prefix} {kind.upper()} measure(integer) {returns} LANGUAGE sql AS $$ SELECT 1 $$"
+    updated = original.replace("SELECT 1", "SELECT 2")
+    live = SchemiiDesignContent(functions=[_routine(original)])
+    desired = SchemiiDesignContent(functions=[_routine(updated)])
+
+    steps, blockers = compile_migration_steps("public", live, desired)
+
+    assert blockers == []
+    assert len(steps) == 1
+    assert steps[0].operation == "replace"
+    assert steps[0].sql.startswith(f"CREATE OR REPLACE {kind.upper()} measure(")
+    assert "SELECT 2" in steps[0].sql
+    assert not steps[0].destructive
+
+
+@pytest.mark.parametrize(
+    ("before_args", "after_args", "returns"),
+    [
+        ("value integer", "renamed integer", "integer"),
+        ("value integer", "integer", "integer"),
+        ("value integer DEFAULT 1", "value integer", "integer"),
+        ("OUT value integer, OUT label text", "OUT value bigint, OUT label text", "record"),
+        ("OUT value integer, OUT label text", "OUT renamed integer, OUT label text", "record"),
+        ("OUT value integer, OUT label text", "OUT value integer", "record"),
+    ],
+)
+def test_incompatible_parameter_declarations_are_blocked(
+    before_args: str, after_args: str, returns: str,
+) -> None:
+    def content(arguments: str) -> SchemiiDesignContent:
+        return SchemiiDesignContent(functions=[_routine(
+            f"CREATE FUNCTION measure({arguments}) RETURNS {returns} LANGUAGE sql AS $$ SELECT 1 $$"
+        )])
+
+    steps, blockers = compile_migration_steps("public", content(before_args), content(after_args))
+
+    assert steps == []
+    assert [warning.code for warning in blockers] == ["routine_parameter_change_unsupported"]
+
+
+@pytest.mark.parametrize(
+    ("before_args", "after_args"),
+    [
+        ("integer", "value integer"),
+        ("value integer", "IN value integer"),
+        ("value integer", "value integer DEFAULT 1"),
+        ("value integer DEFAULT 1", "value integer DEFAULT 2"),
+    ],
+)
+def test_compatible_parameter_declarations_remain_replaceable(before_args: str, after_args: str) -> None:
+    def content(arguments: str) -> SchemiiDesignContent:
+        return SchemiiDesignContent(functions=[_routine(
+            f"CREATE FUNCTION measure({arguments}) RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$"
+        )])
+
+    steps, blockers = compile_migration_steps("public", content(before_args), content(after_args))
+
+    assert blockers == []
+    assert len(steps) == 1
+    assert steps[0].operation == "replace"
+
+
+@pytest.mark.parametrize(
+    ("before_kind", "after_kind", "name"),
+    [
+        ("view", "view", "renamed"),
+        ("materialized_view", "materialized_view", "renamed"),
+        ("view", "materialized_view", "counts"),
+        ("materialized_view", "view", "counts"),
+    ],
+)
+def test_view_identity_changes_are_blocked(before_kind: str, after_kind: str, name: str) -> None:
+    live = SchemiiDesignContent(views=[DesignView(
+        id=_id("view", "b"), name="counts", kind=before_kind, definition="SELECT 1 AS total",
+    )])
+    desired = SchemiiDesignContent(views=[DesignView(
+        id=_id("view", "b"), name=name, kind=after_kind, definition="SELECT 2 AS total",
+    )])
+
+    steps, blockers = compile_migration_steps("public", live, desired)
+
+    assert steps == []
+    assert [warning.code for warning in blockers] == ["view_identity_change_unsupported"]
+    assert blockers[0].object_path == f"views.{name}"
+
+
+def test_ordinary_view_query_edits_remain_replaceable() -> None:
+    live = SchemiiDesignContent(views=[DesignView(
+        id=_id("view", "b"), name="counts", kind="view", definition="SELECT 1 AS total",
+    )])
+    desired = live.model_copy(deep=True)
+    desired.views[0].definition = "SELECT 2 AS total"
+
+    steps, blockers = compile_migration_steps("public", live, desired)
+
+    assert blockers == []
+    assert len(steps) == 1
+    assert steps[0].sql == 'CREATE OR REPLACE VIEW "public"."counts" AS\nSELECT 2 AS total;'
 
 
 def test_type_classifier_only_allows_provably_non_narrowing_changes() -> None:
