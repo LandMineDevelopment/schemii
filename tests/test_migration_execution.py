@@ -24,12 +24,20 @@ from schemii.common.postgres.gateway import (
 )
 from schemii.common.postgres.models import (
     PostgresColumn,
+    PostgresFunction,
+    PostgresMaterializedView,
     PostgresTable,
+    PostgresView,
     build_postgres_catalog,
 )
 from schemii.main import ApplicationServices, create_app
 from schemii.schemii.designs.importer import import_postgres_catalog
-from schemii.schemii.designs.models import DesignColumn, SchemiiDesignContent
+from schemii.schemii.designs.models import (
+    DesignColumn,
+    DesignFunction,
+    DesignView,
+    SchemiiDesignContent,
+)
 from schemii.schemii.designs.store import design_fingerprint
 from schemii.schemii.migrations.models import (
     MigrationExecutionCreate,
@@ -1236,6 +1244,178 @@ def test_plan_creation_rejects_an_imported_workspace_without_its_atomic_baseline
 
     assert missing.value.code == "migration_baseline_missing"
     assert gateway.introspection_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("object_kind", "changes", "blocker_code"),
+    [
+        pytest.param(
+            "function",
+            {"definition": (
+                "CREATE FUNCTION renamed(value integer) RETURNS integer "
+                "LANGUAGE sql AS $$ SELECT value $$"
+            )},
+            "routine_identity_change_unsupported",
+            id="routine-name",
+        ),
+        pytest.param(
+            "function",
+            {"definition": (
+                "CREATE FUNCTION echo(value bigint) RETURNS integer "
+                "LANGUAGE sql AS $$ SELECT value::integer $$"
+            )},
+            "routine_identity_change_unsupported",
+            id="routine-signature",
+        ),
+        pytest.param(
+            "function",
+            {"definition": (
+                "CREATE FUNCTION echo(value integer) RETURNS bigint "
+                "LANGUAGE sql AS $$ SELECT value::bigint $$"
+            )},
+            "routine_return_type_change_unsupported",
+            id="routine-return-type",
+        ),
+        pytest.param(
+            "function",
+            {"definition": (
+                "CREATE PROCEDURE echo(value integer) "
+                "LANGUAGE plpgsql AS $$ BEGIN NULL; END $$"
+            )},
+            "routine_identity_change_unsupported",
+            id="routine-kind",
+        ),
+        pytest.param(
+            "view",
+            {"name": "renamed"},
+            "view_identity_change_unsupported",
+            id="view-name",
+        ),
+        pytest.param(
+            "view",
+            {"kind": "materialized_view"},
+            "view_identity_change_unsupported",
+            id="view-to-materialized",
+        ),
+        pytest.param(
+            "materialized_view",
+            {"name": "renamed"},
+            "view_identity_change_unsupported",
+            id="materialized-view-name",
+        ),
+        pytest.param(
+            "materialized_view",
+            {"kind": "view", "populate_on_create": None},
+            "view_identity_change_unsupported",
+            id="materialized-to-view",
+        ),
+    ],
+)
+def test_unsupported_object_transition_cannot_reserve_execution(
+    object_kind: str,
+    changes: dict[str, Any],
+    blocker_code: str,
+) -> None:
+    routine = PostgresFunction(
+        namespace="public",
+        name="echo",
+        kind="function",
+        identity_arguments="value integer",
+        arguments="value integer",
+        return_type="integer",
+        language="sql",
+        definition=(
+            "CREATE FUNCTION public.echo(value integer) RETURNS integer "
+            "LANGUAGE sql AS $$ SELECT value $$"
+        ),
+    )
+    view_fields = {
+        "namespace": "public",
+        "name": "constant_value",
+        "columns": (
+            PostgresColumn(name="value", ordinal=1, data_type="integer", nullable=True),
+        ),
+        "query_definition": "SELECT 1 AS value",
+    }
+    catalog = build_postgres_catalog(
+        database="analytics",
+        namespace="public",
+        server_version="17.2",
+        server_version_num=170002,
+        server_timezone="UTC",
+        tables=(),
+        relationships=(),
+        functions=(routine,) if object_kind == "function" else (),
+        views=(PostgresView(**view_fields),) if object_kind == "view" else (),
+        materialized_views=(
+            (PostgresMaterializedView(**view_fields, populated=True),)
+            if object_kind == "materialized_view" else ()
+        ),
+        captured_at=NOW,
+    )
+    imported = import_postgres_catalog(catalog)
+    assert imported.summary.complete
+    baseline = imported.content
+    desired = baseline.model_copy(deep=True)
+    if object_kind == "function":
+        desired.functions[0] = DesignFunction.model_validate(
+            {**desired.functions[0].model_dump(), **changes}
+        )
+        assert desired.functions[0].id == baseline.functions[0].id
+    else:
+        desired.views[0] = DesignView.model_validate(
+            {**desired.views[0].model_dump(), **changes}
+        )
+        assert desired.views[0].id == baseline.views[0].id
+    designs = _DesignRepository(design_fingerprint(desired), content=desired)
+    repository = InMemoryMigrationRepository(designs)
+    _seed_baseline(repository, catalog=catalog, content=baseline)
+
+    class Gateway(_SuccessfulGateway):
+        def introspect(self, connection: Any, namespace: str) -> Any:
+            self.introspection_calls += 1
+            return catalog
+
+    gateway = Gateway()
+    service = MigrationService(
+        repository=repository,
+        connections=_Connections(),
+        postgres=gateway,
+        workspaces=_WorkspaceRepository(),
+        designs=designs,
+        clock=lambda: NOW,
+    )
+    plan = service.create_plan(
+        OWNER_ID,
+        WORKSPACE_ID,
+        MigrationPlanCreate(expected_workspace_revision=1, expected_design_revision=1),
+    )
+    assert plan.status == "blocked"
+    assert plan.apply_capable is False
+    assert [difference.code for difference in plan.blocking_differences] == [blocker_code]
+    assert plan.steps == []
+    introspections_after_planning = gateway.introspection_calls
+
+    with pytest.raises(MigrationServiceError) as rejected:
+        service.create_execution(
+            OWNER_ID,
+            plan.id,
+            _request(
+                review_digest=plan.review_digest,
+                confirm_destructive=True,
+                confirm_external_changes=True,
+            ),
+        )
+
+    assert rejected.value.code == "migration_plan_not_executable"
+    assert service.list_executions(OWNER_ID, WORKSPACE_ID, 10) == []
+    assert repository.claim_next_execution(
+        claimed_at=NOW,
+        lease_owner=WORKER_ID,
+        lease_expires_at=NOW + timedelta(minutes=2),
+    ) is None
+    assert gateway.execution_calls == 0
+    assert gateway.introspection_calls == introspections_after_planning
 
 
 @pytest.mark.parametrize(
