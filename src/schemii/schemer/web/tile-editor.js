@@ -72,9 +72,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
         if (current.kind !== 'kpi') body.append(fieldList('Dimensions', 'dimensions'));
         body.append(fieldList('Measures', 'measures', true));
       }
-      const limit = element('input', { attrs: { type: 'number', min: 1, max: 100, 'aria-label': 'Rows or groups per page' } }); limit.value = current.limit;
-      limit.onchange = () => { current.limit = Math.max(1, Math.min(100, Number(limit.value) || 100)); limit.value = current.limit; };
-      body.append(element('label', { className: 'inline-label' }, ['Rows / groups per batch', limit]), element('p', { className: 'hint', text: 'Tables page through cached rows. Charts fetch the next batch as you scroll. Each query runs once; previously loaded rows are reused.' }));
+      body.append(element('p', { className: 'hint', text: 'Results stream automatically into a bounded browser cache. Scroll to browse received rows or groups; scrolling does not run another query. Previews stop at row or memory limits, and charts may display fewer groups. Refresh runs the query again. Expand a tile and choose Download full results to run the full query against a fresh snapshot.' }));
     } else if (tab === 'filters') {
       const parameters = element('section'), filters = element('section'); body.append(parameters, filters);
       const optionalDraft = { ...modelDraft, scopes: modelDraft.scopes.filter(scope => scope.kind !== 'required' && scope.requirement !== 'optional') };
