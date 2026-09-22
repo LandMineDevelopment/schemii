@@ -177,6 +177,9 @@ def save_role(request,data,actor,role_id=None):
         if any(getattr(source,key) != getattr(target,key) for key in ('host','port','database')):
             raise HTTPException(422,'Report access must use the same database target as its model')
     with auth(request).store.transaction(write=True) as state:
+        managed = {(g['owner_id'],g['connection_id']) for r in state['roles'].values() for g in r['connections']}
+        if any(g['owner_id'] != actor and (g['owner_id'],g['connection_id']) not in managed for g in role['connections']):
+            raise HTTPException(403,'Only your own connections or already managed connections can be assigned to roles')
         if role_id is not None and role_id not in state['roles']: raise HTTPException(404,'Role not found')
         if any(u not in state['users'] for u in role['user_ids']): raise HTTPException(422,'Unknown role member')
         if any(r['id'] != role_id and r['name']==role['name'] for r in state['roles'].values()): raise HTTPException(409,'Role name already exists')

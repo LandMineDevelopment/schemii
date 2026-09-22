@@ -294,6 +294,14 @@ viewport against the canonical application stack:
 npm run test:e2e
 ```
 
+For an already configured installation, provide explicit test credentials with
+`SCHEMII_E2E_USERNAME` / `SCHEMII_E2E_PASSWORD`, or point
+`SCHEMII_E2E_CREDENTIALS_FILE` at a private mode-0600 JSON file containing
+`username` and `password` (a nested `admin` object is also accepted). Browser tests
+never claim or reset an existing administrator. First-admin setup is allowed only
+with the explicit bootstrap flag and a fresh installation. Session state is stored
+under ignored, private `artifacts/playwright-auth/` and is not a CI artifact.
+
 Playwright keeps screenshots and traces only for failures under `artifacts/`.
 CI runs the complete suite against its disposable stack with
 `SCHEMII_E2E_BOOTSTRAP=1`. This opt-in setup registers the launcher's bookstore,

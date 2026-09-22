@@ -37,6 +37,7 @@ class ReportAccess:
         self.grant, self.dashboard, self.model, self.profile = grant, dashboard, model, profile
         self.session_token = session_token
         self.resource_id = dashboard.id
+        self.connection_owner_id = grant["connection_owner_id"]
 
     def check(self):
         user = self.auth.resolve(self.session_token) if self.session_token is not None else self.auth.user(self.actor)
@@ -182,6 +183,7 @@ class OwnerReportAccess:
     def __init__(self, services, auth, actor, resource_id, token):
         self.services, self.auth, self.actor = services, auth, actor
         self.resource_id, self.token = resource_id, token
+        self.connection_owner_id = actor
 
     def check(self):
         user = self.auth.resolve(self.token)

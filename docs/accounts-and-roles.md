@@ -74,7 +74,8 @@ blocks subsequent API requests, not a rollback of database work already submitte
 ## Metadata and recovery
 
 Migration 0037 adds accounts, sessions, roles, memberships, connection/report grants,
-audit events, and login throttling. Existing migration files are unchanged. This
+audit events, and login throttling. Migration 0038 separates the execution actor
+from its credential owner while preserving private workspace identities. Existing migration files are unchanged. This
 iteration retains owner-private model/workspace foreign keys and introduces a
 narrow shared-report execution adapter instead of rewriting ownership or encrypted
 credentials. The setup token and encryption key live outside metadata PostgreSQL.

@@ -17,6 +17,8 @@ export default defineConfig({
   use: {
     baseURL,
     ignoreHTTPSErrors: true,
+    extraHTTPHeaders: { Origin: new URL(baseURL).origin },
+    storageState: "./artifacts/playwright-auth/admin.json",
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },

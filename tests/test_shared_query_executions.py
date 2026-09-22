@@ -234,3 +234,23 @@ def test_native_result_route_defaults_are_values_for_direct_ai_calls():
     for query in ({"cursor": ""}, {"page_size": 0}, {"page_size": -1}):
         assert api.get(path, params=query).status_code == 422
     service.close_result(LOCAL_PROTOTYPE_USER_ID, None, receipt.id, result.id)
+
+
+def test_report_access_keeps_credential_owner_out_of_public_profile():
+    from types import SimpleNamespace
+    api, _, service, args = setup_target()
+    profile = service._connections.get(LOCAL_PROTOTYPE_USER_ID, args['connection_id'])
+    assert not hasattr(profile, 'owner_id')
+    access = SimpleNamespace(connection_owner_id=LOCAL_PROTOTYPE_USER_ID,
+                             get=service._connections.get, use=service._connections.use)
+    receipt = service.reserve_read_target(LOCAL_PROTOTYPE_USER_ID, connection_access=access, **args)
+    service.run(LOCAL_PROTOTYPE_USER_ID, receipt.id, connection_access=access)
+    assert service.get_owned(LOCAL_PROTOTYPE_USER_ID, receipt.id).status == 'succeeded'
+    assert service.is_shared_report_execution(receipt.id)
+
+    path = f'/shared-test/query-executions/{receipt.id}'
+    result_id = service.get_owned(LOCAL_PROTOTYPE_USER_ID, receipt.id).results[0].id
+    assert api.get(path).status_code == 403
+    assert api.get(f'{path}/results/{result_id}').status_code == 403
+    assert api.get(f'{path}/results/{result_id}/export.csv').status_code == 403
+    assert api.delete(f'{path}/results/{result_id}').status_code == 204

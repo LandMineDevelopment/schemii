@@ -449,6 +449,9 @@ def create_app(
     from schemii.common.auth.routes import router as auth_router
     from schemii.common.auth.middleware import AuthenticationMiddleware
     application.state.auth = AuthService(active_services.metadata.connection_factory)
+    from schemii.common.auth.dependencies import AccountConnectionDependencies
+    if application.state.auth.enabled:
+        active_services.connections.register_dependency_provider(AccountConnectionDependencies(application.state.auth))
     application.add_middleware(AuthenticationMiddleware)
     application.include_router(auth_router)
     from schemii.common.auth.resources import router as account_resources_router

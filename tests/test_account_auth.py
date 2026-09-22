@@ -107,3 +107,49 @@ def test_role_rejects_unbound_dashboard_and_managed_authoring(client):
     grant=dict(dashboard_id='dashboard_x',owner_id='user_x',connection_id='pg_x',connection_owner_id='user_x')
     assert client.post('/api/v1/admin/roles',json=dict(name='Invalid',dashboards=[grant])).status_code==422
     assert client.post('/api/v1/admin/roles',json=dict(name='Invalid',connections=[dict(connection_id='pg_x',owner_id='user_x',allow_authoring=True)])).status_code==422
+
+
+def test_admin_cannot_share_other_users_private_credentials(client,app):
+    from types import SimpleNamespace
+    app.state.services=SimpleNamespace(connections=SimpleNamespace(get=lambda *args: object()))
+    bootstrap(client)
+    private=dict(connection_id='pg_private',owner_id='another_user')
+    response=client.post('/api/v1/admin/roles',json=dict(name='Private access',connections=[private]))
+    assert response.status_code==403
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['existing']=dict(id='existing',name='Already managed',capabilities=[],user_ids=[],connections=[{**private,'allow_authoring':False}],dashboards=[])
+    response=client.post('/api/v1/admin/roles',json=dict(name='Reused access',connections=[private]))
+    assert response.status_code==201
+
+
+def test_role_connection_dependencies_explain_blocked_deletion(client,app):
+    from schemii.common.auth.dependencies import AccountConnectionDependencies
+    bootstrap(client)
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['existing']=dict(id='existing',name='Report viewers',capabilities=[],user_ids=[],connections=[dict(connection_id='pg_managed',owner_id='user_local_prototype',allow_authoring=False)],dashboards=[])
+    provider=AccountConnectionDependencies(app.state.auth)
+    assert provider.count_for_connection('user_local_prototype','pg_managed')==1
+    dependency=provider.dependencies_for_connection('user_local_prototype','pg_managed')[0]
+    assert dependency.name=='Report viewers'
+    assert dependency.deletion_blocked
+    assert provider.count_for_connection('another_user','pg_managed')==0
+
+
+def test_admin_inventory_excludes_private_profiles(client,app):
+    from types import SimpleNamespace
+    from schemii.common.auth.resources import router as resources_router
+    app.include_router(resources_router)
+    bootstrap(client)
+    user=client.post('/api/v1/admin/accounts',json=dict(username='private_owner',display_name='Private owner',password='private-password-123')).json()
+    private=SimpleNamespace(id='pg_private',name='Private',database='private_db',username='private_login')
+    managed=SimpleNamespace(id='pg_managed',name='Managed',database='report_db',username='report_login')
+    app.state.services=SimpleNamespace(
+        connections=SimpleNamespace(list=lambda owner: [private,managed] if owner==user['id'] else []),
+        dashboards=SimpleNamespace(list=lambda owner: []),
+    )
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['existing']=dict(id='existing',name='Managed',capabilities=[],user_ids=[],connections=[dict(connection_id='pg_managed',owner_id=user['id'],allow_authoring=False)],dashboards=[])
+    response=client.get('/api/v1/admin/resources')
+    assert response.status_code==200
+    assert [item['id'] for item in response.json()['connections']]==['pg_managed']
+    assert 'private_login' not in response.text

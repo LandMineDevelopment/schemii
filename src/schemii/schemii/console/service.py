@@ -401,7 +401,8 @@ class ConsoleService:
             mode="managed_read",
             statements=statements,
         )
-        target = ConsoleTarget(profile.id, profile.revision, database, namespace)
+        target = ConsoleTarget(profile.id, profile.revision, database, namespace,
+                               connection_access.connection_owner_id if connection_access is not None and connection_access.connection_owner_id != owner_id else None)
         receipt = self._reserve_read(owner_id, None, None, target, request, row_page_size=row_page_size)
         if connection_access is not None:
             with self._transient_results_lock:
