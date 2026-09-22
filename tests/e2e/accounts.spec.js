@@ -29,6 +29,25 @@ test('a provisioned viewer can sign in, see an empty report library, and sign ou
     await page.getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
+    // Streamed report exports navigate a native POST form. Exercise that browser
+    // request mode without fixtures: a fresh viewer session can safely log out.
+    await page.getByRole('textbox', { name: 'Username', exact: true }).fill(username);
+    await page.getByLabel('Password', { exact: true }).fill(password);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page).toHaveURL(/\/schemer$/);
+    const submitted = context.waitForEvent('response', {
+      predicate: response => response.url().endsWith('/api/v1/auth/logout') && response.request().method() === 'POST',
+    });
+    await page.evaluate(() => {
+      const form = document.createElement('form');
+      form.method = 'POST'; form.action = '/api/v1/auth/logout'; form.target = '_blank';
+      document.body.append(form); form.submit(); form.remove();
+    });
+    const response = await submitted;
+    expect((await response.request().allHeaders()).origin).toBe(new URL(baseURL).origin);
+    expect(response.status()).toBe(200);
+    expect((await context.request.get('/api/v1/auth/me')).status()).toBe(401);
+
   } finally {
     await context.close();
     // Accounts are retained for auditing; only this test's newly created account is disabled.

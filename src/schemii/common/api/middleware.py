@@ -88,7 +88,9 @@ def install_api_middleware(application: FastAPI) -> None:
         response.headers["Permissions-Policy"] = (
             "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
         )
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # Keep cross-origin referrers private while preserving a verifiable Origin
+        # on same-origin POST forms (including streamed CSV downloads).
+        response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         if path in FRONTEND_DOCUMENT_PATHS or path.startswith(("/assets/", "/schemoo-assets/")):
