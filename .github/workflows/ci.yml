@@ -67,7 +67,7 @@ jobs:
   browser-smoke:
     name: Assembled browser smoke (${{ matrix.project }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +83,7 @@ jobs:
       - name: Start the canonical application stack
         run: ./start.sh
       - name: Exercise browser flows
-        timeout-minutes: 18
+        timeout-minutes: 28
         env:
           SCHEMII_E2E_BOOTSTRAP: "1"
         run: npm run test:e2e -- --project=${{ matrix.project }}

@@ -64,7 +64,7 @@ def application_services(
 def test_runtime_config_rejects_implicit_or_unauthenticated_external_deployment() -> None:
     with pytest.raises(ValueError, match="SCHEMII_DEPLOYMENT_MODE"):
         RuntimeConfig.from_env({})
-    with pytest.raises(ValueError, match="identity adapter"):
+    with pytest.raises(ValueError, match="SCHEMII_AUTH_ENABLED"):
         RuntimeConfig.from_env(
             {
                 "SCHEMII_DEPLOYMENT_MODE": "authenticated",

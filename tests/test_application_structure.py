@@ -33,7 +33,13 @@ def test_openapi_contains_current_prototype_routes() -> None:
     workspace_create = schema["components"]["schemas"]["SchemiiWorkspaceCreate"]
     assert set(workspace_create["properties"]) == {"name"}
     assert "mode" not in schema["components"]["schemas"]["SchemiiWorkspace"]["properties"]
-    assert not any("password" in path.lower() for path in paths)
+    assert "post" in paths["/api/v1/auth/change-password"]
+    assert not any(
+        "get" in operations and "password" in path.lower()
+        for path, operations in paths.items()
+    )
+    connection_response = schema["components"]["schemas"]["PostgresConnectionProfile"]
+    assert "password" not in connection_response["properties"]
     assert (
         paths["/api/v1/connections"]["post"]["responses"]["422"]["content"]
         ["application/json"]["schema"]["$ref"]

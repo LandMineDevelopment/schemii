@@ -1,4 +1,5 @@
 import { createIconElement } from "./ui.js";
+import { currentAccount, canAuthor, signOut } from "./accounts-session.js";
 
 const PRODUCTS = Object.freeze([
   { id: "schemii", name: "Schemii", description: "Schema design", href: "/" },
@@ -42,5 +43,16 @@ export function installProductNavigation(host, { activeProduct } = {}) {
 
   menu.append(trigger, surface);
   host.replaceChildren(menu);
+  void currentAccount().then(account => {
+    if (!canAuthor(account)) {
+      for (const item of surface.querySelectorAll('a')) if (item.getAttribute('href') !== '/schemer') item.remove();
+      if (activeProduct !== 'schemer') location.replace('/schemer');
+    }
+    for (const [label, href] of [[account.user.display_name || account.user.username, '/account'], ...(account.is_admin ? [['Administration', '/admin']] : [])]) {
+      const item = document.createElement('a'); item.href = href; item.className = 'ui-product-navigation__item'; item.textContent = label; surface.append(item);
+    }
+    const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = 'Sign out';
+    logout.onclick = async () => { logout.disabled = true; try { await signOut(); } catch (error) { logout.textContent = error.message; logout.disabled = false; } }; surface.append(logout);
+  }).catch(error => { if (error.status === 401) location.replace('/login'); });
   return menu;
 }

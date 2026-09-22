@@ -109,7 +109,26 @@ test('repetition inspection and optional summary preserve intentional joined rep
     await expect(inspector).toContainText('Personnel');
     await expect(inspector.getByRole('link', { name: 'Open model in Schemoo', exact: true })).toHaveAttribute('href', `/schemoo?model=${modelId}`);
     await inspector.getByRole('button', { name: 'Close', exact: true }).click();
-    await page.getByRole('button', { name: 'Refresh dashboard', exact: true }).click();
+    // A refresh must stop interaction with the old cache while checking the
+    // model. Opening it here used to leave drill-through on a disposed cache.
+    let releaseRefresh, observeRefresh;
+    const refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
+    const refreshRequested = new Promise(resolve => { observeRefresh = resolve; });
+    const contextUrl = `**/api/v1/schemer/dashboards/${dashboardId}/context`;
+    await page.route(contextUrl, async route => {
+      observeRefresh();
+      await refreshGate;
+      await route.continue();
+    });
+    try {
+      await page.getByRole('button', { name: 'Refresh dashboard', exact: true }).click();
+      await refreshRequested;
+      await expect(page.getByRole('button', { name: 'Refresh dashboard', exact: true })).toBeDisabled();
+      await expect(page.locator('#tile-grid')).toHaveJSProperty('inert', true);
+    } finally { releaseRefresh(); }
+    await expect(page.getByRole('button', { name: 'Refresh dashboard', exact: true })).toBeEnabled({ timeout: 30000 });
+    await expect(page.locator('#tile-grid')).toHaveJSProperty('inert', false);
+    await page.unroute(contextUrl);
     await expect(tile.locator('tbody')).toHaveText(reportRows, { useInnerText: true });
     await tile.getByRole('heading').click();
     const expanded = page.getByRole('dialog', { name: 'Personnel counts by certification', exact: true });

@@ -62,7 +62,9 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      SCHEMII_DEPLOYMENT_MODE: local-development
+      SCHEMII_DEPLOYMENT_MODE: authenticated
+      SCHEMII_AUTH_ENABLED: "1"
+      SCHEMII_SETUP_TOKEN_FILE: /run/secrets/account_setup_token
       SCHEMII_DEVELOPER_INSPECTION: "1"
       SCHEMII_TARGET_EGRESS_MODE: internal-only
       SCHEMII_ALLOWED_TARGET_HOSTS: demo-postgres,postgres
@@ -95,6 +97,7 @@ services:
       - "${SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE:-./.schemii/secrets/metadata_app_password}:/run/secrets/metadata_app_password:ro"
       - "${SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE:-./.schemii/secrets/metadata_encryption_key}:/run/secrets/metadata_encryption_key:ro"
       - ./dev/schemii.toml:/etc/schemii/schemii.toml:ro
+      - "${SCHEMII_ACCOUNT_SETUP_TOKEN_SECRET_FILE:-./.schemii/secrets/account_setup_token}:/run/secrets/account_setup_token:ro"
       - "${SCHEMII_OPENCODE_PASSWORD_SECRET_FILE:-./.schemii/secrets/opencode_password}:/run/secrets/opencode_password:ro"
     group_add:
       - "${SCHEMII_SECRET_READER_GID:-10001}"
@@ -237,6 +240,7 @@ services:
     user: postgres
     volumes:
       - ./dev/postgres/demo-bootstrap.sh:/bootstrap/demo-bootstrap.sh:ro
+      - ./dev/postgres/account-access-fixture.sql:/bootstrap/account-access-fixture.sql:ro
       - "${SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_admin_password}:/run/secrets/demo_admin_password:ro"
       - "${SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE:-./.schemii/secrets/demo_target_password}:/run/secrets/demo_target_password:ro"
     group_add:
@@ -295,7 +299,9 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      SCHEMII_DEPLOYMENT_MODE: local-development
+      SCHEMII_DEPLOYMENT_MODE: authenticated
+      SCHEMII_AUTH_ENABLED: "1"
+      SCHEMII_SETUP_TOKEN_FILE: /run/secrets/account_setup_token
       SCHEMII_TARGET_EGRESS_MODE: internal-only
       SCHEMII_ALLOWED_TARGET_HOSTS: demo-postgres,postgres
       SCHEMII_STORAGE_MODE: postgresql

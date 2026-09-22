@@ -51,10 +51,19 @@ test("creating and deleting aliases preserves the user's zoom and pan", async ({
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
   const stage = page.locator(".sc-stage");
   const beforePan = await stage.getAttribute("style");
-  const box = await page.locator("#canvas-host").boundingBox();
-  await page.mouse.move(box.x + 12, box.y + 120);
+  const background = await page.locator('#canvas-host').evaluate(host => {
+    const box = host.getBoundingClientRect();
+    for (let y = box.top + 60; y < box.bottom - 80; y += 30) {
+      for (let x = box.left + 12; x < box.right - 80; x += 30) {
+        const target = document.elementFromPoint(x, y);
+        if (target && host.contains(target) && !target.closest('.sc-node, .sc-edge, .sc-connection-tools, button')) return { x, y };
+      }
+    }
+    throw new Error('No visible canvas background available for panning');
+  });
+  await page.mouse.move(background.x, background.y);
   await page.mouse.down();
-  await page.mouse.move(box.x + 48, box.y + 160, { steps: 5 });
+  await page.mouse.move(background.x + 36, background.y + 40, { steps: 5 });
   await page.mouse.up();
   await expect(stage).not.toHaveAttribute("style", beforePan);
   await inspectCertification(page);

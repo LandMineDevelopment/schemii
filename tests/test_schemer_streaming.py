@@ -181,3 +181,19 @@ def test_asgi_transport_failures_release_source(monkeypatch, spec_version, failu
         assert console.closed == ["result"]
 
     asyncio.run(run())
+
+
+def test_revoked_report_stops_before_delivering_pending_rows():
+    from schemii.common.api.errors import ApiProblem
+    console, services, model = setup([[["private"]]])
+    checks = 0
+    def check():
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise ApiProblem(403, 'report_access_revoked', 'Report access was removed.')
+    services.report_access = NS(check=check)
+    events = collect(services, model)
+    assert not [event for event in events if event['type'] == 'rows']
+    assert next(event for event in events if event['type'] == 'error')['code'] == 'report_access_revoked'
+    assert console.cancelled and console.closed == ['result']

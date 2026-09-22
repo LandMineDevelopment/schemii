@@ -58,6 +58,9 @@ export async function requestJson(path, {
     }
 
     if (!response.ok) {
+      if (response.status === 401 && !path.startsWith('/api/v1/auth/') && globalThis.location?.pathname !== '/login') {
+        globalThis.location?.replace('/login');
+      }
       const envelope = document?.error;
       throw new ApiError(envelope?.message || "The request could not be completed", {
         status: response.status,

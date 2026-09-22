@@ -387,3 +387,18 @@ VIEWS_QUERY = """
     ORDER BY c.relkind, c.relname
     LIMIT %s
 """
+
+
+READABLE_COLUMNS_QUERY = """
+    /* schemii_report_readable_columns */
+    SELECT c.relname AS relation_name, a.attname AS column_name
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+    WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'v', 'm')
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND pg_catalog.has_schema_privilege(n.oid, 'USAGE')
+      AND pg_catalog.has_column_privilege(c.oid, a.attnum, 'SELECT')
+    ORDER BY c.relname, a.attnum
+    LIMIT %s
+"""

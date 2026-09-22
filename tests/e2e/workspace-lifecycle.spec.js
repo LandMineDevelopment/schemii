@@ -198,6 +198,9 @@ test("redo restores a removed view as one fully assembled analyzed surface", asy
   await seedDesign(request, workspaceId, { ...complete, views: [] });
   await seedDesign(request, workspaceId, complete);
   await page.reload();
+  // Wait for URL restoration and the saved design before changing layers.
+  await expect(page.locator('#workspace-title')).toHaveText(workspaceName);
+  await expect(page.locator('#refresh-catalog-button')).toBeEnabled();
 
   await page.getByRole("button", { name: "Views", exact: true }).click();
   const viewButton = page.locator(".view-list-button").filter({ hasText: viewName });

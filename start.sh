@@ -136,6 +136,7 @@ SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/demo_admin_
 SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/demo_target_password"
 SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/metadata_encryption_key"
 SCHEMII_OPENCODE_PASSWORD_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/opencode_password"
+SCHEMII_ACCOUNT_SETUP_TOKEN_SECRET_FILE="${SCHEMII_SECRET_DIRECTORY}/account_setup_token"
 
 certificate_is_current() {
   local certificate_text certificate_modulus key_modulus
@@ -335,6 +336,7 @@ ensure_configured_secret \
 ensure_random_secret "$SCHEMII_METADATA_APP_PASSWORD_SECRET_FILE" "metadata-app-password"
 ensure_random_secret "$SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE" "demo-admin-password"
 ensure_random_secret "$SCHEMII_OPENCODE_PASSWORD_SECRET_FILE" "opencode-password"
+ensure_random_secret "$SCHEMII_ACCOUNT_SETUP_TOKEN_SECRET_FILE" "account-setup-token"
 if ! metadata_encryption_key_is_valid; then
   if [[ -e "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" ]]; then
     fail "the existing metadata encryption key is invalid; restore the original 256-bit base64 key"
@@ -343,6 +345,8 @@ if ! metadata_encryption_key_is_valid; then
   create_metadata_encryption_key
 fi
 SCHEMII_SECRET_READER_GID="$(stat -c '%g' "$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE")"
+# A stale-group recovery shell may create a new secret with another primary group.
+chgrp --reference="$SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE" "$SCHEMII_ACCOUNT_SETUP_TOKEN_SECRET_FILE"
 
 export SCHEMII_TEST_APP_PORT
 export SCHEMII_TEST_POSTGRES_DB
@@ -358,6 +362,7 @@ export SCHEMII_DEMO_ADMIN_PASSWORD_SECRET_FILE
 export SCHEMII_DEMO_TARGET_PASSWORD_SECRET_FILE
 export SCHEMII_METADATA_ENCRYPTION_KEY_SECRET_FILE
 export SCHEMII_OPENCODE_PASSWORD_SECRET_FILE
+export SCHEMII_ACCOUNT_SETUP_TOKEN_SECRET_FILE
 export SCHEMII_PI_PROTOTYPE_URL
 export SCHEMII_SECRET_READER_GID
 export SCHEMII_RESET_MIGRATION_DEMO
@@ -457,3 +462,5 @@ fi
 printf 'Schemii is ready at https://localhost:%s/\n' "$SCHEMII_TEST_APP_PORT"
 printf 'API map: https://localhost:%s/api-map\n' "$SCHEMII_TEST_APP_PORT"
 printf 'DB call map: https://localhost:%s/db-map\n' "$SCHEMII_TEST_APP_PORT"
+
+printf 'Accounts: https://localhost:%s/login (first setup token is stored in %s)\n' "$SCHEMII_TEST_APP_PORT" "$SCHEMII_ACCOUNT_SETUP_TOKEN_SECRET_FILE"

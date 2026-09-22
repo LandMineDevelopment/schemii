@@ -8,6 +8,7 @@ from schemii.schemoo.derived import type_family
 from schemii.schemoo.routes import api_errors
 from schemii.schemoo.service import load_model, model_catalog, plan_query
 from .time_analysis import validate_time_analysis
+from .access import available_dashboards, prepare_dashboard
 from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate
 from .dashboard_store import (DashboardNotFoundError, DashboardConflictError,
                               DashboardLimitError, DashboardStorageUnavailableError)
@@ -104,7 +105,7 @@ def validate_dashboard(services, owner, body):
 def list_dashboards(request: Request, principal: Principal = Depends(get_current_principal)):
     with dashboard_errors():
         return {"dashboards": [d.model_dump(mode="json", by_alias=True) for d in
-                               request.app.state.services.dashboards.list(principal.user_id)]}
+                               available_dashboards(request, principal.user_id)]}
 
 
 @router.post("", response_model=Dashboard, status_code=201)
@@ -119,7 +120,7 @@ def create_dashboard(body: DashboardCreate, request: Request,
 def get_dashboard(dashboard_id: str, request: Request,
                   principal: Principal = Depends(get_current_principal)):
     with dashboard_errors():
-        return request.app.state.services.dashboards.get(principal.user_id, dashboard_id)
+        return prepare_dashboard(request, principal.user_id, dashboard_id)[0]
 
 
 @router.put("/{dashboard_id}", response_model=Dashboard)

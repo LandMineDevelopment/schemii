@@ -16,7 +16,7 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "same-origin"
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "connect-src 'self'" in response.headers["content-security-policy"]
     assert '<script type="module" src="assets/app.js"></script>' in response.text
@@ -251,7 +251,7 @@ def test_api_documentation_receives_general_browser_safety_headers() -> None:
     assert response.status_code == 200
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "same-origin"
     assert "content-security-policy" not in response.headers
 
 

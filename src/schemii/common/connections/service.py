@@ -70,22 +70,17 @@ class ConnectionService:
         self._dependency_providers = dependency_providers
         self._target_policy = target_policy or AllowAllConnectionTargetPolicy()
         self._locks = tuple(threading.RLock() for _ in range(64))
-        transactional_providers = tuple(
-            provider
-            for provider in dependency_providers
-            if isinstance(provider, TransactionalConnectionDependencyProvider)
-        )
-        if transactional_providers and isinstance(
-            repository, ConnectionMutationGuardRegistrar
-        ):
-            repository.set_mutation_guard(
-                self._transactional_guard(transactional_providers)
-            )
+        if isinstance(repository, ConnectionMutationGuardRegistrar):
+            repository.set_mutation_guard(self._transactional_guard())
 
-    @staticmethod
-    def _transactional_guard(
-        providers: tuple[TransactionalConnectionDependencyProvider, ...],
-    ) -> ConnectionMutationGuard:
+    def register_dependency_provider(self, provider: ConnectionDependencyProvider) -> None:
+        """Attach a composed service's dependency guard before serving requests."""
+        self._dependency_providers = tuple(
+            current for current in self._dependency_providers
+            if current.dependency_name != provider.dependency_name
+        ) + (provider,)
+
+    def _transactional_guard(self) -> ConnectionMutationGuard:
         def guard(
             cursor: Any,
             owner_id: str,
@@ -93,7 +88,9 @@ class ConnectionService:
             operation: ConnectionMutationOperation,
             changed_fields: frozenset[str],
         ) -> None:
-            for provider in providers:
+            for provider in self._dependency_providers:
+                if not isinstance(provider, TransactionalConnectionDependencyProvider):
+                    continue
                 provider.guard_connection_mutation(
                     cursor,
                     owner_id,

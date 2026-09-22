@@ -42,7 +42,8 @@ def test_compose_keeps_postgres_private_and_never_mounts_docker_socket() -> None
     assert "  app-ingress:\n    internal: true" in networks
     assert "postgres:17-alpine@sha256:" in compose
     assert 'SCHEMII_DEVELOPER_INSPECTION: "1"' in schemii
-    assert "SCHEMII_DEPLOYMENT_MODE: local-development" in schemii
+    assert "SCHEMII_DEPLOYMENT_MODE: authenticated" in schemii
+    assert 'SCHEMII_AUTH_ENABLED: "1"' in schemii
     assert "SCHEMII_TARGET_EGRESS_MODE: internal-only" in schemii
     assert "SCHEMII_ALLOWED_TARGET_HOSTS: demo-postgres,postgres" in schemii
     assert "metadata-postgres" not in next(

@@ -57,6 +57,7 @@ class ConsoleTarget:
     connection_revision: int
     database: str
     namespace: str
+    connection_owner_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1084,16 +1085,16 @@ class PostgresConsoleRepository:
                     INSERT INTO schemii.console_executions (
                         id, owner_id, workspace_id, console_id, workspace_revision,
                         connection_id, connection_revision, database_name, namespace,
-                        transaction_id, status, statements, page_size, created_at, updated_at
+                        transaction_id, status, statements, page_size, created_at, updated_at, connection_owner_id
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                              %s, 'reserved', %s::jsonb, %s, %s, %s)
+                              %s, 'reserved', %s::jsonb, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
                         identifier, owner_id, workspace_id, console_id,
                         workspace_revision, target.connection_id,
                         target.connection_revision, target.database, target.namespace,
-                        transaction_id, json.dumps(statements), page_size, now, now,
+                        transaction_id, json.dumps(statements), page_size, now, now, target.connection_owner_id or owner_id,
                     ),
                 )
                 record = self._record_from_row(cursor.fetchone())
@@ -1668,6 +1669,7 @@ class PostgresConsoleRepository:
                 connection_id=row["connection_id"],
                 connection_revision=int(row["connection_revision"]),
                 database=row["database_name"], namespace=row["namespace"],
+                connection_owner_id=(row.get("connection_owner_id") if row.get("connection_owner_id") != row["owner_id"] else None),
             ),
             statements=tuple(row["statements"]), page_size=int(row["page_size"]),
             backend_pid=row["backend_pid"],

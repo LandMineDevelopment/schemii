@@ -416,3 +416,40 @@ def test_workspace_dependency_snapshot_reports_lifecycle_blocker() -> None:
     assert dependencies[0].target == "analytics.public"
     assert dependencies[0].deletion_blocked is True
     assert dependencies[0].blocking_reason is not None
+
+
+def test_composed_dependency_guards_register_once_and_include_late_providers():
+    class OnceRegistrar:
+        def __init__(self):
+            self.guard = None
+
+        def set_mutation_guard(self, guard):
+            if self.guard is not None:
+                raise RuntimeError('a connection mutation guard is already registered')
+            self.guard = guard
+
+    calls = []
+
+    class Provider:
+        def __init__(self, name):
+            self.dependency_name = name
+
+        def guard_connection_mutation(self, cursor, owner, connection, operation, changed_fields):
+            calls.append((self.dependency_name, owner, connection, operation))
+
+    repository = OnceRegistrar()
+    service = ConnectionService(repository, (Provider('workspaces'),))
+    original_guard = repository.guard
+    service.register_dependency_provider(Provider('account_roles'))
+    assert repository.guard is original_guard
+    repository.guard(None, 'owner', 'connection', 'delete', frozenset())
+    assert calls == [('workspaces', 'owner', 'connection', 'delete'),
+                     ('account_roles', 'owner', 'connection', 'delete')]
+
+    # A service with no initial transactional dependencies still installs the
+    # one dynamic guard needed by later composed account services.
+    empty_repository = OnceRegistrar()
+    empty_service = ConnectionService(empty_repository, ())
+    empty_service.register_dependency_provider(Provider('late'))
+    empty_repository.guard(None, 'owner', 'connection', 'delete', frozenset())
+    assert calls[-1] == ('late', 'owner', 'connection', 'delete')

@@ -45,3 +45,9 @@ SELECT format(
   'ALTER DATABASE %I OWNER TO %I', :'target_database', :'target_user'
 ) \gexec
 SQL
+
+# Restricted identities deliberately do not own their reporting tables.
+psql --username "$SCHEMII_DEMO_ADMIN_USER" \
+  --dbname "$SCHEMII_DEMO_TARGET_DATABASE" \
+  --set ON_ERROR_STOP=1 \
+  --file /bootstrap/account-access-fixture.sql
