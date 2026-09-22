@@ -117,11 +117,59 @@ test('refresh checks for a Schemoo model update before it reruns dashboard queri
   expect(errors).toEqual([]);
 });
 
+test('dashboards without configured filters still expose filter configuration', async ({ page }) => {
+  const { fixture, errors } = await mock(page, { optionalFilter: true });
+  fixture.model.definition.scopes = fixture.model.definition.scopes.filter(scope => scope.requirement === 'optional');
+  fixture.dashboard.selections = {};
+  await page.goto('/schemer');
+  await expect(page.locator('#filter-summary')).toHaveText('No filters applied');
+  await page.getByRole('button', { name: 'Filters', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Apply filters', exact: true })).toBeHidden();
+  await page.getByRole('button', { name: 'Choose filters', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: 'Offer Region' })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('toolbar filters toggle the panel without losing edits or claiming drafts are applied', async ({ page }) => {
+  const { fixture, requests, errors } = await mock(page);
+  await page.goto('/schemer');
+  await expect(page.locator('.tile-status')).toContainText('2 groups');
+  const toggle = page.getByRole('button', { name: 'Filters', exact: true });
+  const panel = page.getByRole('region', { name: 'Dashboard filters', exact: true });
+  const summary = page.getByRole('status', { name: 'Applied dashboard filters' });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(panel).toBeHidden();
+  await expect(summary).toContainText('Organization: HQ');
+  const before = requests.length;
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(panel).toBeVisible();
+  await expect(summary).toBeHidden();
+  const input = page.getByRole('textbox', { name: 'Organization: Root organization' });
+  await input.fill('Branch');
+  await toggle.click();
+  await expect(summary).toContainText('Organization: HQ');
+  await expect(summary).toContainText('Unapplied changes');
+  await expect(summary).not.toContainText('Branch');
+  await toggle.click();
+  await expect(input).toHaveValue('Branch');
+  expect(requests).toHaveLength(before);
+  await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+  await expect(page.locator('.tile-status')).toContainText('2 groups');
+  await toggle.click();
+  await expect(summary).toContainText('Organization: Branch');
+  await expect(summary).not.toContainText('Unapplied changes');
+  expect(fixture.dashboard.selections.organization.values.org).toBe('Branch');
+  expect(errors).toEqual([]);
+});
+
 test('dashboard creators expose optional model filters and viewers explicitly activate them', async ({ page }) => {
   const { fixture, errors } = await mock(page, { optionalFilter: true });
   await page.goto('/schemer');
 
   await page.getByRole('button', { name: 'Filters', exact: true }).click();
+  await page.getByRole('button', { name: 'Choose filters', exact: true }).click();
   const chooser = page.getByRole('dialog', { name: 'Choose dashboard filters' });
   await chooser.getByRole('checkbox', { name: 'Offer Region' }).check();
   await chooser.getByRole('button', { name: 'Save available filters' }).click();
@@ -129,12 +177,17 @@ test('dashboard creators expose optional model filters and viewers explicitly ac
   const activate = page.getByRole('checkbox', { name: 'Activate Region' });
   await expect(activate).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Region: Region' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Filters', exact: true }).click();
+  await expect(page.locator('#filter-summary')).not.toContainText('Region');
+  await page.getByRole('button', { name: 'Filters', exact: true }).click();
   await activate.check();
   await page.getByRole('textbox', { name: 'Region: Region' }).fill('Branch');
   await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
 
   expect(fixture.dashboard.optionalFilters).toEqual(['region']);
   expect(fixture.dashboard.selections.region).toMatchObject({ active: true, values: { region: 'Branch' } });
+  await page.getByRole('button', { name: 'Filters', exact: true }).click();
+  await expect(page.locator('#filter-summary')).toContainText('Region: Branch');
   expect(errors).toEqual([]);
 });
 

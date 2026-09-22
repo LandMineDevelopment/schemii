@@ -8,6 +8,7 @@ import { readExecution } from '#common/query-execution.js';
 import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderParameterValues } from '#model/filter-controls.js';
 import { newTile, dashboardUpdate, TILE_TYPES } from './dashboard-state.js';
+import { appliedFilterSummary } from './filter-summary.js';
 import { ResultCache, DashboardResultGroup, CacheBudget, readResultStream } from './result-cache.js';
 import { renderVisualization } from './visualizations.js';
 import { openTileEditor } from './tile-editor.js';
@@ -15,6 +16,7 @@ import { openExpanded, openSql } from './result-viewer.js';
 
 const $ = id => document.getElementById(id), API = '/api/v1/schemer/dashboards';
 let dashboard, model, catalog, library = [], modelList = [], slicerDraft, slicersDirty = false, saving = false, epoch = 0;
+let filtersExpanded = false;
 const runs = new Map(), tileStates = new Map(), streams = new Map();
 let closing = Promise.resolve(), dashboardGroup;
 const browserBudget = new CacheBudget();
@@ -122,13 +124,27 @@ function renderSlicers() {
   const configured = new Set(dashboard.optionalFilters || []);
   slicerDraft = { ...structuredClone(model.definition), fields: [], scopes: model.definition.scopes.filter(scope =>
     scope.kind === 'required' && scope.requirement !== 'optional' || scope.requirement === 'optional' && configured.has(scope.id)), selections: structuredClone(dashboard.selections) };
-  $('slicer-panel').hidden = !slicerDraft.scopes.length;
   renderParameterValues($('slicers'), { draft: slicerDraft, catalog, force: true, optionalSelectionLabel: 'Activate', onLoadDomain: loadDomainOptions, onChange: () => {
     slicersDirty = true; stopRuns(); tileStates.clear(); renderTiles();
     $('slicer-status').textContent = 'Filters changed. Apply to update every tile.'; $('apply-slicers').classList.add('primary');
+    renderFilterDisclosure();
   } });
   $('apply-slicers').classList.remove('primary');
   const missing = missingSlicers(); $('slicer-status').textContent = missing.length ? `Choose ${missing.join(', ')} to load data.` : '';
+  if (missing.length) filtersExpanded = true;
+  $('apply-slicers').hidden = !slicerDraft.scopes.length;
+  renderFilterDisclosure();
+}
+function renderFilterDisclosure() {
+  $('slicer-panel').hidden = !filtersExpanded;
+  $('toggle-dashboard-filters').setAttribute('aria-expanded', String(filtersExpanded));
+  $('toggle-dashboard-filters').title = filtersExpanded ? 'Collapse dashboard filters' : 'Expand dashboard filters';
+  $('filter-summary').hidden = filtersExpanded;
+  const applied = appliedFilterSummary(slicerDraft.scopes, dashboard.selections);
+  $('filter-summary').replaceChildren(element('span', { className: 'hint', text: applied.length ? 'Applied' : 'No filters applied' }),
+    ...applied.slice(0, 3).map(text => element('span', { className: 'filter-summary-chip', text, attrs: { title: text } })));
+  if (applied.length > 3) $('filter-summary').append(element('span', { className: 'hint', text: `+${applied.length - 3} more`, attrs: { title: applied.slice(3).join('\n') } }));
+  if (slicersDirty) $('filter-summary').append(element('span', { className: 'filter-summary-pending', text: 'Unapplied changes' }));
 }
 async function loadDomainOptions(context) {
   const origin = model;
@@ -295,7 +311,7 @@ async function openDashboard(id) {
     const source = await requestJson(`/api/v1/schemoo/models/${next.modelId}`);
     const sourceCatalog = await requestJson(`/api/v1/schemoo/catalog?connection_id=${encodeURIComponent(source.connectionId)}&namespace=${encodeURIComponent(source.namespace)}`);
     if (version !== epoch) return;
-    dashboard = next; model = source; catalog = sourceCatalog; slicersDirty = false; tileStates.clear();
+    dashboard = next; model = source; catalog = sourceCatalog; slicersDirty = false; filtersExpanded = false; tileStates.clear();
     $('empty-dashboard').hidden = true; $('dashboard-content').hidden = false;
     history.replaceState(null, '', `/schemer?dashboard=${encodeURIComponent(id)}`);
     renderLibrary(); renderHeading(); renderModelUpdate(); renderSlicers(); renderTiles(); message('');
@@ -338,6 +354,7 @@ async function dashboardDialog(mode = 'create') {
   document.body.append(dialog); dialog.showModal(); name.focus();
 }
 function manageDashboardFilters() {
+  if (!model || !checkLeave()) return;
   if (saving || modelNeedsUpdate()) { if (modelNeedsUpdate()) message('Update the dashboard model before changing its available filters.'); return; }
   const available = model.definition.scopes.filter(scope => scope.requirement === 'optional');
   const selected = new Set(dashboard.optionalFilters || []);
@@ -372,6 +389,10 @@ $('create-dashboard').onclick = () => dashboardDialog(); $('welcome-create').onc
 $('rename-dashboard').onclick = () => dashboardDialog('rename'); $('duplicate-dashboard').onclick = () => dashboardDialog('duplicate');
 $('add-tile').onclick = () => editTile(newTile()); $('refresh-dashboard').onclick = () => { void refreshDashboard(); };
 $('manage-dashboard-filters').onclick = manageDashboardFilters;
+$('toggle-dashboard-filters').onclick = () => {
+  if (!model || !slicerDraft) return;
+  filtersExpanded = !filtersExpanded; renderFilterDisclosure();
+};
 $('update-dashboard-model').onclick = () => { void updateDashboardModel(); };
 $('stop-dashboard').onclick = () => { stopRuns({ keepCache: true }); for (const [id, state] of tileStates) if (state.loading) tileStates.set(id, { error: 'Query cancelled.' }); renderTiles(); };
 $('apply-slicers').onclick = async () => {
