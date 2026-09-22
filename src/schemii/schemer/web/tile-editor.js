@@ -4,6 +4,7 @@ import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderReportFilters, renderParameterValues } from '#model/filter-controls.js';
 import { fieldLabel } from '#model/model-columns.js';
 import { aggregateChoices } from './report-state.js';
+import { timeDimensions } from './time-analysis.js';
 import { renderTimeAnalysis } from './time-analysis-editor.js';
 import { TILE_TYPES, tileErrors, fieldChoices, fieldKey } from './dashboard-state.js';
 
@@ -24,12 +25,16 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
     if (value === 'detail') { current.dimensions = []; current.measures = []; current.timeAnalysis = null; }
     if (value === 'kpi') { current.timeAnalysis = null; current.dimensions = []; current.measures = current.measures.slice(0, 1); }
     if (['bar', 'line', 'donut'].includes(value)) current.dimensions = current.dimensions.slice(0, 1);
+    clearMissingTimeDimension();
     if (value === 'donut') current.measures = current.measures.slice(0, 1);
     render();
   });
   const tabbar = element('div', { className: 'editor-tabs', attrs: { role: 'tablist', 'aria-label': 'Tile configuration' } });
   let tab = 'fields', pending = false;
-  const panes = new Map();
+  function clearMissingTimeDimension() {
+    const time = current.timeAnalysis;
+    if (time && !current.dimensions.some(field => field.table === time.table && field.column === time.column)) current.timeAnalysis = null;
+  }
   function fieldList(title, key, measure = false) {
     const host = element('section', { className: 'field-section' });
     host.append(element('h3', { text: title }));
@@ -43,23 +48,35 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
       current[key].push({ table: field.table, column: field.column, aggregate }); render();
     });
     selectHost.append(select); host.append(selectHost);
+    if (key === 'dimensions' && timeDimensions(current, model, catalog).length > 1) host.append(element('p', { className: 'hint', text: 'Group one date dimension by a calendar period. Choosing another date returns the previous date to exact values.' }));
     current[key].forEach((field, index) => {
       const row = element('div', { className: 'field-output' });
       row.append(element('span', { text: fieldLabel(modelDraft, catalog, field) }));
+      const dateDimension = key === 'dimensions' && timeDimensions({ dimensions: [field] }, model, catalog).length > 0;
+      const grouped = current.timeAnalysis?.table === field.table && current.timeAnalysis?.column === field.column;
+      if (dateDimension) {
+        const grouping = modelSelect(`Dimension ${index + 1} group by`, [['none', 'Exact date / time'], ['day', 'Day'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year']], grouped ? current.timeAnalysis.granularity : 'none', value => {
+          if (value === 'none') { if (grouped) current.timeAnalysis = null; }
+          else current.timeAnalysis = { timezone: 'UTC', weekStart: 'monday', comparison: 'none', runningTotal: false, ...current.timeAnalysis, table: field.table, column: field.column, granularity: value };
+          render();
+        });
+        row.append(grouping);
+      }
       if (measure) {
         const opts = aggregateChoices(modelDraft, catalog, field).filter(([value]) => value !== 'none' || model.definition.nodes.find(n => n.id === field.table)?.derivation?.kind === 'aggregate');
         row.append(modelSelect(`Measure ${index + 1} aggregation`, opts, field.aggregate, value => { field.aggregate = value; }));
       }
       const move = direction => { const [field] = current[key].splice(index, 1); current[key].splice(index + direction, 0, field); render(); };
-      row.append(element('div', { className: 'actions' }, [icon('earlier', `Move ${title} ${index + 1} earlier`, () => move(-1), index === 0), icon('later', `Move ${title} ${index + 1} later`, () => move(1), index === current[key].length - 1), icon('close', `Remove ${title} ${index + 1}`, () => { current[key].splice(index, 1); render(); })]));
+      row.append(element('div', { className: 'actions' }, [icon('earlier', `Move ${title} ${index + 1} earlier`, () => move(-1), index === 0), icon('later', `Move ${title} ${index + 1} later`, () => move(1), index === current[key].length - 1), icon('close', `Remove ${title} ${index + 1}`, () => { current[key].splice(index, 1); clearMissingTimeDimension(); render(); })]));
       host.append(row);
+      if (dateDimension && grouped) host.append(renderTimeAnalysis(current));
     });
     return host;
   }
   function render() {
     disposeSelects(body); body.replaceChildren();
     tabbar.replaceChildren();
-    const tabs = [['fields', 'View & fields'], ...(['detail', 'kpi'].includes(current.kind) ? [] : [['time', 'Time analysis']]), ['filters', 'Optional filters'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
+    const tabs = [['fields', 'View & fields'], ['filters', 'Optional filters'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
     if (!tabs.some(([id]) => id === tab)) tab = 'fields';
     for (const [id, label] of tabs) {
       const button = element('button', { type: 'button', className: 'ui-button', text: label, attrs: { role: 'tab', 'aria-selected': id === tab, 'aria-controls': `tile-${id}-pane` } });
@@ -74,8 +91,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
         body.append(fieldList('Measures', 'measures', true));
       }
       body.append(element('p', { className: 'hint', text: 'Results stream automatically into a bounded browser cache. Scroll to browse received rows or groups; scrolling does not run another query. Previews stop at row or memory limits, and charts may display fewer groups. Refresh runs the query again. Expand a tile and choose Download full results to run the full query against a fresh snapshot.' }));
-    } else if (tab === 'time') {
-      body.append(renderTimeAnalysis(current, model, catalog, render));
+
     } else if (tab === 'filters') {
       const parameters = element('section'), filters = element('section'); body.append(parameters, filters);
       const optionalDraft = { ...modelDraft, scopes: modelDraft.scopes.filter(scope => scope.kind !== 'required' && scope.requirement !== 'optional') };
