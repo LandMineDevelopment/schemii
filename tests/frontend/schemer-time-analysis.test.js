@@ -19,11 +19,11 @@ test('time dimension choices include timestamps with precision and exclude time-
   assert.deepEqual(timeDimensions({...tile,dimensions:[field('occurred'),field('clock'),field('date')]},model,catalog).map(f=>f.column), ['occurred','date']);
   assert.deepEqual(availableTimeDimensions(model,catalog).map(f=>f.column), ['occurred','date']);
 });
-test('choosing time directly replaces a chart dimension and preserves aggregate dimensions', () => {
+test('choosing time preserves other chart and aggregate dimensions', () => {
   const chart = {...tile, dimensions:[field('category')], timeAnalysis:null};
   chart.timeAnalysis = {table:'events',column:'occurred'};
   selectTimeDimension(chart, field('date'));
-  assert.deepEqual(chart.dimensions, [field('date')]);
+  assert.deepEqual(chart.dimensions, [field('date'),field('category')]);
   assert.deepEqual([chart.timeAnalysis.table, chart.timeAnalysis.column], ['events','date']);
 
   const aggregate = {...tile, kind:'aggregate', dimensions:[field('category'),field('occurred')], timeAnalysis:{table:'events',column:'occurred'}};
@@ -43,4 +43,10 @@ test('saved dashboard update retains independent time settings', () => {
   assert.deepEqual(update.tiles[0].timeAnalysis,tile.timeAnalysis);
   update.tiles[0].timeAnalysis.timezone='America/New_York';
   assert.equal(tile.timeAnalysis.timezone,'UTC');
+});
+
+test('replacing an existing time dimension preserves its chart position and other groups', () => {
+  const chart = {...tile, dimensions:[field('category'),field('occurred'),field('region')], timeAnalysis:{table:'events',column:'occurred'}};
+  selectTimeDimension(chart, field('date'));
+  assert.deepEqual(chart.dimensions, [field('category'),field('date'),field('region')]);
 });

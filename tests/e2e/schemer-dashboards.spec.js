@@ -9,7 +9,7 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false, multidimensional = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
   if (optionalFilter) fixture.model.definition.scopes.push({ id: 'region', label: 'Region', kind: 'conditional', requirement: 'optional', alternatives: [{ id: 'choose', label: 'Choose region', inputs: [{ id: 'region', label: 'Region', type: 'text', defaultValue: '' }], conditions: [{ table: 'person', column: 'org', operator: 'eq', parameterId: 'region' }] }] });
@@ -22,6 +22,9 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
       path: [{ node: 'person', label: 'Personnel' }, { node: 'assignment', label: 'Assignments' }] }] }] : [];
   if (emptySlicers) fixture.dashboard.selections = {};
   if (chartTypes) fixture.dashboard.tiles = ['bar', 'line', 'donut', 'aggregate', 'kpi', 'detail'].map(kind => ({ ...fixture.dashboard.tiles[0], id: kind, kind, title: `${kind} view`, dimensions: ['kpi', 'detail'].includes(kind) ? [] : [field('org')], measures: kind === 'detail' ? [] : [field('id', 'count')] }));
+  if (multidimensional) fixture.dashboard.tiles = ['bar', 'line', 'donut', 'aggregate'].map(kind => ({
+    ...fixture.dashboard.tiles[0], id: kind, kind, title: `${kind} grouped`, dimensions: [field('org'), field('name')],
+  }));
   if (manyBars) fixture.dashboard.tiles[0].limit = 20;
   if (manyRows) {
     fixture.dashboard.tiles[0].kind = 'aggregate';
@@ -46,6 +49,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   }
   function dataFor(tile, drill) {
     return drill || tile.kind === 'detail' ? { rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']], columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }], size: tile.limit }
+      : multidimensional ? { rows: multidimensional === 'wide' ? Array.from({ length: 150 }, (_, index) => [index, 'Group', index + 1]) : multidimensional === 'many' ? Array.from({ length: 150 }, (_, index) => ['HQ', `Person ${index}`, index + 1]) : [['Branch', 'Alex', 2], ['Branch', 'Blake', 3], ['HQ', 'Alex', 4], ['Remote', 'Alex', 1], ['Remote', 'Blake', 5]], columns: [{ name: 'org', dataType: 'text' }, { name: 'name', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }] }
       : tile.kind === 'kpi' ? { rows: [[3]], columns: [{ name: 'COUNT id', dataType: 'bigint' }], size: tile.limit }
         : { rows: manyBars || manyRows ? Array.from({ length: 500 }, (_, index) => [`Organization ${index + 1}`, index + 1]) : [['HQ', 3], ['Branch', 2]], columns: [{ name: 'org', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }], size: tile.limit };
   }
@@ -56,7 +60,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     if (url.pathname === '/api/v1/schemoo/models') response = { models: [fixture.model] };
     else if (url.pathname === `/api/v1/schemoo/models/${modelId}`) response = fixture.model;
     else if (url.pathname === '/api/v1/schemoo/catalog') response = fixture.catalog;
-    else if (url.pathname === '/api/v1/schemer/dashboards') response = { dashboards: [fixture.dashboard] };
+    else if (url.pathname === '/api/v1/schemer/dashboards') response = { dashboards: multidimensional === 'many' ? [fixture.dashboard, ...Array.from({ length: 4 }, (_, index) => ({ ...fixture.dashboard, id: `other-${index}`, name: `Long multidimensional dashboard ${index}` }))] : [fixture.dashboard] };
     else if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}`) {
       if (request.method() === 'PUT') fixture.dashboard = { ...fixture.dashboard, ...body, revision: fixture.dashboard.revision + 1 };
       response = fixture.dashboard;
@@ -175,7 +179,7 @@ test('required slicers gate every tile and tile editor validates dimensions befo
   const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
   await editor.getByRole('button', { name: 'Remove Dimensions 1', exact: true }).click();
   await editor.getByRole('button', { name: 'Apply & run' }).click();
-  await expect(editor.getByRole('alert')).toContainText('Choose one dimension');
+  await expect(editor.getByRole('alert')).toContainText('Choose at least one dimension');
   await editor.getByRole('combobox', { name: 'Add dimensions', exact: true }).fill('org');
   await page.getByRole('option', { name: 'Personnel · org', exact: true }).click();
   await editor.getByRole('textbox', { name: 'Tile title', exact: true }).fill('Manager positions');
@@ -489,5 +493,118 @@ test('stopping a partial stream keeps cached rows and ignores late batches until
   await page.evaluate(() => window.finishReportStream());
   await expect(tile.locator('.tile-status')).toContainText('500 groups');
   await expect(tile).not.toContainText('Query stopped');
+  expect(errors).toEqual([]);
+});
+
+
+test('multidimensional charts label complete groups, separate lines, persist fields, and drill exact tuples', async ({ page }) => {
+  const { fixture, requests, errors } = await mock(page, { multidimensional: true });
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile')).toHaveCount(4);
+  await expect(page.locator('.tile-status').filter({ hasText: '5 groups' })).toHaveCount(4);
+  const bar = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'bar grouped', exact: true }) });
+  await expect(bar.locator('.bar-label').first()).toContainText('Branch');
+  await expect(bar.locator('.bar-series-label').first()).toContainText('Alex');
+  const line = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'line grouped', exact: true }) });
+  await expect(line.locator('.line-chart path')).toHaveCount(2);
+  await expect(line.locator('.line-chart circle')).toHaveCount(5);
+  const paths = await line.locator('.line-chart path').evaluateAll(nodes => nodes.map(node => node.getAttribute('d')));
+  expect(paths.some(path => (path.match(/M/g) || []).length === 2)).toBe(true);
+  await expect(page.locator('.donut-entry').first()).toContainText('Alex');
+  await bar.getByRole('heading').click();
+  const expanded = page.getByRole('dialog', { name: 'bar grouped', exact: true });
+  await expanded.locator('.bar-value-row').first().click();
+  await expect(expanded.locator('.drill-body')).toContainText('Alex');
+  const drill = requests.find(request => request.body.selection);
+  expect(drill.body.selection).toEqual({ dimensions: [
+    { table: 'person', column: 'org', value: 'Branch' },
+    { table: 'person', column: 'name', value: 'Alex' },
+  ], measureIndex: 0 });
+  await expanded.getByRole('button', { name: 'Close expanded tile' }).click();
+  await page.getByRole('button', { name: 'Edit bar grouped', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  for (const kind of ['Line chart', 'Donut chart', 'Aggregation report', 'Bar chart']) {
+    await editor.getByRole('combobox', { name: 'Analytics view', exact: true }).fill(kind);
+    await page.getByRole('option', { name: kind, exact: true }).click();
+    await expect(editor.getByRole('button', { name: 'Remove Dimensions 2', exact: true })).toBeVisible();
+  }
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('org'), field('name')]);
+  await page.reload();
+  await expect(bar.locator('.bar-series-label').first()).toContainText('Alex');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+
+test('large dimension legends scroll while compact plots stay visible and results do not overlap', async ({ page }) => {
+  const { errors } = await mock(page, { multidimensional: 'many' });
+  await page.goto('/schemer');
+  await expect(page.locator('.tile-status').filter({ hasText: '150 groups' })).toHaveCount(4);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  for (const kind of ['line', 'donut']) {
+    const tile = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: `${kind} grouped`, exact: true }) });
+    const bounds = await tile.evaluate(node => {
+      const body = node.querySelector('.tile-body').getBoundingClientRect();
+      const plot = node.querySelector('.line-chart, .donut-chart').getBoundingClientRect();
+      const legend = node.querySelector('.chart-legend, .donut-legend');
+      return { bodyBottom: body.bottom, plotTop: plot.top, plotBottom: plot.bottom, legendHeight: legend.clientHeight, legendContent: legend.scrollHeight };
+    });
+    expect(bounds.plotTop).toBeLessThan(bounds.bodyBottom - 80);
+    expect(bounds.legendContent).toBeGreaterThan(bounds.legendHeight);
+    if (kind === 'donut') {
+      await tile.locator('.tile-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+      const legend = await tile.locator('.donut-legend').boundingBox();
+      const status = await tile.locator('.stream-progress').boundingBox();
+      expect(status.y).toBeGreaterThanOrEqual(legend.y + legend.height);
+    }
+  }
+  expect(errors).toEqual([]);
+});
+
+
+test('wide line axes keep their first points visible before horizontal scrolling', async ({ page }) => {
+  await mock(page, { multidimensional: 'wide' });
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'line grouped', exact: true }) });
+  await expect(tile.locator('.tile-status')).toContainText('150 groups');
+  const body = await tile.locator('.tile-body').boundingBox();
+  const point = await tile.locator('.line-chart circle').first().boundingBox();
+  expect(point.x).toBeGreaterThanOrEqual(body.x);
+  expect(point.x + point.width).toBeLessThan(body.x + body.width);
+  expect(point.y + point.height).toBeLessThan(body.y + body.height);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+
+test('bars cluster under one dimension with consistent colors and regroup without a query', async ({ page }) => {
+  const { requests, errors } = await mock(page, { multidimensional: true });
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'bar grouped', exact: true }) });
+  await expect(tile.locator('.bar-group')).toHaveCount(3);
+  await expect(tile.locator('.bar-group').first().locator('.bar-value-row')).toHaveCount(2);
+  const colors = await tile.locator('.bar-value-row').evaluateAll(nodes => nodes.map(node => [node.dataset.seriesKey, node.querySelector('.bar-mark').style.background]));
+  const byKey = new Map();
+  for (const [key, color] of colors) {
+    if (byKey.has(key)) expect(color).toBe(byKey.get(key));
+    else byKey.set(key, color);
+  }
+  expect(new Set(byKey.values()).size).toBe(2);
+  await tile.getByRole('heading').click();
+  const expanded = page.getByRole('dialog', { name: 'bar grouped', exact: true });
+  const before = requests.length;
+  await expanded.getByRole('combobox', { name: 'Group bars by' }).selectOption('1');
+  await expect(expanded.locator('.bar-group')).toHaveCount(2);
+  await expect(expanded.locator('.bar-label').first()).toHaveText('Alex');
+  await expect(expanded.locator('.bar-group').first().locator('.bar-value-row')).toHaveCount(3);
+  await expect(expanded.locator('.stream-progress')).toContainText('End of result');
+  expect(requests).toHaveLength(before);
+  await expanded.locator('.bar-group').first().locator('.bar-value-row').nth(1).click();
+  await expect(expanded.locator('.drill-body')).toContainText('Alex');
+  expect(requests.at(-1).body.selection.dimensions).toEqual([
+    { table: 'person', column: 'org', value: 'HQ' },
+    { table: 'person', column: 'name', value: 'Alex' },
+  ]);
   expect(errors).toEqual([]);
 });

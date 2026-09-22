@@ -15,6 +15,8 @@ def timed(context, **options):
     catalog['tables'][0]['columns'][0]['dataType'] = 'integer'
     tile.dimensions = [field('people', 'created_at'), field('org', 'name')]
     tile.time_analysis = TimeAnalysis(table='people', column='created_at', **options)
+    tile = DashboardTile.model_validate({**vars(tile), 'title': 'Time by organization'})
+    dashboard.tiles = [tile]
     return dashboard, tile, model
 
 

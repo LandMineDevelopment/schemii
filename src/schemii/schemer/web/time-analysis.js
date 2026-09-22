@@ -22,14 +22,12 @@ export function selectTimeDimension(tile, field) {
   const selected = { table: field.table, column: field.column, aggregate: 'none' };
   const previous = tile.timeAnalysis && [tile.timeAnalysis.table, tile.timeAnalysis.column];
   const matches = (candidate, key) => key && candidate.table === key[0] && candidate.column === key[1];
-  if (['bar', 'line', 'donut'].includes(tile.kind)) {
-    tile.dimensions = [selected];
-  } else {
-    const previousIndex = tile.dimensions.findIndex(candidate => matches(candidate, previous));
-    const dimensions = tile.dimensions.filter(candidate => !matches(candidate, previous) && !matches(candidate, [selected.table, selected.column]));
-    dimensions.splice(Math.min(previousIndex < 0 ? dimensions.length : previousIndex, dimensions.length), 0, selected);
-    tile.dimensions = dimensions;
-  }
+  const previousIndex = tile.dimensions.findIndex(candidate => matches(candidate, previous));
+  const selectedIndex = tile.dimensions.findIndex(candidate => matches(candidate, [selected.table, selected.column]));
+  const dimensions = tile.dimensions.filter(candidate => !matches(candidate, previous) && !matches(candidate, [selected.table, selected.column]));
+  const position = previousIndex >= 0 ? previousIndex : selectedIndex >= 0 ? selectedIndex : 0;
+  dimensions.splice(Math.min(position, dimensions.length), 0, selected);
+  tile.dimensions = dimensions;
   if (tile.timeAnalysis) {
     tile.timeAnalysis.table = selected.table;
     tile.timeAnalysis.column = selected.column;
