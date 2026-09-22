@@ -1,4 +1,9 @@
 :root { --dashboard-header:64px; }
+.filter-summary { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; margin:-8px 0 20px; min-width:0; }
+.filter-summary-chip { max-width:min(100%,280px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:3px 8px; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--muted); font-size:11px; }
+.filter-summary-pending { color:var(--accent-bright); font-size:11px; }
+#toggle-dashboard-filters[aria-expanded=true] { border-color:var(--accent); color:var(--accent-bright); }
+.slicer-panel>header { flex-wrap:wrap; }
 * { box-sizing:border-box; } [hidden],dialog:not([open]) { display:none!important; }
 body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 system-ui,sans-serif; }
 button,input,select,textarea { font:inherit; } button { cursor:pointer; } button:disabled { cursor:default; }

@@ -98,6 +98,7 @@ test("author a column comparison, edit it inline, and apply it as a live dashboa
   await page.goto(`/schemer?dashboard=${dashboardId}`);
   const count = page.locator(".kpi-value strong");
   await expect(count).toHaveText(String(baseline.rows.length), { timeout: 30_000 });
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
   await page.getByRole("checkbox", { name: "Activate Model filter", exact: true }).check();
   await page.getByRole("button", { name: "Apply filters", exact: true }).click();
   await expect(count).toHaveText(String(matching), { timeout: 30_000 });
@@ -108,6 +109,8 @@ test("author a column comparison, edit it inline, and apply it as a live dashboa
   await page.getByRole("button", { name: "Apply filters", exact: true }).click();
   await expect(count).toHaveText(String(matching), { timeout: 30_000 });
   await page.reload();
+  await expect(page.locator("#filter-summary")).toContainText("Model filter: Default");
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: "Activate Model filter", exact: true })).toBeChecked();
   await expect(count).toHaveText(String(matching), { timeout: 30_000 });
   await page.getByRole("checkbox", { name: "Activate Model filter", exact: true }).uncheck();
