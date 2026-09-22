@@ -130,6 +130,19 @@ test('dashboards without configured filters still expose filter configuration', 
   expect(errors).toEqual([]);
 });
 
+test('a failed model reload hides the previous applied filter summary', async ({ page }) => {
+  const { errors } = await mock(page);
+  await page.goto('/schemer');
+  await expect(page.locator('#filter-summary')).toContainText('Organization: HQ');
+  await page.route(`**/api/v1/schemoo/models/${modelId}`, route => route.fulfill({ status: 503, json: { error: { message: 'Model unavailable' } } }));
+  await page.locator('.dashboard-link').click();
+  await expect(page.locator('#tile-grid')).toContainText('The source model could not be loaded');
+  await expect(page.locator('#filter-summary')).toBeHidden();
+  await expect(page.locator('#slicer-panel')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Filters', exact: true })).toHaveAttribute('aria-expanded', 'false');
+  expect(errors).toEqual([]);
+});
+
 test('toolbar filters toggle the panel without losing edits or claiming drafts are applied', async ({ page }) => {
   const { fixture, requests, errors } = await mock(page);
   await page.goto('/schemer');

@@ -304,6 +304,8 @@ async function deleteTile(tile) {
 }
 async function openDashboard(id) {
   stopRuns(); const version = epoch; message('Loading dashboard…'); model = null; $('dashboard-content').hidden = true;
+  $('filter-summary').hidden = true;
+  $('toggle-dashboard-filters').setAttribute('aria-expanded', 'false');
   try {
     const next = await requestJson(`${API}/${id}`);
     if (version !== epoch) return;
