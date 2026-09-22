@@ -150,7 +150,7 @@ function renderTile(card, tile) {
     const position = scrollPosition(body);
     const chart = !['detail', 'aggregate'].includes(tile.kind);
     const data = state.result;
-    renderVisualization(body, tile, data, { compact: true });
+    renderVisualization(body, tile, data, { compact: true, modelId: dashboard.modelId });
     appendStreamStatus(body, data);
     restoreScroll(body, position);
     status.textContent = `${data.rows.length} ${tile.kind === 'detail' ? 'rows' : 'groups'} cached${cache?.loading ? ' · loading…' : data.limitReached ? ' · preview limit' : data.error ? ' · interrupted' : ' · complete'}`;
@@ -207,7 +207,7 @@ async function runAll() {
 }
 function expand(tile) {
   if (!readyToRun()) return;
-  openExpanded({ tile, cache: getStream(tile), createDrillCache: selection => getStream(tile, selection), onRefresh: () => void runTile(tile) });
+  openExpanded({ tile, modelId: dashboard.modelId, cache: getStream(tile), createDrillCache: selection => getStream(tile, selection), onRefresh: () => void runTile(tile) });
 }
 
 async function showTileSql(tile) {

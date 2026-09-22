@@ -15,11 +15,11 @@ const labeled = (text, control) => element("label", { className: "stack" }, [tex
 const uid = prefix => `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0,12)}`;
 
 /** A local, cancellable definition editor. SQL/type/grain validation belongs to the server. */
-export function openDerivedSource({ draft, catalog, owner, existing, onApply, onLoadDomain }) {
+export function openDerivedSource({ draft, catalog, owner, existing, initial, onApply, onLoadDomain }) {
   const physical = draft.nodes.filter(node => !node.derivation);
-  let source = existing?.derivation.source || owner?.id || physical[0]?.id;
+  let source = existing?.derivation.source || initial?.derivation.source || owner?.id || physical[0]?.id;
   if (!source) return;
-  const definition = structuredClone(existing?.derivation || { kind: "row", source, groupBy: [], outputs: [] });
+  const definition = structuredClone(existing?.derivation || initial?.derivation || { kind: "row", source, groupBy: [], outputs: [] });
   let target = definition.connection?.target || owner?.id || source;
   if (definition.kind === "aggregate" && !definition.connection) definition.connection = {target, columns: definition.groupBy.map(column => ({source:column,target:column}))};
   const columns = id => catalog.tables.find(t => t.name === physical.find(n => n.id === id)?.table)?.columns || [];
@@ -27,7 +27,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, onApply, on
   const body = element("div", { className: "derived-body" });
   const error = element("p", { attrs: { role: "alert" }, className: "warning" });
   const name = element("input", { attrs: { "aria-label": "Calculated source name", maxlength: 100 } });
-  name.value = existing?.label || `${physical.find(n => n.id === source)?.label} calculations`;
+  name.value = existing?.label || initial?.label || `${physical.find(n => n.id === source)?.label} calculations`;
   const button = (text, fn) => { const b = element("button", { type: "button", className: "ui-button", text }); b.onclick = fn; return b; };
   const newOutput = () => ({ id: uid("field"), label: "", operation: definition.kind === "row" ? "add" : "list", column: "", nodeId: source, distinct: false, delimiter: ", " });
   const suggestConnection = () => {

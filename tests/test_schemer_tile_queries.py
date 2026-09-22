@@ -51,6 +51,21 @@ def test_chart_and_drill_keep_join_and_group(context):
     assert any("count once" in warning for warning in drill["warnings"])
 
 
+def test_repetition_diagnostics_survive_tile_ordering_without_blocking_drill(context):
+    dashboard, tile, _ = context
+    tile.dimensions = [field("cert", "id")]
+    tile.measures = [field("people", "id", "count")]
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+    diagnostic, = plan["repetitionDiagnostics"]
+    assert diagnostic["outputIndex"] == 1
+    assert diagnostic["relationships"][0]["id"] == "cert_fk"
+    assert "COUNT(DISTINCT" not in plan["sql"]
+    _, drill = queries.tile_plan(None, None, dashboard, tile.id, selection={
+        "dimensions": [{"table": "cert", "column": "id", "value": "1"}], "measureIndex": 0})
+    assert drill["drill"]
+    assert '"cert"' in drill["sql"]
+
+
 def test_null_and_quoted_dimension_values_are_safe(context):
     dashboard, tile, _ = context
     _, null = queries.tile_plan(None, None, dashboard, tile.id, selection=selection(None))

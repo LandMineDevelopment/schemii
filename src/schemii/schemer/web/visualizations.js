@@ -2,6 +2,7 @@ import { element } from '#common/dom.js';
 import { createResultGrid } from './scroll-results.js';
 import { chartPreview } from './chart-preview.js';
 import { markSelection } from './dashboard-state.js';
+import { repetitionNotice } from '#model/repetition.js';
 const colors = ['#f4b942', '#65a9ff', '#9b82f4', '#71d49a', '#f36b74', '#55c5c2'];
 const label = value => value === null ? 'NULL' : String(value);
 const numeric = value => value !== null && value !== '' && Number.isFinite(Number(value));
@@ -18,19 +19,11 @@ function actionable(node, text, callback) {
   node.onclick = event => { event.stopPropagation(); callback(); };
   node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); callback(); } };
 }
-export function renderVisualization(host, tile, result, { onDrill, compact = false } = {}) {
+export function renderVisualization(host, tile, result, { onDrill, compact = false, modelId } = {}) {
   result = chartPreview(tile, result);
   host.replaceChildren();
-  const warnings = (result?.plan?.warnings || []).filter(text => text.includes('repeated rows from joins'));
-  if (warnings.length) {
-    const notice = element('details', { className: 'aggregation-warning' }, [
-      element('summary', { text: 'Aggregation warning' }),
-      ...warnings.map(text => element('p', { text })),
-    ]);
-    notice.onclick = event => event.stopPropagation();
-    notice.onkeydown = event => event.stopPropagation();
-    host.append(notice);
-  }
+  const repetition = repetitionNotice(result?.plan, { modelId });
+  if (repetition) host.append(repetition);
   if (result.visualTruncated) host.append(element('p', { className: 'chart-partial-notice', text: `Chart shows the first ${result.rows.length} of ${result.cachedRows} cached groups. Export cached rows or download full results to see more.` }));
   if (!['detail', 'aggregate', 'kpi'].includes(tile.kind) && (result?.loading || result?.limitReached || result?.error || result?.visualTruncated)) host.append(element('p', { className: 'chart-partial-notice', text: tile.kind === 'donut' ? 'Partial result · percentages reflect displayed groups only.' : 'Partial result · showing received groups.' }));
   if (!result?.rows.length) { host.append(element('p', { className: 'empty-state', text: result?.loading ? 'Waiting for the first rows…' : result?.error ? 'The query did not complete.' : 'No matching rows for these slicers and filters.' })); return; }
