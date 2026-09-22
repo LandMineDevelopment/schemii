@@ -47,3 +47,12 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
 .viewer-footer { flex-wrap:wrap; }
 @keyframes stream-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .stream-progress.is-loading::before { animation:none; } }
+
+.time-analysis-controls { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; margin:20px 0; }
+.time-analysis-controls input:not([type=checkbox]) { width:100%; min-width:0; }
+.time-toggle { display:flex; align-items:center; gap:10px; min-height:36px; }
+.time-toggle input { width:18px; height:18px; accent-color:var(--accent-bright); }
+.time-analysis-settings .hint { margin:14px 0; line-height:1.6; }
+.time-chart-control { display:flex; gap:10px; align-items:center; margin:0 0 12px; color:var(--muted); font-size:12px; }
+.time-chart-control select { min-width:0; max-width:100%; }
+@media(max-width:600px) { .time-analysis-controls { grid-template-columns:1fr; gap:14px; } }

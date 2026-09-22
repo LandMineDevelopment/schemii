@@ -89,6 +89,27 @@ Preview row and byte limits bound each query; a shared browser budget also bound
 cached tiles and drill selections. Capped and interrupted results remain readable
 and are explicitly marked incomplete.
 
+Grouped tiles support **Time analysis** in the tile editor: select a date or timestamp
+from the tile dimensions, choose day/week/month, an IANA time zone, and Monday or
+Sunday week starts. Zoned timestamps use the chosen time zone; dates and timestamps
+without a zone retain their calendar values. Null dates are excluded. Bucket labels
+are their starting dates, and base-measure drill-through uses those same boundaries.
+
+Previous-period and prior-year comparisons include the baseline, absolute change,
+and percentage change (`100 × (current − baseline) / baseline`). They use the same
+filtered data as the current values: excluded or missing baseline periods yield NULL,
+as do percentages with a zero baseline. Missing periods are omitted; partial periods
+are compared as available, without prorating. Prior-year days clamp February 29 to
+February 28; prior-year weeks use the week containing the bucket start minus one year.
+
+Running totals sum each period's measure chronologically, separately for each
+combination of the other dimensions. For averages or distinct counts this is a sum
+of period values, not a recomputed cumulative average or distinct count. These
+calculations run over the complete filtered query before preview caps. Charts offer
+a Show selector for values, changes, percentages, and running totals; aggregate
+reports and CSV exports include every configured output. Only base measures drill
+into a single period; computed outputs combine periods and are not drill targets.
+
 The source connection stays open only while the stream executes and transfers
 its bounded preview, and is released on completion, cap, cancellation, or failure.
 Dashboard refreshes share one repeatable-read transaction; individual tile refreshes

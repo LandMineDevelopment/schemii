@@ -1,3 +1,4 @@
+import { timeAnalysisErrors } from './time-analysis.js';
 import { availableFields, aggregateChoices } from './report-state.js';
 
 export const TILE_TYPES = [['detail', 'Detail report'], ['aggregate', 'Aggregation report'], ['bar', 'Bar chart'], ['line', 'Line chart'], ['donut', 'Donut chart'], ['kpi', 'KPI']];
@@ -15,7 +16,7 @@ export function tileErrors(tile) {
   if (tile.kind === 'kpi' && tile.dimensions.length) errors.push('A KPI has no grouping dimensions.');
   if (tile.kind !== 'detail' && !tile.detailFields.length) errors.push('Choose the columns to show when drilling into this tile.');
   if (tile.dimensions.length + tile.measures.length > 64 || tile.detailFields.length > 64) errors.push('Choose no more than 64 output columns.');
-  return errors;
+  return [...errors, ...timeAnalysisErrors(tile)];
 }
 export function dashboardUpdate(dashboard, patch = {}) {
   return { name: dashboard.name, modelId: dashboard.modelId, modelRevision: dashboard.modelRevision,

@@ -4,6 +4,7 @@ import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderReportFilters, renderParameterValues } from '#model/filter-controls.js';
 import { fieldLabel } from '#model/model-columns.js';
 import { aggregateChoices } from './report-state.js';
+import { renderTimeAnalysis } from './time-analysis-editor.js';
 import { TILE_TYPES, tileErrors, fieldChoices, fieldKey } from './dashboard-state.js';
 
 function icon(name, label, onClick, disabled = false) {
@@ -20,8 +21,8 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
   name.oninput = () => { current.title = name.value; };
   const type = modelSelect('Analytics view', TILE_TYPES, current.kind, value => {
     current.kind = value;
-    if (value === 'detail') { current.dimensions = []; current.measures = []; }
-    if (value === 'kpi') { current.dimensions = []; current.measures = current.measures.slice(0, 1); }
+    if (value === 'detail') { current.dimensions = []; current.measures = []; current.timeAnalysis = null; }
+    if (value === 'kpi') { current.timeAnalysis = null; current.dimensions = []; current.measures = current.measures.slice(0, 1); }
     if (['bar', 'line', 'donut'].includes(value)) current.dimensions = current.dimensions.slice(0, 1);
     if (value === 'donut') current.measures = current.measures.slice(0, 1);
     render();
@@ -58,7 +59,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
   function render() {
     disposeSelects(body); body.replaceChildren();
     tabbar.replaceChildren();
-    const tabs = [['fields', 'View & fields'], ['filters', 'Optional filters'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
+    const tabs = [['fields', 'View & fields'], ...(['detail', 'kpi'].includes(current.kind) ? [] : [['time', 'Time analysis']]), ['filters', 'Optional filters'], ...(current.kind === 'detail' ? [] : [['drill', 'Drill-through columns']])];
     if (!tabs.some(([id]) => id === tab)) tab = 'fields';
     for (const [id, label] of tabs) {
       const button = element('button', { type: 'button', className: 'ui-button', text: label, attrs: { role: 'tab', 'aria-selected': id === tab, 'aria-controls': `tile-${id}-pane` } });
@@ -73,6 +74,8 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
         body.append(fieldList('Measures', 'measures', true));
       }
       body.append(element('p', { className: 'hint', text: 'Results stream automatically into a bounded browser cache. Scroll to browse received rows or groups; scrolling does not run another query. Previews stop at row or memory limits, and charts may display fewer groups. Refresh runs the query again. Expand a tile and choose Download full results to run the full query against a fresh snapshot.' }));
+    } else if (tab === 'time') {
+      body.append(renderTimeAnalysis(current, model, catalog, render));
     } else if (tab === 'filters') {
       const parameters = element('section'), filters = element('section'); body.append(parameters, filters);
       const optionalDraft = { ...modelDraft, scopes: modelDraft.scopes.filter(scope => scope.kind !== 'required' && scope.requirement !== 'optional') };
