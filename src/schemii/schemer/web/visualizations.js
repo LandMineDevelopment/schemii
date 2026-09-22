@@ -90,7 +90,7 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     const width = compact ? Math.max(360, lines.axis.length * 28) : Math.max(760, lines.axis.length * 40), height = compact ? 270 : 450, pad = compact ? 34 : 52;
     const values = result.rows.flatMap(row => series.map(({ column }) => row[column])).filter(numeric).map(Number);
     const low = values.reduce((a, b) => Math.min(a, b), 0), high = values.reduce((a, b) => Math.max(a, b), 1), span = high - low || 1;
-    const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, class: 'line-chart', role: 'img', 'aria-label': tile.title });
+    const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', class: 'line-chart', role: 'img', 'aria-label': tile.title });
     chart.style.minWidth = `${width}px`;
     const x = index => pad + index / Math.max(1, lines.axis.length - 1) * (width - pad * 2);
     const y = n => height - pad - (n - low) / span * (height - pad * 2);

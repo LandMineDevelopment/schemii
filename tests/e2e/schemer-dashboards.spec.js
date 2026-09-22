@@ -49,7 +49,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   }
   function dataFor(tile, drill) {
     return drill || tile.kind === 'detail' ? { rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']], columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }], size: tile.limit }
-      : multidimensional ? { rows: multidimensional === 'many' ? Array.from({ length: 150 }, (_, index) => ['HQ', `Person ${index}`, index + 1]) : [['Branch', 'Alex', 2], ['Branch', 'Blake', 3], ['HQ', 'Alex', 4], ['Remote', 'Alex', 1], ['Remote', 'Blake', 5]], columns: [{ name: 'org', dataType: 'text' }, { name: 'name', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }] }
+      : multidimensional ? { rows: multidimensional === 'wide' ? Array.from({ length: 150 }, (_, index) => [index, 'Group', index + 1]) : multidimensional === 'many' ? Array.from({ length: 150 }, (_, index) => ['HQ', `Person ${index}`, index + 1]) : [['Branch', 'Alex', 2], ['Branch', 'Blake', 3], ['HQ', 'Alex', 4], ['Remote', 'Alex', 1], ['Remote', 'Blake', 5]], columns: [{ name: 'org', dataType: 'text' }, { name: 'name', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }] }
       : tile.kind === 'kpi' ? { rows: [[3]], columns: [{ name: 'COUNT id', dataType: 'bigint' }], size: tile.limit }
         : { rows: manyBars || manyRows ? Array.from({ length: 500 }, (_, index) => [`Organization ${index + 1}`, index + 1]) : [['HQ', 3], ['Branch', 2]], columns: [{ name: 'org', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }], size: tile.limit };
   }
@@ -561,4 +561,18 @@ test('large dimension legends scroll while compact plots stay visible and result
     }
   }
   expect(errors).toEqual([]);
+});
+
+
+test('wide line axes keep their first points visible before horizontal scrolling', async ({ page }) => {
+  await mock(page, { multidimensional: 'wide' });
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'line grouped', exact: true }) });
+  await expect(tile.locator('.tile-status')).toContainText('150 groups');
+  const body = await tile.locator('.tile-body').boundingBox();
+  const point = await tile.locator('.line-chart circle').first().boundingBox();
+  expect(point.x).toBeGreaterThanOrEqual(body.x);
+  expect(point.x + point.width).toBeLessThan(body.x + body.width);
+  expect(point.y + point.height).toBeLessThan(body.y + body.height);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
