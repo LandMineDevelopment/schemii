@@ -57,7 +57,9 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   await page.context().route('**/api/v1/**', async route => {
     const request = route.request(), url = new URL(request.url()), body = request.headers()['content-type']?.includes('application/x-www-form-urlencoded') ? JSON.parse(new URLSearchParams(request.postData()).get('payload')) : request.postDataJSON();
     let response;
-    if (url.pathname === '/api/v1/schemoo/models') response = { models: [fixture.model] };
+    if (url.pathname.startsWith('/api/v1/auth/')) { await route.fallback(); return; }
+    if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}/context`) response = { model: fixture.model, catalog: fixture.catalog, permissions: { edit: true, export: true, drill: true } };
+    else if (url.pathname === '/api/v1/schemoo/models') response = { models: [fixture.model] };
     else if (url.pathname === `/api/v1/schemoo/models/${modelId}`) response = fixture.model;
     else if (url.pathname === '/api/v1/schemoo/catalog') response = fixture.catalog;
     else if (url.pathname === '/api/v1/schemer/dashboards') response = { dashboards: multidimensional === 'many' ? [fixture.dashboard, ...Array.from({ length: 4 }, (_, index) => ({ ...fixture.dashboard, id: `other-${index}`, name: `Long multidimensional dashboard ${index}` }))] : [fixture.dashboard] };
@@ -134,7 +136,7 @@ test('a failed model reload hides the previous applied filter summary', async ({
   const { errors } = await mock(page);
   await page.goto('/schemer');
   await expect(page.locator('#filter-summary')).toContainText('Organization: HQ');
-  await page.route(`**/api/v1/schemoo/models/${modelId}`, route => route.fulfill({ status: 503, json: { error: { message: 'Model unavailable' } } }));
+  await page.route(`**/api/v1/schemer/dashboards/${dashboardId}/context`, route => route.fulfill({ status: 503, json: { error: { message: 'Model unavailable' } } }));
   await page.locator('.dashboard-link').click();
   await expect(page.locator('#tile-grid')).toContainText('The source model could not be loaded');
   await expect(page.locator('#filter-summary')).toBeHidden();

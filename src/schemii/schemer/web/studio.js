@@ -257,6 +257,8 @@ async function loadCurrentModel({ catalogRequired = false } = {}) {
 async function refreshDashboard() {
   const origin = dashboard;
   if (!origin || saving) return;
+  setSaving(true);
+  $('tile-grid').inert = true;
   message('Checking the current Schemoo model…');
   try {
     const source = await loadCurrentModel();
@@ -268,6 +270,7 @@ async function refreshDashboard() {
     }
     renderHeading(); renderModelUpdate(); message(''); await runAll();
   } catch (error) { if (dashboard?.id === origin.id) message(error.message); }
+  finally { $('tile-grid').inert = false; setSaving(false); }
 }
 async function updateDashboardModel() {
   const origin = dashboard;
