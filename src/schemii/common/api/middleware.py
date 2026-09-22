@@ -20,7 +20,7 @@ from .observability import (
 
 
 LOCAL_PROTOTYPE_HOSTS = ("127.0.0.1", "localhost")
-FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map", "/ai-prototype", "/schemoo", "/schemer"))
+FRONTEND_DOCUMENT_PATHS = frozenset(("/", "/api-map", "/db-map", "/system-map", "/ai-prototype", "/schemoo", "/schemer", "/login", "/account", "/admin"))
 IMPORT_MAP_DIGEST = base64.b64encode(hashlib.sha256(COMMON_IMPORT_MAP.encode()).digest()).decode()
 SCHEMER_IMPORT_MAP_DIGEST = base64.b64encode(hashlib.sha256(SCHEMER_IMPORT_MAP.encode()).digest()).decode()
 
@@ -82,7 +82,7 @@ def install_api_middleware(application: FastAPI) -> None:
         if path.startswith(("/assets/", "/schemoo-assets/")):
             response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
         elif path in FRONTEND_DOCUMENT_PATHS:
-            response.headers["Cache-Control"] = "no-cache"
+            response.headers["Cache-Control"] = "no-store" if getattr(getattr(request.app.state, "auth", None), "enabled", False) else "no-cache"
         else:
             response.headers["Cache-Control"] = "no-store"
         response.headers["Permissions-Policy"] = (

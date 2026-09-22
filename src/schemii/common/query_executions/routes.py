@@ -18,10 +18,12 @@ from .errors import ConsoleServiceError
 router = APIRouter(tags=["common-query-executions"])
 
 
-def _service(request: Request):
+def _service(request: Request, execution_id=None, *, read=False):
     service = request.app.state.services.console
     if service is None:
         raise ApiProblem(503, "query_execution_unavailable", "Query execution is unavailable")
+    if read and service.is_shared_report_execution(execution_id):
+        raise ApiProblem(403, "report_result_private", "Shared report results are available only through their authorized report stream.")
     return service
 
 
@@ -39,7 +41,7 @@ def get_execution(
 ) -> ConsoleExecution:
     """Read one owned execution receipt without rerunning its SQL."""
     try:
-        return _service(request).get_owned(principal.user_id, execution_id)
+        return _service(request, execution_id, read=True).get_owned(principal.user_id, execution_id)
     except ConsoleServiceError as error:
         raise _problem(error) from error
 
@@ -69,7 +71,7 @@ def get_result_page(
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleResultPage:
     """Page a transient result with the shared cursor and memory-limit policy."""
-    service = _service(request)
+    service = _service(request, execution_id, read=True)
     try:
         receipt = service.get_owned(principal.user_id, execution_id)
         return service.page(
@@ -101,7 +103,7 @@ def export_result(
     principal: Principal = Depends(get_current_principal),
 ) -> StreamingResponse:
     """Stream the result directly, without persisting its rows in metadata."""
-    service = _service(request)
+    service = _service(request, execution_id, read=True)
     try:
         receipt = service.get_owned(principal.user_id, execution_id)
         rows = service.export_csv(principal.user_id, receipt.workspace_id, execution_id, result_id)

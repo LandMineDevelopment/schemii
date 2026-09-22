@@ -1,6 +1,7 @@
 import { scrollPosition, restoreScroll, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { requestJson } from '#common/http.js';
+import { currentAccount, canAuthor } from '#common/accounts-session.js';
 import { initializeUi, createIconButton, createIconElement } from '#common/ui.js';
 import { installProductNavigation } from '#common/product-navigation.js';
 import { confirmAction } from '#common/confirmation.js';
@@ -16,7 +17,19 @@ import { openExpanded, openSql } from './result-viewer.js';
 
 const $ = id => document.getElementById(id), API = '/api/v1/schemer/dashboards';
 let dashboard, model, catalog, library = [], modelList = [], slicerDraft, slicersDirty = false, saving = false, epoch = 0;
-let filtersExpanded = false;
+let filtersExpanded = false, author = false;
+let permissions = { edit: false, export: false, drill: false };
+const selectionBody = (source = dashboard) => ({ selections: source.selections });
+function renderAccess() {
+  for (const id of ['create-dashboard', 'welcome-create']) $(id).hidden = !author;
+  for (const id of ['rename-dashboard', 'duplicate-dashboard', 'delete-dashboard', 'add-tile', 'manage-dashboard-filters', 'update-dashboard-model', 'review-dashboard-model']) $(id).hidden = !permissions.edit;
+  document.querySelector('.model-link').hidden = !author;
+  if (!author) {
+    $('empty-dashboard').querySelector('small').textContent = 'YOUR REPORT LIBRARY';
+    $('empty-dashboard').querySelector('h1').textContent = 'Reports shared with you';
+    $('empty-dashboard').querySelector('p').textContent = 'Your administrator can assign reports through your roles. Shared dashboards will appear here when access is granted.';
+  }
+}
 const runs = new Map(), tileStates = new Map(), streams = new Map();
 let closing = Promise.resolve(), dashboardGroup;
 const browserBudget = new CacheBudget();
@@ -54,7 +67,7 @@ function getStream(tile, selection = null) {
     const origin = dashboard;
     const currentGroup = dashboardGroup;
     const cache = new ResultCache({ pageSize: tile.limit, budget: browserBudget, start: (onFrame, signal) => !selected && currentGroup ? currentGroup.tile(tile.id, onFrame) : readResultStream(`${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/executions/stream`,
-      { expectedRevision: origin.revision, selection: selected }, frame => {
+      { expectedRevision: origin.revision, selection: selected, ...selectionBody(origin) }, frame => {
         if (frame.type === 'start') onFrame({ ...frame, plan: frame.tiles.find(item => item.tileId === tile.id)?.plan });
         else onFrame(frame);
       }, signal), onChange: () => {
@@ -65,10 +78,10 @@ function getStream(tile, selection = null) {
         scheduledCards.add(card); requestAnimationFrame(() => { scheduledCards.delete(card); if (card.isConnected) renderTile(card, tile); });
       }
     } });
-    cache.download = () => {
+    if (permissions.export) cache.download = () => {
       if (dashboard?.id !== origin.id) { message('Reopen this dashboard before downloading its results.'); return; }
       const form = document.createElement('form'); form.method = 'POST'; form.action = `${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/export`; form.target = '_blank';
-      const input = document.createElement('input'); input.type = 'hidden'; input.name = 'payload'; input.value = JSON.stringify({ expectedRevision: dashboard.revision, selection: selected });
+      const input = document.createElement('input'); input.type = 'hidden'; input.name = 'payload'; input.value = JSON.stringify({ expectedRevision: dashboard.revision, selection: selected, ...selectionBody() });
       form.append(input); document.body.append(form); form.submit(); form.remove();
     };
     return cache;
@@ -103,9 +116,10 @@ function renderLibrary() {
     const button = element('button', { type: 'button', className: 'dashboard-link', attrs: { 'aria-current': item.id === dashboard?.id ? 'page' : undefined } }, [element('strong', { text: item.name }), element('small', { text: `${item.tiles.length} tile${item.tiles.length === 1 ? '' : 's'}` })]);
     button.onclick = () => { if (!saving && checkLeave()) void openDashboard(item.id); }; return button;
   }));
-  if (!library.length) $('dashboard-list').append(element('p', { className: 'hint', text: 'Your saved dashboards appear here.' }));
+  if (!library.length) $('dashboard-list').append(element('p', { className: 'hint', text: author ? 'Your saved dashboards appear here.' : 'No reports have been shared with you yet.' }));
 }
 function renderHeading() {
+  renderAccess();
   $('dashboard-name').textContent = dashboard.name;
   $('dashboard-source').textContent = model ? `${model.name} · ${model.database}.${model.namespace}` : 'Model unavailable';
   $('dashboard-status').textContent = `${dashboard.tiles.length} analytics tiles · ${model && model.revision !== dashboard.modelRevision ? `model v${dashboard.modelRevision} needs updating` : 'saved on server'}`;
@@ -113,7 +127,7 @@ function renderHeading() {
 function modelNeedsUpdate() { return !!model && model.revision !== dashboard?.modelRevision; }
 function renderModelUpdate() {
   const stale = modelNeedsUpdate();
-  $('model-update').hidden = !stale;
+  $('model-update').hidden = !stale || !permissions.edit;
   if (!stale) return;
   $('model-update-message').textContent = `This dashboard uses ${model.name} v${dashboard.modelRevision}; v${model.revision} is available. Updating validates every tile and slicer before saving.`;
   $('review-dashboard-model').href = `/schemoo?model=${encodeURIComponent(model.id)}`;
@@ -150,8 +164,8 @@ async function loadDomainOptions(context) {
   const origin = model;
   const authoring = !!context.draft, domain = context.domain || context.input?.domain;
   const binding = authoring ? { definition: origin.definition, domain } : { scopeId: context.scope.id, alternativeId: context.alternative.id, parameterId: context.input.id };
-  const response = await requestJson(`/api/v1/schemoo/models/${origin.id}/${authoring ? 'domain-values' : 'parameter-values'}`, { method: 'POST', body: { expectedRevision: origin.revision, ...binding, search: context.search, consoleId: `con_${crypto.randomUUID().replaceAll('-', '')}` } });
-  const result = await readExecution(response), hasLabel = domain?.labelColumn && domain.labelColumn !== domain.column;
+  const response = await requestJson(permissions.edit ? `/api/v1/schemoo/models/${origin.id}/${authoring ? 'domain-values' : 'parameter-values'}` : `${API}/${dashboard.id}/parameter-values`, { method: 'POST', body: { expectedRevision: origin.revision, ...binding, search: context.search, consoleId: `con_${crypto.randomUUID().replaceAll('-', '')}` } });
+  const result = Array.isArray(response.rows) ? response : await readExecution(response), hasLabel = domain?.labelColumn && domain.labelColumn !== domain.column;
   return result.rows.filter(row => row[0] !== null).map(row => ({ value: row[0], label: String(hasLabel ? row[1] ?? row[0] : row[0]), description: hasLabel ? String(row[0]) : '' }));
 }
 function tileUrl(tile, suffix) { return `${API}/${dashboard.id}/tiles/${encodeURIComponent(tile.id)}/${suffix}`; }
@@ -186,14 +200,14 @@ function renderTiles() {
       ['Duplicate', () => duplicateTile(tile), false], ['Delete tile', () => deleteTile(tile), false]]) {
       const button = element('button', { type: 'button', text: label }); button.disabled = disabled; button.onclick = event => { event.stopPropagation(); menu.open = false; void callback(); }; contents.append(button);
     }
-    menu.append(trigger, contents); actions.append(menu);
+    menu.append(trigger, contents); actions.append(menu); actions.hidden = !permissions.edit;
     card.append(element('header', { className: 'tile-header' }, [element('div', {}, [element('h2', { text: tile.title }), element('small', { text: TILE_TYPES.find(([type]) => type === tile.kind)?.[1] })]), actions]), element('div', { className: 'tile-body' }), element('footer', { className: 'tile-footer' }, [element('span', { className: 'tile-status', attrs: { role: 'status' } }), element('span', { className: 'expand-hint', text: 'Click to expand' })]));
     card.onclick = event => { if (!event.target.closest('button,summary,details')) expand(tile); };
     card.onkeydown = event => { if (event.target === card && ['Enter', ' '].includes(event.key)) { event.preventDefault(); expand(tile); } };
     $('tile-grid').append(card); renderTile(card, tile);
   }
   const add = element('button', { type: 'button', className: 'add-tile-card' }, [createIconElement('add'), element('strong', { text: 'Add analytics tile' }), element('small', { text: 'Report, chart, or KPI' })]);
-  add.onclick = () => editTile(newTile()); $('tile-grid').append(add);
+  add.onclick = () => editTile(newTile()); if (permissions.edit) $('tile-grid').append(add);
 }
 function readyToRun() {
   if (!model || model.revision !== dashboard.modelRevision) { message('Review the updated source model before running this dashboard.'); return false; }
@@ -218,12 +232,12 @@ async function runTile(tile, useGroup = false) {
 async function runAll() {
   if (!readyToRun()) return;
   await stopRuns(); const version = epoch, queue = [...dashboard.tiles], origin = dashboard;
-  dashboardGroup = new DashboardResultGroup({ start: (onFrame, signal) => readResultStream(`${API}/${origin.id}/executions/stream`, { expectedRevision: origin.revision }, onFrame, signal) });
+  dashboardGroup = new DashboardResultGroup({ start: (onFrame, signal) => readResultStream(`${API}/${origin.id}/executions/stream`, { expectedRevision: origin.revision, ...selectionBody(origin) }, onFrame, signal) });
   await Promise.all(queue.map(tile => runTile(tile, true)));
 }
 function expand(tile) {
   if (!readyToRun()) return;
-  openExpanded({ tile, modelId: dashboard.modelId, cache: getStream(tile), createDrillCache: selection => getStream(tile, selection), onRefresh: () => void runTile(tile) });
+  openExpanded({ tile, modelId: dashboard.modelId, canExport: permissions.export, canDrill: permissions.drill, canViewSql: permissions.edit, cache: getStream(tile), createDrillCache: selection => getStream(tile, selection), onRefresh: () => void runTile(tile) });
 }
 
 async function showTileSql(tile) {
@@ -234,10 +248,9 @@ async function showTileSql(tile) {
   catch (error) { message(error.message); }
 }
 async function loadCurrentModel({ catalogRequired = false } = {}) {
-  const source = await requestJson(`/api/v1/schemoo/models/${dashboard.modelId}`);
-  if (catalogRequired || source.revision !== model?.revision) {
-    catalog = await requestJson(`/api/v1/schemoo/catalog?connection_id=${encodeURIComponent(source.connectionId)}&namespace=${encodeURIComponent(source.namespace)}`);
-  }
+  const context = await requestJson(`${API}/${dashboard.id}/context`);
+  const source = context.model;
+  catalog = context.catalog; permissions = context.permissions;
   model = source;
   return source;
 }
@@ -310,8 +323,8 @@ async function openDashboard(id) {
     const next = await requestJson(`${API}/${id}`);
     if (version !== epoch) return;
     dashboard = next;
-    const source = await requestJson(`/api/v1/schemoo/models/${next.modelId}`);
-    const sourceCatalog = await requestJson(`/api/v1/schemoo/catalog?connection_id=${encodeURIComponent(source.connectionId)}&namespace=${encodeURIComponent(source.namespace)}`);
+    const context = await requestJson(`${API}/${next.id}/context`);
+    const source = context.model, sourceCatalog = context.catalog; permissions = context.permissions;
     if (version !== epoch) return;
     dashboard = next; model = source; catalog = sourceCatalog; slicersDirty = false; filtersExpanded = false; tileStates.clear();
     $('empty-dashboard').hidden = true; $('dashboard-content').hidden = false;
@@ -399,7 +412,7 @@ $('update-dashboard-model').onclick = () => { void updateDashboardModel(); };
 $('stop-dashboard').onclick = () => { stopRuns({ keepCache: true }); for (const [id, state] of tileStates) if (state.loading) tileStates.set(id, { error: 'Query cancelled.' }); renderTiles(); };
 $('apply-slicers').onclick = async () => {
   const missing = missingSlicers(); if (missing.length) { $('slicer-status').textContent = `Choose ${missing.join(', ')}.`; return; }
-  try { await update({ selections: slicerDraft.selections }); slicersDirty = false; renderSlicers(); message(''); await runAll(); }
+  try { if (permissions.edit) await update({ selections: slicerDraft.selections }); else dashboard = { ...dashboard, selections: structuredClone(slicerDraft.selections) }; slicersDirty = false; renderSlicers(); message(''); await runAll(); }
   catch (error) { message(error.message); }
 };
 $('delete-dashboard').onclick = async () => {
@@ -409,16 +422,18 @@ $('delete-dashboard').onclick = async () => {
     if (library.length) await openDashboard(library[0].id); else { $('dashboard-content').hidden = true; $('empty-dashboard').hidden = false; history.replaceState(null, '', '/schemer'); }
   } });
 };
+window.addEventListener('schemii:logout', () => { slicersDirty = false; void stopRuns(); $('tile-grid').replaceChildren(); });
 window.addEventListener('pagehide', () => { void dashboardGroup?.close(); for (const group of streams.values()) for (const cache of [group.main, ...group.drills.values()]) void cache.close(); });
 window.addEventListener('beforeunload', event => { if (slicersDirty) { event.preventDefault(); event.returnValue = ''; } });
 initializeUi(); installProductNavigation($('product-navigation'), { activeProduct: 'schemer' });
 async function initialize() {
   try {
-    const [dashboards, models] = await Promise.all([requestJson(API), requestJson('/api/v1/schemoo/models')]);
+    author = canAuthor(await currentAccount()); renderAccess();
+    const [dashboards, models] = await Promise.all([requestJson(API), author ? requestJson('/api/v1/schemoo/models') : Promise.resolve({ models: [] })]);
     library = dashboards.dashboards; modelList = models.models; renderLibrary();
     const selected = new URLSearchParams(location.search).get('dashboard');
     if (selected || library.length) await openDashboard(selected || library[0].id);
-    if (!modelList.length) message('Create a Schemoo model before creating a dashboard.');
+    if (author && !modelList.length) message('Create a Schemoo model before creating a dashboard.');
   } catch (error) { message(error.message); }
 }
 void initialize();

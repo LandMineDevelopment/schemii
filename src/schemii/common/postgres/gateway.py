@@ -450,6 +450,24 @@ class PsycopgPostgresGateway:
         finally:
             self._cleanup(database_connection)
 
+    def readable_columns(self, connection, namespace):
+        """Report-facing visibility under the exact query identity."""
+        from .queries import READABLE_COLUMNS_QUERY
+        namespace = self._validated_namespace(namespace)
+        database_connection = None
+        try:
+            database_connection = self._connect(connection)
+            self._begin_read_only(database_connection)
+            metadata = self._one(self._execute_rows(database_connection, METADATA_QUERY))
+            self._require_database(metadata, connection.database)
+            rows = self._execute_rows(database_connection, READABLE_COLUMNS_QUERY,
+                                      (namespace, self._limits.max_columns + 1))
+            if len(rows) > self._limits.max_columns:
+                raise PostgresCatalogLimitError("columns", self._limits.max_columns, len(rows))
+            return {(row["relation_name"], row["column_name"]) for row in rows}
+        finally:
+            self._cleanup(database_connection)
+
     def introspect(
         self,
         connection: ResolvedPostgresConnection,

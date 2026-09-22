@@ -247,7 +247,7 @@ def test_result_owner_check_precedes_page_or_cancel(services):
     def owned(owner, execution_id):
         calls.append((owner, execution_id))
         raise ConsoleServiceError(404, "console_execution_not_found", "Execution not found")
-    services.console = SimpleNamespace(get_owned=owned,
+    services.console = SimpleNamespace(is_shared_report_execution=lambda key:False, get_owned=owned,
         page=lambda *args: pytest.fail("must not page another owner's results"),
         cancel=lambda *args: pytest.fail("must not cancel another owner's execution"))
     for operation, args in [("get_result_page", {"executionId": EXECUTION_ID, "resultId": RESULT_ID}),
@@ -263,7 +263,7 @@ def test_result_sampling_enforces_rows_bytes_and_discloses_skipped_page_rows(ser
     services.admin_config = SimpleNamespace(ai=SimpleNamespace(result_context_rows=2, result_context_bytes=800))
     receipt = SimpleNamespace(workspace_id=None)
     page = {"rows": [["first"], ["a" * 2000], ["third"]], "columns": [{"name": "label"}], "nextCursor": "next"}
-    services.console = SimpleNamespace(get_owned=lambda owner, execution_id: receipt,
+    services.console = SimpleNamespace(is_shared_report_execution=lambda key:False, get_owned=lambda owner, execution_id: receipt,
         page=lambda *args: page)
     result = run(services, "get_result_page", {"executionId": EXECUTION_ID, "resultId": RESULT_ID})
     assert result["rows"] == [["first"]]

@@ -191,6 +191,7 @@ class ConsoleService:
         self._result_cursors: dict[str, tuple[str, int, datetime]] = {}
         self._transient_results_lock = threading.RLock()
         self._protected_results: dict[str, datetime] = {}
+        self._shared_report_executions: dict[str, datetime] = {}
         self._active_read_sessions: OrderedDict[
             str, _ActiveConsoleReadSession
         ] = OrderedDict()
@@ -373,6 +374,7 @@ class ConsoleService:
         statements: list[str],
         row_page_size: int | None = None,
         protect_result: bool = False,
+        connection_access=None,
     ) -> ConsoleExecution:
         """Reserve product-compiled reads without manufacturing a Schemii workspace.
 
@@ -382,7 +384,7 @@ class ConsoleService:
         do not enter the workspace's human-authored query history.
         """
         try:
-            profile = self._connections.get(owner_id, connection_id)
+            profile = (connection_access or self._connections).get(owner_id, connection_id)
         except ConnectionNotFoundError as error:
             raise ConsoleServiceError(
                 404, "console_connection_missing", "The PostgreSQL connection was not found"
@@ -401,6 +403,11 @@ class ConsoleService:
         )
         target = ConsoleTarget(profile.id, profile.revision, database, namespace)
         receipt = self._reserve_read(owner_id, None, None, target, request, row_page_size=row_page_size)
+        if connection_access is not None:
+            with self._transient_results_lock:
+                now = self._clock()
+                self._shared_report_executions = {key: expires for key, expires in self._shared_report_executions.items() if expires > now}
+                self._shared_report_executions[receipt.id] = now + self._result_ttl + timedelta(hours=1)
         if protect_result:
             with self._transient_results_lock:
                 self._purge_transient_results(self._clock())
@@ -456,14 +463,14 @@ class ConsoleService:
             raise self._repository_error(error) from error
         return record.execution
 
-    def run(self, owner_id: str, execution_id: str) -> None:
+    def run(self, owner_id: str, execution_id: str, *, connection_access=None) -> None:
         """Execute one previously returned receipt; failures become durable state."""
 
         try:
             record = self._repository.claim(owner_id, execution_id, self._clock())
             if record is None:
                 return
-            with self._connections.use(owner_id, record.target.connection_id) as target:
+            with (connection_access or self._connections).use(owner_id, record.target.connection_id) as target:
                 if (
                     target.revision != record.target.connection_revision
                     or target.database != record.target.database
@@ -846,6 +853,10 @@ class ConsoleService:
             self._result_cursors.clear()
         for read_session in read_sessions:
             read_session.close()
+
+    def is_shared_report_execution(self, execution_id: str) -> bool:
+        with self._transient_results_lock:
+            return execution_id in self._shared_report_executions
 
     def get_owned(self, owner_id: str, execution_id: str) -> ConsoleExecution:
         """Resolve an exact owner-bound receipt for product-neutral result routes."""

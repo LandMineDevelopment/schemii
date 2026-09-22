@@ -47,9 +47,9 @@ class RuntimeConfig:
         inspection_value = values.get("SCHEMII_DEVELOPER_INSPECTION", "0")
         if inspection_value not in {"0", "1"}:
             raise ValueError("SCHEMII_DEVELOPER_INSPECTION must be 0 or 1")
-        if deployment_mode is DeploymentMode.AUTHENTICATED:
+        if deployment_mode is DeploymentMode.AUTHENTICATED and values.get("SCHEMII_AUTH_ENABLED") != "1":
             raise ValueError(
-                "authenticated deployment mode requires an identity adapter that is not yet configured"
+                "authenticated deployment mode requires SCHEMII_AUTH_ENABLED=1"
             )
         if target_egress_mode is TargetEgressMode.EXTERNAL:
             raise ValueError(

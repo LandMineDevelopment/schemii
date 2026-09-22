@@ -1,0 +1,167 @@
+"""Password sessions and explicit, revocable role grants."""
+import hashlib
+import hmac
+import os
+from pathlib import Path
+import secrets
+import time
+from uuid import uuid4
+
+from fastapi import HTTPException
+
+from .store import AuthStore
+
+COOKIE = 'schemii_session'
+SESSION_SECONDS = 12 * 60 * 60
+
+
+def password_hash(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    return salt.hex() + ':' + digest.hex()
+
+
+def password_matches(password, stored):
+    salt, expected = stored.split(':')
+    actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1)
+    return hmac.compare_digest(actual.hex(), expected)
+
+
+def public_user(user):
+    return {key: user[key] for key in ('id','username','display_name','is_admin','disabled')}
+
+
+class AuthService:
+    def __init__(self, connection_factory=None, *, enabled=None, setup_token=None):
+        if os.getenv('SCHEMII_AUTH_ENABLED', '0') not in {'0','1'}:
+            raise ValueError('SCHEMII_AUTH_ENABLED must be 0 or 1')
+        self.enabled = os.getenv('SCHEMII_AUTH_ENABLED', '0') == '1' if enabled is None else enabled
+        self.store = AuthStore(connection_factory)
+        token_file = os.getenv('SCHEMII_SETUP_TOKEN_FILE')
+        self.setup_token = setup_token or (Path(token_file).read_text().strip() if token_file else os.getenv('SCHEMII_SETUP_TOKEN', ''))
+        self._dummy_hash = password_hash(secrets.token_urlsafe(32))
+        if self.store.factory and not self.enabled and not self.setup_required():
+            raise ValueError('Existing accounts require SCHEMII_AUTH_ENABLED=1; refusing unauthenticated downgrade')
+        if self.enabled and not self.setup_token and self.setup_required():
+            raise ValueError('First account requires SCHEMII_SETUP_TOKEN_FILE')
+
+    def setup_required(self):
+        if self.store.factory:
+            return not self.store.query("SELECT 1 FROM metadata.auth_accounts LIMIT 1")
+        with self.store.transaction() as state: return not state['users']
+
+    def user(self, user_id):
+        if self.store.factory:
+            rows=self.store.query("SELECT a.user_id AS id,a.username,a.is_admin,a.disabled,u.display_name FROM metadata.auth_accounts a JOIN metadata.users u ON u.id=a.user_id WHERE a.user_id=%s AND NOT a.disabled",(user_id,))
+            return public_user(rows[0]) if rows else None
+        with self.store.transaction() as state:
+            user = state['users'].get(user_id)
+            return public_user(user) if user and not user['disabled'] else None
+
+    def is_admin(self, user_id):
+        if not self.enabled: return True
+        user = self.user(user_id)
+        return bool(user and user['is_admin'])
+
+    def capabilities(self, user_id):
+        if self.is_admin(user_id): return ['author']
+        if self.store.factory:
+            rows=self.store.query('SELECT r.capabilities FROM metadata.auth_roles r JOIN metadata.auth_user_roles ur ON ur.role_id=r.id JOIN metadata.auth_accounts a ON a.user_id=ur.user_id WHERE ur.user_id=%s AND NOT a.disabled',(user_id,))
+            return sorted({c for row in rows for c in row['capabilities']})
+        with self.store.transaction() as state:
+            user = state['users'].get(user_id)
+            if not user or user['disabled']: return []
+            return sorted({c for r in state['roles'].values() if user_id in r['user_ids'] for c in r['capabilities']})
+
+    def _grants(self, user_id, key):
+        if self.store.factory:
+            table={'connections':'auth_role_connections','dashboards':'auth_role_dashboards'}[key]
+            return self.store.query('SELECT g.* FROM metadata.'+table+' g JOIN metadata.auth_user_roles ur ON ur.role_id=g.role_id JOIN metadata.auth_accounts a ON a.user_id=ur.user_id WHERE ur.user_id=%s AND NOT a.disabled',(user_id,))
+        with self.store.transaction() as state:
+            user = state['users'].get(user_id)
+            if not user or user['disabled']: return []
+            return [{**g,'role_id':r['id']} for r in state['roles'].values() if user_id in r['user_ids'] for g in r[key]]
+
+    def connection_grants(self, user_id): return self._grants(user_id, 'connections')
+    def dashboard_grants(self, user_id): return self._grants(user_id, 'dashboards')
+
+    def resolve(self, token):
+        if not token: return None
+        if self.store.factory:
+            rows=self.store.query('SELECT a.user_id AS id,a.username,a.is_admin,a.disabled,u.display_name FROM metadata.auth_sessions s JOIN metadata.auth_accounts a ON a.user_id=s.user_id JOIN metadata.users u ON u.id=a.user_id WHERE s.token_hash=%s AND s.expires_at > extract(epoch from now()) AND NOT a.disabled',(hashlib.sha256(token.encode()).hexdigest(),))
+            return public_user(rows[0]) if rows else None
+        with self.store.transaction() as state:
+            session = state['sessions'].get(hashlib.sha256(token.encode()).hexdigest())
+            if not session or session['expires_at'] <= time.time(): return None
+            user = state['users'].get(session['user_id'])
+            return public_user(user) if user and not user['disabled'] else None
+
+    def create_user(self, data, actor=None, setup_token=None):
+        hashed = password_hash(data.password)
+        with self.store.transaction(write=True) as state:
+            setup = setup_token is not None
+            if setup and (state['users'] or not self.setup_token or not hmac.compare_digest(setup_token,self.setup_token)):
+                raise HTTPException(403,'Account setup is unavailable or token is invalid')
+            username = data.username.casefold()
+            if any(u['username'] == username for u in state['users'].values()): raise HTTPException(409,'Username already exists')
+            user_id = 'user_local_prototype' if setup else 'user_' + uuid4().hex
+            user = dict(id=user_id,username=username,display_name=data.display_name,password_hash=hashed,is_admin=True if setup else data.is_admin,disabled=False)
+            state['users'][user_id] = user
+            state['audit'].append((actor or user_id,'account.create',user_id))
+        return public_user(user)
+
+    def login(self, username, password):
+        username = username.casefold()
+        with self.store.transaction(write=True) as state:
+            now = time.time()
+            state['attempts'] = {k:v for k,v in state['attempts'].items() if v['expires_at'] > now}
+            attempt = state['attempts'].setdefault(username, {'attempts':0,'expires_at':now+900})
+            if attempt['attempts'] >= 10:
+                raise HTTPException(429,'Too many sign-in attempts. Try again in 15 minutes.')
+            attempt['attempts'] += 1
+            state['audit'].append((None,'session.attempt',None))
+        # Hash outside the write transaction so expensive password work does not hold DB locks.
+        with self.store.transaction() as state:
+            candidate = next((u for u in state['users'].values() if u['username'] == username.casefold()), None)
+            stored = candidate['password_hash'] if candidate else self._dummy_hash
+        matches = password_matches(password, stored)
+        with self.store.transaction(write=True) as state:
+            user = state['users'].get(candidate['id']) if candidate else None
+            if not matches or not user or user['disabled'] or user['password_hash'] != stored:
+                raise HTTPException(401,'Invalid username or password')
+            state['attempts'].pop(username, None)
+            token = secrets.token_urlsafe(32)
+            now = time.time()
+            state['sessions'] = {key:s for key,s in state['sessions'].items() if s['expires_at'] > now}
+            state['sessions'][hashlib.sha256(token.encode()).hexdigest()] = dict(user_id=user['id'],expires_at=now+SESSION_SECONDS)
+            state['audit'].append((user['id'],'session.login',user['id']))
+        return token, public_user(user)
+
+    def logout(self, token):
+        with self.store.transaction(write=True) as state:
+            state['sessions'].pop(hashlib.sha256((token or '').encode()).hexdigest(), None)
+
+    def update_user(self, user_id, data, actor):
+        updates = data.model_dump(exclude_unset=True)
+        if 'password' in updates: updates['password_hash'] = password_hash(updates.pop('password'))
+        with self.store.transaction(write=True) as state:
+            user = state['users'].get(user_id)
+            if user is None: raise HTTPException(404,'Account not found')
+            next_user = {**user,**updates}
+            if user['is_admin'] and not user['disabled'] and (next_user['disabled'] or not next_user['is_admin']):
+                if not any(u['id'] != user_id and u['is_admin'] and not u['disabled'] for u in state['users'].values()):
+                    raise HTTPException(409,'Keep at least one active administrator')
+            state['users'][user_id] = next_user
+            if next_user['disabled'] or 'password_hash' in updates:
+                state['sessions'] = {key:s for key,s in state['sessions'].items() if s['user_id'] != user_id}
+            state['audit'].append((actor,'account.update',user_id))
+        return public_user(next_user)
+
+    def audit(self, actor, action, target):
+        if self.store.factory:
+            with self.store.factory() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute('INSERT INTO metadata.auth_audit(actor_id,action,target_id) VALUES(%s,%s,%s)',(actor,action,target))
+        else:
+            with self.store.transaction(write=True) as state:
+                state['audit'].append((actor,action,target))

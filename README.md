@@ -12,7 +12,7 @@ Schemii is a local, self-hosted PostgreSQL design and analytics workbench made u
 - **Schemoo** defines durable semantic models over an explicit saved connection and schema, including relationships, derived fields, and required or optional model scopes.
 - **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore streamed results, and drill into contributing rows cached in their browser.
 
-The repository is intentionally a local-development deployment: it has one local prototype principal and no application authentication or public ingress. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
+The launcher runs an authenticated private deployment with local accounts, roles, and managed report connections. It does not add public ingress. See [Accounts and database roles](docs/accounts-and-roles.md) for setup, permissions, and rollout scope. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
 
 ## Installation
 
@@ -24,7 +24,7 @@ cd schemii
 ./start.sh
 ```
 
-Open <https://localhost:8001/> after the launcher reports healthy services. `./start.sh` is the supported lifecycle command: it builds current source, starts or refreshes the stack, creates the local TLS certificate and private metadata secrets, and performs health checks. Do not run Compose directly or commit/copy `.schemii/`; it contains local TLS material, database secrets, and the encryption key required to read saved connection passwords.
+Open <https://localhost:8001/login> after the launcher reports healthy services. On first launch, use the setup token file printed by the launcher to create the administrator. `./start.sh` is the supported lifecycle command: it builds current source, starts or refreshes the stack, creates the local TLS certificate and private metadata secrets, and performs health checks. Do not run Compose directly or commit/copy `.schemii/`; it contains local TLS material, database secrets, and the encryption key required to read saved connection passwords.
 
 For a Tailscale-connected device, use the configured private preview at <https://omarchy.taile4f57f.ts.net/>. It remains tailnet-only and is not a public deployment boundary.
 
@@ -60,9 +60,9 @@ src/schemii/
 
 ## Current API
 
-The current API deliberately uses one local application user while product workflows are prototyped:
+The application API authenticates users and applies role permissions:
 
-- `GET /api/v1/session` returns the valid local prototype principal.
+- `GET /api/v1/session` returns the authenticated principal. `/login`, `/account`, and `/admin` provide account setup, sign-in, password changes, and role management.
 - `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
 - `/api/v1/schemii/workspaces` manages each user's durable local and PostgreSQL-backed designs plus presentation preferences.
 - `POST /api/v1/schemii/workspaces/postgres` opens the user's existing design for one exact saved connection and namespace, or imports it once from a bounded PostgreSQL catalog snapshot when none exists.
@@ -131,7 +131,13 @@ account for parsed values and row overhead; a browser may stop retaining rows
 before the server byte limit. These are preview/transfer limits, not promises
 that joins or aggregates can execute without scanning their source data.
 
-This phase has no application authentication, so the packaged local deployment is explicitly `local-development` and its Compose ingress remains bound to loopback. The configured Tailscale Serve route exposes that loopback listener only to the tailnet and must be protected by tailnet ACLs. It is a preview route, not a public deployment boundary. The storage design does not depend on Tailscale; a future authenticated deployment can replace the local principal without changing connection or product route signatures. The server currently rejects an authenticated/public deployment mode instead of silently starting without its future identity adapter.
+The packaged deployment uses authenticated mode and loopback HTTPS ingress. The
+configured Tailscale Serve route remains tailnet-only. First-admin setup requires
+the launcher-generated token; it preserves the existing prototype user's saved
+objects and credential encryption identities. Subsequent users receive private
+accounts and explicit role grants. Tests may still select the in-memory prototype
+identity; durable deployments containing accounts refuse unauthenticated startup.
+
 
 Connection profiles, workspaces, desired designs, import provenance, creation-time target identities, and presentation preferences survive application rebuilds and restarts in the deployment's private PostgreSQL volume. Passwords are accepted only by write models, represented as `SecretStr`, authenticated-encrypted before entering metadata PostgreSQL, omitted from profiles and errors, and decrypted only while opening the selected target. The persistent encryption key lives outside PostgreSQL under `.schemii/secrets`; losing that key makes stored passwords unrecoverable.
 

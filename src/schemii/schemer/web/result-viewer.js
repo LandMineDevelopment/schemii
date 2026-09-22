@@ -36,7 +36,7 @@ function gridInteractions(host, result) {
   });
   viewport.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('td:not(.drill-mark)')) { event.preventDefault(); event.target.click(); } });
 }
-export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh }) {
+export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh, canExport = true, canDrill = true, canViewSql = true }) {
   const dialog = element('dialog', { className: 'expanded-dialog', attrs: { 'aria-label': tile.title } });
   const chartPane = element('section', { className: 'expanded-chart-pane' });
   const chartBody = element('div', { className: 'expanded-chart-body' });
@@ -61,7 +61,8 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     host.replaceChildren(); if (!stream) return;
     const data = stream.snapshot();
     host.append(element('span', { className: 'hint', text: `${data.rows.length} cached · ${data.loading ? 'receiving rows' : data.error ? 'interrupted' : data.limitReached ? 'Preview limit reached' : 'end of result'}` }),
-      icon('download', 'Export cached rows as CSV', () => downloadContent(csvContent(data), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8')));
+      ...(canExport ? [icon('download', 'Export cached rows as CSV', () => downloadContent(csvContent(data), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8'))] : []));
+    if (!canExport) return;
     const download = element('button', { type: 'button', className: 'ui-button', text: 'Download full results', attrs: { title: 'Runs the full query against a fresh snapshot. Results may differ from this preview.' } });
     download.onclick = () => stream.download?.(); download.disabled = !stream.download; host.append(download);
     host.append(element('small', { className: 'export-snapshot-note', text: 'Full download uses a fresh snapshot.' }));
@@ -69,7 +70,7 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   function renderMain() {
     if (!dialog.isConnected) return;
     const position = scrollPosition(chartBody), result = cache.snapshot();
-    renderVisualization(chartBody, tile, result, { modelId, onDrill: tile.kind === 'detail' ? null : selected => {
+    renderVisualization(chartBody, tile, result, { modelId, onDrill: !canDrill || tile.kind === 'detail' ? null : selected => {
       unsubscribeDrill?.(); detailCache = createDrillCache(selected); unsubscribeDrill = detailCache.subscribe(scheduleDetails);
       chips.replaceChildren(...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
       detailPane.hidden = false; pane('details'); renderDetails(); void detailCache.loadMore();
@@ -85,8 +86,10 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     detailStatus.textContent = `Model detail rows · ${data.rows.length} cached${data.plan?.warnings?.some(w => w.includes('repeat') || w.includes('DISTINCT')) ? ' · Related or repeated rows may differ from the measure count' : ''}`;
     footer(detailFooter, detailCache);
   }
-  chartActions.append(icon('sql', 'Show tile SQL', () => { if (cache.plan) openSql(cache.plan, `${tile.title} · SQL`); }), icon('refresh', 'Refresh tile', () => { dialog.close(); onRefresh(); }), icon('close', 'Close expanded tile', () => dialog.close()));
-  detailActions.append(icon('sql', 'Show detail SQL', () => { if (detailCache?.plan) openSql(detailCache.plan, 'Detail rows · SQL'); }), icon('close', 'Close detail rows', () => { detailPane.hidden = true; pane('chart'); }));
+  if (canViewSql) chartActions.append(icon('sql', 'Show tile SQL', () => { if (cache.plan) openSql(cache.plan, `${tile.title} · SQL`); }));
+  chartActions.append( icon('refresh', 'Refresh tile', () => { dialog.close(); onRefresh(); }), icon('close', 'Close expanded tile', () => dialog.close()));
+  if (canViewSql) detailActions.append(icon('sql', 'Show detail SQL', () => { if (detailCache?.plan) openSql(detailCache.plan, 'Detail rows · SQL'); }));
+  detailActions.append( icon('close', 'Close detail rows', () => { detailPane.hidden = true; pane('chart'); }));
   chartPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [chartTitle, chartStatus]), chartActions]), chartBody, chartFooter);
   detailPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [detailTitle, chips, detailStatus]), detailActions]), detailBody, detailFooter);
   dialog.append(chartPane, detailPane);

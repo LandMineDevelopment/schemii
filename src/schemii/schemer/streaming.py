@@ -94,6 +94,10 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
         receipt = await reserve(services, owner, model, tiles)
         yield {"type": "execution", "executionId": receipt.id}
         pending = asyncio.create_task(asyncio.to_thread(console.run, owner, receipt.id))
+        access = getattr(services, "report_access", None)
+        while access is not None and not pending.done():
+            await asyncio.wait({pending}, timeout=0.5)
+            await asyncio.to_thread(access.check)
         await asyncio.shield(pending)
         pending = None
         execution = await asyncio.to_thread(console.get_owned, owner, receipt.id)
@@ -107,6 +111,9 @@ async def events(services, owner, model, tiles, errors=(), *, export=False):
             while True:
                 pending = asyncio.create_task(asyncio.to_thread(console.page, owner, None,
                     receipt.id, result.id, cursor))
+                while access is not None and not pending.done():
+                    await asyncio.wait({pending}, timeout=0.5)
+                    await asyncio.to_thread(access.check)
                 page = await asyncio.shield(pending)
                 pending = None
                 columns = [document(column) for column in page.columns]

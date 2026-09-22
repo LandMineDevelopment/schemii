@@ -101,12 +101,24 @@ async def execute_prepared(services, owner, model, plan, row_limit, request, *, 
         _materialize, console, owner, receipt, plan, row_limit, stopped))
     try:
         while not work.done():
+            access = getattr(services, "report_access", None)
+            if access is not None:
+                try:
+                    await asyncio.to_thread(access.check)
+                except Exception:
+                    stopped.set()
+                    await asyncio.to_thread(console.cancel, owner, None, receipt.id)
+                    await asyncio.shield(work)
+                    raise
             if await request.is_disconnected():
                 stopped.set()
                 await asyncio.to_thread(console.cancel, owner, None, receipt.id)
                 break
             await asyncio.wait({work}, timeout=0.1)
         response = await asyncio.shield(work)
+        access = getattr(services, "report_access", None)
+        if access is not None:
+            await asyncio.to_thread(access.check)
         response["elapsedMs"] = round((time.monotonic() - started) * 1000, 3)
         return response
     except asyncio.CancelledError:
