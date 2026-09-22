@@ -1,26 +1,31 @@
 import { element } from '#common/dom.js';
 import { modelSelect } from '#model/select.js';
 import { fieldLabel } from '#model/model-columns.js';
-import { timeDimensions } from './time-analysis.js';
+import { availableTimeDimensions, selectTimeDimension, timeDimensions } from './time-analysis.js';
 
 export function renderTimeAnalysis(tile, model, catalog, onChange) {
   const host = element('section', { className: 'time-analysis-settings' });
-  const dimensions = timeDimensions(tile, model, catalog);
+  const selectedDimensions = timeDimensions(tile, model, catalog);
+  const dimensions = availableTimeDimensions(model, catalog);
   const enabled = element('input', { attrs: { type: 'checkbox', 'aria-label': 'Group by time' } });
   enabled.checked = Boolean(tile.timeAnalysis);
   enabled.disabled = !dimensions.length && !tile.timeAnalysis;
   enabled.onchange = () => {
-    tile.timeAnalysis = enabled.checked ? { table: dimensions[0].table, column: dimensions[0].column, granularity: 'month', timezone: 'UTC', weekStart: 'monday', comparison: 'none', runningTotal: false } : null;
+    if (enabled.checked) {
+      const field = selectedDimensions[0] || dimensions[0];
+      tile.timeAnalysis = { table: field.table, column: field.column, granularity: 'month', timezone: 'UTC', weekStart: 'monday', comparison: 'none', runningTotal: false };
+      selectTimeDimension(tile, field);
+    } else tile.timeAnalysis = null;
     onChange();
   };
   host.append(element('label', { className: 'time-toggle' }, [enabled, 'Group by time']));
-  if (!dimensions.length) host.append(element('p', { className: 'hint', text: 'Add a date or timestamp dimension in View & fields to enable time analysis.' }));
+  if (!dimensions.length) host.append(element('p', { className: 'hint', text: 'This model does not expose a date or timestamp field for time analysis.' }));
   const time = tile.timeAnalysis;
   if (!time) return host;
   const controls = element('div', { className: 'time-analysis-controls' });
   const selectedIndex = dimensions.findIndex(field => field.table === time.table && field.column === time.column);
   controls.append(modelSelect('Time dimension', dimensions.map((field, index) => [String(index), fieldLabel(model.definition, catalog, field)]), selectedIndex < 0 ? '' : String(selectedIndex), value => {
-    const field = dimensions[Number(value)]; if (field) { time.table = field.table; time.column = field.column; }
+    const field = dimensions[Number(value)]; if (field) { selectTimeDimension(tile, field); onChange(); }
   }));
   controls.append(modelSelect('Time grouping', [['day', 'Day'], ['week', 'Week'], ['month', 'Month']], time.granularity, value => { time.granularity = value; onChange(); }));
   const timezone = element('input', { attrs: { 'aria-label': 'Time zone', placeholder: 'America/New_York', maxlength: 100, spellcheck: 'false' } });
@@ -37,4 +42,3 @@ export function renderTimeAnalysis(tile, model, catalog, onChange) {
     element('p', { className: 'hint', text: 'Running totals add each period’s measure, oldest first, separately for each combination of other dimensions. All calculations use the full filtered result, including periods outside the preview.' }));
   return host;
 }
-

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { timeDimensions, timeAnalysisErrors, timeSeries } from '../../src/schemii/schemer/web/time-analysis.js';
+import { availableTimeDimensions, selectTimeDimension, timeDimensions, timeAnalysisErrors, timeSeries } from '../../src/schemii/schemer/web/time-analysis.js';
 import { tileErrors, dashboardUpdate } from '../../src/schemii/schemer/web/dashboard-state.js';
 const field = (column, aggregate = 'none') => ({ table: 'events', column, aggregate });
 const tile = { title: 'Monthly sales', kind: 'line', dimensions: [field('occurred')], measures: [field('amount', 'sum'), field('amount', 'count')], detailFields: [field('occurred')], timeAnalysis: { table: 'events', column: 'occurred', granularity: 'month', timezone: 'UTC', comparison: 'previous_period', runningTotal: true } };
@@ -17,6 +17,18 @@ test('time dimension choices include timestamps with precision and exclude time-
   const model = {definition:{nodes:[{id:'events',table:'events'}]}};
   const catalog = {tables:[{name:'events',columns:[{name:'occurred',dataType:'timestamp(3) with time zone'},{name:'clock',dataType:'time'},{name:'date',dataType:'date'}]}]};
   assert.deepEqual(timeDimensions({...tile,dimensions:[field('occurred'),field('clock'),field('date')]},model,catalog).map(f=>f.column), ['occurred','date']);
+  assert.deepEqual(availableTimeDimensions(model,catalog).map(f=>f.column), ['occurred','date']);
+});
+test('choosing time directly replaces a chart dimension and preserves aggregate dimensions', () => {
+  const chart = {...tile, dimensions:[field('category')], timeAnalysis:null};
+  chart.timeAnalysis = {table:'events',column:'occurred'};
+  selectTimeDimension(chart, field('date'));
+  assert.deepEqual(chart.dimensions, [field('date')]);
+  assert.deepEqual([chart.timeAnalysis.table, chart.timeAnalysis.column], ['events','date']);
+
+  const aggregate = {...tile, kind:'aggregate', dimensions:[field('category'),field('occurred')], timeAnalysis:{table:'events',column:'occurred'}};
+  selectTimeDimension(aggregate, field('date'));
+  assert.deepEqual(aggregate.dimensions, [field('category'),field('date')]);
 });
 test('invalid time configuration blocks save while ordinary tiles remain compatible', () => {
   assert.deepEqual(tileErrors(tile), []);
