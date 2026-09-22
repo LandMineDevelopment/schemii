@@ -1,6 +1,7 @@
 import { element } from '#common/dom.js';
 import { createResultGrid } from './scroll-results.js';
 import { dimensionLabel, lineSeries, linePath } from './chart-dimensions.js';
+import { barGroups, dimensionName, barMeasureName } from './bar-series.js';
 import { chartPreview } from './chart-preview.js';
 import { timeSeries } from './time-analysis.js';
 import { markSelection } from './dashboard-state.js';
@@ -29,6 +30,12 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
   const selectedSeries = timeSeries(tile, metric);
   const series = tile.kind === 'donut' ? selectedSeries.slice(0, 1) : selectedSeries;
   result = chartPreview({ ...tile, measures: series }, result);
+  const redraw = focusLabel => {
+    const status = host.querySelector(':scope > .stream-progress');
+    renderVisualization(host, tile, fullResult, { onDrill, compact, modelId });
+    if (status) host.append(status);
+    if (focusLabel) [...host.querySelectorAll('select')].find(node => node.getAttribute('aria-label') === focusLabel)?.focus();
+  };
   host.replaceChildren();
   const repetition = repetitionNotice(result?.plan, { modelId });
   if (repetition) host.append(repetition);
@@ -49,12 +56,12 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     const value = element('div', { className: 'kpi-value' }, [element('strong', { text: format(result.rows[0][0]) }), element('span', { text: result.columns[0].name })]);
     actionable(value, 'View contributing records', drill(result.rows[0], 0)); host.append(value); return;
   }
-  if (tile.timeAnalysis) {
+  if (tile.timeAnalysis && options.length > 1) {
     const select = element('select', { attrs: { 'aria-label': 'Displayed time measure' } });
     options.forEach(([value, text]) => select.append(element('option', { text, attrs: { value } })));
     select.value = metric;
     select.onclick = event => event.stopPropagation();
-    select.onchange = () => { host.dataset.timeMetric = select.value; renderVisualization(host, tile, fullResult, { onDrill, compact, modelId }); };
+    select.onchange = () => { host.dataset.timeMetric = select.value; redraw('Displayed time measure'); };
     host.append(element('label', { className: 'time-chart-control' }, ['Show', select]));
     if (!compact) host.append(element('p', { className: 'hint', text: 'Only current-period values drill into records. Missing comparisons have no chart mark. Partial periods use the available filtered data.' }));
   }
@@ -68,23 +75,53 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
     item.style.setProperty('--series-color', colors[index % colors.length]); legend.append(item);
   });
   if (tile.kind === 'bar') {
-    const chart = element('div', { className: 'bar-chart' });
+    const groupIndex = Math.min(Math.max(0, Number(host.dataset.barGroupIndex) || 0), tile.dimensions.length - 1);
+    const grouped = barGroups(tile, result, series, groupIndex);
+    const multidimensional = tile.dimensions.length > 1;
+    const toolbar = element('div', { className: 'bar-toolbar' });
+    toolbar.onclick = event => event.stopPropagation();
+    if (multidimensional) {
+      const select = element('select', { attrs: { 'aria-label': 'Group bars by' } });
+      tile.dimensions.forEach((_, index) => select.append(element('option', { text: dimensionName(tile, index), attrs: { value: index } })));
+      select.value = String(groupIndex);
+      select.onclick = event => event.stopPropagation();
+      select.onchange = () => { host.dataset.barGroupIndex = select.value; redraw('Group bars by'); };
+      toolbar.append(element('label', { className: 'bar-group-control' }, ['Group by', select]));
+    }
+    if (series.length === 1) toolbar.append(element('span', { className: 'bar-measure-caption', text: barMeasureName(tile, series[0].column) }));
+    legend.replaceChildren();
+    legend.classList.add('bar-series-legend');
+    legend.setAttribute('aria-label', 'Bar series');
+    grouped.series.forEach(item => {
+      const entry = element('span', { text: item.label, title: item.label, dataset: { seriesKey: item.key } });
+      entry.style.setProperty('--series-color', item.color); legend.append(entry);
+    });
+    const header = element('div', { className: 'bar-chart-header' }, [toolbar]);
+    if (multidimensional || series.length > 1) {
+      header.append(element('span', { className: 'bar-color-caption', text: grouped.seriesDimensions.map(index => dimensionName(tile, index)).join(' · ') || 'Measures' }), legend);
+    }
+    const chart = element('div', { className: `bar-chart${multidimensional ? ' grouped-bars' : ''}` });
     const values = result.rows.flatMap(row => series.map(({ column }) => Number(row[column] ?? 0)));
     const min = values.reduce((a, b) => Math.min(a, b), 0), max = values.reduce((a, b) => Math.max(a, b), 0), span = max - min || 1;
-    for (const row of result.rows) {
-      const group = element('div', { className: 'bar-group' }, [element('div', { className: 'bar-label', text: dimensionLabel(tile, row) })]);
-      series.forEach(({ column, drill: measureIndex }, index) => {
+    for (const { label: groupLabel, bars } of grouped.groups) {
+      const group = element('section', { className: 'bar-group', attrs: { 'aria-label': groupLabel } }, [element('div', { className: 'bar-label', text: groupLabel })]);
+      for (const { row, series: item } of bars) {
+        const { column, drill: measureIndex } = item;
         const n = Number(row[column] ?? 0);
         const bar = element('div', { className: 'bar-mark' });
-        bar.style.left = `${(Math.min(0, n) - min) / span * 100}%`; bar.style.width = `${Math.abs(n) / span * 100}%`; if (!numeric(row[column])) bar.hidden = true; bar.style.background = colors[index % colors.length];
+        bar.style.left = `${(Math.min(0, n) - min) / span * 100}%`; bar.style.width = `${Math.abs(n) / span * 100}%`; if (!numeric(row[column])) bar.hidden = true; bar.style.background = item.color;
         const axis = element('span', { className: 'zero-axis' }); axis.style.left = `${-min / span * 100}%`;
         const track = element('div', { className: 'bar-track' }, [axis, bar]);
-        const rowNode = element('div', { className: 'bar-value-row', title: `${dimensionLabel(tile, row)}: ${format(row[column])}` }, [track, element('span', { text: format(row[column]) })]);
-        actionable(rowNode, `${dimensionLabel(tile, row)}: ${format(row[column])}. View records`, drill(row, measureIndex)); group.append(rowNode);
-      });
+        const text = `${dimensionLabel(tile, row)}: ${format(row[column])}`;
+        const rowNode = element('div', { className: 'bar-value-row', title: `${text} · ${barMeasureName(tile, column)}`, dataset: { seriesKey: item.key } });
+        if (multidimensional || series.length > 1) rowNode.append(element('span', { className: 'bar-series-label', text: item.label, title: item.label }));
+        rowNode.append(track, element('span', { className: 'bar-number', text: format(row[column]) }));
+        rowNode.style.setProperty('--series-color', item.color);
+        actionable(rowNode, `${text}${series.length > 1 ? ` · ${barMeasureName(tile, column)}` : ''}. View records`, drill(row, measureIndex)); group.append(rowNode);
+      }
       chart.append(group);
     }
-    host.append(legend, chart); return;
+    host.append(header, chart); return;
   }
   if (tile.kind === 'line') {
     const width = compact ? Math.max(360, lines.axis.length * 28) : Math.max(760, lines.axis.length * 40), height = compact ? 270 : 450, pad = compact ? 34 : 52;

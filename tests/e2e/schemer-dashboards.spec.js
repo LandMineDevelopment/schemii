@@ -504,7 +504,7 @@ test('multidimensional charts label complete groups, separate lines, persist fie
   await expect(page.locator('.tile-status').filter({ hasText: '5 groups' })).toHaveCount(4);
   const bar = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'bar grouped', exact: true }) });
   await expect(bar.locator('.bar-label').first()).toContainText('Branch');
-  await expect(bar.locator('.bar-label').first()).toContainText('Alex');
+  await expect(bar.locator('.bar-series-label').first()).toContainText('Alex');
   const line = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'line grouped', exact: true }) });
   await expect(line.locator('.line-chart path')).toHaveCount(2);
   await expect(line.locator('.line-chart circle')).toHaveCount(5);
@@ -532,7 +532,7 @@ test('multidimensional charts label complete groups, separate lines, persist fie
   await expect(editor).toHaveCount(0);
   expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('org'), field('name')]);
   await page.reload();
-  await expect(bar.locator('.bar-label').first()).toContainText('Alex');
+  await expect(bar.locator('.bar-series-label').first()).toContainText('Alex');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
@@ -575,4 +575,36 @@ test('wide line axes keep their first points visible before horizontal scrolling
   expect(point.x + point.width).toBeLessThan(body.x + body.width);
   expect(point.y + point.height).toBeLessThan(body.y + body.height);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+
+test('bars cluster under one dimension with consistent colors and regroup without a query', async ({ page }) => {
+  const { requests, errors } = await mock(page, { multidimensional: true });
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile').filter({ has: page.getByRole('heading', { name: 'bar grouped', exact: true }) });
+  await expect(tile.locator('.bar-group')).toHaveCount(3);
+  await expect(tile.locator('.bar-group').first().locator('.bar-value-row')).toHaveCount(2);
+  const colors = await tile.locator('.bar-value-row').evaluateAll(nodes => nodes.map(node => [node.dataset.seriesKey, node.querySelector('.bar-mark').style.background]));
+  const byKey = new Map();
+  for (const [key, color] of colors) {
+    if (byKey.has(key)) expect(color).toBe(byKey.get(key));
+    else byKey.set(key, color);
+  }
+  expect(new Set(byKey.values()).size).toBe(2);
+  await tile.getByRole('heading').click();
+  const expanded = page.getByRole('dialog', { name: 'bar grouped', exact: true });
+  const before = requests.length;
+  await expanded.getByRole('combobox', { name: 'Group bars by' }).selectOption('1');
+  await expect(expanded.locator('.bar-group')).toHaveCount(2);
+  await expect(expanded.locator('.bar-label').first()).toHaveText('Alex');
+  await expect(expanded.locator('.bar-group').first().locator('.bar-value-row')).toHaveCount(3);
+  await expect(expanded.locator('.stream-progress')).toContainText('End of result');
+  expect(requests).toHaveLength(before);
+  await expanded.locator('.bar-group').first().locator('.bar-value-row').nth(1).click();
+  await expect(expanded.locator('.drill-body')).toContainText('Alex');
+  expect(requests.at(-1).body.selection.dimensions).toEqual([
+    { table: 'person', column: 'org', value: 'HQ' },
+    { table: 'person', column: 'name', value: 'Alex' },
+  ]);
+  expect(errors).toEqual([]);
 });

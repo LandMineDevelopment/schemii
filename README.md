@@ -378,9 +378,12 @@ Set `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_
 
 ### Multidimensional Schemer tiles
 
-Bar and donut charts accept one or more dimensions. Each complete combination
-forms a bar group or donut slice; labels include every dimension. Donuts retain
-one measure. Line charts use the first dimension for the horizontal axis and
+Bar and donut charts accept one or more dimensions. Bars cluster under the first
+dimension, with the remaining dimensions shown as consistently colored series.
+The Group by control changes the grouping in the current view without another
+query; reorder dimensions in the editor to set the saved default. Calendar series
+use readable period labels. Each complete combination forms a donut slice, and
+donuts retain one measure. Line charts use the first dimension for the horizontal axis and
 split remaining dimension combinations into independent series for each measure.
 Move dimensions earlier or later in the tile editor to choose the axis. Missing
 series values break the line rather than connecting different groups.

@@ -66,3 +66,33 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
 .donut-legend { flex:none; max-height:160px; overflow:auto; }
 .tile-body .donut-chart { height:140px; }
 .tile-body .donut-legend { max-height:100px; }
+
+/* Cluster bars under a shared category and keep series labels beside the marks. */
+.bar-chart-header { flex:none; min-width:0; padding:0 4px 12px; }
+.bar-toolbar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 16px; margin-bottom:8px; }
+.bar-group-control { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:12px; min-width:0; }
+.bar-group-control select { min-width:0; max-width:240px; padding:6px 28px 6px 10px; }
+.bar-measure-caption,.bar-color-caption { color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+.bar-color-caption { display:block; margin-bottom:6px; font-weight:600; }
+.bar-series-legend { gap:6px 16px; margin:0; max-height:80px; }
+.bar-series-legend span { display:inline-flex; align-items:center; }
+.bar-series-legend span::before { flex:none; }
+.grouped-bars .bar-group { padding:12px 0; margin:0; border-top:1px solid var(--line); }
+.grouped-bars .bar-label { font-size:13px; font-weight:600; color:var(--text); margin:0 0 8px; }
+.grouped-bars .bar-value-row,.bar-value-row:has(.bar-series-label) { grid-template-columns:minmax(70px,140px) minmax(0,1fr) minmax(42px,auto); gap:12px; min-height:24px; padding:2px 0; }
+.bar-value-row>.bar-series-label { font:11px/1.35 system-ui,sans-serif; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bar-series-label::before { content:''; display:inline-block; width:6px; height:6px; border-radius:2px; margin-right:7px; background:var(--series-color); }
+.bar-value-row>.bar-number { text-align:right; font-variant-numeric:tabular-nums; }
+.grouped-bars .bar-track { height:12px; }
+.tile-body .bar-toolbar { gap:6px; }
+.tile-body .bar-group-control { width:100%; justify-content:space-between; font-size:11px; }
+.tile-body .bar-group-control select { max-width:70%; padding:3px 20px 3px 6px; font-size:11px; }
+.tile-body .bar-chart-header { padding-bottom:4px; }
+.tile-body .bar-series-legend { max-height:42px; }
+.tile-body .grouped-bars .bar-value-row { grid-template-columns:minmax(50px,85px) minmax(0,1fr) minmax(28px,auto); gap:6px; min-height:21px; }
+@media(max-width:600px) {
+  .bar-toolbar { align-items:flex-start; flex-direction:column; }
+  .bar-group-control { width:100%; justify-content:space-between; }
+  .bar-group-control select { max-width:70%; }
+  .grouped-bars .bar-value-row { grid-template-columns:minmax(58px,90px) minmax(0,1fr) minmax(32px,auto); gap:7px; }
+}
