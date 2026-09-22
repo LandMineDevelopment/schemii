@@ -7,7 +7,7 @@ function fixtures() {
     definition: { root: 'person', nodes: [{ id: 'person', table: 'personnel', label: 'Personnel' }], edges: [], scopes: [{ id: 'organization', label: 'Organization', kind: 'required', alternatives: [{ id: 'choose', label: 'Choose organization', inputs: [{ id: 'org', label: 'Root organization', type: 'text' }], conditions: [{ table: 'person', column: 'org', operator: 'eq', parameterId: 'org' }] }] }] }, explore: { fields: [], selections: {} } };
   const tile = { id: 'positions', title: 'Positions by org', kind: 'bar', dimensions: [field('org')], measures: [field('id', 'count')], detailFields: [field('id'), field('name')], reportFilters: [], selections: {}, limit: 2 };
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
-  return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }] }], relationships: [] } };
+  return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
 async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false } = {}) {
   const fixture = fixtures();
@@ -182,6 +182,23 @@ test('required slicers gate every tile and tile editor validates dimensions befo
   await editor.getByRole('button', { name: 'Apply & run' }).click();
   await expect(editor).toHaveCount(0); await expect(page.locator('.analytics-tile')).toContainText('Manager positions');
   await page.reload(); await expect(page.locator('.analytics-tile')).toContainText('Manager positions');
+  expect(errors).toEqual([]);
+});
+
+test('time analysis can select an exposed date without first editing chart dimensions', async ({ page }) => {
+  const { fixture, errors } = await mock(page);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Time analysis', exact: true }).click();
+  const enabled = editor.getByRole('checkbox', { name: 'Group by time', exact: true });
+  await expect(enabled).toBeEnabled();
+  await enabled.check();
+  await expect(editor.getByRole('combobox', { name: 'Time dimension', exact: true })).toHaveValue('Personnel · hired_at');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('hired_at')]);
+  expect(fixture.dashboard.tiles[0].timeAnalysis).toMatchObject({ table: 'person', column: 'hired_at', granularity: 'month' });
   expect(errors).toEqual([]);
 });
 

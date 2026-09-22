@@ -1,11 +1,39 @@
 import { nodeColumns } from '#model/model-columns.js';
+import { availableFields } from './report-state.js';
+
+const timeType = /^(date|timestamp(?:\(\d+\))?(?: with(?:out)? time zone)?|timestamptz)$/i;
+
+function isTimeField(field, model, catalog) {
+  const node = model.definition.nodes.find(item => item.id === field.table);
+  const type = nodeColumns(model.definition, catalog, node).find(item => item.name === field.column)?.dataType || '';
+  return timeType.test(type);
+}
+
+export function availableTimeDimensions(model, catalog) {
+  const draft = { ...model.definition, fields: [] };
+  return availableFields(draft, catalog).filter(field => isTimeField(field, model, catalog));
+}
 
 export function timeDimensions(tile, model, catalog) {
-  return tile.dimensions.filter(field => {
-    const node = model.definition.nodes.find(item => item.id === field.table);
-    const type = nodeColumns(model.definition, catalog, node).find(item => item.name === field.column)?.dataType || '';
-    return /^(date|timestamp(?:\(\d+\))?(?: with(?:out)? time zone)?|timestamptz)$/i.test(type);
-  });
+  return tile.dimensions.filter(field => isTimeField(field, model, catalog));
+}
+
+export function selectTimeDimension(tile, field) {
+  const selected = { table: field.table, column: field.column, aggregate: 'none' };
+  const previous = tile.timeAnalysis && [tile.timeAnalysis.table, tile.timeAnalysis.column];
+  const matches = (candidate, key) => key && candidate.table === key[0] && candidate.column === key[1];
+  if (['bar', 'line', 'donut'].includes(tile.kind)) {
+    tile.dimensions = [selected];
+  } else {
+    const previousIndex = tile.dimensions.findIndex(candidate => matches(candidate, previous));
+    const dimensions = tile.dimensions.filter(candidate => !matches(candidate, previous) && !matches(candidate, [selected.table, selected.column]));
+    dimensions.splice(Math.min(previousIndex < 0 ? dimensions.length : previousIndex, dimensions.length), 0, selected);
+    tile.dimensions = dimensions;
+  }
+  if (tile.timeAnalysis) {
+    tile.timeAnalysis.table = selected.table;
+    tile.timeAnalysis.column = selected.column;
+  }
 }
 
 export function timeAnalysisErrors(tile) {
