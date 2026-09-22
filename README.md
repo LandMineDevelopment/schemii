@@ -375,3 +375,25 @@ Neither PostgreSQL service has a published host port; both are reachable only on
 The seed records a fixture version and refuses to use a retained target volume with an older catalog shape. PostgreSQL initialization variables apply only when their data volume is first created. Keep the original database, username, and password values for retained state; the launcher rejects a conflicting explicit password instead of desynchronizing a mounted secret from the database role.
 
 Set `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, or `SCHEMII_TEST_POSTGRES_PASSWORD` before running `start.sh` to override the development defaults.
+
+### Multidimensional Schemer tiles
+
+Bar and donut charts accept one or more dimensions. Each complete combination
+forms a bar group or donut slice; labels include every dimension. Donuts retain
+one measure. Line charts use the first dimension for the horizontal axis and
+split remaining dimension combinations into independent series for each measure.
+Move dimensions earlier or later in the tile editor to choose the axis. Missing
+series values break the line rather than connecting different groups.
+
+Aggregation reports retain one column per dimension, detail reports show raw
+columns, and KPIs show a single ungrouped measure. Compatible chart type changes
+preserve dimensions. Calendar grouping, comparisons and running totals apply
+within the other dimension groups; put the calendar dimension first for a time
+line. Chart marks drill through using the complete dimension combination and
+selected base measure. Computed comparisons and totals do not drill through.
+
+Existing dashboard create/update, tile plan, execution, stream, drill and export
+routes carry the dimension arrays without new endpoints or storage migrations.
+The 64-output-field limit and bounded chart previews still apply. Exports retain
+all dimension columns; donut percentages describe only displayed groups when
+results are partial.

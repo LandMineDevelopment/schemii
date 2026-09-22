@@ -24,7 +24,6 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
     current.kind = value;
     if (value === 'detail') { current.dimensions = []; current.measures = []; current.timeAnalysis = null; }
     if (value === 'kpi') { current.timeAnalysis = null; current.dimensions = []; current.measures = current.measures.slice(0, 1); }
-    if (['bar', 'line', 'donut'].includes(value)) current.dimensions = current.dimensions.slice(0, 1);
     clearMissingTimeDimension();
     if (value === 'donut') current.measures = current.measures.slice(0, 1);
     render();
@@ -86,7 +85,7 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain }) {
     if (tab === 'fields') {
       if (current.kind === 'detail') body.append(element('p', { className: 'hint', text: 'Return raw joined rows using these columns. No grouping or aggregation is applied.' }), fieldList('Detail columns', 'detailFields'));
       else {
-        body.append(element('p', { className: 'hint', text: current.kind === 'aggregate' ? 'Dimensions become GROUP BY columns. Measures calculate one value per group.' : current.kind === 'kpi' ? 'Choose one measure across all matching records.' : 'Choose one dimension and numeric measures. Click a mark in the expanded view to inspect its contributing records.' }));
+        body.append(element('p', { className: 'hint', text: current.kind === 'aggregate' ? 'Dimensions become GROUP BY columns. Measures calculate one value per group.' : current.kind === 'kpi' ? 'Choose one measure across all matching records.' : current.kind === 'line' ? 'The first dimension is the horizontal axis; remaining dimensions define separate lines for each measure. Move dimensions to change their roles. Put the date first for time trends. Missing points break lines.' : current.kind === 'donut' ? 'Choose one or more dimensions and one numeric measure. Each complete dimension combination becomes a slice.' : 'Choose one or more dimensions and numeric measures. Each complete dimension combination becomes a bar group.' }));
         if (current.kind !== 'kpi') body.append(fieldList('Dimensions', 'dimensions'));
         body.append(fieldList('Measures', 'measures', true));
       }

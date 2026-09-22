@@ -52,8 +52,8 @@ class DashboardTile(Contract):
                 raise ValueError("Detail tiles require detail columns and no grouped fields")
         elif not self.measures:
             raise ValueError("Analytic tiles require at least one measure")
-        if self.kind in {"bar", "line", "donut"} and len(self.dimensions) != 1:
-            raise ValueError("Charts require exactly one dimension")
+        if self.kind in {"bar", "line", "donut"} and not self.dimensions:
+            raise ValueError("Charts require at least one dimension")
         if self.kind == "donut" and len(self.measures) != 1:
             raise ValueError("Donut charts require exactly one measure")
         if self.kind == "kpi" and (self.dimensions or len(self.measures) != 1):

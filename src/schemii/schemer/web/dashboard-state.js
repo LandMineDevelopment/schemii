@@ -11,7 +11,7 @@ export function tileErrors(tile) {
   if (!tile.title.trim()) errors.push('Name this tile.');
   if (tile.kind === 'detail' && !tile.detailFields.length) errors.push('Choose at least one detail column.');
   if (tile.kind !== 'detail' && !tile.measures.length) errors.push('Choose at least one measure.');
-  if (['bar', 'line', 'donut'].includes(tile.kind) && tile.dimensions.length !== 1) errors.push('Choose one dimension for this chart.');
+  if (['bar', 'line', 'donut'].includes(tile.kind) && !tile.dimensions.length) errors.push('Choose at least one dimension for this chart.');
   if (['kpi', 'donut'].includes(tile.kind) && tile.measures.length !== 1) errors.push('Choose one measure for this view.');
   if (tile.kind === 'kpi' && tile.dimensions.length) errors.push('A KPI has no grouping dimensions.');
   if (tile.kind !== 'detail' && !tile.detailFields.length) errors.push('Choose the columns to show when drilling into this tile.');
