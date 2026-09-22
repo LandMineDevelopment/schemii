@@ -185,6 +185,31 @@ test('required slicers gate every tile and tile editor validates dimensions befo
   expect(errors).toEqual([]);
 });
 
+test('every tile editor explains bounded streaming without an ineffective batch control', async ({ page }) => {
+  const { fixture, errors } = await mock(page, { chartTypes: true });
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile')).toHaveCount(6);
+
+  for (const tile of [...fixture.dashboard.tiles]) {
+    await page.getByRole('button', { name: `Edit ${tile.title}`, exact: true }).click();
+    const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+    await expect(editor.getByRole('spinbutton')).toHaveCount(0);
+    await expect(editor).not.toContainText('per batch');
+    await expect(editor).toContainText('Results stream automatically into a bounded browser cache.');
+    await expect(editor).toContainText('scrolling does not run another query');
+    await expect(editor).toContainText('Previews stop at row or memory limits');
+    await expect(editor).toContainText('Refresh runs the query again.');
+    await expect(editor).toContainText('Download full results to run the full query against a fresh snapshot.');
+    await editor.getByRole('textbox', { name: 'Tile title', exact: true }).fill(`${tile.title} updated`);
+    await editor.getByRole('button', { name: 'Apply & run' }).click();
+    await expect(editor).toHaveCount(0);
+    const saved = fixture.dashboard.tiles.find(saved => saved.id === tile.id);
+    expect(saved.title).toBe(`${tile.title} updated`);
+    expect(saved.limit).toBe(tile.limit);
+  }
+  expect(errors).toEqual([]);
+});
+
 test('all supported tile views render in a responsive square grid', async ({ page }, testInfo) => {
   const { errors } = await mock(page, { chartTypes: true });
   await page.goto('/schemer');
