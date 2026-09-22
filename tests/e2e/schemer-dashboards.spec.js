@@ -185,20 +185,56 @@ test('required slicers gate every tile and tile editor validates dimensions befo
   expect(errors).toEqual([]);
 });
 
-test('time analysis can select an exposed date without first editing chart dimensions', async ({ page }) => {
+test('date dimensions offer inline grouping and retain saved year settings', async ({ page }) => {
   const { fixture, errors } = await mock(page);
   await page.goto('/schemer');
   await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
   const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
-  await editor.getByRole('tab', { name: 'Time analysis', exact: true }).click();
-  const enabled = editor.getByRole('checkbox', { name: 'Group by time', exact: true });
-  await expect(enabled).toBeEnabled();
-  await enabled.check();
-  await expect(editor.getByRole('combobox', { name: 'Time dimension', exact: true })).toHaveValue('Personnel · hired_at');
+  await expect(editor.getByRole('tab', { name: 'Time analysis', exact: true })).toHaveCount(0);
+  await expect(editor.getByRole('combobox', { name: 'Dimension 1 group by', exact: true })).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Remove Dimensions 1', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Add dimensions', exact: true }).fill('hired');
+  await page.getByRole('option', { name: 'Personnel · hired_at', exact: true }).click();
+  const grouping = editor.getByRole('combobox', { name: 'Dimension 1 group by', exact: true });
+  await expect(grouping).toHaveValue('Exact date / time');
+  await grouping.click();
+  await page.getByRole('option', { name: 'Month', exact: true }).click();
+  await expect(grouping).toHaveValue('Month');
+  await grouping.click();
+  await page.getByRole('option', { name: 'Year', exact: true }).click();
+  await editor.getByText('Date grouping options', { exact: true }).click();
+  await expect(editor.getByRole('textbox', { name: 'Time zone', exact: true })).toHaveValue('UTC');
   await editor.getByRole('button', { name: 'Apply & run' }).click();
   await expect(editor).toHaveCount(0);
   expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('hired_at')]);
-  expect(fixture.dashboard.tiles[0].timeAnalysis).toMatchObject({ table: 'person', column: 'hired_at', granularity: 'month' });
+  expect(fixture.dashboard.tiles[0].timeAnalysis).toMatchObject({ table: 'person', column: 'hired_at', granularity: 'year' });
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  await expect(grouping).toHaveValue('Year');
+  await grouping.click();
+  await page.getByRole('option', { name: 'Exact date / time', exact: true }).click();
+  await expect(editor.getByText('Date grouping options', { exact: true })).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0].timeAnalysis).toBeNull();
+  expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('hired_at')]);
+  expect(errors).toEqual([]);
+});
+
+test('removing a grouped date clears its time settings', async ({ page }) => {
+  const { fixture, errors } = await mock(page);
+  fixture.dashboard.tiles[0].dimensions = [field('hired_at')];
+  fixture.dashboard.tiles[0].timeAnalysis = { table: 'person', column: 'hired_at', granularity: 'month', timezone: 'UTC', weekStart: 'monday', comparison: 'none', runningTotal: false };
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await expect(editor.getByRole('combobox', { name: 'Dimension 1 group by', exact: true })).toHaveValue('Month');
+  await editor.getByRole('button', { name: 'Remove Dimensions 1', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Add dimensions', exact: true }).fill('org');
+  await page.getByRole('option', { name: 'Personnel · org', exact: true }).click();
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0].timeAnalysis).toBeNull();
   expect(errors).toEqual([]);
 });
 

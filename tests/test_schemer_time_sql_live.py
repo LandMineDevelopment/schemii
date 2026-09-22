@@ -140,6 +140,26 @@ def test_month_groups_partial_periods_as_filtered(execute, compile_time):
     assert numeric(rows[1][1:]) == [30, 20, 10, 50]
 
 
+@pytest.mark.parametrize('comparison', ['previous_period', 'prior_year'])
+def test_year_groups_leap_days_and_compares_calendar_years(execute, compile_time, comparison):
+    plan = compile_time(analysis={'granularity': 'year', 'comparison': comparison, 'runningTotal': True})
+    rows = run(execute, plan, "(DATE '2023-12-31',20::numeric,'A'::text),('2024-01-01',10,'A'),('2024-02-29',20,'A'),('2026-01-01',5,'A')")
+    assert [str(row[0])[:10] for row in rows] == ['2023-01-01', '2024-01-01', '2026-01-01']
+    assert numeric(rows[1][1:]) == [30, 20, 10, 50, 50]
+    assert numeric(rows[2][1:]) == [5, None, None, None, 55]
+
+
+def test_year_timezone_boundary_and_drill_match(execute, compile_time):
+    values = "(TIMESTAMPTZ '2024-01-01 04:59:59+00',1::numeric,'A'::text),('2024-01-01 05:00:00+00',2,'A'),('2025-01-01 04:59:59+00',3,'A'),('2025-01-01 05:00:00+00',4,'A')"
+    config = {'granularity': 'year', 'timezone': 'America/New_York'}
+    plan = compile_time(kind='timestamp with time zone', analysis=config)
+    rows = run(execute, plan, values)
+    assert [(str(row[0])[:10], float(row[1])) for row in rows] == [('2023-01-01', 1), ('2024-01-01', 5), ('2025-01-01', 4)]
+    drill = compile_time(kind='timestamp with time zone', analysis=config, selection={
+        'dimensions': [{'table': 'events', 'column': 'occurred', 'value': '2024-01-01'}], 'measureIndex': 0})
+    assert sorted(float(row[1]) for row in run(execute, drill, values)) == [2, 3]
+
+
 def test_timezone_free_timestamp_retains_calendar_date(execute, compile_time):
     plan = compile_time(kind="timestamp without time zone", analysis={"timezone": "Pacific/Honolulu"})
     rows = run(execute, plan, "(TIMESTAMP '2024-03-10 00:01',2::numeric,'A'::text),('2024-03-10 23:59',3,'A'),(NULL,100,'A')")

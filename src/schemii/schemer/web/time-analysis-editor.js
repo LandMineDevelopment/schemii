@@ -1,33 +1,10 @@
 import { element } from '#common/dom.js';
 import { modelSelect } from '#model/select.js';
-import { fieldLabel } from '#model/model-columns.js';
-import { availableTimeDimensions, selectTimeDimension, timeDimensions } from './time-analysis.js';
-
-export function renderTimeAnalysis(tile, model, catalog, onChange) {
-  const host = element('section', { className: 'time-analysis-settings' });
-  const selectedDimensions = timeDimensions(tile, model, catalog);
-  const dimensions = availableTimeDimensions(model, catalog);
-  const enabled = element('input', { attrs: { type: 'checkbox', 'aria-label': 'Group by time' } });
-  enabled.checked = Boolean(tile.timeAnalysis);
-  enabled.disabled = !dimensions.length && !tile.timeAnalysis;
-  enabled.onchange = () => {
-    if (enabled.checked) {
-      const field = selectedDimensions[0] || dimensions[0];
-      tile.timeAnalysis = { table: field.table, column: field.column, granularity: 'month', timezone: 'UTC', weekStart: 'monday', comparison: 'none', runningTotal: false };
-      selectTimeDimension(tile, field);
-    } else tile.timeAnalysis = null;
-    onChange();
-  };
-  host.append(element('label', { className: 'time-toggle' }, [enabled, 'Group by time']));
-  if (!dimensions.length) host.append(element('p', { className: 'hint', text: 'This model does not expose a date or timestamp field for time analysis.' }));
+export function renderTimeAnalysis(tile) {
+  const host = element('details', { className: 'time-analysis-settings' });
+  host.append(element('summary', { text: 'Date grouping options' }));
   const time = tile.timeAnalysis;
-  if (!time) return host;
   const controls = element('div', { className: 'time-analysis-controls' });
-  const selectedIndex = dimensions.findIndex(field => field.table === time.table && field.column === time.column);
-  controls.append(modelSelect('Time dimension', dimensions.map((field, index) => [String(index), fieldLabel(model.definition, catalog, field)]), selectedIndex < 0 ? '' : String(selectedIndex), value => {
-    const field = dimensions[Number(value)]; if (field) { selectTimeDimension(tile, field); onChange(); }
-  }));
-  controls.append(modelSelect('Time grouping', [['day', 'Day'], ['week', 'Week'], ['month', 'Month']], time.granularity, value => { time.granularity = value; onChange(); }));
   const timezone = element('input', { attrs: { 'aria-label': 'Time zone', placeholder: 'America/New_York', maxlength: 100, spellcheck: 'false' } });
   timezone.value = time.timezone; timezone.oninput = () => { time.timezone = timezone.value.trim(); };
   controls.append(element('label', { className: 'stack' }, ['Time zone', timezone]));

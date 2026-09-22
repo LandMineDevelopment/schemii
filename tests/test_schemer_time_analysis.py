@@ -45,6 +45,26 @@ def test_week_sunday_and_prior_year_use_calendar_lookup(context):
     assert 'LAG(' not in plan['sql']
 
 
+@pytest.mark.parametrize('comparison', ['previous_period', 'prior_year'])
+def test_year_grouping_uses_calendar_year_comparison(context, comparison):
+    dashboard, tile, _ = timed(context, granularity='year', comparison=comparison)
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id)
+    assert "DATE_TRUNC('YEAR'," in plan['sql']
+    assert "INTERVAL '1 YEAR'" in plan['sql']
+    assert plan['timeAnalysis']['granularity'] == 'year'
+
+
+def test_year_bucket_drill_uses_the_same_calendar_group(context):
+    dashboard, tile, _ = timed(context, granularity='year', timezone='America/New_York')
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id, selection={
+        'dimensions': [{'table': 'people', 'column': 'created_at', 'value': '2024-01-01'},
+                       {'table': 'org', 'column': 'name', 'value': 'Engineering'}], 'measureIndex': 0})
+    assert "DATE_TRUNC('YEAR'," in plan['sql']
+    assert "AT TIME ZONE 'America/New_York'" in plan['sql']
+    assert "CAST(e'2024-01-01' AS DATE)" in plan['sql']
+    assert 'GROUP BY' not in plan['sql']
+
+
 def test_time_bucket_drill_preserves_zone_and_filters(context):
     dashboard, tile, _ = timed(context, granularity='day', timezone='America/New_York')
     _, plan = queries.tile_plan(None, None, dashboard, tile.id, selection={
@@ -70,11 +90,12 @@ def test_time_fields_and_arithmetic_types_are_validated(context):
         queries.tile_plan(None, None, dashboard, tile.id)
 
 
-def test_time_configuration_round_trips_and_validates():
+@pytest.mark.parametrize('granularity', ['day', 'week', 'month', 'year'])
+def test_time_configuration_round_trips_and_validates(granularity):
     body = {'id': 'time', 'title': 'Monthly', 'kind': 'line',
             'dimensions': [{'table': 'events', 'column': 'created_at'}],
             'measures': [{'table': 'events', 'column': 'id', 'aggregate': 'count'}],
-            'timeAnalysis': {'table': 'events', 'column': 'created_at', 'granularity': 'week',
+            'timeAnalysis': {'table': 'events', 'column': 'created_at', 'granularity': granularity,
                              'weekStart': 'sunday', 'timezone': 'America/New_York', 'runningTotal': True}}
     tile = DashboardTile.model_validate(body)
     assert DashboardTile.model_validate(tile.model_dump(by_alias=True)) == tile

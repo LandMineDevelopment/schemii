@@ -9,7 +9,7 @@ from schemii.schemoo.models import Contract, SelectedField, ScopeSelection, Repo
 class TimeAnalysis(Contract):
     table: str = Field(min_length=1, max_length=200)
     column: str = Field(min_length=1, max_length=200)
-    granularity: Literal["day", "week", "month"] = "month"
+    granularity: Literal["day", "week", "month", "year"] = "month"
     timezone: str = Field(default="UTC", min_length=1, max_length=100)
     week_start: Literal["monday", "sunday"] = "monday"
     comparison: Literal["none", "previous_period", "prior_year"] = "none"
