@@ -1,8 +1,27 @@
 """Dashboard configuration only: no query results are retained."""
 from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, model_validator
 from schemii.schemoo.models import Contract, SelectedField, ScopeSelection, ReportFilter
+
+
+class TimeAnalysis(Contract):
+    table: str = Field(min_length=1, max_length=200)
+    column: str = Field(min_length=1, max_length=200)
+    granularity: Literal["day", "week", "month"] = "month"
+    timezone: str = Field(default="UTC", min_length=1, max_length=100)
+    week_start: Literal["monday", "sunday"] = "monday"
+    comparison: Literal["none", "previous_period", "prior_year"] = "none"
+    running_total: bool = False
+
+    @model_validator(mode="after")
+    def valid_timezone(self):
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Choose a valid IANA timezone, such as UTC or America/New_York") from None
+        return self
 
 
 class DashboardTile(Contract):
@@ -15,6 +34,7 @@ class DashboardTile(Contract):
     selections: dict[str, ScopeSelection] = Field(default_factory=dict, max_length=20)
     report_filters: list[ReportFilter] = Field(default_factory=list, max_length=32)
     limit: int = Field(default=100, ge=1, le=100)
+    time_analysis: TimeAnalysis | None = None
 
     @model_validator(mode="after")
     def valid_view(self):
@@ -38,6 +58,11 @@ class DashboardTile(Contract):
             raise ValueError("Donut charts require exactly one measure")
         if self.kind == "kpi" and (self.dimensions or len(self.measures) != 1):
             raise ValueError("KPI tiles require one measure and no dimensions")
+        if self.time_analysis:
+            if (self.time_analysis.table, self.time_analysis.column) not in {(f.table, f.column) for f in self.dimensions}:
+                raise ValueError("The time field must be a selected dimension")
+            if any(f.aggregate == "none" for f in self.measures):
+                raise ValueError("Time analysis measures require an explicit aggregation")
         return self
 
 

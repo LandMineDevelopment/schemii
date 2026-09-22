@@ -13,6 +13,7 @@ from schemii.schemoo.models import ExploreState
 from schemii.schemoo.service import document, load_model, model_catalog, plan_query
 from schemii.schemoo.prototype import _literal
 from .models import ReportQuery
+from .time_analysis import bucket_expression, compile_time_analysis, validate_time_analysis
 
 
 def _problem(message):
@@ -104,8 +105,15 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     query.explore.selections = {**query.explore.selections, **optional_selections}
     catalog = model_catalog(services, owner, model, fresh=fresh)
     original = plan_query(catalog, model.definition, query.explore, model.catalog_fingerprint, _bounded=False)
+    time_analysis = getattr(tile, "time_analysis", None)
+    time_kind = validate_time_analysis(tile, catalog, model.definition)
     if selection is None:
-        return model, _ordered(original, parse_one(original["sql"], read="postgres"), tile.limit,
+        statement = parse_one(original["sql"], read="postgres")
+        if time_analysis:
+            statement, metadata = compile_time_analysis(tile, statement, catalog, model.definition)
+            metadata["warnings"] = [*original.get("warnings", []), *metadata["warnings"]]
+            original.update(metadata)
+        return model, _ordered(original, statement, tile.limit,
                             _text_order_fields(catalog, model.definition, query.explore.fields))
     if hasattr(selection, "model_dump"):
         selection = selection.model_dump(mode="json", by_alias=True)
@@ -152,7 +160,18 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
                 literal = parse_one(_literal(value), read="postgres")
             except (ValueError, TypeError):
                 _problem("The selected dimension has an invalid value.")
-            conditions.append(exp.EQ(this=column(key), expression=literal))
+            expression = column(key)
+            if time_analysis and key == (time_analysis.table, time_analysis.column):
+                expression = bucket_expression(expression, time_analysis, time_kind)
+                # Only canonical bucket dates from the displayed results are accepted.
+                from datetime import date
+                try:
+                    if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+                        raise ValueError
+                except ValueError:
+                    _problem("Select a valid calendar bucket date.")
+                literal = exp.Cast(this=literal, to=exp.DataType.build("date"))
+            conditions.append(exp.EQ(this=expression, expression=literal))
     # SQL aggregates ignore NULL inputs, including count(column) and DISTINCT.
     # MIN/MAX drill shows all inputs used to compute the extremum, not just ties.
     measure = tile.measures[measure_index]
