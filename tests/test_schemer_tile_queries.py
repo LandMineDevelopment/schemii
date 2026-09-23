@@ -44,8 +44,8 @@ def test_chart_and_drill_keep_join_and_group(context):
     assert 'LIMIT' not in chart["sql"]
     _, drill = queries.tile_plan(None, None, dashboard, tile.id, selection=selection())
     assert 'LEFT JOIN "public"."org"' in drill["sql"]
-    assert '"contributors"."org.name" = ' in drill["sql"]
-    assert 'NOT "contributors"."people.id" IS NULL' in drill["sql"]
+    assert '"contributors"."field_1" = ' in drill["sql"]
+    assert 'NOT "contributors"."field_2" IS NULL' in drill["sql"]
     assert 'GROUP BY' not in drill["sql"]
     assert 'LIMIT' not in drill["sql"] and 'OFFSET' not in drill["sql"]
     assert any("count once" in warning for warning in drill["warnings"])
@@ -69,7 +69,7 @@ def test_repetition_diagnostics_survive_tile_ordering_without_blocking_drill(con
 def test_null_and_quoted_dimension_values_are_safe(context):
     dashboard, tile, _ = context
     _, null = queries.tile_plan(None, None, dashboard, tile.id, selection=selection(None))
-    assert '"contributors"."org.name" IS NULL' in null["sql"]
+    assert '"contributors"."field_1" IS NULL' in null["sql"]
     _, quoted = queries.tile_plan(None, None, dashboard, tile.id, selection=selection("O'Reilly; DROP TABLE people"))
     assert parse_one(quoted["sql"], read="postgres").key == "select"
 
@@ -189,7 +189,7 @@ def test_calculated_dimension_is_filtered_by_result_expression(context):
     tile.dimensions = [field("calculation", "combined")]
     value = {"dimensions": [{"table": "calculation", "column": "combined", "value": 2}], "measureIndex": 0}
     _, drill = queries.tile_plan(None, None, dashboard, tile.id, selection=value)
-    assert '"contributors"."Calculated.Combined" = 2' in drill["sql"]
+    assert '"contributors"."field_1" = 2' in drill["sql"]
     assert execute(drill["sql"]) == [("Alice",)]
 
 
@@ -229,6 +229,31 @@ def test_long_output_labels_use_distinct_safe_sql_aliases(context):
         "Current personnel slate status and slot.personnel_pay_band_level",
         "Current personnel slate status and slot.personnel_pay_band_level_matches_slot",
     ]
+
+
+@pytest.mark.parametrize("label", [("Personnel " * 8).strip(), "職員" * 20])
+def test_drill_uses_safe_contributor_aliases_and_preserves_labels(context, label):
+    from sqlglot import exp
+
+    dashboard, tile, model = context
+    model.definition.nodes[0].label = label
+    tile.detail_fields = [field("people", "name"), field("people", "id"), field("org", "name")]
+    _, plan = queries.tile_plan(None, None, dashboard, tile.id, selection=selection())
+    assert plan["outputLabels"] == [f"{label}.name", f"{label}.id", "org.name"]
+    assert len(label.encode("utf-8")) > 63
+
+    statement = parse_one(plan["sql"], read="postgres")
+    contributors = next(node for node in statement.find_all(exp.Subquery) if node.alias == "contributors")
+    assert [output.alias for output in contributors.this.expressions] == ["field_1", "field_2", "field_3"]
+    assert {column.name for column in statement.find_all(exp.Column) if column.table == "contributors"} == {
+        "field_1", "field_2", "field_3",
+    }
+    # Also execute with PostgreSQL's identifier byte limit applied. This catches
+    # collisions that ordinary SQLite execution would silently accept.
+    for identifier in statement.find_all(exp.Identifier):
+        identifier.set("this", identifier.this.encode("utf-8")[:63].decode("utf-8", errors="ignore"))
+    assert execute(statement.sql(dialect="postgres")) == [("Alice", 1, "Engineering"), ("Bob", 2, "Engineering")]
+
 
 def test_dashboard_can_save_and_plan_count_with_join_multiplication(context, monkeypatch):
     from schemii.schemer import dashboard_routes

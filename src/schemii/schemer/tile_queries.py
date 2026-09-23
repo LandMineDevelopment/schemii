@@ -150,7 +150,15 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
                       _scope_outer_nodes=original["outerNodes"])
     statement = parse_one(plan["sql"], read="postgres")
     labels = {_key(field): output.alias for field, output in zip(raw_fields, statement.expressions)}
-    column = lambda key: exp.column(labels[key], table="contributors", quoted=True)
+    # The contributor relation is another nesting boundary: display labels may
+    # exceed PostgreSQL's 63-byte identifier limit or collide after truncation.
+    # Keep them as presentation metadata and reference compact SQL aliases.
+    aliases = {_key(field): f"field_{index + 1}" for index, field in enumerate(raw_fields)}
+    statement.set("expressions", [
+        output.this.as_(aliases[_key(field)], quoted=True)
+        for field, output in zip(raw_fields, statement.expressions)
+    ])
+    column = lambda key: exp.column(aliases[key], table="contributors", quoted=True)
     conditions = []
     for key, value in selected.items():
         if value is None:
@@ -176,7 +184,8 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     # MIN/MAX drill shows all inputs used to compute the extremum, not just ties.
     measure = tile.measures[measure_index]
     conditions.append(exp.Not(this=exp.Is(this=column(_key(measure)), expression=exp.Null())))
-    statement = exp.select(*(column(_key(field)) for field in tile.detail_fields)).from_(statement.subquery("contributors")).where(*conditions)
+    statement = exp.select(*(column(_key(field)).as_(labels[_key(field)], quoted=True)
+                             for field in tile.detail_fields)).from_(statement.subquery("contributors")).where(*conditions)
     warnings = list(plan.get("warnings", []))
     if set(plan["outerNodes"]) - set(original["outerNodes"]):
         warnings.append("Related detail branches can repeat a contributing row. Detail row counts are not the chart measure.")
