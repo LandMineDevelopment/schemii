@@ -1,5 +1,6 @@
 :root { --dashboard-header:64px; }
 .filter-summary { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; margin:-8px 0 20px; min-width:0; }
+.app-header-actions { display:flex; align-items:center; gap:10px; min-width:0; }
 .filter-summary-chip { max-width:min(100%,280px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:3px 8px; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--muted); font-size:11px; }
 .filter-summary-pending { color:var(--accent-bright); font-size:11px; }
 #toggle-dashboard-filters[aria-expanded=true] { border-color:var(--accent); color:var(--accent-bright); }

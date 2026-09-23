@@ -31,7 +31,7 @@ from schemii.common.source_inspection import (
 
 
 DEVELOPER_SYSTEM_PATH = "/_developer/system"
-_MAX_ROUTES = 200
+_MAX_ROUTES = 256
 # Installed application-state AI components bring the graph above 1,000 objects.
 # Keep the developer map bounded with modest headroom.
 # Include deferred background execution, beyond the response/reservation path.

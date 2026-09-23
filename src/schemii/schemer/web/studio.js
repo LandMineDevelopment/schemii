@@ -5,6 +5,7 @@ import { currentAccount, canAccessProduct, canAuthor } from '#common/accounts-se
 import { initializeUi, createIconButton, createIconElement } from '#common/ui.js';
 import { installProductNavigation } from '#common/product-navigation.js';
 import { confirmAction } from '#common/confirmation.js';
+import { createProductAssistant } from '#common/model-assistant.js';
 import { readExecution } from '#common/query-execution.js';
 import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderParameterValues } from '#model/filter-controls.js';
@@ -35,6 +36,35 @@ let closing = Promise.resolve(), dashboardGroup;
 const browserBudget = new CacheBudget();
 const scheduledCards = new WeakSet();
 const message = text => { $('notice').textContent = text; };
+const assistant = createProductAssistant({
+  trigger: $('ai-assistant-button'), getSubjectId: () => dashboard?.id || null,
+  api: '/api/v1/schemer/ai', productLabel: 'Schemer', subjectLabel: 'dashboard',
+  subjectKey: 'dashboardId', subjectQueryKey: 'dashboard_id', revisionKey: 'dashboardRevision',
+  title: 'Dashboard assistant', emptyTitle: 'Explore this dashboard',
+  emptyDescription: 'Ask about saved tiles and report results, or describe a dashboard change. Available actions follow your dashboard access.',
+  examplePrompts: ['Explain this dashboard and its tiles.', 'What do the results in this dashboard show?', 'Suggest a useful new tile for this dashboard.'],
+  resultOperations: ['execute_tile', 'drill_tile', 'parameter_values'],
+  resultPrompt: ({ payload }) => payload.operation === 'parameter_values'
+    ? `Look up current values for exposed filter ${payload.action?.args?.scopeId || 'this filter'} and explain the choices. The values may have changed since the earlier lookup.`
+    : `Rerun tile ${payload.action?.args?.tileId || 'the saved tile'} on this dashboard and explain its current results. The data may have changed since the earlier run.`,
+  permissionScopeNote: 'Your dashboard access determines which actions appear here. Assistant settings cannot grant author, export, or drill rights.',
+  getAvailableActions: actions => actions.filter(action => (permissions.edit || !action.mutates) && (permissions.export || !action.requiresExport) && (permissions.drill || !action.requiresDrill)).map(action => action.id),
+  onSubjectChanged: async id => {
+    if (id !== dashboard?.id) return;
+    library = (await requestJson(API)).dashboards;
+    renderLibrary();
+    if (slicersDirty || saving) return 'The saved dashboard changed. Your current filter choices are preserved. Apply or discard them before reloading.';
+    if (library.some(item => item.id === id)) {
+      await openDashboard(id);
+      return 'Dashboard refreshed with the assistant’s saved changes.';
+    }
+    dashboard = null; model = null; $('dashboard-content').hidden = true;
+    $('ai-assistant-button').disabled = true;
+    if (library.length) await openDashboard(library[0].id);
+    else { $('empty-dashboard').hidden = false; history.replaceState(null, '', '/schemer'); }
+    return 'The saved dashboard was deleted. Choose another dashboard to continue.';
+  },
+});
 function icon(name, label, callback, disabled = false) { const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.disabled = disabled; button.onclick = event => { event.stopPropagation(); callback(); }; return button; }
 function requiredSelections(source, values = {}) { return Object.fromEntries(source.definition.scopes.filter(s => s.kind === 'required' && s.requirement !== 'optional' && values[s.id]).map(s => [s.id, structuredClone(values[s.id])])); }
 function missingSlicers() {
@@ -331,6 +361,8 @@ async function openDashboard(id) {
     permissions = { ...context.permissions, edit: author && context.permissions.edit };
     if (version !== epoch) return;
     dashboard = next; model = source; catalog = sourceCatalog; slicersDirty = false; filtersExpanded = false; tileStates.clear();
+    $('ai-assistant-button').disabled = false;
+    void assistant.subjectChanged();
     $('empty-dashboard').hidden = true; $('dashboard-content').hidden = false;
     history.replaceState(null, '', `/schemer?dashboard=${encodeURIComponent(id)}`);
     renderLibrary(); renderHeading(); renderModelUpdate(); renderSlicers(); renderTiles(); message('');
@@ -422,7 +454,7 @@ $('apply-slicers').onclick = async () => {
 $('delete-dashboard').onclick = async () => {
   const item = dashboard;
   await confirmAction({ title: 'Delete dashboard?', message: `Delete “${item.name}” and its tiles?`, details: 'The Schemoo model is kept.', confirmLabel: 'Delete dashboard', onConfirm: async () => {
-    await requestJson(`${API}/${item.id}?expectedRevision=${item.revision}`, { method: 'DELETE' }); stopRuns(); library = library.filter(d => d.id !== item.id); dashboard = null; model = null; slicersDirty = false; renderLibrary();
+    await requestJson(`${API}/${item.id}?expectedRevision=${item.revision}`, { method: 'DELETE' }); stopRuns(); library = library.filter(d => d.id !== item.id); dashboard = null; model = null; slicersDirty = false; $('ai-assistant-button').disabled = true; void assistant.subjectChanged(); renderLibrary();
     if (library.length) await openDashboard(library[0].id); else { $('dashboard-content').hidden = true; $('empty-dashboard').hidden = false; history.replaceState(null, '', '/schemer'); }
   } });
 };

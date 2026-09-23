@@ -24,13 +24,17 @@ function dialog(title) {
   return node;
 }
 
-/** Shared semantic-model assistant shell. The host owns model selection and draft recovery. */
-export function createModelAssistant({ trigger, getModelId, onModelChanged, api = "/api/v1/schemoo/ai" }) {
+/** Shared product assistant shell. Product APIs own tools and permissions. */
+export function createProductAssistant({
+  trigger, getSubjectId, onSubjectChanged, api, productLabel, subjectLabel,
+  subjectKey, subjectQueryKey, revisionKey, title, emptyTitle, emptyDescription,
+  examplePrompts, resultOperations = [], resultPrompt, getAvailableActions, permissionScopeNote,
+}) {
   let chat = null, settings = null, runtime = null, available = [], pollTimer, loginTimer, login = null;
   let busy = false, opened = false, contextId = null, generation = 0, transcriptKey = "";
   let elapsedTimer = null, activityCard = null, activityRun = null, activityChatId = null;
   const revisions = new Map(), observedMutations = new Map();
-  const panel = element("aside", { className: "model-ai", attrs: { id: "model-ai", "aria-label": "Model assistant", "aria-hidden": "true", inert: "" } });
+  const panel = element("aside", { className: "model-ai", attrs: { id: "model-ai", "aria-label": title, "aria-hidden": "true", inert: "" } });
   const status = element("span", { className: "model-ai-status", text: "Ready", attrs: { role: "status" } });
   const modelSelect = element("select", { attrs: { "aria-label": "Assistant model" } });
   const reasoningSelect = element("select", { attrs: { "aria-label": "Assistant reasoning level" } });
@@ -39,7 +43,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   const disclosure = el("p", "", "model-ai-disclosure");
   const messages = element("div", { className: "model-ai-messages", attrs: { role: "log", "aria-label": "Conversation", "aria-live": "polite" } });
   const scroll = element("div", { className: "model-ai-scroll" }, [messages]);
-  const input = element("textarea", { attrs: { rows: 3, placeholder: "Ask about this model or describe a change…", "aria-label": "Message to model assistant" } });
+  const input = element("textarea", { attrs: { rows: 3, placeholder: `Ask about this ${subjectLabel} or describe a change…`, "aria-label": `Message to ${title.toLowerCase()}` } });
   const send = createIconButton({ icon: "run", label: "Send", className: "ui-button primary" });
   send.type = "submit";
   const cancel = button("Stop", () => void act("cancel", {}), "stop");
@@ -52,7 +56,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   }), "new-chat");
   const retry = button("Refresh", () => void guard(async () => { if (chat) await refresh(); else await load(); }));
   const form = element("form", { className: "model-ai-composer" }, [input, element("div", {}, [el("small", "Enter to send · Shift + Enter for a new line"), cancel, send])]);
-  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", "SCHEMOO / AI"), el("h2", "Model assistant")]), status, history, fresh, permissions, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [element("div", { className: "model-ai-model-options" }, [modelSelect, element("label", { className: "model-ai-reasoning" }, [el("span", "Reasoning"), reasoningSelect])]), disclosure]), notice, scroll, form);
+  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", `${productLabel.toUpperCase()} / AI`), el("h2", title)]), status, history, fresh, permissions, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [element("div", { className: "model-ai-model-options" }, [modelSelect, element("label", { className: "model-ai-reasoning" }, [el("span", "Reasoning"), reasoningSelect])]), disclosure]), notice, scroll, form);
   document.body.append(panel);
   const modelPicker = enhanceModelPicker(modelSelect, { refresh: () => refreshProviders({ refresh: true }) });
   const settingsDialog = dialog("Assistant settings"), historyDialog = dialog("Conversation history");
@@ -83,13 +87,13 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     const running = active(chat);
     status.textContent = busy ? "Loading" : ({ working: "Working", waiting_approval: "Review batch", failed: "Needs attention" }[chat?.status] || "Ready");
     status.dataset.state = chat?.status || "idle";
-    send.disabled = busy || running || !getModelId() || !selected() || !input.value.trim();
+    send.disabled = busy || running || !getSubjectId() || !selected() || !input.value.trim();
     send.hidden = running;
     cancel.hidden = !running; cancel.disabled = busy;
     modelSelect.disabled = busy;
     reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1;
     settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1;
-    fresh.disabled = busy || running || !getModelId() || !selected(); history.disabled = busy || !getModelId();
+    fresh.disabled = busy || running || !getSubjectId() || !selected(); history.disabled = busy || !getSubjectId();
     saveSettings.disabled = busy;
     permissionEditor?.setBusy(busy);
     messages.querySelectorAll(".model-ai-approval button").forEach(control => { control.disabled = busy; });
@@ -108,10 +112,10 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
       if (!activityRun || activityRun.state !== "working") activityRun = { turnId: chat.turnId, startedAt: Date.now(), state: "working" };
       activityRun.stages = [{ label: chat?.stream ? "Writing response" : "Waiting for model response", state: "running" }];
     } else activityRun = null;
-    if (activityRun) activityCard = renderAiActivity(activityRun, { existing: activityCard, workingLabel: "Working with this model", onStop: () => void act("cancel", {}) });
+    if (activityRun) activityCard = renderAiActivity(activityRun, { existing: activityCard, workingLabel: `Working with this ${subjectLabel}`, onStop: () => void act("cancel", {}) });
     if (opened && activityRun?.state === "working") {
       if (!elapsedTimer) elapsedTimer = setInterval(() => {
-        if (activityRun) renderAiActivity(activityRun, { existing: activityCard, workingLabel: "Working with this model", onStop: () => void act("cancel", {}) });
+        if (activityRun) renderAiActivity(activityRun, { existing: activityCard, workingLabel: `Working with this ${subjectLabel}`, onStop: () => void act("cancel", {}) });
       }, 1000);
     } else { clearInterval(elapsedTimer); elapsedTimer = null; }
   }
@@ -125,7 +129,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     const expanded = new Map([...messages.querySelectorAll("details[data-detail-key]")].map(node => [node.dataset.detailKey, node.open]));
     let content = [];
     for (const message of chat?.messages || []) {
-      const article = createMessageNode(message, { assistantName: "Schemoo AI", onError: message => tell(message, true), existing: previousMessages.get(message.id) });
+      const article = createMessageNode(message, { assistantName: `${productLabel} AI`, onError: message => tell(message, true), existing: previousMessages.get(message.id) });
       article.classList.add("model-ai-message", `model-ai-message--${message.role}`);
       article.querySelector(".ai-message__content").classList.add("model-ai-markdown");
       content.push(article);
@@ -142,9 +146,9 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
         card.append(details("Result summary", result));
         if (["succeeded", "completed"].includes(payload.status || activity.status)) { const download = assistantDownloadLink(result); if (download) card.append(download); }
       }
-      if (["execute_model", "get_execution", "get_result_page", "parameter_values", "domain_values"].includes(operation) && ["succeeded", "completed"].includes(payload.status || activity.status)) card.append(button("Ask about this result", () => {
+      if (resultOperations.includes(operation) && ["succeeded", "completed"].includes(payload.status || activity.status)) card.append(button("Ask about this result", () => {
         const executionId = payload.executionId || payload.action?.args?.executionId;
-        input.value = `Explain the result of ${title} (action ${activity.id}${executionId ? `, execution ${executionId}` : ""}). Use its result tools; if expired, rerun the saved read and tell me the data may have changed.`;
+        input.value = resultPrompt?.({ activity, payload, title, executionId }) || `Explain the result of ${title} (action ${activity.id}${executionId ? `, execution ${executionId}` : ""}). Use its result tools; if expired, rerun the saved read and tell me the data may have changed.`;
         input.focus(); controls();
       }, "assistant"));
       if (payload.error) card.append(el("p", typeof payload.error === "string" ? payload.error : payload.error.message));
@@ -154,7 +158,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     const streamText = typeof chat?.stream === "string" ? chat.stream : chat?.stream?.text;
     if (activityRun) content = placeTurnActivity(content, activityCard, activityRun);
     if (streamText && chat?.status === "working") {
-      const stream = createMessageNode({ id: "stream", role: "assistant", text: streamText }, { assistantName: "Schemoo AI · writing", onError: message => tell(message, true), existing: previousMessages.get("stream") });
+      const stream = createMessageNode({ id: "stream", role: "assistant", text: streamText }, { assistantName: `${productLabel} AI · writing`, onError: message => tell(message, true), existing: previousMessages.get("stream") });
       stream.classList.add("model-ai-message", "model-ai-stream");
       stream.querySelector(".ai-message__content").classList.add("model-ai-markdown");
       content.push(stream);
@@ -176,8 +180,8 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     }
     if (chat?.error && !activityRun?.error) content.push(element("section", { className: "model-ai-failure", attrs: { role: "alert" } }, [el("strong", "The assistant could not finish"), el("p", typeof chat.error === "string" ? chat.error : chat.error.message)]));
     if (!content.length) {
-      const empty = element("section", { className: "model-ai-empty" }, [el("span", "AI"), el("h3", "Shape your semantic model"), el("p", "Explore tables and relationships, explain a filter, or describe a model change. Your saved model provides the context.")]);
-      for (const prompt of ["Explain this model and its relationships.", "Check this model for issues.", "Help me build a useful preview query."]) empty.append(button(prompt, () => { input.value = prompt; input.focus(); controls(); }));
+      const empty = element("section", { className: "model-ai-empty" }, [el("span", "AI"), el("h3", emptyTitle), el("p", emptyDescription)]);
+      for (const prompt of examplePrompts) empty.append(button(prompt, () => { input.value = prompt; input.focus(); controls(); }));
       content.push(empty);
     }
     // Keep surviving nodes attached: polling must not restart dots, shimmer, or message animations.
@@ -187,21 +191,21 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
   }
   async function accept(next) {
-    if (!next || next.modelId !== contextId) return;
+    if (!next || next[subjectKey] !== contextId) return;
     if (next.id === chat?.id && next.revision < chat.revision) return;
     const newlyFailed = next.status === "failed" && (chat?.id !== next.id || chat?.status !== "failed");
     const previous = revisions.get(next.id);
-    const mutations = (next.activity || []).filter(item => item.status === "succeeded" && (!item.modelId || item.modelId === contextId) && settings?.actions?.some(action => action.id === item.operation && action.mutates && action.group !== "Results"));
+    const mutations = (next.activity || []).filter(item => item.status === "succeeded" && (!item[subjectKey] || item[subjectKey] === contextId) && settings?.actions?.some(action => action.id === item.operation && action.mutates && action.group !== "Results"));
     const observed = observedMutations.get(next.id);
     const newlySaved = observed ? mutations.filter(item => !observed.has(item.id)) : [];
     observedMutations.set(next.id, new Set(mutations.map(item => item.id)));
     chat = next;
     populateModels();
-    if (next.modelRevision !== undefined) {
-      revisions.set(next.id, next.modelRevision);
+    if (next[revisionKey] !== undefined) {
+      revisions.set(next.id, next[revisionKey]);
     }
-    if ((previous !== undefined && next.modelRevision !== undefined && previous !== next.modelRevision) || newlySaved.length) {
-      const message = await onModelChanged?.(contextId, next.modelRevision, newlySaved);
+    if ((previous !== undefined && next[revisionKey] !== undefined && previous !== next[revisionKey]) || newlySaved.length) {
+      const message = await onSubjectChanged?.(contextId, next[revisionKey], newlySaved);
       if (message) tell(message);
     }
     render(); schedule();
@@ -215,17 +219,17 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
     if (generation === ticket && chat?.id === id) await accept(next);
   }
   async function newChat() {
-    const choice = selected(); if (!choice || !getModelId()) throw new Error("Choose a saved model and connect an AI provider first.");
-    const next = await requestJson(`${api}/chats`, { method: "POST", body: { modelId: getModelId(), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForModel(choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
+    const choice = selected(); if (!choice || !getSubjectId()) throw new Error(`Choose a saved ${subjectLabel} and connect an AI provider first.`);
+    const next = await requestJson(`${api}/chats`, { method: "POST", body: { [subjectKey]: getSubjectId(), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForModel(choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
     generation++; input.value = ""; transcriptKey = ""; await accept(next); tell("Started a new conversation. Previous conversations remain in history.");
   }
   async function load() {
-    const id = getModelId(); if (!id) { tell("Open or create a saved model to start a conversation."); render(); return; }
+    const id = getSubjectId(); if (!id) { tell(`Open or create a saved ${subjectLabel} to start a conversation.`); render(); return; }
     const ticket = ++generation; contextId = id;
-    const [nextSettings, nextRuntime, list] = await Promise.all([requestJson(`${api}/settings`), requestJson("/api/v1/ai/status"), requestJson(`${api}/chats?model_id=${encodeURIComponent(id)}`)]);
-    if (ticket !== generation || getModelId() !== id) return;
+    const [nextSettings, nextRuntime, list] = await Promise.all([requestJson(`${api}/settings`), requestJson("/api/v1/ai/status"), requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(id)}`)]);
+    if (ticket !== generation || getSubjectId() !== id) return;
     settings = nextSettings; runtime = nextRuntime;
-    if (chat?.modelId !== id) chat = null;
+    if (chat?.[subjectKey] !== id) chat = null;
     populateModels();
     if (chat) await refresh();
     else if (list.chats?.length) await accept(await requestJson(`${api}/chats/${encodeURIComponent(list.chats[0].id)}`));
@@ -253,7 +257,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   input.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); } });
   panel.addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); close(); } });
   form.onsubmit = async event => {
-    event.preventDefault(); const text = input.value.trim(); if (!text || busy || active(chat) || !selected() || !getModelId()) return;
+    event.preventDefault(); const text = input.value.trim(); if (!text || busy || active(chat) || !selected() || !getSubjectId()) return;
     const providerId = chat?.providerId || selected().providerId;
     const provider = runtime?.providers?.find(item => item.id === providerId);
     const acknowledgment = providerId === "opencode";
@@ -293,17 +297,21 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
 
   async function showSettings() {
     settingsDialog.showModal(); settingsStatus.textContent = "Loading settings…";
-    try { if (!settings || !runtime) await load(); else runtime = await requestJson("/api/v1/ai/status"); populateModels(); populateReasoningOptions(settingsReasoning, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", active(chat)); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
+    try { if (!settings || !runtime) await load(); else runtime = await requestJson("/api/v1/ai/status"); if (chat) await refresh(); populateModels(); populateReasoningOptions(settingsReasoning, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", active(chat)); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
     catch (error) { settingsStatus.textContent = error.message; }
   }
   function renderPermissions() {
-    permissionEditor = renderPermissionBundles(permissionList, settings?.actions || [], chat?.modes || settings?.modes, { attribute: "data-action" });
+    const availableActions = chat?.availableActions || getAvailableActions?.(settings?.actions || []);
+    const allowed = availableActions ? new Set(availableActions) : null;
+    const actions = (settings?.actions || []).filter(action => !allowed || allowed.has(action.id));
+    permissionEditor = renderPermissionBundles(permissionList, actions, chat?.modes || settings?.modes, { attribute: "data-action" });
+    if (allowed && permissionScopeNote) permissionList.prepend(el("p", permissionScopeNote, "model-ai-muted"));
     controls();
   }
   async function persistSettings() {
     if (busy) return; busy = true; controls(); settingsStatus.textContent = "Saving…";
     try {
-      const values = Object.fromEntries([...permissionList.querySelectorAll("select[data-action]")].map(control => [control.dataset.action, control.value]));
+      const values = { ...(chat?.modes || settings?.modes || {}), ...Object.fromEntries([...permissionList.querySelectorAll("select[data-action]")].map(control => [control.dataset.action, control.value])) };
       const body = { modes: values, providerId: chat?.providerId || selected()?.providerId, aiModelId: chat?.aiModelId || selected()?.id, reasoningEffort: settingsReasoning.value, expectedRevision: chat?.revision };
       if (chat) await accept(await requestJson(`${api}/chats/${encodeURIComponent(chat.id)}/preferences`, { method: "PUT", body }));
       settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes, reasoningEffort: body.reasoningEffort } });
@@ -363,7 +371,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   async function showHistory() {
     historyDialog.showModal(); historyBody.replaceChildren(el("p", "Loading conversations…"));
     try {
-      const list = await requestJson(`${api}/chats?model_id=${encodeURIComponent(getModelId())}`);
+      const list = await requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(getSubjectId())}`);
       historyBody.replaceChildren();
       for (const item of list.chats || []) {
         const openChat = button(item.title || "Untitled conversation", () => void guard(async () => { generation++; clearTimeout(pollTimer); await accept(await requestJson(`${api}/chats/${encodeURIComponent(item.id)}`)); populateModels(); historyDialog.close(); input.value = ""; input.focus(); controls(); }));
@@ -374,16 +382,29 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
         }, "delete");
         historyBody.append(element("article", {}, [element("div", {}, [openChat, el("small", `${item.aiModelId || ""}${item.id === chat?.id ? " · Current" : ""}${item.updatedAt ? ` · ${new Date(item.updatedAt).toLocaleString()}` : ""}`)]), remove]));
       }
-      if (!historyBody.children.length) historyBody.append(el("p", "No saved conversations for this model yet."));
+      if (!historyBody.children.length) historyBody.append(el("p", `No saved conversations for this ${subjectLabel} yet.`));
     } catch (error) { historyBody.replaceChildren(el("p", error.message, "model-ai-failure")); }
   }
   window.addEventListener("beforeunload", () => { clearTimeout(pollTimer); clearTimeout(loginTimer); clearInterval(elapsedTimer); });
   return {
     open,
-    async modelChanged() {
-      if (contextId === getModelId()) return;
-      generation++; chat = null; transcriptKey = ""; input.value = ""; clearTimeout(pollTimer); clearInterval(elapsedTimer); elapsedTimer = null; contextId = getModelId();
+    async subjectChanged() {
+      if (contextId === getSubjectId()) return;
+      generation++; chat = null; transcriptKey = ""; input.value = ""; tell(); clearTimeout(pollTimer); clearInterval(elapsedTimer); elapsedTimer = null; contextId = getSubjectId();
       if (opened) { busy = true; controls(); await guard(load); busy = false; render(); }
     },
   };
+}
+
+export function createModelAssistant({ trigger, getModelId, onModelChanged, api = "/api/v1/schemoo/ai" }) {
+  const assistant = createProductAssistant({
+    trigger, getSubjectId: getModelId, onSubjectChanged: onModelChanged, api,
+    productLabel: "Schemoo", subjectLabel: "model", subjectKey: "modelId",
+    subjectQueryKey: "model_id", revisionKey: "modelRevision", title: "Model assistant",
+    emptyTitle: "Shape your semantic model",
+    emptyDescription: "Explore tables and relationships, explain a filter, or describe a model change. Your saved model provides the context.",
+    examplePrompts: ["Explain this model and its relationships.", "Check this model for issues.", "Help me build a useful preview query."],
+    resultOperations: ["execute_model", "get_execution", "get_result_page", "parameter_values", "domain_values"],
+  });
+  return { ...assistant, modelChanged: assistant.subjectChanged };
 }

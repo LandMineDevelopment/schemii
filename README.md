@@ -12,6 +12,13 @@ Schemii is a local, self-hosted PostgreSQL design and analytics workbench made u
 - **Schemoo** defines durable semantic models over an explicit saved connection and schema, including relationships, derived fields, and required or optional model scopes.
 - **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore streamed results, and drill into contributing rows cached in their browser.
 
+All three products have an AI assistant with the same conversation, provider,
+approval, and permission controls. Each assistant has its own product tools and
+action settings. Schemer conversations belong to one dashboard. A dashboard
+author can ask for saved dashboard changes; a view-only user can ask about the
+dashboard and run permitted report reads through their assigned database role.
+Assistant settings cannot add edit, export, or drill rights to a shared report.
+
 The launcher runs an authenticated private deployment with local accounts, per-product roles, and role-managed PostgreSQL connections. It does not add public ingress. See [Accounts and database roles](docs/accounts-and-roles.md) for setup, permissions, and rollout scope. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
 
 ## Installation

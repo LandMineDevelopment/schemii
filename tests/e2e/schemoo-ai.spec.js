@@ -37,7 +37,7 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
       error: "This model is not available through the connected provider account. Choose another model; your conversation is kept." };
     return route.fulfill({ json: chat });
   });
-  await page.route("**/assistant-fixture", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/common/ui.css"><link rel="stylesheet" href="/assets/common/searchable-select.css"><link rel="stylesheet" href="/assets/common/model-assistant.css"></head><body><button id="open">Open model assistant</button><script type="module">import { createModelAssistant } from '/assets/common/model-assistant.js'; window.modelRefreshes = []; createModelAssistant({trigger:document.querySelector('#open'),getModelId:()=> '${modelId}',onModelChanged:async(id,revision)=>{window.modelRefreshes.push({id,revision});return 'Saved model refreshed.';}});</script></body></html>` }));
+  await page.route("**/assistant-fixture", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/common/ui.css"><link rel="stylesheet" href="/assets/common/searchable-select.css"><link rel="stylesheet" href="/assets/common/model-assistant.css"></head><body><button id="open">Open model assistant</button><script type="module">import { createModelAssistant } from '/assets/common/model-assistant.js'; window.modelRefreshes = []; window.currentModelId = '${modelId}'; window.assistant = createModelAssistant({trigger:document.querySelector('#open'),getModelId:()=> window.currentModelId,onModelChanged:async(id,revision)=>{window.modelRefreshes.push({id,revision});return 'Saved model refreshed.';}});</script></body></html>` }));
   if (shell) {
     const catalog = { database: "fixture", namespace: "public", fingerprint: "fixture-v1", notice: "Isolated browser fixture", tables: [{ name: "people", primaryKey: ["id"], columns: [{ name: "id", dataType: "integer", nullable: false }, { name: "name", dataType: "text", nullable: false }] }], relationships: [], positions: [{ name: "people", x: 80, y: 80 }] };
     const saved = { id: modelId, connectionId: "pg_fixture", namespace: "public", name: "Assistant shell fixture", revision: 1, layoutRevision: 1, exploreRevision: 1, catalogFingerprint: catalog.fingerprint, ...splitDraft(importedDraft(catalog)) };
@@ -239,6 +239,18 @@ test("permissions, provider selection, and history retain conversation context",
   await history.getByRole("button", { name: "Model review", exact: true }).click();
   await expect(history).toBeHidden();
   await expect(page.locator(".model-ai-markdown strong")).toHaveText("relationships");
+});
+
+test("switching the selected subject clears the previous conversation notice", async ({ page }) => {
+  await fixture(page);
+  await page.getByRole("button", { name: "New conversation" }).click();
+  await expect(page.locator(".model-ai-notice")).toContainText("Started a new conversation");
+  await page.evaluate(async () => {
+    window.currentModelId = "model_another_fixture";
+    await window.assistant.modelChanged();
+  });
+  await expect(page.locator(".model-ai-notice")).toBeHidden();
+  await expect(page.locator(".model-ai-empty")).toBeVisible();
 });
 
 test("permissions can revoke a pending batch and model selection can stop an active turn", async ({ page }) => {

@@ -36,7 +36,7 @@ _MAX_MODELS_PER_ROLE = 32
 # Typed diagnostics and bulk-job routes add handlers and request models to the
 # source inventory. Keep modest bounded headroom for the registered API graph.
 _MAX_OBJECTS = DEFAULT_OBJECT_LIMIT * 4
-_MAX_ROUTES = 200
+_MAX_ROUTES = 256
 _MAX_DOCSTRING_CHARACTERS = DEFAULT_DOCSTRING_LIMIT
 _MAX_HIGHLIGHT_SEGMENTS = DEFAULT_HIGHLIGHT_SEGMENT_LIMIT
 _MAX_SOURCE_CHARACTERS = DEFAULT_SOURCE_LIMIT

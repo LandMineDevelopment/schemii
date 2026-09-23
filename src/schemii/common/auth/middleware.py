@@ -13,6 +13,8 @@ from .service import COOKIE, PRODUCT_CAPABILITIES, SCHEMER_AUTHOR, PROVISION_CAP
 PUBLIC = {'/api/v1/auth/status','/api/v1/auth/setup','/api/v1/auth/login','/api/v1/readiness'}
 REPORT_READ = re.compile(r'^/api/v1/schemer/dashboards(?:/[^/]+(?:/context)?)?$')
 REPORT_RUN = re.compile(r'^/api/v1/schemer/dashboards/[^/]+/(?:parameter-values|executions(?:/stream)?|tiles/[^/]+/(?:plan|parameter-values|executions(?:/stream)?|export))$')
+SCHEMER_AI = re.compile(r'^/api/v1/schemer/ai(?:/settings|/chats(?:/[^/]+(?:/(?:messages|preferences|approval|cancel))?)?)?$')
+SELF_AI = re.compile(r'^/api/v1/ai/(?:status|credentials/[^/]+|prototype/(?:credentials|catalog|login|logins/[^/]+))$')
 RESULT_READ = re.compile(r'^/api/v1/common/query-executions/[^/]+(?:/activity|/results/[^/]+(?:/rows|/export\.csv)?)?$')
 ACCOUNT_ENDPOINTS = {'/api/v1/session','/api/v1/auth/me','/api/v1/auth/logout','/api/v1/auth/change-password'}
 DEVELOPER_ENDPOINTS = {'/api-map','/db-map','/system-map','/openapi.json','/docs','/redoc'}
@@ -32,6 +34,7 @@ def permits_api(path, method, capabilities):
     if path.startswith('/api/v1/schemer/'):
         if SCHEMER_AUTHOR in rights and 'schemer:access' in rights: return True
         if 'schemer:access' not in rights: return False
+        if SCHEMER_AI.fullmatch(path): return True
         return ((method in {'GET','HEAD'} and bool(REPORT_READ.fullmatch(path)))
                 or (method == 'POST' and bool(REPORT_RUN.fullmatch(path))))
     if path == '/api/v1/connections' or path.startswith('/api/v1/connections/'):
@@ -40,7 +43,7 @@ def permits_api(path, method, capabilities):
         return author_products or (method == 'DELETE' and 'schemer:access' in rights
                                    and bool(RESULT_READ.fullmatch(path)))
     if path == '/api/v1/ai' or path.startswith('/api/v1/ai/'):
-        return author_products
+        return author_products or ('schemer:access' in rights and bool(SELF_AI.fullmatch(path)))
     if path == '/api/v1/activity':
         return bool(rights.intersection(PRODUCT_CAPABILITIES))
     return False
