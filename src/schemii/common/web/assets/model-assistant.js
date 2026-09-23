@@ -47,7 +47,10 @@ export function createProductAssistant({
   const send = createIconButton({ icon: "run", label: "Send", className: "ui-button primary" });
   send.type = "submit";
   const cancel = button("Stop", () => void act("cancel", {}), "stop");
-  const permissions = button("Assistant settings", () => void showSettings(), "settings");
+  const settingsButton = button("Assistant settings", () => void showSettings(), "settings");
+  const permissionsCopy = el("strong", "No actions enabled");
+  const permissions = element("button", { type: "button", className: "model-ai-permissions-summary", attrs: { "aria-label": "Assistant permissions" } }, [el("span", "Permissions"), permissionsCopy]);
+  permissions.onclick = () => void showSettings();
   const history = button("Conversation history", () => void showHistory(), "history");
   const fresh = button("New conversation", () => void guard(async () => {
     if (busy) return;
@@ -56,7 +59,7 @@ export function createProductAssistant({
   }), "new-chat");
   const retry = button("Refresh", () => void guard(async () => { if (chat) await refresh(); else await load(); }));
   const form = element("form", { className: "model-ai-composer" }, [input, element("div", {}, [el("small", "Enter to send · Shift + Enter for a new line"), cancel, send])]);
-  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", `${productLabel.toUpperCase()} / AI`), el("h2", title)]), status, history, fresh, permissions, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [element("div", { className: "model-ai-model-options" }, [modelSelect, element("label", { className: "model-ai-reasoning" }, [el("span", "Reasoning"), reasoningSelect])]), disclosure]), notice, scroll, form);
+  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", `${productLabel.toUpperCase()} / AI`), el("h2", title)]), status, history, fresh, settingsButton, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [element("label", {}, [el("span", "Model"), modelSelect]), element("label", {}, [el("span", "Reasoning"), reasoningSelect]), permissions, disclosure]), notice, scroll, form);
   document.body.append(panel);
   const modelPicker = enhanceModelPicker(modelSelect, { refresh: () => refreshProviders({ refresh: true }) });
   const settingsDialog = dialog("Assistant settings"), historyDialog = dialog("Conversation history");
@@ -97,6 +100,11 @@ export function createProductAssistant({
     saveSettings.disabled = busy;
     permissionEditor?.setBusy(busy);
     messages.querySelectorAll(".model-ai-approval button").forEach(control => { control.disabled = busy; });
+    const permitted = new Set(chat?.availableActions || getAvailableActions?.(settings?.actions || []) || (settings?.actions || []).map(action => action.id));
+    const actions = (settings?.actions || []).filter(action => permitted.has(action.id));
+    const modes = chat?.modes || settings?.modes || {};
+    const enabled = actions.filter(action => modes[action.id] !== "disabled").length;
+    permissionsCopy.textContent = enabled ? `${enabled} of ${actions.length} actions` : "No actions enabled";
     const automatic = Object.values(chat?.modes || settings?.modes || {}).includes("automatic");
     const provider = runtime?.providers?.find(item => item.id === (chat?.providerId || selected()?.providerId));
     disclosure.textContent = `${automatic ? "Automatic actions enabled. Other actions require batch approval." : "Review each permitted action batch before it runs."} ${provider?.privacy || provider?.privacyNotice || ""}`;

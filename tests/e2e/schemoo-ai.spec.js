@@ -223,7 +223,9 @@ test("shared activity respects reduced motion without hiding work status", async
 
 test("permissions, provider selection, and history retain conversation context", async ({ page }) => {
   const requests = await fixture(page);
-  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const summary = page.getByRole("button", { name: "Assistant permissions", exact: true });
+  await expect(summary).toContainText("2 of 2 actions");
+  await summary.click();
   const settings = page.getByRole("dialog", { name: "Assistant settings" });
   await expect(settings.getByRole("button", { name: "Connect Codex", exact: true })).toBeVisible();
   await settings.getByRole("combobox", { name: "Change model", exact: true }).selectOption("disabled");
