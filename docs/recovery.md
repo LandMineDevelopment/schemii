@@ -2,7 +2,7 @@
 
 Run recovery through `./start.sh`. The launcher serializes these operations with
 normal starts. Recovery never requires direct Docker commands or elevated shell
-privileges. Python 3 is required on the host.
+privileges. Python 3.10 or later is required on the host.
 
 ## Make and verify a private backup
 

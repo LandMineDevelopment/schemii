@@ -41,6 +41,41 @@ test("workspace toolbar follows Tables, Views, and SQL contexts", async ({ page,
   await expect(toolbar.getByRole("button", { name: "Undo design change" })).toBeHidden();
 });
 
+for (const loadingPhase of ["workspaces", "design snapshot"]) {
+  test(`a layer chosen while ${loadingPhase} loads survives startup and browser history`, async ({ page, request }) => {
+    const workspace = await databaseWorkspace(request);
+    const endpoint = loadingPhase === "workspaces"
+      ? "**/api/v1/schemii/workspaces"
+      : `**/api/v1/schemii/workspaces/${workspace.id}/design/snapshot`;
+    let release, observed;
+    const held = new Promise(resolve => { release = resolve; });
+    const requested = new Promise(resolve => { observed = resolve; });
+    await page.route(endpoint, async route => {
+      observed();
+      await held;
+      await route.continue();
+    });
+    try {
+      await page.goto(`/?workspace=${workspace.id}&layer=tables`);
+      await requested;
+      const toolbar = page.locator("#tool-rail");
+      await page.getByRole("button", { name: "Views", exact: true }).click();
+      await expect(toolbar).toHaveAttribute("aria-label", "Views tools");
+      release();
+      await expect(toolbar.getByRole("button", { name: "Create view", exact: true })).toBeEnabled();
+      await expect(toolbar).toHaveAttribute("aria-label", "Views tools");
+      await expect(page).toHaveURL(new RegExp(`workspace=${workspace.id}.*layer=views`));
+
+      await page.getByRole("button", { name: "SQL", exact: true }).click();
+      await expect(toolbar).toHaveAttribute("aria-label", "SQL tools");
+      await page.goBack();
+      await expect(toolbar).toHaveAttribute("aria-label", "Views tools");
+      await page.goForward();
+      await expect(toolbar).toHaveAttribute("aria-label", "SQL tools");
+    } finally { release(); }
+  });
+}
+
 test("safe-read Console runs the cursor statement and renders PostgreSQL column types", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);

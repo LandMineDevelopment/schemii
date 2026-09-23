@@ -580,6 +580,7 @@ const state = {
   canvasResizeFrame: null,
   preferenceTimer: null,
   navigationGeneration: 0,
+  layerNavigationGeneration: 0,
   restoringNavigation: false,
 };
 syncWorkspaceToolbar(elements.toolRail, state.activeLayer);
@@ -1065,7 +1066,7 @@ function currentWorkspaceNavigation() {
 }
 
 function syncWorkspaceNavigation(historyMode = "replace") {
-  if (!historyMode || state.restoringNavigation) return;
+  if (!historyMode || !state.startupComplete || state.restoringNavigation) return;
   const next = workspaceNavigationHref(window.location.href, currentWorkspaceNavigation());
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next === current) return;
@@ -1127,7 +1128,7 @@ function applyWorkspaceNavigation(navigation) {
   }
 }
 
-async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } = {}) {
+async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, layerGeneration = state.layerNavigationGeneration } = {}) {
   const generation = ++state.navigationGeneration;
   const wasRestoring = state.restoringNavigation;
   state.restoringNavigation = true;
@@ -1154,7 +1155,9 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } =
       if (!await openWorkspace(workspace, { historyMode: null })) return false;
     }
     if (generation !== state.navigationGeneration || !state.catalog) return false;
-    applyWorkspaceNavigation(navigation);
+    // A layer chosen during loading is newer than the URL being restored.
+    applyWorkspaceNavigation(layerGeneration === state.layerNavigationGeneration
+      ? navigation : { ...navigation, layer: state.activeLayer, tableId: null, table: null, viewId: null, view: null, viewKind: null });
     restored = true;
     return true;
   } finally {
@@ -1321,6 +1324,8 @@ async function loadRuntime() {
 
 async function bootstrap() {
   const requestedNavigation = readWorkspaceNavigation(window.location.href);
+  const layerGeneration = state.layerNavigationGeneration;
+  setLayerState(requestedNavigation.layer);
   state.startupComplete = false;
   state.connectionsLoading = true;
   state.workspacesLoading = true;
@@ -1329,7 +1334,7 @@ async function bootstrap() {
   renderWorkspaces();
   await Promise.all([loadRuntime(), loadConnections(), loadWorkspaces()]);
   state.startupComplete = true;
-  await restoreWorkspaceNavigation(requestedNavigation, { notifyMissing: true });
+  await restoreWorkspaceNavigation(requestedNavigation, { notifyMissing: true, layerGeneration });
   renderCatalogState();
   updateHeader();
 }
@@ -2465,7 +2470,8 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
       canvasPositions: designPositions(design, layout),
     });
     const navigation = readWorkspaceNavigation(window.location.href);
-    if (navigation.workspaceId === workspaceId) {
+    // An enclosing navigation restore owns the final selection after loading.
+    if (!state.restoringNavigation && navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
       syncWorkspaceNavigation("replace");
     }
@@ -2543,7 +2549,8 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
     }
     renderWorkspaces();
     const navigation = readWorkspaceNavigation(window.location.href);
-    if (navigation.workspaceId === workspaceId) {
+    // An enclosing navigation restore owns the final selection after loading.
+    if (!state.restoringNavigation && navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
       syncWorkspaceNavigation("replace");
     }
@@ -5237,6 +5244,7 @@ function setLayerState(layer) {
 }
 
 function setLayer(layer, { historyMode = "push" } = {}) {
+  if (historyMode === "push") state.layerNavigationGeneration++;
   setLayerState(layer);
   if (layer === "views") renderViews();
   if (layer === "tables") window.requestAnimationFrame(() => canvas.refreshGeometry());
