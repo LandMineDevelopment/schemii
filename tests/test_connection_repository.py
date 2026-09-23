@@ -8,8 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from schemii.common.connections.models import (
+    SCHEMII_CONNECTION_OWNER_ID,
     PostgresConnectionCreate,
+    PostgresConnectionProfile,
     PostgresConnectionUpdate,
+    ResolvedPostgresConnection,
 )
 from schemii.common.connections.postgres_store import PostgresConnectionRepository
 from schemii.common.connections.service import ConnectionService
@@ -31,6 +34,7 @@ class RecordingCursor:
         self.row = {
             "id": "pg_" + "1" * 32,
             "owner_id": "owner",
+            "ownership": "user",
             "revision": 1,
             "name": "Reporting",
             "host": "localhost",
@@ -129,6 +133,8 @@ def test_connections_are_owner_scoped_and_profiles_are_redacted() -> None:
     profile = repository.create("owner-a", request())
 
     assert repository.list("owner-a") == [profile]
+    assert profile.owner_id == "owner-a"
+    assert profile.ownership == "user"
     assert repository.list("owner-b") == []
     assert "password" not in profile.model_dump()
     assert repository.resolve("owner-a", profile.id).password.get_secret_value() == "secret"
@@ -139,6 +145,48 @@ def test_connections_are_owner_scoped_and_profiles_are_redacted() -> None:
         pass
     else:  # pragma: no cover - assertion branch.
         raise AssertionError("another owner accessed the connection")
+
+
+def test_schemii_owned_profiles_are_explicit_and_separate_from_personal_profiles() -> None:
+    repository = InMemoryConnectionRepository()
+    shared = repository.create(SCHEMII_CONNECTION_OWNER_ID, request("shared secret"))
+    personal = repository.create("person-a", request("personal secret"))
+
+    assert shared.ownership == "schemii"
+    assert shared.owner_id == SCHEMII_CONNECTION_OWNER_ID
+    assert personal.ownership == "user"
+    assert repository.list("person-a") == [personal]
+    assert repository.list(SCHEMII_CONNECTION_OWNER_ID) == [shared]
+    resolved = repository.resolve(SCHEMII_CONNECTION_OWNER_ID, shared.id)
+    assert resolved.ownership == "schemii"
+    assert resolved.owner_id == SCHEMII_CONNECTION_OWNER_ID
+    assert resolved.password.get_secret_value() == "shared secret"
+    with pytest.raises(ConnectionNotFoundError):
+        repository.get("person-a", shared.id)
+    with pytest.raises(ConnectionNotFoundError):
+        repository.resolve(SCHEMII_CONNECTION_OWNER_ID, personal.id)
+
+    updated = repository.update(
+        SCHEMII_CONNECTION_OWNER_ID,
+        shared.id,
+        PostgresConnectionUpdate(expected_revision=1, name="Renamed shared"),
+    )
+    assert updated.ownership == "schemii"
+
+
+def test_connection_models_reject_ownership_owner_mismatches() -> None:
+    repository = InMemoryConnectionRepository()
+    profile = repository.create("person-a", request())
+    resolved = repository.resolve("person-a", profile.id)
+
+    with pytest.raises(ValidationError, match="ownership does not match"):
+        PostgresConnectionProfile.model_validate(
+            {**profile.model_dump(), "ownership": "schemii"}
+        )
+    with pytest.raises(ValidationError, match="ownership does not match"):
+        ResolvedPostgresConnection.model_validate(
+            {**resolved.model_dump(), "owner_id": SCHEMII_CONNECTION_OWNER_ID}
+        )
 
 
 def test_update_preserves_replaces_and_removes_password() -> None:

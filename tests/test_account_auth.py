@@ -1,11 +1,12 @@
 """Security regression checks for account sessions and role boundaries."""
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
 from schemii.common.auth.middleware import AuthenticationMiddleware
 from schemii.common.auth.routes import router
 from schemii.common.auth.service import AuthService, COOKIE
+from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
 
 
 @pytest.fixture
@@ -174,12 +175,12 @@ def test_managed_connection_requires_same_role_product_and_authoring_grant(clien
         state['roles']['product']=dict(id='product',name='Model access',capabilities=['schemoo:access'],
             user_ids=[user['id']],connections=[],dashboards=[])
         state['roles']['profile']=dict(id='profile',name='Managed profile',capabilities=[],
-            user_ids=[user['id']],connections=[dict(connection_id='pg_shared',owner_id='owner_a',allow_authoring=True)],dashboards=[])
+            user_ids=[user['id']],connections=[dict(connection_id='pg_shared',owner_id=SCHEMII_CONNECTION_OWNER_ID,allow_authoring=True)],dashboards=[])
     access=app.state.auth.connection_access
     assert access(user['id'],'pg_shared','schemoo') is None
     with app.state.auth.store.transaction(write=True) as state:
         state['roles']['profile']['capabilities']=['schemoo:access']
-    assert access(user['id'],'pg_shared','schemoo')['owner_id']=='owner_a'
+    assert access(user['id'],'pg_shared','schemoo')['owner_id']==SCHEMII_CONNECTION_OWNER_ID
     assert access(user['id'],'pg_shared','schemii') is None
     assert access(user['id'],'pg_shared','schemer') is None
     with app.state.auth.store.transaction(write=True) as state:
@@ -187,23 +188,22 @@ def test_managed_connection_requires_same_role_product_and_authoring_grant(clien
     assert access(user['id'],'pg_shared','schemer') is None
     with app.state.auth.store.transaction(write=True) as state:
         state['roles']['profile']['capabilities']=['schemer:access','schemer:author']
-    assert access(user['id'],'pg_shared','schemer')['owner_id']=='owner_a'
+    assert access(user['id'],'pg_shared','schemer')['owner_id']==SCHEMII_CONNECTION_OWNER_ID
     with app.state.auth.store.transaction(write=True) as state:
-        state['roles']['other']=dict(id='other',name='Other identity',capabilities=['schemer:access','schemer:author'],
+        state['roles']['other']=dict(id='other',name='Legacy person-owned grant',capabilities=['schemer:access','schemer:author'],
             user_ids=[user['id']],connections=[dict(connection_id='pg_shared',owner_id='owner_b',allow_authoring=True)],dashboards=[])
-    with pytest.raises(HTTPException) as failure:
-        access(user['id'],'pg_shared','schemer')
-    assert failure.value.status_code==409
+    assert access(user['id'],'pg_shared','schemer')['owner_id']==SCHEMII_CONNECTION_OWNER_ID
+    assert all(grant['owner_id']==SCHEMII_CONNECTION_OWNER_ID for grant in app.state.auth.connection_grants(user['id']))
 
 
 def test_provisioner_can_bind_authoring_profile_to_product_role(client,app):
     from types import SimpleNamespace
     bootstrap(client)
-    app.state.services=SimpleNamespace(connections=SimpleNamespace(get=lambda owner, connection: object()))
+    app.state.services=SimpleNamespace(connections=SimpleNamespace(get=lambda owner, connection: SimpleNamespace(ownership='schemii')))
     user=client.post('/api/v1/admin/accounts',json=dict(username='analyst',display_name='Analyst',password='analyst-password-123')).json()
     role=client.post('/api/v1/admin/roles',json=dict(
         name='Organization modeling',capabilities=['schemoo:access'],user_ids=[user['id']],
-        connections=[dict(connection_id='pg_organization',owner_id='user_local_prototype',allow_authoring=True)],
+        connections=[dict(connection_id='pg_organization',owner_id=SCHEMII_CONNECTION_OWNER_ID,allow_authoring=True)],
     ))
     assert role.status_code==201
     assert app.state.auth.connection_access(user['id'],'pg_organization','schemoo')['role_id']==role.json()['id']
@@ -211,25 +211,29 @@ def test_provisioner_can_bind_authoring_profile_to_product_role(client,app):
 
 def test_admin_cannot_share_other_users_private_credentials(client,app):
     from types import SimpleNamespace
-    app.state.services=SimpleNamespace(connections=SimpleNamespace(get=lambda *args: object()))
+    app.state.services=SimpleNamespace(connections=SimpleNamespace(get=lambda *args: SimpleNamespace(ownership='user')))
     bootstrap(client)
     private=dict(connection_id='pg_private',owner_id='another_user')
     response=client.post('/api/v1/admin/roles',json=dict(name='Private access',connections=[private]))
-    assert response.status_code==403
+    assert response.status_code==422
     with app.state.auth.store.transaction(write=True) as state:
         state['roles']['existing']=dict(id='existing',name='Already managed',capabilities=[],user_ids=[],connections=[{**private,'allow_authoring':False}],dashboards=[])
     response=client.post('/api/v1/admin/roles',json=dict(name='Reused access',connections=[private]))
-    assert response.status_code==201
+    assert response.status_code==422
+    # The reserved owner alone is insufficient if the stored profile is not marked Schemii-owned.
+    response=client.post('/api/v1/admin/roles',json=dict(name='Forged pool access',connections=[dict(
+        connection_id='pg_private',owner_id=SCHEMII_CONNECTION_OWNER_ID)]))
+    assert response.status_code==422
 
 
 def test_role_connection_dependencies_explain_blocked_deletion(client,app):
     from schemii.common.auth.dependencies import AccountConnectionDependencies
     bootstrap(client)
     with app.state.auth.store.transaction(write=True) as state:
-        state['roles']['existing']=dict(id='existing',name='Report viewers',capabilities=[],user_ids=[],connections=[dict(connection_id='pg_managed',owner_id='user_local_prototype',allow_authoring=False)],dashboards=[])
+        state['roles']['existing']=dict(id='existing',name='Report viewers',capabilities=[],user_ids=[],connections=[dict(connection_id='pg_managed',owner_id=SCHEMII_CONNECTION_OWNER_ID,allow_authoring=False)],dashboards=[])
     provider=AccountConnectionDependencies(app.state.auth)
-    assert provider.count_for_connection('user_local_prototype','pg_managed')==1
-    dependency=provider.dependencies_for_connection('user_local_prototype','pg_managed')[0]
+    assert provider.count_for_connection(SCHEMII_CONNECTION_OWNER_ID,'pg_managed')==1
+    dependency=provider.dependencies_for_connection(SCHEMII_CONNECTION_OWNER_ID,'pg_managed')[0]
     assert dependency.name=='Report viewers'
     assert dependency.deletion_blocked
     assert provider.count_for_connection('another_user','pg_managed')==0
@@ -244,12 +248,14 @@ def test_admin_inventory_excludes_private_profiles(client,app):
     private=SimpleNamespace(id='pg_private',name='Private',database='private_db',username='private_login')
     managed=SimpleNamespace(id='pg_managed',name='Managed',database='report_db',username='report_login')
     app.state.services=SimpleNamespace(
-        connections=SimpleNamespace(list=lambda owner: [private,managed] if owner==user['id'] else []),
+        connections=SimpleNamespace(list=lambda owner: [private] if owner==user['id'] else [],
+                                    list_schemii_owned=lambda: [managed]),
         dashboards=SimpleNamespace(list=lambda owner: []),
     )
     with app.state.auth.store.transaction(write=True) as state:
-        state['roles']['existing']=dict(id='existing',name='Managed',capabilities=[],user_ids=[],connections=[dict(connection_id='pg_managed',owner_id=user['id'],allow_authoring=False)],dashboards=[])
+        state['roles']['existing']=dict(id='existing',name='Legacy personal grant',capabilities=[],user_ids=[],connections=[dict(connection_id='pg_private',owner_id=user['id'],allow_authoring=False)],dashboards=[])
     response=client.get('/api/v1/admin/resources')
     assert response.status_code==200
     assert [item['id'] for item in response.json()['connections']]==['pg_managed']
+    assert response.json()['connections'][0]['ownership']=='schemii'
     assert 'private_login' not in response.text

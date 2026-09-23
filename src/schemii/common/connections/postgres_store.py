@@ -13,11 +13,13 @@ from schemii.common.metadata.crypto import CredentialCipher, EncryptedCredential
 from schemii.common.metadata.users import ensure_local_metadata_user
 
 from .models import (
+    SCHEMII_CONNECTION_OWNER_ID,
     PostgresConnectionCreate,
     PostgresConnectionMetadata,
     PostgresConnectionProfile,
     PostgresConnectionUpdate,
     ResolvedPostgresConnection,
+    ownership_for_owner,
 )
 from .store import (
     MAX_CONNECTIONS_PER_OWNER,
@@ -90,7 +92,17 @@ class PostgresConnectionRepository:
         encrypted = self._encrypt(owner_id, connection_id, request.password)
         with self._transaction() as connection:
             with connection.cursor() as cursor:
-                ensure_local_metadata_user(cursor, owner_id)
+                if owner_id == SCHEMII_CONNECTION_OWNER_ID:
+                    cursor.execute(
+                        "SELECT id FROM metadata.users WHERE id = %s FOR UPDATE",
+                        (owner_id,),
+                    )
+                    if cursor.fetchone() is None:
+                        raise ConnectionStorageUnavailableError(
+                            "Schemii-owned connection identity is unavailable"
+                        )
+                else:
+                    ensure_local_metadata_user(cursor, owner_id)
                 cursor.execute(
                     """
                     SELECT count(*) AS connection_count
@@ -104,15 +116,16 @@ class PostgresConnectionRepository:
                 cursor.execute(
                     """
                     INSERT INTO metadata.postgres_connections (
-                        id, owner_id, name, host, port, database_name, username,
+                        id, owner_id, ownership, name, host, port, database_name, username,
                         ssl_mode, connect_timeout
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
                         connection_id,
                         owner_id,
+                        ownership_for_owner(owner_id),
                         request.name,
                         request.host,
                         request.port,
@@ -305,6 +318,7 @@ class PostgresConnectionRepository:
                 return ResolvedPostgresConnection(
                     id=row["id"],
                     owner_id=row["owner_id"],
+                    ownership=row["ownership"],
                     revision=row["revision"],
                     **self._metadata_row(row),
                     password=password,
@@ -399,6 +413,7 @@ class PostgresConnectionRepository:
         return PostgresConnectionProfile(
             id=row["id"],
             owner_id=row["owner_id"],
+            ownership=row["ownership"],
             revision=row["revision"],
             **PostgresConnectionRepository._metadata_row(row),
             credential_stored=row["credential_stored"],

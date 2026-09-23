@@ -1,7 +1,7 @@
 # Accounts and database roles
 
 This private deployment has administrator-provisioned local accounts, per-product
-roles, and role-managed PostgreSQL connections. It does not add public ingress or
+roles, and Schemii-owned read-only PostgreSQL accounts. It does not add public ingress or
 automatically invite anyone to a Tailscale tailnet.
 
 ## First launch and accounts
@@ -32,16 +32,33 @@ has `accounts:provision`: it permits account and role management, but implies no
 product or PostgreSQL privilege. Migration 0039 preserves existing author and
 administrator product access while making future assignments explicit.
 
-A role may also bind an existing saved PostgreSQL connection. To let a member
-use it in Schemii or Schemoo tools or edit Schemer dashboards, check **Use in
-Schemii and Schemoo tools or Schemer editing** on the connection grant, even if
-the PostgreSQL login is read-only. This selects the login for those app workflows;
-it does not grant database writes. The grant and relevant product capability must
-be in the same role. The profile and encrypted password remain owned by the
-original account; the friend sees non-secret connection details but cannot edit
-or delete it. New Schemii workspaces and Schemoo models remain private to the
-friend who created them, while pointing to that managed connection. No
-credentials are copied.
+An application provisioner can create a **Schemii-owned read-only database
+account** in Administration after a database administrator has created its
+PostgreSQL login and configured its grants and row policies. The provisioner
+saves the login as a Schemii-owned profile, tests connectivity, and grants
+that profile through a role. Multiple Schemii-owned profiles can point at the
+same database with different read-only PostgreSQL identities and therefore
+different RLS views. Their encrypted passwords stay in Schemii metadata and are
+never shown to role members. The application cannot create a PostgreSQL login,
+make a write-capable login safe by calling it read-only, or alter the database's
+RLS policies. A successful Schemii connection test does not certify read-only
+privileges or RLS; verify both directly in PostgreSQL before assignment.
+
+To let a member use a granted Schemii-owned profile in Schemii or Schemoo tools
+or edit Schemer dashboards, check **Use in Schemii and Schemoo tools or Schemer
+editing** on the connection grant. This permits those app workflows; it does not
+grant database writes. The grant and relevant product capability must be in the
+same role. New Schemii workspaces and Schemoo models remain private to the
+friend who created them, while pointing to the managed connection. No
+credentials are copied to that person's account.
+
+Users can also save several **user-owned connections** with their own PostgreSQL
+credentials under one Schemii login. Those profiles are private and are usable
+only with the relevant product capability. Administrators cannot turn a personal
+profile into a shared grant. Existing user-owned role grants from older metadata
+are inactive; replace each with a Schemii-owned profile and rebind affected
+dashboards before removing the legacy grant. The Administration role editor
+lists such legacy grants for migration but does not offer them for assignment.
 
 For a Schemer author to create a dashboard from a model, also grant
 `schemoo:access` so they can select or create that model. A report viewer needs
@@ -51,12 +68,14 @@ Export and drill-through are independent opt-ins. If roles assign different
 database identities to one report, access fails closed rather than choosing a
 stronger identity.
 
-To offer read-only and write-capable roles, create distinct PostgreSQL logins.
-Configure their table/column grants, row policies, and read/write/DDL privileges
-in PostgreSQL; save each login as a separate connection profile; then bind each
-profile to the intended app role. The app does not create or alter privileges in
-the organization database. Users who share one login share its database-visible
-identity. An application provisioner is not a PostgreSQL administrator.
+To offer distinct read-only RLS views, create distinct read-only PostgreSQL
+logins. Configure table/column grants and row policies in PostgreSQL; save each
+login as a separate Schemii-owned profile; then bind each profile to the intended
+app role. A user with their own write-capable PostgreSQL login may save it as a
+private profile, but that credential is not shared through roles. PostgreSQL
+alone decides whether it can write. Users who share one Schemii-owned login
+share its database-visible identity. An application provisioner is not a
+PostgreSQL administrator.
 
 ## Database enforcement and revocation
 

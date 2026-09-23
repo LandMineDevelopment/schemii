@@ -232,6 +232,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         39,
         40,
         41,
+        42,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -274,6 +275,7 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0039_product_access_roles.sql": "1f306b654fefc5e315543ad0d500713903fa6e2d810b9e28be515a794bd763ae",
         "0040_managed_model_sources.sql": "94cbe715704ed81c5201d61f493ae3450c5a7466eb422f224c3e5380477dd4b9",
         "0041_managed_schemii_targets.sql": "d06b6707a1e591b5a1785abbe02f008904ddd0bed94d0280166d822d5c6dacd7",
+        "0042_schemii_connection_ownership.sql": "21684a726de90bb8b5cafbcaf111dbfd5e0edc353d2a60ad538b7c3452c0aa62",
         "0034_ai_console_app_actions.sql": "507abfedba95dbfcede1f994af7823a7b596edd9a2973cbfd4927c50cbd0eff0",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"

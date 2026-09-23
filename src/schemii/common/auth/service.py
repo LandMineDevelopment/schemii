@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
 from .store import AuthStore
 
 COOKIE = 'schemii_session'
@@ -91,11 +92,11 @@ class AuthService:
                 'JOIN metadata.auth_roles r ON r.id=g.role_id '
                 'JOIN metadata.auth_user_roles ur ON ur.role_id=r.id '
                 'JOIN metadata.auth_accounts a ON a.user_id=ur.user_id '
-                'WHERE ur.user_id=%s AND NOT a.disabled AND g.connection_id=%s '
+                'WHERE ur.user_id=%s AND NOT a.disabled AND g.connection_id=%s AND g.owner_id=%s '
                 'AND g.allow_authoring AND r.capabilities ? %s '
                 + ('AND r.capabilities ? %s' if product == 'schemer' else ''),
-                (user_id, connection_id, capability, SCHEMER_AUTHOR) if product == 'schemer'
-                else (user_id, connection_id, capability),
+                (user_id, connection_id, SCHEMII_CONNECTION_OWNER_ID, capability, SCHEMER_AUTHOR) if product == 'schemer'
+                else (user_id, connection_id, SCHEMII_CONNECTION_OWNER_ID, capability),
             )
         else:
             with self.store.transaction() as state:
@@ -105,7 +106,8 @@ class AuthService:
                         and user_id in role['user_ids'] and capability in role['capabilities']
                         and (product != 'schemer' or SCHEMER_AUTHOR in role['capabilities'])
                         for grant in role['connections']
-                        if grant['connection_id'] == connection_id and grant['allow_authoring']]
+                        if grant['connection_id'] == connection_id and grant['owner_id'] == SCHEMII_CONNECTION_OWNER_ID
+                        and grant['allow_authoring']]
         owners = {row['owner_id'] for row in rows}
         if len(owners) > 1: raise HTTPException(409, 'Conflicting database identities are assigned by roles')
         return sorted(rows, key=lambda row: row['role_id'])[0] if rows else None
@@ -113,11 +115,14 @@ class AuthService:
     def _grants(self, user_id, key):
         if self.store.factory:
             table={'connections':'auth_role_connections','dashboards':'auth_role_dashboards'}[key]
-            return self.store.query('SELECT g.* FROM metadata.'+table+' g JOIN metadata.auth_user_roles ur ON ur.role_id=g.role_id JOIN metadata.auth_accounts a ON a.user_id=ur.user_id WHERE ur.user_id=%s AND NOT a.disabled',(user_id,))
+            owner_field = 'owner_id' if key == 'connections' else 'connection_owner_id'
+            return self.store.query('SELECT g.* FROM metadata.'+table+' g JOIN metadata.auth_user_roles ur ON ur.role_id=g.role_id JOIN metadata.auth_accounts a ON a.user_id=ur.user_id WHERE ur.user_id=%s AND NOT a.disabled AND g.'+owner_field+'=%s',(user_id,SCHEMII_CONNECTION_OWNER_ID))
         with self.store.transaction() as state:
             user = state['users'].get(user_id)
             if not user or user['disabled']: return []
-            return [{**g,'role_id':r['id']} for r in state['roles'].values() if user_id in r['user_ids'] for g in r[key]]
+            owner_field = 'owner_id' if key == 'connections' else 'connection_owner_id'
+            return [{**g,'role_id':r['id']} for r in state['roles'].values() if user_id in r['user_ids']
+                    for g in r[key] if g[owner_field] == SCHEMII_CONNECTION_OWNER_ID]
 
     def connection_grants(self, user_id): return self._grants(user_id, 'connections')
     def dashboard_grants(self, user_id): return self._grants(user_id, 'dashboards')

@@ -54,6 +54,8 @@ class ReportAccess:
         if not matches:
             raise ApiProblem(403, "report_access_revoked", "The role no longer has access to this database.")
         current = self.services.connections.get(self.grant["connection_owner_id"], self.grant["connection_id"])
+        if current.ownership != "schemii":
+            raise ApiProblem(403, "report_access_revoked", "The role no longer has a Schemii-owned database connection.")
         if current.revision != self.profile.revision:
             raise ApiProblem(409, "report_connection_changed", "The report connection changed. Reload the report.")
         current_dashboard = self.services.dashboards.get(self.grant["owner_id"], self.dashboard.id)
@@ -166,6 +168,8 @@ def prepare_dashboard(request, actor, dashboard_id, *, export=False, drill=False
     model = services.models.get(grant["owner_id"], dashboard.model_id)
     source = services.connections.get(model.connection_owner_id or grant["owner_id"], model.connection_id)
     profile = services.connections.get(grant["connection_owner_id"], grant["connection_id"])
+    if profile.ownership != "schemii":
+        raise ApiProblem(403, "report_access_revoked", "The role no longer has a Schemii-owned database connection.")
     if (source.host, source.port, source.database) != (profile.host, profile.port, profile.database):
         raise ApiProblem(409, "report_source_mismatch", "The assigned connection must target the report's database server and database.")
     access = ReportAccess(services, auth, actor, grant, dashboard, model, profile,

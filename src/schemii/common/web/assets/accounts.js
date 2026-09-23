@@ -53,11 +53,15 @@ function dialog(title) {
 }
 async function adminPage() {
   document.title = 'Administration · Schemii';
-  main.replaceChildren(...heading('Administration', 'Assign application access and database profiles through roles. PostgreSQL controls the rows, columns, and write operations available through each profile.'));
-  const [users, roles, resources] = await Promise.all([requestJson(`${ADMIN}/accounts`), requestJson(`${ADMIN}/roles`), requestJson(`${ADMIN}/resources`)]);
+  main.replaceChildren(...heading('Administration', 'Assign application access and Schemii-owned read-only database accounts through roles. PostgreSQL controls visible rows, columns, and write operations.'));
+  const [users, roles, resources, managedResult] = await Promise.all([
+    requestJson(`${ADMIN}/accounts`), requestJson(`${ADMIN}/roles`), requestJson(`${ADMIN}/resources`),
+    requestJson(`${ADMIN}/schemii-connections`).then(value => ({ connections: value.connections })).catch(error => ({ error })),
+  ]);
+  const managedConnections = managedResult.connections || [];
   const columns = el('div', { className: 'account-columns' });
-  const people = el('section', { className: 'account-panel' }, [el('h2', { text: 'People' }), button('Add user', () => editUser(null), true)]);
-  const rolePanel = el('section', { className: 'account-panel' }, [el('h2', { text: 'Roles' }), button('Create role', () => editRole(null), true)]);
+  const people = el('section', { className: 'account-panel', attrs: { 'aria-labelledby': 'admin-people-title' } }, [el('h2', { text: 'People', attrs: { id: 'admin-people-title' } }), button('Add user', () => editUser(null), true)]);
+  const rolePanel = el('section', { className: 'account-panel', attrs: { 'aria-labelledby': 'admin-roles-title' } }, [el('h2', { text: 'Roles', attrs: { id: 'admin-roles-title' } }), button('Create role', () => editRole(null), true)]);
   const userList = el('div', { className: 'account-list' });
   for (const user of users) userList.append(el('div', { className: 'account-row' }, [el('div', {}, [el('strong', { text: user.display_name || user.username }), el('small', { text: `${user.username} · ${user.disabled ? 'Disabled' : user.is_admin ? 'Administrator' : 'Active'}` })]), button('Edit', () => editUser(user))]));
   people.append(userList);
@@ -65,6 +69,50 @@ async function adminPage() {
   for (const role of roles) roleList.append(el('div', { className: 'account-row' }, [el('div', {}, [el('strong', { text: role.name }), el('small', { text: `${role.user_ids.length} members · ${role.connections.length} connections · ${role.dashboards.length} dashboards` })]), button('Edit', () => editRole(role))]));
   if (!roles.length) roleList.append(el('p', { text: 'Create a role to give people access to shared reports.' }));
   rolePanel.append(roleList); columns.append(people, rolePanel);
+  const connectionPanel = el('section', { className: 'account-panel', attrs: { 'aria-labelledby': 'schemii-connections-title' } }, [
+    el('h2', { text: 'Schemii-owned read-only database accounts', attrs: { id: 'schemii-connections-title' } }),
+    el('p', { text: 'Create and verify read-only PostgreSQL logins with the required row policies in each database first. Save their credentials here, then assign the accounts to roles. A connection test checks connectivity, not read-only privileges. People can use these accounts without seeing the passwords; their personal connections remain separate.' }),
+  ]);
+  const addManaged = button('Add Schemii-owned account', () => editManagedConnection(null), true);
+  if (managedResult.error) {
+    addManaged.disabled = true;
+    connectionPanel.append(el('p', { className: 'account-error', text: `Schemii-owned accounts could not be loaded: ${managedResult.error.message}`, attrs: { role: 'alert' } }), button('Retry loading accounts', adminPage));
+  } else {
+    const connectionList = el('div', { className: 'account-list' });
+    if (!managedConnections.length) connectionList.append(el('p', { text: 'No Schemii-owned accounts yet. Add a dedicated read-only PostgreSQL login to offer managed access.' }));
+    for (const connection of managedConnections) {
+      const status = el('p', { className: 'account-inline-status', attrs: { role: 'status' } });
+      const actions = el('div', { className: 'account-actions' }, [
+        button('Test connection', async event => {
+          const trigger = event.currentTarget; trigger.disabled = true; status.textContent = 'Testing saved database identity…';
+          try {
+            const result = await requestJson(`${ADMIN}/schemii-connections/${encodeURIComponent(connection.id)}/test`, { method: 'POST' });
+            status.textContent = `Connected to ${result.database} as the saved PostgreSQL account.`;
+          } catch (error) { status.textContent = `Connection test failed: ${error.message}`; }
+          finally { trigger.disabled = false; }
+        }),
+        button('Edit', () => editManagedConnection(connection)),
+        button('Delete', () => confirmAction({
+          title: 'Delete Schemii-owned account?',
+          message: `Delete “${connection.name}” from Schemii?`,
+          details: 'Any roles or saved work depending on this account must be removed first. The PostgreSQL login itself is not deleted.',
+          confirmLabel: 'Delete account',
+          onConfirm: async () => {
+            await requestJson(`${ADMIN}/schemii-connections/${encodeURIComponent(connection.id)}?expectedRevision=${connection.revision}`, { method: 'DELETE' });
+            await adminPage();
+          },
+        })),
+      ]);
+      connectionList.append(el('div', { className: 'account-row' }, [
+        el('div', {}, [
+          el('strong', { text: connection.name }),
+          el('small', { text: `Schemii-owned · ${connection.username}@${connection.host}:${connection.port}/${connection.database} · credential ${connection.credentialStored ? 'stored' : 'missing'}` }),
+          status,
+        ]), actions,
+      ]));
+    }
+    connectionPanel.append(addManaged, connectionList);
+  }
   const diagnostics = el('section', { className: 'account-panel', attrs: { id: 'system-diagnostics', 'aria-labelledby': 'system-diagnostics-title' } }, [
     el('h2', { text: 'System diagnostics', attrs: { id: 'system-diagnostics-title' } }),
     el('p', { text: 'Inspect the application topology and API/database paths. These pages are available only to application provisioners.' }),
@@ -81,7 +129,38 @@ async function adminPage() {
     ]));
   }
   diagnostics.append(diagnosticList);
-  main.append(link('Jump to system diagnostics', '#system-diagnostics'), columns, diagnostics);
+  main.append(columns, connectionPanel, link('Jump to system diagnostics', '#system-diagnostics'), diagnostics);
+  function editManagedConnection(connection) {
+    const d = dialog(connection ? 'Edit Schemii-owned account' : 'Add Schemii-owned account');
+    const name = field('Account name', { value: connection?.name || '' });
+    const host = field('PostgreSQL host', { value: connection?.host || '' });
+    const port = field('Port', { value: connection?.port ?? 5432, type: 'number' });
+    port.input.min = '1'; port.input.max = '65535'; port.input.step = '1';
+    const database = field('Database', { value: connection?.database || '' });
+    const username = field('PostgreSQL username', { value: connection?.username || '' });
+    const password = field(connection ? 'Replace password (leave blank to keep)' : 'PostgreSQL password', { type: 'password', autocomplete: 'new-password', required: !connection });
+    password.input.removeAttribute('minlength'); password.input.maxLength = 4096;
+    const sslMode = el('select', { attrs: { 'aria-label': 'SSL mode' } });
+    for (const [value, label] of [['verify-full', 'Verify full'], ['verify-ca', 'Verify CA'], ['require', 'Require'], ['prefer', 'Prefer'], ['allow', 'Allow'], ['disable', 'Disable']]) sslMode.append(el('option', { text: label, attrs: { value } }));
+    sslMode.value = connection?.sslMode || 'verify-full';
+    const timeout = field('Connect timeout (seconds)', { value: connection?.connectTimeout ?? 10, type: 'number' });
+    timeout.input.min = '1'; timeout.input.max = '30'; timeout.input.step = '1';
+    d.append(formWithSubmit(connection ? 'Save account' : 'Add account', async () => {
+      const values = { name: name.input.value.trim(), host: host.input.value.trim(), port: Number(port.input.value), database: database.input.value.trim(), username: username.input.value.trim(), sslMode: sslMode.value, connectTimeout: Number(timeout.input.value) };
+      const body = connection ? { expectedRevision: connection.revision } : values;
+      if (connection) for (const [key, value] of Object.entries(values)) if (value !== connection[key]) body[key] = value;
+      if (password.input.value) body.password = password.input.value;
+      if (connection && Object.keys(body).length === 1) throw new Error('No account details changed.');
+      await requestJson(`${ADMIN}/schemii-connections${connection ? `/${encodeURIComponent(connection.id)}` : ''}`, { method: connection ? 'PATCH' : 'POST', body });
+      password.input.value = '';
+      d.close(); await adminPage();
+    }, [
+      el('p', { text: connection ? 'This is a Schemii-owned account, not a personal connection. The password is never displayed; leave it blank to retain the saved credential.' : 'Use a dedicated read-only login already created in PostgreSQL. Its grants and RLS policies determine what members can see.' }),
+      name.node, host.node, port.node, database.node, username.node, password.node,
+      el('label', { className: 'account-field' }, ['SSL mode', sslMode]), timeout.node,
+    ]));
+    d.append(button('Cancel', () => d.close())); d.showModal();
+  }
   function editUser(user) {
     const d = dialog(user ? 'Edit user' : 'Add user');
     const username = field('Username', { value: user?.username || '', autocomplete: 'off' });
@@ -104,9 +183,11 @@ async function adminPage() {
       ['schemer:author', 'Schemer — create and edit dashboards'],
     ].map(([id, label]) => ({ id, ...check(label, role?.capabilities.includes(id)) }));
     const memberships = users.map(user => ({ id: user.id, ...check(`${user.display_name || user.username} (${user.username})`, role?.user_ids.includes(user.id)) }));
-    const profiles = resources.connections.map(connection => {
+    const roleConnections = resources.connections.filter(connection => connection.ownership === 'schemii');
+    const legacyConnections = (role?.connections || []).filter(grant => grant.owner_id !== 'user_schemii_connection_pool');
+    const profiles = roleConnections.map(connection => {
       const current = role?.connections.find(c => c.connection_id === connection.id && c.owner_id === connection.owner_id);
-      const enabled = check(`${connection.name || connection.id} · ${connection.database} · ${connection.username}`, !!current);
+      const enabled = check(`Schemii-owned read-only · ${connection.name || connection.id} · ${connection.database} · ${connection.username}`, !!current);
       const authoring = check('Use in Schemii and Schemoo tools or Schemer editing', current?.allow_authoring);
       const options = el('div', { className: 'account-editor', hidden: !current }, [authoring.node,
         el('p', { text: 'Enable this even for read-only PostgreSQL profiles. This permits app workflows; PostgreSQL still controls visible rows, columns, and write privileges.' }),
@@ -115,21 +196,22 @@ async function adminPage() {
       return { connection, input: enabled.input, authoring, node: el('div', { className: 'account-grant' }, [enabled.node, options]) };
     });
     const grants = resources.dashboards.map(dashboard => {
-      const current = role?.dashboards.find(g => g.dashboard_id === dashboard.id && g.owner_id === dashboard.owner_id);
+      const saved = role?.dashboards.find(g => g.dashboard_id === dashboard.id && g.owner_id === dashboard.owner_id);
+      const current = saved && roleConnections.some(c => c.id === saved.connection_id && c.owner_id === saved.connection_owner_id) ? saved : null;
       const enabled = check(dashboard.name, !!current), exp = check('Allow export', current?.can_export), drill = check('Allow drill-through', current?.can_drill);
       const select = el('select', { attrs: { 'aria-label': `Database connection for ${dashboard.name}` } });
       select.append(el('option', { text: 'Choose an authorized connection', attrs: { value: '' } }));
-      resources.connections.forEach((c, i) => select.append(el('option', { text: c.name || c.id, attrs: { value: String(i) } })));
-      if (current) select.value = String(resources.connections.findIndex(c => c.id === current.connection_id && c.owner_id === current.connection_owner_id));
+      roleConnections.forEach((c, i) => select.append(el('option', { text: `Schemii-owned · ${c.name || c.id}`, attrs: { value: String(i) } })));
+      if (current) select.value = String(roleConnections.findIndex(c => c.id === current.connection_id && c.owner_id === current.connection_owner_id));
       const options = el('div', { className: 'account-editor', hidden: !current }, [el('label', { className: 'account-field' }, ['Run using', select]), exp.node, drill.node]);
       enabled.input.onchange = () => { options.hidden = !enabled.input.checked; };
       return { dashboard, enabled, select, exp, drill, node: el('div', { className: 'account-grant' }, [enabled.node, options]) };
     });
-    const sections = [name.node, el('h3', { text: 'Applications' }), el('div', { className: 'account-list' }, capabilities.map(c => c.node)), el('p', { text: 'Schemer editing also requires Schemer access. Database operations use the PostgreSQL identity on an authorized connection.' }), el('h3', { text: 'Members' }), el('div', { className: 'account-list' }, memberships.map(m => m.node)), el('h3', { text: 'Database connections' }), el('p', { text: 'Choose managed access profiles for this role. Credentials stay on the server; PostgreSQL grants and row policies apply to every query.' }), el('div', { className: 'account-list' }, profiles.length ? profiles.map(p => p.node) : [el('p', { text: 'No saved connections are available yet.' })]), el('h3', { text: 'Shared dashboards' }), el('p', { text: 'Bind each dashboard to one of the connections selected above. The database applies that connection’s row and column permissions.' }), el('div', { className: 'account-list' }, grants.length ? grants.map(g => g.node) : [el('p', { text: 'Create a dashboard in Schemer before sharing it.' })])];
+    const sections = [name.node, el('h3', { text: 'Applications' }), el('div', { className: 'account-list' }, capabilities.map(c => c.node)), el('p', { text: 'Schemer editing also requires Schemer access. Database operations use the PostgreSQL identity on an authorized connection.' }), el('h3', { text: 'Members' }), el('div', { className: 'account-list' }, memberships.map(m => m.node)), el('h3', { text: 'Schemii-owned read-only accounts' }), el('p', { text: 'Choose which read-only PostgreSQL identity this role may use. Credentials stay on the server; PostgreSQL grants and row policies apply to every query.' }), el('div', { className: 'account-list' }, profiles.length ? profiles.map(p => p.node) : [el('p', { text: 'No Schemii-owned accounts are available yet. Add one in Administration first.' })]), ...(legacyConnections.length ? [el('h3', { text: 'Inactive legacy user-owned grants' }), el('p', { text: 'Personal credentials can no longer be shared through roles. Create a Schemii-owned read-only account for each needed row-policy identity, select it above, and rebind affected dashboards. Saving this role removes these inactive grants.' }), el('div', { className: 'account-list' }, legacyConnections.map(c => el('p', { text: `${c.connection_id} · owned by ${c.owner_id} · user-owned, not assignable` })))] : []), el('h3', { text: 'Shared dashboards' }), el('p', { text: 'Bind each dashboard to one of the connections selected above. The database applies that connection’s row and column permissions.' }), el('div', { className: 'account-list' }, grants.length ? grants.map(g => g.node) : [el('p', { text: 'Create a dashboard in Schemer before sharing it.' })])];
     d.append(formWithSubmit('Save role', async () => {
       const selected = profiles.filter(p => p.input.checked).map(p => p.connection);
       const dashboards = grants.filter(g => g.enabled.input.checked).map(g => {
-        const c = g.select.value === '' ? null : resources.connections[Number(g.select.value)];
+        const c = g.select.value === '' ? null : roleConnections[Number(g.select.value)];
         if (!c || !selected.includes(c)) throw new Error(`Select an authorized role connection for “${g.dashboard.name}”.`);
         return { dashboard_id: g.dashboard.id, owner_id: g.dashboard.owner_id, connection_id: c.id, connection_owner_id: c.owner_id, can_export: g.exp.input.checked, can_drill: g.drill.input.checked };
       });

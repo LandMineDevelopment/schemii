@@ -467,6 +467,8 @@ def create_app(
     application.include_router(auth_router)
     from schemii.common.auth.resources import router as account_resources_router
     application.include_router(account_resources_router)
+    from schemii.common.auth.managed_connections import router as managed_connections_router
+    application.include_router(managed_connections_router)
     application.state.services = active_services
     application.state.pi_client = PiClient.from_env()
     application.state.ai_model_catalog = (
