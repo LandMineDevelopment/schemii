@@ -1,271 +1,281 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
-
-// This test submits an ephemeral password: never retain a trace of form input/API bodies.
 test.use({ trace: 'off', video: 'off' });
-
-test('system diagnostics live in Administration, not the Schemii Help menu', async ({ page }) => {
-  await page.goto('/');
-  const help = page.locator('summary[aria-label="Help"]');
-  await help.click();
-  const menu = help.locator('..');
-  await expect(menu.getByRole('button', { name: 'Show introduction' })).toBeVisible();
-  await expect(menu.getByRole('link')).toHaveCount(0);
-  await expect(menu.getByRole('button', { name: /Restore examples|Shut down Schemii/ })).toHaveCount(0);
-
-  await page.goto('/admin');
-  await expect(page.getByRole('heading', { name: 'Administration' })).toBeVisible();
-  await page.getByRole('link', { name: 'Jump to system diagnostics' }).click();
-  const diagnostics = page.getByRole('region', { name: 'System diagnostics' });
-  await expect(diagnostics).toBeInViewport();
-  await expect(diagnostics.getByRole('link', { name: 'Open live system map' })).toHaveAttribute('href', '/system-map');
-  await expect(diagnostics.getByRole('link', { name: 'Open API lens' })).toHaveAttribute('href', '/api-map');
-  await expect(diagnostics.getByRole('link', { name: 'Open database lens' })).toHaveAttribute('href', '/db-map');
-  await diagnostics.getByRole('link', { name: 'Open API lens' }).click();
-  await expect(page).toHaveURL(/\/api-map$/);
-});
-
-test('role editor explains that app connection use does not grant PostgreSQL writes', async ({ page, request }) => {
-  const status = await (await request.get('/api/v1/auth/status')).json();
-  test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
-  const resources = await (await request.get('/api/v1/admin/resources')).json();
-  test.skip(!resources.connections.some(connection => connection.ownership === 'schemii'), 'A Schemii-owned connection is needed to display connection grants.');
-  await page.goto('/admin');
-  await page.getByRole('button', { name: 'Create role' }).click();
-  const roleEditor = page.getByRole('dialog', { name: 'Create role' });
-  await roleEditor.locator('.account-grant').first().getByRole('checkbox').first().check();
-  await expect(roleEditor.getByRole('checkbox', { name: 'Use in Schemii and Schemoo tools or Schemer editing' })).toBeVisible();
-  await expect(roleEditor).toContainText('Enable this even for read-only PostgreSQL profiles.');
-  await expect(roleEditor).toContainText('PostgreSQL still controls visible rows, columns, and write privileges.');
-});
-
-test('Administration manages Schemii-owned accounts without exposing their password', async ({ page, request }) => {
-  const status = await (await request.get('/api/v1/auth/status')).json();
-  test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
-  const profile = { id: `pg_${'a'.repeat(32)}`, ownership: 'schemii', ownerId: 'user_schemii_connection_pool', revision: 1,
-    name: 'East reporting', host: 'db.example.internal', port: 5432, database: 'organization', username: 'report_east',
-    sslMode: 'verify-full', connectTimeout: 10, credentialStored: true };
-  const password = 'fixture-only-not-real';
-  let saved = null;
-  await page.route('**/api/v1/admin/schemii-connections**', async route => {
-    const url = new URL(route.request().url());
+const POOL = 'user_schemii_connection_pool';
+const profile = { id: 'pg_admin_fixture', owner_id: POOL, ownerId: POOL, ownership: 'schemii', name: 'Reporting database', database: 'reports', username: 'report_reader', host: 'db.example.internal', port: 5432, sslMode: 'verify-full', connectTimeout: 10, credentialStored: true, revision: 1 };
+const model = { id: 'gpt-6-luna', name: 'GPT-6 Luna', reasoningLevels: ['default', 'minimal', 'high'] };
+async function fixture(page, { legacy = false, failSecondAi = false } = {}) {
+  const user = { id: 'user_admin_fixture', username: 'fixture_user', display_name: 'Fixture user', disabled: false, is_admin: false, direct_access: { capabilities: [], connections: [], dashboards: [] } };
+  const role = { id: 'role_admin_fixture', name: 'Reporting analysts', capabilities: ['schemii:access'], user_ids: [], connections: [{ connection_id: legacy ? 'pg_legacy' : profile.id, owner_id: legacy ? 'personal_owner' : POOL, allow_authoring: true }], dashboards: [] };
+  const shared = { connected: true, catalogCheckedAt: '2026-09-23T00:00:00Z', models: [model], verifiedModels: [model], grants: [], roleGrants: [], connections: [] };
+  const writes = [], accounts = [user];
+  let aiAttempts = 0;
+  await page.route('**/api/v1/admin/**', async route => {
+    const path = new URL(route.request().url()).pathname.replace('/api/v1/admin/', '');
     const method = route.request().method();
-    const respond = (value, responseStatus = 200) => route.fulfill({ status: responseStatus, contentType: 'application/json', body: JSON.stringify(value) });
-    if (url.pathname.endsWith('/schemii-connections') && method === 'GET') return respond({ connections: saved ? [saved] : [] });
-    if (url.pathname.endsWith('/schemii-connections') && method === 'POST') {
-      const body = route.request().postDataJSON();
-      expect(body.password).toBe(password);
-      saved = { ...profile, ...body, password: undefined };
-      return respond(saved, 201);
+    const data = ['POST','PATCH','PUT','DELETE'].includes(method) && route.request().postData() ? route.request().postDataJSON() : null;
+    const respond = (body, status=200) => route.fulfill({ status, contentType:'application/json', body: JSON.stringify(body) });
+    if (method !== 'GET') writes.push({ path, method, data });
+    if (path === 'resources') return respond({ connections: [profile, ...(legacy ? [{ id: 'pg_legacy', owner_id: 'personal_owner', ownership: 'user', name: 'Old private login' }] : [])], dashboards: [] });
+    if (path === 'schemii-connections') return respond({ connections: [profile] });
+    if (path === 'accounts' && method === 'GET') return respond(accounts);
+    if (path.startsWith('accounts/') && method === 'DELETE') { accounts.splice(0); return route.fulfill({status:204}); }
+    if (path.startsWith('accounts/') && method === 'PATCH') { Object.assign(user,data); role.user_ids = data.role_ids.includes(role.id) ? [user.id] : []; return respond(user); }
+    if (path === 'roles' && method === 'GET') return respond([role]);
+    if (path.startsWith('roles/') && method === 'PUT') { Object.assign(role,data); return respond(role); }
+    if (path === 'ai/zen') return respond({ connected: false, grants: [], roleGrants: [], connections: [] });
+    if (path === 'ai/shared-codex') return respond(shared);
+    if (path === 'ai/shared-codex/test') return respond({connected:true,models:[model],checkedAt:'2026-09-24T00:00:00Z'});
+    if (path === 'ai/shared-codex/role-grants') {
+      if (method === 'PUT') { aiAttempts++; if (failSecondAi && aiAttempts === 2) return respond({detail:'Fixture connection interruption'},503); shared.roleGrants.push({...data,active:true}); return respond(data); }
+      const index = shared.roleGrants.findIndex(g => g.modelId === data.modelId && g.reasoningEffort === data.reasoningEffort && g.connectionId === data.connectionId);
+      shared.roleGrants.splice(index,1); return respond({deleted:true});
     }
-    if (url.pathname.endsWith('/test') && method === 'POST') return respond({ ok: true, database: 'organization', serverVersion: 'fixture' });
-    if (method === 'PATCH') {
-      const body = route.request().postDataJSON();
-      expect(body.expectedRevision).toBe(1);
-      saved = { ...saved, name: body.name, revision: 2 };
-      return respond(saved);
-    }
-    if (method === 'DELETE') {
-      expect(url.searchParams.get('expectedRevision')).toBe('2');
-      saved = null;
-      return route.fulfill({ status: 204 });
-    }
-    throw new Error(`Unexpected managed-profile request: ${method} ${url.pathname}`);
+    throw Error(`Unexpected fixture request ${method} ${path}`);
   });
+  return { user, role, shared, writes };
+}
+
+test('admin navigation separates sections and opens diagnostics', async ({ page }) => {
   await page.goto('/admin');
-  const managed = page.getByRole('region', { name: 'Schemii-owned read-only database accounts' });
-  await expect(managed).toContainText('No Schemii-owned accounts yet');
-  await managed.getByRole('button', { name: 'Add Schemii-owned account' }).click();
-  const editor = page.getByRole('dialog', { name: 'Add Schemii-owned account' });
-  await editor.getByRole('textbox', { name: 'Account name' }).fill('East reporting');
-  await editor.getByRole('textbox', { name: 'PostgreSQL host' }).fill('db.example.internal');
-  await editor.getByRole('textbox', { name: 'Database', exact: true }).fill('organization');
-  await editor.getByRole('textbox', { name: 'PostgreSQL username' }).fill('report_east');
-  await editor.getByLabel('PostgreSQL password').fill(password);
-  await editor.getByRole('button', { name: 'Add account' }).click();
-  await expect(managed.getByText('East reporting')).toBeVisible();
-  await expect(managed).not.toContainText(password);
-  await managed.getByRole('button', { name: 'Test connection' }).click();
-  await expect(managed).toContainText('Connected to organization as the saved PostgreSQL account.');
-  await managed.getByRole('button', { name: 'Edit' }).click();
-  const update = page.getByRole('dialog', { name: 'Edit Schemii-owned account' });
-  await expect(update.getByLabel('Replace password (leave blank to keep)')).toBeEmpty();
-  await update.getByRole('textbox', { name: 'Account name' }).fill('East reporting v2');
-  await update.getByRole('button', { name: 'Save account' }).click();
-  await expect(managed.getByText('East reporting v2')).toBeVisible();
-  await managed.getByRole('button', { name: 'Delete' }).click();
-  await page.getByRole('dialog', { name: 'Delete Schemii-owned account?' }).getByRole('button', { name: 'Delete account' }).click();
-  await expect(managed).toContainText('No Schemii-owned accounts yet');
+  await expect(page.getByRole('heading', { name: 'Access & connections' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Roles', exact: true })).toHaveCount(0);
+  await page.getByRole('link', { name: 'Diagnostics', exact: true }).click();
+  await expect(page).toHaveURL(/#diagnostics$/);
+  await expect(page.getByRole('link', { name: 'Open API lens' })).toHaveAttribute('href','/api-map');
 });
 
-test('role editor offers Schemii-owned profiles but only lists legacy personal grants as inactive', async ({ page, request }) => {
-  const status = await (await request.get('/api/v1/auth/status')).json();
-  test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
-  const managed = { id: `pg_${'b'.repeat(32)}`, owner_id: 'user_schemii_connection_pool', ownership: 'schemii', name: 'East shared', database: 'organization', username: 'report_east' };
-  const personal = { id: `pg_${'c'.repeat(32)}`, owner_id: 'user_personal', ownership: 'user', name: 'Personal login', database: 'organization', username: 'private_writer' };
-  const role = { id: 'role_legacy_fixture', name: 'Legacy role', capabilities: ['schemii:access'], user_ids: [],
-    connections: [{ connection_id: personal.id, owner_id: personal.owner_id, allow_authoring: true }], dashboards: [] };
-  let savedRole = null;
-  await page.route('**/api/v1/admin/resources', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ connections: [managed, personal], dashboards: [] }) }));
-  await page.route('**/api/v1/admin/roles**', route => {
-    if (route.request().method() === 'GET') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([role]) });
-    savedRole = route.request().postDataJSON();
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...role, ...savedRole }) });
-  });
+test('user detail shows source and stages role and direct permissions behind one save', async ({page}) => {
+  const state = await fixture(page);
   await page.goto('/admin');
-  await page.getByRole('region', { name: 'Roles' }).getByRole('button', { name: 'Create role' }).click();
-  const create = page.getByRole('dialog', { name: 'Create role' });
-  await expect(create.getByRole('checkbox', { name: /Schemii-owned read-only · East shared/ })).toBeVisible();
-  await expect(create).not.toContainText('Personal login');
-  await create.getByRole('button', { name: 'Cancel' }).click();
-  await page.getByRole('region', { name: 'Roles' }).getByRole('button', { name: 'Edit' }).click();
-  const edit = page.getByRole('dialog', { name: 'Edit role' });
-  await expect(edit).toContainText('Inactive legacy user-owned grants');
-  await expect(edit).toContainText(personal.id);
-  await expect(edit).not.toContainText('Personal login');
-  await expect(edit.getByRole('checkbox', { name: new RegExp(personal.id) })).toHaveCount(0);
-  await edit.getByRole('button', { name: 'Save role' }).click();
-  await expect.poll(() => savedRole).not.toBeNull();
-  expect(savedRole.connections).toEqual([]);
+  await page.getByRole('button', {name:'Edit fixture_user'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('heading', {name:'App access without a database'})).toBeVisible();
+  await page.getByRole('checkbox', {name:'Reporting analysts',exact:true}).check();
+  await page.getByRole('checkbox', {name:'Schemoo — semantic models'}).check();
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole('button', {name:'Save user',exact:true}).click();
+  await expect(page).toHaveURL(/#users$/);
+  expect(state.writes[0].data.role_ids).toEqual([state.role.id]);
+  expect(state.writes[0].data.direct_access.capabilities).toEqual(['schemoo:access']);
+  expect(state.writes[0].data.direct_access.connections).toEqual([]);
+  await page.getByRole('button',{name:'Edit fixture_user'}).click();
+  await expect(page.getByText('Source: Role: Reporting analysts').first()).toBeVisible();
+  await page.getByRole('tab',{name:'Account',exact:true}).click();
+  await page.getByRole('button',{name:'Remove account',exact:true}).click();
+  await page.getByRole('dialog',{name:'Remove user account?'}).getByRole('button',{name:'Remove account',exact:true}).click();
+  await expect(page.getByText('No users match your search.')).toBeVisible();
 });
 
-test('People can assign, review, revoke, and remove a user account', async ({ page, request }) => {
-  const status = await (await request.get('/api/v1/auth/status')).json();
-  test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
-  const role = { id: 'role_ui_fixture', name: 'Report reviewers', capabilities: ['schemer:access'], user_ids: [],
-    connections: [{ connection_id: 'pg_ui_fixture', owner_id: 'user_schemii_connection_pool', allow_authoring: false }],
-    dashboards: [{ dashboard_id: 'dashboard_ui_fixture', owner_id: 'user_author', connection_id: 'pg_ui_fixture', connection_owner_id: 'user_schemii_connection_pool' }] };
-  const users = [];
-  const writes = [];
-  await page.route('**/api/v1/admin/resources', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-    connections: [{ id: 'pg_ui_fixture', owner_id: 'user_schemii_connection_pool', ownership: 'schemii', name: 'Reporting database' }],
-    dashboards: [{ id: 'dashboard_ui_fixture', owner_id: 'user_author', name: 'Weekly report' }],
-  }) }));
-  await page.route('**/api/v1/admin/roles', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([role]) }));
-  await page.route('**/api/v1/admin/accounts**', route => {
-    const method = route.request().method();
-    const body = method === 'POST' || method === 'PATCH' ? route.request().postDataJSON() : null;
-    if (body) writes.push({ method, role_ids: body.role_ids, direct_access: body.direct_access });
-    if (method === 'POST') {
-      const user = { id: 'user_ui_fixture', username: body.username, display_name: body.display_name,
-        is_admin: body.is_admin, disabled: false, direct_access: body.direct_access };
-      users.push(user); role.user_ids = body.role_ids.includes(role.id) ? [user.id] : [];
-      return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(user) });
-    }
-    if (method === 'PATCH') {
-      Object.assign(users[0], { display_name: body.display_name, is_admin: body.is_admin,
-        disabled: body.disabled, direct_access: body.direct_access });
-      role.user_ids = body.role_ids.includes(role.id) ? [users[0].id] : [];
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(users[0]) });
-    }
-    if (method === 'DELETE') {
-      expect(route.request().url()).toContain('/accounts/user_ui_fixture');
-      users.splice(0); role.user_ids = [];
-      return route.fulfill({ status: 204 });
-    }
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(users) });
-  });
-  await page.goto('/admin');
-  const people = page.getByRole('region', { name: 'People' });
-  await people.getByRole('button', { name: 'Add user' }).click();
-  const create = page.getByRole('dialog', { name: 'Add user' });
-  await expect(create).toContainText('Apps: Schemer viewer · Databases: Reporting database · Dashboards: Weekly report');
-  await create.getByRole('textbox', { name: 'Username' }).fill('qa_ui_fixture');
-  await create.getByRole('textbox', { name: 'Display name' }).fill('UI fixture');
-  await create.getByLabel('Initial password').fill('fixture-only-not-real');
-  await create.getByRole('checkbox', { name: 'Report reviewers' }).check();
-  await create.getByRole('checkbox', { name: 'Schemii — schema design and SQL' }).check();
-  await create.getByRole('checkbox', { name: /Schemii-owned read-only · Reporting database/ }).check();
-  await create.getByRole('checkbox', { name: 'Use in Schemii and Schemoo tools or Schemer editing' }).check();
-  await create.getByRole('button', { name: 'Create user' }).click();
-  await expect(people).toContainText('Roles: Report reviewers · Apps: Schemii, Schemer viewer · Managed databases: 1');
-  expect(writes[0].role_ids).toEqual([role.id]);
-  expect(writes[0].direct_access).toEqual({ capabilities: ['schemii:access'],
-    connections: [{ connection_id: 'pg_ui_fixture', owner_id: 'user_schemii_connection_pool', allow_authoring: true }], dashboards: [] });
-  await people.getByRole('button', { name: 'Edit qa_ui_fixture' }).click();
-  const edit = page.getByRole('dialog', { name: 'Edit user' });
-  await expect(edit.getByRole('checkbox', { name: 'Report reviewers' })).toBeChecked();
-  await expect(edit.getByLabel('Reset password (leave blank to keep)')).toBeEmpty();
-  await edit.getByRole('checkbox', { name: 'Report reviewers' }).uncheck();
-  await edit.getByRole('checkbox', { name: /Schemii-owned read-only · Reporting database/ }).uncheck();
-  await edit.getByRole('checkbox', { name: 'Schemii — schema design and SQL' }).uncheck();
-  await edit.getByRole('button', { name: 'Save user' }).click();
-  await expect(people).toContainText('Roles: none · Apps: none · Managed databases: 0');
-  expect(writes[1].role_ids).toEqual([]);
-  expect(writes[1].direct_access).toEqual({ capabilities: [], connections: [], dashboards: [] });
-  await people.getByRole('button', { name: 'Edit qa_ui_fixture' }).click();
-  await page.getByRole('dialog', { name: 'Edit user' }).getByRole('button', { name: 'Remove account' }).click();
-  const confirmation = page.getByRole('dialog', { name: 'Remove user account?' });
-  await expect(confirmation).toContainText('Dashboards and other work they own remain.');
-  await confirmation.getByRole('button', { name: 'Remove account' }).click();
-  await expect(people).toContainText('No users yet');
-  expect(users).toHaveLength(0);
+test('cancel and section navigation protect pending edits', async ({page}) => {
+  const state = await fixture(page);
+  await page.goto('/admin#users/user_admin_fixture');
+  await page.getByRole('tab',{name:'Account',exact:true}).click();
+  await page.getByRole('textbox',{name:'Display name'}).fill('Changed name');
+  await page.getByRole('link',{name:'Databases',exact:true}).click();
+  const dialog = page.getByRole('dialog',{name:'Discard unsaved changes?'});
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(page.getByRole('textbox',{name:'Display name'})).toHaveValue('Changed name');
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.getByRole('dialog',{name:'Discard unsaved changes?'}).getByRole('button',{name:'Discard changes'}).click();
+  await expect(page).toHaveURL(/#users$/);
+  expect(state.writes).toHaveLength(0);
 });
 
-test('a role can grant two exact Shared Codex reasoning policies on one database', async ({ page, request }) => {
-  const status = await (await request.get('/api/v1/auth/status')).json();
-  test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
-  const connectionId = `pg_${'d'.repeat(32)}`;
-  const role = { id: 'role_ai_ui_fixture', name: 'Reporting analysts', capabilities: ['schemii:access'], user_ids: [],
-    connections: [{ connection_id: connectionId, owner_id: 'user_schemii_connection_pool', allow_authoring: true }], dashboards: [] };
-  const model = { id: 'gpt-6-luna', name: 'GPT-6 Luna', reasoningLevels: ['default', 'minimal', 'high'] };
-  const shared = { connected: true, sourceConnected: false, catalogCheckedAt: '2026-09-23T00:00:00Z',
-    models: [model], verifiedModels: [model], grants: [], roleGrants: [], connections: [] };
-  const deleted = [];
-  await page.route('**/api/v1/admin/accounts', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
-  await page.route('**/api/v1/admin/roles', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([role]) }));
-  await page.route('**/api/v1/admin/resources', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-    connections: [{ id: connectionId, owner_id: 'user_schemii_connection_pool', ownership: 'schemii', name: 'Reporting database', database: 'reports', username: 'report_reader' }], dashboards: [],
-  }) }));
-  await page.route('**/api/v1/admin/ai/zen', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-    connected: false, grants: [], roleGrants: [], connections: [],
-  }) }));
-  await page.route('**/api/v1/admin/ai/shared-codex**', route => {
-    const method = route.request().method();
-    const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/role-grants') && method === 'PUT') {
-      const body = route.request().postDataJSON();
-      const saved = { ...body, revision: shared.roleGrants.length + 1, active: true };
-      shared.roleGrants.push(saved);
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(saved) });
-    }
-    if (path.endsWith('/role-grants') && method === 'DELETE') {
-      const body = route.request().postDataJSON();
-      deleted.push(body);
-      const index = shared.roleGrants.findIndex(grant => grant.roleId === body.roleId && grant.product === body.product
-        && grant.connectionId === body.connectionId && grant.modelId === body.modelId && grant.reasoningEffort === body.reasoningEffort);
-      expect(index).toBeGreaterThanOrEqual(0);
-      shared.roleGrants.splice(index, 1);
-      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"deleted":true}' });
-    }
-    if (method === 'GET' && path.endsWith('/shared-codex')) {
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(shared) });
-    }
-    throw new Error(`Unexpected Shared Codex request: ${method} ${path}`);
-  });
-  await page.goto('/admin');
-  await page.getByRole('region', { name: 'Roles' }).getByRole('button', { name: 'Edit' }).click();
-  const editor = page.getByRole('dialog', { name: 'Edit role' });
-  const ai = editor.getByRole('region', { name: 'Role AI access' });
-  await ai.getByRole('button', { name: 'Add Shared Codex policy' }).click();
-  const first = page.getByRole('dialog', { name: 'Add Shared Codex role access' });
-  await first.getByRole('combobox', { name: 'App and database scope' }).selectOption({ label: 'Schemii · Reporting database' });
-  await first.getByRole('combobox', { name: 'Reasoning level' }).selectOption('minimal');
-  await first.getByRole('button', { name: 'Add AI policy' }).click();
-  await expect(ai).toContainText('gpt-6-luna · Minimal reasoning');
-  await ai.getByRole('button', { name: 'Add Shared Codex policy' }).click();
-  const second = page.getByRole('dialog', { name: 'Add Shared Codex role access' });
-  await second.getByRole('combobox', { name: 'App and database scope' }).selectOption({ label: 'Schemii · Reporting database' });
-  await second.getByRole('combobox', { name: 'Reasoning level' }).selectOption('high');
-  await second.getByRole('button', { name: 'Add AI policy' }).click();
-  await expect(ai.getByRole('button', { name: 'Remove model' })).toHaveCount(2);
-  await ai.getByRole('button', { name: 'Remove model' }).first().click();
-  await page.getByRole('dialog', { name: 'Revoke Shared Codex role access?' }).getByRole('button', { name: 'Remove model' }).click();
-  expect(deleted).toHaveLength(1);
-  expect(deleted[0]).toMatchObject({ roleId: role.id, product: 'schemii', connectionId, modelId: 'gpt-6-luna', reasoningEffort: 'minimal' });
-  expect(deleted[0]).not.toHaveProperty('revision');
-  await expect(ai).not.toContainText('Minimal reasoning');
-  await expect(ai).toContainText('High reasoning');
+test('user AI tab shows inherited policies and links to their source role', async ({page}) => {
+  const state = await fixture(page);
+  state.role.user_ids.push(state.user.id);
+  state.shared.roleGrants.push({roleId:state.role.id,product:'schemii',connectionOwnerId:POOL,connectionId:profile.id,modelId:model.id,reasoningEffort:'high',active:true});
+  await page.goto('/admin#users/user_admin_fixture');
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  const inherited = page.getByRole('region',{name:'AI access through roles'});
+  await expect(inherited).toContainText('gpt-6-luna');
+  await expect(inherited).toContainText('High');
+  await expect(inherited).toContainText('Active · Source: role Reporting analysts');
+  await inherited.getByRole('button',{name:'Edit role Reporting analysts'}).click();
+  await expect(page).toHaveURL(/#roles\/role_admin_fixture$/);
+});
+
+test('saving reveals the tab containing a required invalid field', async ({page}) => {
+  const state = await fixture(page);
+  await page.goto('/admin#users/new');
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  await page.getByRole('button',{name:'Create user',exact:true}).click();
+  await expect(page.getByRole('tab',{name:'Account',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(page.getByRole('textbox',{name:'Display name'})).toBeVisible();
+  expect(state.writes).toHaveLength(0);
+});
+
+test('database access table identifies role scopes and opens a preselected new role', async ({page}) => {
+  await fixture(page);
+  await page.goto('/admin#databases');
+  await page.getByRole('button',{name:'Manage access'}).click();
+  await expect(page.getByRole('table')).toContainText('Reporting analysts');
+  await expect(page.getByRole('table')).toContainText('App tools enabled');
+  await expect(page.getByRole('table')).toContainText('No AI access');
+  await page.getByRole('button',{name:'Create role for this database'}).click();
+  await expect(page.getByRole('checkbox',{name:'Reporting database · report_reader',exact:true})).toBeChecked();
+  await expect(page.getByRole('heading',{name:'Add role',exact:true})).toBeVisible();
+});
+
+test('database actions retain database context and open role members directly', async ({page}) => {
+  const state = await fixture(page);
+  await page.goto(`/admin#databases/${profile.id}`);
+  await page.getByRole('button',{name:'Grant direct user access'}).click();
+  await page.getByRole('dialog',{name:'Choose user'}).getByRole('button',{name:'Continue'}).click();
+  await expect(page.getByRole('tab',{name:'Access',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(page.getByRole('checkbox',{name:'Reporting database · report_reader',exact:true})).toBeChecked();
+  await expect(page.getByText('Unsaved changes',{exact:true})).toBeVisible();
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.getByRole('dialog',{name:'Discard unsaved changes?'}).getByRole('button',{name:'Discard changes'}).click();
+  await page.goto(`/admin#databases/${profile.id}`);
+  await page.getByRole('button',{name:'Assign a role to users'}).click();
+  await page.getByRole('dialog',{name:'Assign database role'}).getByRole('button',{name:'Review role & members'}).click();
+  await expect(page.getByRole('tab',{name:'Members',exact:true})).toHaveAttribute('aria-selected','true');
+  expect(state.writes).toHaveLength(0);
+});
+
+test('disabled user effective access explains assignments cannot currently be used', async ({page}) => {
+  const state = await fixture(page); state.user.disabled = true;
+  await page.goto('/admin#users/user_admin_fixture');
+  await expect(page.getByRole('region',{name:'Saved effective access'})).toContainText('Sign-in is disabled; these saved assignments are currently unusable.');
+});
+
+test('legacy grants require an explicit acknowledgment before unrelated save', async ({page}) => {
+  const state = await fixture(page,{legacy:true});
+  await page.goto('/admin#roles/role_admin_fixture');
+  await expect(page.getByRole('heading',{name:'Inactive legacy database grants'})).toBeVisible();
+  await expect(page.getByText('Old private login · inactive personal profile', {exact:true})).toBeVisible();
+  await page.getByRole('textbox',{name:'Role name'}).fill('Renamed role');
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('confirm removal');
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole('checkbox',{name:'Remove these inactive legacy grants when saving'}).check();
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page).toHaveURL(/#roles$/);
+  expect(state.writes[0].data.connections).toEqual([]);
+});
+
+async function stagePolicy(page, effort) {
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  await page.getByRole('button',{name:'Add AI policy',exact:true}).click();
+  await page.getByRole('combobox',{name:'App and database scope'}).selectOption({label:'Schemii · Reporting database'});
+  await page.getByRole('combobox',{name:'Reasoning level'}).selectOption(effort);
+  await page.getByRole('button',{name:'Stage AI policy'}).click();
+}
+
+test('AI policies stage, cancel, save exact siblings, and remove one only on save', async ({page}) => {
+  const state = await fixture(page);
+  await page.goto('/admin#roles/role_admin_fixture');
+  await stagePolicy(page,'minimal');
+  expect(state.shared.roleGrants).toHaveLength(0);
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.getByRole('dialog',{name:'Discard unsaved changes?'}).getByRole('button',{name:'Discard changes'}).click();
+  await expect(page).toHaveURL(/#roles$/);
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole('button',{name:'Edit Reporting analysts'}).click();
+  await stagePolicy(page,'minimal'); await stagePolicy(page,'high');
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page).toHaveURL(/#roles$/);
+  expect(state.shared.roleGrants.map(g=>g.reasoningEffort)).toEqual(['minimal','high']);
+  await page.getByRole('button',{name:'Edit Reporting analysts'}).click();
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  await page.getByRole('button',{name:'Remove policy'}).first().click();
+  expect(state.shared.roleGrants).toHaveLength(2);
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page).toHaveURL(/#roles$/);
+  expect(state.shared.roleGrants.map(g=>g.reasoningEffort)).toEqual(['high']);
+  const deletion=state.writes.find(w=>w.method==='DELETE');
+  expect(deletion.data).toMatchObject({roleId:state.role.id,connectionId:profile.id,modelId:model.id,reasoningEffort:'minimal'});
+  expect(deletion.data).not.toHaveProperty('active');
+});
+
+test('editing an unavailable policy preserves its values until an explicit replacement is staged', async ({page}) => {
+  const state = await fixture(page);
+  state.shared.roleGrants.push({roleId:state.role.id,product:'schemii',connectionOwnerId:POOL,connectionId:'removed_database',modelId:'retired_model',reasoningEffort:'high',active:false});
+  await page.goto('/admin#roles/role_admin_fixture');
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  await page.getByRole('button',{name:'Edit policy',exact:true}).click();
+  await expect(page.getByRole('combobox',{name:'Allowed model'})).toHaveValue('retired_model');
+  await expect(page.getByRole('combobox',{name:'App and database scope'})).toHaveValue(JSON.stringify(['schemii',POOL,'removed_database']));
+  await expect(page.getByRole('button',{name:'Stage policy changes'})).toBeDisabled();
+  await page.getByRole('button',{name:'Cancel policy',exact:true}).click();
+  await expect(page.getByText('No unsaved changes',{exact:true})).toBeVisible();
+  expect(state.writes).toHaveLength(0);
+  await expect(page.getByText(/retired_model/).first()).toBeVisible();
+  await page.getByRole('button',{name:'Edit policy',exact:true}).click();
+  await page.getByRole('combobox',{name:'App and database scope'}).selectOption({label:'Schemii · Reporting database'});
+  await expect(page.getByRole('button',{name:'Stage policy changes'})).toBeDisabled();
+  await expect(page.getByRole('combobox',{name:'Reasoning level'})).toHaveValue('high');
+  await page.getByRole('combobox',{name:'Allowed model'}).selectOption('gpt-6-luna');
+  await expect(page.getByRole('combobox',{name:'Reasoning level'})).toHaveValue('high');
+  await expect(page.getByRole('button',{name:'Stage policy changes'})).toBeEnabled();
+  await page.getByRole('button',{name:'Stage policy changes'}).click();
+  expect(state.writes).toHaveLength(0);
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page).toHaveURL(/#roles$/);
+  expect(state.shared.roleGrants).toHaveLength(1);
+  expect(state.shared.roleGrants[0]).toMatchObject({modelId:'gpt-6-luna',connectionId:profile.id,reasoningEffort:'high'});
+});
+
+test('choosing a supported reasoning level immediately enables an edited policy', async ({page}) => {
+  const state = await fixture(page);
+  state.shared.roleGrants.push({roleId:state.role.id,product:'schemii',connectionOwnerId:POOL,connectionId:profile.id,modelId:model.id,reasoningEffort:'max',active:false});
+  await page.goto('/admin#roles/role_admin_fixture');
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  await page.getByRole('button',{name:'Edit policy',exact:true}).click();
+  await expect(page.getByRole('combobox',{name:'Reasoning level'})).toHaveValue('max');
+  await expect(page.getByRole('button',{name:'Stage policy changes'})).toBeDisabled();
+  await page.getByRole('combobox',{name:'Reasoning level'}).selectOption('high');
+  await expect(page.getByRole('button',{name:'Stage policy changes'})).toBeEnabled();
+  expect(state.writes).toHaveLength(0);
+});
+
+test('verifying models inside the policy composer preserves an unsaved role draft', async ({page}) => {
+  const state = await fixture(page); state.shared.catalogCheckedAt = null; state.shared.verifiedModels = [];
+  await page.goto('/admin#roles/role_admin_fixture');
+  await page.getByRole('textbox',{name:'Role name'}).fill('Unsaved role name');
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  await page.getByRole('button',{name:'Add AI policy',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Stage AI policy'})).toBeDisabled();
+  await page.getByRole('button',{name:'Verify models',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Stage AI policy'})).toBeEnabled();
+  await expect(page.getByText('1 models verified. Your pending access changes are preserved.')).toBeVisible();
+  await page.getByRole('tab',{name:'Permissions',exact:true}).click();
+  await expect(page.getByRole('textbox',{name:'Role name'})).toHaveValue('Unsaved role name');
+  expect(state.writes.map(write=>write.path)).toEqual(['ai/shared-codex/test']);
+});
+
+test('Save refuses to silently discard an open unstaged policy editor', async ({page}) => {
+  const state = await fixture(page);
+  await page.goto('/admin#roles/role_admin_fixture');
+  await page.getByRole('tab',{name:'AI',exact:true}).click();
+  await page.getByRole('button',{name:'Add AI policy',exact:true}).click();
+  await page.getByRole('combobox',{name:'Reasoning level'}).selectOption('high');
+  await page.getByRole('tab',{name:'Permissions',exact:true}).click();
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('Stage or cancel the open AI policy');
+  await expect(page.getByRole('tab',{name:'AI',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(page.getByRole('combobox',{name:'Reasoning level'})).toHaveValue('high');
+  expect(state.writes).toHaveLength(0);
+});
+
+test('partial AI save reports completed work and retries only remaining policy', async ({page}) => {
+  const state = await fixture(page,{failSecondAi:true});
+  await page.goto('/admin#roles/role_admin_fixture');
+  await stagePolicy(page,'minimal'); await stagePolicy(page,'high');
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('permissions were saved');
+  await expect(page.getByText(/Pending addition/)).toHaveCount(1);
+  expect(state.shared.roleGrants.map(g=>g.reasoningEffort)).toEqual(['minimal']);
+  await page.getByRole('button',{name:'Save role',exact:true}).click();
+  await expect(page).toHaveURL(/#roles$/);
+  expect(state.shared.roleGrants.map(g=>g.reasoningEffort)).toEqual(['minimal','high']);
+  expect(state.writes.filter(w=>w.path.endsWith('role-grants') && w.data.reasoningEffort==='minimal')).toHaveLength(1);
 });
 
 test('a provisioned viewer can sign in, see an empty report library, and sign out', async ({ browser, request, baseURL }, testInfo) => {
