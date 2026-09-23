@@ -92,6 +92,11 @@ streaming. Previously rendered or downloaded data cannot be recalled. A SQL
 transaction or migration already submitted to PostgreSQL may finish after a role
 is removed; revocation cannot roll back confirmed database work.
 
+Deleting an otherwise unused connection removes its completed Console operational
+receipts, including shared-report receipts owned by viewers. Active executions,
+open or unresolved transactions, and existing saved-resource dependencies block
+deletion. Busy receipts return a conflict instead of waiting on database locks.
+
 ## Metadata, deployment, and remaining scope
 
 Migration 0037 added accounts, sessions, roles, memberships, grants, and audit
