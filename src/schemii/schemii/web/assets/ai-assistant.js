@@ -1,4 +1,4 @@
-import { managedProviderForModel, populateScopedReasoningOptions, reasoningForSelection } from "#common/ai-reasoning.js";
+import { populateScopedReasoningOptions, reasoningForSelection } from "#common/ai-reasoning.js";
 import { designExportReceipt, workspaceReceiptUrl } from "./ai-app-receipts.js";
 import { downloadContent, createIconElement } from "#common/ui.js";
 import { validateCopyHandoff, openCopyHandoff } from "./ai-copy-handoff.js";
@@ -933,7 +933,6 @@ elements.settingsModel?.addEventListener("change", () => {
 elements.reasoning?.addEventListener("change", async () => {
   const reasoningEffort = elements.reasoning.value;
   const model = selectedModel(); if (!model) return;
-  if (managedProviderForModel(runtime, model)) return;
   elements.reasoning.disabled = true;
   try {
     if (!chat) await createConversation({ model, reasoningEffort });

@@ -20,8 +20,8 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
   await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: !emptyModels, authenticated: true, models: [{ id: "fixture-model", name: "Fixture model", reasoningLevels: ["low", "medium", "high", "max"], status: modelDenied && chat.status === "failed" ? "unavailable" : "active" }, { id: "second-model", name: "Second model", status: "active" }] }, { id: "openai-codex", name: "Codex", available: false, authenticated: false, models: [] },
     ...(zenConnect ? [{ id: "opencode", name: "OpenCode Zen", available: false, authenticated: false, privacy: "Free Zen models may use prompts for training.", models: [{ id: "big-pickle", name: "Big Pickle", status: "active" }] }] : []),
     ...(sharedCodex ? [{ id: "instance-codex", name: "Shared ChatGPT Codex", available: true, authenticated: true, adminManaged: true,
-      selectedModelId: "gpt-6-luna", selectedReasoningEffort: "high",
-      models: [{ id: "gpt-6-luna", name: "GPT-6 Luna", status: "active", reasoningLevels: ["high"] }] }] : [])] } }));
+      ...(sharedCodex === true ? { selectedModelId: "gpt-6-luna", selectedReasoningEffort: "high",
+        models: [{ id: "gpt-6-luna", name: "GPT-6 Luna", status: "active", reasoningLevels: ["high"] }] } : sharedCodex) }] : [])] } }));
   await page.route("**/api/v1/schemoo/ai/**", async route => {
     const url = new URL(route.request().url()), method = route.request().method();
     const body = method === "GET" || method === "DELETE" ? null : route.request().postDataJSON();
@@ -89,6 +89,27 @@ test("shared model assistant applies administrator-selected Codex model and reas
   await expect(provider).toContainText("Administrator policy: GPT-6 Luna · High reasoning");
   await expect(dialog.getByRole("combobox", { name: "Reasoning level", exact: true })).toBeDisabled();
   await expect(provider.getByRole("button", { name: /Connect|Disconnect/ })).toHaveCount(0);
+});
+
+test("shared model assistant limits reasoning to each granted model policy", async ({ page }) => {
+  const requests = await fixture(page, { sharedCodex: { models: [
+    { id: "gpt-6-luna", name: "GPT-6 Luna", status: "active", reasoningLevels: ["default"] },
+    { id: "gpt-5.5", name: "GPT-5.5", status: "active", reasoningLevels: ["medium"] },
+    { id: "gpt-6-sol", name: "GPT-6 Sol", status: "active", reasoningLevels: ["low", "high"] },
+  ] } });
+  const model = page.getByRole("combobox", { name: "Assistant model", exact: true });
+  const reasoning = page.getByRole("combobox", { name: "Assistant reasoning level", exact: true });
+  await model.click();
+  await page.getByRole("option", { name: "GPT-5.5 · Shared ChatGPT Codex" }).click();
+  await expect.poll(() => requests.filter(item => item.path.endsWith("/preferences")).at(-1)?.body.reasoningEffort).toBe("medium");
+  await expect(reasoning).toHaveValue("medium");
+  await expect(reasoning).toBeDisabled();
+  await model.click();
+  await page.getByRole("option", { name: "GPT-6 Sol · Shared ChatGPT Codex" }).click();
+  await expect.poll(() => requests.filter(item => item.path.endsWith("/preferences")).at(-1)?.body.reasoningEffort).toBe("low");
+  await expect(reasoning).toBeEnabled();
+  await reasoning.selectOption("high");
+  await expect.poll(() => requests.filter(item => item.path.endsWith("/preferences")).at(-1)?.body.reasoningEffort).toBe("high");
 });
 
 test("completed tracker stays between its prompt and answer, including reopened history", async ({ page }) => {

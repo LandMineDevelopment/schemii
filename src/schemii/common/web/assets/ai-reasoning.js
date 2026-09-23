@@ -22,14 +22,22 @@ export function managedProviderForModel(status, model) {
 }
 
 export function reasoningForSelection(status, model, value = 'default') {
-  return managedProviderForModel(status, model)?.selectedReasoningEffort || reasoningForModel(model, value);
+  const policy = managedProviderForModel(status, model);
+  if (!policy) return reasoningForModel(model, value);
+  const allowed = Object.keys(labels).filter(level => model?.reasoningLevels?.includes(level));
+  if (policy.selectedReasoningEffort && (!policy.selectedModelId || policy.selectedModelId === model?.id)
+      && allowed.includes(policy.selectedReasoningEffort)) return policy.selectedReasoningEffort;
+  return allowed.includes(value) ? value : (allowed[0] || 'default');
 }
 
 export function populateScopedReasoningOptions(select, status, model, value = 'default', busy = false) {
   const policy = managedProviderForModel(status, model);
-  populateReasoningOptions(select, model, policy?.selectedReasoningEffort || value, busy);
-  if (policy) {
-    select.disabled = true;
-    select.title = 'An administrator manages this model’s reasoning level.';
-  }
+  if (!policy) return populateReasoningOptions(select, model, value, busy);
+  const levels = Object.keys(labels).filter(level => model?.reasoningLevels?.includes(level));
+  select.replaceChildren(...levels.map(level => element('option', { text: labels[level], attrs: { value: level } })));
+  select.value = reasoningForSelection(status, model, value);
+  select.disabled = busy || levels.length <= 1;
+  select.title = levels.length > 1
+    ? 'Choose an administrator-approved reasoning level.'
+    : 'An administrator manages this model’s reasoning level.';
 }
