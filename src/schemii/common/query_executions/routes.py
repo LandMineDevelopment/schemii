@@ -18,12 +18,25 @@ from .errors import ConsoleServiceError
 router = APIRouter(tags=["common-query-executions"])
 
 
-def _service(request: Request, execution_id=None, *, read=False):
+def _service(request: Request, execution_id=None, *, read=False, owner_id=None):
     service = request.app.state.services.console
     if service is None:
         raise ApiProblem(503, "query_execution_unavailable", "Query execution is unavailable")
     if read and service.is_shared_report_execution(execution_id):
         raise ApiProblem(403, "report_result_private", "Shared report results are available only through their authorized report stream.")
+    # Schemoo's owner-private result route is also used by models backed by a
+    # role-managed credential. Recheck the role before exposing retained rows;
+    # the original SQL may have run before access was revoked.
+    if read and owner_id is not None and execution_id is not None:
+        try:
+            receipt = service.get_owned(owner_id, execution_id)
+            connections = request.app.state.services.connections
+            if hasattr(connections, "for_product"):
+                service.authorize_managed_result(
+                    owner_id, execution_id,
+                    connections.for_product("schemoo" if receipt.workspace_id is None else "schemii"))
+        except ConsoleServiceError as error:
+            raise _problem(error) from error
     return service
 
 
@@ -41,7 +54,7 @@ def get_execution(
 ) -> ConsoleExecution:
     """Read one owned execution receipt without rerunning its SQL."""
     try:
-        return _service(request, execution_id, read=True).get_owned(principal.user_id, execution_id)
+        return _service(request, execution_id, read=True, owner_id=principal.user_id).get_owned(principal.user_id, execution_id)
     except ConsoleServiceError as error:
         raise _problem(error) from error
 
@@ -71,7 +84,7 @@ def get_result_page(
     principal: Principal = Depends(get_current_principal),
 ) -> ConsoleResultPage:
     """Page a transient result with the shared cursor and memory-limit policy."""
-    service = _service(request, execution_id, read=True)
+    service = _service(request, execution_id, read=True, owner_id=principal.user_id)
     try:
         receipt = service.get_owned(principal.user_id, execution_id)
         return service.page(
@@ -103,7 +116,7 @@ def export_result(
     principal: Principal = Depends(get_current_principal),
 ) -> StreamingResponse:
     """Stream the result directly, without persisting its rows in metadata."""
-    service = _service(request, execution_id, read=True)
+    service = _service(request, execution_id, read=True, owner_id=principal.user_id)
     try:
         receipt = service.get_owned(principal.user_id, execution_id)
         rows = service.export_csv(principal.user_id, receipt.workspace_id, execution_id, result_id)
@@ -125,6 +138,6 @@ def get_execution_activity(
 ) -> dict:
     """Inspect only this owner's execution, using bounded independent monitoring."""
     try:
-        return _service(request).activity(principal.user_id, execution_id)
+        return _service(request, execution_id, read=True, owner_id=principal.user_id).activity(principal.user_id, execution_id)
     except ConsoleServiceError as error:
         raise _problem(error) from error

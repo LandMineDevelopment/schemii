@@ -12,6 +12,11 @@ test('a provisioned viewer can sign in, see an empty report library, and sign ou
   const created = await request.post('/api/v1/admin/accounts', { data: { username, display_name: 'QA isolated report viewer', password, is_admin: false } });
   expect(created.ok()).toBeTruthy();
   const user = await created.json();
+  const granted = await request.post('/api/v1/admin/roles', { data: {
+    name: `QA report viewer ${suffix}`, capabilities: ['schemer:access'], user_ids: [user.id],
+  } });
+  expect(granted.ok()).toBeTruthy();
+  const role = await granted.json();
   const { viewport, userAgent, deviceScaleFactor, isMobile, hasTouch } = testInfo.project.use;
   const context = await browser.newContext({ viewport, userAgent, deviceScaleFactor, isMobile, hasTouch, baseURL, ignoreHTTPSErrors: true, storageState: { cookies: [], origins: [] } });
   try {
@@ -53,5 +58,7 @@ test('a provisioned viewer can sign in, see an empty report library, and sign ou
     // Accounts are retained for auditing; only this test's newly created account is disabled.
     const cleanup = await request.patch(`/api/v1/admin/accounts/${user.id}`, { data: { disabled: true } });
     expect(cleanup.ok()).toBeTruthy();
+    const deletedRole = await request.delete(`/api/v1/admin/roles/${role.id}`);
+    expect(deletedRole.ok()).toBeTruthy();
   }
 });

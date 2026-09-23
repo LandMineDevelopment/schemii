@@ -35,7 +35,7 @@ def shared():
     grant = dict(role_id='east',owner_id='admin',dashboard_id=dashboard.id,connection_id='pg_'+'b'*32,
                  connection_owner_id='admin',can_export=False,can_drill=False)
     db_grant = dict(role_id='east',owner_id='admin',connection_id=grant['connection_id'])
-    auth = NS(enabled=True, is_admin=lambda actor:False, capabilities=lambda actor:[], audit=lambda *args:None, user=lambda actor: {'disabled':False},
+    auth = NS(enabled=True, is_admin=lambda actor:False, capabilities=lambda actor:['schemer:access'] if actor == 'viewer' else [], audit=lambda *args:None, user=lambda actor: {'disabled':False},
               dashboard_grants=lambda actor: [deepcopy(grant)] if actor=='viewer' else [],
               connection_grants=lambda actor: [deepcopy(db_grant)])
     calls=[]

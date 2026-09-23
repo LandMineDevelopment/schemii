@@ -106,3 +106,18 @@ def test_relation_cursor_is_bound_to_search_and_catalog_fingerprint():
     assert second.relations[0].name == "customer_names"
     with pytest.raises(RelationBrowserError, match="restart browsing"):
         browser.list("owner", workspace_id, cursor=first.next_cursor, page_size=1, search="view")
+
+
+def test_relation_browser_rejects_a_changed_managed_identity_before_reading():
+    browser, postgres = service()
+    browser._workspaces.get = lambda owner_id, workspace_id: SimpleNamespace(
+        id=workspace_id,
+        connection_id="pg_1",
+        connection_owner_id="role-expected",
+        database="demo",
+        namespace="public",
+    )
+    with pytest.raises(RelationBrowserError) as error:
+        browser.list("owner", "ws_" + "3" * 32, cursor=None, page_size=10, search=None)
+    assert error.value.code == "workspace_target_changed"
+    assert postgres.statements == []

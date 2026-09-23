@@ -144,7 +144,7 @@ def test_wire_contract_uses_common_camel_case_aliases():
     assert document["connectionId"] == model.connection_id
     assert document["layoutRevision"] == 1
     assert "owner_id" not in document
-    assert ModelCreate.model_validate({key: value for key, value in document.items() if key not in {"id", "ownerId", "revision", "layoutRevision", "exploreRevision", "createdAt", "updatedAt"}})
+    assert ModelCreate.model_validate({key: value for key, value in document.items() if key not in {"id", "ownerId", "connectionOwnerId", "revision", "layoutRevision", "exploreRevision", "createdAt", "updatedAt"}})
 
 
 def test_invalid_drafts_can_be_saved_for_repair_but_duplicate_ids_cannot():

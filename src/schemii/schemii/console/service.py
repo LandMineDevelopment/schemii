@@ -402,9 +402,9 @@ class ConsoleService:
             statements=statements,
         )
         target = ConsoleTarget(profile.id, profile.revision, database, namespace,
-                               connection_access.connection_owner_id if connection_access is not None and connection_access.connection_owner_id != owner_id else None)
+                               getattr(profile, "owner_id", None) if getattr(profile, "owner_id", None) != owner_id else None)
         receipt = self._reserve_read(owner_id, None, None, target, request, row_page_size=row_page_size)
-        if connection_access is not None:
+        if connection_access is not None and hasattr(connection_access, "resource_id"):
             with self._transient_results_lock:
                 now = self._clock()
                 self._shared_report_executions = {key: expires for key, expires in self._shared_report_executions.items() if expires > now}
@@ -464,6 +464,25 @@ class ConsoleService:
             raise self._repository_error(error) from error
         return record.execution
 
+    def authorize_managed_result(self, owner_id: str, execution_id: str, connection_access) -> None:
+        """Recheck a product's database grant before serving retained data."""
+        try:
+            record = self._repository.get(owner_id, execution_id)
+        except ConsoleNotFoundError as error:
+            raise ConsoleServiceError(404, "console_execution_not_found", "Execution was not found") from error
+        except ConsoleRepositoryError as error:
+            raise self._repository_error(error) from error
+        try:
+            profile = connection_access.get(owner_id, record.target.connection_id)
+        except ConnectionNotFoundError as error:
+            raise ConsoleServiceError(403, "console_connection_revoked", "Access to the PostgreSQL connection was revoked") from error
+        if (
+            profile.revision != record.target.connection_revision
+            or profile.database != record.target.database
+            or (getattr(profile, "owner_id", None) or owner_id) != (record.target.connection_owner_id or owner_id)
+        ):
+            raise ConsoleServiceError(409, "console_target_changed", "The PostgreSQL connection changed")
+
     def run(self, owner_id: str, execution_id: str, *, connection_access=None) -> None:
         """Execute one previously returned receipt; failures become durable state."""
 
@@ -475,6 +494,7 @@ class ConsoleService:
                 if (
                     target.revision != record.target.connection_revision
                     or target.database != record.target.database
+                    or (getattr(target, "owner_id", None) or owner_id) != (record.target.connection_owner_id or owner_id)
                 ):
                     self._repository.fail(
                         owner_id,
@@ -590,6 +610,7 @@ class ConsoleService:
                     if (
                         resolved.revision != target.connection_revision
                         or resolved.database != target.database
+                        or (getattr(resolved, "owner_id", None) or owner_id) != (target.connection_owner_id or owner_id)
                     ):
                         raise ConsoleServiceError(
                             409,
@@ -873,6 +894,8 @@ class ConsoleService:
             raise self._repository_error(error) from error
         if record.execution.workspace_id != workspace_id:
             raise ConsoleServiceError(404, "console_execution_not_found", "Console execution was not found")
+        if workspace_id is not None:
+            self.authorize_managed_result(owner_id, execution_id, self._connections)
         return record.execution
 
     def cancel(self, owner_id: str, workspace_id: str | None, execution_id: str) -> ConsoleExecution:
@@ -1474,6 +1497,14 @@ class ConsoleService:
                 "console_transaction_interrupted",
                 "The server process owning this transaction ended; PostgreSQL rolled it back",
             )
+        try:
+            profile = self._connections.get(owner_id, record.target.connection_id)
+        except ConnectionNotFoundError as error:
+            self._expire_live_transaction(owner_id, transaction_id, session, self._clock())
+            raise ConsoleServiceError(403, "console_connection_revoked", "Access to the PostgreSQL connection was revoked") from error
+        if (getattr(profile, "owner_id", None) or owner_id) != (record.target.connection_owner_id or owner_id) or profile.revision != record.target.connection_revision:
+            self._expire_live_transaction(owner_id, transaction_id, session, self._clock())
+            raise ConsoleServiceError(409, "console_target_changed", "The PostgreSQL connection changed")
         return session
 
     def _transaction_record(
@@ -1580,11 +1611,14 @@ class ConsoleService:
                 "console_database_changed",
                 "The workspace database no longer matches its connection",
             )
+        if (getattr(profile, "owner_id", None) or owner_id) != (getattr(workspace, "connection_owner_id", None) or owner_id):
+            raise ConsoleServiceError(409, "console_target_changed", "The workspace PostgreSQL identity changed")
         return workspace, ConsoleTarget(
             connection_id=profile.id,
             connection_revision=profile.revision,
             database=workspace.database,
             namespace=workspace.namespace,
+            connection_owner_id=getattr(workspace, "connection_owner_id", None) if getattr(workspace, "connection_owner_id", None) != owner_id else None,
         )
 
     def _validate_settings_revision(self, owner_id: str, revision: int) -> ConsoleSettings:

@@ -152,6 +152,7 @@ class PostgresConnectionProfile(PostgresConnectionMetadata):
     """Public connection metadata; credentials are intentionally absent."""
 
     id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
+    owner_id: str | None = None
     revision: Annotated[int, Field(strict=True, ge=1)]
     credential_stored: bool
     created_at: datetime
@@ -175,5 +176,6 @@ class ResolvedPostgresConnection(PostgresConnectionMetadata):
     """Internal target resolved only when opening PostgreSQL."""
 
     id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
+    owner_id: str | None = None
     revision: Annotated[int, Field(strict=True, ge=1)]
     password: SecretStr | None = None

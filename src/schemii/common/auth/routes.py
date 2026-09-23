@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from schemii.common.metadata.models import get_current_principal
-from .service import COOKIE, SESSION_SECONDS, password_matches, public_user
+from .service import (COOKIE, SESSION_SECONDS, PROVISIONER_ROLE_ID, PROVISION_CAPABILITY, SCHEMER_AUTHOR,
+                      password_matches, public_user)
 
 router = APIRouter(prefix='/api/v1')
 
@@ -46,7 +47,7 @@ class AccountUpdate(Input):
 class ConnectionGrant(Input):
     connection_id: str
     owner_id: str
-    allow_authoring: Literal[False] = False
+    allow_authoring: bool = False
 
 
 class DashboardGrant(Input):
@@ -60,7 +61,7 @@ class DashboardGrant(Input):
 
 class RoleInput(Input):
     name: str = Field(min_length=1,max_length=128)
-    capabilities: list[Literal['author']] = Field(default_factory=list,max_length=1)
+    capabilities: list[Literal['schemii:access','schemoo:access','schemer:access','schemer:author']] = Field(default_factory=list,max_length=4)
     user_ids: list[str] = Field(default_factory=list,max_length=1000)
     connections: list[ConnectionGrant] = Field(default_factory=list,max_length=1000)
     dashboards: list[DashboardGrant] = Field(default_factory=list,max_length=1000)
@@ -70,7 +71,8 @@ def auth(request): return request.app.state.auth
 
 
 def me_document(service,user):
-    return {'user':user,'is_admin':user['is_admin'],'capabilities':service.capabilities(user['id'])}
+    capabilities=service.capabilities(user['id'])
+    return {'user':user,'is_admin':PROVISION_CAPABILITY in capabilities,'capabilities':capabilities}
 
 
 def set_cookie(response,token):
@@ -155,24 +157,35 @@ def update_account(user_id:str,data:AccountUpdate,request:Request,actor=Depends(
 
 @router.get('/admin/roles')
 def roles(request:Request,actor=Depends(admin)):
-    with auth(request).store.transaction() as state: return list(state['roles'].values())
+    with auth(request).store.transaction() as state:
+        return [role for role in state['roles'].values() if role['id'] != PROVISIONER_ROLE_ID]
 
 
 def save_role(request,data,actor,role_id=None):
+    if role_id == PROVISIONER_ROLE_ID:
+        raise HTTPException(403,'Reserved application role cannot be edited')
     role=data.model_dump()
+    if len(set(role['capabilities'])) != len(role['capabilities']): raise HTTPException(422,'Duplicate capabilities')
+    if SCHEMER_AUTHOR in role['capabilities'] and 'schemer:access' not in role['capabilities']:
+        raise HTTPException(422,'Schemer authoring requires Schemer access in the same role')
     if len(set(role['user_ids'])) != len(role['user_ids']): raise HTTPException(422,'Duplicate role members')
     for key,id_key in [('connections','connection_id'),('dashboards','dashboard_id')]:
         if len({g[id_key] for g in role[key]}) != len(role[key]): raise HTTPException(422,'Duplicate grants')
     for grant in role['dashboards']:
+        if 'schemer:access' not in role['capabilities']:
+            raise HTTPException(422,'Shared dashboards require Schemer access in the same role')
         if not any(c['connection_id']==grant['connection_id'] and c['owner_id']==grant['connection_owner_id'] for c in role['connections']):
             raise HTTPException(422,'Each dashboard requires its database connection in the same role')
+    if any(g['allow_authoring'] for g in role['connections']) and not any(
+            c in role['capabilities'] for c in ('schemii:access','schemoo:access',SCHEMER_AUTHOR)):
+        raise HTTPException(422,'Authoring connections require a product authoring capability in the same role')
     services=request.app.state.services
     for grant in role['connections']:
         services.connections.get(grant['owner_id'],grant['connection_id'])
     for grant in role['dashboards']:
         dashboard=services.dashboards.get(grant['owner_id'],grant['dashboard_id'])
         model=services.models.get(grant['owner_id'],dashboard.model_id)
-        source=services.connections.get(grant['owner_id'],model.connection_id)
+        source=services.connections.get(model.connection_owner_id or grant['owner_id'],model.connection_id)
         target=services.connections.get(grant['connection_owner_id'],grant['connection_id'])
         if any(getattr(source,key) != getattr(target,key) for key in ('host','port','database')):
             raise HTTPException(422,'Report access must use the same database target as its model')
@@ -199,6 +212,8 @@ def update_role(role_id:str,data:RoleInput,request:Request,actor=Depends(admin))
 
 @router.delete('/admin/roles/{role_id}',status_code=204)
 def delete_role(role_id:str,request:Request,actor=Depends(admin)):
+    if role_id == PROVISIONER_ROLE_ID:
+        raise HTTPException(403,'Reserved application role cannot be deleted')
     with auth(request).store.transaction(write=True) as state:
         if state['roles'].pop(role_id,None) is None: raise HTTPException(404,'Role not found')
         state['audit'].append((actor,'role.delete',role_id))

@@ -304,6 +304,7 @@ class PostgresConnectionRepository:
                         ) from error
                 return ResolvedPostgresConnection(
                     id=row["id"],
+                    owner_id=row["owner_id"],
                     revision=row["revision"],
                     **self._metadata_row(row),
                     password=password,
@@ -397,6 +398,7 @@ class PostgresConnectionRepository:
     def _profile(row: dict[str, Any]) -> PostgresConnectionProfile:
         return PostgresConnectionProfile(
             id=row["id"],
+            owner_id=row["owner_id"],
             revision=row["revision"],
             **PostgresConnectionRepository._metadata_row(row),
             credential_stored=row["credential_stored"],

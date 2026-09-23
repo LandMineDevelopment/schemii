@@ -381,6 +381,10 @@ def _bounded_page(services, result):
 
 def execute_action(services, owner, current_model_id, action):
     """Execute one already-authorized action and return its actual API receipt."""
+    scoped = SimpleNamespace(**vars(services))
+    if hasattr(services.connections, "for_product"):
+        scoped.connections = services.connections.for_product("schemoo")
+    services = scoped
     parsed = _ACTION.validate_python(action)
     name, args = parsed.operation, parsed.args
     if name == "list_connections":

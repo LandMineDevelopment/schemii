@@ -12,7 +12,7 @@ Schemii is a local, self-hosted PostgreSQL design and analytics workbench made u
 - **Schemoo** defines durable semantic models over an explicit saved connection and schema, including relationships, derived fields, and required or optional model scopes.
 - **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore streamed results, and drill into contributing rows cached in their browser.
 
-The launcher runs an authenticated private deployment with local accounts, roles, and managed report connections. It does not add public ingress. See [Accounts and database roles](docs/accounts-and-roles.md) for setup, permissions, and rollout scope. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
+The launcher runs an authenticated private deployment with local accounts, per-product roles, and role-managed PostgreSQL connections. It does not add public ingress. See [Accounts and database roles](docs/accounts-and-roles.md) for setup, permissions, and rollout scope. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
 
 ## Installation
 
@@ -63,7 +63,7 @@ src/schemii/
 The application API authenticates users and applies role permissions:
 
 - `GET /api/v1/session` returns the authenticated principal. `/login`, `/account`, and `/admin` provide account setup, sign-in, password changes, and role management.
-- `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
+- `/api/v1/connections` manages owner-owned profiles and lists role-managed profiles for the selected product; only the profile owner can edit or delete one.
 - `/api/v1/schemii/workspaces` manages each user's durable local and PostgreSQL-backed designs plus presentation preferences.
 - `POST /api/v1/schemii/workspaces/postgres` opens the user's existing design for one exact saved connection and namespace, or imports it once from a bounded PostgreSQL catalog snapshot when none exists.
 - `PATCH /api/v1/schemii/workspaces/{id}` renames the owner's saved workspace with a revision check, without renaming its PostgreSQL database/schema or changing its saved design.

@@ -1,7 +1,7 @@
 import { requestJson } from './http.js';
 import { element as el } from './dom.js';
 import { confirmAction } from './confirmation.js';
-import { canAuthor, signOut, sessionChanged } from './accounts-session.js';
+import { canAccessProduct, landingPath, signOut, sessionChanged } from './accounts-session.js';
 const main = document.getElementById('accounts-main');
 const nav = document.getElementById('account-navigation');
 const AUTH = '/api/v1/auth', ADMIN = '/api/v1/admin';
@@ -30,13 +30,13 @@ async function login(status) {
   const panel = el('section', { className: 'account-panel account-login' }, [...heading(setup ? 'Create your administrator account' : 'Welcome back', setup ? 'Use the setup token configured for this installation. Your administrator account will manage users, roles, and shared report access.' : 'Sign in to your reports and database tools.')]);
   panel.append(formWithSubmit(setup ? 'Create administrator account' : 'Sign in', async () => {
     const account = await requestJson(`${AUTH}/${setup ? 'setup' : 'login'}`, { method: 'POST', body: { username: username.input.value.trim(), password: password.input.value, ...(setup ? { display_name: display.input.value.trim(), setup_token: token.input.value } : {}) } });
-    sessionChanged(); location.replace(canAuthor(account) ? '/' : '/schemer');
+    sessionChanged(); location.replace(landingPath(account));
   }, [...(setup ? [token.node, display.node] : []), username.node, password.node]));
   main.replaceChildren(panel);
 }
 function accountPage(account) {
   const user = account.user;
-  main.replaceChildren(...heading(user.display_name || user.username, `Signed in as ${user.username}. ${account.is_admin ? 'You administer this installation.' : canAuthor(account) ? 'You can create models and dashboards with your authorized database connections.' : 'Your roles determine which reports and database connections you can use.'}`));
+  main.replaceChildren(...heading(user.display_name || user.username, `Signed in as ${user.username}. Your roles determine which applications and database connections you can use.${account.is_admin ? ' You can provision accounts and roles.' : ''}`));
   const current = field('Current password', { type: 'password', autocomplete: 'current-password' }); current.input.removeAttribute('minlength');
   const password = field('New password', { type: 'password', autocomplete: 'new-password' });
   const confirmation = field('Confirm new password', { type: 'password', autocomplete: 'new-password' });
@@ -52,7 +52,7 @@ function dialog(title) {
   d.onclose = () => d.remove(); document.body.append(d); return d;
 }
 async function adminPage() {
-  main.replaceChildren(...heading('People and access', 'Assign users to roles. Each role can use multiple database connections and share specific dashboards. PostgreSQL controls the rows and columns those connections can read.'));
+  main.replaceChildren(...heading('People and access', 'Assign application access and database profiles through roles. PostgreSQL controls the rows, columns, and write operations available through each profile.'));
   const [users, roles, resources] = await Promise.all([requestJson(`${ADMIN}/accounts`), requestJson(`${ADMIN}/roles`), requestJson(`${ADMIN}/resources`)]);
   const columns = el('div', { className: 'account-columns' });
   const people = el('section', { className: 'account-panel' }, [el('h2', { text: 'People' }), button('Add user', () => editUser(null), true)]);
@@ -69,7 +69,7 @@ async function adminPage() {
     const username = field('Username', { value: user?.username || '', autocomplete: 'off' });
     const display = field('Display name', { value: user?.display_name || '', autocomplete: 'off' });
     const password = field(user ? 'Reset password (leave blank to keep)' : 'Initial password', { type: 'password', autocomplete: 'new-password', required: !user });
-    const admin = check('Installation administrator', user?.is_admin), disabled = check('Disable sign-in and revoke sessions', user?.disabled);
+    const admin = check('Can provision accounts and roles', user?.is_admin), disabled = check('Disable sign-in and revoke sessions', user?.disabled);
     d.append(formWithSubmit(user ? 'Save user' : 'Create user', async () => {
       const body = { display_name: display.input.value.trim(), is_admin: admin.input.checked, ...(password.input.value ? { password: password.input.value } : {}), ...(user ? { disabled: disabled.input.checked } : { username: username.input.value.trim() }) };
       await requestJson(`${ADMIN}/accounts${user ? `/${user.id}` : ''}`, { method: user ? 'PATCH' : 'POST', body }); d.close(); await adminPage();
@@ -79,9 +79,21 @@ async function adminPage() {
   function editRole(role) {
     const d = dialog(role ? 'Edit role' : 'Create role');
     const name = field('Role name', { value: role?.name || '' });
-    const author = check('Allow authoring using personal database connections', role?.capabilities.includes('author'));
+    const capabilities = [
+      ['schemii:access', 'Schemii — schema design and SQL'],
+      ['schemoo:access', 'Schemoo — semantic models'],
+      ['schemer:access', 'Schemer — view granted dashboards'],
+      ['schemer:author', 'Schemer — create and edit dashboards'],
+    ].map(([id, label]) => ({ id, ...check(label, role?.capabilities.includes(id)) }));
     const memberships = users.map(user => ({ id: user.id, ...check(`${user.display_name || user.username} (${user.username})`, role?.user_ids.includes(user.id)) }));
-    const profiles = resources.connections.map(connection => ({ connection, ...check(connection.name || connection.id, role?.connections.some(c => c.connection_id === connection.id && c.owner_id === connection.owner_id)) }));
+    const profiles = resources.connections.map(connection => {
+      const current = role?.connections.find(c => c.connection_id === connection.id && c.owner_id === connection.owner_id);
+      const enabled = check(`${connection.name || connection.id} · ${connection.database} · ${connection.username}`, !!current);
+      const authoring = check('Use for Schemii, Schemoo, or Schemer authoring', current?.allow_authoring);
+      const options = el('div', { className: 'account-editor', hidden: !current }, [authoring.node]);
+      enabled.input.onchange = () => { options.hidden = !enabled.input.checked; };
+      return { connection, input: enabled.input, authoring, node: el('div', { className: 'account-grant' }, [enabled.node, options]) };
+    });
     const grants = resources.dashboards.map(dashboard => {
       const current = role?.dashboards.find(g => g.dashboard_id === dashboard.id && g.owner_id === dashboard.owner_id);
       const enabled = check(dashboard.name, !!current), exp = check('Allow export', current?.can_export), drill = check('Allow drill-through', current?.can_drill);
@@ -93,7 +105,7 @@ async function adminPage() {
       enabled.input.onchange = () => { options.hidden = !enabled.input.checked; };
       return { dashboard, enabled, select, exp, drill, node: el('div', { className: 'account-grant' }, [enabled.node, options]) };
     });
-    const sections = [name.node, author.node, el('h3', { text: 'Members' }), el('div', { className: 'account-list' }, memberships.map(m => m.node)), el('h3', { text: 'Database connections' }), el('p', { text: 'Choose managed access profiles for this role. Their database credentials stay on the server. Create connections in the schema application first.' }), el('div', { className: 'account-list' }, profiles.length ? profiles.map(p => p.node) : [el('p', { text: 'No saved connections are available yet.' })]), el('h3', { text: 'Shared dashboards' }), el('p', { text: 'Bind each dashboard to one of the connections selected above. The database applies that connection’s row and column permissions.' }), el('div', { className: 'account-list' }, grants.length ? grants.map(g => g.node) : [el('p', { text: 'Create a dashboard in Schemer before sharing it.' })])];
+    const sections = [name.node, el('h3', { text: 'Applications' }), el('div', { className: 'account-list' }, capabilities.map(c => c.node)), el('p', { text: 'Schemer editing also requires Schemer access. Database operations use the PostgreSQL identity on an authorized connection.' }), el('h3', { text: 'Members' }), el('div', { className: 'account-list' }, memberships.map(m => m.node)), el('h3', { text: 'Database connections' }), el('p', { text: 'Choose managed access profiles for this role. Credentials stay on the server; PostgreSQL grants and row policies apply to every query.' }), el('div', { className: 'account-list' }, profiles.length ? profiles.map(p => p.node) : [el('p', { text: 'No saved connections are available yet.' })]), el('h3', { text: 'Shared dashboards' }), el('p', { text: 'Bind each dashboard to one of the connections selected above. The database applies that connection’s row and column permissions.' }), el('div', { className: 'account-list' }, grants.length ? grants.map(g => g.node) : [el('p', { text: 'Create a dashboard in Schemer before sharing it.' })])];
     d.append(formWithSubmit('Save role', async () => {
       const selected = profiles.filter(p => p.input.checked).map(p => p.connection);
       const dashboards = grants.filter(g => g.enabled.input.checked).map(g => {
@@ -101,7 +113,7 @@ async function adminPage() {
         if (!c || !selected.includes(c)) throw new Error(`Select an authorized role connection for “${g.dashboard.name}”.`);
         return { dashboard_id: g.dashboard.id, owner_id: g.dashboard.owner_id, connection_id: c.id, connection_owner_id: c.owner_id, can_export: g.exp.input.checked, can_drill: g.drill.input.checked };
       });
-      await requestJson(`${ADMIN}/roles${role ? `/${role.id}` : ''}`, { method: role ? 'PUT' : 'POST', body: { name: name.input.value.trim(), capabilities: author.input.checked ? ['author'] : [], user_ids: memberships.filter(m => m.input.checked).map(m => m.id), connections: selected.map(c => ({ connection_id: c.id, owner_id: c.owner_id, allow_authoring: false })), dashboards } });
+      await requestJson(`${ADMIN}/roles${role ? `/${role.id}` : ''}`, { method: role ? 'PUT' : 'POST', body: { name: name.input.value.trim(), capabilities: capabilities.filter(c => c.input.checked).map(c => c.id), user_ids: memberships.filter(m => m.input.checked).map(m => m.id), connections: profiles.filter(p => p.input.checked).map(p => ({ connection_id: p.connection.id, owner_id: p.connection.owner_id, allow_authoring: p.authoring.input.checked })), dashboards } });
       d.close(); await adminPage();
     }, sections));
     const actions = el('div', { className: 'account-actions' }, [button('Cancel', () => d.close())]);
@@ -118,8 +130,11 @@ async function initialize() {
     const status = await requestJson(`${AUTH}/status`);
     if (!status.authenticated) { if (location.pathname !== '/login') { location.replace('/login'); return; } await login(status); return; }
     const account = await requestJson(`${AUTH}/me`);
-    if (location.pathname === '/login') { location.replace(canAuthor(account) ? '/' : '/schemer'); return; }
-    nav.append(link('Reports', '/schemer'), link('Account', '/account'));
+    if (location.pathname === '/login') { location.replace(landingPath(account)); return; }
+    for (const [product, label, href] of [['schemii', 'Schemii', '/'], ['schemoo', 'Schemoo', '/schemoo'], ['schemer', 'Schemer', '/schemer']]) {
+      if (canAccessProduct(account, product)) nav.append(link(label, href));
+    }
+    nav.append(link('Account', '/account'));
     if (account.is_admin) nav.append(link('Administration', '/admin'));
     nav.append(button('Sign out', async () => { try { await signOut(); } catch (e) { main.prepend(el('p', { className: 'account-error', text: e.message, attrs: { role: 'alert' } })); } }));
     if (location.pathname === '/admin') { if (!account.is_admin) throw new Error('Administrator access is required.'); await adminPage(); } else accountPage(account);

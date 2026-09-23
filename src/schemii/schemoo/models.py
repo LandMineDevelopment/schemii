@@ -352,6 +352,7 @@ class ModelSummary(Contract):
     owner_id: str
     name: str
     connection_id: str
+    connection_owner_id: str | None = None
     database: str
     namespace: str
     catalog_fingerprint: str = ""

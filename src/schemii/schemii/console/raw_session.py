@@ -17,6 +17,7 @@ from psycopg import InterfaceError, OperationalError
 
 from schemii.common.api.errors import ApiProblem
 from schemii.common.api.models import ApiModel
+from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.console.raw import RawSession
 from schemii.common.postgres.errors import PostgresGatewayError
@@ -152,6 +153,8 @@ class RawSessionService:
             self.opening.add(key)
         try:
             with self.connections.use(owner, target.connection_id) as resolved:
+                if (getattr(resolved, "owner_id", None) or owner) != (target.connection_owner_id or owner) or resolved.revision != target.connection_revision or resolved.database != target.database:
+                    raise ApiProblem(409, "console_target_changed", "The PostgreSQL connection changed")
                 connection = self.postgres._connect(resolved, retained=True)
                 try:
                     raw = RawSession(connection, target.namespace, autocommit=True,
@@ -169,6 +172,8 @@ class RawSessionService:
                 with self.lock:
                     self.sessions[session["id"]] = session
             return self.view(session)
+        except ConnectionNotFoundError as error:
+            raise ApiProblem(403, "console_connection_revoked", "Access to the PostgreSQL connection was revoked") from error
         finally:
             with self.lock:
                 self.opening.discard(key)
@@ -184,10 +189,13 @@ class RawSessionService:
         self.console._require_workspace(owner, workspace)
         current = self.console._workspaces.get(owner, workspace)
         target = session["target"]
-        if (current.connection_id, current.database, current.namespace) != (target.connection_id, target.database, target.namespace):
+        if (current.connection_id, getattr(current, "connection_owner_id", None) or owner, current.database, current.namespace) != (target.connection_id, target.connection_owner_id or owner, target.database, target.namespace):
             raise ApiProblem(409, "console_target_changed", "Workspace target changed; close this database session and reconnect")
-        profile = self.connections.get(owner, session["target"].connection_id)
-        if profile.revision != session["target"].connection_revision:
+        try:
+            profile = self.connections.get(owner, session["target"].connection_id)
+        except ConnectionNotFoundError as error:
+            raise ApiProblem(403, "console_connection_revoked", "Access to the PostgreSQL connection was revoked") from error
+        if profile.revision != session["target"].connection_revision or (getattr(profile, "owner_id", None) or owner) != (target.connection_owner_id or owner):
             raise ApiProblem(409, "console_connection_changed", "Connection changed; close this session and reconnect")
         return session
 
@@ -372,8 +380,12 @@ class RawSessionService:
         data = self.view(session)
         try:
             with self.connections.use(session["owner"], session["target"].connection_id) as resolved:
+                if (getattr(resolved, "owner_id", None) or session["owner"]) != (session["target"].connection_owner_id or session["owner"]):
+                    raise ApiProblem(409, "console_target_changed", "The PostgreSQL connection changed")
                 data.update(self.postgres.console_activity(resolved, session["raw"].backend_pid,
                                                           started_before=datetime.fromisoformat(session["createdAt"])))
+        except ConnectionNotFoundError as error:
+            raise ApiProblem(403, "console_connection_revoked", "Access to the PostgreSQL connection was revoked") from error
         except PostgresGatewayError:
             data.update(monitoringAvailable=False, monitoringMessage="Database activity is temporarily unavailable")
         return data

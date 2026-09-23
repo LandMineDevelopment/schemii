@@ -19,7 +19,7 @@ def _enabled(request):
 def available_dashboards(request, actor):
     services = request.app.state.services
     auth = _enabled(request)
-    author = auth is None or auth.is_admin(actor) or "author" in auth.capabilities(actor)
+    author = auth is None or {"schemer:access", "schemer:author"}.issubset(auth.capabilities(actor))
     dashboards = {item.id: item for item in services.dashboards.list(actor)} if author else {}
     if auth:
         for grant in auth.dashboard_grants(actor):
@@ -43,6 +43,8 @@ class ReportAccess:
         user = self.auth.resolve(self.session_token) if self.session_token is not None else self.auth.user(self.actor)
         if not user or user.get("disabled"):
             raise ApiProblem(403, "report_access_revoked", "Your report access has been removed.")
+        if "schemer:access" not in self.auth.capabilities(self.actor):
+            raise ApiProblem(403, "report_access_revoked", "Your Schemer access has been removed.")
         if self.grant not in self.auth.dashboard_grants(self.actor):
             raise ApiProblem(403, "report_access_revoked", "Your report access changed. Reload the report.")
         matches = [item for item in self.auth.connection_grants(self.actor)
@@ -147,7 +149,7 @@ def prepare_dashboard(request, actor, dashboard_id, *, export=False, drill=False
         if auth is None:
             raise
     else:
-        if auth is None or auth.is_admin(actor) or "author" in auth.capabilities(actor):
+        if auth is None or {"schemer:access", "schemer:author"}.issubset(auth.capabilities(actor)):
             return dashboard, owned_report_services(request, actor, dashboard.id), {"edit": True, "export": True, "drill": True}
     grants = [g for g in auth.dashboard_grants(actor) if g["dashboard_id"] == dashboard_id]
     if not grants:
@@ -162,7 +164,7 @@ def prepare_dashboard(request, actor, dashboard_id, *, export=False, drill=False
     grant = eligible[0]
     dashboard = services.dashboards.get(grant["owner_id"], dashboard_id)
     model = services.models.get(grant["owner_id"], dashboard.model_id)
-    source = services.connections.get(grant["owner_id"], model.connection_id)
+    source = services.connections.get(model.connection_owner_id or grant["owner_id"], model.connection_id)
     profile = services.connections.get(grant["connection_owner_id"], grant["connection_id"])
     if (source.host, source.port, source.database) != (profile.host, profile.port, profile.database):
         raise ApiProblem(409, "report_source_mismatch", "The assigned connection must target the report's database server and database.")
@@ -184,22 +186,25 @@ class OwnerReportAccess:
         self.services, self.auth, self.actor = services, auth, actor
         self.resource_id, self.token = resource_id, token
         self.connection_owner_id = actor
+        self.connections = services.connections.for_product("schemer")
 
     def check(self):
         user = self.auth.resolve(self.token)
-        if not user or (not user['is_admin'] and 'author' not in self.auth.capabilities(self.actor)):
+        if not user or not {"schemer:access", "schemer:author"}.issubset(self.auth.capabilities(self.actor)):
             raise ApiProblem(403, "report_access_revoked", "Your report access has been removed. Sign in again or contact an administrator.")
 
     def get(self, actor, connection_id):
         self.check()
         if actor != self.actor:
             raise ApiProblem(403, "report_source_forbidden", "This connection belongs to another account.")
-        return self.services.connections.get(actor, connection_id)
+        profile = self.connections.get(actor, connection_id)
+        self.connection_owner_id = profile.owner_id or actor
+        return profile
 
     @contextmanager
     def use(self, actor, connection_id):
         self.get(actor, connection_id)
-        with self.services.connections.use(actor, connection_id) as target:
+        with self.connections.use(actor, connection_id) as target:
             yield target
 
 

@@ -113,7 +113,7 @@ class RelationBrowserService:
         if workspace.connection_id is None or workspace.database is None or workspace.namespace is None:
             raise RelationBrowserError(409, "workspace_target_required", "Relation browsing requires a PostgreSQL-backed workspace")
         with self._connections.use(owner_id, workspace.connection_id) as connection:
-            if connection.database != workspace.database:
+            if connection.database != workspace.database or (getattr(connection, "owner_id", None) or owner_id) != (getattr(workspace, "connection_owner_id", None) or owner_id):
                 raise RelationBrowserError(409, "workspace_target_changed", "The workspace connection no longer targets its saved database")
             return workspace, self._postgres.introspect(connection, workspace.namespace)
 
@@ -202,6 +202,8 @@ class RelationBrowserService:
         quote = lambda value: '"' + value.replace('"', '""') + '"'
         statement = f"SELECT * FROM {quote(workspace.namespace)}.{quote(relation.value.name)} OFFSET {offset} LIMIT {page_size + 1}"
         with self._connections.use(owner_id, workspace.connection_id) as connection:
+            if connection.database != workspace.database or (getattr(connection, "owner_id", None) or owner_id) != (getattr(workspace, "connection_owner_id", None) or owner_id):
+                raise RelationBrowserError(409, "workspace_target_changed", "The workspace connection identity changed")
             results = self._postgres.execute_console(
                 connection,
                 workspace.namespace,

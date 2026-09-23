@@ -1,5 +1,5 @@
 """Security regression checks for account sessions and role boundaries."""
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
@@ -16,8 +16,14 @@ def app():
     application.add_middleware(AuthenticationMiddleware)
     @application.get('/api/v1/private')
     def private(): return {'secret':True}
+    @application.get('/api/v1/schemii/workspaces')
+    def workspaces(): return []
+    @application.get('/api/v1/schemoo/models')
+    def models(): return []
     @application.get('/api/v1/schemer/dashboards')
     def dashboards(): return []
+    @application.post('/api/v1/schemer/dashboards')
+    def create_dashboard(): return {'ok':True}
     return application
 
 
@@ -38,7 +44,8 @@ def test_bootstrap_claims_owner_once_and_secure_cookie(client):
     assert response.json()['user']['id']=='user_local_prototype'
     cookie=response.headers['set-cookie']
     assert 'HttpOnly' in cookie and 'Secure' in cookie and 'SameSite=lax' in cookie
-    assert client.get('/api/v1/private').status_code==200
+    assert client.get('/api/v1/private').status_code==403
+    assert client.get('/api/v1/schemii/workspaces').status_code==200
     assert client.post('/api/v1/auth/setup',json=dict(setup_token='setup-secret',username='other',display_name='Other',password='long-password-123')).status_code==403
 
 
@@ -56,7 +63,7 @@ def test_viewer_default_deny_disable_and_last_admin(client,app):
     viewer_cookie=client.cookies.get(COOKIE)
     assert client.get('/api/v1/private').status_code==403
     assert client.get('/api/v1/admin/accounts').status_code==403
-    assert client.get('/api/v1/schemer/dashboards').status_code==200
+    assert client.get('/api/v1/schemer/dashboards').status_code==403
     client.cookies.clear()
     client.cookies.set(COOKIE,admin_cookie)
     assert client.patch('/api/v1/admin/accounts/user_local_prototype',json={'disabled':True}).status_code==409
@@ -88,25 +95,116 @@ def test_role_changes_take_effect_without_new_session(client,app):
     app.state.services=SimpleNamespace()
     bootstrap(client)
     user=client.post('/api/v1/admin/accounts',json=dict(username='author',display_name='Author',password='author-password-123')).json()
-    role=client.post('/api/v1/admin/roles',json=dict(name='Authors',capabilities=['author'],user_ids=[user['id']])).json()
+    role=client.post('/api/v1/admin/roles',json=dict(name='Schema authors',capabilities=['schemii:access'],user_ids=[user['id']])).json()
     admin_cookie=client.cookies.get(COOKIE)
     assert client.post('/api/v1/auth/login',json=dict(username='author',password='author-password-123')).status_code==200
     author_cookie=client.cookies.get(COOKIE)
-    assert client.get('/api/v1/private').status_code==200
+    assert client.get('/api/v1/schemii/workspaces').status_code==200
+    assert client.get('/api/v1/schemoo/models').status_code==403
+    assert client.get('/api/v1/schemer/dashboards').status_code==403
     assert client.get('/_developer/inspection').status_code==403
     client.cookies.clear()
     client.cookies.set(COOKIE,admin_cookie)
     assert client.delete('/api/v1/admin/roles/'+role['id']).status_code==204
     client.cookies.clear()
     client.cookies.set(COOKIE,author_cookie)
-    assert client.get('/api/v1/private').status_code==403
+    assert client.get('/api/v1/schemii/workspaces').status_code==403
 
 
-def test_role_rejects_unbound_dashboard_and_managed_authoring(client):
+def test_role_rejects_unbound_dashboard_and_authoring_without_product(client):
     bootstrap(client)
     grant=dict(dashboard_id='dashboard_x',owner_id='user_x',connection_id='pg_x',connection_owner_id='user_x')
     assert client.post('/api/v1/admin/roles',json=dict(name='Invalid',dashboards=[grant])).status_code==422
     assert client.post('/api/v1/admin/roles',json=dict(name='Invalid',connections=[dict(connection_id='pg_x',owner_id='user_x',allow_authoring=True)])).status_code==422
+    assert client.post('/api/v1/admin/roles',json=dict(name='Invalid',capabilities=['schemer:author'])).status_code==422
+
+
+def test_provisioner_has_no_implicit_product_access(client):
+    bootstrap(client)
+    provisioner=client.post('/api/v1/admin/accounts',json=dict(username='provisioner',display_name='Provisioner',password='provision-password-123',is_admin=True)).json()
+    assert provisioner['is_admin']
+    roles=client.get('/api/v1/admin/roles').json()
+    assert all(role['id'] != 'role_application_provisioners' for role in roles)
+    assert client.delete('/api/v1/admin/roles/role_application_provisioners').status_code==403
+    assert client.post('/api/v1/admin/roles',json=dict(name='Escalation',capabilities=['accounts:provision'])).status_code==422
+    assert client.post('/api/v1/auth/login',json=dict(username='provisioner',password='provision-password-123')).status_code==200
+    assert client.get('/api/v1/auth/me').json()['capabilities']==['accounts:provision']
+    assert client.get('/api/v1/admin/accounts').status_code==200
+    assert client.get('/api/v1/schemii/workspaces').status_code==403
+    assert client.get('/api/v1/schemoo/models').status_code==403
+    assert client.get('/api/v1/schemer/dashboards').status_code==403
+
+
+def test_provisioner_revocation_applies_to_existing_session(client):
+    bootstrap(client)
+    provisioner=client.post('/api/v1/admin/accounts',json=dict(username='operator',display_name='Operator',password='operator-password-123',is_admin=True)).json()
+    bootstrap_cookie=client.cookies.get(COOKIE)
+    client.post('/api/v1/auth/login',json=dict(username='operator',password='operator-password-123'))
+    operator_cookie=client.cookies.get(COOKIE)
+    assert client.get('/api/v1/admin/accounts').status_code==200
+    client.cookies.set(COOKIE,bootstrap_cookie)
+    assert client.patch('/api/v1/admin/accounts/'+provisioner['id'],json={'is_admin':False}).status_code==200
+    client.cookies.set(COOKIE,operator_cookie)
+    assert client.get('/api/v1/admin/accounts').status_code==403
+    assert client.get('/api/v1/auth/me').json()['capabilities']==[]
+
+
+def test_schemer_viewer_cannot_edit_and_author_can(client,app):
+    app.state.services=type('Services',(),{})()
+    bootstrap(client)
+    user=client.post('/api/v1/admin/accounts',json=dict(username='reporter',display_name='Reporter',password='report-password-123')).json()
+    role=client.post('/api/v1/admin/roles',json=dict(name='Report access',capabilities=['schemer:access'],user_ids=[user['id']])).json()
+    admin_cookie=client.cookies.get(COOKIE)
+    client.post('/api/v1/auth/login',json=dict(username='reporter',password='report-password-123'))
+    viewer_cookie=client.cookies.get(COOKIE)
+    assert client.get('/api/v1/schemer/dashboards').status_code==200
+    assert client.post('/api/v1/schemer/dashboards').status_code==403
+    client.cookies.set(COOKIE,admin_cookie)
+    assert client.put('/api/v1/admin/roles/'+role['id'],json=dict(name='Report access',capabilities=['schemer:access','schemer:author'],user_ids=[user['id']])).status_code==200
+    client.cookies.set(COOKIE,viewer_cookie)
+    assert client.post('/api/v1/schemer/dashboards').status_code==200
+
+
+def test_managed_connection_requires_same_role_product_and_authoring_grant(client,app):
+    bootstrap(client)
+    user=client.post('/api/v1/admin/accounts',json=dict(username='modeler',display_name='Modeler',password='modeler-password-123')).json()
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['product']=dict(id='product',name='Model access',capabilities=['schemoo:access'],
+            user_ids=[user['id']],connections=[],dashboards=[])
+        state['roles']['profile']=dict(id='profile',name='Managed profile',capabilities=[],
+            user_ids=[user['id']],connections=[dict(connection_id='pg_shared',owner_id='owner_a',allow_authoring=True)],dashboards=[])
+    access=app.state.auth.connection_access
+    assert access(user['id'],'pg_shared','schemoo') is None
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['profile']['capabilities']=['schemoo:access']
+    assert access(user['id'],'pg_shared','schemoo')['owner_id']=='owner_a'
+    assert access(user['id'],'pg_shared','schemii') is None
+    assert access(user['id'],'pg_shared','schemer') is None
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['profile']['capabilities']=['schemer:access']
+    assert access(user['id'],'pg_shared','schemer') is None
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['profile']['capabilities']=['schemer:access','schemer:author']
+    assert access(user['id'],'pg_shared','schemer')['owner_id']=='owner_a'
+    with app.state.auth.store.transaction(write=True) as state:
+        state['roles']['other']=dict(id='other',name='Other identity',capabilities=['schemer:access','schemer:author'],
+            user_ids=[user['id']],connections=[dict(connection_id='pg_shared',owner_id='owner_b',allow_authoring=True)],dashboards=[])
+    with pytest.raises(HTTPException) as failure:
+        access(user['id'],'pg_shared','schemer')
+    assert failure.value.status_code==409
+
+
+def test_provisioner_can_bind_authoring_profile_to_product_role(client,app):
+    from types import SimpleNamespace
+    bootstrap(client)
+    app.state.services=SimpleNamespace(connections=SimpleNamespace(get=lambda owner, connection: object()))
+    user=client.post('/api/v1/admin/accounts',json=dict(username='analyst',display_name='Analyst',password='analyst-password-123')).json()
+    role=client.post('/api/v1/admin/roles',json=dict(
+        name='Organization modeling',capabilities=['schemoo:access'],user_ids=[user['id']],
+        connections=[dict(connection_id='pg_organization',owner_id='user_local_prototype',allow_authoring=True)],
+    ))
+    assert role.status_code==201
+    assert app.state.auth.connection_access(user['id'],'pg_organization','schemoo')['role_id']==role.json()['id']
 
 
 def test_admin_cannot_share_other_users_private_credentials(client,app):

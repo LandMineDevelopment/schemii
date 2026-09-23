@@ -245,6 +245,7 @@ class MigrationExecutionCoordinator:
         design = self._design(owner_id, plan.workspace_id)
         if (
             workspace.connection_id != record.authority.connection_id
+            or (getattr(workspace, "connection_owner_id", None) or owner_id) != (record.authority.connection_owner_id or owner_id)
             or workspace.database != record.authority.database
             or workspace.namespace != record.authority.namespace
         ):
@@ -365,7 +366,7 @@ class MigrationExecutionCoordinator:
             with self._connections.use(
                 owner_id, record.authority.connection_id
             ) as connection:
-                if connection.revision != record.authority.connection_revision:
+                if connection.revision != record.authority.connection_revision or (getattr(connection, "owner_id", None) or owner_id) != (record.authority.connection_owner_id or owner_id):
                     return self._fail_before_apply(
                         execution_record,
                         "connection_changed",
@@ -563,6 +564,8 @@ class MigrationExecutionCoordinator:
             with self._connections.use(
                 owner_id, plan.authority.connection_id
             ) as connection:
+                if (getattr(connection, "owner_id", None) or owner_id) != (plan.authority.connection_owner_id or owner_id):
+                    raise ConnectionNotFoundError("Migration PostgreSQL identity changed")
                 recovery = status_reader(connection, execution.transaction_id)
         except (ConnectionNotFoundError, PostgresGatewayError) as error:
             if automatic:
@@ -670,6 +673,7 @@ class MigrationExecutionCoordinator:
                     owner_id=owner_id,
                     workspace_id=record.plan.workspace_id,
                     connection_id=record.authority.connection_id,
+                    connection_owner_id=record.authority.connection_owner_id or owner_id,
                     connection_revision=record.authority.connection_revision,
                     database=record.authority.database,
                     namespace=record.authority.namespace,

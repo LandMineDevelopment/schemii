@@ -1,101 +1,91 @@
 # Accounts and database roles
 
-This first authenticated release supports administrator-provisioned local accounts,
-private author connections, and managed report access. It is intended for private
-self-hosted testing; it does not add public ingress.
+This private deployment has administrator-provisioned local accounts, per-product
+roles, and role-managed PostgreSQL connections. It does not add public ingress or
+automatically invite anyone to a Tailscale tailnet.
 
 ## First launch and accounts
 
-Run `./start.sh`. Open `https://localhost:8001/login`, or the configured tailnet
-origin. The launcher prints the location of a persistent setup token, not its value.
-Use that token to create the first administrator. Setup atomically claims the
-existing local prototype user ID, preserving all saved objects and encrypted
-credentials. Setup cannot be repeated after an account exists. The server refuses
-to start unauthenticated against metadata containing accounts.
+Run `./start.sh`. Open `https://localhost:8001/login` or the configured tailnet
+origin. The launcher prints the path to a persistent setup token, not its value.
+Use it once to create the first application provisioner. Setup claims the existing
+local prototype user ID, preserving saved objects and encrypted credentials. The
+server refuses to run unauthenticated after accounts exist.
 
-The administrator provisions accounts and initial passwords in **Accounts & roles**.
-Users can change their password on **My account**. Administrators can reset another
-user's password or disable an account. Password changes revoke all of that user's
-sessions. The final enabled administrator cannot be disabled or demoted. Account
-records are retained; deleting a user and cascading shared content is not exposed.
+Provisioners create accounts and initial passwords in **Accounts & roles**. Users
+can change their passwords on **My account**. A provisioner can reset a password
+or disable an account; password changes revoke that user's sessions. The final
+enabled provisioner cannot be disabled or demoted. Account deletion is not
+exposed, so shared data cannot be cascaded away accidentally.
 
 Sessions use hashed, expiring server-side tokens and Secure, HttpOnly, SameSite
-cookies. Passwords use salted scrypt hashes. Mutation requests must originate from
-the app's HTTPS origin; configured exact trusted origins support the tailnet proxy.
+cookies. Passwords use salted scrypt hashes. Mutations must originate from the
+app's HTTPS origin; configured exact trusted origins support the tailnet proxy.
 Never put a wildcard in `SCHEMII_TRUSTED_ORIGINS`.
 
-## Roles and connections
+## Product and database roles
 
-A role can contain any number of users, saved database connections, and dashboard
-grants. A managed connection is an existing saved connection explicitly granted to
-a role; existing credential IDs and encryption bindings remain intact. No password
-is disclosed when a connection is granted. Multiple roles may reuse a connection.
+Roles assign `schemii:access`, `schemoo:access`, `schemer:access`, and optionally
+`schemer:author` for dashboard editing. A user may use Schemoo without receiving
+Schemii Console or migration access. The reserved Application provisioners role
+has `accounts:provision`: it permits account and role management, but implies no
+product or PostgreSQL privilege. Migration 0039 preserves existing author and
+administrator product access while making future assignments explicit.
 
-An **Author** role allows users to create their own private connections and author
-models, dashboards, SQL queries, and schema workspaces. Managed role connections
-are currently usable only for the explicitly granted saved dashboards; they do not
-grant arbitrary SQL or shared model authoring. An application administrator is not
-a PostgreSQL administrator: all database operations still use saved credentials.
+A role may also bind an existing saved PostgreSQL connection. To let a member
+author workspaces, models, or dashboards with it, set **Allow authoring** on the
+connection grant. The grant and relevant product capability must be in the same
+role. The profile and encrypted password remain owned by the original account;
+the friend sees non-secret connection details but cannot edit or delete it. New
+Schemii workspaces and Schemoo models remain private to the friend who created
+them, while pointing to that managed connection. No credentials are copied.
 
-Each dashboard grant binds one connection in the same role. It must target the same
-host, port, and database as the model's authored source. Separate credentials can
-therefore execute the same dashboard under different PostgreSQL permissions.
-Different host aliases are deliberately not inferred to mean the same server.
-If a user's roles assign different identities to one dashboard, access fails with
-an explanation; it never silently selects the stronger identity. Consolidate that
-user's role bindings to choose one connection.
+For a Schemer author to create a dashboard from a model, also grant
+`schemoo:access` so they can select or create that model. A report viewer needs
+only `schemer:access`, an explicit dashboard grant, and its connection grant in
+the same role; viewers cannot edit reports or use generic model or SQL routes.
+Export and drill-through are independent opt-ins. If roles assign different
+database identities to one report, access fails closed rather than choosing a
+stronger identity.
 
-Export and drill-through are independent opt-ins. Shared viewers cannot edit the
-report, use generic model queries, run SQL, or use the author's credentials. Filters
-are sent with each execution and do not overwrite another viewer's selections.
-Personal connections remain private; sharing a dashboard does not share its author's
-connection automatically.
+To offer read-only and write-capable roles, create distinct PostgreSQL logins.
+Configure their table/column grants, row policies, and read/write/DDL privileges
+in PostgreSQL; save each login as a separate connection profile; then bind each
+profile to the intended app role. The app does not create or alter privileges in
+the organization database. Users who share one login share its database-visible
+identity. An application provisioner is not a PostgreSQL administrator.
 
-## Database enforcement
+## Database enforcement and revocation
 
-Use dedicated non-owner, non-superuser reporting logins without BYPASSRLS. Apply
-row policies and column SELECT grants in PostgreSQL. Users sharing one login share
-its database-visible identity. Application filters and hidden semantic fields are
-not row or column security.
+Use dedicated non-owner, non-superuser logins without `BYPASSRLS`. Application
+filters and hidden fields are not row or column security. Catalogs for managed
+Schemoo sources and shared reports refresh under the assigned identity and hide
+columns without `SELECT`. Schemii catalogs, Console work, migrations, Schemoo
+previews, and Schemer reports use the selected profile. PostgreSQL rejects
+unauthorized reads, writes, or DDL; the app never retries with another identity.
 
-Shared report catalogs refresh under the assigned identity and include only
-SELECT-permitted columns and usable relationships. Reports, option lookups,
-drill-through, and CSV export use that same identity. Missing privileges fail; no
-fallback identity is attempted. Query results stay transient and execution receipts
-belong to the actual viewer. Shared report handles cannot be fetched/exported
-through generic result endpoints.
+Account, session, role, and connection changes are checked before new database
+work and before retained results are served. Shared-report streams recheck while
+streaming. Previously rendered or downloaded data cannot be recalled. A SQL
+transaction or migration already submitted to PostgreSQL may finish after a role
+is removed; revocation cannot roll back confirmed database work.
 
-Account, session, role, and connection changes are checked during report streams;
-revoked streams stop and close their source sessions. Previously downloaded or
-rendered data cannot be recalled. Other already-admitted author jobs (such as a
-migration or raw SQL transaction) retain their existing lifecycle; revocation
-blocks subsequent API requests, not a rollback of database work already submitted.
+## Metadata, deployment, and remaining scope
 
-## Metadata and recovery
+Migration 0037 added accounts, sessions, roles, memberships, grants, and audit
+records. Migration 0038 separated shared-report actors from credential owners.
+Migrations 0039–0041 add product capabilities and separate credential ownership
+for Schemoo models and Schemii workspaces, migration plans, and Console receipts.
+Saved resource IDs and encrypted credentials are preserved. Back up the metadata
+volume and its encryption key together. Never delete account tables to regain
+anonymous access.
 
-Migration 0037 adds accounts, sessions, roles, memberships, connection/report grants,
-audit events, and login throttling. Migration 0038 separates the execution actor
-from its credential owner while preserving private workspace identities. Existing migration files are unchanged. This
-iteration retains owner-private model/workspace foreign keys and introduces a
-narrow shared-report execution adapter instead of rewriting ownership or encrypted
-credentials. The setup token and encryption key live outside metadata PostgreSQL.
-Back up the metadata volume and its encryption key together using your operator
-backup process. Never delete the account tables to regain anonymous access.
+The local demo fixture creates `accounts_demo.sales` with separate regional
+reporting logins, row policies, and an inaccessible `secret` column. Fixture
+passwords are local-demo-only. PostgreSQL integration tests use an explicitly
+configured disposable database and skip when it is absent.
 
-Local demo bootstrap creates `accounts_demo.sales` with separate `report_east` and
-`report_west` logins, row policies, and an inaccessible `secret` column. Fixture
-passwords in `dev/postgres/account-access-fixture.sql` are local-demo-only. Ordinary
-saved data is untouched by this repeatable fixture.
-
-## Verification and remaining scope
-
-Unit/API tests cover session isolation, CSRF, setup races, role checks, private
-credentials, export/drill permissions, source mismatch, ambiguous identities,
-revocation, and column filtering. PostgreSQL integration tests use the existing
-explicit disposable-database test configuration and skip when it is absent.
-Physical browser verification must use the launcher-built HTTPS application.
-
-SSO, email invitations/recovery, MFA, managed model authoring, organization tenancy,
+Tailnet invitations, SSO, email recovery, MFA, role-shared workspaces/models,
 public links, individual app-identity RLS context, and cross-database joins are
-separate follow-up capabilities. A database-target/access-profile schema split can
-be introduced later without changing the role-to-execution contract.
+separate capabilities. Invite a friend to the tailnet and give them an app account
+and role separately; neither operation automatically performs the other.

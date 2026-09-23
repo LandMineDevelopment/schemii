@@ -13,6 +13,11 @@ from .store import AuthStore
 
 COOKIE = 'schemii_session'
 SESSION_SECONDS = 12 * 60 * 60
+PROVISIONER_ROLE_ID = 'role_application_provisioners'
+BOOTSTRAP_PRODUCTS_ROLE_ID = 'role_bootstrap_products'
+PRODUCT_CAPABILITIES = ('schemii:access', 'schemoo:access', 'schemer:access')
+SCHEMER_AUTHOR = 'schemer:author'
+PROVISION_CAPABILITY = 'accounts:provision'
 
 
 def password_hash(password):
@@ -60,11 +65,10 @@ class AuthService:
 
     def is_admin(self, user_id):
         if not self.enabled: return True
-        user = self.user(user_id)
-        return bool(user and user['is_admin'])
+        return PROVISION_CAPABILITY in self.capabilities(user_id)
 
     def capabilities(self, user_id):
-        if self.is_admin(user_id): return ['author']
+        if not self.enabled: return sorted((*PRODUCT_CAPABILITIES, SCHEMER_AUTHOR, PROVISION_CAPABILITY))
         if self.store.factory:
             rows=self.store.query('SELECT r.capabilities FROM metadata.auth_roles r JOIN metadata.auth_user_roles ur ON ur.role_id=r.id JOIN metadata.auth_accounts a ON a.user_id=ur.user_id WHERE ur.user_id=%s AND NOT a.disabled',(user_id,))
             return sorted({c for row in rows for c in row['capabilities']})
@@ -72,6 +76,39 @@ class AuthService:
             user = state['users'].get(user_id)
             if not user or user['disabled']: return []
             return sorted({c for r in state['roles'].values() if user_id in r['user_ids'] for c in r['capabilities']})
+
+    def connection_access(self, user_id, connection_id, product):
+        """Resolve one managed profile whose grant and product rights belong to the same role.
+
+        Private profiles belong to the caller and are resolved by ConnectionService.
+        Different matching database identities are ambiguous and must fail closed.
+        """
+        capability = f'{product}:access'
+        if capability not in PRODUCT_CAPABILITIES: raise ValueError('Unknown product')
+        if self.store.factory:
+            rows = self.store.query(
+                'SELECT g.role_id,g.owner_id,g.connection_id FROM metadata.auth_role_connections g '
+                'JOIN metadata.auth_roles r ON r.id=g.role_id '
+                'JOIN metadata.auth_user_roles ur ON ur.role_id=r.id '
+                'JOIN metadata.auth_accounts a ON a.user_id=ur.user_id '
+                'WHERE ur.user_id=%s AND NOT a.disabled AND g.connection_id=%s '
+                'AND g.allow_authoring AND r.capabilities ? %s '
+                + ('AND r.capabilities ? %s' if product == 'schemer' else ''),
+                (user_id, connection_id, capability, SCHEMER_AUTHOR) if product == 'schemer'
+                else (user_id, connection_id, capability),
+            )
+        else:
+            with self.store.transaction() as state:
+                user = state['users'].get(user_id)
+                rows = [dict(role_id=role['id'], owner_id=grant['owner_id'], connection_id=grant['connection_id'])
+                        for role in state['roles'].values() if user and not user['disabled']
+                        and user_id in role['user_ids'] and capability in role['capabilities']
+                        and (product != 'schemer' or SCHEMER_AUTHOR in role['capabilities'])
+                        for grant in role['connections']
+                        if grant['connection_id'] == connection_id and grant['allow_authoring']]
+        owners = {row['owner_id'] for row in rows}
+        if len(owners) > 1: raise HTTPException(409, 'Conflicting database identities are assigned by roles')
+        return sorted(rows, key=lambda row: row['role_id'])[0] if rows else None
 
     def _grants(self, user_id, key):
         if self.store.factory:
@@ -107,6 +144,16 @@ class AuthService:
             user_id = 'user_local_prototype' if setup else 'user_' + uuid4().hex
             user = dict(id=user_id,username=username,display_name=data.display_name,password_hash=hashed,is_admin=True if setup else data.is_admin,disabled=False)
             state['users'][user_id] = user
+            if user['is_admin']:
+                provisioners = state['roles'].setdefault(PROVISIONER_ROLE_ID, dict(
+                    id=PROVISIONER_ROLE_ID, name='Application provisioners',
+                    capabilities=[PROVISION_CAPABILITY], user_ids=[], connections=[], dashboards=[]))
+                provisioners['user_ids'].append(user_id)
+            if setup:
+                state['roles'][BOOTSTRAP_PRODUCTS_ROLE_ID] = dict(
+                    id=BOOTSTRAP_PRODUCTS_ROLE_ID, name='Bootstrap product access',
+                    capabilities=[*PRODUCT_CAPABILITIES, SCHEMER_AUTHOR],
+                    user_ids=[user_id], connections=[], dashboards=[])
             state['audit'].append((actor or user_id,'account.create',user_id))
         return public_user(user)
 
@@ -152,6 +199,14 @@ class AuthService:
                 if not any(u['id'] != user_id and u['is_admin'] and not u['disabled'] for u in state['users'].values()):
                     raise HTTPException(409,'Keep at least one active administrator')
             state['users'][user_id] = next_user
+            provisioners = state['roles'].get(PROVISIONER_ROLE_ID)
+            if next_user['is_admin'] and provisioners is None:
+                provisioners = state['roles'][PROVISIONER_ROLE_ID] = dict(
+                    id=PROVISIONER_ROLE_ID, name='Application provisioners',
+                    capabilities=[PROVISION_CAPABILITY], user_ids=[], connections=[], dashboards=[])
+            if provisioners:
+                provisioners['user_ids'] = [member for member in provisioners['user_ids'] if member != user_id]
+                if next_user['is_admin']: provisioners['user_ids'].append(user_id)
             if next_user['disabled'] or 'password_hash' in updates:
                 state['sessions'] = {key:s for key,s in state['sessions'].items() if s['user_id'] != user_id}
             state['audit'].append((actor,'account.update',user_id))

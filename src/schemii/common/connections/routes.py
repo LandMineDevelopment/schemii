@@ -1,6 +1,6 @@
 """Shared FastAPI routes for owner-scoped PostgreSQL connections."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import Field
@@ -18,7 +18,7 @@ from .models import (
     PostgresConnectionUpdate,
 )
 from .policy import ConnectionTargetForbiddenError
-from .service import ConnectionInUseError, ConnectionService
+from .service import ConnectionInUseError, ConnectionService, ProductConnectionAccess
 from .store import (
     ConnectionConflictError,
     ConnectionLimitError,
@@ -85,6 +85,10 @@ def _service(request: Request) -> ConnectionService:
     return request.app.state.services.connections
 
 
+def _product_service(request: Request, product: Literal["schemii", "schemoo", "schemer"]) -> ProductConnectionAccess:
+    return _service(request).for_product(product)
+
+
 def _not_found(error: ConnectionNotFoundError) -> ApiProblem:
     return ApiProblem(404, "connection_not_found", str(error))
 
@@ -96,12 +100,13 @@ def _forbidden_target(error: ConnectionTargetForbiddenError) -> ApiProblem:
 @router.get("", response_model=ConnectionListResponse)
 def list_connections(
     request: Request,
+    product: Literal["schemii", "schemoo", "schemer"] = Query("schemii"),
     principal: Principal = Depends(get_current_principal),
 ) -> ConnectionListResponse:
     """List the current owner's non-secret PostgreSQL connection profiles."""
 
     return ConnectionListResponse(
-        connections=_service(request).list(principal.user_id)
+        connections=_product_service(request, product).list(principal.user_id)
     )
 
 
@@ -136,12 +141,13 @@ def create_connection(
 def get_connection(
     connection_id: str,
     request: Request,
+    product: Literal["schemii", "schemoo", "schemer"] = Query("schemii"),
     principal: Principal = Depends(get_current_principal),
 ) -> PostgresConnectionProfile:
     """Return one owner-scoped connection without exposing its credential."""
 
     try:
-        return _service(request).get(principal.user_id, connection_id)
+        return _product_service(request, product).get(principal.user_id, connection_id)
     except ConnectionNotFoundError as error:
         raise _not_found(error) from error
 
@@ -181,12 +187,13 @@ def update_connection(
 def test_connection(
     connection_id: str,
     request: Request,
+    product: Literal["schemii", "schemoo", "schemer"] = Query("schemii"),
     principal: Principal = Depends(get_current_principal),
 ) -> ConnectionTestResponse:
     """Resolve the stored credential and verify the exact PostgreSQL target."""
 
     try:
-        with _service(request).use(principal.user_id, connection_id) as resolved:
+        with _product_service(request, product).use(principal.user_id, connection_id) as resolved:
             result = request.app.state.services.postgres.test_connection(resolved)
     except ConnectionTargetForbiddenError as error:
         raise _forbidden_target(error) from error
@@ -208,12 +215,13 @@ def test_connection(
 def list_connection_namespaces(
     connection_id: str,
     request: Request,
+    product: Literal["schemii", "schemoo", "schemer"] = Query("schemii"),
     principal: Principal = Depends(get_current_principal),
 ) -> ConnectionNamespaceListResponse:
     """List bounded namespaces visible to an owner-scoped connection."""
 
     try:
-        with _service(request).use(principal.user_id, connection_id) as resolved:
+        with _product_service(request, product).use(principal.user_id, connection_id) as resolved:
             namespaces = request.app.state.services.postgres.list_namespaces(resolved)
     except ConnectionTargetForbiddenError as error:
         raise _forbidden_target(error) from error

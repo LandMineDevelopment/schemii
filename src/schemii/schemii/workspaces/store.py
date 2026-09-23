@@ -62,6 +62,7 @@ class WorkspaceImportBaselineStore(Protocol):
         owner_id: str,
         workspace_id: str,
         connection_id: str,
+        connection_owner_id: str | None = None,
         database: str,
         namespace: str,
         baseline: WorkspaceImportBaseline,
@@ -289,6 +290,7 @@ class InMemoryWorkspaceRepository:
                 revision=1,
                 name=request.name,
                 connection_id=request.connection_id,
+                connection_owner_id=request.connection_owner_id or (owner_id if request.connection_id else None),
                 database=request.database,
                 namespace=request.namespace,
                 tables=[],
@@ -354,6 +356,7 @@ class InMemoryWorkspaceRepository:
                 revision=1,
                 name=request.name,
                 connection_id=request.connection_id,
+                connection_owner_id=request.connection_owner_id or owner_id,
                 database=request.database,
                 namespace=request.namespace,
                 tables=[],
@@ -377,6 +380,7 @@ class InMemoryWorkspaceRepository:
                     owner_id=owner_id,
                     workspace_id=workspace.id,
                     connection_id=request.connection_id,
+                    connection_owner_id=request.connection_owner_id or owner_id,
                     database=request.database,
                     namespace=request.namespace,
                     baseline=baseline,
@@ -479,7 +483,9 @@ class InMemoryWorkspaceRepository:
         with self._lock:
             return sum(
                 workspace.connection_id == connection_id
-                for workspace in self._records.get(owner_id, {}).values()
+                and (getattr(workspace, "connection_owner_id", None) or actor_id) == owner_id
+                for actor_id, workspaces in self._records.items()
+                for workspace in workspaces.values()
             )
 
     def dependencies_for_connection(
@@ -489,33 +495,37 @@ class InMemoryWorkspaceRepository:
     ) -> tuple[ConnectionDependentResource, ...]:
         with self._lock:
             resources: list[ConnectionDependentResource] = []
-            for workspace in self._records.get(owner_id, {}).values():
-                if workspace.connection_id != connection_id:
-                    continue
-                blocked = bool(
-                    self._mutation_guard is not None
-                    and self._mutation_guard(owner_id, workspace.id)
-                )
-                resources.append(
-                    ConnectionDependentResource(
-                        provider=self.dependency_name,
-                        kind="workspace",
-                        resource_id=workspace.id,
-                        revision=workspace.revision,
-                        name=workspace.name,
-                        target=(
-                            f"{workspace.database}.{workspace.namespace}"
-                            if workspace.database and workspace.namespace
-                            else None
-                        ),
-                        deletion_blocked=blocked,
-                        blocking_reason=(
-                            "An active or unreconciled migration must finish first."
-                            if blocked
-                            else None
-                        ),
+            for actor_id, workspaces in self._records.items():
+                for workspace in workspaces.values():
+                    if (
+                        workspace.connection_id != connection_id
+                        or (getattr(workspace, "connection_owner_id", None) or actor_id) != owner_id
+                    ):
+                        continue
+                    blocked = bool(
+                        self._mutation_guard is not None
+                        and self._mutation_guard(actor_id, workspace.id)
                     )
-                )
+                    resources.append(
+                        ConnectionDependentResource(
+                            provider=self.dependency_name,
+                            kind="workspace",
+                            resource_id=workspace.id,
+                            revision=workspace.revision,
+                            name=workspace.name,
+                            target=(
+                                f"{workspace.database}.{workspace.namespace}"
+                                if workspace.database and workspace.namespace
+                                else None
+                            ),
+                            deletion_blocked=blocked,
+                            blocking_reason=(
+                                "An active or unreconciled migration must finish first."
+                                if blocked
+                                else None
+                            ),
+                        )
+                    )
             return tuple(resources)
 
     def _record(self, owner_id: str, workspace_id: str) -> SchemiiWorkspace:

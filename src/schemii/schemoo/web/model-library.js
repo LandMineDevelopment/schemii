@@ -23,7 +23,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
   disposeSelects(content); content.replaceChildren(element("p", { text: "Loading your models and connections…", attrs: { role: "status" } }));
   if (!dialog.open) dialog.showModal();
   try {
-    const [{ models }, { connections }] = await Promise.all([requestJson(`${API}/models`), requestJson("/api/v1/connections")]);
+    const [{ models }, { connections }] = await Promise.all([requestJson(`${API}/models`), requestJson("/api/v1/connections?product=schemoo")]);
     if (ticket !== libraryTicket || !dialog.open) return;
     content.replaceChildren();
     const status = element("p", { className: "hint", attrs: { role: "status" } });
@@ -112,7 +112,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
       if (!value) return;
       status.textContent = "Loading visible schemas…";
       try {
-        const data = await requestJson(`/api/v1/connections/${value}/namespaces`, { timeoutMs: 30000 });
+        const data = await requestJson(`/api/v1/connections/${value}/namespaces?product=schemoo`, { timeoutMs: 30000 });
         if (ticket !== namespaceTicket) return;
         const available = data.namespaces.filter(n => !n.system);
         namespaceHost.append(modelSelect("Source schema", [["", "Choose schema"], ...available.map(n => [n.name, n.name])], "", value => { namespace = value; create.disabled = !namespace; }));

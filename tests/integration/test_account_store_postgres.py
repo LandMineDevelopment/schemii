@@ -17,8 +17,8 @@ def test_sessions_roles_and_disable_are_visible_across_auth_instances(postgres_m
         assert second.resolve(token)['id']==user['id']
         assert second.capabilities(user['id'])==[]
         with first.store.transaction(write=True) as state:
-            state['roles'][role_id]=dict(id=role_id,name=role_id,capabilities=['author'],user_ids=[user['id']],connections=[],dashboards=[])
-        assert second.capabilities(user['id'])==['author']
+            state['roles'][role_id]=dict(id=role_id,name=role_id,capabilities=['schemoo:access'],user_ids=[user['id']],connections=[],dashboards=[])
+        assert second.capabilities(user['id'])==['schemoo:access']
         with second.store.transaction(write=True) as state:
             state['roles'][role_id]['capabilities']=[]
         assert first.capabilities(user['id'])==[]

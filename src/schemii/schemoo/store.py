@@ -90,7 +90,7 @@ class ModelRepository(Protocol):
     dependency_name: str
     def list(self, owner_id: str) -> list[ModelSummary]: ...
     def get(self, owner_id: str, model_id: str) -> SchemooModel: ...
-    def create(self, owner_id: str, request: ModelCreate) -> SchemooModel: ...
+    def create(self, owner_id: str, request: ModelCreate, *, connection_owner_id: str | None = None) -> SchemooModel: ...
     def duplicate(self, owner_id: str, model_id: str, request: ModelDuplicate) -> SchemooModel: ...
     def update(self, owner_id: str, model_id: str, request: ModelUpdate) -> SchemooModel: ...
     def update_layout(self, owner_id: str, model_id: str, request: LayoutUpdate) -> SchemooModel: ...
@@ -135,7 +135,8 @@ class _Dependencies:
         return tuple(ConnectionDependentResource(
             provider=self.dependency_name, kind="semantic_model", resource_id=model.id,
             revision=model.revision, name=model.name, target=f"{model.database}.{model.namespace}",
-        ) for model in self.list(owner_id) if model.connection_id == connection_id)
+        ) for model in self.list(owner_id)
+          if model.connection_id == connection_id and (model.connection_owner_id or model.owner_id) == owner_id)
 
 
 class InMemoryModelRepository(_Dependencies):
@@ -149,6 +150,15 @@ class InMemoryModelRepository(_Dependencies):
         self._previews = {}
         self._lock = RLock()
 
+    def dependencies_for_connection(self, owner_id, connection_id):
+        with self._lock:
+            return tuple(ConnectionDependentResource(
+                provider=self.dependency_name, kind="semantic_model", resource_id=model.id,
+                revision=model.revision, name=model.name, target=f"{model.database}.{model.namespace}",
+            ) for model in self._records.values()
+              if model.connection_id == connection_id
+              and (model.connection_owner_id or model.owner_id) == owner_id)
+
     def list(self, owner_id):
         with self._lock:
             return [ModelSummary(**{key: getattr(model, key) for key in ModelSummary.model_fields})
@@ -161,7 +171,7 @@ class InMemoryModelRepository(_Dependencies):
             except KeyError as error:
                 raise ModelNotFoundError("Semantic model was not found") from error
 
-    def create(self, owner_id, request):
+    def create(self, owner_id, request, *, connection_owner_id=None):
         request = ModelCreate.model_validate(request)
         _check_documents(request.model_dump(mode="json"), self._maximum_document_bytes)
         with self._lock:
@@ -169,7 +179,8 @@ class InMemoryModelRepository(_Dependencies):
                 raise ModelLimitError(self._maximum)
             now = datetime.now(timezone.utc)
             model = SchemooModel(**request.model_dump(), id=f"model_{secrets.token_hex(16)}",
-                owner_id=owner_id, revision=1, created_at=now, updated_at=now)
+                owner_id=owner_id, connection_owner_id=connection_owner_id or owner_id,
+                revision=1, created_at=now, updated_at=now)
             self._records[owner_id, model.id] = model.model_copy(deep=True)
             return model
 
@@ -309,28 +320,42 @@ class PostgresModelRepository(_Dependencies):
         with self._transaction() as cursor:
             return self._row(cursor, owner_id, model_id)
 
+    def dependencies_for_connection(self, owner_id, connection_id):
+        # A connection owner may not own the models authored against a
+        # role-managed profile. Deletion impact must include those references.
+        with self._transaction() as cursor:
+            cursor.execute("""SELECT id,revision,name,database,namespace FROM schemoo.models
+                WHERE connection_owner_id = %s AND connection_id = %s
+                ORDER BY created_at,id""", (owner_id, connection_id))
+            return tuple(ConnectionDependentResource(
+                provider=self.dependency_name, kind="semantic_model", resource_id=row["id"],
+                revision=row["revision"], name=row["name"],
+                target=f"{row['database']}.{row['namespace']}",
+            ) for row in cursor.fetchall())
+
     @staticmethod
     def guard_connection_mutation(cursor, owner_id, connection_id, operation, changed_fields=frozenset()):
         """Called under the saved connection row lock, including across workers."""
         if operation != "delete" and {"host", "port", "database", "username"}.isdisjoint(changed_fields):
             return
-        cursor.execute("SELECT count(*) AS count FROM schemoo.models WHERE owner_id = %s AND connection_id = %s", (owner_id, connection_id))
+        cursor.execute("SELECT count(*) AS count FROM schemoo.models WHERE connection_owner_id = %s AND connection_id = %s", (owner_id, connection_id))
         count = cursor.fetchone()["count"]
         if count:
             raise ConnectionInUseError({PostgresModelRepository.dependency_name: count})
 
-    def create(self, owner_id, request):
+    def create(self, owner_id, request, *, connection_owner_id=None):
         request = ModelCreate.model_validate(request)
         _check_documents(request.model_dump(mode="json"), self._maximum_document_bytes)
         with self._transaction() as cursor:
-            self._lock_creation(cursor, owner_id, request)
+            connection_owner_id = connection_owner_id or owner_id
+            self._lock_creation(cursor, owner_id, request, connection_owner_id)
             model_id = f"model_{secrets.token_hex(16)}"
-            return self._insert_model(cursor, owner_id, model_id, request)
+            return self._insert_model(cursor, owner_id, model_id, request, connection_owner_id)
 
-    def _lock_creation(self, cursor, owner_id, request):
+    def _lock_creation(self, cursor, owner_id, request, connection_owner_id):
         # Keep the same lock order for every creation, including duplication.
         cursor.execute("SELECT id FROM metadata.users WHERE id = %s FOR UPDATE", (owner_id,))
-        cursor.execute("SELECT database_name FROM metadata.postgres_connections WHERE owner_id = %s AND id = %s FOR UPDATE", (owner_id, request.connection_id))
+        cursor.execute("SELECT database_name FROM metadata.postgres_connections WHERE owner_id = %s AND id = %s FOR UPDATE", (connection_owner_id, request.connection_id))
         connection = cursor.fetchone()
         if connection is None or connection["database_name"] != request.database:
             raise ModelNotFoundError("The selected connection no longer exists or its database changed")
@@ -339,11 +364,11 @@ class PostgresModelRepository(_Dependencies):
             raise ModelLimitError(self._maximum)
 
     @staticmethod
-    def _insert_model(cursor, owner_id, model_id, request):
+    def _insert_model(cursor, owner_id, model_id, request, connection_owner_id):
         cursor.execute("""INSERT INTO schemoo.models
-                (id, owner_id, connection_id, database, namespace, name, definition, layout, explore, catalog_fingerprint)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
-                (model_id, owner_id, request.connection_id, request.database, request.namespace, request.name,
+                (id, owner_id, connection_owner_id, connection_id, database, namespace, name, definition, layout, explore, catalog_fingerprint)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (model_id, owner_id, connection_owner_id, request.connection_id, request.database, request.namespace, request.name,
                  Jsonb(request.definition.model_dump(mode="json")), Jsonb(request.layout.model_dump(mode="json")),
                  Jsonb(request.explore.model_dump(mode="json")), request.catalog_fingerprint))
         return SchemooModel.model_validate(cursor.fetchone())
@@ -352,14 +377,14 @@ class PostgresModelRepository(_Dependencies):
         request = ModelDuplicate.model_validate(request)
         with self._transaction() as cursor:
             source = self._row(cursor, owner_id, model_id)
-            self._lock_creation(cursor, owner_id, source)
+            self._lock_creation(cursor, owner_id, source, source.connection_owner_id or owner_id)
             # Every document and preview writer takes this parent row lock.
             # Re-read after acquiring it so the copied documents and previews
             # belong to one snapshot, even when another worker is saving them.
             source = self._row(cursor, owner_id, model_id, lock=True)
             model, previews = _duplicate_snapshot(source, self._preview_rows(cursor, owner_id, model_id),
                 request, self._maximum_document_bytes)
-            saved = self._insert_model(cursor, owner_id, model.id, model)
+            saved = self._insert_model(cursor, owner_id, model.id, model, source.connection_owner_id or owner_id)
             for preview in previews:
                 cursor.execute("""INSERT INTO schemoo.model_previews
                     (id, owner_id, model_id, name, explore, created_at, updated_at)

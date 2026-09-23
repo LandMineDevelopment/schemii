@@ -10,6 +10,7 @@ const consoleRequest = (path, options = {}) => (
 function publicConnection(value) {
   return {
     id: value.id,
+    ownerId: value.ownerId,
     revision: value.revision,
     name: value.name,
     host: value.host,
@@ -37,11 +38,11 @@ export const api = Object.freeze({
   session: options => requestJson(`${API_ROOT}/session`, options),
   readiness: options => requestJson(`${API_ROOT}/readiness`, options),
   async listConnections(options) {
-    const response = await requestJson(`${API_ROOT}/connections`, options);
+    const response = await requestJson(`${API_ROOT}/connections?product=schemii`, options);
     return response.connections.map(publicConnection);
   },
   async getConnection(id, options) {
-    return publicConnection(await requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}`, options));
+    return publicConnection(await requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}?product=schemii`, options));
   },
   async createConnection(body, options = {}) {
     return publicConnection(await requestJson(`${API_ROOT}/connections`, { ...options, method: "POST", body }));
@@ -49,8 +50,8 @@ export const api = Object.freeze({
   async updateConnection(id, body, options = {}) {
     return publicConnection(await requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}`, { ...options, method: "PATCH", body }));
   },
-  testConnection: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/test`, { ...options, method: "POST" }),
-  listConnectionNamespaces: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/namespaces`, options),
+  testConnection: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/test?product=schemii`, { ...options, method: "POST" }),
+  listConnectionNamespaces: (id, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/namespaces?product=schemii`, options),
   getConnectionDeletionImpact: (id, options) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}/deletion-impact`, options),
   deleteConnection: (id, expectedRevision, options = {}) => requestJson(`${API_ROOT}/connections/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`, { ...options, method: "DELETE" }),
   async listWorkspaces(options) {

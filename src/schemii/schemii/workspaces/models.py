@@ -104,6 +104,7 @@ class WorkspaceCreateRecord(SchemiiWorkspaceCreate):
     """Internal creation record with an optional fixed PostgreSQL identity."""
 
     connection_id: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
+    connection_owner_id: str | None = Field(default=None, exclude=True)
     database: DatabaseName | None = None
     namespace: NamespaceName | None = None
 
@@ -165,6 +166,7 @@ class SchemiiWorkspace(ApiModel):
     revision: Annotated[int, Field(strict=True, ge=1)]
     name: WorkspaceName
     connection_id: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
+    connection_owner_id: str | None = Field(default=None, exclude=True)
     database: DatabaseName | None = None
     namespace: NamespaceName | None = None
     tables: list[TablePosition]
