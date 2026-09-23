@@ -4,7 +4,7 @@ import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
 const modelId = "model_assistant_fixture", chatId = "chat_assistant_fixture";
 async function fixture(page, { pending = false, shell = false, modelDenied = false, emptyModels = false,
-  completed = false, zenConnect = false } = {}) {
+  completed = false, zenConnect = false, sharedCodex = false } = {}) {
   const actions = [
     { id: "read_model", label: "Inspect model", group: "Read", description: "Read the saved model." },
     { id: "update_model", label: "Change model", group: "Write", description: "Save semantic model changes." },
@@ -18,7 +18,10 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
   }
   const requests = [];
   await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: !emptyModels, authenticated: true, models: [{ id: "fixture-model", name: "Fixture model", reasoningLevels: ["low", "medium", "high", "max"], status: modelDenied && chat.status === "failed" ? "unavailable" : "active" }, { id: "second-model", name: "Second model", status: "active" }] }, { id: "openai-codex", name: "Codex", available: false, authenticated: false, models: [] },
-    ...(zenConnect ? [{ id: "opencode", name: "OpenCode Zen", available: false, authenticated: false, privacy: "Free Zen models may use prompts for training.", models: [{ id: "big-pickle", name: "Big Pickle", status: "active" }] }] : [])] } }));
+    ...(zenConnect ? [{ id: "opencode", name: "OpenCode Zen", available: false, authenticated: false, privacy: "Free Zen models may use prompts for training.", models: [{ id: "big-pickle", name: "Big Pickle", status: "active" }] }] : []),
+    ...(sharedCodex ? [{ id: "instance-codex", name: "Shared ChatGPT Codex", available: true, authenticated: true, adminManaged: true,
+      selectedModelId: "gpt-6-luna", selectedReasoningEffort: "high",
+      models: [{ id: "gpt-6-luna", name: "GPT-6 Luna", status: "active", reasoningLevels: ["high"] }] }] : [])] } }));
   await page.route("**/api/v1/schemoo/ai/**", async route => {
     const url = new URL(route.request().url()), method = route.request().method();
     const body = method === "GET" || method === "DELETE" ? null : route.request().postDataJSON();
@@ -69,6 +72,22 @@ test("shared model assistant shows administrator-managed Zen access without a us
   await expect(provider).toContainText("An administrator manages Zen access for each person, app, and database.");
   await expect(provider).toContainText("Unavailable");
   await expect(provider.getByRole("textbox")).toHaveCount(0);
+  await expect(provider.getByRole("button", { name: /Connect|Disconnect/ })).toHaveCount(0);
+});
+
+test("shared model assistant applies administrator-selected Codex model and reasoning", async ({ page }) => {
+  const requests = await fixture(page, { sharedCodex: true });
+  await page.getByRole("combobox", { name: "Assistant model", exact: true }).click();
+  await page.getByRole("option", { name: "GPT-6 Luna · Shared ChatGPT Codex" }).click();
+  await expect.poll(() => requests.filter(item => item.path.endsWith("/preferences")).at(-1)?.body).toMatchObject({
+    providerId: "instance-codex", aiModelId: "gpt-6-luna", reasoningEffort: "high",
+  });
+  await expect(page.getByRole("combobox", { name: "Assistant reasoning level", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Assistant settings" });
+  const provider = dialog.locator(".model-ai-provider").filter({ hasText: "Shared ChatGPT Codex" });
+  await expect(provider).toContainText("Administrator policy: GPT-6 Luna · High reasoning");
+  await expect(dialog.getByRole("combobox", { name: "Reasoning level", exact: true })).toBeDisabled();
   await expect(provider.getByRole("button", { name: /Connect|Disconnect/ })).toHaveCount(0);
 });
 

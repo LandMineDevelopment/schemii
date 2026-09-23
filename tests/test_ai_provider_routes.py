@@ -5,7 +5,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
-from schemii.common.ai.routes import admin_router, router
+from schemii.common.ai.credential_store import MemoryAiCredentialStore
+from schemii.common.ai.routes import admin_router, router, shared_codex_router
 from schemii.common.api.errors import install_api_error_handlers
 from schemii.common.metadata.models import Principal, get_current_principal
 
@@ -93,3 +94,49 @@ def test_provider_status_passes_server_resolved_product_scope():
     assert response.status_code == 200
     assert calls == [("alice", True, ("schemoo", "alice", "pg_" + "a" * 32))]
     assert client.get("/api/v1/ai/status?product=schemoo").status_code == 422
+
+
+def test_shared_codex_admin_controls_connection_model_reasoning_and_exact_grant():
+    app = FastAPI()
+    app.include_router(shared_codex_router)
+    install_api_error_handlers(app)
+    credentials = MemoryAiCredentialStore()
+    credentials.begin_login("admin", "codex-prototype", "openai-codex")
+    credentials.save("admin", "codex-prototype", "openai-codex",
+                     {"type": "oauth", "refresh": "private-refresh-token"}, 1)
+    instance = MemoryInstanceAiProviderStore()
+    app.state.auth = Auth()
+    app.state.services = SimpleNamespace(
+        metadata=SimpleNamespace(ai_instance_providers=instance, ai_credentials=credentials),
+        connections=SimpleNamespace(for_product=lambda product: SimpleNamespace(list=lambda user: [])))
+    app.state.ai_service = SimpleNamespace(runtime=SimpleNamespace(
+        _supported_models=lambda: [{"providerId": "openai-codex", "id": "gpt-6-luna",
+                                    "name": "GPT-6 Luna", "reasoningLevels": ["default", "high"]}],
+        instance_codex_catalog=lambda: {"verifiedModels": [], "catalogCheckedAt": None},
+        test_instance_codex=lambda: {"connected": True, "checkedAt": "now", "models": [
+            {"providerId": "openai-codex", "id": "gpt-6-luna"}]}))
+    app.dependency_overrides[get_current_principal] = lambda: Principal(
+        user_id="admin", authentication_source="local_prototype")
+    client = TestClient(app)
+    assert client.get("/api/v1/admin/ai/shared-codex").json()["sourceConnected"] is True
+    connected = client.put("/api/v1/admin/ai/shared-codex/credential")
+    assert connected.status_code == 200 and connected.json()["connected"] is True
+    grant = {"userId": "alice", "product": "schemii", "connectionOwnerId": None,
+             "connectionId": None, "modelId": "gpt-6-luna", "reasoningEffort": "high"}
+    assert client.put("/api/v1/admin/ai/shared-codex/grants", json=grant).status_code == 200
+    listing = client.get("/api/v1/admin/ai/shared-codex")
+    assert listing.status_code == 200
+    assert listing.json()["grants"][0].items() >= grant.items()
+    assert "private-refresh-token" not in listing.text + connected.text
+    assert client.post("/api/v1/admin/ai/shared-codex/test").json()["models"][0]["id"] == "gpt-6-luna"
+    credentials.delete("admin", "codex-prototype")
+    detached_source = client.get("/api/v1/admin/ai/shared-codex").json()
+    assert detached_source["sourceConnected"] is False and detached_source["connected"] is True
+    invalid = client.put("/api/v1/admin/ai/shared-codex/grants",
+                         json={**grant, "reasoningEffort": "max"})
+    assert invalid.status_code == 422 and instance.get_grant("alice", "schemii", provider_id="openai-codex")["reasoningEffort"] == "high"
+    app.dependency_overrides[get_current_principal] = lambda: Principal(
+        user_id="alice", authentication_source="local_prototype")
+    assert client.get("/api/v1/admin/ai/shared-codex").status_code == 403
+    assert client.put("/api/v1/admin/ai/shared-codex/credential").status_code == 403
+    assert client.post("/api/v1/admin/ai/shared-codex/test").status_code == 403

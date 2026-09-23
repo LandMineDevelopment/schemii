@@ -85,6 +85,15 @@ class Conversations:
         except PiError as error:
             raise ApiProblem(error.status, error.code, str(error)) from error
 
+    def _require_instance_policy(self, owner, provider, model, effort, subject, scope):
+        if provider != "instance-codex":
+            return
+        try:
+            self.runtime.require_instance_policy(owner, provider, model, effort,
+                lambda: self._zen_scope(owner, subject, scope))
+        except PiError as error:
+            raise ApiProblem(error.status, error.code, str(error)) from error
+
     def settings(self, owner, value=None):
         if value is not None:
             previous = self.store.settings(owner)
@@ -102,6 +111,7 @@ class Conversations:
         self.adapter.context(scoped or self.services,owner,subject)
         effort = body.get("reasoningEffort") or "default"
         self._require_reasoning(owner, body["providerId"], body["aiModelId"], effort)
+        self._require_instance_policy(owner, body["providerId"], body["aiModelId"], effort, subject, scope)
         if body["providerId"] == "opencode":
             self.runtime.require_instance_access(owner, lambda: self._zen_scope(owner, subject, scope))
         revision_key = "modelRevision" if self.subject_key == "modelId" else "dashboardRevision"
@@ -200,6 +210,8 @@ class Conversations:
             if chat["providerId"] == "opencode":
                 self.runtime.require_instance_access(owner, lambda: self._zen_scope(
                     owner, chat[self.subject_key], scope))
+            self._require_instance_policy(owner, chat["providerId"], chat["aiModelId"],
+                chat.get("reasoningEffort", "default"), chat[self.subject_key], scope)
             self._require_reasoning(owner, chat["providerId"], chat["aiModelId"], chat.get("reasoningEffort", "default"))
         except PiError as error:
             raise ApiProblem(error.status,error.code,str(error)) from error
@@ -228,6 +240,8 @@ class Conversations:
             effort = body.get("reasoningEffort") or value.get("reasoningEffort", "default")
             if (value["providerId"], value["aiModelId"], value.get("reasoningEffort", "default")) != (body["providerId"], body["aiModelId"], effort):
                 self._require_reasoning(owner, body["providerId"], body["aiModelId"], effort)
+            self._require_instance_policy(owner, body["providerId"], body["aiModelId"], effort,
+                value[self.subject_key], scope)
             def change(current):
                 current.update(modes=modes,providerId=body["providerId"],aiModelId=body["aiModelId"],reasoningEffort=effort)
                 if current["status"] in {"working","waiting_approval"}:
@@ -454,7 +468,7 @@ class Conversations:
                 # runs. Recheck immediately before handing any results to Pi.
                 if not self._authorized(owner,chat_id,turn_id): return
                 zen_scope = (lambda: self._zen_scope(owner, chat[self.subject_key],
-                    self.active.get((owner,chat_id),{}).get("scope"))) if chat["providerId"] == "opencode" else None
+                    self.active.get((owner,chat_id),{}).get("scope"))) if chat["providerId"] in {"opencode", "instance-codex"} else None
                 reply=self.runtime.run(owner,turn_id,chat["providerId"],chat["aiModelId"],request_system,"",tools,on_text=on_text,is_authorized=lambda:self._authorized(owner,chat_id,turn_id),messages=messages,reasoning_effort=chat.get("reasoningEffort", "default"),zen_scope=zen_scope)
                 if not self._authorized(owner,chat_id,turn_id): return
                 if finalizing and reply.tool_calls:

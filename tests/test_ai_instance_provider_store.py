@@ -73,3 +73,70 @@ def test_detached_schemii_scope_is_explicit_and_not_a_wildcard() -> None:
         store.upsert_grant(ALICE, "other", SOURCE_OWNER, SOURCE)
     with pytest.raises(ValueError, match="OpenCode Zen API key"):
         store.set_key(" ")
+
+
+def test_instance_codex_credential_is_owned_and_provider_grants_are_separate() -> None:
+    store = MemoryInstanceAiProviderStore(cipher=CredentialCipher(bytes(range(32))))
+    first = {"type": "oauth", "refresh": "refresh-secret", "access": "access-secret"}
+    assert store.status("openai-codex") == {"connected": False, "generation": 0}
+    assert store.set_credential("openai-codex", first) == {"connected": True, "generation": 1}
+    assert b"refresh-secret" not in store._rows["openai-codex"]["encrypted"].ciphertext
+    assert "refresh-secret" not in repr(store.status("openai-codex"))
+    assert store.credential() == {"credential": first, "generation": 1}
+    assert store.resolve(ALICE, "schemii", provider_id="openai-codex") is None
+
+    policy = store.upsert_grant(ALICE, "schemii", provider_id="openai-codex")
+    assert policy == {"userId": ALICE, "product": "schemii",
+                      "connectionOwnerId": None, "connectionId": None,
+                      "modelId": "gpt-6-luna", "reasoningEffort": "default", "revision": 1}
+    assert store.get_grant(ALICE, "schemii", provider_id="openai-codex") == policy
+    assert store.list_grants("openai-codex") == [policy]
+    assert store.list_grants() == []
+    assert store.resolve(ALICE, "schemii", provider_id="openai-codex") == {
+        "credential": first, "generation": 1,
+        "modelId": "gpt-6-luna", "reasoningEffort": "default", "revision": 1}
+    assert store.resolve(ALICE, "schemii") is None
+    assert store.resolve(ALICE, "schemoo", SOURCE_OWNER, SOURCE,
+                         provider_id="openai-codex") is None
+
+
+def test_codex_refresh_and_policy_revision_fence_stale_turns() -> None:
+    store = MemoryInstanceAiProviderStore()
+    store.set_credential("openai-codex", {"refresh": "first"})
+    first = store.upsert_grant(ALICE, "schemer", SOURCE_OWNER, SOURCE,
+                               provider_id="openai-codex")
+    assert store.save_credential("openai-codex", {"refresh": "second"}, 1)
+    assert store.generation("openai-codex") == 1
+    changed = store.upsert_grant(ALICE, "schemer", SOURCE_OWNER, SOURCE,
+                                 provider_id="openai-codex", model_id="gpt-6-sol",
+                                 reasoning_effort="high")
+    assert changed["revision"] > first["revision"]
+    assert changed["modelId"] == "gpt-6-sol"
+    assert changed["reasoningEffort"] == "high"
+    assert store.delete_grant(ALICE, "schemer", SOURCE_OWNER, SOURCE,
+                              provider_id="openai-codex")
+    assert store.get_grant(ALICE, "schemer", SOURCE_OWNER, SOURCE,
+                           provider_id="openai-codex") is None
+    recreated = store.upsert_grant(ALICE, "schemer", SOURCE_OWNER, SOURCE,
+                                   provider_id="openai-codex")
+    assert recreated["revision"] > changed["revision"]
+
+    assert store.clear_credential("openai-codex") == {"connected": False, "generation": 2}
+    assert store.credential() is None
+    assert not store.save_credential("openai-codex", {"refresh": "stale"}, 1)
+    assert store.set_credential("openai-codex", {"refresh": "new"}) == {
+        "connected": True, "generation": 3}
+    assert not store.save_credential("openai-codex", {"refresh": "stale"}, 1)
+    assert store.credential()["credential"] == {"refresh": "new"}
+
+
+def test_codex_credentials_and_policy_reject_invalid_values() -> None:
+    store = MemoryInstanceAiProviderStore()
+    with pytest.raises(ValueError, match="Unsupported instance AI provider"):
+        store.status("other")
+    with pytest.raises(ValueError, match="maximum size"):
+        store.set_credential("openai-codex", {"refresh": "x" * 65536})
+    with pytest.raises(ValueError, match="bounded Codex model"):
+        store.upsert_grant(ALICE, "schemii", provider_id="openai-codex", model_id="")
+    with pytest.raises(ValueError, match="bounded Codex model"):
+        store.upsert_grant(ALICE, "schemii", provider_id="openai-codex", reasoning_effort="")

@@ -2,15 +2,18 @@
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, SecretStr, Field, ConfigDict, model_validator, field_validator
+from typing import Literal
 
 from schemii.common.api.errors import ApiProblem
 from schemii.common.auth.routes import admin
 from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.metadata.models import Principal, get_current_principal
 from .models import AiStatusResponse
+from .pi import PiError
 
 router = APIRouter(prefix="/api/v1/ai", tags=["ai-providers"])
 admin_router = APIRouter(prefix="/api/v1/admin/ai/zen", tags=["ai-providers-admin"])
+shared_codex_router = APIRouter(prefix="/api/v1/admin/ai/shared-codex", tags=["ai-providers-admin"])
 
 
 class ApiCredentialCreate(BaseModel):
@@ -38,6 +41,11 @@ class ZenGrant(BaseModel):
         if self.connectionId is None and self.product != "schemii":
             raise ValueError("Only Schemii supports detached workspaces")
         return self
+
+
+class SharedCodexGrant(ZenGrant):
+    modelId: str = Field(default="gpt-6-luna", min_length=1, max_length=128)
+    reasoningEffort: Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"] = "default"
 
 
 @router.get("/status", response_model=AiStatusResponse)
@@ -95,8 +103,12 @@ def disconnect(provider_id: str, request: Request,
     return {"deleted": True}
 
 
-def _zen_store(request):
+def _instance_store(request):
     return request.app.state.services.metadata.ai_instance_providers
+
+
+def _zen_store(request):
+    return _instance_store(request)
 
 
 def _visible_connections(request, user_id, product):
@@ -121,9 +133,8 @@ def _visible_connections(request, user_id, product):
             for profile in profiles]
 
 
-@admin_router.get("")
-def admin_zen(request: Request, actor: str = Depends(admin)):
-    store = _zen_store(request)
+def _admin_instance_state(request, provider_id):
+    store = _instance_store(request)
     with request.app.state.auth.store.transaction() as state:
         users = [user_id for user_id, user in state["users"].items() if not user["disabled"]]
     connections = {}
@@ -132,7 +143,24 @@ def admin_zen(request: Request, actor: str = Depends(admin)):
             for profile in _visible_connections(request, user_id, product):
                 key = (profile["userId"], profile["product"], profile["connectionOwnerId"], profile["connectionId"])
                 connections[key] = profile
-    return {**store.status(), "grants": store.list_grants(), "connections": list(connections.values())}
+    return {**store.status(provider_id), "grants": store.list_grants(provider_id),
+            "connections": list(connections.values())}
+
+
+def _validate_instance_grant(body, request):
+    auth = request.app.state.auth
+    if not auth.user(body.userId) or f"{body.product}:access" not in auth.capabilities(body.userId):
+        raise ApiProblem(422, "ai_grant_user_invalid", "The user needs access to the selected app.")
+    if body.connectionId is not None and not any(
+        item["connectionOwnerId"] == body.connectionOwnerId and item["connectionId"] == body.connectionId
+        for item in _visible_connections(request, body.userId, body.product)
+    ):
+        raise ApiProblem(422, "ai_grant_database_invalid", "The user cannot access this database in the selected app.")
+
+
+@admin_router.get("")
+def admin_zen(request: Request, actor: str = Depends(admin)):
+    return _admin_instance_state(request, "opencode")
 
 
 @admin_router.put("/credential")
@@ -152,13 +180,7 @@ def admin_delete_zen(request: Request, actor: str = Depends(admin)):
 @admin_router.put("/grants")
 def admin_save_zen_grant(body: ZenGrant, request: Request, actor: str = Depends(admin)):
     auth = request.app.state.auth
-    if not auth.user(body.userId) or f"{body.product}:access" not in auth.capabilities(body.userId):
-        raise ApiProblem(422, "ai_grant_user_invalid", "The user needs access to the selected app.")
-    if body.connectionId is not None and not any(
-        item["connectionOwnerId"] == body.connectionOwnerId and item["connectionId"] == body.connectionId
-        for item in _visible_connections(request, body.userId, body.product)
-    ):
-        raise ApiProblem(422, "ai_grant_database_invalid", "The user cannot access this database in the selected app.")
+    _validate_instance_grant(body, request)
     result = _zen_store(request).upsert_grant(body.userId, body.product, body.connectionOwnerId, body.connectionId)
     auth.audit(actor, "ai.zen.grant", f"{body.userId}:{body.product}:{body.connectionOwnerId or 'detached'}:{body.connectionId or ''}")
     return result
@@ -168,4 +190,87 @@ def admin_save_zen_grant(body: ZenGrant, request: Request, actor: str = Depends(
 def admin_delete_zen_grant(body: ZenGrant, request: Request, actor: str = Depends(admin)):
     removed = _zen_store(request).delete_grant(body.userId, body.product, body.connectionOwnerId, body.connectionId)
     request.app.state.auth.audit(actor, "ai.zen.revoke", f"{body.userId}:{body.product}:{body.connectionOwnerId or 'detached'}:{body.connectionId or ''}")
+    return {"deleted": removed}
+
+
+def _shared_models(request):
+    runtime = request.app.state.ai_service.runtime
+    if runtime is None:
+        raise ApiProblem(503, "ai_runtime_unavailable", "The AI service is unavailable.")
+    try:
+        catalog = runtime._supported_models()
+    except Exception:
+        raise ApiProblem(503, "ai_catalog_unavailable", "The AI model catalog is temporarily unavailable.") from None
+    return [{"id": item["id"], "name": item.get("name", item["id"]),
+             "reasoningLevels": item.get("reasoningLevels", ["default"])}
+            for item in catalog if item.get("providerId") == "openai-codex"]
+
+
+@shared_codex_router.get("")
+def admin_shared_codex(request: Request, actor: str = Depends(admin)):
+    state = _admin_instance_state(request, "openai-codex")
+    runtime = request.app.state.ai_service.runtime
+    state.update(runtime.instance_codex_catalog() if runtime else
+                 {"verifiedModels": [], "catalogCheckedAt": None})
+    personal = request.app.state.services.metadata.ai_credentials.list(actor)
+    state["sourceConnected"] = any(row["credential_id"] == "codex-prototype" and row["provider_id"] == "openai-codex"
+                                   for row in personal)
+    try:
+        state["models"] = _shared_models(request)
+    except ApiProblem:
+        state["models"] = []
+        state["catalogError"] = "The model catalog is temporarily unavailable. Try again shortly."
+    return state
+
+
+@shared_codex_router.put("/credential")
+def admin_save_shared_codex(request: Request, actor: str = Depends(admin)):
+    source = request.app.state.services.metadata.ai_credentials.get(actor, "codex-prototype")
+    if source is None or source["provider_id"] != "openai-codex" or source["credential"].get("type") != "oauth":
+        raise ApiProblem(409, "ai_codex_source_missing", "Connect your personal ChatGPT Codex sign-in, then add it to this installation.")
+    result = _instance_store(request).set_credential("openai-codex", source["credential"])
+    request.app.state.auth.audit(actor, "ai.shared_codex.connect", "instance")
+    return result
+
+
+@shared_codex_router.delete("/credential")
+def admin_delete_shared_codex(request: Request, actor: str = Depends(admin)):
+    result = _instance_store(request).clear_credential("openai-codex")
+    request.app.state.auth.audit(actor, "ai.shared_codex.disconnect", "instance")
+    return result
+
+
+@shared_codex_router.post("/test")
+def admin_test_shared_codex(request: Request, actor: str = Depends(admin)):
+    runtime = request.app.state.ai_service.runtime
+    if runtime is None:
+        raise ApiProblem(503, "ai_runtime_unavailable", "The AI service is unavailable.")
+    try:
+        result = runtime.test_instance_codex()
+    except PiError as error:
+        raise ApiProblem(error.status, error.code, str(error)) from error
+    request.app.state.auth.audit(actor, "ai.shared_codex.test", "instance")
+    return result
+
+
+@shared_codex_router.put("/grants")
+def admin_save_shared_codex_grant(body: SharedCodexGrant, request: Request, actor: str = Depends(admin)):
+    _validate_instance_grant(body, request)
+    model = next((item for item in _shared_models(request) if item["id"] == body.modelId), None)
+    if model is None or body.reasoningEffort not in model["reasoningLevels"]:
+        raise ApiProblem(422, "ai_grant_model_invalid", "Choose a supported ChatGPT Codex model and reasoning level.")
+    result = _instance_store(request).upsert_grant(body.userId, body.product,
+        body.connectionOwnerId, body.connectionId, provider_id="openai-codex",
+        model_id=body.modelId, reasoning_effort=body.reasoningEffort)
+    request.app.state.auth.audit(actor, "ai.shared_codex.grant",
+        f"{body.userId}:{body.product}:{body.connectionOwnerId or 'detached'}:{body.connectionId or ''}:{body.modelId}:{body.reasoningEffort}")
+    return result
+
+
+@shared_codex_router.delete("/grants")
+def admin_delete_shared_codex_grant(body: SharedCodexGrant, request: Request, actor: str = Depends(admin)):
+    removed = _instance_store(request).delete_grant(body.userId, body.product,
+        body.connectionOwnerId, body.connectionId, provider_id="openai-codex")
+    request.app.state.auth.audit(actor, "ai.shared_codex.revoke",
+        f"{body.userId}:{body.product}:{body.connectionOwnerId or 'detached'}:{body.connectionId or ''}")
     return {"deleted": removed}

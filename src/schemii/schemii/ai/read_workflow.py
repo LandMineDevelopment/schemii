@@ -223,7 +223,7 @@ def run_read_workflow(service, owner, chat, turn, system, prompt,
                                     on_text=on_text, is_authorized=is_authorized, messages=messages,
                                     reasoning_effort=getattr(chat, "reasoning_effort", "default"),
                                     zen_scope=(lambda: service._zen_scope(owner, chat.workspace_id))
-                                        if chat.provider_id == "opencode" else None)
+                                        if chat.provider_id in {"opencode", "instance-codex"} else None)
         check()
         if finalizing and (reply.tool_calls or not reply.text.strip()):
             raise round_limit_error

@@ -28,7 +28,8 @@ _MESSAGES = {
     "billing_required": "The selected provider requires billing or credits. Check that provider account or explicitly select another model. No fallback model was used.",
     "provider_access_denied": "The provider denied access. Check your API key, billing setup, or model access, then retry. No fallback model was used.",
     "credentials_required": "Connect your own provider account before running this request.",
-    "instance_access_denied": "An administrator has not enabled Zen for your account, app, and database.",
+    "instance_access_denied": "An administrator has not enabled this AI provider for your account, app, and database.",
+    "instance_policy_changed": "The administrator changed this connection's model or reasoning. Start a new response with the current settings.",
     "credentials_changed": "Your AI credentials were disconnected, replaced, or expired. Reconnect and try again.",
     "reasoning_unsupported": "The selected model does not support this reasoning effort. Choose an available level or Model default.",
     "model_unavailable": "This model is not available through the connected provider account. Choose another model; your conversation is kept. No fallback model was used.",
@@ -53,6 +54,8 @@ class PiReply:
 
 
 class PiRuntime:
+    SHARED_CODEX_ID = "instance-codex"
+
     def __init__(self, client, store, catalog, policy=None, *, opener=urlopen,
                  instance_store=None, auth=None):
         self.client, self.store, self.catalog = client, store, catalog
@@ -70,6 +73,7 @@ class PiRuntime:
         # Account discovery retains only supported model IDs, timestamps and safe
         # errors in memory. Credential generations isolate reconnects and owners.
         self._account_catalogs = {}
+        self._instance_codex_catalog = None
 
     def _account_catalog(self, owner, provider_id, generation):
         now = time.monotonic()
@@ -184,24 +188,32 @@ class PiRuntime:
                         refresh_results = {row["provider_id"]: result for row, result in zip(records, results)}
                 credentials = self.store.list(owner)
             connected = {row["provider_id"] for row in credentials if row.get("connected")}
-            if self.instance_store and self.instance_store.status()["connected"]:
-                if zen_scope is None:
-                    if any(grant["userId"] == owner for grant in self.instance_store.list_grants()):
-                        connected.add("opencode")
-                else:
-                    try:
-                        self.require_instance_access(owner, zen_scope)
-                    except Exception:
-                        pass  # An inaccessible resource never exposes Zen as selectable.
+            instance_grants = {}
+            if self.instance_store:
+                for actual_provider, public_provider in (("opencode", "opencode"),
+                                                         ("openai-codex", self.SHARED_CODEX_ID)):
+                    if not self.instance_store.status(actual_provider)["connected"]:
+                        continue
+                    if zen_scope is None:
+                        if any(grant["userId"] == owner for grant in self.instance_store.list_grants(actual_provider)):
+                            connected.add(public_provider)
                     else:
-                        connected.add("opencode")
+                        try:
+                            scope = self.require_instance_access(owner, zen_scope, actual_provider)
+                        except Exception:
+                            pass  # An inaccessible resource is never selectable.
+                        else:
+                            connected.add(public_provider)
+                            instance_grants[public_provider] = self.instance_store.get_grant(
+                                owner, *scope, provider_id=actual_provider)
             generations = {row["provider_id"]: row["generation"] for row in credentials if row.get("connected")}
             denied = self._denied_models(owner, credentials)
             zen = self.catalog.snapshot() if self.catalog else {"models": [], "error": None, "checkedAt": None}
             verified_zen = {model["id"] for model in zen["models"]}
             providers = []
             for provider_id, name in (("openai-codex", "ChatGPT Codex"),
-                                      ("openai", "OpenAI"), ("opencode", "OpenCode Zen")):
+                                      ("openai", "OpenAI"), ("opencode", "OpenCode Zen"),
+                                      (self.SHARED_CODEX_ID, "Shared ChatGPT Codex")):
                 account = self._account_catalog(owner, provider_id, generations.get(provider_id, 0))
                 refresh_error = refresh_results.get(provider_id, {}).get("error")
                 ids = account.get("ids")
@@ -211,8 +223,15 @@ class PiRuntime:
                            "reasoningLevels": item.get("reasoningLevels", ["default"]),
                            "status": "unavailable" if (provider_id, item["id"]) in denied
                                or (ids is not None and item["id"] not in ids) else "active"}
-                          for item in supported if item.get("providerId") == provider_id
+                          for item in supported if item.get("providerId") == (
+                              "openai-codex" if provider_id == self.SHARED_CODEX_ID else provider_id)
                           and (provider_id != "opencode" or item["id"] in verified_zen)]
+                if provider_id == self.SHARED_CODEX_ID:
+                    grant = instance_grants.get(provider_id)
+                    if grant:
+                        models = [model for model in models if model["id"] == grant["modelId"]]
+                        for model in models:
+                            model["reasoningLevels"] = [grant["reasoningEffort"]]
                 authenticated = provider_id in connected
                 available = any(model["status"] == "active" for model in models) and authenticated
                 item = {"id": provider_id, "name": name, "available": available,
@@ -224,6 +243,11 @@ class PiRuntime:
                     item["catalogCheckedAt"] = zen.get("checkedAt")
                     if zen.get("error"):
                         item["catalogError"] = "Could not refresh the free-model catalog. The list uses its last unexpired snapshot."
+                if provider_id == self.SHARED_CODEX_ID:
+                    item["adminManaged"] = True
+                    if instance_grants.get(provider_id):
+                        item["selectedModelId"] = instance_grants[provider_id]["modelId"]
+                        item["selectedReasoningEffort"] = instance_grants[provider_id]["reasoningEffort"]
                 providers.append(item)
             errors = [f'{provider["name"]}: {provider["catalogError"]}' for provider in providers if provider["catalogError"]]
             return {"enabled": self.policy.enabled, "healthy": True, "providers": providers,
@@ -249,7 +273,7 @@ class PiRuntime:
         }:
             raise PiError("model_unavailable", status=409)
 
-    def require_instance_access(self, owner, zen_scope):
+    def require_instance_access(self, owner, zen_scope, provider_id="opencode"):
         if self.instance_store is None or not callable(zen_scope):
             raise PiError("instance_access_denied", status=403)
         scope = zen_scope()
@@ -260,11 +284,22 @@ class PiRuntime:
             not self.auth.user(owner) or f"{product}:access" not in self.auth.capabilities(owner)
         ):
             raise PiError("instance_access_denied", status=403)
-        if not self.instance_store.status()["connected"] or not self.instance_store.has_grant(
-            owner, product, connection_owner_id, connection_id
+        if not self.instance_store.status(provider_id)["connected"] or not self.instance_store.has_grant(
+            owner, product, connection_owner_id, connection_id, provider_id=provider_id
         ):
             raise PiError("instance_access_denied", status=403)
         return scope
+
+    def require_instance_policy(self, owner, provider_id, model_id, reasoning_effort, scope):
+        if provider_id != self.SHARED_CODEX_ID:
+            return None
+        actual_scope = self.require_instance_access(owner, scope, "openai-codex")
+        grant = self.instance_store.get_grant(owner, *actual_scope, provider_id="openai-codex")
+        if not grant:
+            raise PiError("instance_access_denied", status=403)
+        if grant["modelId"] != model_id or grant["reasoningEffort"] != reasoning_effort:
+            raise PiError("instance_policy_changed", status=409)
+        return grant
 
     def require_reasoning_effort(self, owner, provider_id, model_id, reasoning_effort="default"):
         if reasoning_effort == "default":
@@ -273,6 +308,68 @@ class PiRuntime:
         model = next((item for item in provider.get("models", []) if item["id"] == model_id), {})
         if reasoning_effort not in model.get("reasoningLevels", ["default"]):
             raise PiError("reasoning_unsupported", status=422)
+
+    def test_instance_codex(self):
+        """Verify the installation credential against Codex's live model endpoint."""
+        if self.instance_store is None:
+            raise PiError("unavailable", status=503)
+        identity = ("schemii-instance", "instance-codex")
+        with self._identity_lock:
+            if identity in self._identities:
+                raise PiError("busy", status=429)
+            self._identities.add(identity)
+        record = None
+        try:
+            record = self.instance_store.credential("openai-codex")
+            if record is None:
+                raise PiError("credentials_required", status=409)
+            generation = record["generation"]
+            reply = self.client.call("/models/refresh", {
+                "owner": identity[0], "providerId": "openai-codex",
+                "credentialId": identity[1], "generation": generation,
+                "credential": record["credential"],
+            })
+            if (reply.get("generation") != generation or
+                    self.instance_store.generation("openai-codex") != generation):
+                raise PiError("credentials_changed", status=409)
+            if "credential" in reply and not self.instance_store.save_credential(
+                    "openai-codex", reply["credential"], generation):
+                raise PiError("credentials_changed", status=409)
+            if reply.get("type") == "error":
+                code = reply.get("code")
+                raise PiError(code if code in _MESSAGES else "provider_failed")
+            models = reply.get("models")
+            if reply.get("type") != "result" or not isinstance(models, list) or any(
+                    not isinstance(item, dict) or item.get("providerId") != "openai-codex"
+                    or not isinstance(item.get("id"), str) for item in models):
+                raise PiError("invalid_response")
+            available_ids = {item["id"] for item in models}
+            result = {"connected": True, "checkedAt": datetime.now(timezone.utc).isoformat(),
+                      "models": [item for item in self._supported_models()
+                                 if item.get("providerId") == "openai-codex"
+                                 and item.get("id") in available_ids]}
+            with self._catalog_lock:
+                self._instance_codex_catalog = {**result, "generation": generation,
+                                                "updated": time.monotonic()}
+            return result
+        except Exception:
+            with self._catalog_lock:
+                self._instance_codex_catalog = None
+            raise
+        finally:
+            if record is not None:
+                record["credential"].clear()
+            with self._identity_lock:
+                self._identities.discard(identity)
+
+    def instance_codex_catalog(self):
+        generation = self.instance_store.generation("openai-codex") if self.instance_store else 0
+        with self._catalog_lock:
+            cached = self._instance_codex_catalog
+            if cached and cached["generation"] == generation and (
+                    time.monotonic() - cached["updated"] < self.policy.catalog_max_stale_seconds):
+                return {"verifiedModels": cached["models"], "catalogCheckedAt": cached["checkedAt"]}
+        return {"verifiedModels": [], "catalogCheckedAt": None}
 
     def disconnect(self, owner, credential_id="codex-prototype"):
         self.store.delete(owner, credential_id)
@@ -288,7 +385,8 @@ class PiRuntime:
     def run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
             on_text=lambda text: None, is_authorized=lambda: True, messages=None,
             reasoning_effort="default", zen_scope=None):
-        identity = (owner, "instance-opencode" if provider_id == "opencode" else self.credential_id(provider_id))
+        identity = (("schemii-instance", "instance-codex") if provider_id == self.SHARED_CODEX_ID else
+                    (owner, "instance-opencode" if provider_id == "opencode" else self.credential_id(provider_id)))
         # TODO(multi-replica-ai): Before enabling multiple API workers/replicas,
         # acquire a durable owner/credential lease and read credentials AFTER it
         # is acquired; hold it through token-refresh persistence. This process-local
@@ -315,15 +413,23 @@ class PiRuntime:
         credential_id = self.credential_id(provider_id)
         record = self.store.get(owner, credential_id) if credential_id else None
         instance_scope = None
-        if provider_id == "opencode":
-            instance_scope = self.require_instance_access(owner, zen_scope)
+        grant_policy = None
+        if provider_id in {"opencode", self.SHARED_CODEX_ID}:
+            actual_provider = "openai-codex" if provider_id == self.SHARED_CODEX_ID else "opencode"
+            instance_scope = self.require_instance_access(owner, zen_scope, actual_provider)
             product, connection_owner_id, connection_id = instance_scope
-            record = self.instance_store.resolve(owner, product, connection_owner_id, connection_id)
+            record = self.instance_store.resolve(owner, product, connection_owner_id, connection_id,
+                                                 provider_id=actual_provider)
             if record is None:
                 raise PiError("instance_access_denied", status=403)
-            record = {"generation": record["generation"],
-                      "credential": {"type": "api_key", "key": record["credential"]}}
-            credential_id = "instance-opencode"
+            if provider_id == self.SHARED_CODEX_ID:
+                grant_policy = self.require_instance_policy(owner, provider_id, model_id,
+                                                            reasoning_effort, zen_scope)
+                credential_id = "instance-codex"
+            else:
+                record = {"generation": record["generation"],
+                          "credential": {"type": "api_key", "key": record["credential"]}}
+                credential_id = "instance-opencode"
         if credential_id and record is None:
             raise PiError("credentials_required", status=401)
         if messages is not None and (not isinstance(messages, list) or not messages
@@ -340,7 +446,8 @@ class PiRuntime:
         if context_bytes > self.policy.context_bytes:
             raise PiError("context_too_large", status=413, limit_event=LimitEventNotice(
                 "ai_turn", "ai.context_bytes", self.policy.context_bytes, context_bytes))
-        body = {"owner": owner, "turnId": turn_id, "providerId": provider_id,
+        body = {"owner": owner, "turnId": turn_id,
+                "providerId": "openai-codex" if provider_id == self.SHARED_CODEX_ID else provider_id,
                 "modelId": model_id, "context": context,
                 "limits": {"maxConcurrent": self.policy.maximum_concurrent_turns,
                            "maxPerOwner": self.policy.maximum_concurrent_turns_per_user,
@@ -357,9 +464,12 @@ class PiRuntime:
                 if instance_scope is not None:
                     if zen_scope() != instance_scope or (self.auth and self.auth.enabled and (
                         not self.auth.user(owner) or f"{instance_scope[0]}:access" not in self.auth.capabilities(owner)
-                    )) or self.instance_store.generation() != record["generation"] or not self.instance_store.has_grant(
-                        owner, *instance_scope
+                    )) or self.instance_store.generation(actual_provider) != record["generation"] or not self.instance_store.has_grant(
+                        owner, *instance_scope, provider_id=actual_provider
                     ):
+                        raise PiError("permission_changed", status=409)
+                    if grant_policy and self.instance_store.get_grant(
+                        owner, *instance_scope, provider_id=actual_provider) != grant_policy:
                         raise PiError("permission_changed", status=409)
                 else:
                     current = self.store.get(owner, credential_id)
@@ -369,7 +479,11 @@ class PiRuntime:
                 raise PiError("permission_changed", status=409)
 
         def persist(event):
-            if record and instance_scope is not None and "credential" in event:
+            if record and instance_scope is not None and provider_id == self.SHARED_CODEX_ID and "credential" in event:
+                if event.get("generation") != record["generation"] or not self.instance_store.save_credential(
+                    "openai-codex", event["credential"], record["generation"]):
+                    raise PiError("credentials_changed", status=409)
+            if record and instance_scope is not None and provider_id == "opencode" and "credential" in event:
                 # The sidecar returns the credential in its private terminal
                 # envelope. Instance API keys are immutable during a turn;
                 # accept only an unchanged value and never write it to a user store.

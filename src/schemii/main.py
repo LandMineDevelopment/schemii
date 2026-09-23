@@ -22,7 +22,8 @@ from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.admin_config import AdminConfig
 from schemii.common.ai.credential_lifecycle import CredentialExpiryWorker, router as activity_router
 from schemii.common.ai.model_catalog import ModelCatalogWorker, ZenModelCatalog
-from schemii.common.ai.routes import router as ai_provider_router, admin_router as ai_provider_admin_router
+from schemii.common.ai.routes import (router as ai_provider_router,
+    admin_router as ai_provider_admin_router, shared_codex_router as ai_shared_codex_admin_router)
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.policy import (
     CompositeConnectionTargetPolicy,
@@ -295,6 +296,7 @@ COMMON_ROUTERS: tuple[APIRouter, ...] = (
     connections_router,
     ai_provider_router,
     ai_provider_admin_router,
+    ai_shared_codex_admin_router,
 )
 
 

@@ -1,10 +1,10 @@
-import { populateReasoningOptions, reasoningForModel } from "#common/ai-reasoning.js";
+import { managedProviderForModel, populateScopedReasoningOptions, reasoningForSelection } from "#common/ai-reasoning.js";
 import { designExportReceipt, workspaceReceiptUrl } from "./ai-app-receipts.js";
 import { downloadContent, createIconElement } from "#common/ui.js";
 import { validateCopyHandoff, openCopyHandoff } from "./ai-copy-handoff.js";
 import { requestJson } from "#common/http.js";
 import { renderMarkdown } from "#common/ai-markdown.js";
-import { createMessageNode, formatDate, modelValue, availableModels, populateModelOptions, apiKeyProviderDetails, providerConnectionState, zenConnectionNotice, aiStatusPath } from "#common/ai-presentation.js";
+import { createMessageNode, formatDate, modelValue, availableModels, populateModelOptions, apiKeyProviderDetails, providerConnectionState, zenConnectionNotice, sharedCodexConnectionNotice, sharedCodexPolicy, aiStatusPath } from "#common/ai-presentation.js";
 import { renderAiActivity } from "#common/ai-activity.js";
 import { enhanceModelPicker } from "#common/ai-model-picker.js";
 import { placeTurnActivity } from "#common/ai-timeline.js";
@@ -123,7 +123,7 @@ function updateContextControls() {
   elements.permissionsCopy.textContent = permissionSummary(chat?.capabilities || settings?.defaultCapabilities, settings?.permissionActions || []);
   const working = chat?.status === "working";
   elements.model.disabled = working;
-  populateReasoningOptions(elements.reasoning, selectedModel(), chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", working);
+  populateScopedReasoningOptions(elements.reasoning, runtime, selectedModel(), chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", working);
   elements.newButton.disabled = !models.length || working;
   elements.settingsButton.disabled = false;
   elements.permissions.disabled = false;
@@ -626,6 +626,8 @@ function renderProviders() {
     }
     if (provider.id === "opencode") {
       const notice = document.createElement("p"); notice.className = "ai-provider-empty"; notice.textContent = zenConnectionNotice; card.append(notice);
+    } else if (provider.id === "instance-codex") {
+      const notice = document.createElement("p"); notice.className = "ai-provider-empty"; notice.textContent = `${sharedCodexConnectionNotice} ${sharedCodexPolicy(provider)}`; card.append(notice);
     } else if (provider.authenticated && ["openai-codex", "openai"].includes(provider.id)) {
       const disconnect = document.createElement("button"); disconnect.type = "button"; disconnect.className = "ui-button compact"; disconnect.textContent = "Disconnect";
       disconnect.addEventListener("click", async () => {
@@ -646,7 +648,7 @@ async function refreshProviderStatus({ refresh = false } = {}) {
   runtime = await requestJson(aiStatusPath("schemii", workspaceId(), refresh), { timeoutMs: refresh ? 20_000 : 10_000 }); models = availableModels(runtime);
   loadModelOptions(elements.model, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
   loadModelOptions(elements.settingsModel, settingsSelection[0] || chat?.providerId || settings?.defaultProviderId, settingsSelection[1] || chat?.modelId || settings?.defaultModelId);
-  populateReasoningOptions(elements.settingsReasoning, selectedModel(elements.settingsModel), elements.settingsReasoning.value || chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
+  populateScopedReasoningOptions(elements.settingsReasoning, runtime, selectedModel(elements.settingsModel), elements.settingsReasoning.value || chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
   renderProviders(); updateContextControls();
   modelPickers.forEach(picker => picker.sync());
   if (refresh && (runtime.healthy === false || runtime.providers?.some(provider => provider.catalogError))) {
@@ -656,7 +658,7 @@ async function refreshProviderStatus({ refresh = false } = {}) {
 
 async function createConversation({ model = defaultModel(), capabilities = defaultCapabilities(), reasoningEffort = chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", title = "New conversation" } = {}) {
   if (!model) throw new Error("No AI model is configured for this deployment.");
-  chat = await requestJson(`/api/v1/schemii/workspaces/${workspaceId()}/ai/chats`, { method: "POST", body: { providerId: model.providerId, modelId: model.id, title, capabilities, reasoningEffort: reasoningForModel(model, reasoningEffort) } });
+  chat = await requestJson(`/api/v1/schemii/workspaces/${workspaceId()}/ai/chats`, { method: "POST", body: { providerId: model.providerId, modelId: model.id, title, capabilities, reasoningEffort: reasoningForSelection(runtime, model, reasoningEffort) } });
   chats = [chat, ...chats.filter(item => item.id !== chat.id)];
   activitySequence = 0; timelineSignature = ""; resultContextOperationId = null;
   updateContextControls(); renderAttachment(); renderTimeline([], [], []); return chat;
@@ -802,7 +804,7 @@ const refreshContextSelection = bindContextSelection(elements.settingsForm.query
 function fillSettings() {
   loadModelOptions(elements.settingsModel, chat?.providerId || settings?.defaultProviderId, chat?.modelId || settings?.defaultModelId);
   elements.settingsModel.disabled = chat?.status === "working";
-  populateReasoningOptions(elements.settingsReasoning, selectedModel(elements.settingsModel), chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
+  populateScopedReasoningOptions(elements.settingsReasoning, runtime, selectedModel(elements.settingsModel), chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", chat?.status === "working");
   const capabilities = chat?.capabilities || defaultCapabilities();
   permissionEditor = renderPermissionBundles(elements.permissionActions, settings?.permissionActions || [], capabilities.actionModes);
   for (const name of ["liveCatalog", "structuredDataRead", "monitorQueries"]) elements.settingsForm.elements[name].checked = Boolean(capabilities[name]);
@@ -916,7 +918,7 @@ elements.model?.addEventListener("change", async () => {
   try {
     if (!chat) await createConversation({ model, capabilities: defaultCapabilities() });
     else {
-      const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities: chat.capabilities, reasoningEffort: reasoningForModel(model, chat.reasoningEffort) } });
+      const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities: chat.capabilities, reasoningEffort: reasoningForSelection(runtime, model, chat.reasoningEffort) } });
       settings = result.settings; chat = result.chat;
     }
     setNotice(`Switched to ${model.name}. Conversation retained.`); await refresh(); elements.input.focus();
@@ -926,11 +928,12 @@ elements.model?.addEventListener("change", async () => {
 
 elements.settingsModel?.addEventListener("change", () => {
   const model = selectedModel(elements.settingsModel);
-  populateReasoningOptions(elements.settingsReasoning, model, reasoningForModel(model, elements.settingsReasoning.value));
+  populateScopedReasoningOptions(elements.settingsReasoning, runtime, model, reasoningForSelection(runtime, model, elements.settingsReasoning.value));
 });
 elements.reasoning?.addEventListener("change", async () => {
   const reasoningEffort = elements.reasoning.value;
   const model = selectedModel(); if (!model) return;
+  if (managedProviderForModel(runtime, model)) return;
   elements.reasoning.disabled = true;
   try {
     if (!chat) await createConversation({ model, reasoningEffort });
@@ -976,7 +979,7 @@ elements.settingsForm?.addEventListener("submit", async event => {
   elements.settingsStatus.textContent = "Saving…";
   try {
     const modelChanged = model.providerId !== chat.providerId || model.id !== chat.modelId;
-    const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities, reasoningEffort: elements.settingsReasoning.value } });
+    const result = await requestJson(`/api/v1/schemii/ai/chats/${chat.id}/preferences`, { method: "PUT", body: { expectedSettingsRevision: settings.revision, expectedChatRevision: chat.revision, providerId: model.providerId, modelId: model.id, capabilities, reasoningEffort: reasoningForSelection(runtime, model, elements.settingsReasoning.value) } });
     settings = result.settings; chat = result.chat;
     updateContextControls(); closeDialog(elements.settingsDialog); setNotice(modelChanged ? `Switched to ${model.name}. Conversation retained; permissions saved.` : "Assistant permissions saved."); await refresh();
   } catch (error) { elements.settingsStatus.textContent = error.message; }

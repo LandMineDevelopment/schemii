@@ -1,9 +1,9 @@
-import { populateReasoningOptions, reasoningForModel } from "./ai-reasoning.js";
+import { managedProviderForModel, populateScopedReasoningOptions, reasoningForSelection } from "./ai-reasoning.js";
 import { assistantDownloadLink } from "./ai-download.js";
 import { requestJson } from "./http.js";
 import { element } from "./dom.js";
 import { createIconButton } from "./ui.js";
-import { createMessageNode, availableModels, populateModelOptions, modelValue, apiKeyProviderDetails, providerConnectionState, zenConnectionNotice, aiStatusPath } from "./ai-presentation.js";
+import { createMessageNode, availableModels, populateModelOptions, modelValue, apiKeyProviderDetails, providerConnectionState, zenConnectionNotice, sharedCodexConnectionNotice, sharedCodexPolicy, aiStatusPath } from "./ai-presentation.js";
 import { renderPermissionBundles } from "./ai-permissions.js";
 import { renderAiActivity } from "./ai-activity.js";
 import { enhanceModelPicker } from "./ai-model-picker.js";
@@ -82,7 +82,7 @@ export function createProductAssistant({
     const selectedId = chat?.aiModelId || settings?.aiModelId || settings?.modelId;
     available = availableModels(runtime);
     populateModelOptions(modelSelect, available, selectedProvider, selectedId);
-    populateReasoningOptions(reasoningSelect, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", busy || active(chat));
+    populateScopedReasoningOptions(reasoningSelect, runtime, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", busy || active(chat));
     controls();
   }
   let permissionEditor = null;
@@ -94,8 +94,8 @@ export function createProductAssistant({
     send.hidden = running;
     cancel.hidden = !running; cancel.disabled = busy;
     modelSelect.disabled = busy;
-    reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1;
-    settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1;
+    reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1 || Boolean(managedProviderForModel(runtime, selected()));
+    settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1 || Boolean(managedProviderForModel(runtime, selected()));
     fresh.disabled = busy || running || !getSubjectId() || !selected(); history.disabled = busy || !getSubjectId();
     saveSettings.disabled = busy;
     permissionEditor?.setBusy(busy);
@@ -228,7 +228,7 @@ export function createProductAssistant({
   }
   async function newChat() {
     const choice = selected(); if (!choice || !getSubjectId()) throw new Error(`Choose a saved ${subjectLabel} and connect an AI provider first.`);
-    const next = await requestJson(`${api}/chats`, { method: "POST", body: { [subjectKey]: getSubjectId(), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForModel(choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
+    const next = await requestJson(`${api}/chats`, { method: "POST", body: { [subjectKey]: getSubjectId(), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForSelection(runtime, choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
     generation++; input.value = ""; transcriptKey = ""; await accept(next); tell("Started a new conversation. Previous conversations remain in history.");
   }
   async function load() {
@@ -284,7 +284,7 @@ export function createProductAssistant({
     const wasActive = active(chat);
     busy = true; controls();
     try {
-      const body = { providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForModel(choice, chat?.reasoningEffort || settings?.reasoningEffort), expectedRevision: chat?.revision };
+      const body = { providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForSelection(runtime, choice, chat?.reasoningEffort || settings?.reasoningEffort), expectedRevision: chat?.revision };
       if (chat) await accept(await requestJson(`${api}/chats/${encodeURIComponent(chat.id)}/preferences`, { method: "PUT", body }));
       settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes, reasoningEffort: body.reasoningEffort } });
       tell(`Switched to ${choice.name}.${wasActive ? " The current turn was stopped. Send a follow-up to continue." : " Conversation retained."}`);
@@ -293,7 +293,7 @@ export function createProductAssistant({
 
   reasoningSelect.onchange = () => void guard(async () => {
     const reasoningEffort = reasoningSelect.value, choice = selected();
-    if (!choice || busy || active(chat)) return;
+    if (!choice || busy || active(chat) || managedProviderForModel(runtime, choice)) return;
     busy = true; controls();
     try {
       const body = { providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort, expectedRevision: chat?.revision };
@@ -305,7 +305,7 @@ export function createProductAssistant({
 
   async function showSettings() {
     settingsDialog.showModal(); settingsStatus.textContent = "Loading settings…";
-    try { if (!settings || !runtime) await load(); else runtime = await requestJson(aiStatusPath(productLabel.toLowerCase(), getSubjectId())); if (chat) await refresh(); populateModels(); populateReasoningOptions(settingsReasoning, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", active(chat)); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
+    try { if (!settings || !runtime) await load(); else runtime = await requestJson(aiStatusPath(productLabel.toLowerCase(), getSubjectId())); if (chat) await refresh(); populateModels(); populateScopedReasoningOptions(settingsReasoning, runtime, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", active(chat)); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
     catch (error) { settingsStatus.textContent = error.message; }
   }
   function renderPermissions() {
@@ -320,7 +320,8 @@ export function createProductAssistant({
     if (busy) return; busy = true; controls(); settingsStatus.textContent = "Saving…";
     try {
       const values = { ...(chat?.modes || settings?.modes || {}), ...Object.fromEntries([...permissionList.querySelectorAll("select[data-action]")].map(control => [control.dataset.action, control.value])) };
-      const body = { modes: values, providerId: chat?.providerId || selected()?.providerId, aiModelId: chat?.aiModelId || selected()?.id, reasoningEffort: settingsReasoning.value, expectedRevision: chat?.revision };
+      const choice = selected();
+      const body = { modes: values, providerId: chat?.providerId || choice?.providerId, aiModelId: chat?.aiModelId || choice?.id, reasoningEffort: reasoningForSelection(runtime, choice, settingsReasoning.value), expectedRevision: chat?.revision };
       if (chat) await accept(await requestJson(`${api}/chats/${encodeURIComponent(chat.id)}/preferences`, { method: "PUT", body }));
       settings = await requestJson(`${api}/settings`, { method: "PUT", body: { providerId: body.providerId, aiModelId: body.aiModelId, modes: body.modes, reasoningEffort: body.reasoningEffort } });
       settingsDialog.close(); tell("Assistant settings saved.");
@@ -341,6 +342,7 @@ export function createProductAssistant({
       card.open = !provider.available || provider.id === chat?.providerId;
       if (provider.privacy || provider.privacyNotice) card.append(el("p", provider.privacy || provider.privacyNotice));
       if (provider.id === "opencode") card.append(el("p", zenConnectionNotice, "model-ai-muted"));
+      else if (provider.id === "instance-codex") card.append(el("p", `${sharedCodexConnectionNotice} ${sharedCodexPolicy(provider)}`, "model-ai-muted"));
       else if (provider.authenticated && ["openai", "openai-codex"].includes(provider.id)) card.append(button("Disconnect", async () => {
         if (!confirm(`Disconnect ${provider.name}? Other conversations using this provider will also be affected.`)) return;
         try { await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "DELETE" }); await refreshProviders(); } catch (error) { settingsStatus.textContent = error.message; }

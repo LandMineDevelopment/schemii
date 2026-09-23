@@ -2,6 +2,7 @@ import { loginUrl } from './login-return.js';
 import { requestJson } from './http.js';
 import { element as el } from './dom.js';
 import { confirmAction } from './confirmation.js';
+import { reasoningLabel, reasoningLevels } from './ai-reasoning.js';
 import { canAccessProduct, signInDestination, signOut, sessionChanged } from './accounts-session.js';
 const main = document.getElementById('accounts-main');
 const nav = document.getElementById('account-navigation');
@@ -88,18 +89,25 @@ function zenAdministration(zen, users, roles) {
     confirmLabel: 'Remove key',
     onConfirm: async () => { await requestJson(`${ADMIN}/ai/zen/credential`, { method: 'DELETE' }); await adminPage(); },
   })));
-  panel.append(connectionStatus, keyActions, el('h3', { text: 'Access grants' }));
-
+  panel.append(connectionStatus, keyActions);
+  appendAiGrants(panel, zen, users, roles, { name: 'Zen', path: 'zen' });
+  return panel;
+}
+function appendAiGrants(panel, provider, users, roles, { name, path }) {
+  panel.append(el('h3', { text: 'Access grants' }));
+  const verifiedCatalog = path !== 'shared-codex' || Boolean(provider.catalogCheckedAt);
+  const selectableModels = path === 'shared-codex'
+    ? (verifiedCatalog ? provider.verifiedModels || [] : provider.models || []) : [];
   const userById = new Map(users.map(user => [user.id, user]));
-  const visibleConnections = zen.connections || [];
+  const visibleConnections = provider.connections || [];
   const connectionByGrant = grant => visibleConnections.find(connection => {
     const identity = connectionIdentity(connection);
     return connection.userId === grant.userId && connection.product === grant.product
       && identity.connectionOwnerId === grant.connectionOwnerId && identity.connectionId === grant.connectionId;
   });
   const grantList = el('div', { className: 'account-list' });
-  const grants = zen.grants || [];
-  if (!grants.length) grantList.append(el('p', { text: 'No one has been granted Zen access yet.' }));
+  const grants = provider.grants || [];
+  if (!grants.length) grantList.append(el('p', { text: `No one has been granted ${name} access yet.` }));
   for (const grant of grants) {
     const user = userById.get(grant.userId);
     const product = AI_PRODUCTS.find(([id]) => id === grant.product)?.[1] || grant.product;
@@ -107,24 +115,46 @@ function zenAdministration(zen, users, roles) {
     const database = grant.connectionId === null ? 'No database · Schemii workspace' : connection
       ? `${connection.name || connection.connectionId || connection.id} · ${connection.database}`
       : `${grant.connectionOwnerId}/${grant.connectionId}`;
+    const model = provider.models?.find(item => item.id === grant.modelId);
+    const policy = path === 'shared-codex' ? ` · ${model?.name || grant.modelId || 'GPT-6 Luna'} · ${reasoningLabel(grant.reasoningEffort || 'default')} reasoning` : '';
+    const unverified = path === 'shared-codex' && verifiedCatalog && !selectableModels.some(item => item.id === grant.modelId);
     grantList.append(el('div', { className: 'account-row' }, [
-      el('div', {}, [el('strong', { text: `${user?.display_name || user?.username || grant.userId} · ${product}` }), el('small', { text: database })]),
+      el('div', {}, [el('strong', { text: `${user?.display_name || user?.username || grant.userId} · ${product}` }), el('small', { text: `${database}${policy}` }),
+        ...(unverified ? [el('small', { className: 'account-error', text: 'This model is no longer verified for the installation connection. Choose an available model or revoke this grant.' })] : [])]),
+      ...(path === 'shared-codex' ? [button('Change model and reasoning', () => openGrantEditor(grant))] : []),
       button('Revoke', () => confirmAction({
-        title: 'Revoke Zen access?',
-        message: `Remove ${product} Zen access for ${user?.display_name || user?.username || grant.userId} on ${database}?`,
+        title: `Revoke ${name} access?`,
+        message: `Remove ${product} ${name} access for ${user?.display_name || user?.username || grant.userId} on ${database}?`,
         details: 'An in-progress turn may stop. The person’s application and database permissions are unaffected.',
         confirmLabel: 'Revoke access',
-        onConfirm: async () => { await requestJson(`${ADMIN}/ai/zen/grants`, { method: 'DELETE', body: grant }); await adminPage(); },
+        onConfirm: async () => { await requestJson(`${ADMIN}/ai/${path}/grants`, { method: 'DELETE', body: grant }); await adminPage(); },
       })),
     ]));
   }
-  panel.append(button('Grant Zen access', () => {
-    const d = dialog('Grant Zen access');
+  function openGrantEditor(existingGrant = null) {
+    const d = dialog(existingGrant ? 'Change shared Codex policy' : `Grant ${name} access`);
     const userSelect = el('select', { attrs: { 'aria-label': 'Person' } });
     for (const user of users.filter(item => !item.disabled)) userSelect.append(el('option', { text: `${user.display_name || user.username} (${user.username})`, attrs: { value: user.id } }));
     const productSelect = el('select', { attrs: { 'aria-label': 'Application' } });
     const databaseSelect = el('select', { attrs: { 'aria-label': 'Database profile' } });
     const scopeHelp = el('p', { attrs: { role: 'status' } });
+    const modelSelect = el('select', { attrs: { 'aria-label': 'Allowed model' } });
+    const reasoningSelect = el('select', { attrs: { 'aria-label': 'Reasoning level' } });
+    if (path === 'shared-codex') {
+      if (existingGrant?.modelId && !selectableModels.some(item => item.id === existingGrant.modelId)) {
+        modelSelect.append(el('option', { text: `${existingGrant.modelId} · unavailable — choose another model`, attrs: { value: existingGrant.modelId, disabled: '' } }));
+      }
+      for (const model of selectableModels) modelSelect.append(el('option', { text: model.name || model.id, attrs: { value: model.id } }));
+      modelSelect.value = existingGrant?.modelId || (selectableModels.some(model => model.id === 'gpt-6-luna') ? 'gpt-6-luna' : selectableModels[0]?.id || '');
+      const updateReasoning = preferred => {
+        const model = selectableModels.find(item => item.id === modelSelect.value);
+        const levels = reasoningLevels(model);
+        reasoningSelect.replaceChildren(...levels.map(level => el('option', { text: reasoningLabel(level), attrs: { value: level } })));
+        reasoningSelect.value = levels.includes(preferred) ? preferred : 'default';
+      };
+      modelSelect.onchange = () => updateReasoning('default');
+      updateReasoning(existingGrant?.reasoningEffort || 'default');
+    }
     const options = [];
     function updateProducts() {
       const selected = userById.get(userSelect.value), previous = productSelect.value;
@@ -154,26 +184,101 @@ function zenAdministration(zen, users, roles) {
       databaseSelect.disabled = !options.length;
       scopeHelp.textContent = options.length ? 'A grant applies only to the selected database identity. App and database permissions are checked again for each AI turn.' : productSelect.value ? 'This person has no database profile available for this app.' : 'This person does not have access to an AI app yet.';
     }
-    userSelect.onchange = updateProducts; productSelect.onchange = updateConnections; updateProducts();
-    d.append(formWithSubmit('Add grant', async () => {
+    userSelect.onchange = updateProducts; productSelect.onchange = updateConnections;
+    if (existingGrant) userSelect.value = existingGrant.userId;
+    updateProducts();
+    if (existingGrant) {
+      productSelect.value = existingGrant.product; updateConnections();
+      const selectedIndex = options.findIndex(scope => scope.connectionOwnerId === existingGrant.connectionOwnerId && scope.connectionId === existingGrant.connectionId);
+      if (selectedIndex >= 0) databaseSelect.value = String(selectedIndex);
+      userSelect.disabled = true; productSelect.disabled = true; databaseSelect.disabled = true;
+    }
+    const policyFields = path === 'shared-codex' ? [
+      el('label', { className: 'account-field' }, ['Allowed model', modelSelect]),
+      el('label', { className: 'account-field' }, ['Reasoning level', reasoningSelect]),
+      el('p', { text: 'The selected model and reasoning level are enforced for this person, app, and database profile.' }),
+      ...(!verifiedCatalog ? [el('p', { className: 'account-error', text: 'Test the shared Codex connection first. The listed catalog models have not been verified for this account.' })] : []),
+      ...(verifiedCatalog && !selectableModels.length ? [el('p', { className: 'account-error', text: 'No Codex models were verified for this account. Reconnect or test again before granting access.' })] : []),
+    ] : [];
+    const grantForm = formWithSubmit(existingGrant ? 'Save policy' : 'Add grant', async () => {
       const scope = options[Number(databaseSelect.value)];
       if (!scope) throw new Error('Choose an available database profile.');
-      const body = { userId: userSelect.value, product: productSelect.value, ...scope };
-      if (grants.some(grant => grant.userId === body.userId && grant.product === body.product && grant.connectionOwnerId === body.connectionOwnerId && grant.connectionId === body.connectionId)) throw new Error('This access grant already exists.');
-      await requestJson(`${ADMIN}/ai/zen/grants`, { method: 'PUT', body });
+      const body = { userId: userSelect.value, product: productSelect.value, ...scope,
+        ...(path === 'shared-codex' ? { modelId: modelSelect.value, reasoningEffort: reasoningSelect.value } : {}) };
+      if (path === 'shared-codex' && (!verifiedCatalog || !selectableModels.some(item => item.id === body.modelId))) throw new Error('Test the Codex connection and choose a verified model before saving this grant.');
+      if (!existingGrant && grants.some(grant => grant.userId === body.userId && grant.product === body.product && grant.connectionOwnerId === body.connectionOwnerId && grant.connectionId === body.connectionId)) throw new Error('This access grant already exists.');
+      await requestJson(`${ADMIN}/ai/${path}/grants`, { method: 'PUT', body });
       d.close(); await adminPage();
-    }, [el('label', { className: 'account-field' }, ['Person', userSelect]), el('label', { className: 'account-field' }, ['Application', productSelect]), el('label', { className: 'account-field' }, ['Database profile', databaseSelect]), scopeHelp]));
+    }, [el('label', { className: 'account-field' }, ['Person', userSelect]), el('label', { className: 'account-field' }, ['Application', productSelect]), el('label', { className: 'account-field' }, ['Database profile', databaseSelect]), scopeHelp, ...policyFields]);
+    if (path === 'shared-codex') {
+      const save = grantForm.querySelector('button[type="submit"]');
+      const syncSubmit = () => { save.disabled = !verifiedCatalog || !selectableModels.some(item => item.id === modelSelect.value); };
+      modelSelect.addEventListener('change', syncSubmit); syncSubmit();
+    }
+    d.append(grantForm);
     d.append(button('Cancel', () => d.close())); d.showModal();
-  }, true), grantList);
+  }
+  panel.append(button(`Grant ${name} access`, () => openGrantEditor(), true), grantList);
+}
+function sharedCodexAdministration(shared, users, roles) {
+  const panel = el('section', { className: 'account-panel', attrs: { 'aria-labelledby': 'shared-codex-administration-title' } }, [
+    el('h2', { text: 'Shared ChatGPT Codex for this installation', attrs: { id: 'shared-codex-administration-title' } }),
+    el('p', { text: 'Share an administrator’s existing ChatGPT Codex sign-in through an encrypted installation-owned connection. Grant each person access by app and database profile. People never see the connection, and these grants do not add app, database, or Schemer authoring rights.' }),
+  ]);
+  if (shared.error) {
+    panel.append(el('p', { className: 'account-error', text: `Shared Codex administration could not be loaded: ${shared.error.message}`, attrs: { role: 'alert' } }), button('Retry loading shared Codex settings', adminPage));
+    return panel;
+  }
+  panel.append(el('p', { className: shared.connected ? 'account-message' : 'account-inline-status', attrs: { role: 'status' }, text: shared.connected
+    ? 'Installation connection stored. Granted people can use their assigned Codex model without their own sign-in.'
+    : 'No installation connection stored. Shared Codex is unavailable until an administrator connects it.' }));
+  const verified = shared.verifiedModels || [];
+  panel.append(el('p', { className: 'account-inline-status', text: shared.catalogCheckedAt
+    ? `Verified for this account: ${verified.length ? verified.map(model => model.name || model.id).join(', ') : 'No supported Codex models'}.`
+    : `Supported model catalog (unverified): ${(shared.models || []).map(model => model.name || model.id).join(', ') || 'Unavailable'}. Test the shared connection before granting access.` }));
+  const testStatus = el('p', { className: 'account-inline-status', attrs: { role: 'status' } });
+  if (shared.connected) panel.append(button('Test shared Codex connection', async event => {
+    const trigger = event.currentTarget; trigger.disabled = true; testStatus.textContent = 'Checking available Codex models…';
+    try {
+      const result = await requestJson(`${ADMIN}/ai/shared-codex/test`, { method: 'POST' });
+      const models = result.models || [];
+      testStatus.textContent = result.connected
+        ? `Connection verified. ${models.length} ${models.length === 1 ? 'model' : 'models'} available.`
+        : `Connection unavailable: ${result.error || 'Codex sign-in could not be verified.'}`;
+      if (result.connected) { shared.verifiedModels = models; shared.catalogCheckedAt = result.checkedAt || new Date().toISOString(); await adminPage(); }
+    } catch (error) { testStatus.textContent = `Connection test failed: ${error.message}`; }
+    finally { trigger.disabled = false; }
+  }), testStatus);
+  const credentialActions = el('div', { className: 'account-actions' });
+  if (shared.sourceConnected) {
+    credentialActions.append(button(shared.connected ? 'Replace shared Codex connection' : 'Share my Codex sign-in', async event => {
+      const trigger = event.currentTarget; trigger.disabled = true;
+      try { await requestJson(`${ADMIN}/ai/shared-codex/credential`, { method: 'PUT', body: {} }); await adminPage(); }
+      catch (error) { trigger.disabled = false; panel.append(el('p', { className: 'account-error', text: `Could not share Codex sign-in: ${error.message}`, attrs: { role: 'alert' } })); }
+    }, !shared.connected));
+  } else {
+    panel.append(el('p', { className: 'account-inline-status', text: 'To connect or replace this installation connection, first sign in to your personal Codex account from an AI assistant, then return here.' }));
+    credentialActions.append(link('Open Schemii assistant', '/'));
+  }
+  if (shared.connected) credentialActions.append(button('Remove shared Codex connection', () => confirmAction({
+    title: 'Remove shared Codex connection?',
+    message: 'Shared Codex will stop working for everyone on this installation.',
+    details: 'Existing grants remain saved. Share a new Codex sign-in to restore access to granted people.',
+    confirmLabel: 'Remove connection',
+    onConfirm: async () => { await requestJson(`${ADMIN}/ai/shared-codex/credential`, { method: 'DELETE' }); await adminPage(); },
+  })));
+  panel.append(credentialActions);
+  appendAiGrants(panel, shared, users, roles, { name: 'shared Codex', path: 'shared-codex' });
   return panel;
 }
 async function adminPage() {
   document.title = 'Administration · Schemii';
   main.replaceChildren(...heading('Administration', 'Assign application access and Schemii-owned read-only database accounts through roles. PostgreSQL controls visible rows, columns, and write operations.'));
-  const [users, roles, resources, managedResult, zenResult] = await Promise.all([
+  const [users, roles, resources, managedResult, zenResult, sharedCodexResult] = await Promise.all([
     requestJson(`${ADMIN}/accounts`), requestJson(`${ADMIN}/roles`), requestJson(`${ADMIN}/resources`),
     requestJson(`${ADMIN}/schemii-connections`).then(value => ({ connections: value.connections })).catch(error => ({ error })),
     requestJson(`${ADMIN}/ai/zen`).catch(error => ({ error })),
+    requestJson(`${ADMIN}/ai/shared-codex`).catch(error => ({ error })),
   ]);
   const managedConnections = managedResult.connections || [];
   const columns = el('div', { className: 'account-columns' });
@@ -246,7 +351,7 @@ async function adminPage() {
     ]));
   }
   diagnostics.append(diagnosticList);
-  main.append(columns, connectionPanel, zenAdministration(zenResult, users, roles), link('Jump to system diagnostics', '#system-diagnostics'), diagnostics);
+  main.append(columns, connectionPanel, sharedCodexAdministration(sharedCodexResult, users, roles), zenAdministration(zenResult, users, roles), link('Jump to system diagnostics', '#system-diagnostics'), diagnostics);
   function editManagedConnection(connection) {
     const d = dialog(connection ? 'Edit Schemii-owned account' : 'Add Schemii-owned account');
     const name = field('Account name', { value: connection?.name || '' });

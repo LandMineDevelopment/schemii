@@ -51,7 +51,7 @@ def test_owner_specific_availability_requires_a_zen_key_and_verified_free_model(
     bob = runtime.status("bob")["providers"]
     assert alice[0]["available"]
     assert not bob[0]["available"]
-    assert [provider["id"] for provider in bob] == ["openai-codex", "openai", "opencode"]
+    assert [provider["id"] for provider in bob] == ["openai-codex", "openai", "opencode", "instance-codex"]
     assert not bob[2]["available"]
     assert [model["id"] for model in bob[2]["models"]] == ["free"]
     assert "personal" in bob[2]["privacy"]
@@ -505,3 +505,72 @@ def test_reasoning_effort_catalog_validation_and_transport():
         run(runtime, reasoning_effort="max")
     assert error.value.code == "reasoning_unsupported"
     assert len(requests) == 2
+
+
+def test_shared_codex_uses_admin_policy_and_refreshes_only_instance_credential():
+    rotated = {"type": "oauth", "refresh": "rotated"}
+    runtime, owner_store, requests = setup([{"type": "result", "text": "shared reply",
+        "generation": 1, "credential": rotated}])
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna",
+                           "reasoningLevels": ["default", "low", "high"]}]
+    runtime._supported_until = float("inf")
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "original"})
+    instance.upsert_grant("alice", "schemii", provider_id="openai-codex",
+                          model_id="gpt-6-luna", reasoning_effort="high")
+    runtime.instance_store = instance
+    scope = lambda: ("schemii", None, None)
+    provider = runtime.status("alice", zen_scope=scope)["providers"][-1]
+    assert provider["adminManaged"] is True and provider["available"] is True
+    assert provider["selectedModelId"] == "gpt-6-luna"
+    assert provider["models"][0]["reasoningLevels"] == ["high"]
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "bad", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                    zen_scope=scope, reasoning_effort="low")
+    assert caught.value.code == "instance_policy_changed" and requests == []
+    reply = runtime.run("alice", "shared", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                        zen_scope=scope, reasoning_effort="high")
+    assert reply.text == "shared reply"
+    assert requests[0]["providerId"] == "openai-codex"
+    assert requests[0]["credentialId"] == "instance-codex"
+    assert requests[0]["reasoningEffort"] == "high"
+    assert instance.credential("openai-codex")["credential"] == rotated
+    assert owner_store.get("alice", "codex-prototype")["credential"]["refresh"] == "old"
+
+
+def test_shared_codex_grant_revision_fences_running_turn():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "original"})
+    instance.upsert_grant("alice", "schemii", provider_id="openai-codex")
+    runtime, _, requests = setup([{"type": "result", "text": "late", "generation": 1}],
+        before=lambda _: instance.upsert_grant("alice", "schemii", provider_id="openai-codex"))
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna",
+                           "reasoningLevels": ["default"]}]
+    runtime._supported_until = float("inf")
+    runtime.instance_store = instance
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "shared", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                    zen_scope=lambda: ("schemii", None, None))
+    assert caught.value.code == "permission_changed"
+    assert len(requests) == 1
+
+
+def test_shared_codex_admin_connection_test_uses_live_catalog_without_prompt():
+    runtime, _, requests = setup([])
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "old"})
+    runtime.instance_store = instance
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna"}]
+    runtime._supported_until = float("inf")
+    def call(path, body=None):
+        assert path == "/models/refresh"
+        assert body["providerId"] == "openai-codex"
+        return {"type": "result", "generation": 1,
+                "credential": {"type": "oauth", "refresh": "new"},
+                "models": [{"providerId": "openai-codex", "id": "gpt-6-luna"}]}
+    runtime.client.call = call
+    result = runtime.test_instance_codex()
+    assert [model["id"] for model in result["models"]] == ["gpt-6-luna"]
+    assert [model["id"] for model in runtime.instance_codex_catalog()["verifiedModels"]] == ["gpt-6-luna"]
+    assert instance.credential("openai-codex")["credential"]["refresh"] == "new"
+    assert requests == []

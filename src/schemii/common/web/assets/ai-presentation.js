@@ -1,6 +1,7 @@
 import { element } from "./dom.js";
 import { createIconButton } from "./ui.js";
 import { renderMarkdown } from "./ai-markdown.js";
+import { reasoningLabel } from "./ai-reasoning.js";
 
 export function formatDate(value) {
   const date = new Date(value);
@@ -19,11 +20,18 @@ export const apiKeyProviderDetails = Object.freeze({
 });
 
 export function providerConnectionState(provider) {
-  if (provider.id === "opencode") return provider.available ? "Available" : "Unavailable";
+  if (["opencode", "instance-codex"].includes(provider.id)) return provider.available ? "Available" : "Unavailable";
   return provider.authenticated ? "Connected" : provider.available ? "Available" : "Not connected";
 }
 
 export const zenConnectionNotice = "An administrator manages Zen access for each person, app, and database. Your app and database permissions still apply.";
+export const sharedCodexConnectionNotice = "An administrator manages shared ChatGPT Codex access for each person, app, and database. Your app and database permissions still apply. Your personal Codex sign-in remains separate.";
+
+export function sharedCodexPolicy(provider) {
+  if (!provider?.adminManaged || !provider.selectedModelId) return "";
+  const model = provider.models?.find(item => item.id === provider.selectedModelId);
+  return `Administrator policy: ${model?.name || provider.selectedModelId} · ${reasoningLabel(provider.selectedReasoningEffort || "default")} reasoning. Model and reasoning are managed in Administration.`;
+}
 
 export function aiStatusPath(product, resourceId, refresh = false) {
   const query = new URLSearchParams();
