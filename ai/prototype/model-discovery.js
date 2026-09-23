@@ -6,7 +6,7 @@ import { providers, TurnError } from './runtime.js';
 // Protocol reference: openai/codex codex-rs/codex-api/src/endpoint/models.rs.
 // This compatibility version matches the locally verified Codex catalog format.
 const endpoints = {
-  'openai-codex': 'https://chatgpt.com/backend-api/codex/models?client_version=0.153.4',
+  'openai-codex': 'https://chatgpt.com/backend-api/codex/models?client_version=0.156.1',
   openai: 'https://api.openai.com/v1/models',
 };
 const noAmbientAuth = Object.freeze({ env: async () => undefined, fileExists: async () => false });

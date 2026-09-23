@@ -22,7 +22,8 @@ from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.admin_config import AdminConfig
 from schemii.common.ai.credential_lifecycle import CredentialExpiryWorker, router as activity_router
 from schemii.common.ai.model_catalog import ModelCatalogWorker, ZenModelCatalog
-from schemii.common.ai.routes import router as ai_provider_router
+from schemii.common.ai.routes import (router as ai_provider_router,
+    admin_router as ai_provider_admin_router, shared_codex_router as ai_shared_codex_admin_router)
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.policy import (
     CompositeConnectionTargetPolicy,
@@ -294,6 +295,8 @@ COMMON_ROUTERS: tuple[APIRouter, ...] = (
     runtime_router,
     connections_router,
     ai_provider_router,
+    ai_provider_admin_router,
+    ai_shared_codex_admin_router,
 )
 
 
@@ -392,13 +395,15 @@ def create_app(
         await asyncio.to_thread(application.state.bulk_jobs.repository.recover)
         await asyncio.to_thread(application.state.ai_service.recover_interrupted)
         await asyncio.to_thread(application.state.schemoo_ai.store.prune, True)
+        await asyncio.to_thread(application.state.schemer_ai.store.prune, True)
         async def maintain_chats():
             while True:
                 await asyncio.sleep(60)
                 try:
                     await asyncio.to_thread(application.state.schemoo_ai.maintain)
+                    await asyncio.to_thread(application.state.schemer_ai.maintain)
                 except Exception:
-                    logging.getLogger(__name__).exception("Schemoo chat maintenance failed")
+                    logging.getLogger(__name__).exception("Product chat maintenance failed")
         chat_maintenance=asyncio.create_task(maintain_chats())
         active_services.migrations.set_execution_waker(migration_worker.notify)
         await migration_worker.start()
@@ -505,7 +510,9 @@ def create_app(
     from schemii.common.ai.pi import PiRuntime
     ai_runtime = (
         PiRuntime(application.state.pi_client, active_services.metadata.ai_credentials,
-                  application.state.ai_model_catalog, active_services.admin_config.ai)
+                  application.state.ai_model_catalog, active_services.admin_config.ai,
+                  instance_store=active_services.metadata.ai_instance_providers,
+                  auth=application.state.auth)
         if application.state.pi_client is not None else None
     )
     application.state.ai_service = AiService(
@@ -515,16 +522,23 @@ def create_app(
         active_services,
     )
     application.state.ai_service.raw_console = application.state.raw_console
-    from schemii.schemoo.conversation_store import ConversationStore
-    from schemii.schemoo.conversations import Conversations
+    from schemii.common.ai.conversation_store import ConversationStore
+    from schemii.common.ai.conversations import Conversations
     from schemii.schemoo import ai_tools
     from schemii.schemoo.ai_routes import router as schemoo_ai_router
+    from schemii.schemer import ai_tools as schemer_ai_tools
+    from schemii.schemer.ai_routes import router as schemer_ai_router
     application.state.ai_runtime = ai_runtime
     application.state.schemoo_ai = Conversations(
         ConversationStore(active_services.metadata.connection_factory,active_services.admin_config.ai,"schemoo"),
         ai_runtime,active_services,ai_tools,
     )
+    application.state.schemer_ai = Conversations(
+        ConversationStore(active_services.metadata.connection_factory,active_services.admin_config.ai,"schemer","dashboardId"),
+        ai_runtime,active_services,schemer_ai_tools,
+    )
     application.include_router(schemoo_ai_router)
+    application.include_router(schemer_ai_router)
     application.state.migration_worker = migration_worker
     install_api_middleware(application)
     install_api_error_handlers(application)

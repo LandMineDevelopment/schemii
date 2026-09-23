@@ -35,6 +35,36 @@ def test_runtime_binding_resolves_nested_installed_services_without_name_special
     assert index.resolve(unknown.func, callable_subject=record_activity).subject is None
 
 
+def test_runtime_binding_tracks_optional_callable_factory_without_hiding_unguarded_calls():
+    from schemii.common.auth.service import AuthService
+    from schemii.common.metadata.config import MetadataConfig
+    from schemii.common.metadata.database import MetadataConnectionFactory
+    from schemii.common.source_inspection import SourceControlContext, SourceRegistry
+
+    application = create_app()
+    call = ast.parse("self.store.factory()").body[0].value
+    guarded = (SourceControlContext("if", "self.store.factory", 1),)
+    absent = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state=application.state._state,
+    )
+    assert absent.resolve(call.func, callable_subject=AuthService.audit).resolution == "inactive-runtime-field"
+    assert not absent.is_material_unresolved_call(
+        call.func, callable_subject=AuthService.audit, contexts=guarded)
+    assert absent.is_material_unresolved_call(call.func, callable_subject=AuthService.audit)
+
+    application.state.auth.store.factory = MetadataConnectionFactory(MetadataConfig(
+        dsn="host=metadata dbname=schemii", password_file="/run/secrets/password",
+        encryption_key_file="/run/secrets/key"))
+    connected = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state=application.state._state,
+    )
+    resolved = connected.resolve(call.func, callable_subject=AuthService.audit)
+    assert resolved.subject is MetadataConnectionFactory.__call__
+    assert resolved.resolution == "runtime-callable-field"
+
+
 def _installed_state_provider(request):
     raise AssertionError("Inspection must never execute a provider")
     return request.app.state.arbitrary_component

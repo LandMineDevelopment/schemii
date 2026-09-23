@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from schemii.common.postgres.gateway import PostgresGateway
 from schemii.common.source_inspection import (
     SourceInspectionLimits,
+    SourceControlContext,
     SourceRegistry,
     attribute_parts,
     call_argument_bindings,
@@ -31,17 +32,17 @@ from schemii.common.source_inspection import (
 
 
 DEVELOPER_SYSTEM_PATH = "/_developer/system"
-_MAX_ROUTES = 200
+_MAX_ROUTES = 256
 # Installed application-state AI components bring the graph above 1,000 objects.
 # Keep the developer map bounded with modest headroom.
 # Include deferred background execution, beyond the response/reservation path.
-_MAX_CALLABLES = 1024
+_MAX_CALLABLES = 1280
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96
 # Keep the whole registered application visible as implemented route families grow.
 # This remains a hard bound; it is not a pagination or runtime discovery setting.
-_MAX_OBJECTS = 1536
+_MAX_OBJECTS = 1792
 _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 768
@@ -124,6 +125,7 @@ class RuntimeBindingIndex:
         self.top_level = dict(vars(services))
         self.application_state = {"services": services, **(application_state or {})}
         self.field_types: dict[tuple[type[object], str], tuple[type[object], ...]] = {}
+        self.null_fields: set[tuple[type[object], str]] = set()
         self.contracts_by_type: dict[type[object], set[type[object]]] = {}
         self.instances_by_type: dict[type[object], object] = {}
         self.database_types: set[type[object]] = set()
@@ -179,6 +181,8 @@ class RuntimeBindingIndex:
             return
         annotations = self._annotations(instance_type)
         for attribute, value in attributes.items():
+            if value is None:
+                self.null_fields.add((instance_type, attribute))
             children = _contained_first_party_instances(value)
             if not children:
                 continue
@@ -270,8 +274,16 @@ class RuntimeBindingIndex:
         node: ast.AST,
         *,
         callable_subject: object,
+        contexts: tuple[SourceControlContext, ...] = (),
     ) -> bool:
         """Identify unresolved expressions that cross a first-party boundary."""
+
+        # Only suppress a proven-null field call when its own truthiness guard
+        # encloses it. An unguarded call on None remains a material failure.
+        if (self.resolve(node, callable_subject=callable_subject).resolution == "inactive-runtime-field"
+                and any(context.kind == "if" and context.label == ast.unparse(node)
+                        for context in contexts)):
+            return False
 
         parts = attribute_parts(node)
         if parts and "services" in parts:
@@ -425,6 +437,24 @@ class RuntimeBindingIndex:
         ))
         if len(methods) == 1:
             return ResolvedCall(methods[0], "runtime-receiver")
+
+        # A field may itself be an installed callable object rather than a
+        # method on its owner (for example AuthStore.factory in PostgreSQL).
+        field_types = tuple(dict.fromkeys(
+            field_type for candidate in candidates
+            for field_type in self.field_types.get((candidate, node.attr), ())
+        ))
+        callables = [
+            getattr(field_type, "__call__", None) for field_type in field_types
+            if callable(self.instances_by_type.get(field_type))
+        ]
+        callables = [method for method in callables if method is not None]
+        if len(callables) == 1:
+            return ResolvedCall(callables[0], "runtime-callable-field")
+        if candidates and not field_types and all(
+            (candidate, node.attr) in self.null_fields for candidate in candidates
+        ):
+            return ResolvedCall(None, "inactive-runtime-field")
 
         if isinstance(node.value, ast.Call):
             provider = self.resolve(
@@ -855,7 +885,7 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
         SourceInspectionLimits(
             object_limit=_MAX_OBJECTS,
             source_limit=128_000,
-            total_source_limit=2_048_000,
+            total_source_limit=2_560_000,
         )
     )
     runtime = RuntimeBindingIndex(
@@ -1023,6 +1053,7 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
                 if runtime.is_material_unresolved_call(
                     expression,
                     callable_subject=subject,
+                    contexts=site.contexts,
                 ):
                     unresolved_calls.append(
                         {

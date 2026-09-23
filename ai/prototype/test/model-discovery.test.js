@@ -19,7 +19,7 @@ const codex = (extra = {}) => input({ providerId: 'openai-codex', credential: {
 test('Codex refresh uses account auth and intersects visible models with SDK support', async t => {
   const service = new TurnService();
   t.mock.method(globalThis, 'fetch', async (url, options) => {
-    assert.equal(url, 'https://chatgpt.com/backend-api/codex/models?client_version=0.153.4');
+    assert.equal(url, 'https://chatgpt.com/backend-api/codex/models?client_version=0.156.1');
     assert.equal(options.method, 'GET');
     assert.equal(options.redirect, 'error');
     assert.equal(options.headers.Authorization, `Bearer ${token('alice')}`);

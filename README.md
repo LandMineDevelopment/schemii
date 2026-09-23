@@ -12,6 +12,13 @@ Schemii is a local, self-hosted PostgreSQL design and analytics workbench made u
 - **Schemoo** defines durable semantic models over an explicit saved connection and schema, including relationships, derived fields, and required or optional model scopes.
 - **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore streamed results, and drill into contributing rows cached in their browser.
 
+All three products have an AI assistant with the same conversation, provider,
+approval, and permission controls. Each assistant has its own product tools and
+action settings. Schemer conversations belong to one dashboard. A dashboard
+author can ask for saved dashboard changes; a view-only user can ask about the
+dashboard and run permitted report reads through their assigned database role.
+Assistant settings cannot add edit, export, or drill rights to a shared report.
+
 The launcher runs an authenticated private deployment with local accounts, per-product roles, and role-managed PostgreSQL connections. It does not add public ingress. See [Accounts and database roles](docs/accounts-and-roles.md) for setup, permissions, and rollout scope. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
 
 ## Installation
@@ -201,12 +208,16 @@ database access, shell tools or persistent chat storage. The browser talks only
 to Schemii's same-origin API. Pi returns structured proposals; Schemii owns tool
 validation, permissions, execution and user approval.
 
-AI settings support ChatGPT Codex device sign-in, OpenAI API keys, and verified
-free OpenCode Zen models. The server periodically refreshes free-model availability;
-it never silently substitutes a model. Conversations can switch models between
-turns. Credentials are encrypted and owner-scoped, with configurable inactivity
-expiration. See [AI runtime documentation](ai/prototype/README.md) for retention,
-provider privacy, deployment limitations and sidecar tests. The current supported
+AI settings support ChatGPT Codex device sign-in and personal OpenAI API keys.
+Administrators can store one encrypted, installation-owned OpenCode Zen key and
+grant access by user, app, and exact database profile. Detached Schemii workspaces
+have a separate grant. Zen rejects external inference with the public credential.
+The assistant never silently substitutes a model. Conversations can switch models
+between turns. Personal credentials are encrypted and owner-scoped, with
+configurable inactivity expiration; the instance Zen key is encrypted separately
+and is never committed to Git. See the
+[AI runtime documentation](ai/prototype/README.md) for retention, provider privacy,
+deployment limitations and sidecar tests. The current supported
 deployment remains a single API process with authenticated, owner-scoped accounts.
 
 Each turn receives the current owner-scoped workspace, desired design, bounded chat
@@ -301,6 +312,17 @@ For an already configured installation, provide explicit test credentials with
 never claim or reset an existing administrator. First-admin setup is allowed only
 with the explicit bootstrap flag and a fresh installation. Session state is stored
 under ignored, private `artifacts/playwright-auth/` and is not a CI artifact.
+
+To verify Schemer against a connected real provider, run the opt-in smoke test
+after `./start.sh`. The admin test account needs an active ChatGPT Codex connection.
+The test selects a currently available model, creates a disposable report, checks
+that `get_dashboard` succeeds and the answer names its saved tile, then removes
+the chat and report fixtures:
+
+```bash
+SCHEMII_LIVE_AI=1 SCHEMII_E2E_CREDENTIALS_FILE=/path/to/private-credentials.json \
+  npx playwright test tests/e2e/schemer-ai-live.spec.js --project=desktop-chromium
+```
 
 Playwright keeps screenshots and traces only for failures under `artifacts/`.
 CI runs the complete suite against its disposable stack with

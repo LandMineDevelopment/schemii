@@ -3,7 +3,8 @@ import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
 const modelId = "model_assistant_fixture", chatId = "chat_assistant_fixture";
-async function fixture(page, { pending = false, shell = false, modelDenied = false, emptyModels = false, completed = false } = {}) {
+async function fixture(page, { pending = false, shell = false, modelDenied = false, emptyModels = false,
+  completed = false, zenConnect = false, sharedCodex = false } = {}) {
   const actions = [
     { id: "read_model", label: "Inspect model", group: "Read", description: "Read the saved model." },
     { id: "update_model", label: "Change model", group: "Write", description: "Save semantic model changes." },
@@ -16,7 +17,11 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
     chat.progress = { turnId: "completed_turn", startedAt: "2026-09-08T12:01:00Z", finishedAt: "2026-09-08T12:01:35Z", state: "completed", stages: [{ id: "validation", label: "Validated model", state: "completed" }] };
   }
   const requests = [];
-  await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: !emptyModels, authenticated: true, models: [{ id: "fixture-model", name: "Fixture model", reasoningLevels: ["low", "medium", "high", "max"], status: modelDenied && chat.status === "failed" ? "unavailable" : "active" }, { id: "second-model", name: "Second model", status: "active" }] }, { id: "openai-codex", name: "Codex", available: false, authenticated: false, models: [] }] } }));
+  await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: !emptyModels, authenticated: true, models: [{ id: "fixture-model", name: "Fixture model", reasoningLevels: ["low", "medium", "high", "max"], status: modelDenied && chat.status === "failed" ? "unavailable" : "active" }, { id: "second-model", name: "Second model", status: "active" }] }, { id: "openai-codex", name: "Codex", available: false, authenticated: false, models: [] },
+    ...(zenConnect ? [{ id: "opencode", name: "OpenCode Zen", available: false, authenticated: false, privacy: "Free Zen models may use prompts for training.", models: [{ id: "big-pickle", name: "Big Pickle", status: "active" }] }] : []),
+    ...(sharedCodex ? [{ id: "instance-codex", name: "Shared ChatGPT Codex", available: true, authenticated: true, adminManaged: true,
+      selectedModelId: "gpt-6-luna", selectedReasoningEffort: "high",
+      models: [{ id: "gpt-6-luna", name: "GPT-6 Luna", status: "active", reasoningLevels: ["high"] }] }] : [])] } }));
   await page.route("**/api/v1/schemoo/ai/**", async route => {
     const url = new URL(route.request().url()), method = route.request().method();
     const body = method === "GET" || method === "DELETE" ? null : route.request().postDataJSON();
@@ -37,7 +42,7 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
       error: "This model is not available through the connected provider account. Choose another model; your conversation is kept." };
     return route.fulfill({ json: chat });
   });
-  await page.route("**/assistant-fixture", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/common/ui.css"><link rel="stylesheet" href="/assets/common/searchable-select.css"><link rel="stylesheet" href="/assets/common/model-assistant.css"></head><body><button id="open">Open model assistant</button><script type="module">import { createModelAssistant } from '/assets/common/model-assistant.js'; window.modelRefreshes = []; createModelAssistant({trigger:document.querySelector('#open'),getModelId:()=> '${modelId}',onModelChanged:async(id,revision)=>{window.modelRefreshes.push({id,revision});return 'Saved model refreshed.';}});</script></body></html>` }));
+  await page.route("**/assistant-fixture", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/common/ui.css"><link rel="stylesheet" href="/assets/common/searchable-select.css"><link rel="stylesheet" href="/assets/common/model-assistant.css"></head><body><button id="open">Open model assistant</button><script type="module">import { createModelAssistant } from '/assets/common/model-assistant.js'; window.modelRefreshes = []; window.currentModelId = '${modelId}'; window.assistant = createModelAssistant({trigger:document.querySelector('#open'),getModelId:()=> window.currentModelId,onModelChanged:async(id,revision)=>{window.modelRefreshes.push({id,revision});return 'Saved model refreshed.';}});</script></body></html>` }));
   if (shell) {
     const catalog = { database: "fixture", namespace: "public", fingerprint: "fixture-v1", notice: "Isolated browser fixture", tables: [{ name: "people", primaryKey: ["id"], columns: [{ name: "id", dataType: "integer", nullable: false }, { name: "name", dataType: "text", nullable: false }] }], relationships: [], positions: [{ name: "people", x: 80, y: 80 }] };
     const saved = { id: modelId, connectionId: "pg_fixture", namespace: "public", name: "Assistant shell fixture", revision: 1, layoutRevision: 1, exploreRevision: 1, catalogFingerprint: catalog.fingerprint, ...splitDraft(importedDraft(catalog)) };
@@ -52,6 +57,39 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
   await expect.poll(() => page.locator(".model-ai").evaluate(node => Math.abs(new DOMMatrixReadOnly(getComputedStyle(node).transform).m41))).toBeLessThan(.1);
   return requests;
 }
+
+test("shared model assistant shows administrator-managed Zen access without a user key form", async ({ page }) => {
+  const scopes = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/v1/ai/status") scopes.push({ product: url.searchParams.get("product"), resourceId: url.searchParams.get("resourceId") });
+  });
+  await fixture(page, { zenConnect: true });
+  expect(scopes).toContainEqual({ product: "schemoo", resourceId: modelId });
+  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const provider = page.locator(".model-ai-provider").filter({ hasText: "OpenCode Zen" });
+  if (!(await provider.evaluate(card => card.open))) await provider.locator("summary").click();
+  await expect(provider).toContainText("An administrator manages Zen access for each person, app, and database.");
+  await expect(provider).toContainText("Unavailable");
+  await expect(provider.getByRole("textbox")).toHaveCount(0);
+  await expect(provider.getByRole("button", { name: /Connect|Disconnect/ })).toHaveCount(0);
+});
+
+test("shared model assistant applies administrator-selected Codex model and reasoning", async ({ page }) => {
+  const requests = await fixture(page, { sharedCodex: true });
+  await page.getByRole("combobox", { name: "Assistant model", exact: true }).click();
+  await page.getByRole("option", { name: "GPT-6 Luna · Shared ChatGPT Codex" }).click();
+  await expect.poll(() => requests.filter(item => item.path.endsWith("/preferences")).at(-1)?.body).toMatchObject({
+    providerId: "instance-codex", aiModelId: "gpt-6-luna", reasoningEffort: "high",
+  });
+  await expect(page.getByRole("combobox", { name: "Assistant reasoning level", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Assistant settings" });
+  const provider = dialog.locator(".model-ai-provider").filter({ hasText: "Shared ChatGPT Codex" });
+  await expect(provider).toContainText("Administrator policy: GPT-6 Luna · High reasoning");
+  await expect(dialog.getByRole("combobox", { name: "Reasoning level", exact: true })).toBeDisabled();
+  await expect(provider.getByRole("button", { name: /Connect|Disconnect/ })).toHaveCount(0);
+});
 
 test("completed tracker stays between its prompt and answer, including reopened history", async ({ page }) => {
   await fixture(page, { completed: true });
@@ -131,7 +169,7 @@ test("opening model choices checks availability once, preserves selection, and r
   const requests = await fixture(page);
   let checks = 0, finish;
   const checked = { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: true, models: [{ id: "second-model", name: "Second model", status: "active" }] }] };
-  await page.route("**/api/v1/ai/status?refresh=true", async route => {
+  await page.route(/\/api\/v1\/ai\/status\?.*refresh=true/, async route => {
     checks += 1;
     if (checks === 1) await new Promise(resolve => { finish = resolve; });
     await route.fulfill({ json: checked });
@@ -162,7 +200,7 @@ test("opening model choices checks availability once, preserves selection, and r
 test("model choices recover an empty catalog and keep prior choices on a failed check", async ({ page }) => {
   const requests = await fixture(page, { emptyModels: true });
   let checks = 0;
-  await page.route("**/api/v1/ai/status?refresh=true", route => {
+  await page.route(/\/api\/v1\/ai\/status\?.*refresh=true/, route => {
     checks += 1;
     if (checks === 2) return route.fulfill({ status: 503, json: { error: { message: "Provider check unavailable." } } });
     return route.fulfill({ json: { healthy: true, message: checks === 4 ? "Account catalog check failed." : null,
@@ -223,7 +261,9 @@ test("shared activity respects reduced motion without hiding work status", async
 
 test("permissions, provider selection, and history retain conversation context", async ({ page }) => {
   const requests = await fixture(page);
-  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const summary = page.getByRole("button", { name: "Assistant permissions", exact: true });
+  await expect(summary).toContainText("2 of 2 actions");
+  await summary.click();
   const settings = page.getByRole("dialog", { name: "Assistant settings" });
   await expect(settings.getByRole("button", { name: "Connect Codex", exact: true })).toBeVisible();
   await settings.getByRole("combobox", { name: "Change model", exact: true }).selectOption("disabled");
@@ -239,6 +279,18 @@ test("permissions, provider selection, and history retain conversation context",
   await history.getByRole("button", { name: "Model review", exact: true }).click();
   await expect(history).toBeHidden();
   await expect(page.locator(".model-ai-markdown strong")).toHaveText("relationships");
+});
+
+test("switching the selected subject clears the previous conversation notice", async ({ page }) => {
+  await fixture(page);
+  await page.getByRole("button", { name: "New conversation" }).click();
+  await expect(page.locator(".model-ai-notice")).toContainText("Started a new conversation");
+  await page.evaluate(async () => {
+    window.currentModelId = "model_another_fixture";
+    await window.assistant.modelChanged();
+  });
+  await expect(page.locator(".model-ai-notice")).toBeHidden();
+  await expect(page.locator(".model-ai-empty")).toBeVisible();
 });
 
 test("permissions can revoke a pending batch and model selection can stop an active turn", async ({ page }) => {
