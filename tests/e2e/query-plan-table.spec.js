@@ -24,6 +24,8 @@ async function mount(page, request, analyze = true, fixture = plan) {
   expect(workspace).toBeTruthy();
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);
   await expect(page.getByRole('textbox', { name: 'Unsaved SQL draft' })).toBeVisible();
+  await page.locator('#show-sql-results').click();
+  await expect(page.locator('#sql-results')).toContainText('Ready for a query');
   await page.evaluate(async ({ plan, analyze }) => {
     const { createQueryPlanView } = await import('/assets/common/query-plan.js');
     if (!analyze) {
@@ -41,7 +43,6 @@ async function mount(page, request, analyze = true, fixture = plan) {
     target.replaceChildren(createQueryPlanView({ plan, analyze, sql: 'SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id WHERE total > 100', settings: {} }));
     target.scrollIntoView();
   }, { plan: fixture, analyze });
-  await page.locator('#show-sql-results').click();
   return page.locator('.query-plan-view');
 }
 
