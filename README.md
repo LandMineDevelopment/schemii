@@ -309,6 +309,17 @@ never claim or reset an existing administrator. First-admin setup is allowed onl
 with the explicit bootstrap flag and a fresh installation. Session state is stored
 under ignored, private `artifacts/playwright-auth/` and is not a CI artifact.
 
+To verify Schemer against a connected real provider, run the opt-in smoke test
+after `./start.sh`. The admin test account needs an active ChatGPT Codex connection.
+The test selects a currently available model, creates a disposable report, checks
+that `get_dashboard` succeeds and the answer names its saved tile, then removes
+the chat and report fixtures:
+
+```bash
+SCHEMII_LIVE_AI=1 SCHEMII_E2E_CREDENTIALS_FILE=/path/to/private-credentials.json \
+  npx playwright test tests/e2e/schemer-ai-live.spec.js --project=desktop-chromium
+```
+
 Playwright keeps screenshots and traces only for failures under `artifacts/`.
 CI runs the complete suite against its disposable stack with
 `SCHEMII_E2E_BOOTSTRAP=1`. This opt-in setup registers the launcher's bookstore,
