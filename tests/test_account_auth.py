@@ -103,6 +103,8 @@ def test_role_changes_take_effect_without_new_session(client,app):
     assert client.get('/api/v1/schemoo/models').status_code==403
     assert client.get('/api/v1/schemer/dashboards').status_code==403
     assert client.get('/_developer/inspection').status_code==403
+    for path in ('/system-map','/api-map','/db-map'):
+        assert client.get(path).status_code==403
     client.cookies.clear()
     client.cookies.set(COOKIE,admin_cookie)
     assert client.delete('/api/v1/admin/roles/'+role['id']).status_code==204

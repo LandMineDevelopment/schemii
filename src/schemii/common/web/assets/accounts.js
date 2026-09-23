@@ -52,7 +52,8 @@ function dialog(title) {
   d.onclose = () => d.remove(); document.body.append(d); return d;
 }
 async function adminPage() {
-  main.replaceChildren(...heading('People and access', 'Assign application access and database profiles through roles. PostgreSQL controls the rows, columns, and write operations available through each profile.'));
+  document.title = 'Administration · Schemii';
+  main.replaceChildren(...heading('Administration', 'Assign application access and database profiles through roles. PostgreSQL controls the rows, columns, and write operations available through each profile.'));
   const [users, roles, resources] = await Promise.all([requestJson(`${ADMIN}/accounts`), requestJson(`${ADMIN}/roles`), requestJson(`${ADMIN}/resources`)]);
   const columns = el('div', { className: 'account-columns' });
   const people = el('section', { className: 'account-panel' }, [el('h2', { text: 'People' }), button('Add user', () => editUser(null), true)]);
@@ -63,7 +64,24 @@ async function adminPage() {
   const roleList = el('div', { className: 'account-list' });
   for (const role of roles) roleList.append(el('div', { className: 'account-row' }, [el('div', {}, [el('strong', { text: role.name }), el('small', { text: `${role.user_ids.length} members · ${role.connections.length} connections · ${role.dashboards.length} dashboards` })]), button('Edit', () => editRole(role))]));
   if (!roles.length) roleList.append(el('p', { text: 'Create a role to give people access to shared reports.' }));
-  rolePanel.append(roleList); columns.append(people, rolePanel); main.append(columns);
+  rolePanel.append(roleList); columns.append(people, rolePanel);
+  const diagnostics = el('section', { className: 'account-panel', attrs: { id: 'system-diagnostics', 'aria-labelledby': 'system-diagnostics-title' } }, [
+    el('h2', { text: 'System diagnostics', attrs: { id: 'system-diagnostics-title' } }),
+    el('p', { text: 'Inspect the application topology and API/database paths. These pages are available only to application provisioners.' }),
+  ]);
+  const diagnosticList = el('div', { className: 'account-list' });
+  for (const [title, action, description, path] of [
+    ['Live system map', 'Open live system map', 'Follow request journeys through the application.', '/system-map'],
+    ['API lens', 'Open API lens', 'Inspect routes and request/response contracts.', '/api-map'],
+    ['Database lens', 'Open database lens', 'Trace application calls into database operations.', '/db-map'],
+  ]) {
+    diagnosticList.append(el('div', { className: 'account-row' }, [
+      el('div', {}, [el('strong', { text: title }), el('small', { text: description })]),
+      link(action, path),
+    ]));
+  }
+  diagnostics.append(diagnosticList);
+  main.append(link('Jump to system diagnostics', '#system-diagnostics'), columns, diagnostics);
   function editUser(user) {
     const d = dialog(user ? 'Edit user' : 'Add user');
     const username = field('Username', { value: user?.username || '', autocomplete: 'off' });

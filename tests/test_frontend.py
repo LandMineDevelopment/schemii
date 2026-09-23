@@ -34,8 +34,12 @@ def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
     assert 'id="connection-impact-dialog"' in response.text
     assert 'id="connection-impact-list"' in response.text
     assert 'id="delete-reviewed-connection"' in response.text
-    assert 'href="/api-map"' in response.text
-    assert 'href="/db-map"' in response.text
+    assert 'id="introduction-button"' in response.text
+    assert 'href="/system-map"' not in response.text
+    assert 'href="/api-map"' not in response.text
+    assert 'href="/db-map"' not in response.text
+    assert 'data-unavailable="restore-examples"' not in response.text
+    assert 'data-unavailable="shutdown"' not in response.text
     assert "<script>" not in response.text
 
     head = api.head("/")
@@ -408,8 +412,8 @@ def test_unavailable_controls_are_backed_by_the_shared_capability_registry() -> 
     references.update(re.findall(r'unavailableButton\("([^"]+)"', catalog))
 
     assert references == registry
-    assert "restore-examples" in registry
-    assert "The active API does not provide example content" in unavailable
+    assert "restore-examples" not in registry
+    assert "shutdown" not in registry
 
 
 def test_frontend_uses_only_the_active_same_origin_api_contract() -> None:

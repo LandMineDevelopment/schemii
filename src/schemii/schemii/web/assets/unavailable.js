@@ -8,8 +8,6 @@ export const UNAVAILABLE_CAPABILITIES = Object.freeze({
   "relationship-edit": { title: "Edit relationship", description: "The active API has no contract for altering foreign-key relationships." },
   "relationship-delete": { title: "Delete relationship", description: "The active API has no contract for dropping foreign-key relationships." },
   "sql-upload": { title: "Upload SQL", description: "The active API has no contract for parsing or importing an uploaded SQL document." },
-  "restore-examples": { title: "Restore examples", description: "The active API does not provide example content, and this frontend does not fabricate it." },
-  shutdown: { title: "Shut down Schemii", description: "The active API has no authenticated process-shutdown contract." },
   "workspace-naming": { title: "Name workspace", description: "Active workspaces are target bindings and do not have a mutable name field." },
 });
 

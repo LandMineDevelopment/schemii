@@ -4,6 +4,27 @@ import { expect, test } from '@playwright/test';
 // This test submits an ephemeral password: never retain a trace of form input/API bodies.
 test.use({ trace: 'off', video: 'off' });
 
+test('system diagnostics live in Administration, not the Schemii Help menu', async ({ page }) => {
+  await page.goto('/');
+  const help = page.locator('summary[aria-label="Help"]');
+  await help.click();
+  const menu = help.locator('..');
+  await expect(menu.getByRole('button', { name: 'Show introduction' })).toBeVisible();
+  await expect(menu.getByRole('link')).toHaveCount(0);
+  await expect(menu.getByRole('button', { name: /Restore examples|Shut down Schemii/ })).toHaveCount(0);
+
+  await page.goto('/admin');
+  await expect(page.getByRole('heading', { name: 'Administration' })).toBeVisible();
+  await page.getByRole('link', { name: 'Jump to system diagnostics' }).click();
+  const diagnostics = page.getByRole('region', { name: 'System diagnostics' });
+  await expect(diagnostics).toBeInViewport();
+  await expect(diagnostics.getByRole('link', { name: 'Open live system map' })).toHaveAttribute('href', '/system-map');
+  await expect(diagnostics.getByRole('link', { name: 'Open API lens' })).toHaveAttribute('href', '/api-map');
+  await expect(diagnostics.getByRole('link', { name: 'Open database lens' })).toHaveAttribute('href', '/db-map');
+  await diagnostics.getByRole('link', { name: 'Open API lens' }).click();
+  await expect(page).toHaveURL(/\/api-map$/);
+});
+
 test('role editor explains that app connection use does not grant PostgreSQL writes', async ({ page, request }) => {
   const status = await (await request.get('/api/v1/auth/status')).json();
   test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
