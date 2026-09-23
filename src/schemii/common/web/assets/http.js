@@ -1,3 +1,4 @@
+import { loginUrl } from './login-return.js';
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export class ApiError extends Error {
@@ -59,7 +60,7 @@ export async function requestJson(path, {
 
     if (!response.ok) {
       if (response.status === 401 && !path.startsWith('/api/v1/auth/') && globalThis.location?.pathname !== '/login') {
-        globalThis.location?.replace('/login');
+        globalThis.location?.replace(loginUrl());
       }
       const envelope = document?.error;
       throw new ApiError(envelope?.message || "The request could not be completed", {

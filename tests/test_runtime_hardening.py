@@ -18,7 +18,7 @@ from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import InMemoryConnectionRepository
 from schemii.common.errors import MetadataStorageUnavailableError
 from schemii.common.metadata.factory import MetadataRepositories
-from schemii.main import ApplicationServices, create_app
+from schemii.main import ApplicationServices, create_app, create_services
 from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.migrations.repository import InMemoryMigrationRepository
 from schemii.schemii.migrations.service import MigrationService
@@ -97,6 +97,42 @@ def test_runtime_config_rejects_implicit_or_unauthenticated_external_deployment(
                 "SCHEMII_TARGET_EGRESS_MODE": "internal-only",
             }
         )
+
+
+def test_authenticated_external_targets_still_require_explicit_approval(monkeypatch) -> None:
+    settings = {
+        "SCHEMII_DEPLOYMENT_MODE": "authenticated",
+        "SCHEMII_AUTH_ENABLED": "1",
+        "SCHEMII_TARGET_EGRESS_MODE": "external",
+        "SCHEMII_ALLOWED_TARGET_HOSTS": "reports.example.test,metadata.internal",
+    }
+    configured = RuntimeConfig.from_env(settings)
+    metadata = MetadataRepositories(
+        connections=InMemoryConnectionRepository(),
+        target_policy=MetadataControlPlaneTargetPolicy.from_dsn(
+            "host=metadata.internal port=5432 dbname=control user=runtime"
+        ),
+    )
+    monkeypatch.setattr("schemii.main.create_metadata_repositories", lambda **kwargs: metadata)
+    services = create_services(configured)
+    profile = services.connections.create("owner", PostgresConnectionCreate(
+        name="Approved report source", host="reports.example.test",
+        database="reports", username="reporter",
+    ))
+    assert profile.host == "reports.example.test"
+    for host, code in (
+        ("arbitrary.example.test", "connection_target_not_allowed"),
+        ("metadata.internal", "metadata_control_plane_target_forbidden"),
+    ):
+        with pytest.raises(ConnectionTargetForbiddenError) as rejected:
+            services.connections.create("owner", PostgresConnectionCreate(
+                name="Rejected target", host=host, database="reports", username="reporter",
+            ))
+        assert rejected.value.code == code
+    with pytest.raises(ValueError, match="SCHEMII_ALLOWED_TARGET_HOSTS"):
+        RuntimeConfig.from_env({**settings, "SCHEMII_ALLOWED_TARGET_HOSTS": " , "})
+    with pytest.raises(ValueError, match="SCHEMII_AUTH_ENABLED"):
+        RuntimeConfig.from_env({**settings, "SCHEMII_AUTH_ENABLED": "0"})
 
 
 def test_metadata_target_policy_normalizes_host_and_blocks_create_and_use() -> None:

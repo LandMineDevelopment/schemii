@@ -1,3 +1,4 @@
+import { loginUrl } from './login-return.js';
 import { createIconElement } from "./ui.js";
 import { currentAccount, canAccessProduct, landingPath, signOut } from "./accounts-session.js";
 
@@ -53,6 +54,6 @@ export function installProductNavigation(host, { activeProduct } = {}) {
     }
     const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = 'Sign out';
     logout.onclick = async () => { logout.disabled = true; try { await signOut(); } catch (error) { logout.textContent = error.message; logout.disabled = false; } }; surface.append(logout);
-  }).catch(error => { if (error.status === 401) location.replace('/login'); });
+  }).catch(error => { if (error.status === 401) location.replace(loginUrl()); });
   return menu;
 }

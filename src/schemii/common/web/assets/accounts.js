@@ -1,7 +1,8 @@
+import { loginUrl } from './login-return.js';
 import { requestJson } from './http.js';
 import { element as el } from './dom.js';
 import { confirmAction } from './confirmation.js';
-import { canAccessProduct, landingPath, signOut, sessionChanged } from './accounts-session.js';
+import { canAccessProduct, signInDestination, signOut, sessionChanged } from './accounts-session.js';
 const main = document.getElementById('accounts-main');
 const nav = document.getElementById('account-navigation');
 const AUTH = '/api/v1/auth', ADMIN = '/api/v1/admin';
@@ -30,7 +31,7 @@ async function login(status) {
   const panel = el('section', { className: 'account-panel account-login' }, [...heading(setup ? 'Create your administrator account' : 'Welcome back', setup ? 'Use the setup token configured for this installation. Your administrator account will manage users, roles, and shared report access.' : 'Sign in to your reports and database tools.')]);
   panel.append(formWithSubmit(setup ? 'Create administrator account' : 'Sign in', async () => {
     const account = await requestJson(`${AUTH}/${setup ? 'setup' : 'login'}`, { method: 'POST', body: { username: username.input.value.trim(), password: password.input.value, ...(setup ? { display_name: display.input.value.trim(), setup_token: token.input.value } : {}) } });
-    sessionChanged(); location.replace(landingPath(account));
+    sessionChanged(); location.replace(signInDestination(account));
   }, [...(setup ? [token.node, display.node] : []), username.node, password.node]));
   main.replaceChildren(panel);
 }
@@ -230,9 +231,9 @@ async function adminPage() {
 async function initialize() {
   try {
     const status = await requestJson(`${AUTH}/status`);
-    if (!status.authenticated) { if (location.pathname !== '/login') { location.replace('/login'); return; } await login(status); return; }
+    if (!status.authenticated) { if (location.pathname !== '/login') { location.replace(loginUrl()); return; } await login(status); return; }
     const account = await requestJson(`${AUTH}/me`);
-    if (location.pathname === '/login') { location.replace(landingPath(account)); return; }
+    if (location.pathname === '/login') { location.replace(signInDestination(account)); return; }
     for (const [product, label, href] of [['schemii', 'Schemii', '/'], ['schemoo', 'Schemoo', '/schemoo'], ['schemer', 'Schemer', '/schemer']]) {
       if (canAccessProduct(account, product)) nav.append(link(label, href));
     }

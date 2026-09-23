@@ -32,7 +32,17 @@ disposable databases if they will experiment with SQL writes or migrations.
 
 The bundled demo database is the default. Additional PostgreSQL servers must be
 explicitly approved by the operator through `SCHEMII_ALLOWED_TARGET_HOSTS` when
-running `./start.sh`. Supply exact, comma-separated hostnames; do not use wildcards
+running `./start.sh`. For sources outside the bundled network, select
+`SCHEMII_TARGET_EGRESS_MODE=external`; this requires authenticated mode and still
+enforces the exact host allowlist. For example:
+
+```bash
+SCHEMII_TARGET_EGRESS_MODE=external \
+SCHEMII_ALLOWED_TARGET_HOSTS=demo-postgres,postgres,reports.example.internal \
+  ./start.sh
+```
+
+Retain these settings for later launches. Supply exact, comma-separated hostnames; do not use wildcards
 or include the metadata server. Keep existing target names in the list while saved
 connections still use them. Removing a host also blocks subsequent use of saved
 credentials for that host.
