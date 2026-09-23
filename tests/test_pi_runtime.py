@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from schemii.common.ai.credential_store import MemoryAiCredentialStore
+from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
 from schemii.common.ai.pi import PiError, PiRuntime
 
 
@@ -44,13 +45,16 @@ def run(runtime, **kwargs):
     return runtime.run("alice", "turn1", "openai-codex", "model", "system", "hello", [], **kwargs)
 
 
-def test_owner_specific_availability_excludes_public_zen_models():
+def test_owner_specific_availability_requires_a_zen_key_and_verified_free_model():
     runtime, _, _ = setup([])
     alice = runtime.status("alice")["providers"]
     bob = runtime.status("bob")["providers"]
     assert alice[0]["available"]
     assert not bob[0]["available"]
-    assert [provider["id"] for provider in bob] == ["openai-codex", "openai"]
+    assert [provider["id"] for provider in bob] == ["openai-codex", "openai", "opencode"]
+    assert not bob[2]["available"]
+    assert [model["id"] for model in bob[2]["models"]] == ["free"]
+    assert "personal" in bob[2]["privacy"]
 
 
 def test_confirmed_model_denial_is_owner_scoped_and_expires(monkeypatch):
@@ -326,12 +330,77 @@ def test_same_identity_reentrant_turn_is_rejected_until_save_finishes():
 
 
 @pytest.mark.parametrize("model_id", ["free", "not-verified"])
-def test_public_zen_models_cannot_reach_transport(model_id):
+def test_zen_models_cannot_reach_transport_without_an_owner_key(model_id):
     runtime, _, requests = setup([])
     with pytest.raises(PiError) as caught:
         runtime.run("alice", "turn", "opencode", model_id, "system", "hello", [])
     assert caught.value.code == "model_unavailable"
     assert requests == []
+
+
+def test_zen_turn_uses_only_instance_key_after_exact_grant_for_a_verified_free_model():
+    runtime, store, requests = setup([{"type": "result", "text": "Zen reply", "generation": 1}])
+    instance = MemoryInstanceAiProviderStore()
+    runtime.instance_store = instance
+    instance.set_key("instance-zen-key")
+    instance.upsert_grant("alice", "schemii")
+    status = runtime.status("alice")["providers"][2]
+    assert status["authenticated"] and status["available"]
+    assert runtime.status("alice", zen_scope=lambda: ("schemoo", "alice", "pg_" + "a" * 32))["providers"][2]["available"] is False
+    assert runtime.status("alice", zen_scope=lambda: ("schemii", None, None))["providers"][2]["available"] is True
+    assert [model["id"] for model in status["models"]] == ["free"]
+    scope = lambda: ("schemii", None, None)
+    assert runtime.run("alice", "zen-turn", "opencode", "free", "system", "hello", [], zen_scope=scope).text == "Zen reply"
+    assert requests[0]["credentialId"] == "instance-opencode"
+    assert requests[0]["credential"] == {"type": "api_key", "key": "instance-zen-key"}
+    assert requests[0]["generation"] == 1
+    assert all(path != "/models/refresh" for path, _ in runtime.client.calls)
+    with pytest.raises(PiError, match="not available"):
+        runtime.run("alice", "zen-turn-2", "opencode", "not-verified", "system", "hello", [], zen_scope=scope)
+    assert len(requests) == 1
+
+
+def test_zen_exact_grant_is_checked_before_transport_and_after_revocation():
+    instance = MemoryInstanceAiProviderStore()
+    runtime, _, requests = setup([{"type": "result", "text": "reply", "generation": 1}])
+    runtime.instance_store = instance
+    instance.set_key("instance-zen-key")
+    instance.upsert_grant("alice", "schemoo", "alice", "pg_" + "a" * 32)
+    scope = lambda: ("schemoo", "alice", "pg_" + "b" * 32)
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "turn1", "opencode", "free", "system", "hello", [], zen_scope=scope)
+    assert caught.value.code == "instance_access_denied"
+    assert not requests
+    instance.delete_grant("alice", "schemoo", "alice", "pg_" + "a" * 32)
+    assert not runtime.status("alice")["providers"][2]["available"]
+
+
+def test_zen_private_terminal_credential_is_not_saved_to_owner_store():
+    credential = {"type": "api_key", "key": "instance-zen-key"}
+    runtime, owner_store, _ = setup([{
+        "type": "result", "text": "reply", "generation": 1, "credential": credential,
+    }])
+    instance = MemoryInstanceAiProviderStore()
+    runtime.instance_store = instance
+    instance.set_key(credential["key"])
+    instance.upsert_grant("alice", "schemii")
+    assert runtime.run("alice", "turn", "opencode", "free", "system", "hello", [],
+                       zen_scope=lambda: ("schemii", None, None)).text == "reply"
+    assert owner_store.get("alice", "instance-opencode") is None
+
+
+def test_zen_revoked_grant_stops_a_running_turn_before_accepting_reply():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_key("instance-zen-key")
+    instance.upsert_grant("alice", "schemii")
+    runtime, _, _ = setup([{"type": "result", "text": "late", "generation": 1,
+                            "credential": {"type": "api_key", "key": "instance-zen-key"}}],
+                           before=lambda _: instance.delete_grant("alice", "schemii"))
+    runtime.instance_store = instance
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "turn", "opencode", "free", "system", "hello", [],
+                    zen_scope=lambda: ("schemii", None, None))
+    assert caught.value.code == "permission_changed"
 
 
 def test_disconnect_fences_database_even_if_sidecar_is_unavailable():

@@ -162,6 +162,19 @@ def authorize(services, owner, dashboard_id, request):
                            request=request, owner=owner)
 
 
+def zen_scope(services, owner, dashboard_id, request):
+    """Use the viewer's effective report connection, including its row policy."""
+    from schemii.common.ai.pi import PiError
+
+    bundle = authorize(services, owner, dashboard_id, request)
+    model = bundle.services.models.get(owner, bundle.dashboard.model_id)
+    profile = bundle.services.connections.get(owner, model.connection_id)
+    identity = (profile.owner_id or owner, profile.id)
+    if (model.connection_owner_id or owner, model.connection_id) != identity:
+        raise PiError("permission_changed", status=409)
+    return ("schemer", *identity)
+
+
 def _can_open_dashboard(services, owner, dashboard_id, request):
     try:
         authorize(services, owner, dashboard_id, request)

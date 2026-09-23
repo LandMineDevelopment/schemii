@@ -52,12 +52,128 @@ function dialog(title) {
   const d = el('dialog', { className: 'account-dialog', attrs: { 'aria-label': title } }, [el('h2', { text: title })]);
   d.onclose = () => d.remove(); document.body.append(d); return d;
 }
+const AI_PRODUCTS = [['schemii', 'Schemii'], ['schemoo', 'Schemoo'], ['schemer', 'Schemer']];
+const connectionIdentity = connection => ({
+  connectionOwnerId: connection.connectionOwnerId ?? connection.owner_id,
+  connectionId: connection.connectionId ?? connection.id,
+});
+function zenAdministration(zen, users, roles) {
+  const panel = el('section', { className: 'account-panel', attrs: { 'aria-labelledby': 'zen-administration-title' } }, [
+    el('h2', { text: 'OpenCode Zen for this installation', attrs: { id: 'zen-administration-title' } }),
+    el('p', { text: 'Save one installation-owned key, then grant access to each person, app, and database profile. People never see the key. These grants do not add application access, database access, or Schemer authoring rights.' }),
+  ]);
+  if (zen.error) {
+    panel.append(el('p', { className: 'account-error', text: `Zen administration could not be loaded: ${zen.error.message}`, attrs: { role: 'alert' } }), button('Retry loading Zen settings', adminPage));
+    return panel;
+  }
+
+  const key = field(zen.connected ? 'Replace Zen API key' : 'Zen API key', { type: 'password', autocomplete: 'off' });
+  key.input.removeAttribute('minlength'); key.input.maxLength = 16384; key.input.spellcheck = false;
+  const connectionStatus = el('p', { className: zen.connected ? 'account-message' : 'account-inline-status', text: zen.connected ? 'Installation key stored. Its value is never displayed.' : 'No installation key stored. Zen remains unavailable until a key is saved.' });
+  const keyForm = formWithSubmit(zen.connected ? 'Replace installation key' : 'Save installation key', async () => {
+    try {
+      const apiKey = key.input.value.trim();
+      if (!apiKey) throw new Error('Enter a Zen API key.');
+      await requestJson(`${ADMIN}/ai/zen/credential`, { method: 'PUT', body: { apiKey } });
+      await adminPage();
+    } finally { key.input.value = ''; }
+  }, [key.node, el('p', { text: 'Create a key in your OpenCode account. It is encrypted on this installation and never added to the repository.' }),
+    el('a', { className: 'ui-button', text: 'Get a Zen API key', attrs: { href: 'https://opencode.ai/auth', target: '_blank', rel: 'noopener noreferrer' } })]);
+  keyForm.classList.add('account-ai-key-form');
+  const keyActions = el('div', { className: 'account-actions' }, [keyForm]);
+  if (zen.connected) keyActions.append(button('Remove installation key', () => confirmAction({
+    title: 'Remove installation Zen key?',
+    message: 'Zen will stop working for everyone on this installation.',
+    details: 'Existing grants remain saved. Add a new key to restore access to granted users.',
+    confirmLabel: 'Remove key',
+    onConfirm: async () => { await requestJson(`${ADMIN}/ai/zen/credential`, { method: 'DELETE' }); await adminPage(); },
+  })));
+  panel.append(connectionStatus, keyActions, el('h3', { text: 'Access grants' }));
+
+  const userById = new Map(users.map(user => [user.id, user]));
+  const visibleConnections = zen.connections || [];
+  const connectionByGrant = grant => visibleConnections.find(connection => {
+    const identity = connectionIdentity(connection);
+    return connection.userId === grant.userId && connection.product === grant.product
+      && identity.connectionOwnerId === grant.connectionOwnerId && identity.connectionId === grant.connectionId;
+  });
+  const grantList = el('div', { className: 'account-list' });
+  const grants = zen.grants || [];
+  if (!grants.length) grantList.append(el('p', { text: 'No one has been granted Zen access yet.' }));
+  for (const grant of grants) {
+    const user = userById.get(grant.userId);
+    const product = AI_PRODUCTS.find(([id]) => id === grant.product)?.[1] || grant.product;
+    const connection = connectionByGrant(grant);
+    const database = grant.connectionId === null ? 'No database · Schemii workspace' : connection
+      ? `${connection.name || connection.connectionId || connection.id} · ${connection.database}`
+      : `${grant.connectionOwnerId}/${grant.connectionId}`;
+    grantList.append(el('div', { className: 'account-row' }, [
+      el('div', {}, [el('strong', { text: `${user?.display_name || user?.username || grant.userId} · ${product}` }), el('small', { text: database })]),
+      button('Revoke', () => confirmAction({
+        title: 'Revoke Zen access?',
+        message: `Remove ${product} Zen access for ${user?.display_name || user?.username || grant.userId} on ${database}?`,
+        details: 'An in-progress turn may stop. The person’s application and database permissions are unaffected.',
+        confirmLabel: 'Revoke access',
+        onConfirm: async () => { await requestJson(`${ADMIN}/ai/zen/grants`, { method: 'DELETE', body: grant }); await adminPage(); },
+      })),
+    ]));
+  }
+  panel.append(button('Grant Zen access', () => {
+    const d = dialog('Grant Zen access');
+    const userSelect = el('select', { attrs: { 'aria-label': 'Person' } });
+    for (const user of users.filter(item => !item.disabled)) userSelect.append(el('option', { text: `${user.display_name || user.username} (${user.username})`, attrs: { value: user.id } }));
+    const productSelect = el('select', { attrs: { 'aria-label': 'Application' } });
+    const databaseSelect = el('select', { attrs: { 'aria-label': 'Database profile' } });
+    const scopeHelp = el('p', { attrs: { role: 'status' } });
+    const options = [];
+    function updateProducts() {
+      const selected = userById.get(userSelect.value), previous = productSelect.value;
+      productSelect.replaceChildren();
+      for (const [id, name] of AI_PRODUCTS) {
+        if (selected?.is_admin || roles.some(role => role.user_ids.includes(selected?.id) && role.capabilities.includes(`${id}:access`))) {
+          productSelect.append(el('option', { text: name, attrs: { value: id } }));
+        }
+      }
+      if ([...productSelect.options].some(option => option.value === previous)) productSelect.value = previous;
+      updateConnections();
+    }
+    function updateConnections() {
+      databaseSelect.replaceChildren(); options.length = 0;
+      if (productSelect.value === 'schemii') {
+        options.push({ connectionOwnerId: null, connectionId: null });
+        databaseSelect.append(el('option', { text: 'No database · detached Schemii workspace', attrs: { value: '0' } }));
+      }
+      const selected = visibleConnections.filter(connection => connection.userId === userSelect.value && connection.product === productSelect.value);
+      for (const connection of selected) {
+        const identity = connectionIdentity(connection);
+        if (options.some(item => item.connectionOwnerId === identity.connectionOwnerId && item.connectionId === identity.connectionId)) continue;
+        options.push(identity);
+        const ownership = connection.ownership === 'schemii' ? 'Schemii-owned' : 'Personal';
+        databaseSelect.append(el('option', { text: `${connection.name || identity.connectionId} · ${connection.database} · ${ownership}`, attrs: { value: String(options.length - 1) } }));
+      }
+      databaseSelect.disabled = !options.length;
+      scopeHelp.textContent = options.length ? 'A grant applies only to the selected database identity. App and database permissions are checked again for each AI turn.' : productSelect.value ? 'This person has no database profile available for this app.' : 'This person does not have access to an AI app yet.';
+    }
+    userSelect.onchange = updateProducts; productSelect.onchange = updateConnections; updateProducts();
+    d.append(formWithSubmit('Add grant', async () => {
+      const scope = options[Number(databaseSelect.value)];
+      if (!scope) throw new Error('Choose an available database profile.');
+      const body = { userId: userSelect.value, product: productSelect.value, ...scope };
+      if (grants.some(grant => grant.userId === body.userId && grant.product === body.product && grant.connectionOwnerId === body.connectionOwnerId && grant.connectionId === body.connectionId)) throw new Error('This access grant already exists.');
+      await requestJson(`${ADMIN}/ai/zen/grants`, { method: 'PUT', body });
+      d.close(); await adminPage();
+    }, [el('label', { className: 'account-field' }, ['Person', userSelect]), el('label', { className: 'account-field' }, ['Application', productSelect]), el('label', { className: 'account-field' }, ['Database profile', databaseSelect]), scopeHelp]));
+    d.append(button('Cancel', () => d.close())); d.showModal();
+  }, true), grantList);
+  return panel;
+}
 async function adminPage() {
   document.title = 'Administration · Schemii';
   main.replaceChildren(...heading('Administration', 'Assign application access and Schemii-owned read-only database accounts through roles. PostgreSQL controls visible rows, columns, and write operations.'));
-  const [users, roles, resources, managedResult] = await Promise.all([
+  const [users, roles, resources, managedResult, zenResult] = await Promise.all([
     requestJson(`${ADMIN}/accounts`), requestJson(`${ADMIN}/roles`), requestJson(`${ADMIN}/resources`),
     requestJson(`${ADMIN}/schemii-connections`).then(value => ({ connections: value.connections })).catch(error => ({ error })),
+    requestJson(`${ADMIN}/ai/zen`).catch(error => ({ error })),
   ]);
   const managedConnections = managedResult.connections || [];
   const columns = el('div', { className: 'account-columns' });
@@ -130,7 +246,7 @@ async function adminPage() {
     ]));
   }
   diagnostics.append(diagnosticList);
-  main.append(columns, connectionPanel, link('Jump to system diagnostics', '#system-diagnostics'), diagnostics);
+  main.append(columns, connectionPanel, zenAdministration(zenResult, users, roles), link('Jump to system diagnostics', '#system-diagnostics'), diagnostics);
   function editManagedConnection(connection) {
     const d = dialog(connection ? 'Edit Schemii-owned account' : 'Add Schemii-owned account');
     const name = field('Account name', { value: connection?.name || '' });

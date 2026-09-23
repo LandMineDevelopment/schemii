@@ -3,7 +3,8 @@ import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
 const modelId = "model_assistant_fixture", chatId = "chat_assistant_fixture";
-async function fixture(page, { pending = false, shell = false, modelDenied = false, emptyModels = false, completed = false } = {}) {
+async function fixture(page, { pending = false, shell = false, modelDenied = false, emptyModels = false,
+  completed = false, zenConnect = false } = {}) {
   const actions = [
     { id: "read_model", label: "Inspect model", group: "Read", description: "Read the saved model." },
     { id: "update_model", label: "Change model", group: "Write", description: "Save semantic model changes." },
@@ -16,7 +17,8 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
     chat.progress = { turnId: "completed_turn", startedAt: "2026-09-08T12:01:00Z", finishedAt: "2026-09-08T12:01:35Z", state: "completed", stages: [{ id: "validation", label: "Validated model", state: "completed" }] };
   }
   const requests = [];
-  await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: !emptyModels, authenticated: true, models: [{ id: "fixture-model", name: "Fixture model", reasoningLevels: ["low", "medium", "high", "max"], status: modelDenied && chat.status === "failed" ? "unavailable" : "active" }, { id: "second-model", name: "Second model", status: "active" }] }, { id: "openai-codex", name: "Codex", available: false, authenticated: false, models: [] }] } }));
+  await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: !emptyModels, authenticated: true, models: [{ id: "fixture-model", name: "Fixture model", reasoningLevels: ["low", "medium", "high", "max"], status: modelDenied && chat.status === "failed" ? "unavailable" : "active" }, { id: "second-model", name: "Second model", status: "active" }] }, { id: "openai-codex", name: "Codex", available: false, authenticated: false, models: [] },
+    ...(zenConnect ? [{ id: "opencode", name: "OpenCode Zen", available: false, authenticated: false, privacy: "Free Zen models may use prompts for training.", models: [{ id: "big-pickle", name: "Big Pickle", status: "active" }] }] : [])] } }));
   await page.route("**/api/v1/schemoo/ai/**", async route => {
     const url = new URL(route.request().url()), method = route.request().method();
     const body = method === "GET" || method === "DELETE" ? null : route.request().postDataJSON();
@@ -52,6 +54,23 @@ async function fixture(page, { pending = false, shell = false, modelDenied = fal
   await expect.poll(() => page.locator(".model-ai").evaluate(node => Math.abs(new DOMMatrixReadOnly(getComputedStyle(node).transform).m41))).toBeLessThan(.1);
   return requests;
 }
+
+test("shared model assistant shows administrator-managed Zen access without a user key form", async ({ page }) => {
+  const scopes = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/v1/ai/status") scopes.push({ product: url.searchParams.get("product"), resourceId: url.searchParams.get("resourceId") });
+  });
+  await fixture(page, { zenConnect: true });
+  expect(scopes).toContainEqual({ product: "schemoo", resourceId: modelId });
+  await page.getByRole("button", { name: "Assistant settings", exact: true }).click();
+  const provider = page.locator(".model-ai-provider").filter({ hasText: "OpenCode Zen" });
+  if (!(await provider.evaluate(card => card.open))) await provider.locator("summary").click();
+  await expect(provider).toContainText("An administrator manages Zen access for each person, app, and database.");
+  await expect(provider).toContainText("Unavailable");
+  await expect(provider.getByRole("textbox")).toHaveCount(0);
+  await expect(provider.getByRole("button", { name: /Connect|Disconnect/ })).toHaveCount(0);
+});
 
 test("completed tracker stays between its prompt and answer, including reopened history", async ({ page }) => {
   await fixture(page, { completed: true });
@@ -131,7 +150,7 @@ test("opening model choices checks availability once, preserves selection, and r
   const requests = await fixture(page);
   let checks = 0, finish;
   const checked = { healthy: true, providers: [{ id: "openai", name: "OpenAI", available: true, models: [{ id: "second-model", name: "Second model", status: "active" }] }] };
-  await page.route("**/api/v1/ai/status?refresh=true", async route => {
+  await page.route(/\/api\/v1\/ai\/status\?.*refresh=true/, async route => {
     checks += 1;
     if (checks === 1) await new Promise(resolve => { finish = resolve; });
     await route.fulfill({ json: checked });
@@ -162,7 +181,7 @@ test("opening model choices checks availability once, preserves selection, and r
 test("model choices recover an empty catalog and keep prior choices on a failed check", async ({ page }) => {
   const requests = await fixture(page, { emptyModels: true });
   let checks = 0;
-  await page.route("**/api/v1/ai/status?refresh=true", route => {
+  await page.route(/\/api\/v1\/ai\/status\?.*refresh=true/, route => {
     checks += 1;
     if (checks === 2) return route.fulfill({ status: 503, json: { error: { message: "Provider check unavailable." } } });
     return route.fulfill({ json: { healthy: true, message: checks === 4 ? "Account catalog check failed." : null,

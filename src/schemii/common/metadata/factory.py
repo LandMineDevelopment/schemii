@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 if TYPE_CHECKING:
     from schemii.common.ai.credential_store import MemoryAiCredentialStore, PostgresAiCredentialStore
+    from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore, PostgresInstanceAiProviderStore
 from schemii.common.connections.store import (
     ConnectionRepository,
     InMemoryConnectionRepository,
@@ -44,6 +45,12 @@ def _memory_ai_credentials() -> MemoryAiCredentialStore:
     return MemoryAiCredentialStore()
 
 
+def _memory_ai_instance_providers() -> MemoryInstanceAiProviderStore:
+    from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
+
+    return MemoryInstanceAiProviderStore()
+
+
 @dataclass(frozen=True)
 class MetadataRepositories:
     connections: ConnectionRepository
@@ -74,6 +81,11 @@ class MetadataRepositories:
         repr=False,
         compare=False,
     )
+    ai_instance_providers: MemoryInstanceAiProviderStore | PostgresInstanceAiProviderStore = field(
+        default_factory=_memory_ai_instance_providers,
+        repr=False,
+        compare=False,
+    )
 
     def check_readiness(self) -> None:
         self.readiness_probe()
@@ -94,12 +106,14 @@ def create_metadata_repositories(
     config = MetadataConfig.from_env(env)
     if config is None:
         from schemii.common.ai.credential_store import MemoryAiCredentialStore
+        from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
 
         return MetadataRepositories(
             ai_credentials=MemoryAiCredentialStore(
                 inactivity_days=credential_inactivity_days,
                 expiration_enabled=credential_expiration_enabled,
             ),
+            ai_instance_providers=MemoryInstanceAiProviderStore(),
             connections=InMemoryConnectionRepository(
                 max_connections_per_owner=maximum_connections_per_owner
             ),
@@ -110,6 +124,7 @@ def create_metadata_repositories(
         )
     from schemii.common.connections.postgres_store import PostgresConnectionRepository
     from schemii.common.ai.credential_store import PostgresAiCredentialStore
+    from schemii.common.ai.instance_provider_store import PostgresInstanceAiProviderStore
 
     connection_factory = MetadataConnectionFactory(config)
     MetadataMigrator(
@@ -145,4 +160,5 @@ def create_metadata_repositories(
             connection_factory, cipher, inactivity_days=credential_inactivity_days,
             expiration_enabled=credential_expiration_enabled,
         ),
+        ai_instance_providers=PostgresInstanceAiProviderStore(connection_factory, cipher),
     )

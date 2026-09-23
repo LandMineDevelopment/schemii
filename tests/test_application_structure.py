@@ -14,6 +14,7 @@ def test_common_and_product_namespaces_are_independent() -> None:
         "/api/v1",
         "/api/v1/connections",
         "/api/v1/ai",
+        "/api/v1/admin/ai/zen",
     ]
     assert [(router.prefix, router.tags) for router in PRODUCT_ROUTERS] == [
         ("/api/v1/schemii", ["schemii"]),

@@ -221,7 +221,9 @@ def run_read_workflow(service, owner, chat, turn, system, prompt,
         reply = service.runtime.run(owner, turn.id, chat.provider_id, chat.model_id,
                                     request_system, prompt, tools,
                                     on_text=on_text, is_authorized=is_authorized, messages=messages,
-                                    reasoning_effort=getattr(chat, "reasoning_effort", "default"))
+                                    reasoning_effort=getattr(chat, "reasoning_effort", "default"),
+                                    zen_scope=(lambda: service._zen_scope(owner, chat.workspace_id))
+                                        if chat.provider_id == "opencode" else None)
         check()
         if finalizing and (reply.tool_calls or not reply.text.strip()):
             raise round_limit_error

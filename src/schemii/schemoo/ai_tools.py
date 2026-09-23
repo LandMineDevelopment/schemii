@@ -442,3 +442,15 @@ def context(services, owner, model_id):
     if model_id:
         result["model"] = _model_context(services.models.get(owner, model_id))
     return result
+
+
+def zen_scope(services, owner, model_id, request=None):
+    """Resolve the selected model's current product-visible database identity."""
+    from schemii.common.ai.pi import PiError
+
+    model = services.models.get(owner, model_id)
+    profile = services.connections.for_product("schemoo").get(owner, model.connection_id)
+    identity = (profile.owner_id or owner, profile.id)
+    if (model.connection_owner_id or owner, model.connection_id) != identity:
+        raise PiError("permission_changed", status=409)
+    return ("schemoo", *identity)

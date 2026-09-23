@@ -26,7 +26,9 @@ _MESSAGES = {
     "provider_request_rejected": "The provider rejected the AI request format. Reconnecting will not fix this; the request needs to be corrected.",
     "rate_limited": "The selected provider has reached its usage or rate limit. Wait and retry, or explicitly select another available model. No fallback model was used.",
     "billing_required": "The selected provider requires billing or credits. Check that provider account or explicitly select another model. No fallback model was used.",
+    "provider_access_denied": "The provider denied access. Check your API key, billing setup, or model access, then retry. No fallback model was used.",
     "credentials_required": "Connect your own provider account before running this request.",
+    "instance_access_denied": "An administrator has not enabled Zen for your account, app, and database.",
     "credentials_changed": "Your AI credentials were disconnected, replaced, or expired. Reconnect and try again.",
     "reasoning_unsupported": "The selected model does not support this reasoning effort. Choose an available level or Model default.",
     "model_unavailable": "This model is not available through the connected provider account. Choose another model; your conversation is kept. No fallback model was used.",
@@ -51,8 +53,10 @@ class PiReply:
 
 
 class PiRuntime:
-    def __init__(self, client, store, catalog, policy=None, *, opener=urlopen):
+    def __init__(self, client, store, catalog, policy=None, *, opener=urlopen,
+                 instance_store=None, auth=None):
         self.client, self.store, self.catalog = client, store, catalog
+        self.instance_store, self.auth = instance_store, auth
         self.policy = policy or AiPolicy()
         self._open = opener
         self._identities = set()
@@ -164,13 +168,14 @@ class PiRuntime:
     def credential_id(provider_id):
         return {"openai-codex": "codex-prototype", "openai": "openai"}.get(provider_id)
 
-    def status(self, owner, *, refresh=False):
+    def status(self, owner, *, refresh=False, zen_scope=None):
         try:
             supported = self._supported_models()
             credentials = self.store.list(owner)
             refresh_results = {}
             if refresh and self.policy.enabled:
-                records = [row for row in credentials if row.get("connected")]
+                records = [row for row in credentials if row.get("connected")
+                           and row["provider_id"] in {"openai-codex", "openai"}]
                 # Providers are independent, but each identity shares the turn's
                 # credential lease so OAuth rotation cannot race a running chat.
                 if records:
@@ -179,10 +184,24 @@ class PiRuntime:
                         refresh_results = {row["provider_id"]: result for row, result in zip(records, results)}
                 credentials = self.store.list(owner)
             connected = {row["provider_id"] for row in credentials if row.get("connected")}
+            if self.instance_store and self.instance_store.status()["connected"]:
+                if zen_scope is None:
+                    if any(grant["userId"] == owner for grant in self.instance_store.list_grants()):
+                        connected.add("opencode")
+                else:
+                    try:
+                        self.require_instance_access(owner, zen_scope)
+                    except Exception:
+                        pass  # An inaccessible resource never exposes Zen as selectable.
+                    else:
+                        connected.add("opencode")
             generations = {row["provider_id"]: row["generation"] for row in credentials if row.get("connected")}
             denied = self._denied_models(owner, credentials)
+            zen = self.catalog.snapshot() if self.catalog else {"models": [], "error": None, "checkedAt": None}
+            verified_zen = {model["id"] for model in zen["models"]}
             providers = []
-            for provider_id, name in (("openai-codex", "ChatGPT Codex"), ("openai", "OpenAI")):
+            for provider_id, name in (("openai-codex", "ChatGPT Codex"),
+                                      ("openai", "OpenAI"), ("opencode", "OpenCode Zen")):
                 account = self._account_catalog(owner, provider_id, generations.get(provider_id, 0))
                 refresh_error = refresh_results.get(provider_id, {}).get("error")
                 ids = account.get("ids")
@@ -192,13 +211,19 @@ class PiRuntime:
                            "reasoningLevels": item.get("reasoningLevels", ["default"]),
                            "status": "unavailable" if (provider_id, item["id"]) in denied
                                or (ids is not None and item["id"] not in ids) else "active"}
-                          for item in supported if item.get("providerId") == provider_id]
+                          for item in supported if item.get("providerId") == provider_id
+                          and (provider_id != "opencode" or item["id"] in verified_zen)]
                 authenticated = provider_id in connected
                 available = any(model["status"] == "active" for model in models) and authenticated
                 item = {"id": provider_id, "name": name, "available": available,
                         "authenticated": authenticated, "models": models,
                         "authMethods": [], "catalogError": refresh_error or account.get("error"),
                         "catalogCheckedAt": account.get("checkedAt")}
+                if provider_id == "opencode":
+                    item["privacy"] = "Free Zen models may use prompts and selected context for training. Do not send confidential or personal data."
+                    item["catalogCheckedAt"] = zen.get("checkedAt")
+                    if zen.get("error"):
+                        item["catalogError"] = "Could not refresh the free-model catalog. The list uses its last unexpired snapshot."
                 providers.append(item)
             errors = [f'{provider["name"]}: {provider["catalogError"]}' for provider in providers if provider["catalogError"]]
             return {"enabled": self.policy.enabled, "healthy": True, "providers": providers,
@@ -224,6 +249,23 @@ class PiRuntime:
         }:
             raise PiError("model_unavailable", status=409)
 
+    def require_instance_access(self, owner, zen_scope):
+        if self.instance_store is None or not callable(zen_scope):
+            raise PiError("instance_access_denied", status=403)
+        scope = zen_scope()
+        if not isinstance(scope, tuple) or len(scope) != 3:
+            raise PiError("instance_access_denied", status=403)
+        product, connection_owner_id, connection_id = scope
+        if self.auth and self.auth.enabled and (
+            not self.auth.user(owner) or f"{product}:access" not in self.auth.capabilities(owner)
+        ):
+            raise PiError("instance_access_denied", status=403)
+        if not self.instance_store.status()["connected"] or not self.instance_store.has_grant(
+            owner, product, connection_owner_id, connection_id
+        ):
+            raise PiError("instance_access_denied", status=403)
+        return scope
+
     def require_reasoning_effort(self, owner, provider_id, model_id, reasoning_effort="default"):
         if reasoning_effort == "default":
             return
@@ -244,8 +286,9 @@ class PiRuntime:
             pass  # Persisted generation fencing still rejects every late completion.
 
     def run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
-            on_text=lambda text: None, is_authorized=lambda: True, messages=None, reasoning_effort="default"):
-        identity = (owner, self.credential_id(provider_id))
+            on_text=lambda text: None, is_authorized=lambda: True, messages=None,
+            reasoning_effort="default", zen_scope=None):
+        identity = (owner, "instance-opencode" if provider_id == "opencode" else self.credential_id(provider_id))
         # TODO(multi-replica-ai): Before enabling multiple API workers/replicas,
         # acquire a durable owner/credential lease and read credentials AFTER it
         # is acquired; hold it through token-refresh persistence. This process-local
@@ -259,18 +302,28 @@ class PiRuntime:
                 self._identities.add(identity)
         try:
             return self._run(owner, turn_id, provider_id, model_id, system, prompt,
-                             tools, on_text, is_authorized, messages, reasoning_effort)
+                             tools, on_text, is_authorized, messages, reasoning_effort, zen_scope)
         finally:
             with self._identity_lock:
                 if identity[1]:
                     self._identities.discard(identity)
 
     def _run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
-             on_text, is_authorized, messages, reasoning_effort="default"):
+             on_text, is_authorized, messages, reasoning_effort="default", zen_scope=None):
         self.require_available_model(owner, provider_id, model_id)
         self.require_reasoning_effort(owner, provider_id, model_id, reasoning_effort)
         credential_id = self.credential_id(provider_id)
         record = self.store.get(owner, credential_id) if credential_id else None
+        instance_scope = None
+        if provider_id == "opencode":
+            instance_scope = self.require_instance_access(owner, zen_scope)
+            product, connection_owner_id, connection_id = instance_scope
+            record = self.instance_store.resolve(owner, product, connection_owner_id, connection_id)
+            if record is None:
+                raise PiError("instance_access_denied", status=403)
+            record = {"generation": record["generation"],
+                      "credential": {"type": "api_key", "key": record["credential"]}}
+            credential_id = "instance-opencode"
         if credential_id and record is None:
             raise PiError("credentials_required", status=401)
         if messages is not None and (not isinstance(messages, list) or not messages
@@ -301,14 +354,28 @@ class PiRuntime:
 
         def authority():
             if record:
-                current = self.store.get(owner, credential_id)
-                if current is None or current["generation"] != record["generation"]:
-                    raise PiError("credentials_changed", status=409)
+                if instance_scope is not None:
+                    if zen_scope() != instance_scope or (self.auth and self.auth.enabled and (
+                        not self.auth.user(owner) or f"{instance_scope[0]}:access" not in self.auth.capabilities(owner)
+                    )) or self.instance_store.generation() != record["generation"] or not self.instance_store.has_grant(
+                        owner, *instance_scope
+                    ):
+                        raise PiError("permission_changed", status=409)
+                else:
+                    current = self.store.get(owner, credential_id)
+                    if current is None or current["generation"] != record["generation"]:
+                        raise PiError("credentials_changed", status=409)
             if not is_authorized():
                 raise PiError("permission_changed", status=409)
 
         def persist(event):
-            if record and "credential" in event:
+            if record and instance_scope is not None and "credential" in event:
+                # The sidecar returns the credential in its private terminal
+                # envelope. Instance API keys are immutable during a turn;
+                # accept only an unchanged value and never write it to a user store.
+                if event.get("generation") != record["generation"] or event["credential"] != record["credential"]:
+                    raise PiError("credentials_changed", status=409)
+            if record and instance_scope is None and "credential" in event:
                 if event.get("generation") != record["generation"] or not self.store.save(
                     owner, credential_id, provider_id, event["credential"], record["generation"],
                 ):

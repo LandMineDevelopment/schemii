@@ -14,6 +14,27 @@ export function formatDate(value) {
 
 export const modelValue = (providerId, modelId) => `${providerId || ""}\u0000${modelId || ""}`;
 
+export const apiKeyProviderDetails = Object.freeze({
+  openai: { label: "OpenAI API key" },
+});
+
+export function providerConnectionState(provider) {
+  if (provider.id === "opencode") return provider.available ? "Available" : "Unavailable";
+  return provider.authenticated ? "Connected" : provider.available ? "Available" : "Not connected";
+}
+
+export const zenConnectionNotice = "An administrator manages Zen access for each person, app, and database. Your app and database permissions still apply.";
+
+export function aiStatusPath(product, resourceId, refresh = false) {
+  const query = new URLSearchParams();
+  if (product && resourceId) {
+    query.set("product", product);
+    query.set("resourceId", resourceId);
+  }
+  if (refresh) query.set("refresh", "true");
+  return `/api/v1/ai/status${query.size ? `?${query}` : ""}`;
+}
+
 export function availableModels(status) {
   return (status?.providers || []).flatMap(provider => (provider.available ? provider.models || [] : [])
     .filter(model => model.status === "active")

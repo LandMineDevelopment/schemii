@@ -52,6 +52,7 @@ export class TurnError extends Error {
       not_found: 'The AI request was not found.',
       rate_limited: 'The AI provider usage or capacity limit was reached. Wait and try again, or select another available model.',
       billing_required: 'The AI provider requires billing or credits for this request. Check your provider account or select another model.',
+      provider_access_denied: 'The provider denied access. Check your API key, billing setup, or model access, then retry.',
     };
     super(messages[code]);
     this.name = 'TurnError';
@@ -185,12 +186,13 @@ export class TurnRunner {
         // Only classify a leading HTTP status; never expose provider text, which
         // may contain private diagnostics or credentials.
         const status = providerStatus ?? (typeof reply.errorMessage === 'string'
-          ? /^(?:OpenAI API error \()?(401|402|429)(?:\):|\b)/.exec(reply.errorMessage)?.[1]
+          ? /^(?:OpenAI API error \()?(401|402|403|429)(?:\):|\b)/.exec(reply.errorMessage)?.[1]
           : undefined);
         const category = Number(status) === 400 ? rejectionCategory(reply.errorMessage) : undefined;
         console.warn(JSON.stringify({ event: 'ai_provider_failure', provider: providerId,
           httpStatus: status === undefined ? null : Number(status), ...(category ? { category } : {}) }));
         throw new TurnError({ '401': 'credentials_required', '402': 'billing_required',
+          '403': 'provider_access_denied',
           '400': category === 'model_unavailable' ? 'model_unavailable' : 'provider_request_rejected',
           '429': 'rate_limited' }[status] ?? 'provider_failed');
       }

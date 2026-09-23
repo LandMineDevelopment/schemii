@@ -22,7 +22,7 @@ from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.admin_config import AdminConfig
 from schemii.common.ai.credential_lifecycle import CredentialExpiryWorker, router as activity_router
 from schemii.common.ai.model_catalog import ModelCatalogWorker, ZenModelCatalog
-from schemii.common.ai.routes import router as ai_provider_router
+from schemii.common.ai.routes import router as ai_provider_router, admin_router as ai_provider_admin_router
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.policy import (
     CompositeConnectionTargetPolicy,
@@ -294,6 +294,7 @@ COMMON_ROUTERS: tuple[APIRouter, ...] = (
     runtime_router,
     connections_router,
     ai_provider_router,
+    ai_provider_admin_router,
 )
 
 
@@ -507,7 +508,9 @@ def create_app(
     from schemii.common.ai.pi import PiRuntime
     ai_runtime = (
         PiRuntime(application.state.pi_client, active_services.metadata.ai_credentials,
-                  application.state.ai_model_catalog, active_services.admin_config.ai)
+                  application.state.ai_model_catalog, active_services.admin_config.ai,
+                  instance_store=active_services.metadata.ai_instance_providers,
+                  auth=application.state.auth)
         if application.state.pi_client is not None else None
     )
     application.state.ai_service = AiService(

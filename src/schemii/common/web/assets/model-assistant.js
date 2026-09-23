@@ -3,7 +3,7 @@ import { assistantDownloadLink } from "./ai-download.js";
 import { requestJson } from "./http.js";
 import { element } from "./dom.js";
 import { createIconButton } from "./ui.js";
-import { createMessageNode, availableModels, populateModelOptions, modelValue } from "./ai-presentation.js";
+import { createMessageNode, availableModels, populateModelOptions, modelValue, apiKeyProviderDetails, providerConnectionState, zenConnectionNotice, aiStatusPath } from "./ai-presentation.js";
 import { renderPermissionBundles } from "./ai-permissions.js";
 import { renderAiActivity } from "./ai-activity.js";
 import { enhanceModelPicker } from "./ai-model-picker.js";
@@ -234,7 +234,7 @@ export function createProductAssistant({
   async function load() {
     const id = getSubjectId(); if (!id) { tell(`Open or create a saved ${subjectLabel} to start a conversation.`); render(); return; }
     const ticket = ++generation; contextId = id;
-    const [nextSettings, nextRuntime, list] = await Promise.all([requestJson(`${api}/settings`), requestJson("/api/v1/ai/status"), requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(id)}`)]);
+    const [nextSettings, nextRuntime, list] = await Promise.all([requestJson(`${api}/settings`), requestJson(aiStatusPath(productLabel.toLowerCase(), id)), requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(id)}`)]);
     if (ticket !== generation || getSubjectId() !== id) return;
     settings = nextSettings; runtime = nextRuntime;
     if (chat?.[subjectKey] !== id) chat = null;
@@ -305,7 +305,7 @@ export function createProductAssistant({
 
   async function showSettings() {
     settingsDialog.showModal(); settingsStatus.textContent = "Loading settings…";
-    try { if (!settings || !runtime) await load(); else runtime = await requestJson("/api/v1/ai/status"); if (chat) await refresh(); populateModels(); populateReasoningOptions(settingsReasoning, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", active(chat)); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
+    try { if (!settings || !runtime) await load(); else runtime = await requestJson(aiStatusPath(productLabel.toLowerCase(), getSubjectId())); if (chat) await refresh(); populateModels(); populateReasoningOptions(settingsReasoning, selected(), chat?.reasoningEffort || settings?.reasoningEffort || "default", active(chat)); renderProviders(); renderPermissions(); settingsStatus.textContent = active(chat) ? "Saving permissions stops the current turn and clears its pending batch. Send a follow-up to continue with the new permissions." : ""; }
     catch (error) { settingsStatus.textContent = error.message; }
   }
   function renderPermissions() {
@@ -328,7 +328,7 @@ export function createProductAssistant({
     finally { busy = false; render(); }
   }
   async function refreshProviders({ refresh = false } = {}) {
-    runtime = await requestJson(`/api/v1/ai/status${refresh ? "?refresh=true" : ""}`, { timeoutMs: refresh ? 20_000 : 10_000 });
+    runtime = await requestJson(aiStatusPath(productLabel.toLowerCase(), getSubjectId(), refresh), { timeoutMs: refresh ? 20_000 : 10_000 });
     populateModels(); renderProviders(); modelPicker.sync();
     if (refresh && (runtime.healthy === false || runtime.providers?.some(provider => provider.catalogError))) {
       throw new Error(runtime.message || "Could not check available models. Try again.");
@@ -337,18 +337,21 @@ export function createProductAssistant({
   function renderProviders() {
     providers.replaceChildren();
     for (const provider of runtime?.providers || []) {
-      const card = element("details", { className: "model-ai-provider" }, [element("summary", {}, [el("strong", provider.name), el("span", provider.authenticated ? "Connected" : provider.available ? "Available" : "Not connected")])]);
+      const card = element("details", { className: "model-ai-provider" }, [element("summary", {}, [el("strong", provider.name), el("span", providerConnectionState(provider))])]);
       card.open = !provider.available || provider.id === chat?.providerId;
       if (provider.privacy || provider.privacyNotice) card.append(el("p", provider.privacy || provider.privacyNotice));
-      if (provider.authenticated && ["openai", "openai-codex"].includes(provider.id)) card.append(button("Disconnect", async () => {
+      if (provider.id === "opencode") card.append(el("p", zenConnectionNotice, "model-ai-muted"));
+      else if (provider.authenticated && ["openai", "openai-codex"].includes(provider.id)) card.append(button("Disconnect", async () => {
         if (!confirm(`Disconnect ${provider.name}? Other conversations using this provider will also be affected.`)) return;
         try { await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "DELETE" }); await refreshProviders(); } catch (error) { settingsStatus.textContent = error.message; }
       }));
-      else if (provider.id === "openai") {
-        const key = element("input", { attrs: { type: "password", autocomplete: "off", required: "", "aria-label": "OpenAI API key", placeholder: "API key" } });
+      else if (apiKeyProviderDetails[provider.id]) {
+        const details = apiKeyProviderDetails[provider.id];
+        const key = element("input", { attrs: { type: "password", autocomplete: "off", required: "", "aria-label": details.label, placeholder: details.label } });
         const connect = element("button", { type: "submit", className: "ui-button", text: "Connect" });
         const auth = element("form", { className: "model-ai-auth" }, [key, connect]);
-        auth.onsubmit = async event => { event.preventDefault(); connect.disabled = true; try { await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "POST", body: { apiKey: key.value } }); key.value = ""; await refreshProviders(); settingsStatus.textContent = "OpenAI connected."; } catch (error) { settingsStatus.textContent = error.message; connect.disabled = false; } }; card.append(auth);
+        auth.onsubmit = async event => { event.preventDefault(); connect.disabled = true; try { await requestJson(`/api/v1/ai/credentials/${encodeURIComponent(provider.id)}`, { method: "POST", body: { apiKey: key.value } }); key.value = ""; await refreshProviders(); settingsStatus.textContent = `${provider.name} connected.`; } catch (error) { settingsStatus.textContent = error.message; connect.disabled = false; } };
+        card.append(auth);
       } else if (provider.id === "openai-codex") {
         if (login) {
           card.open = true; card.append(el("p", login.userCode ? "Enter this code at OpenAI:" : "Preparing device sign-in…"), el("strong", login.userCode || ""));
