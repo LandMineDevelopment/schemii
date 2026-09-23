@@ -446,13 +446,18 @@ class PostgresInstanceAiProviderStore(_Encryption):
                           model_id: str | None = None, reasoning_effort: str | None = None) -> bool:
         scope = _role_grant(role_id, product, connection_owner_id, connection_id)
         with self._connection_factory() as connection, connection.cursor() as cursor:
-            cursor.execute("""DELETE FROM metadata.ai_instance_provider_role_grants
+            query = """DELETE FROM metadata.ai_instance_provider_role_grants
                 WHERE provider_id = %s AND role_id = %s AND product = %s
                   AND connection_owner_id IS NOT DISTINCT FROM %s
-                  AND connection_id IS NOT DISTINCT FROM %s
-                  AND (%s IS NULL OR model_id = %s)
-                  AND (%s IS NULL OR reasoning_effort = %s)""",
-                (_provider(provider_id), *scope, model_id, model_id, reasoning_effort, reasoning_effort))
+                  AND connection_id IS NOT DISTINCT FROM %s"""
+            params = [_provider(provider_id), *scope]
+            if model_id is not None:
+                query += " AND model_id = %s"
+                params.append(model_id)
+            if reasoning_effort is not None:
+                query += " AND reasoning_effort = %s"
+                params.append(reasoning_effort)
+            cursor.execute(query, params)
             return cursor.rowcount > 0
 
     @staticmethod
