@@ -7,6 +7,36 @@ async function workspace(request) {
   return body.workspaces.find(item => item.name === "Test design") || body.workspaces[0];
 }
 
+async function assistantFixture(page, request, workspaceId) {
+  const settingsResponse = await request.get("/api/v1/schemii/ai/settings");
+  expect(settingsResponse.ok()).toBe(true);
+  const settings = await settingsResponse.json();
+  let chat = { id: `chat_${"a".repeat(32)}`, workspaceId, providerId: "openai", modelId: "e2e-model",
+    title: "UI fixture conversation", status: "idle", capabilities: {}, reasoningEffort: "default", revision: 1 };
+  await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { enabled: true, healthy: true, providers: [
+    { id: "openai", name: "OpenAI", available: true, authenticated: true,
+      models: [{ id: "e2e-model", name: "UI fixture model", status: "active" }] },
+  ] } }));
+  await page.route("**/api/v1/schemii/ai/chats?*", route => route.fulfill({ json: { chats: [chat] } }));
+  await page.route("**/api/v1/schemii/ai/chats/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    const root = `/api/v1/schemii/ai/chats/${chat.id}`;
+    if (path === root && route.request().method() === "GET") return route.fulfill({ json: chat });
+    if (path === `${root}/preferences` && route.request().method() === "PUT") {
+      chat = { ...chat, ...route.request().postDataJSON(), revision: chat.revision + 1 };
+      return route.fulfill({ json: { chat, settings } });
+    }
+    const empty = path === `${root}/messages` ? { messages: [] }
+      : path === `${root}/proposals` ? { proposals: [] }
+      : path === `${root}/operations` ? { operations: [] }
+      : path === `${root}/activity` ? { events: [], nextSequence: 0 }
+      : path === `${root}/transient-responses` ? { responses: [] }
+      : path === `${root}/stream` ? null : undefined;
+    return empty === undefined ? route.fallback() : route.fulfill({ json: empty });
+  });
+  return { chat: () => chat };
+}
+
 test("header and settings model pickers refresh availability without changing conversation or draft selections", async ({ page, request }) => {
   const activeWorkspace = await workspace(request);
   const chat = { id: "chat_model_picker_fixture", workspaceId: activeWorkspace.id, providerId: "openai", modelId: "old-model", title: "Retained conversation", status: "idle", capabilities: {}, revision: 1 };
@@ -57,6 +87,7 @@ test("header and settings model pickers refresh availability without changing co
 
 test("assistant keeps proposals and outcomes with the turn that created them", async ({ page, request }) => {
   const activeWorkspace = await workspace(request);
+  await assistantFixture(page, request, activeWorkspace.id);
   const chatId = `chat_${"a".repeat(32)}`;
   const firstTurn = `turn_${"b".repeat(32)}`;
   const secondTurn = `turn_${"c".repeat(32)}`;
@@ -222,6 +253,7 @@ test("assistant keeps proposals and outcomes with the turn that created them", a
 
 test("migration recovery approval explains bundled conflict choices and outcome checks", async ({ page, request }) => {
   const activeWorkspace = await workspace(request);
+  await assistantFixture(page, request, activeWorkspace.id);
   const createdAt = new Date().toISOString();
   const turnId = `turn_${"9".repeat(32)}`;
   let submitted = null;
@@ -262,6 +294,7 @@ test("migration recovery approval explains bundled conflict choices and outcome 
 
 test("read batch approval resumes the answer inline", async ({ page, request }) => {
   const activeWorkspace = await workspace(request);
+  const fixture = await assistantFixture(page, request, activeWorkspace.id);
   const turnId = `turn_${"8".repeat(32)}`;
   const proposalId = `prop_${"7".repeat(32)}`;
   const operationId = `aop_${"6".repeat(32)}`;
@@ -275,8 +308,7 @@ test("read batch approval resumes the answer inline", async ({ page, request }) 
     ...(approved && terminalObserved ? [{ id: "answer", turnId, sequence: 2, role: "assistant", text: "The current total is one lower than the earlier total.", createdAt: new Date(Date.parse(createdAt) + 1000).toISOString() }] : []),
   ] } }));
   await page.route("**/api/v1/schemii/ai/chats/*", async route => {
-    const response = await route.fetch();
-    const currentChat = await response.json();
+    const currentChat = fixture.chat();
     // A transcript fetched before terminal status still contains no answer.
     // The browser must observe completion before requesting that transcript.
     terminalObserved = approved;
@@ -310,6 +342,7 @@ test("read batch approval resumes the answer inline", async ({ page, request }) 
 
 test("assistant provides formatted messages, model, permissions, and history", async ({ page, request }) => {
   const activeWorkspace = await workspace(request);
+  await assistantFixture(page, request, activeWorkspace.id);
   let submitted = null;
   await page.route("**/api/v1/schemii/ai/chats/*/messages", async route => {
     if (route.request().method() === "POST") {
@@ -380,7 +413,7 @@ test("assistant provides formatted messages, model, permissions, and history", a
   await expect(settings.getByRole("heading", { name: "Model providers" })).toBeVisible();
   await expect(settings.getByText("OpenAI", { exact: true })).toBeVisible();
   const openAiProvider = settings.locator("details.ai-provider-card", { hasText: "OpenAI" });
-  await openAiProvider.locator("summary").click();
+  if (!(await openAiProvider.evaluate(card => card.open))) await openAiProvider.locator("summary").click();
   await expect(openAiProvider.getByRole("button", { name: /Connect|Disconnect/ })).toBeVisible();
   const saveSettings = settings.getByRole("button", { name: "Save settings" });
   await expect(saveSettings).toBeVisible();
