@@ -51,6 +51,7 @@ from schemii.schemii.console.repository import (
     PostgresConsoleRepository,
 )
 from schemii.schemii.console.service import ConsoleService
+from schemii.schemii.console.connection_dependencies import PostgresConsoleConnectionDependencies
 from schemii.schemii.migrations.repository import (
     InMemoryMigrationRepository,
     PostgresMigrationRepository,
@@ -234,6 +235,8 @@ def create_services(
         if metadata.connection_factory is not None
         else InMemoryConsoleRepository()
     )
+    if metadata.connection_factory is not None:
+        connections.register_dependency_provider(PostgresConsoleConnectionDependencies(metadata.connection_factory))
     console = ConsoleService(
         repository=console_repository,
         connections=connections,
