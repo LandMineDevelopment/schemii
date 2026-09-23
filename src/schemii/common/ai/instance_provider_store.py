@@ -211,12 +211,12 @@ class PostgresInstanceAiProviderStore:
             cursor.execute("""SELECT credential.generation, credential.ciphertext,
                        credential.nonce, credential.key_version
                 FROM metadata.ai_instance_provider_credentials AS credential
-                JOIN metadata.ai_instance_provider_grants AS grant
-                  ON grant.provider_id = credential.provider_id
+                JOIN metadata.ai_instance_provider_grants AS access_grant
+                  ON access_grant.provider_id = credential.provider_id
                 WHERE credential.provider_id = %s AND credential.ciphertext IS NOT NULL
-                  AND grant.user_id = %s AND grant.product = %s
-                  AND grant.connection_owner_id IS NOT DISTINCT FROM %s
-                  AND grant.connection_id IS NOT DISTINCT FROM %s""", (_PROVIDER, *grant))
+                  AND access_grant.user_id = %s AND access_grant.product = %s
+                  AND access_grant.connection_owner_id IS NOT DISTINCT FROM %s
+                  AND access_grant.connection_id IS NOT DISTINCT FROM %s""", (_PROVIDER, *grant))
             row = cursor.fetchone()
         if row is None:
             return None
