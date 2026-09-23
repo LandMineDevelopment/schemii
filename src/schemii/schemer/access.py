@@ -90,8 +90,10 @@ class ReportModels:
         if actor != access.actor or model_id != access.model.id:
             raise ModelNotFoundError("The model was not found")
         current = access.services.models.get(access.grant["owner_id"], model_id)
-        return current.model_copy(update={"connection_id": access.profile.id,
-                                          "connection_owner_id": access.grant["connection_owner_id"]})
+        return current.model_copy(update={
+            "connection_id": access.profile.id,
+            "connection_owner_id": access.connection_owner_id,
+        })
 
 
 class ReportConsole:

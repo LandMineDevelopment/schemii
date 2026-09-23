@@ -58,7 +58,7 @@ class CompositeConnectionTargetPolicy:
 
 @dataclass(frozen=True)
 class InternalOnlyConnectionTargetPolicy:
-    """Admit only PostgreSQL host identities selected by the operator.
+    """Admit only PostgreSQL host identities selected by the operator in either egress mode.
 
     Internal network ranges are not an authorization boundary: their meaning
     differs by deployment, and resolving arbitrary user-supplied names before
@@ -89,7 +89,7 @@ class InternalOnlyConnectionTargetPolicy:
     ) -> None:
         if _normalize_host(target.host) not in self.allowed_hosts:
             raise ConnectionTargetForbiddenError(
-                "This PostgreSQL host is not allowed by the deployment's internal target policy",
+                "This PostgreSQL host is not allowed by the deployment's approved target policy",
                 code="connection_target_not_allowed",
             )
 

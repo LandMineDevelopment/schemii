@@ -23,7 +23,7 @@ The launcher runs an authenticated private deployment with local accounts, per-p
 
 ## Installation
 
-Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
+Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. Backup and recovery commands additionally require Python 3.10 or later on the host. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
 
 ```bash
 git clone git@github.com:LandMineDevelopment/schemii.git
@@ -150,7 +150,7 @@ Connection profiles, workspaces, desired designs, import provenance, creation-ti
 
 Each profile targets exactly one PostgreSQL host. TLS certificate and hostname verification (`verify-full`) is the default; weaker libpq SSL modes must be selected explicitly for environments that require them.
 
-The local deployment's `internal-only` egress mode admits connection profiles only when their normalized host is listed in the operator-owned `SCHEMII_ALLOWED_TARGET_HOSTS` setting. The list contains private network identities, not user-entered patterns or inferred address ranges, and is checked when a profile is created, updated, and every time its credential is resolved for use. The metadata PostgreSQL identity is denied independently. Deployments must therefore control DNS for each allowed alias; an alternate alias or literal address is rejected unless the operator explicitly adds it.
+Both `internal-only` and authenticated `external` target modes admit connection profiles only when their normalized host is listed in the operator-owned `SCHEMII_ALLOWED_TARGET_HOSTS` setting. The list contains operator-approved host identities, not user-entered patterns or inferred address ranges, and is checked when a profile is created, updated, and every time its credential is resolved for use. The metadata PostgreSQL identity is denied independently. Deployments must therefore control DNS for each allowed alias; an alternate alias or literal address is rejected unless the operator explicitly adds it.
 
 A workspace is either a database-independent editable design or a new editable design imported from PostgreSQL. Targets cannot be attached, replaced, or detached after creation. A PostgreSQL import atomically records the catalog baseline, design revision, layout, provenance, and lossiness report, so existing local work cannot be overwritten. The saved connection's PostgreSQL grants—not a Schemii workspace mode—determine which database operations are permitted. Local designs can be exported as SQL for use outside Schemii. Database-backed workspaces inspect columns, constraints, relationships, indexes, triggers, functions, views, materialized views, enums, and domains from bounded PostgreSQL snapshots. Capabilities that remain planned are registered for review in the API map and return an explicit `501 planned_capability`.
 
@@ -194,7 +194,7 @@ certutil -A -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"
 
 Restart the browser or T3Code after changing trust. Remove the exception with `certutil -D -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"`. Other clients can either trust `.schemii/tls/localhost.crt` through their own certificate store or retain their normal self-signed-certificate warning.
 
-Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. `SCHEMII_ALLOWED_TARGET_HOSTS` is deployment-owned and must contain only PostgreSQL aliases reachable on the intended private target network. Database identity and password overrides are initialization inputs and must continue to match retained local state. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
+Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. `SCHEMII_ALLOWED_TARGET_HOSTS` is deployment-owned and must contain only PostgreSQL aliases reachable on the intended private target network. Database identity and password overrides are initialization inputs and must continue to match retained local state. The authenticated Compose deployment keeps ingress loopback-only; the configured Tailscale Serve route provides private remote access. See [the friends rollout guide](docs/friends-rollout.md) for account, role, and database onboarding.
 
 Non-secret administrator policy is loaded once at startup from the absolute path in `SCHEMII_CONFIG_FILE`; the local stack mounts [`dev/schemii.toml`](dev/schemii.toml). The file owns process connection admission, bounded catalog materialization, operation timeouts, Console statement/session/memory policy, query-history and saved-query retention, migration review/lease timing, and per-user metadata resource limits. Invalid, unknown, or internally conflicting settings fail startup instead of being silently ignored. These are Schemii safety ceilings; PostgreSQL permissions and stricter database-side limits remain authoritative.
 
@@ -214,7 +214,7 @@ it never silently substitutes a model. Conversations can switch models between
 turns. Credentials are encrypted and owner-scoped, with configurable inactivity
 expiration. See [AI runtime documentation](ai/prototype/README.md) for retention,
 provider privacy, deployment limitations and sidecar tests. The current supported
-deployment remains a single API process with the local development principal.
+deployment remains a single API process with authenticated, owner-scoped accounts.
 
 Each turn receives the current owner-scoped workspace, desired design, bounded chat
 history, and—only when granted—a freshly inspected live catalog. Design proposals

@@ -319,6 +319,7 @@ export function createSqlConsole({
   let pendingInitialDraft = typeof initialDraft === "string" && initialDraft.trim()
     ? initialDraft
     : null;
+  let hasPendingUnscopedDraft = false;
 
   function workspace() {
     const current = getWorkspace();
@@ -1409,8 +1410,12 @@ export function createSqlConsole({
         ? consoleIdForWorkspace(nextId)
         : newConsoleId();
       if (queryTabs) {
+        const usePendingUnscopedDraft = nextId && hasPendingUnscopedDraft;
+        const initialWorkspaceDraft = usePendingUnscopedDraft
+          ? draft.value
+          : pendingInitialDraft;
         const fallbackDraft = nextId
-          ? pendingInitialDraft ?? storedValue(consoleStorageKey(nextId, "draft")) ?? ""
+          ? initialWorkspaceDraft ?? storedValue(consoleStorageKey(nextId, "draft")) ?? ""
           : "";
         if (nextId) loadBrowserWorkspace(nextId, fallbackDraft);
         else {
@@ -1421,12 +1426,13 @@ export function createSqlConsole({
           renderQueryTabs();
           renderQueryDrawer();
         }
-        if (nextId && pendingInitialDraft !== null) {
+        if (nextId && initialWorkspaceDraft !== null) {
           const query = activeQuery();
-          if (query) query.sql = pendingInitialDraft;
-          draft.value = pendingInitialDraft;
+          if (query) query.sql = initialWorkspaceDraft;
+          draft.value = initialWorkspaceDraft;
           persistQueries();
-          pendingInitialDraft = null;
+          if (usePendingUnscopedDraft) hasPendingUnscopedDraft = false;
+          else pendingInitialDraft = null;
         }
       } else {
         queries = nextId
@@ -1579,6 +1585,9 @@ export function createSqlConsole({
     draft.addEventListener(eventName, updateControls);
   }
   draft.addEventListener("input", persistDraft);
+  draft.addEventListener("input", () => {
+    if (!workspaceId) hasPendingUnscopedDraft = true;
+  });
   draft.addEventListener("keydown", event => {
     if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
     event.preventDefault();

@@ -18,7 +18,7 @@ from schemii.common.api import (
 )
 from schemii.common.api.models import ApiErrorResponse
 from schemii.common.api.routes import router as runtime_router
-from schemii.common.api.runtime import RuntimeConfig, TargetEgressMode
+from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.admin_config import AdminConfig
 from schemii.common.ai.credential_lifecycle import CredentialExpiryWorker, router as activity_router
 from schemii.common.ai.model_catalog import ModelCatalogWorker, ZenModelCatalog
@@ -51,6 +51,7 @@ from schemii.schemii.console.repository import (
     PostgresConsoleRepository,
 )
 from schemii.schemii.console.service import ConsoleService
+from schemii.schemii.console.connection_dependencies import PostgresConsoleConnectionDependencies
 from schemii.schemii.migrations.repository import (
     InMemoryMigrationRepository,
     PostgresMigrationRepository,
@@ -145,16 +146,16 @@ def create_services(
               if metadata.connection_factory is not None else InMemoryModelRepository(
               maximum_models_per_owner=selected_admin.resources.maximum_models_per_user,
               maximum_document_bytes=selected_admin.resources.maximum_model_document_bytes))
-    target_policy = metadata.target_policy
-    if selected_runtime.target_egress_mode is TargetEgressMode.INTERNAL_ONLY:
-        target_policy = CompositeConnectionTargetPolicy(
-            (
-                target_policy,
-                InternalOnlyConnectionTargetPolicy.from_hosts(
-                    selected_runtime.allowed_target_hosts
-                ),
-            )
+    # External routing never grants arbitrary database access. Both deployment
+    # modes require exact operator-approved identities and deny the control plane.
+    target_policy = CompositeConnectionTargetPolicy(
+        (
+            metadata.target_policy,
+            InternalOnlyConnectionTargetPolicy.from_hosts(
+                selected_runtime.allowed_target_hosts
+            ),
         )
+    )
     connections = ConnectionService(
         metadata.connections,
         (workspaces, models),
@@ -234,6 +235,8 @@ def create_services(
         if metadata.connection_factory is not None
         else InMemoryConsoleRepository()
     )
+    if metadata.connection_factory is not None:
+        connections.register_dependency_provider(PostgresConsoleConnectionDependencies(metadata.connection_factory))
     console = ConsoleService(
         repository=console_repository,
         connections=connections,

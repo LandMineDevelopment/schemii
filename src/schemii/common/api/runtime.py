@@ -34,7 +34,7 @@ class RuntimeConfig:
             )
         except ValueError as error:
             raise ValueError(
-                "SCHEMII_DEPLOYMENT_MODE must be explicitly set to local-development"
+                "SCHEMII_DEPLOYMENT_MODE must be explicitly set to local-development or authenticated"
             ) from error
         try:
             target_egress_mode = TargetEgressMode(
@@ -42,7 +42,7 @@ class RuntimeConfig:
             )
         except ValueError as error:
             raise ValueError(
-                "SCHEMII_TARGET_EGRESS_MODE must be explicitly set to internal-only"
+                "SCHEMII_TARGET_EGRESS_MODE must be explicitly set to internal-only or external"
             ) from error
         inspection_value = values.get("SCHEMII_DEVELOPER_INSPECTION", "0")
         if inspection_value not in {"0", "1"}:
@@ -51,7 +51,8 @@ class RuntimeConfig:
             raise ValueError(
                 "authenticated deployment mode requires SCHEMII_AUTH_ENABLED=1"
             )
-        if target_egress_mode is TargetEgressMode.EXTERNAL:
+        if (target_egress_mode is TargetEgressMode.EXTERNAL
+                and deployment_mode is not DeploymentMode.AUTHENTICATED):
             raise ValueError(
                 "external target egress requires authenticated deployment mode"
             )
@@ -60,12 +61,9 @@ class RuntimeConfig:
             for host in values.get("SCHEMII_ALLOWED_TARGET_HOSTS", "").split(",")
             if host.strip()
         )
-        if (
-            target_egress_mode is TargetEgressMode.INTERNAL_ONLY
-            and not allowed_target_hosts
-        ):
+        if not allowed_target_hosts:
             raise ValueError(
-                "SCHEMII_ALLOWED_TARGET_HOSTS must name at least one host for internal-only target egress"
+                "SCHEMII_ALLOWED_TARGET_HOSTS must name at least one explicitly approved PostgreSQL host"
             )
         return cls(
             deployment_mode=deployment_mode,

@@ -1,3 +1,4 @@
+import { refreshedSelections, staleModelMessage } from './dashboard-refresh.js';
 import { scrollPosition, restoreScroll, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { requestJson } from '#common/http.js';
@@ -240,7 +241,7 @@ function renderTiles() {
   add.onclick = () => editTile(newTile()); if (permissions.edit) $('tile-grid').append(add);
 }
 function readyToRun() {
-  if (!model || model.revision !== dashboard.modelRevision) { message('Review the updated source model before running this dashboard.'); return false; }
+  if (!model || model.revision !== dashboard.modelRevision) { message(staleModelMessage(permissions.edit)); return false; }
   if (slicersDirty) { message('Apply the dashboard slicers first.'); return false; }
   const missing = missingSlicers(); if (missing.length) { $('slicer-status').textContent = `Choose ${missing.join(', ')} to load data.`; return false; }
   return true;
@@ -285,21 +286,47 @@ async function loadCurrentModel({ catalogRequired = false } = {}) {
   return source;
 }
 async function refreshDashboard() {
-  const origin = dashboard;
-  if (!origin || saving) return;
+  const origin = dashboard, previousModel = model;
+  if (!origin || saving || !checkLeave()) return;
   setSaving(true);
   $('tile-grid').inert = true;
-  message('Checking the current Schemoo model…');
+  message('Refreshing dashboard…');
   try {
-    const source = await loadCurrentModel();
+    const next = await requestJson(`${API}/${origin.id}`);
+    const context = await requestJson(`${API}/${origin.id}/context`);
     if (dashboard?.id !== origin.id) return;
-    if (source.revision !== origin.modelRevision) {
-      await stopRuns(); tileStates.clear(); renderHeading(); renderModelUpdate(); renderSlicers(); renderTiles();
-      message('The source model changed. Update this dashboard after reviewing the model in Schemoo.');
+    const stopped = stopRuns(), refreshEpoch = epoch;
+    await stopped;
+    if (dashboard?.id !== origin.id || epoch !== refreshEpoch) return;
+    dashboard = context.permissions.edit ? next : {
+      ...next, selections: refreshedSelections(origin, previousModel, next, context.model),
+    };
+    model = context.model; catalog = context.catalog; permissions = context.permissions;
+    library = library.map(item => item.id === next.id ? next : item);
+    slicersDirty = false; tileStates.clear();
+    renderLibrary(); renderHeading(); renderModelUpdate(); renderSlicers(); renderTiles();
+    if (model.revision !== next.modelRevision) {
+      message(staleModelMessage(permissions.edit));
       return;
     }
-    renderHeading(); renderModelUpdate(); message(''); await runAll();
-  } catch (error) { if (dashboard?.id === origin.id) message(error.message); }
+    message(''); await runAll();
+  } catch (error) {
+    if (dashboard?.id !== origin.id) return;
+    if (error.status === 403 || error.status === 404) {
+      // An explicit access failure invalidates these cached results. Network and
+      // server failures below leave the last successful view available.
+      void stopRuns();
+      for (const dialog of document.querySelectorAll('.expanded-dialog, .cell-dialog, .sql-dialog')) dialog.close();
+      dashboard = null; model = null; catalog = null; slicerDraft = null; slicersDirty = false;
+      permissions = { edit: false, export: false, drill: false };
+      library = library.filter(item => item.id !== origin.id);
+      disposeSelects($('slicers')); $('slicers').replaceChildren();
+      $('tile-grid').replaceChildren(); $('filter-summary').replaceChildren();
+      $('dashboard-content').hidden = true; $('empty-dashboard').hidden = false;
+      renderAccess(); renderLibrary(); history.replaceState(null, '', '/schemer');
+      message('This dashboard is no longer available to your account. It may have been removed or your access changed. Ask your administrator if you still need access.');
+    } else message(error.message);
+  }
   finally { $('tile-grid').inert = false; setSaving(false); }
 }
 async function updateDashboardModel() {
@@ -366,7 +393,7 @@ async function openDashboard(id) {
     $('empty-dashboard').hidden = true; $('dashboard-content').hidden = false;
     history.replaceState(null, '', `/schemer?dashboard=${encodeURIComponent(id)}`);
     renderLibrary(); renderHeading(); renderModelUpdate(); renderSlicers(); renderTiles(); message('');
-    if (source.revision !== next.modelRevision) message('The source model changed. Update this dashboard after reviewing the model in Schemoo.');
+    if (source.revision !== next.modelRevision) message(staleModelMessage(permissions.edit));
     else void runAll();
   } catch (error) { if (version === epoch) { message(error.message); if (dashboard?.id === id) { $('empty-dashboard').hidden = true; $('dashboard-content').hidden = false; $('slicer-panel').hidden = true; renderHeading(); renderLibrary(); $('tile-grid').replaceChildren(element('p', { className: 'empty-state', text: 'The source model could not be loaded. Dashboard configuration is still saved.' })); } else $('empty-dashboard').hidden = false; } }
 }
