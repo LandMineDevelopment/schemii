@@ -20,6 +20,20 @@ export function formatConsoleCell(value) {
   return formatDataCell(value);
 }
 
+export function formatConsoleActivitySummary(activity, execution = null, runningElapsedMs = null) {
+  const rawExecution = Boolean(execution?.sessionId);
+  const phase = rawExecution ? execution.status : (activity.phase ?? execution?.status ?? activity.status);
+  const elapsedMs = rawExecution
+    ? (TERMINAL_EXECUTION_STATUSES.has(execution.status) ? execution.elapsedMs : runningElapsedMs)
+    : activity.elapsedMs;
+  return [
+    phase,
+    typeof elapsedMs === "number" && Number.isFinite(elapsedMs) && elapsedMs >= 0
+      ? formatElapsed(elapsedMs) : null,
+    "Query activity",
+  ].filter(Boolean).join(" · ");
+}
+
 function newConsoleId() {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
@@ -252,11 +266,15 @@ export function createSqlConsole({
         if ((exportWatch.started && activity.phase !== "exporting") || (!exportWatch.started && Date.now() > exportWatch.deadline)) exportWatch = null;
         updateControls();
       }
-      activitySummary.textContent = `${activity.phase} · ${(activity.elapsedMs / 1000).toFixed(1)} s · Query activity`;
+      const currentExecution = execution?.id === executionId ? execution : null;
+      activitySummary.textContent = formatConsoleActivitySummary(activity, currentExecution, elapsedTimer.value());
       const parts = [
         activity.statementIndex == null ? null : `Statement ${activity.statementIndex + 1}`,
-        `${activity.completedStatementIndexes?.length || 0} statements completed`,
-        `${activity.fetchedRows ?? 0} rows fetched`,
+        Array.isArray(activity.completedStatementIndexes)
+          ? `${activity.completedStatementIndexes.length} statements completed`
+          : Number.isInteger(currentExecution?.completedStatements)
+            ? `${currentExecution.completedStatements} statements completed` : null,
+        activity.fetchedRows == null ? null : `${activity.fetchedRows} rows fetched`,
         activity.transactionStatus ? `Transaction: ${activity.transactionStatus}` : null,
         activity.databaseState,
         activity.waitEvent ? `Waiting: ${activity.waitEventType || "database"} / ${activity.waitEvent}` : null,

@@ -178,7 +178,7 @@ def save_role(request,data,actor,role_id=None):
             raise HTTPException(422,'Each dashboard requires its database connection in the same role')
     if any(g['allow_authoring'] for g in role['connections']) and not any(
             c in role['capabilities'] for c in ('schemii:access','schemoo:access',SCHEMER_AUTHOR)):
-        raise HTTPException(422,'Authoring connections require a product authoring capability in the same role')
+        raise HTTPException(422,'Using a managed connection in product tools requires Schemii, Schemoo, or Schemer editing access in the same role')
     services=request.app.state.services
     for grant in role['connections']:
         services.connections.get(grant['owner_id'],grant['connection_id'])

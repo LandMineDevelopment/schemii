@@ -89,8 +89,10 @@ async function adminPage() {
     const profiles = resources.connections.map(connection => {
       const current = role?.connections.find(c => c.connection_id === connection.id && c.owner_id === connection.owner_id);
       const enabled = check(`${connection.name || connection.id} · ${connection.database} · ${connection.username}`, !!current);
-      const authoring = check('Use for Schemii, Schemoo, or Schemer authoring', current?.allow_authoring);
-      const options = el('div', { className: 'account-editor', hidden: !current }, [authoring.node]);
+      const authoring = check('Use in Schemii and Schemoo tools or Schemer editing', current?.allow_authoring);
+      const options = el('div', { className: 'account-editor', hidden: !current }, [authoring.node,
+        el('p', { text: 'Enable this even for read-only PostgreSQL profiles. This permits app workflows; PostgreSQL still controls visible rows, columns, and write privileges.' }),
+      ]);
       enabled.input.onchange = () => { options.hidden = !enabled.input.checked; };
       return { connection, input: enabled.input, authoring, node: el('div', { className: 'account-grant' }, [enabled.node, options]) };
     });

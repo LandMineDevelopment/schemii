@@ -4,6 +4,20 @@ import { expect, test } from '@playwright/test';
 // This test submits an ephemeral password: never retain a trace of form input/API bodies.
 test.use({ trace: 'off', video: 'off' });
 
+test('role editor explains that app connection use does not grant PostgreSQL writes', async ({ page, request }) => {
+  const status = await (await request.get('/api/v1/auth/status')).json();
+  test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
+  const resources = await (await request.get('/api/v1/admin/resources')).json();
+  test.skip(!resources.connections.length, 'A saved connection is needed to display connection grants.');
+  await page.goto('/admin');
+  await page.getByRole('button', { name: 'Create role' }).click();
+  const roleEditor = page.getByRole('dialog', { name: 'Create role' });
+  await roleEditor.locator('.account-grant').first().getByRole('checkbox').first().check();
+  await expect(roleEditor.getByRole('checkbox', { name: 'Use in Schemii and Schemoo tools or Schemer editing' })).toBeVisible();
+  await expect(roleEditor).toContainText('Enable this even for read-only PostgreSQL profiles.');
+  await expect(roleEditor).toContainText('PostgreSQL still controls visible rows, columns, and write privileges.');
+});
+
 test('a provisioned viewer can sign in, see an empty report library, and sign out', async ({ browser, request, baseURL }, testInfo) => {
   const status = await (await request.get('/api/v1/auth/status')).json();
   test.skip(!status.enabled, 'Account authentication is disabled for this installation.');

@@ -33,12 +33,15 @@ product or PostgreSQL privilege. Migration 0039 preserves existing author and
 administrator product access while making future assignments explicit.
 
 A role may also bind an existing saved PostgreSQL connection. To let a member
-author workspaces, models, or dashboards with it, set **Allow authoring** on the
-connection grant. The grant and relevant product capability must be in the same
-role. The profile and encrypted password remain owned by the original account;
-the friend sees non-secret connection details but cannot edit or delete it. New
-Schemii workspaces and Schemoo models remain private to the friend who created
-them, while pointing to that managed connection. No credentials are copied.
+use it in Schemii or Schemoo tools or edit Schemer dashboards, check **Use in
+Schemii and Schemoo tools or Schemer editing** on the connection grant, even if
+the PostgreSQL login is read-only. This selects the login for those app workflows;
+it does not grant database writes. The grant and relevant product capability must
+be in the same role. The profile and encrypted password remain owned by the
+original account; the friend sees non-secret connection details but cannot edit
+or delete it. New Schemii workspaces and Schemoo models remain private to the
+friend who created them, while pointing to that managed connection. No
+credentials are copied.
 
 For a Schemer author to create a dashboard from a model, also grant
 `schemoo:access` so they can select or create that model. A report viewer needs
