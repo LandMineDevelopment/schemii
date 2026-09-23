@@ -177,16 +177,12 @@ class PiRuntime:
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         results = list(pool.map(lambda row: self._refresh_account_catalog(owner, row), records))
                         refresh_results = {row["provider_id"]: result for row, result in zip(records, results)}
-                # Zen's credential-free catalog already refreshes in its shared
-                # background worker. Do not fetch its large pricing document on
-                # every user's dropdown opening.
                 credentials = self.store.list(owner)
-            verified = {m["id"] for m in self.catalog.snapshot()["models"]} if self.catalog else set()
             connected = {row["provider_id"] for row in credentials if row.get("connected")}
             generations = {row["provider_id"]: row["generation"] for row in credentials if row.get("connected")}
             denied = self._denied_models(owner, credentials)
             providers = []
-            for provider_id, name in (("openai-codex", "ChatGPT Codex"), ("openai", "OpenAI"), ("opencode", "OpenCode Zen")):
+            for provider_id, name in (("openai-codex", "ChatGPT Codex"), ("openai", "OpenAI")):
                 account = self._account_catalog(owner, provider_id, generations.get(provider_id, 0))
                 refresh_error = refresh_results.get(provider_id, {}).get("error")
                 ids = account.get("ids")
@@ -196,18 +192,13 @@ class PiRuntime:
                            "reasoningLevels": item.get("reasoningLevels", ["default"]),
                            "status": "unavailable" if (provider_id, item["id"]) in denied
                                or (ids is not None and item["id"] not in ids) else "active"}
-                          for item in supported if item.get("providerId") == provider_id
-                          and (provider_id != "opencode" or item["id"] in verified)]
+                          for item in supported if item.get("providerId") == provider_id]
                 authenticated = provider_id in connected
-                available = any(model["status"] == "active" for model in models) and (authenticated or provider_id == "opencode")
+                available = any(model["status"] == "active" for model in models) and authenticated
                 item = {"id": provider_id, "name": name, "available": available,
                         "authenticated": authenticated, "models": models,
                         "authMethods": [], "catalogError": refresh_error or account.get("error"),
                         "catalogCheckedAt": account.get("checkedAt")}
-                if provider_id == "opencode":
-                    item["privacy"] = "Free trial models may use prompts and selected context for training. Do not send confidential or personal data."
-                    if self.catalog and self.catalog.snapshot().get("error"):
-                        item["catalogError"] = "Could not refresh the free-model catalog. The list uses its last unexpired snapshot."
                 providers.append(item)
             errors = [f'{provider["name"]}: {provider["catalogError"]}' for provider in providers if provider["catalogError"]]
             return {"enabled": self.policy.enabled, "healthy": True, "providers": providers,
@@ -307,11 +298,6 @@ class PiRuntime:
             body["reasoningEffort"] = reasoning_effort
         if record:
             body.update(credentialId=credential_id, generation=record["generation"], credential=record["credential"])
-        elif provider_id == "opencode":
-            # Explicit public auth marker, never ambient server credentials. Only
-            # verified free models reach this path through the catalog gate above.
-            body.update(credentialId="zen-public", generation=1,
-                        credential={"type": "api_key", "key": "public"})
 
         def authority():
             if record:

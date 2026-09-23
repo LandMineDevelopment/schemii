@@ -44,14 +44,13 @@ def run(runtime, **kwargs):
     return runtime.run("alice", "turn1", "openai-codex", "model", "system", "hello", [], **kwargs)
 
 
-def test_owner_specific_availability_and_verified_free_intersection():
+def test_owner_specific_availability_excludes_public_zen_models():
     runtime, _, _ = setup([])
     alice = runtime.status("alice")["providers"]
     bob = runtime.status("bob")["providers"]
     assert alice[0]["available"]
     assert not bob[0]["available"]
-    assert [m["id"] for m in bob[2]["models"]] == ["free"]
-    assert "personal" in bob[2]["privacy"]
+    assert [provider["id"] for provider in bob] == ["openai-codex", "openai"]
 
 
 def test_confirmed_model_denial_is_owner_scoped_and_expires(monkeypatch):
@@ -326,18 +325,11 @@ def test_same_identity_reentrant_turn_is_rejected_until_save_finishes():
     assert run(runtime).text == "Hi"
 
 
-def test_free_turn_uses_explicit_public_auth_and_never_an_owners_paid_key():
-    runtime, _, requests = setup([{"type": "result", "text": "Free reply"}])
-    reply = runtime.run("bob", "free-turn", "opencode", "free", "system", "hello", [])
-    assert reply.text == "Free reply"
-    assert requests[0]["credential"] == {"type": "api_key", "key": "public"}
-    assert requests[0]["credentialId"] == "zen-public"
-
-
-def test_unknown_free_model_cannot_reach_transport():
+@pytest.mark.parametrize("model_id", ["free", "not-verified"])
+def test_public_zen_models_cannot_reach_transport(model_id):
     runtime, _, requests = setup([])
     with pytest.raises(PiError) as caught:
-        runtime.run("alice", "turn", "opencode", "not-verified", "system", "hello", [])
+        runtime.run("alice", "turn", "opencode", model_id, "system", "hello", [])
     assert caught.value.code == "model_unavailable"
     assert requests == []
 

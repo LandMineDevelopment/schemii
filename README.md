@@ -208,12 +208,13 @@ database access, shell tools or persistent chat storage. The browser talks only
 to Schemii's same-origin API. Pi returns structured proposals; Schemii owns tool
 validation, permissions, execution and user approval.
 
-AI settings support ChatGPT Codex device sign-in, OpenAI API keys, and verified
-free OpenCode Zen models. The server periodically refreshes free-model availability;
-it never silently substitutes a model. Conversations can switch models between
-turns. Credentials are encrypted and owner-scoped, with configurable inactivity
-expiration. See [AI runtime documentation](ai/prototype/README.md) for retention,
-provider privacy, deployment limitations and sidecar tests. The current supported
+AI settings support ChatGPT Codex device sign-in and OpenAI API keys. Public
+OpenCode Zen models are excluded because Zen rejects external inference with the
+public credential. The assistant never silently substitutes a model. Conversations
+can switch models between turns. Credentials are encrypted and owner-scoped, with
+configurable inactivity expiration. See the
+[AI runtime documentation](ai/prototype/README.md) for retention, provider privacy,
+deployment limitations and sidecar tests. The current supported
 deployment remains a single API process with authenticated, owner-scoped accounts.
 
 Each turn receives the current owner-scoped workspace, desired design, bounded chat

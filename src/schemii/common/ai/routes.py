@@ -25,7 +25,7 @@ def status(request: Request, refresh: bool = False, principal: Principal = Depen
 def save_credential(provider_id: str, body: ApiCredentialCreate, request: Request,
                     principal: Principal = Depends(get_current_principal)):
     if provider_id != "openai":
-        raise ApiProblem(422, "ai_provider_unsupported", "Use device sign-in for Codex. Free Zen models need no API key.")
+        raise ApiProblem(422, "ai_provider_unsupported", "Only OpenAI API keys can be saved here. Use device sign-in for Codex.")
     runtime = request.app.state.ai_service.runtime
     if runtime is None:
         raise ApiProblem(503, "ai_runtime_unavailable", "The AI service is unavailable.")
