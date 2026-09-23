@@ -303,7 +303,7 @@ def test_author_domain_lookup_validates_draft_source_without_saving_it(setup):
     api, model, _, _ = setup
     reservations = []
     receipt = SimpleNamespace(id="exec_domain", model_dump=lambda **kwargs: {"id": "exec_domain"})
-    console = SimpleNamespace(reserve_read_target=lambda owner, **kwargs: (reservations.append(kwargs) or receipt), run=lambda *args: None)
+    console = SimpleNamespace(reserve_read_target=lambda owner, **kwargs: (reservations.append(kwargs) or receipt), run=lambda *args, **kwargs: None)
     api.app.state.services = replace(api.app.state.services, console=console)
     url = f"/api/v1/schemoo/models/{model['id']}"
     definition = {**DEFINITION, "nodes": DEFINITION["nodes"] + [{"id": "alias", "table": "people", "label": "Role"}]}
@@ -324,7 +324,7 @@ def test_execution_recompiles_fresh_and_uses_direct_shared_read(setup):
     api, model, _, calls = setup
     reservations = []
     receipt = SimpleNamespace(id="exec_test", model_dump=lambda **kwargs: {"id": "exec_test"})
-    service = SimpleNamespace(reserve_read_target=lambda owner, **kwargs: (reservations.append((owner, kwargs)) or receipt), run=lambda *args: None)
+    service = SimpleNamespace(reserve_read_target=lambda owner, **kwargs: (reservations.append((owner, kwargs)) or receipt), run=lambda *args, **kwargs: None)
     api.app.state.services = replace(api.app.state.services, console=service)
     response = api.post(f"/api/v1/schemoo/models/{model['id']}/executions", json={"expectedRevision": 1, "explore": EXPLORE, "consoleId": "con_" + "a"*32})
     assert response.status_code == 201, response.text
@@ -394,7 +394,7 @@ def test_physical_explain_uses_owned_saved_model_and_read_target(setup, analyze)
     reservations = []
     receipt = SimpleNamespace(id="exec_test", model_dump=lambda **kwargs: {"id": "exec_test"})
     api.app.state.services = replace(api.app.state.services, console=SimpleNamespace(
-        reserve_read_target=lambda owner, **kwargs: (reservations.append((owner, kwargs)) or receipt), run=lambda *args: None))
+        reserve_read_target=lambda owner, **kwargs: (reservations.append((owner, kwargs)) or receipt), run=lambda *args, **kwargs: None))
     body = {"expectedRevision": 1, "explore": EXPLORE, "consoleId": "con_" + "a"*32, "analyze": analyze}
     response = api.post(f"/api/v1/schemoo/models/{model['id']}/explain", json=body)
     assert response.status_code == 201, response.text

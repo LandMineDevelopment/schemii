@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from schemii.common.api.errors import ApiProblem
+from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
 from schemii.schemer.access import available_dashboards, prepare_dashboard, ReportCatalogs
 from schemii.schemer.dashboard_models import DashboardCreate
 from schemii.schemer.dashboard_store import InMemoryDashboardRepository, DashboardNotFoundError
@@ -16,13 +17,14 @@ from schemii.schemoo.store import InMemoryModelRepository, ModelNotFoundError
 @pytest.fixture
 def shared():
     profiles = {
-        'pg_'+'a'*32: NS(id='pg_'+'a'*32, host='postgres', port=5432, database='sales', revision=1, username='author'),
-        'pg_'+'b'*32: NS(id='pg_'+'b'*32, host='postgres', port=5432, database='sales', revision=1, username='east'),
+        'pg_'+'a'*32: NS(id='pg_'+'a'*32, host='postgres', port=5432, database='sales', revision=1, username='author', ownership='user'),
+        'pg_'+'b'*32: NS(id='pg_'+'b'*32, host='postgres', port=5432, database='sales', revision=1, username='east', ownership='schemii'),
     }
     uses = []
     class Connections:
         def get(self, owner, key):
-            assert owner == 'admin'
+            expected = 'admin' if key == 'pg_'+'a'*32 or profiles[key].ownership == 'user' else SCHEMII_CONNECTION_OWNER_ID
+            assert owner == expected
             return profiles[key]
         @contextmanager
         def use(self, owner, key):
@@ -33,9 +35,9 @@ def shared():
         database='sales', namespace='public', definition={'root':'sales','nodes':[{'id':'sales','table':'sales','label':'Sales'}]}))
     dashboard = dashboards.create('admin', DashboardCreate(name='Sales',model_id=model.id,model_revision=1))
     grant = dict(role_id='east',owner_id='admin',dashboard_id=dashboard.id,connection_id='pg_'+'b'*32,
-                 connection_owner_id='admin',can_export=False,can_drill=False)
-    db_grant = dict(role_id='east',owner_id='admin',connection_id=grant['connection_id'])
-    auth = NS(enabled=True, is_admin=lambda actor:False, capabilities=lambda actor:[], audit=lambda *args:None, user=lambda actor: {'disabled':False},
+                 connection_owner_id=SCHEMII_CONNECTION_OWNER_ID,can_export=False,can_drill=False)
+    db_grant = dict(role_id='east',owner_id=SCHEMII_CONNECTION_OWNER_ID,connection_id=grant['connection_id'])
+    auth = NS(enabled=True, is_admin=lambda actor:False, capabilities=lambda actor:['schemer:access'] if actor == 'viewer' else [], audit=lambda *args:None, user=lambda actor: {'disabled':False},
               dashboard_grants=lambda actor: [deepcopy(grant)] if actor=='viewer' else [],
               connection_grants=lambda actor: [deepcopy(db_grant)])
     calls=[]
@@ -113,3 +115,11 @@ def test_shared_catalog_hides_forbidden_columns_and_relationships(shared):
 
 def test_stranger_cannot_read_shared_dashboard(shared):
     with pytest.raises(DashboardNotFoundError): prepare_dashboard(shared.request,'stranger',shared.dashboard.id)
+
+
+def test_legacy_person_owned_dashboard_grant_cannot_resolve(shared):
+    shared.grant['connection_owner_id'] = 'admin'
+    shared.db_grant['owner_id'] = 'admin'
+    shared.profiles[shared.grant['connection_id']].ownership = 'user'
+    with pytest.raises(ApiProblem, match='Schemii-owned'):
+        prepare_dashboard(shared.request,'viewer',shared.dashboard.id)

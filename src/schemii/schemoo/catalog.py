@@ -17,15 +17,21 @@ class ModelCatalogs:
     def get(self, services, owner, connection_id, namespace, *, fresh=False):
         # Recheck ownership and connection revision even for cached catalogs.
         profile = services.connections.get(owner, connection_id)
-        key = (owner, connection_id, profile.revision, namespace)
+        profile_owner = getattr(profile, "owner_id", None) or owner
+        managed = profile_owner != owner
+        key = (owner, profile_owner, connection_id, profile.revision, namespace)
         with self._lock:
             cached = self._cache.get(key)
-            if not fresh and cached and monotonic() - cached[0] < self.refresh_seconds:
+            if not managed and not fresh and cached and monotonic() - cached[0] < self.refresh_seconds:
                 self._cache.move_to_end(key)
                 return deepcopy(cached[1])
         with services.connections.use(owner, connection_id) as connection:
             live = services.postgres.introspect(connection, namespace)
             database = connection.database
+            # Catalog metadata itself must not reveal columns that the exact
+            # PostgreSQL identity cannot read. Grants can change without a
+            # connection revision, so managed catalogs are never cached.
+            readable = services.postgres.readable_columns(connection, namespace) if managed else None
         # Schemoo sources are read-only relations. Keep the existing `tables`
         # response key for API compatibility, but include views and materialized
         # views so they can be used as semantic-model sources as well.
@@ -40,16 +46,24 @@ class ModelCatalogs:
             unique_constraints = getattr(relation, "unique_constraints", ())
             tables.append({
                 "name": relation.name,
-                "columns": [c.model_dump(by_alias=True) for c in relation.columns],
-                "primaryKey": list(primary_key.columns) if primary_key and primary_key.validated else [],
-                "uniqueKeys": [list(key.columns) for key in unique_constraints if key.validated],
+                "columns": [c.model_dump(by_alias=True) for c in relation.columns
+                            if readable is None or (relation.name, c.name) in readable],
+                "primaryKey": list(primary_key.columns) if primary_key and primary_key.validated
+                              and (readable is None or all((relation.name, c) in readable for c in primary_key.columns)) else [],
+                "uniqueKeys": [list(key.columns) for key in unique_constraints if key.validated
+                               and (readable is None or all((relation.name, c) in readable for c in key.columns))],
             })
+        if managed:
+            tables = [table for table in tables if table["columns"]]
         names = {table["name"] for table in tables}
         relationships, omitted = [], 0
         for rel in live.relationships:
             if (len(rel.source_columns) != 1 or len(rel.target_columns) != 1
                     or rel.source_namespace != namespace or rel.target_namespace != namespace
-                    or rel.source_table not in names or rel.target_table not in names):
+                    or rel.source_table not in names or rel.target_table not in names
+                    or (readable is not None and (
+                        (rel.source_table, rel.source_columns[0]) not in readable
+                        or (rel.target_table, rel.target_columns[0]) not in readable))):
                 omitted += 1
                 continue
             relationships.append({
@@ -63,11 +77,12 @@ class ModelCatalogs:
                   "tables": tables, "relationships": relationships,
                   "notice": f"Live schema · {omitted} composite or cross-schema relationships omitted. Model saves never change the database.",
                   "positions": []}
-        with self._lock:
-            self._cache[key] = (monotonic(), deepcopy(result))
-            self._cache.move_to_end(key)
-            while len(self._cache) > self.maximum_entries:
-                self._cache.popitem(last=False)
+        if not managed:
+            with self._lock:
+                self._cache[key] = (monotonic(), deepcopy(result))
+                self._cache.move_to_end(key)
+                while len(self._cache) > self.maximum_entries:
+                    self._cache.popitem(last=False)
         return result
 
 

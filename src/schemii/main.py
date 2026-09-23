@@ -449,6 +449,17 @@ def create_app(
     from schemii.common.auth.routes import router as auth_router
     from schemii.common.auth.middleware import AuthenticationMiddleware
     application.state.auth = AuthService(active_services.metadata.connection_factory)
+    if hasattr(active_services.connections, "set_authority"):
+        active_services.connections.set_authority(application.state.auth)
+    schemii_connections = (active_services.connections.for_product("schemii")
+                           if hasattr(active_services.connections, "for_product")
+                           else active_services.connections)
+    # These long-lived services also run outside HTTP requests. Give them an
+    # explicit product scope so queued work rechecks the role before opening DB.
+    if active_services.migrations is not None:
+        active_services.migrations._connections = schemii_connections
+    if active_services.console is not None:
+        active_services.console._connections = schemii_connections
     from schemii.common.auth.dependencies import AccountConnectionDependencies
     if application.state.auth.enabled:
         active_services.connections.register_dependency_provider(AccountConnectionDependencies(application.state.auth))
@@ -456,6 +467,8 @@ def create_app(
     application.include_router(auth_router)
     from schemii.common.auth.resources import router as account_resources_router
     application.include_router(account_resources_router)
+    from schemii.common.auth.managed_connections import router as managed_connections_router
+    application.include_router(managed_connections_router)
     application.state.services = active_services
     application.state.pi_client = PiClient.from_env()
     application.state.ai_model_catalog = (
@@ -467,11 +480,11 @@ def create_app(
         else None
     )
     from schemii.schemii.console.raw_session import RawSessionService, router as raw_console_router
-    application.state.raw_console = RawSessionService(active_services.console, active_services.connections, active_services.postgres)
+    application.state.raw_console = RawSessionService(active_services.console, schemii_connections, active_services.postgres)
     application.include_router(raw_console_router)
     application.state.bulk_jobs = BulkJobService(
         JobRepository(active_services.metadata.connection_factory),
-        active_services.console, active_services.connections, active_services.postgres,
+        active_services.console, schemii_connections, active_services.postgres,
     )
     workspace_bulk_guard = getattr(active_services.workspaces, "set_mutation_guard", None)
     if callable(workspace_bulk_guard):

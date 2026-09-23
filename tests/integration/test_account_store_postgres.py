@@ -17,8 +17,8 @@ def test_sessions_roles_and_disable_are_visible_across_auth_instances(postgres_m
         assert second.resolve(token)['id']==user['id']
         assert second.capabilities(user['id'])==[]
         with first.store.transaction(write=True) as state:
-            state['roles'][role_id]=dict(id=role_id,name=role_id,capabilities=['author'],user_ids=[user['id']],connections=[],dashboards=[])
-        assert second.capabilities(user['id'])==['author']
+            state['roles'][role_id]=dict(id=role_id,name=role_id,capabilities=['schemoo:access'],user_ids=[user['id']],connections=[],dashboards=[])
+        assert second.capabilities(user['id'])==['schemoo:access']
         with second.store.transaction(write=True) as state:
             state['roles'][role_id]['capabilities']=[]
         assert first.capabilities(user['id'])==[]
@@ -40,7 +40,6 @@ def test_sessions_roles_and_disable_are_visible_across_auth_instances(postgres_m
 
 def test_shared_report_receipt_separates_actor_from_connection_owner(postgres_metadata):
     from datetime import datetime, timezone
-    import psycopg
     import pytest
     from pydantic import SecretStr
     from schemii.common.connections.models import PostgresConnectionCreate
@@ -79,11 +78,11 @@ def test_shared_report_receipt_separates_actor_from_connection_owner(postgres_me
             row=connection.execute('SELECT owner_id,connection_owner_id FROM schemii.console_executions WHERE id=%s',(private.execution.id,)).fetchone()
             assert row['owner_id']==row['connection_owner_id']==author
 
-        # The relaxed source owner applies only to workspace-free report reads.
-        with pytest.raises(psycopg.errors.CheckViolation) as failure:
-            with factory() as connection:
-                connection.execute('UPDATE schemii.console_executions SET workspace_id=%s,workspace_revision=1 WHERE id=%s',(workspace,shared.execution.id))
-        assert failure.value.diag.constraint_name=='console_executions_workspace_private_identity'
+        # Schemii workspaces may now use role-managed profiles too. The actor
+        # still owns the receipt while its credential identity stays separate.
+        with factory() as connection:
+            row=connection.execute('UPDATE schemii.console_executions SET workspace_id=%s,workspace_revision=1 WHERE id=%s RETURNING owner_id,connection_owner_id',(workspace,shared.execution.id)).fetchone()
+            assert row['owner_id']==viewer and row['connection_owner_id']==author
     finally:
         with factory() as connection:
             connection.execute('DELETE FROM schemii.console_executions WHERE owner_id IN (%s,%s)',(author,viewer))

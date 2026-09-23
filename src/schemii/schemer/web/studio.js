@@ -1,7 +1,7 @@
 import { scrollPosition, restoreScroll, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { requestJson } from '#common/http.js';
-import { currentAccount, canAuthor } from '#common/accounts-session.js';
+import { currentAccount, canAccessProduct, canAuthor } from '#common/accounts-session.js';
 import { initializeUi, createIconButton, createIconElement } from '#common/ui.js';
 import { installProductNavigation } from '#common/product-navigation.js';
 import { confirmAction } from '#common/confirmation.js';
@@ -17,13 +17,13 @@ import { openExpanded, openSql } from './result-viewer.js';
 
 const $ = id => document.getElementById(id), API = '/api/v1/schemer/dashboards';
 let dashboard, model, catalog, library = [], modelList = [], slicerDraft, slicersDirty = false, saving = false, epoch = 0;
-let filtersExpanded = false, author = false;
+let filtersExpanded = false, author = false, modelAuthor = false;
 let permissions = { edit: false, export: false, drill: false };
 const selectionBody = (source = dashboard) => ({ selections: source.selections });
 function renderAccess() {
-  for (const id of ['create-dashboard', 'welcome-create']) $(id).hidden = !author;
+  for (const id of ['create-dashboard', 'welcome-create']) $(id).hidden = !author || !modelAuthor;
   for (const id of ['rename-dashboard', 'duplicate-dashboard', 'delete-dashboard', 'add-tile', 'manage-dashboard-filters', 'update-dashboard-model', 'review-dashboard-model']) $(id).hidden = !permissions.edit;
-  document.querySelector('.model-link').hidden = !author;
+  document.querySelector('.model-link').hidden = !modelAuthor;
   if (!author) {
     $('empty-dashboard').querySelector('small').textContent = 'YOUR REPORT LIBRARY';
     $('empty-dashboard').querySelector('h1').textContent = 'Reports shared with you';
@@ -164,7 +164,7 @@ async function loadDomainOptions(context) {
   const origin = model;
   const authoring = !!context.draft, domain = context.domain || context.input?.domain;
   const binding = authoring ? { definition: origin.definition, domain } : { scopeId: context.scope.id, alternativeId: context.alternative.id, parameterId: context.input.id };
-  const response = await requestJson(permissions.edit ? `/api/v1/schemoo/models/${origin.id}/${authoring ? 'domain-values' : 'parameter-values'}` : `${API}/${dashboard.id}/parameter-values`, { method: 'POST', body: { expectedRevision: origin.revision, ...binding, search: context.search, consoleId: `con_${crypto.randomUUID().replaceAll('-', '')}` } });
+  const response = await requestJson(permissions.edit && modelAuthor ? `/api/v1/schemoo/models/${origin.id}/${authoring ? 'domain-values' : 'parameter-values'}` : `${API}/${dashboard.id}/parameter-values`, { method: 'POST', body: { expectedRevision: origin.revision, ...binding, search: context.search, consoleId: `con_${crypto.randomUUID().replaceAll('-', '')}` } });
   const result = Array.isArray(response.rows) ? response : await readExecution(response), hasLabel = domain?.labelColumn && domain.labelColumn !== domain.column;
   return result.rows.filter(row => row[0] !== null).map(row => ({ value: row[0], label: String(hasLabel ? row[1] ?? row[0] : row[0]), description: hasLabel ? String(row[0]) : '' }));
 }
@@ -327,7 +327,8 @@ async function openDashboard(id) {
     if (version !== epoch) return;
     dashboard = next;
     const context = await requestJson(`${API}/${next.id}/context`);
-    const source = context.model, sourceCatalog = context.catalog; permissions = context.permissions;
+    const source = context.model, sourceCatalog = context.catalog;
+    permissions = { ...context.permissions, edit: author && context.permissions.edit };
     if (version !== epoch) return;
     dashboard = next; model = source; catalog = sourceCatalog; slicersDirty = false; filtersExpanded = false; tileStates.clear();
     $('empty-dashboard').hidden = true; $('dashboard-content').hidden = false;
@@ -431,12 +432,13 @@ window.addEventListener('beforeunload', event => { if (slicersDirty) { event.pre
 initializeUi(); installProductNavigation($('product-navigation'), { activeProduct: 'schemer' });
 async function initialize() {
   try {
-    author = canAuthor(await currentAccount()); renderAccess();
-    const [dashboards, models] = await Promise.all([requestJson(API), author ? requestJson('/api/v1/schemoo/models') : Promise.resolve({ models: [] })]);
+    const account = await currentAccount();
+    author = canAuthor(account); modelAuthor = canAccessProduct(account, 'schemoo'); renderAccess();
+    const [dashboards, models] = await Promise.all([requestJson(API), author && modelAuthor ? requestJson('/api/v1/schemoo/models') : Promise.resolve({ models: [] })]);
     library = dashboards.dashboards; modelList = models.models; renderLibrary();
     const selected = new URLSearchParams(location.search).get('dashboard');
     if (selected || library.length) await openDashboard(selected || library[0].id);
-    if (author && !modelList.length) message('Create a Schemoo model before creating a dashboard.');
+    if (author && modelAuthor && !modelList.length) message('Create a Schemoo model before creating a dashboard.');
   } catch (error) { message(error.message); }
 }
 void initialize();

@@ -91,6 +91,7 @@ class BaselineRecord:
     source: str
     source_execution_id: str | None
     created_at: datetime
+    connection_owner_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,7 @@ class PlanAuthority:
     namespace: str
     required_empty_tables: tuple[str, ...] = ()
     rebuild_table_ids: tuple[str, ...] = ()
+    connection_owner_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +285,7 @@ class MigrationRepository(Protocol):
         owner_id: str,
         workspace_id: str,
         connection_id: str,
+        connection_owner_id: str | None = None,
         database: str,
         namespace: str,
         baseline: WorkspaceImportBaseline,
@@ -419,6 +422,7 @@ class InMemoryMigrationRepository:
                 revision=len(rows) + 1,
                 predecessor_id=predecessor.id if predecessor else None,
                 connection_id=values["connection_id"],
+                connection_owner_id=values.get("connection_owner_id") or values["owner_id"],
                 connection_revision=values["connection_revision"],
                 database=values["database"],
                 namespace=values["namespace"],
@@ -441,6 +445,7 @@ class InMemoryMigrationRepository:
         owner_id: str,
         workspace_id: str,
         connection_id: str,
+        connection_owner_id: str | None = None,
         database: str,
         namespace: str,
         baseline: WorkspaceImportBaseline,
@@ -451,6 +456,7 @@ class InMemoryMigrationRepository:
             owner_id=owner_id,
             workspace_id=workspace_id,
             connection_id=connection_id,
+            connection_owner_id=connection_owner_id or owner_id,
             connection_revision=baseline.connection_revision,
             database=database,
             namespace=namespace,
@@ -908,6 +914,7 @@ class InMemoryMigrationRepository:
                 owner_id=record.owner_id,
                 workspace_id=record.plan.workspace_id,
                 connection_id=record.authority.connection_id,
+                connection_owner_id=record.authority.connection_owner_id or record.owner_id,
                 connection_revision=record.authority.connection_revision,
                 database=record.authority.database,
                 namespace=record.authority.namespace,
@@ -1005,6 +1012,7 @@ class PostgresMigrationRepository:
         owner_id: str,
         workspace_id: str,
         connection_id: str,
+        connection_owner_id: str | None = None,
         database: str,
         namespace: str,
         baseline: WorkspaceImportBaseline,
@@ -1013,6 +1021,7 @@ class PostgresMigrationRepository:
             "owner_id": owner_id,
             "workspace_id": workspace_id,
             "connection_id": connection_id,
+            "connection_owner_id": connection_owner_id or owner_id,
             "connection_revision": baseline.connection_revision,
             "database": database,
             "namespace": namespace,
@@ -1075,14 +1084,14 @@ class PostgresMigrationRepository:
                     INSERT INTO schemii.migration_plans (
                         id, workspace_id, owner_id, baseline_id, baseline_revision,
                         workspace_revision, design_revision, design_fingerprint,
-                        merged_design_fingerprint, connection_id, connection_revision,
+                        merged_design_fingerprint, connection_owner_id, connection_id, connection_revision,
                         database_name, namespace, catalog_fingerprint,
                         review_document, authority_document, review_digest, status,
                         complete, apply_capable, destructive, drift_status,
                         created_at, expires_at
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     """,
                     (
@@ -1095,6 +1104,7 @@ class PostgresMigrationRepository:
                         record.plan.design_revision,
                         record.plan.design_fingerprint,
                         record.plan.merged_design_fingerprint,
+                        record.authority.connection_owner_id or record.owner_id,
                         record.authority.connection_id,
                         record.authority.connection_revision,
                         record.authority.database,
@@ -1139,7 +1149,7 @@ class PostgresMigrationRepository:
         with self._transaction() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT workspace_id, connection_id FROM schemii.migration_plans WHERE owner_id = %s AND id = %s",
+                    "SELECT workspace_id, connection_owner_id, connection_id FROM schemii.migration_plans WHERE owner_id = %s AND id = %s",
                     (owner_id, plan_id),
                 )
                 authority_row = cursor.fetchone()
@@ -1147,7 +1157,7 @@ class PostgresMigrationRepository:
                     raise MigrationNotFoundError("Migration plan was not found")
                 cursor.execute(
                     "SELECT id FROM metadata.postgres_connections WHERE owner_id = %s AND id = %s FOR UPDATE",
-                    (owner_id, authority_row["connection_id"]),
+                    (authority_row["connection_owner_id"], authority_row["connection_id"]),
                 )
                 if cursor.fetchone() is None:
                     raise MigrationConflictError(
@@ -1604,7 +1614,7 @@ class PostgresMigrationRepository:
                     WHERE owner_id = %s AND id = %s
                     FOR UPDATE
                     """,
-                    (record.owner_id, record.authority.connection_id),
+                    (record.authority.connection_owner_id or record.owner_id, record.authority.connection_id),
                 )
                 if cursor.fetchone() is None:
                     raise MigrationConflictError(
@@ -1810,6 +1820,7 @@ class PostgresMigrationRepository:
                     owner_id=record.owner_id,
                     workspace_id=record.plan.workspace_id,
                     connection_id=record.authority.connection_id,
+                    connection_owner_id=record.authority.connection_owner_id or record.owner_id,
                     connection_revision=record.authority.connection_revision,
                     database=record.authority.database,
                     namespace=record.authority.namespace,
@@ -1910,11 +1921,11 @@ class PostgresMigrationRepository:
             """
             INSERT INTO schemii.workspace_schema_baselines (
                 id, workspace_id, owner_id, revision, predecessor_id,
-                connection_id, connection_revision, database_name, namespace,
+                connection_owner_id, connection_id, connection_revision, database_name, namespace,
                 design_revision, design_fingerprint, design_content,
                 catalog_fingerprint, catalog, complete, issues, source,
                 source_execution_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
                       %s, %s::jsonb, %s, %s::jsonb, %s, %s)
             RETURNING *
             """,
@@ -1924,6 +1935,7 @@ class PostgresMigrationRepository:
                 values["owner_id"],
                 revision,
                 current_id,
+                values.get("connection_owner_id") or values["owner_id"],
                 values["connection_id"],
                 values["connection_revision"],
                 values["database"],
@@ -1964,6 +1976,7 @@ class PostgresMigrationRepository:
             "liveCatalog": authority.live_catalog.model_dump(mode="json"),
             "allowDestructive": authority.allow_destructive,
             "connectionId": authority.connection_id,
+            "connectionOwnerId": authority.connection_owner_id,
             "connectionRevision": authority.connection_revision,
             "database": authority.database,
             "namespace": authority.namespace,
@@ -1976,6 +1989,7 @@ class PostgresMigrationRepository:
             id=row["id"], owner_id=row["owner_id"], workspace_id=row["workspace_id"],
             revision=row["revision"], predecessor_id=row["predecessor_id"],
             connection_id=row["connection_id"], connection_revision=row["connection_revision"],
+            connection_owner_id=row.get("connection_owner_id") or row["owner_id"],
             database=row["database_name"], namespace=row["namespace"],
             design_revision=row["design_revision"],
             content=SchemiiDesignContent.model_validate(self._json_load(row["design_content"])),
@@ -2003,6 +2017,7 @@ class PostgresMigrationRepository:
                 ),
                 allow_destructive=authority["allowDestructive"],
                 connection_id=authority["connectionId"],
+                connection_owner_id=authority.get("connectionOwnerId") or row["owner_id"],
                 connection_revision=authority["connectionRevision"],
                 database=authority["database"], namespace=authority["namespace"],
                 required_empty_tables=tuple(authority.get("requiredEmptyTables", ())),

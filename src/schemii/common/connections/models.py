@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     AfterValidator,
@@ -21,6 +21,14 @@ from pydantic.alias_generators import to_camel
 ConnectionName = Annotated[str, Field(min_length=1, max_length=128)]
 Host = Annotated[str, Field(min_length=1, max_length=255)]
 MAX_CONNECT_TIMEOUT_SECONDS = 30
+SCHEMII_CONNECTION_OWNER_ID = "user_schemii_connection_pool"
+ConnectionOwnership = Literal["user", "schemii"]
+
+
+def ownership_for_owner(owner_id: str | None) -> ConnectionOwnership:
+    return "schemii" if owner_id == SCHEMII_CONNECTION_OWNER_ID else "user"
+
+
 def _postgres_identifier(value: str) -> str:
     if "\x00" in value or len(value.encode("utf-8")) > 63:
         raise ValueError("value must be a valid PostgreSQL identifier")
@@ -152,6 +160,8 @@ class PostgresConnectionProfile(PostgresConnectionMetadata):
     """Public connection metadata; credentials are intentionally absent."""
 
     id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
+    owner_id: str | None = None
+    ownership: ConnectionOwnership = "user"
     revision: Annotated[int, Field(strict=True, ge=1)]
     credential_stored: bool
     created_at: datetime
@@ -168,6 +178,8 @@ class PostgresConnectionProfile(PostgresConnectionMetadata):
     def valid_chronology(self) -> "PostgresConnectionProfile":
         if self.updated_at < self.created_at:
             raise ValueError("updated_at cannot be earlier than created_at")
+        if self.ownership != ownership_for_owner(self.owner_id):
+            raise ValueError("connection ownership does not match its owner")
         return self
 
 
@@ -175,5 +187,13 @@ class ResolvedPostgresConnection(PostgresConnectionMetadata):
     """Internal target resolved only when opening PostgreSQL."""
 
     id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
+    owner_id: str | None = None
+    ownership: ConnectionOwnership = "user"
     revision: Annotated[int, Field(strict=True, ge=1)]
     password: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def valid_ownership(self) -> "ResolvedPostgresConnection":
+        if self.ownership != ownership_for_owner(self.owner_id):
+            raise ValueError("connection ownership does not match its owner")
+        return self

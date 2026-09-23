@@ -15,6 +15,10 @@ from psycopg import sql
 import pytest
 
 from schemii.common.postgres.queries import READABLE_COLUMNS_QUERY
+from schemii.common.auth.service import AuthService
+from schemii.common.connections.models import PostgresConnectionCreate, SCHEMII_CONNECTION_OWNER_ID
+from schemii.common.connections.service import ConnectionService
+from schemii.common.connections.store import InMemoryConnectionRepository
 
 
 @pytest.fixture
@@ -97,3 +101,45 @@ def test_reporting_logins_cannot_bypass_rls_or_write(reporting_database):
         connection.execute("SET row_security=off")
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             connection.execute(sql.SQL("SELECT id FROM {}").format(table))
+
+
+def test_schemii_owned_profiles_keep_distinct_rls_views_and_cannot_write(reporting_database):
+    admin, namespace, roles, _ = reporting_database
+    auth = AuthService(enabled=True, setup_token="unused")
+    connections = ConnectionService(InMemoryConnectionRepository(), ())
+    connections.set_authority(auth)
+    profiles = {}
+    for region, password in (("east", "schemii-demo-east-only"),
+                             ("west", "schemii-demo-west-only")):
+        profiles[region] = connections.create_schemii_owned(PostgresConnectionCreate(
+            name=f"{region} reporting", host=admin.info.host or "localhost",
+            port=admin.info.port, database=admin.info.dbname,
+            username=roles[region], password=password))
+    with auth.store.transaction(write=True) as state:
+        state["users"]["friend"] = dict(
+            id="friend", username="friend", display_name="Friend",
+            password_hash="unused", is_admin=False, disabled=False)
+        state["roles"]["readers"] = dict(
+            id="readers", name="Readers", capabilities=["schemii:access"],
+            user_ids=["friend"], dashboards=[], connections=[dict(
+                owner_id=SCHEMII_CONNECTION_OWNER_ID,
+                connection_id=profile.id, allow_authoring=True,
+            ) for profile in profiles.values()])
+
+    visible = connections.for_product("schemii")
+    assert {profile.id for profile in visible.list("friend")} == {
+        profile.id for profile in profiles.values()}
+    table = sql.Identifier(namespace, "sales")
+    for region, expected_rows in (("east", [(1, "east"), (2, "east")]),
+                                  ("west", [(3, "west")])):
+        with visible.use("friend", profiles[region].id) as selected:
+            assert selected.owner_id == SCHEMII_CONNECTION_OWNER_ID
+            assert selected.ownership == "schemii"
+            with psycopg.connect(os.environ["SCHEMII_TEST_METADATA_DSN"],
+                                 user=selected.username,
+                                 password=selected.password.get_secret_value(),
+                                 autocommit=True) as connection:
+                assert connection.execute(sql.SQL(
+                    "SELECT id,region FROM {} ORDER BY id").format(table)).fetchall() == expected_rows
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connection.execute(sql.SQL("DELETE FROM {}").format(table))

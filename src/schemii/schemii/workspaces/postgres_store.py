@@ -81,6 +81,7 @@ class PostgresWorkspaceRepository:
                     """
                     SELECT workspace.*,
                            target.connection_id,
+                           target.connection_owner_id,
                            target.database_name,
                            target.namespace
                     FROM schemii.workspaces AS workspace
@@ -159,7 +160,7 @@ class PostgresWorkspaceRepository:
                     assert expected_connection_revision is not None
                     self._lock_target_connection(
                         cursor,
-                        owner_id,
+                        request.connection_owner_id or owner_id,
                         request.connection_id,
                         request.database,
                         expected_connection_revision,
@@ -195,7 +196,7 @@ class PostgresWorkspaceRepository:
             with connection.cursor() as cursor:
                 self._lock_target_connection(
                     cursor,
-                    owner_id,
+                    request.connection_owner_id or owner_id,
                     request.connection_id,
                     request.database,
                     baseline.connection_revision,
@@ -221,6 +222,7 @@ class PostgresWorkspaceRepository:
                     owner_id=owner_id,
                     workspace_id=workspace_id,
                     connection_id=request.connection_id,
+                    connection_owner_id=request.connection_owner_id or owner_id,
                     database=request.database,
                     namespace=request.namespace,
                     baseline=baseline,
@@ -239,6 +241,7 @@ class PostgresWorkspaceRepository:
             """
             SELECT workspace.*,
                    target.connection_id,
+                   target.connection_owner_id,
                    target.database_name,
                    target.namespace
             FROM schemii.workspace_targets AS target
@@ -300,14 +303,15 @@ class PostgresWorkspaceRepository:
             cursor.execute(
                 """
                 INSERT INTO schemii.workspace_targets (
-                    owner_id, workspace_id, connection_id,
+                    owner_id, workspace_id, connection_owner_id, connection_id,
                     database_name, namespace
                 )
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
                     owner_id,
                     workspace_id,
+                    request.connection_owner_id or owner_id,
                     request.connection_id,
                     request.database,
                     request.namespace,
@@ -395,6 +399,7 @@ class PostgresWorkspaceRepository:
             )
         row.update(
             connection_id=request.connection_id,
+            connection_owner_id=request.connection_owner_id or (owner_id if request.connection_id else None),
             database_name=request.database,
             namespace=request.namespace,
         )
@@ -605,7 +610,7 @@ class PostgresWorkspaceRepository:
                 row = cursor.fetchone()
                 cursor.execute(
                     """
-                    SELECT connection_id, database_name, namespace
+                    SELECT connection_id, connection_owner_id, database_name, namespace
                     FROM schemii.workspace_targets
                     WHERE owner_id = %s AND workspace_id = %s
                     """,
@@ -614,6 +619,7 @@ class PostgresWorkspaceRepository:
                 target = cursor.fetchone()
                 row.update(
                     connection_id=target["connection_id"] if target else None,
+                    connection_owner_id=target["connection_owner_id"] if target else None,
                     database_name=target["database_name"] if target else None,
                     namespace=target["namespace"] if target else None,
                 )
@@ -706,7 +712,7 @@ class PostgresWorkspaceRepository:
                     """
                     SELECT count(*) AS workspace_count
                     FROM schemii.workspace_targets
-                    WHERE owner_id = %s AND connection_id = %s
+                    WHERE connection_owner_id = %s AND connection_id = %s
                     """,
                     (owner_id, connection_id),
                 )
@@ -755,7 +761,7 @@ class PostgresWorkspaceRepository:
                     JOIN schemii.workspaces AS workspace
                       ON workspace.owner_id = target.owner_id
                      AND workspace.id = target.workspace_id
-                    WHERE target.owner_id = %s
+                    WHERE target.connection_owner_id = %s
                       AND target.connection_id = %s
                     ORDER BY workspace.created_at, workspace.id
                     """,
@@ -796,7 +802,7 @@ class PostgresWorkspaceRepository:
             JOIN schemii.workspaces AS workspace
               ON workspace.owner_id = target.owner_id
              AND workspace.id = target.workspace_id
-            WHERE target.owner_id = %s AND target.connection_id = %s
+            WHERE target.connection_owner_id = %s AND target.connection_id = %s
             ORDER BY workspace.id
             FOR UPDATE OF workspace
             """,
@@ -819,7 +825,7 @@ class PostgresWorkspaceRepository:
              AND target.workspace_id = execution.workspace_id
             LEFT JOIN schemii.migration_syncs AS sync
               ON sync.execution_id = execution.id
-            WHERE target.owner_id = %s AND target.connection_id = %s
+            WHERE target.connection_owner_id = %s AND target.connection_id = %s
               AND (
                   execution.status IN (
                       'reserved', 'applying', 'uncertain',
@@ -850,6 +856,7 @@ class PostgresWorkspaceRepository:
             """
             SELECT workspace.*,
                    target.connection_id,
+                   target.connection_owner_id,
                    target.database_name,
                    target.namespace
             FROM schemii.workspaces AS workspace
@@ -1030,6 +1037,7 @@ class PostgresWorkspaceRepository:
             revision=row["revision"],
             name=row["name"],
             connection_id=row["connection_id"],
+            connection_owner_id=row.get("connection_owner_id"),
             database=row["database_name"],
             namespace=row["namespace"],
             tables=positions,

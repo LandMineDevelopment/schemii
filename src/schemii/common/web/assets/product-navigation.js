@@ -1,5 +1,5 @@
 import { createIconElement } from "./ui.js";
-import { currentAccount, canAuthor, signOut } from "./accounts-session.js";
+import { currentAccount, canAccessProduct, landingPath, signOut } from "./accounts-session.js";
 
 const PRODUCTS = Object.freeze([
   { id: "schemii", name: "Schemii", description: "Schema design", href: "/" },
@@ -44,10 +44,10 @@ export function installProductNavigation(host, { activeProduct } = {}) {
   menu.append(trigger, surface);
   host.replaceChildren(menu);
   void currentAccount().then(account => {
-    if (!canAuthor(account)) {
-      for (const item of surface.querySelectorAll('a')) if (item.getAttribute('href') !== '/schemer') item.remove();
-      if (activeProduct !== 'schemer') location.replace('/schemer');
+    for (const product of PRODUCTS) {
+      if (!canAccessProduct(account, product.id)) surface.querySelector(`a[href="${product.href}"]`)?.remove();
     }
+    if (!canAccessProduct(account, activeProduct)) { location.replace(landingPath(account)); return; }
     for (const [label, href] of [[account.user.display_name || account.user.username, '/account'], ...(account.is_admin ? [['Administration', '/admin']] : [])]) {
       const item = document.createElement('a'); item.href = href; item.className = 'ui-product-navigation__item'; item.textContent = label; surface.append(item);
     }

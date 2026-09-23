@@ -80,6 +80,28 @@ def test_workspace_kind_and_database_identity_are_fixed_at_creation() -> None:
     assert local.connection_id is None
     assert database.connection_id is not None
 
+
+def test_managed_workspace_keeps_actor_and_credential_owners_distinct() -> None:
+    repository = InMemoryWorkspaceRepository()
+    connection_id = "pg_0123456789abcdef0123456789abcdef"
+    workspace = repository.create(
+        "friend",
+        WorkspaceCreateRecord(
+            connection_id=connection_id,
+            connection_owner_id="role-organization-writer",
+            database="analytics",
+            namespace="public",
+        ),
+    )
+
+    assert repository.get("friend", workspace.id).connection_owner_id == "role-organization-writer"
+    with pytest.raises(WorkspaceNotFoundError):
+        repository.get("role-organization-writer", workspace.id)
+    assert repository.count_for_connection("role-organization-writer", connection_id) == 1
+    assert repository.count_for_connection("friend", connection_id) == 0
+    assert repository.dependencies_for_connection("role-organization-writer", connection_id)[0].resource_id == workspace.id
+    assert "connection_owner_id" not in workspace.model_dump()
+
 def test_workspace_and_aggregate_position_counts_are_bounded() -> None:
     workspace_limited = InMemoryWorkspaceRepository(max_workspaces_per_owner=1)
     workspace_limited.create("owner", workspace_request())

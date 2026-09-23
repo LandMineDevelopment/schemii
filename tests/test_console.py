@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta, timezone
 import threading
 import time
+from types import SimpleNamespace
+
+import pytest
 
 from fastapi.testclient import TestClient
 
 from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import InMemoryConnectionRepository
+from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.metadata.factory import MetadataRepositories
 from schemii.common.postgres.console.execution import (
     ConsoleQueryResult,
@@ -24,7 +28,8 @@ from schemii.common.postgres.models import (
 )
 from schemii.main import ApplicationServices, create_app
 from schemii.schemii.designs.store import InMemoryDesignRepository
-from schemii.schemii.console.repository import InMemoryConsoleRepository
+from schemii.schemii.console.repository import ConsoleTarget, InMemoryConsoleRepository
+from schemii.schemii.console.service import ConsoleService, ConsoleServiceError
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
 
@@ -183,6 +188,37 @@ def execution_body(workspace: dict, sql: str) -> dict:
         "mode": "managed_read",
         "statements": [sql],
     }
+
+
+def test_managed_result_requires_the_reviewed_credential_identity() -> None:
+    repository = InMemoryConsoleRepository()
+    target = ConsoleTarget("pg_" + "1" * 32, 2, "analytics", "public", "role-writer")
+    receipt = repository.reserve(
+        "friend", None, "con_" + "2" * 32, None, target,
+        ("SELECT 1",), 100, datetime.now(timezone.utc),
+    )
+    service = ConsoleService(
+        repository=repository,
+        connections=SimpleNamespace(),
+        postgres=ConsolePostgresGateway(),
+        workspaces=InMemoryWorkspaceRepository(),
+    )
+
+    def access(owner_id):
+        return SimpleNamespace(get=lambda actor, connection: SimpleNamespace(
+            owner_id=owner_id, revision=2, database="analytics",
+        ))
+
+    service.authorize_managed_result("friend", receipt.execution.id, access("role-writer"))
+    with pytest.raises(ConsoleServiceError) as changed:
+        service.authorize_managed_result("friend", receipt.execution.id, access("role-reader"))
+    assert changed.value.code == "console_target_changed"
+    with pytest.raises(ConsoleServiceError) as revoked:
+        service.authorize_managed_result(
+            "friend", receipt.execution.id,
+            SimpleNamespace(get=lambda actor, connection: (_ for _ in ()).throw(ConnectionNotFoundError())),
+        )
+    assert revoked.value.code == "console_connection_revoked"
 
 
 def test_console_preferences_are_durable_bounded_and_not_write_authority() -> None:

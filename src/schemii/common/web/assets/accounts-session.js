@@ -12,7 +12,19 @@ export function sessionChanged() {
 export function currentAccount() {
   return pending ||= requestJson('/api/v1/auth/me');
 }
-export function canAuthor(account) { return !!(account?.is_admin || account?.capabilities?.includes('author')); }
+export function canAccessProduct(account, product) {
+  if (!['schemii', 'schemoo', 'schemer'].includes(product)) return false;
+  return !!account?.capabilities?.includes(`${product}:access`);
+}
+export function canAuthor(account, product = 'schemer') {
+  return canAccessProduct(account, product) && (product !== 'schemer' || account.capabilities.includes('schemer:author'));
+}
+export function landingPath(account) {
+  for (const [product, path] of [['schemii', '/'], ['schemoo', '/schemoo'], ['schemer', '/schemer']]) {
+    if (canAccessProduct(account, product)) return path;
+  }
+  return account?.is_admin ? '/admin' : '/account';
+}
 export async function signOut() {
   await requestJson('/api/v1/auth/logout', { method: 'POST', body: {} });
   // Product preferences and saved data remain on the server. No session data survives logout.

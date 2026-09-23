@@ -389,10 +389,12 @@ class MigrationService:
             workspace.database,
             workspace.namespace,
         )
+        if (baseline.connection_owner_id or owner_id) != (getattr(workspace, "connection_owner_id", None) or owner_id):
+            raise MigrationServiceError(409, "workspace_target_changed", "The workspace PostgreSQL identity differs from its baseline")
 
         try:
             with self._connections.use(owner_id, workspace.connection_id) as connection:
-                if connection.database != workspace.database:
+                if connection.database != workspace.database or (getattr(connection, "owner_id", None) or owner_id) != (getattr(workspace, "connection_owner_id", None) or owner_id):
                     raise MigrationServiceError(
                         409,
                         "workspace_target_changed",
@@ -440,7 +442,7 @@ class MigrationService:
         if inspected_table_names:
             try:
                 with self._connections.use(owner_id, workspace.connection_id) as connection:
-                    if connection.revision != connection_revision:
+                    if connection.revision != connection_revision or (getattr(connection, "owner_id", None) or owner_id) != (getattr(workspace, "connection_owner_id", None) or owner_id):
                         raise MigrationServiceError(
                             409,
                             "connection_changed",
@@ -556,6 +558,8 @@ class MigrationService:
                     compiled = compile_conversion(workspace.namespace, before, after, old, new, choice)
                     review = compiled.review
                     with self._connections.use(owner_id, workspace.connection_id) as connection:
+                        if (getattr(connection, "owner_id", None) or owner_id) != (getattr(workspace, "connection_owner_id", None) or owner_id):
+                            raise MigrationServiceError(409, "workspace_target_changed", "The workspace PostgreSQL identity changed")
                         review.validation_error = self._postgres.validate_column_conversion(connection, compiled.validation_sql)
                     if not review.validation_error:
                         conversions[new.id] = compiled
@@ -716,6 +720,7 @@ class MigrationService:
                         live_catalog=catalog,
                         allow_destructive=request.allow_destructive,
                         connection_id=workspace.connection_id,
+                        connection_owner_id=getattr(workspace, "connection_owner_id", None) or owner_id,
                         connection_revision=connection_revision,
                         database=workspace.database,
                         namespace=workspace.namespace,
@@ -796,6 +801,7 @@ class MigrationService:
         workspace = self._workspace(owner_id, plan.workspace_id)
         if (
             workspace.connection_id != record.authority.connection_id
+            or (getattr(workspace, "connection_owner_id", None) or owner_id) != (record.authority.connection_owner_id or owner_id)
             or workspace.database != record.authority.database
             or workspace.namespace != record.authority.namespace
         ):
@@ -806,7 +812,7 @@ class MigrationService:
             )
         try:
             with self._connections.use(owner_id, record.authority.connection_id) as connection:
-                if connection.revision != record.authority.connection_revision:
+                if connection.revision != record.authority.connection_revision or (getattr(connection, "owner_id", None) or owner_id) != (record.authority.connection_owner_id or owner_id):
                     raise MigrationServiceError(409, "connection_changed", "Connection changed after review")
                 current_catalog = self._postgres.introspect(connection, record.authority.namespace)
         except ConnectionNotFoundError as error:

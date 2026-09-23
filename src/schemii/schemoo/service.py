@@ -16,6 +16,9 @@ def document(value):
 
 def load_model(services, owner, model_id, expected_revision=None):
     model = services.models.get(owner, model_id)
+    profile = services.connections.get(owner, model.connection_id)
+    if (getattr(profile, "owner_id", None) or owner) != (model.connection_owner_id or owner):
+        raise ApiProblem(409, "model_source_changed", "The model's database identity changed. Reload its source.")
     if expected_revision is not None and model.revision != expected_revision:
         raise ModelConflictError(model.revision)
     return model
@@ -129,8 +132,10 @@ def execute_query(services, owner, model, console_id, plan, tasks, *, row_page_s
     options = {} if row_page_size is None else {"row_page_size": row_page_size}
     receipt = services.console.reserve_read_target(
         owner, connection_id=model.connection_id, database=model.database,
-        namespace=model.namespace, console_id=console_id, statements=[plan["sql"]], **options)
-    tasks.add_task(services.console.run, owner, receipt.id)
+        namespace=model.namespace, console_id=console_id, statements=[plan["sql"]],
+        connection_access=services.connections, **options)
+    tasks.add_task(services.console.run, owner, receipt.id,
+                   connection_access=services.connections)
     return {"plan": plan, "execution": document(receipt),
             "executionUrl": f"/api/v1/common/query-executions/{receipt.id}"}
 

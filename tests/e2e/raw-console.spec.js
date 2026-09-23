@@ -172,6 +172,29 @@ test('raw console shows notices, same-session plans, elapsed time, and Stop', as
   }
 });
 
+test('a rejected write keeps valid query activity instead of missing session fields', async ({ page, request }) => {
+  const ctx = await context(request);
+  await page.goto(`/?workspace=${ctx.workspace.id}&layer=sql`);
+  await page.locator('#write-mode-tool').click();
+  await editor(page, 'SELECT 1 / 0');
+  const opened = page.waitForResponse(response => response.url().endsWith('/console/sessions') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Run current statement', exact: true }).click();
+  const session = `${ctx.base}/${(await (await opened).json()).id}`;
+  try {
+    const sqlWorkspace = page.getByRole('region', { name: 'SQL workspace', exact: true });
+    await expect(sqlWorkspace.locator('#sql-results')).toContainText('division by zero');
+    const summary = sqlWorkspace.locator('.sql-query-activity summary');
+    await expect(summary).toContainText(/failed · [0-9.]+ s · Query activity/);
+    await expect(summary).not.toContainText(/undefined|NaN/);
+    await page.getByRole('button', { name: 'Roll back', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Roll back write transaction' }).getByRole('button', { name: 'Roll back', exact: true }).click();
+    await expect(sqlWorkspace.locator('#sql-transaction-status')).toContainText('No transaction open');
+    await expect(summary).not.toContainText(/undefined|NaN/);
+  } finally {
+    await request.delete(session);
+  }
+});
+
 test('COPY dialog streams an uploaded file back through the native browser download', async ({ page, request }) => {
   const ctx = await context(request);
   // Exercise the native streaming fallback on desktop and mobile alike.
