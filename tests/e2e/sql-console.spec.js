@@ -76,6 +76,34 @@ for (const loadingPhase of ["workspaces", "design snapshot"]) {
   });
 }
 
+for (const landing of ["empty", "stale"]) {
+  for (const layer of ["SQL", "Views"]) {
+    test(`a layer chosen on an ${landing} workspace landing survives delayed startup (${layer})`, async ({ page }) => {
+      let release, observed;
+      const held = new Promise(resolve => { release = resolve; });
+      const requested = new Promise(resolve => { observed = resolve; });
+      await page.route("**/api/v1/schemii/workspaces", async route => {
+        observed();
+        await held;
+        await route.fulfill({ json: { workspaces: [] } });
+      });
+      try {
+        await page.goto(landing === "empty" ? "/" : `/?workspace=ws_${"f".repeat(32)}&layer=tables`);
+        await requested;
+        const toolbar = page.locator("#tool-rail");
+        await page.getByRole("button", { name: layer, exact: true }).click();
+        await expect(toolbar).toHaveAttribute("aria-label", `${layer} tools`);
+        release();
+        await expect(page.locator("#catalog-state")).toContainText("Open a schema workspace");
+        await expect(page.locator("#workspace-title")).toHaveText("No workspace open");
+        await expect(toolbar).toHaveAttribute("aria-label", `${layer} tools`);
+        await expect(page.getByRole("button", { name: layer, exact: true })).toHaveAttribute("aria-pressed", "true");
+        await expect(page).not.toHaveURL(/workspace=/);
+      } finally { release(); }
+    });
+  }
+}
+
 test("safe-read Console runs the cursor statement and renders PostgreSQL column types", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);

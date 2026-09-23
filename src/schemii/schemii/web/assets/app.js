@@ -1137,7 +1137,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, la
     if (!navigation.workspaceId) {
       if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
       clearActiveWorkspace({ historyMode: null });
-      setLayer("tables", { historyMode: null });
+      if (layerGeneration === state.layerNavigationGeneration) setLayer("tables", { historyMode: null });
       restored = true;
       return true;
     }
@@ -1146,7 +1146,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, la
     if (!workspace) {
       if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
       clearActiveWorkspace({ historyMode: null });
-      setLayer("tables", { historyMode: null });
+      if (layerGeneration === state.layerNavigationGeneration) setLayer("tables", { historyMode: null });
       if (notifyMissing) showToast("The workspace saved in this browser URL no longer exists.", { error: true });
       restored = true;
       return true;
