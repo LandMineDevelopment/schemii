@@ -36,13 +36,13 @@ _MAX_ROUTES = 256
 # Installed application-state AI components bring the graph above 1,000 objects.
 # Keep the developer map bounded with modest headroom.
 # Include deferred background execution, beyond the response/reservation path.
-_MAX_CALLABLES = 1024
+_MAX_CALLABLES = 1280
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
 _MAX_BINDINGS = 96
 # Keep the whole registered application visible as implemented route families grow.
 # This remains a hard bound; it is not a pagination or runtime discovery setting.
-_MAX_OBJECTS = 1536
+_MAX_OBJECTS = 1792
 _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 768
@@ -885,7 +885,7 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
         SourceInspectionLimits(
             object_limit=_MAX_OBJECTS,
             source_limit=128_000,
-            total_source_limit=2_048_000,
+            total_source_limit=2_560_000,
         )
     )
     runtime = RuntimeBindingIndex(
