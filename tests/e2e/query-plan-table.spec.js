@@ -25,7 +25,7 @@ async function mount(page, request, analyze = true, fixture = plan) {
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);
   await expect(page.getByRole('textbox', { name: 'Unsaved SQL draft' })).toBeVisible();
   await page.locator('#show-sql-results').click();
-  await expect(page.locator('#sql-results')).toContainText('Ready for a query');
+  await expect(page.locator('#sql-results')).toContainText('Select text, place the cursor in a statement, or choose Run all.');
   await page.evaluate(async ({ plan, analyze }) => {
     const { createQueryPlanView } = await import('/assets/common/query-plan.js');
     if (!analyze) {
