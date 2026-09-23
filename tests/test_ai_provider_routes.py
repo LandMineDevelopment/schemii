@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
 from schemii.common.ai.credential_store import MemoryAiCredentialStore
 from schemii.common.ai.routes import admin_router, router, shared_codex_router
+from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
 from schemii.common.api.errors import install_api_error_handlers
 from schemii.common.metadata.models import Principal, get_current_principal
 
@@ -18,6 +19,7 @@ class Auth:
         self.store = self
         self.events = []
         self.admin_id = "admin"
+        self.roles = {}
 
     def is_admin(self, user_id):
         return user_id == self.admin_id
@@ -33,7 +35,7 @@ class Auth:
 
     @contextmanager
     def transaction(self):
-        yield {"users": {"alice": {"disabled": False}}}
+        yield {"users": {"alice": {"disabled": False}}, "roles": self.roles}
 
 
 def test_zen_key_is_admin_managed_and_never_returned_to_client():
@@ -112,7 +114,8 @@ def test_shared_codex_admin_controls_connection_model_reasoning_and_exact_grant(
     app.state.ai_service = SimpleNamespace(runtime=SimpleNamespace(
         _supported_models=lambda: [{"providerId": "openai-codex", "id": "gpt-6-luna",
                                     "name": "GPT-6 Luna", "reasoningLevels": ["default", "high"]}],
-        instance_codex_catalog=lambda: {"verifiedModels": [], "catalogCheckedAt": None},
+        instance_codex_catalog=lambda: {"verifiedModels": [{"id": "gpt-6-luna",
+            "reasoningLevels": ["default", "high"]}], "catalogCheckedAt": None},
         test_instance_codex=lambda: {"connected": True, "checkedAt": "now", "models": [
             {"providerId": "openai-codex", "id": "gpt-6-luna"}]}))
     app.dependency_overrides[get_current_principal] = lambda: Principal(
@@ -127,6 +130,12 @@ def test_shared_codex_admin_controls_connection_model_reasoning_and_exact_grant(
     listing = client.get("/api/v1/admin/ai/shared-codex")
     assert listing.status_code == 200
     assert listing.json()["grants"][0].items() >= grant.items()
+    appended = {**grant, "reasoningEffort": "default"}
+    assert client.post("/api/v1/admin/ai/shared-codex/grants", json=appended).status_code == 200
+    assert len(client.get("/api/v1/admin/ai/shared-codex").json()["grants"]) == 2
+    assert client.request("DELETE", "/api/v1/admin/ai/shared-codex/model-grants",
+                          json=appended).json() == {"deleted": True}
+    assert client.get("/api/v1/admin/ai/shared-codex").json()["grants"][0]["reasoningEffort"] == "high"
     assert "private-refresh-token" not in listing.text + connected.text
     assert client.post("/api/v1/admin/ai/shared-codex/test").json()["models"][0]["id"] == "gpt-6-luna"
     credentials.delete("admin", "codex-prototype")
@@ -140,3 +149,49 @@ def test_shared_codex_admin_controls_connection_model_reasoning_and_exact_grant(
     assert client.get("/api/v1/admin/ai/shared-codex").status_code == 403
     assert client.put("/api/v1/admin/ai/shared-codex/credential").status_code == 403
     assert client.post("/api/v1/admin/ai/shared-codex/test").status_code == 403
+
+
+def test_role_ai_grants_require_same_role_scope_and_verified_model():
+    app = FastAPI()
+    app.include_router(shared_codex_router)
+    app.include_router(admin_router)
+    install_api_error_handlers(app)
+    instance = MemoryInstanceAiProviderStore()
+    auth = Auth()
+    source = "pg_" + "a" * 32
+    role = {"id": "role_reports", "user_ids": ["alice"],
+            "capabilities": ["schemii:access"],
+            "connections": [{"owner_id": SCHEMII_CONNECTION_OWNER_ID,
+                             "connection_id": source, "allow_authoring": True}],
+            "dashboards": []}
+    auth.roles["role_reports"] = role
+    app.state.auth = auth
+    app.state.services = SimpleNamespace(
+        metadata=SimpleNamespace(ai_instance_providers=instance),
+        connections=SimpleNamespace(
+            get=lambda owner, connection: SimpleNamespace(ownership="schemii"),
+            for_product=lambda product: SimpleNamespace(list=lambda user: [])))
+    verified = [{"id": "gpt-6-luna", "reasoningLevels": ["default", "high"]}]
+    app.state.ai_service = SimpleNamespace(runtime=SimpleNamespace(
+        instance_codex_catalog=lambda: {"verifiedModels": verified},
+        _supported_models=lambda: [{"providerId": "openai-codex", **verified[0]}]))
+    app.dependency_overrides[get_current_principal] = lambda: Principal(
+        user_id="admin", authentication_source="local_prototype")
+    client = TestClient(app)
+    body = {"roleId": "role_reports", "product": "schemii",
+            "connectionOwnerId": SCHEMII_CONNECTION_OWNER_ID,
+            "connectionId": source, "modelId": "gpt-6-luna", "reasoningEffort": "high"}
+    response = client.put("/api/v1/admin/ai/shared-codex/role-grants", json=body)
+    assert response.status_code == 200
+    assert client.get("/api/v1/admin/ai/shared-codex/role-grants").json()["grants"] == [
+        {**response.json(), "active": True}]
+    assert client.put("/api/v1/admin/ai/shared-codex/role-grants",
+                      json={**body, "reasoningEffort": "max"}).status_code == 422
+    assert client.put("/api/v1/admin/ai/shared-codex/role-grants",
+                      json={**body, "roleId": "role_personal_alice"}).status_code == 422
+    role["connections"].clear()
+    stale = client.get("/api/v1/admin/ai/shared-codex/role-grants").json()["grants"][0]
+    assert stale["active"] is False and stale["issue"]
+    assert client.put("/api/v1/admin/ai/shared-codex/role-grants", json=body).status_code == 422
+    assert client.request("DELETE", "/api/v1/admin/ai/shared-codex/role-grants",
+                          json=body).json() == {"deleted": True}

@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from schemii.common.admin_config import AiPolicy
 from schemii.common.ai.context import compact_tool_context
+from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
 from schemii.common.metadata.limit_events import LimitEventNotice
 
 
@@ -51,6 +52,22 @@ class PiReply:
     tool_calls: tuple[tuple[str, dict], ...]
     assistant_message: dict | None = None
     tool_call_ids: tuple[str, ...] = ()
+
+
+def role_has_instance_scope(role, product, connection_owner_id, connection_id):
+    """A role's AI permission must share its app and managed profile authority."""
+    if f"{product}:access" not in role.get("capabilities", ()):
+        return False
+    if connection_id is None:
+        return product == "schemii" and connection_owner_id is None
+    if connection_owner_id != SCHEMII_CONNECTION_OWNER_ID:
+        return False
+    if any(grant["owner_id"] == connection_owner_id and grant["connection_id"] == connection_id
+           and grant["allow_authoring"] for grant in role.get("connections", ())):
+        return product != "schemer" or "schemer:author" in role.get("capabilities", ())
+    return product == "schemer" and any(
+        grant["connection_owner_id"] == connection_owner_id and grant["connection_id"] == connection_id
+        for grant in role.get("dashboards", ()))
 
 
 class PiRuntime:
@@ -172,6 +189,32 @@ class PiRuntime:
     def credential_id(provider_id):
         return {"openai-codex": "codex-prototype", "openai": "openai"}.get(provider_id)
 
+    def _effective_instance_grants(self, owner, provider_id, scope=None):
+        """Resolve direct and assigned role grants in the application authority."""
+        if self.instance_store is None:
+            return []
+        if self.auth and self.auth.enabled and not self.auth.user(owner):
+            return []
+        capabilities = set(self.auth.capabilities(owner)) if self.auth and self.auth.enabled else None
+        direct = self.instance_store.list_grants(provider_id)
+        roles = {}
+        if self.auth and self.auth.enabled:
+            with self.auth.store.transaction() as state:
+                roles = {role_id: role for role_id, role in state["roles"].items()
+                         if owner in role["user_ids"]}
+        result = []
+        for grant in direct:
+            grant_scope = (grant["product"], grant["connectionOwnerId"], grant["connectionId"])
+            if (grant["userId"] == owner and (scope is None or grant_scope == scope)
+                    and (capabilities is None or f"{grant['product']}:access" in capabilities)):
+                result.append({**grant, "source": "user"})
+        for grant in self.instance_store.list_role_grants(provider_id):
+            grant_scope = (grant["product"], grant["connectionOwnerId"], grant["connectionId"])
+            role = roles.get(grant["roleId"])
+            if role and (scope is None or grant_scope == scope) and role_has_instance_scope(role, *grant_scope):
+                result.append({**grant, "source": "role"})
+        return result
+
     def status(self, owner, *, refresh=False, zen_scope=None):
         try:
             supported = self._supported_models()
@@ -195,8 +238,10 @@ class PiRuntime:
                     if not self.instance_store.status(actual_provider)["connected"]:
                         continue
                     if zen_scope is None:
-                        if any(grant["userId"] == owner for grant in self.instance_store.list_grants(actual_provider)):
+                        grants = self._effective_instance_grants(owner, actual_provider)
+                        if grants:
                             connected.add(public_provider)
+                            instance_grants[public_provider] = grants
                     else:
                         try:
                             scope = self.require_instance_access(owner, zen_scope, actual_provider)
@@ -204,8 +249,8 @@ class PiRuntime:
                             pass  # An inaccessible resource is never selectable.
                         else:
                             connected.add(public_provider)
-                            instance_grants[public_provider] = self.instance_store.get_grant(
-                                owner, *scope, provider_id=actual_provider)
+                            instance_grants[public_provider] = self._effective_instance_grants(
+                                owner, actual_provider, scope)
             generations = {row["provider_id"]: row["generation"] for row in credentials if row.get("connected")}
             denied = self._denied_models(owner, credentials)
             zen = self.catalog.snapshot() if self.catalog else {"models": [], "error": None, "checkedAt": None}
@@ -227,11 +272,22 @@ class PiRuntime:
                               "openai-codex" if provider_id == self.SHARED_CODEX_ID else provider_id)
                           and (provider_id != "opencode" or item["id"] in verified_zen)]
                 if provider_id == self.SHARED_CODEX_ID:
-                    grant = instance_grants.get(provider_id)
-                    if grant:
-                        models = [model for model in models if model["id"] == grant["modelId"]]
+                    grants = instance_grants.get(provider_id, [])
+                    allowed = {}
+                    for grant in grants:
+                        allowed.setdefault(grant["modelId"], set()).add(grant["reasoningEffort"])
+                    if grants:
+                        models = [model for model in models if model["id"] in allowed]
                         for model in models:
-                            model["reasoningLevels"] = [grant["reasoningEffort"]]
+                            levels = [level for level in model["reasoningLevels"]
+                                      if level in allowed[model["id"]]]
+                            if "default" in allowed[model["id"]] and "default" not in levels:
+                                levels.insert(0, "default")
+                            model["reasoningLevels"] = levels
+                            if not levels:
+                                model["status"] = "unavailable"
+                    else:
+                        models = []
                 authenticated = provider_id in connected
                 available = any(model["status"] == "active" for model in models) and authenticated
                 item = {"id": provider_id, "name": name, "available": available,
@@ -245,9 +301,10 @@ class PiRuntime:
                         item["catalogError"] = "Could not refresh the free-model catalog. The list uses its last unexpired snapshot."
                 if provider_id == self.SHARED_CODEX_ID:
                     item["adminManaged"] = True
-                    if instance_grants.get(provider_id):
-                        item["selectedModelId"] = instance_grants[provider_id]["modelId"]
-                        item["selectedReasoningEffort"] = instance_grants[provider_id]["reasoningEffort"]
+                    policies = {(grant["modelId"], grant["reasoningEffort"])
+                                for grant in instance_grants.get(provider_id, [])}
+                    if len(policies) == 1:
+                        item["selectedModelId"], item["selectedReasoningEffort"] = next(iter(policies))
                 providers.append(item)
             errors = [f'{provider["name"]}: {provider["catalogError"]}' for provider in providers if provider["catalogError"]]
             return {"enabled": self.policy.enabled, "healthy": True, "providers": providers,
@@ -284,9 +341,8 @@ class PiRuntime:
             not self.auth.user(owner) or f"{product}:access" not in self.auth.capabilities(owner)
         ):
             raise PiError("instance_access_denied", status=403)
-        if not self.instance_store.status(provider_id)["connected"] or not self.instance_store.has_grant(
-            owner, product, connection_owner_id, connection_id, provider_id=provider_id
-        ):
+        if (not self.instance_store.status(provider_id)["connected"]
+                or not self._effective_instance_grants(owner, provider_id, scope)):
             raise PiError("instance_access_denied", status=403)
         return scope
 
@@ -294,10 +350,12 @@ class PiRuntime:
         if provider_id != self.SHARED_CODEX_ID:
             return None
         actual_scope = self.require_instance_access(owner, scope, "openai-codex")
-        grant = self.instance_store.get_grant(owner, *actual_scope, provider_id="openai-codex")
-        if not grant:
+        grants = self._effective_instance_grants(owner, "openai-codex", actual_scope)
+        if not grants:
             raise PiError("instance_access_denied", status=403)
-        if grant["modelId"] != model_id or grant["reasoningEffort"] != reasoning_effort:
+        grant = next((item for item in grants if item["modelId"] == model_id
+                      and item["reasoningEffort"] == reasoning_effort), None)
+        if grant is None:
             raise PiError("instance_policy_changed", status=409)
         return grant
 
@@ -409,24 +467,23 @@ class PiRuntime:
     def _run(self, owner, turn_id, provider_id, model_id, system, prompt, tools,
              on_text, is_authorized, messages, reasoning_effort="default", zen_scope=None):
         self.require_available_model(owner, provider_id, model_id)
+        grant_policy = (self.require_instance_policy(owner, provider_id, model_id,
+                        reasoning_effort, zen_scope) if provider_id == self.SHARED_CODEX_ID else None)
         self.require_reasoning_effort(owner, provider_id, model_id, reasoning_effort)
         credential_id = self.credential_id(provider_id)
         record = self.store.get(owner, credential_id) if credential_id else None
         instance_scope = None
-        grant_policy = None
         if provider_id in {"opencode", self.SHARED_CODEX_ID}:
             actual_provider = "openai-codex" if provider_id == self.SHARED_CODEX_ID else "opencode"
             instance_scope = self.require_instance_access(owner, zen_scope, actual_provider)
             product, connection_owner_id, connection_id = instance_scope
-            record = self.instance_store.resolve(owner, product, connection_owner_id, connection_id,
-                                                 provider_id=actual_provider)
+            record = self.instance_store.credential(actual_provider)
             if record is None:
                 raise PiError("instance_access_denied", status=403)
             if provider_id == self.SHARED_CODEX_ID:
-                grant_policy = self.require_instance_policy(owner, provider_id, model_id,
-                                                            reasoning_effort, zen_scope)
                 credential_id = "instance-codex"
             else:
+                grant_policy = self._effective_instance_grants(owner, actual_provider, instance_scope)[0]
                 record = {"generation": record["generation"],
                           "credential": {"type": "api_key", "key": record["credential"]}}
                 credential_id = "instance-opencode"
@@ -464,12 +521,10 @@ class PiRuntime:
                 if instance_scope is not None:
                     if zen_scope() != instance_scope or (self.auth and self.auth.enabled and (
                         not self.auth.user(owner) or f"{instance_scope[0]}:access" not in self.auth.capabilities(owner)
-                    )) or self.instance_store.generation(actual_provider) != record["generation"] or not self.instance_store.has_grant(
-                        owner, *instance_scope, provider_id=actual_provider
-                    ):
+                    )) or self.instance_store.generation(actual_provider) != record["generation"]:
                         raise PiError("permission_changed", status=409)
-                    if grant_policy and self.instance_store.get_grant(
-                        owner, *instance_scope, provider_id=actual_provider) != grant_policy:
+                    if grant_policy not in self._effective_instance_grants(
+                            owner, actual_provider, instance_scope):
                         raise PiError("permission_changed", status=409)
                 else:
                     current = self.store.get(owner, credential_id)

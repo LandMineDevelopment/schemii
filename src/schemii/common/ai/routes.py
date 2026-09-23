@@ -6,10 +6,12 @@ from typing import Literal
 
 from schemii.common.api.errors import ApiProblem
 from schemii.common.auth.routes import admin
+from schemii.common.auth.service import PROVISIONER_ROLE_ID
 from schemii.common.connections.store import ConnectionNotFoundError
+from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
 from schemii.common.metadata.models import Principal, get_current_principal
 from .models import AiStatusResponse
-from .pi import PiError
+from .pi import PiError, role_has_instance_scope
 
 router = APIRouter(prefix="/api/v1/ai", tags=["ai-providers"])
 admin_router = APIRouter(prefix="/api/v1/admin/ai/zen", tags=["ai-providers-admin"])
@@ -46,6 +48,32 @@ class ZenGrant(BaseModel):
 class SharedCodexGrant(ZenGrant):
     modelId: str = Field(default="gpt-6-luna", min_length=1, max_length=128)
     reasoningEffort: Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"] = "default"
+
+
+class SharedCodexExactGrant(ZenGrant):
+    modelId: str = Field(min_length=1, max_length=128)
+    reasoningEffort: Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class RoleGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    roleId: str = Field(min_length=1, max_length=128)
+    product: str = Field(pattern="^(schemii|schemoo|schemer)$")
+    connectionOwnerId: str | None = Field(default=None, max_length=128)
+    connectionId: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
+
+    @model_validator(mode="after")
+    def valid_scope(self):
+        if (self.connectionOwnerId is None) != (self.connectionId is None):
+            raise ValueError("Both connection identity fields are required")
+        if self.connectionId is None and self.product != "schemii":
+            raise ValueError("Only Schemii supports detached workspaces")
+        return self
+
+
+class SharedCodexRoleGrant(RoleGrant):
+    modelId: str = Field(min_length=1, max_length=128)
+    reasoningEffort: Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 @router.get("/status", response_model=AiStatusResponse)
@@ -144,6 +172,7 @@ def _admin_instance_state(request, provider_id):
                 key = (profile["userId"], profile["product"], profile["connectionOwnerId"], profile["connectionId"])
                 connections[key] = profile
     return {**store.status(provider_id), "grants": store.list_grants(provider_id),
+            "roleGrants": _role_grants_state(request, provider_id),
             "connections": list(connections.values())}
 
 
@@ -156,6 +185,41 @@ def _validate_instance_grant(body, request):
         for item in _visible_connections(request, body.userId, body.product)
     ):
         raise ApiProblem(422, "ai_grant_database_invalid", "The user cannot access this database in the selected app.")
+
+
+def _validate_role_grant(body, request):
+    if body.roleId == PROVISIONER_ROLE_ID or body.roleId.startswith("role_personal_"):
+        raise ApiProblem(422, "ai_role_scope_invalid", "Choose a managed role for role AI access.")
+    auth = request.app.state.auth
+    with auth.store.transaction() as state:
+        role = state["roles"].get(body.roleId)
+    if role is None or not role_has_instance_scope(role, body.product,
+            body.connectionOwnerId, body.connectionId):
+        raise ApiProblem(422, "ai_role_scope_invalid",
+                         "Give this role access to the app and exact managed database before enabling AI.")
+    if body.connectionId is not None:
+        if body.connectionOwnerId != SCHEMII_CONNECTION_OWNER_ID:
+            raise ApiProblem(422, "ai_role_scope_invalid", "Role AI grants require a managed database.")
+        try:
+            profile = request.app.state.services.connections.get(body.connectionOwnerId, body.connectionId)
+        except ConnectionNotFoundError:
+            raise ApiProblem(422, "ai_role_scope_invalid", "The managed database is unavailable.") from None
+        if profile.ownership != "schemii":
+            raise ApiProblem(422, "ai_role_scope_invalid", "Role AI grants require a managed database.")
+
+
+def _role_grants_state(request, provider_id):
+    grants = _instance_store(request).list_role_grants(provider_id)
+    for grant in grants:
+        body = RoleGrant(**{key: grant[key] for key in
+                            ("roleId", "product", "connectionOwnerId", "connectionId")})
+        try:
+            _validate_role_grant(body, request)
+        except ApiProblem as problem:
+            grant.update(active=False, issue=problem.message)
+        else:
+            grant["active"] = True
+    return grants
 
 
 @admin_router.get("")
@@ -190,6 +254,28 @@ def admin_save_zen_grant(body: ZenGrant, request: Request, actor: str = Depends(
 def admin_delete_zen_grant(body: ZenGrant, request: Request, actor: str = Depends(admin)):
     removed = _zen_store(request).delete_grant(body.userId, body.product, body.connectionOwnerId, body.connectionId)
     request.app.state.auth.audit(actor, "ai.zen.revoke", f"{body.userId}:{body.product}:{body.connectionOwnerId or 'detached'}:{body.connectionId or ''}")
+    return {"deleted": removed}
+
+
+@admin_router.get("/role-grants")
+def admin_zen_role_grants(request: Request, actor: str = Depends(admin)):
+    return {"grants": _role_grants_state(request, "opencode")}
+
+
+@admin_router.put("/role-grants")
+def admin_save_zen_role_grant(body: RoleGrant, request: Request, actor: str = Depends(admin)):
+    _validate_role_grant(body, request)
+    result = _instance_store(request).upsert_role_grant(
+        body.roleId, body.product, body.connectionOwnerId, body.connectionId)
+    request.app.state.auth.audit(actor, "ai.zen.role_grant", body.roleId)
+    return result
+
+
+@admin_router.delete("/role-grants")
+def admin_delete_zen_role_grant(body: RoleGrant, request: Request, actor: str = Depends(admin)):
+    removed = _instance_store(request).delete_role_grant(
+        body.roleId, body.product, body.connectionOwnerId, body.connectionId)
+    request.app.state.auth.audit(actor, "ai.zen.role_revoke", body.roleId)
     return {"deleted": removed}
 
 
@@ -273,4 +359,69 @@ def admin_delete_shared_codex_grant(body: SharedCodexGrant, request: Request, ac
         body.connectionOwnerId, body.connectionId, provider_id="openai-codex")
     request.app.state.auth.audit(actor, "ai.shared_codex.revoke",
         f"{body.userId}:{body.product}:{body.connectionOwnerId or 'detached'}:{body.connectionId or ''}")
+    return {"deleted": removed}
+
+
+@shared_codex_router.post("/grants")
+def admin_add_shared_codex_grant(body: SharedCodexExactGrant, request: Request,
+                                  actor: str = Depends(admin)):
+    _validate_instance_grant(body, request)
+    runtime = request.app.state.ai_service.runtime
+    verified = runtime.instance_codex_catalog().get("verifiedModels", []) if runtime else []
+    model = next((item for item in verified if item["id"] == body.modelId), None)
+    if model is None or body.reasoningEffort not in model.get("reasoningLevels", ["default"]):
+        raise ApiProblem(422, "ai_grant_model_invalid",
+                         "Test this connection and choose a verified model and reasoning level.")
+    result = _instance_store(request).add_grant(
+        body.userId, body.product, body.connectionOwnerId, body.connectionId,
+        model_id=body.modelId, reasoning_effort=body.reasoningEffort)
+    request.app.state.auth.audit(actor, "ai.shared_codex.grant",
+                                 f"{body.userId}:{body.product}:{body.modelId}:{body.reasoningEffort}")
+    return result
+
+
+@shared_codex_router.delete("/model-grants")
+def admin_delete_shared_codex_model_grant(body: SharedCodexExactGrant, request: Request,
+                                           actor: str = Depends(admin)):
+    removed = _instance_store(request).delete_model_grant(
+        body.userId, body.product, body.connectionOwnerId, body.connectionId,
+        model_id=body.modelId, reasoning_effort=body.reasoningEffort)
+    request.app.state.auth.audit(actor, "ai.shared_codex.revoke",
+                                 f"{body.userId}:{body.product}:{body.modelId}:{body.reasoningEffort}")
+    return {"deleted": removed}
+
+
+@shared_codex_router.get("/role-grants")
+def admin_shared_codex_role_grants(request: Request, actor: str = Depends(admin)):
+    return {"grants": _role_grants_state(request, "openai-codex")}
+
+
+@shared_codex_router.put("/role-grants")
+def admin_save_shared_codex_role_grant(body: SharedCodexRoleGrant, request: Request,
+                                        actor: str = Depends(admin)):
+    _validate_role_grant(body, request)
+    runtime = request.app.state.ai_service.runtime
+    verified = runtime.instance_codex_catalog().get("verifiedModels", []) if runtime else []
+    model = next((item for item in verified if item["id"] == body.modelId), None)
+    if model is None or body.reasoningEffort not in model.get("reasoningLevels", ["default"]):
+        raise ApiProblem(422, "ai_grant_model_invalid",
+                         "Test this connection and choose a verified model and reasoning level.")
+    result = _instance_store(request).upsert_role_grant(
+        body.roleId, body.product, body.connectionOwnerId, body.connectionId,
+        provider_id="openai-codex", model_id=body.modelId,
+        reasoning_effort=body.reasoningEffort)
+    request.app.state.auth.audit(actor, "ai.shared_codex.role_grant",
+                                 f"{body.roleId}:{body.product}:{body.modelId}:{body.reasoningEffort}")
+    return result
+
+
+@shared_codex_router.delete("/role-grants")
+def admin_delete_shared_codex_role_grant(body: SharedCodexRoleGrant, request: Request,
+                                          actor: str = Depends(admin)):
+    removed = _instance_store(request).delete_role_grant(
+        body.roleId, body.product, body.connectionOwnerId, body.connectionId,
+        provider_id="openai-codex", model_id=body.modelId,
+        reasoning_effort=body.reasoningEffort)
+    request.app.state.auth.audit(actor, "ai.shared_codex.role_revoke",
+                                 f"{body.roleId}:{body.product}:{body.modelId}:{body.reasoningEffort}")
     return {"deleted": removed}
