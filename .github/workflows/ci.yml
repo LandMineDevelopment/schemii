@@ -87,6 +87,11 @@ jobs:
         env:
           SCHEMII_E2E_BOOTSTRAP: "1"
         run: npm run test:e2e -- --project=${{ matrix.project }}
+      - name: Verify metadata backup recovery in an isolated database
+        if: matrix.project == 'desktop-chromium'
+        run: |
+          ./start.sh --backup artifacts/recovery-smoke
+          ./start.sh --verify-backup artifacts/recovery-smoke
       - name: Upload browser failure evidence
         if: failure()
         uses: actions/upload-artifact@v4

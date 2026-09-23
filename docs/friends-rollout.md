@@ -59,9 +59,23 @@ private storage outside this machine, and verify a restore. Source databases nee
 their own backups; metadata backups contain configuration and credentials, not
 source rows. Rehearse recovery before depending on saved work.
 
+Use `./start.sh --backup` and then `./start.sh --verify-backup <bundle-directory>`.
+The [recovery guide](recovery.md) covers private storage, fresh-install restore,
+resource ceilings, and rotating logs.
+
 Use the real shared-viewer browser acceptance tests as the rollout gate. Provide
 test-account credentials using the documented private credentials-file mechanism;
 do not reset an existing administrator or run demo resets on valuable data.
+With the launcher stack running:
+
+```bash
+SCHEMII_E2E_CREDENTIALS_FILE=/private/path/test-account.json \
+  npm run test:e2e -- tests/e2e/shared-report-live.spec.js
+```
+
+This exercises the launcher's `accounts_demo` reporting fixture on desktop and
+phone-sized browsers. Test-created accounts are disabled after the run; other
+test-created metadata is removed. Existing source rows and saved work are kept.
 Run the canonical launcher and check both HTTPS origins after changing source.
 
 Start with a small group. Exercise simultaneous report refreshes and cancellation

@@ -102,6 +102,10 @@ Saved resource IDs and encrypted credentials are preserved. Back up the metadata
 volume and its encryption key together. Never delete account tables to regain
 anonymous access.
 
+Use the launcher-owned [backup and recovery workflow](recovery.md) to create a
+paired private bundle and verify it in an isolated database. The
+[friends rollout guide](friends-rollout.md) provides a first-session checklist.
+
 The local demo fixture creates `accounts_demo.sales` with separate regional
 reporting logins, row policies, and an inaccessible `secret` column. Fixture
 passwords are local-demo-only. PostgreSQL integration tests use an explicitly
