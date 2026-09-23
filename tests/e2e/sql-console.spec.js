@@ -177,6 +177,30 @@ test("a SQL deep link preloads one browser-local workspace draft", async ({ page
   await expect(page.locator("#sql-transaction-status")).toContainText("No transaction open");
 });
 
+test("SQL typed before workspace startup completes is kept with the requested workspace", async ({ page, request }) => {
+  const workspace = await databaseWorkspace(request);
+  let release, observed;
+  const held = new Promise(resolve => { release = resolve; });
+  const requested = new Promise(resolve => { observed = resolve; });
+  await page.route("**/api/v1/schemii/workspaces", async route => {
+    observed();
+    await held;
+    await route.continue();
+  });
+  try {
+    await page.goto(`/?workspace=${workspace.id}&layer=sql`);
+    await requested;
+    const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
+    const sql = "SELECT 2468 AS entered_during_startup;";
+    await editor.fill(sql);
+    release();
+    await expect(page.getByRole("heading", { name: "SQL Console" })).toBeVisible();
+    await expect(editor).toHaveValue(sql);
+    await page.getByRole("button", { name: "Run current statement" }).click();
+    await expect(page.locator(".sql-result-card tbody")).toContainText("2468");
+  } finally { release(); }
+});
+
 test("selection, cursor, and Run all target the intended statements", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);
