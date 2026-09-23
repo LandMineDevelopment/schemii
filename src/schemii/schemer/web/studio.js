@@ -319,6 +319,8 @@ async function refreshDashboard() {
       for (const dialog of document.querySelectorAll('.expanded-dialog, .cell-dialog, .sql-dialog')) dialog.close();
       dashboard = null; model = null; catalog = null; slicerDraft = null; slicersDirty = false;
       permissions = { edit: false, export: false, drill: false };
+      $('ai-assistant-button').disabled = true;
+      void assistant.subjectChanged();
       library = library.filter(item => item.id !== origin.id);
       disposeSelects($('slicers')); $('slicers').replaceChildren();
       $('tile-grid').replaceChildren(); $('filter-summary').replaceChildren();

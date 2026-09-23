@@ -36,7 +36,12 @@ test('granted viewers retain deep links, isolate filters and rows, recover edits
       await expect(page.locator('.analytics-tile .tile-status')).toContainText('1 group');
       await expect(page.getByRole('button', { name: 'Rename dashboard', exact: true })).toBeHidden();
       await expect(page.getByRole('button', { name: 'Edit Sales by region', exact: true })).toBeHidden();
+      await expect(page.getByRole('button', { name: 'Open dashboard assistant', exact: true })).toBeEnabled();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      const originalViewport = page.viewportSize();
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.setViewportSize(originalViewport);
     }
     const [east, west] = contexts;
     const [eastPage] = east.pages(), [westPage] = west.pages();
@@ -138,6 +143,7 @@ test('granted viewers retain deep links, isolate filters and rows, recover edits
     expect((await east.request.post(`${path}/tiles/sales/export`, { data: { ...body(0), expectedRevision: 2 } })).status()).toBe(403);
     await eastPage.getByRole('button', { name: 'Refresh dashboard', exact: true }).click();
     await expect(eastPage.locator('.analytics-tile')).toHaveCount(0);
+    await expect(eastPage.getByRole('button', { name: 'Open dashboard assistant', exact: true })).toBeDisabled();
     // Revoking east must not disturb west's existing session or grant.
     expect(await streamedRows(west.request, `${path}/executions/stream`, { ...body(0), expectedRevision: 2 })).toEqual([['west', 800]]);
   } catch (error) {
