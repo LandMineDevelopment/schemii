@@ -11,14 +11,15 @@ from schemii.schemer.access import available_dashboards, prepare_dashboard, Repo
 from schemii.schemer.dashboard_models import DashboardCreate
 from schemii.schemer.dashboard_store import InMemoryDashboardRepository, DashboardNotFoundError
 from schemii.schemoo.models import ModelCreate
+from schemii.schemoo.service import load_model
 from schemii.schemoo.store import InMemoryModelRepository, ModelNotFoundError
 
 
 @pytest.fixture
 def shared():
     profiles = {
-        'pg_'+'a'*32: NS(id='pg_'+'a'*32, host='postgres', port=5432, database='sales', revision=1, username='author', ownership='user'),
-        'pg_'+'b'*32: NS(id='pg_'+'b'*32, host='postgres', port=5432, database='sales', revision=1, username='east', ownership='schemii'),
+        'pg_'+'a'*32: NS(id='pg_'+'a'*32, owner_id='admin', host='postgres', port=5432, database='sales', revision=1, username='author', ownership='user'),
+        'pg_'+'b'*32: NS(id='pg_'+'b'*32, owner_id=SCHEMII_CONNECTION_OWNER_ID, host='postgres', port=5432, database='sales', revision=1, username='east', ownership='schemii'),
     }
     uses = []
     class Connections:
@@ -51,9 +52,11 @@ def shared():
 
 def test_shared_report_keeps_viewer_as_execution_owner_and_uses_only_assigned_profile(shared):
     dashboard, scoped, permissions=prepare_dashboard(shared.request,'viewer',shared.dashboard.id)
-    model=scoped.models.get('viewer',shared.model.id)
+    model=load_model(scoped,'viewer',shared.model.id,shared.model.revision)
     assert model.connection_id==shared.grant['connection_id']
+    assert model.connection_owner_id==SCHEMII_CONNECTION_OWNER_ID
     assert shared.services.models.get('admin',model.id).connection_id!=model.connection_id
+    assert shared.services.models.get('admin',model.id).connection_owner_id=='admin'
     with scoped.connections.use('viewer',model.connection_id) as target:
         assert target.username=='east'
     scoped.console.reserve_read_target('viewer',connection_id=model.connection_id)
