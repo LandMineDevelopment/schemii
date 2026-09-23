@@ -1,3 +1,4 @@
+import { safeReturnPath } from './login-return.js';
 import { requestJson } from './http.js';
 let pending;
 const channel = typeof window !== 'undefined' && typeof BroadcastChannel === 'function' ? new BroadcastChannel('schemii-session') : null;
@@ -24,6 +25,14 @@ export function landingPath(account) {
     if (canAccessProduct(account, product)) return path;
   }
   return account?.is_admin ? '/admin' : '/account';
+}
+export function signInDestination(account, search = globalThis.location?.search || '') {
+  const next = safeReturnPath(new URLSearchParams(search).get('next'));
+  if (!next) return landingPath(account);
+  const path = new URL(next, 'https://app.invalid').pathname;
+  const product = { '/': 'schemii', '/schemoo': 'schemoo', '/schemer': 'schemer' }[path];
+  if (product ? canAccessProduct(account, product) : path === '/account' || account?.is_admin) return next;
+  return landingPath(account);
 }
 export async function signOut() {
   await requestJson('/api/v1/auth/logout', { method: 'POST', body: {} });
