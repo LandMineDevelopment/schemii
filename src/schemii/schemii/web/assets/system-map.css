@@ -912,6 +912,7 @@
 .flow-detail-fact code,
 .data-flow .code-block pre code { font-size: var(--ui-type-helper); }
 .entry-dialog-list { overflow-y: auto; overscroll-behavior: contain; }
+.entry-dialog-tools .entry-search input { font-size: var(--ui-type-control); }
 
 @media (max-width: 720px) {
   .browse-picker { grid-column: 1 / -1; grid-template-columns: auto minmax(0, 1fr); grid-row: 1; }
