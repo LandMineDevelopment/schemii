@@ -79,7 +79,7 @@ def test_drill_selection_reaches_compiler_and_cannot_inject_fields(dashboard, ac
     assert result.status_code == 200, result.text
     plan = result.json() if action == "plan" else json.loads(result.text.splitlines()[0])["tiles"][0]["plan"]
     assert plan["drill"] is True
-    assert '"contributors"."People.name" = ' in plan["sql"]
+    assert '"contributors"."field_1" = ' in plan["sql"]
     assert 'GROUP BY' not in plan["sql"]
     body["selection"]["dimensions"][0]["column"] = "id"
     assert client.post(url + "/" + action, json=body).status_code == 422

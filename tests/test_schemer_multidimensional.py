@@ -66,8 +66,8 @@ def test_grouped_tiles_round_trip_plan_stream_export_and_drill(multidimensional,
     payload["selection"] = {"dimensions": selected, "measureIndex": 0}
     response = client.post(tile_url + "/plan", json=payload)
     assert response.status_code == 200, response.text
-    assert '"contributors"."People.name" IS NULL' in response.json()["sql"]
-    assert '"contributors"."People.id" = ' in response.json()["sql"]
+    assert '"contributors"."field_1" IS NULL' in response.json()["sql"]
+    assert '"contributors"."field_2" = ' in response.json()["sql"]
     assert "GROUP BY" not in response.json()["sql"]
     drill_sql = response.json()["sql"]
     console.page = lambda *args: SimpleNamespace(
