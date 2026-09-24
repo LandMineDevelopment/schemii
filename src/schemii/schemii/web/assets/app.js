@@ -113,7 +113,6 @@ const elements = {
   saveLayoutButton: byId("save-layout-button"),
   downloadCatalogButton: byId("download-catalog-button"),
   exportDesignSqlButton: byId("export-design-sql-button"),
-  introductionButton: byId("introduction-button"),
   mainLayout: byId("main-layout"),
   toolRail: byId("tool-rail"),
   canvas: byId("canvas"),
@@ -402,7 +401,6 @@ const elements = {
   redoDesignButton: byId("redo-design-button"),
   resetDesignButton: byId("reset-design-button"),
   postgresButton: byId("postgres-button"),
-  introductionDialog: byId("introduction-dialog"),
   unavailableDialog: byId("unavailable-dialog"),
   unavailableTitle: byId("unavailable-title"),
   unavailableDescription: byId("unavailable-description"),
@@ -5378,10 +5376,6 @@ function bindEvents() {
   elements.undoDesignButton.addEventListener("click", () => executeDesignHistoryMove("undo"));
   elements.redoDesignButton.addEventListener("click", () => executeDesignHistoryMove("redo"));
   elements.resetDesignButton.addEventListener("click", requestDesignBaselineReset);
-  elements.introductionButton.addEventListener("click", () => {
-    closeDetailsMenus();
-    openDialog(elements.introductionDialog);
-  });
   elements.fitButton.addEventListener("click", () => {
     if (!canvas.fit()) showToast("No live tables are available to fit.");
     else scheduleCanvasViewPersistence();
