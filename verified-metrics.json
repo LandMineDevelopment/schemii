@@ -1,0 +1,56 @@
+{
+  "view": {
+    "hidden": true,
+    "display": "flex",
+    "text": "Populate stored results when created"
+  },
+  "connection": {
+    "hidden": true,
+    "display": "flex",
+    "text": "Remove the credential currently stored by the server"
+  },
+  "fonts": [
+    {
+      "id": "design-view-name",
+      "font": "8px",
+      "color": "rgb(216, 224, 232)",
+      "background": "rgb(13, 18, 24)"
+    },
+    {
+      "id": "design-view-population-row",
+      "font": "16px",
+      "color": "rgb(238, 242, 246)",
+      "background": "rgb(18, 24, 32)"
+    },
+    {
+      "id": "design-view-definition",
+      "font": "9px",
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(59, 59, 59)"
+    },
+    {
+      "id": "save-design-view-button",
+      "font": "8px",
+      "color": "rgb(33, 23, 3)",
+      "background": "rgb(244, 185, 66)"
+    }
+  ],
+  "assets": {
+    "/assets/app.css": {
+      "status": 200,
+      "sha256": "3f87c3dad8a7c8f3cc06734383cdb2ffcfa625d942a2aa62bb1c3e74199a2812"
+    },
+    "/assets/common/ui.css": {
+      "status": 200,
+      "sha256": "1b87b715bb7bc4dc7bbb346e7a55e0061daf8b35fa3bff4c33f2ee6af1cd1712"
+    },
+    "/assets/common/accounts.js": {
+      "status": 200,
+      "sha256": "7b1a1773726ad6b696ea6e760d5d18d36720f52975de0d99aac32cd63e6324a7"
+    },
+    "/assets/common/searchable-select.css": {
+      "status": 200,
+      "sha256": "4ec934dc0fd4d369532ca3b8977d967eab3c908a238014834d65041c60a4e365"
+    }
+  }
+}
