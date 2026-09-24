@@ -236,7 +236,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       (connecting ? row : row?.querySelector("input"))?.focus({ preventScroll: true });
     }
     drawEdges();
-    if (initialFit) { initialFit = false; fitFrame = requestAnimationFrame(fit); }
+    if (initialFit) { initialFit = false; fitFrame = requestAnimationFrame(fitInitial); }
   }
 
   function fit() {
@@ -245,6 +245,18 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
     if (!nodes.length) return;
     viewport.fitBounds({ minX: Math.min(...nodes.map(n => n.x)) - 20, minY: Math.min(...nodes.map(n => n.y)),
       maxX: Math.max(...nodes.map(n => n.x + WIDTH)) + 120, maxY: Math.max(...nodes.map(n => n.y + height(n))) }, { maxZoom: 1 });
+  }
+  function fitInitial() {
+    fit();
+    if (viewport.getView().zoom >= .95) return;
+    const draft = getDraft();
+    const root = draft.nodes.find(node => node.id === (draft.defaultRoot || draft.root)) || draft.nodes[0];
+    if (!root) return;
+    viewport.setView({
+      x: host.clientWidth / 2 - root.x - WIDTH / 2,
+      y: host.clientHeight / 2 - root.y - height(root) / 2,
+      zoom: 1,
+    });
   }
   const keyboard = event => {
     if(event.key === "Escape" && connecting){event.preventDefault();connectionMode(false);return;}

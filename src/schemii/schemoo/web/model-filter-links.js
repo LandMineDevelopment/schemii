@@ -75,7 +75,7 @@ export function modelFilterIssues(scope, draft, catalog) {
         if (!columns.some(c => c.name === domain.column)) add(`input:${input.id}:domain`, "Choose a valid domain value column.");
         if (domain.labelColumn && !columns.some(c => c.name === domain.labelColumn)) add(`input:${input.id}:domain-label`, "Choose a valid domain display label.");
       }
-      if (!(option.conditions || []).some(c => c.parameterId === input.id)) add(`input:${input.id}:binding`, `Bind “${input.label || "this input"}” to a source, or remove it.`);
+      if (!(option.conditions || []).some(c => c.parameterId === input.id)) add(`input:${input.id}:binding`, `Bind “${input.label || "this input"}” to a source, or remove that unused input for a fixed rule.`);
     }
     for (const [index, c] of (option.conditions || []).entries()) {
       const key = `condition:${scope.id}:${option.id}:${index}`;

@@ -4,15 +4,20 @@ import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
 const modelId = "model_editor_audit_fixture";
 
-async function openFixture(page) {
+async function openFixture(page, { wideSavedLayout = false } = {}) {
   const fields = Array.from({ length: 36 }, (_, index) => ({ name: `field_${index}`, dataType: "integer", nullable: false }));
   const catalog = { database: "fixture", namespace: "public", fingerprint: "fixture-v1", notice: "Isolated editor fixture",
     tables: [{ name: "people", primaryKey: ["field_0"], columns: fields }, { name: "teams", primaryKey: ["id"], columns: [{ name: "id", dataType: "integer", nullable: false }] }],
     relationships: [] };
   const draft = importedDraft(catalog);
   draft.edges.push({ id: "late_field", kind: "logical", source: "people", sourceColumn: "field_20", target: "teams", targetColumn: "id", enabled: true });
+  if (wideSavedLayout) {
+    draft.nodes[0].x = 0; draft.nodes[0].y = 0;
+    draft.nodes[1].x = 2400; draft.nodes[1].y = 0;
+  }
   const saved = { id: modelId, connectionId: "fixture_connection", namespace: "public", name: "Editor audit fixture", revision: 1,
-    layoutRevision: 1, exploreRevision: 1, catalogFingerprint: catalog.fingerprint, ...splitDraft(draft), layout: { positions: [] } };
+    layoutRevision: 1, exploreRevision: 1, catalogFingerprint: catalog.fingerprint, ...splitDraft(draft),
+    ...(wideSavedLayout ? {} : { layout: { positions: [] } }) };
   await page.route(`**/api/v1/schemoo/models/${modelId}`, route => route.fulfill({ json: saved }));
   await page.route("**/api/v1/schemoo/catalog?*", route => route.fulfill({ json: catalog }));
   await page.route(`**/api/v1/schemoo/models/${modelId}/validate`, route => route.fulfill({ json: {
@@ -22,6 +27,20 @@ async function openFixture(page) {
   await page.goto(`/schemoo?model=${modelId}`);
   await expect(page.locator(".sc-node")).toHaveCount(2);
 }
+
+test("wide saved models open on a readable starting object; Fit still shows the full graph", async ({ page }) => {
+  await openFixture(page, { wideSavedLayout: true });
+  const zoom = () => page.locator(".sc-stage").evaluate(stage => new DOMMatrixReadOnly(stage.style.transform).a);
+  await expect.poll(zoom).toBeGreaterThanOrEqual(.95);
+  await expect(page.locator("#save-model")).toBeDisabled();
+  const root = await page.locator('.sc-node[data-node-id="people"]').boundingBox();
+  const canvas = await page.locator("#canvas-host").boundingBox();
+  expect(root.x).toBeGreaterThanOrEqual(canvas.x);
+  expect(root.x + root.width).toBeLessThanOrEqual(canvas.x + canvas.width);
+  await page.locator("#fit").click();
+  await expect.poll(zoom).toBeLessThan(.5);
+  await expect(page.locator("#save-model")).toBeDisabled();
+});
 
 test("missing saved positions stay clean; tall fields scroll with visible relationship anchors", async ({ page }) => {
   await openFixture(page);
@@ -98,6 +117,7 @@ test("fixed filter validation reveals and associates the missing source field", 
     const field = input.getBoundingClientRect(), area = document.querySelector(body).getBoundingClientRect();
     return field.top >= area.top && field.bottom <= area.bottom;
   }, ".mf-dialog-body")).toBe(true);
+  expect(await dialog.locator(".mf-inline-error").first().evaluate(error => error.getBoundingClientRect().bottom <= document.querySelector(".mf-dialog-body").getBoundingClientRect().bottom)).toBe(true);
   await invalid.click();
   await page.getByRole("option", { name: "people · field_0" }).click();
   await dialog.getByRole("button", { name: "Apply to model" }).click();
@@ -117,4 +137,5 @@ test("grouped calculation reports only missing fields and focuses the first one"
   await expect(dialog.getByRole("alert")).not.toContainText("grouping");
   const describedBy = await dialog.getByRole("textbox", { name: "Field 1 name" }).getAttribute("aria-describedby");
   await expect(dialog.locator(`#${describedBy}`)).toContainText("Give field 1 a name");
+  expect(await dialog.locator(`#${describedBy}`).evaluate(error => error.getBoundingClientRect().bottom <= document.querySelector(".derived-body").getBoundingClientRect().bottom)).toBe(true);
 });

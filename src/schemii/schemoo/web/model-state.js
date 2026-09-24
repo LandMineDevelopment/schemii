@@ -62,8 +62,18 @@ export function joinModel(model) {
 
 export function changedParts(model, draft, name, initialLayout = model.layout) {
   const parts = splitDraft(draft);
+  // Older saved previews can omit an Explore root or store an empty one. Compare
+  // against the same effective defaults used by joinModel, while retaining
+  // the saved model itself for revision-checked writes.
+  const initialExplore = {
+    root: model.explore?.root || model.definition.root,
+    fields: model.explore?.fields || [],
+    selections: model.explore?.selections || {},
+    reportFilters: model.explore?.reportFilters || [],
+    limit: model.explore?.limit || 100,
+  };
   return Object.fromEntries(Object.keys(parts).map(key => [key,
-    stableJson(parts[key]) !== stableJson(key === "layout" ? initialLayout : model[key]) || (key === "definition" && name !== model.name),
+    stableJson(parts[key]) !== stableJson(key === "layout" ? initialLayout : key === "explore" ? initialExplore : model[key]) || (key === "definition" && name !== model.name),
   ]));
 }
 

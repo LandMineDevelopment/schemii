@@ -47,8 +47,9 @@ export function showEditorValidation(body, summary, issues, scrollBody = body) {
     for (let ancestor = first.closest("details"); ancestor && body.contains(ancestor); ancestor = ancestor.parentElement.closest("details")) ancestor.open = true;
     first.focus({ preventScroll: true });
     const area = scrollBody.getBoundingClientRect(), rect = first.getBoundingClientRect();
+    const errorBottom = document.getElementById(first.dataset.validationErrorId)?.getBoundingClientRect().bottom || rect.bottom;
     if (rect.top < area.top + 16) scrollBody.scrollTop += rect.top - area.top - 16;
-    else if (rect.bottom > area.bottom - 16) scrollBody.scrollTop += rect.bottom - area.bottom + 16;
+    else if (errorBottom > area.bottom - 16) scrollBody.scrollTop += errorBottom - area.bottom + 16;
   }
   return true;
 }

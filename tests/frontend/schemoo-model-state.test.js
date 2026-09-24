@@ -83,6 +83,20 @@ test("generated layout is clean until the author moves a source", () => {
   editing.nodes[0].x=70;
   assert.equal(changedParts(model,editing,"HR",initialLayout).layout,true);
 });
+test("legacy empty Explore defaults are clean while later choices stay dirty", () => {
+  const model={...splitDraft(draft()),name:"HR"};
+  model.explore={root:"",fields:[],limit:0};
+  const editing=joinModel(model);
+  assert.deepEqual(changedParts(model,editing,"HR"),{definition:false,layout:false,explore:false});
+  editing.root="another_node";
+  assert.equal(changedParts(model,editing,"HR").explore,true);
+  editing.root="people";
+  editing.limit=250;
+  assert.equal(changedParts(model,editing,"HR").explore,true);
+  editing.limit=100;
+  editing.fields.push({table:"people",column:"id",aggregate:"none"});
+  assert.equal(changedParts(model,editing,"HR").explore,true);
+});
 test("missing source metadata does not discard model nodes or alias layout", () => {
   const model={...splitDraft(draft()),name:"HR"};
   model.definition.nodes.push({id:"role_alias",table:"deleted_table",label:"Past role"});
