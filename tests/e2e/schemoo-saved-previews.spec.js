@@ -68,8 +68,11 @@ test("duplicate a saved model with independent layout, rules and named previews"
   expect(preview.ok(), await preview.text()).toBe(true);
   const sourcePreview = await preview.json();
   await page.goto(`/schemoo?model=${modelId}`);
+  await expect(page.locator("#workbench")).not.toHaveAttribute("inert", "");
   await page.getByRole("button", { name: "Open models", exact: true }).click();
-  await page.getByRole("button", { name: `Duplicate model ${source.name}`, exact: true }).click();
+  const duplicate = page.getByRole("button", { name: `Duplicate model ${source.name}`, exact: true });
+  await expect(duplicate).toBeEnabled();
+  await duplicate.click();
   const dialog = page.getByRole("dialog", { name: "Duplicate model", exact: true });
   const name = dialog.getByRole("textbox", { name: "New model name", exact: true });
   await expect(name).toHaveValue(`${source.name} copy`);

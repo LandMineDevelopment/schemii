@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { boundFilterSources, filtersAffectingNode, modelFilterIssue, columnFilterBindings, describeFilterCondition } from "../../src/schemii/schemoo/web/model-filter-links.js";
+import { boundFilterSources, filtersAffectingNode, modelFilterIssue, modelFilterIssues, columnFilterBindings, describeFilterCondition } from "../../src/schemii/schemoo/web/model-filter-links.js";
 
 function rule(id, table, kind = "conditional") {
   return {id, label: id, kind, alternatives: [{id: "default", label: "Default", inputs: [], conditions: [{table, column: "id", operator: "not_null"}]}]};
@@ -73,6 +73,21 @@ test("invalid inputs, list choices and domain references surface useful authorin
   option.conditions[0].value = ["id"];
   option.conditions[0].domain = {nodeId: "deleted", column: "id"};
   assert.match(modelFilterIssue(scope, draft, catalog), /valid fixed-value domain/);
+});
+
+test("filter validation identifies each failed control without naming valid conditions", () => {
+  const {draft,catalog}=fixture();
+  const scope={id:"scope_1",label:"",alternatives:[{id:"option_1",label:"Default",inputs:[],conditions:[
+    {table:"people",column:"",operator:"not_null"},
+    {table:"people",column:"id",operator:"not_null"},
+    {table:"people",column:"id",operator:"in",value:[]},
+  ]}]};
+  assert.deepEqual(modelFilterIssues(scope,draft,catalog).map(issue=>issue.key),[
+    "scope:scope_1:name", "condition:scope_1:option_1:0:field", "condition:scope_1:option_1:2:value",
+  ]);
+  scope.label="Valid";scope.alternatives[0].conditions[0].column="id";
+  scope.alternatives[0].conditions[2].value=["42"];
+  assert.deepEqual(modelFilterIssues(scope,draft,catalog),[]);
 });
 
 test("column bindings preserve scopes, alternatives and AND positions without including aliases", () => {

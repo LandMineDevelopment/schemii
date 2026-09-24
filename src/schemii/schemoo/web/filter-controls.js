@@ -5,6 +5,7 @@ import { modelSelect, domainSelect, disposeSelects } from "./select.js";
 import { exposedFields } from "./model-state.js";
 import { columnComparisonOperators, comparisonColumns } from "./column-comparisons.js";
 import { describeFilterCondition } from "./model-filter-links.js";
+import { validationKey } from "./editor-validation.js";
 
 const id = () => crypto.randomUUID();
 const operators = [["eq", "Equals"], ["ne", "Does not equal"], ["in", "Is one of (IN)"], ["not_in", "Is not one of (NOT IN)"], ["gt", ">"], ["gte", "≥"], ["lt", "<"], ["lte", "≤"], ["contains", "Contains"], ["range_contains_date", "Contains date"], ["is_null", "Is null"], ["not_null", "Is not null"]];
@@ -60,23 +61,23 @@ function newCondition(draft, catalog) {
   const first = fields(draft, catalog)[0];
   return { table: first?.table || "", column: first?.column || "", operator: "eq", value: "" };
 }
-function domainControls(domain, { draft, catalog, prefix, refresh }) {
+function domainControls(domain, { draft, catalog, prefix, refresh, inputId }) {
   const host = element("div", { className: "mf-wide" });
   const sources = draft.nodes.filter(n => !n.derivation).map(n => ({ id: n.id, table: n.table, label: n.label || n.table }));
   const choices = sources.flatMap(n => (catalog.tables.find(t => t.name === n.table)?.columns || []).map(c => [JSON.stringify([n.id,n.table,c.name]), `${n.label} · ${c.name}`]));
   for (const t of catalog.tables.filter(t => !sources.some(n => n.id === t.name && n.table === t.name))) for (const c of t.columns) choices.push([JSON.stringify([null,t.name,c.name]), `${t.name} · ${c.name} (source table)`]);
   const selectedNode = domain.nodeId ?? sources.find(n => n.id === domain.table && n.table === domain.table)?.id ?? null;
-  host.append(labeled("Domain value column", select(`${prefix} domain value column`, choices, JSON.stringify([selectedNode,domain.table,domain.column]), value => {
+  host.append(labeled("Domain value column", validationKey(select(`${prefix} domain value column`, choices, JSON.stringify([selectedNode,domain.table,domain.column]), value => {
     const [nodeId, table, column] = JSON.parse(value);
     domain.nodeId = nodeId; domain.table = table; domain.column = column; domain.labelColumn = ""; refresh();
-  }), "parameters"));
+  }), `input:${inputId}:domain`), "parameters"));
   const physical = domain.nodeId != null ? draft.nodes.find(n => n.id === domain.nodeId)?.table : domain.table;
   const labelChoices = (catalog.tables.find(t => t.name === physical)?.columns || []).map(c => [c.name,c.name]);
-  host.append(labeled("Display label (optional)", select(`${prefix} domain label column`, [["", "Show the value"], ...labelChoices], domain.labelColumn || "", value => { domain.labelColumn=value; refresh(); })));
+  host.append(labeled("Display label (optional)", validationKey(select(`${prefix} domain label column`, [["", "Show the value"], ...labelChoices], domain.labelColumn || "", value => { domain.labelColumn=value; refresh(); }), `input:${inputId}:domain-label`)));
   return host;
 }
 
-export function conditionsEditor(conditions, { draft, catalog, onChange, refresh, inputs = [], prefix, onLoadDomain, exposedOnly = false, allowedSources = null, defaultSource = null, allowToday = false, fixedField = null, singleCondition = false, compact = false }) {
+export function conditionsEditor(conditions, { draft, catalog, onChange, refresh, inputs = [], prefix, validationPrefix = prefix, onLoadDomain, exposedOnly = false, allowedSources = null, defaultSource = null, allowToday = false, fixedField = null, singleCondition = false, compact = false }) {
   const allowed = new Set(exposedFields(draft, catalog).map(f => JSON.stringify([f.table, f.column])));
   const choices = fields(draft, catalog).filter(f => (!allowedSources || allowedSources.has(f.table)) && (!exposedOnly || allowed.has(JSON.stringify([f.table, f.column]))));
   const body = element("div", { className: "mf-conditions" });
@@ -116,7 +117,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
       refresh();
     });
     if (!compact) row.append(element("span", { className: "mf-and", text: index ? "AND · also require" : "Condition" }));
-    if (!compact || !fixedField) row.append(labeled("Source · column", field));
+    if (!compact || !fixedField) row.append(labeled("Source · column", validationKey(field, `${validationPrefix}:${index}:field`)));
     if (unavailable) row.append(element("p", { className: "warning mf-wide", text: `${condition.column} is no longer available here. Choose a replacement or explicitly remove this condition; it has not been dropped from the query.`, attrs: { role: "alert" } }));
     row.append(labeled("Comparison", op));
     if (!singleCondition) row.append(action("close", `Remove ${prefix} condition ${index + 1}`, () => { conditions.splice(index, 1); refresh(); }));
@@ -141,7 +142,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
           else condition.value = isList(condition.operator) ? [] : "";
           refresh();
         });
-        const valueSource = labeled("Compare against", binding, "bindings"); valueSource.classList.add("mf-wide"); row.append(valueSource);
+        const valueSource = labeled("Compare against", validationKey(binding, `${validationPrefix}:${index}:value-source`), "bindings"); valueSource.classList.add("mf-wide"); row.append(valueSource);
       }
       if (condition.compareColumn != null) {
         const columns = comparisonColumns(condition, draft, catalog).filter(column => !exposedOnly || allowed.has(JSON.stringify([condition.table, column.name])));
@@ -150,7 +151,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
         if (missing) options.unshift([condition.compareColumn, `${condition.compareColumn} (unavailable)`]);
         const picker = select(`${prefix} condition ${index + 1} comparison column`, options, condition.compareColumn, value => { condition.compareColumn = value; refresh(); });
         picker.querySelector("input").placeholder = "Choose a compatible column";
-        const control = labeled("Second column", picker); control.classList.add("mf-wide"); row.append(control);
+        const control = labeled("Second column", validationKey(picker, `${validationPrefix}:${index}:comparison`)); control.classList.add("mf-wide"); row.append(control);
         row.append(element("p", { className: "mf-help mf-wide", text: `Compares both columns on each row of ${source?.label || condition.table}. Only compatible columns from this source are available.` }));
         if (missing || !columns.length) row.append(element("p", { className: "warning mf-wide", attrs: { role: "alert" }, text: missing ? "The comparison column is no longer available or compatible. Choose a replacement; this condition has not been removed." : "No compatible columns are available here." }));
       }
@@ -162,7 +163,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
           ? domainSelect({ label, multiple, value: condition.value, loadOptions: search => onLoadDomain({ draft, domain: sourceDomain(condition, draft), search }), onChange: value => { condition.value = value; onChange(); } })
           : literalControl(label, condition.value, value => { condition.value = value; onChange(); }, multiple, "Enter a fixed value");
         if (condition.operator === "range_contains_date") literalInput.type = "date";
-        const literal = labeled(multiple ? "Fixed values" : "Fixed value", literalInput); literal.classList.add("mf-wide"); row.append(literal);
+        const literal = labeled(multiple ? "Fixed values" : "Fixed value", validationKey(literalInput, `${validationPrefix}:${index}:value`)); literal.classList.add("mf-wide"); row.append(literal);
         if (onLoadDomain && condition.operator !== "range_contains_date") {
           const toggle = element("input", { attrs: { type: "checkbox", "aria-label": `${prefix} condition ${index + 1} choose fixed value from domain` } });
           toggle.checked = !!condition.domain;
@@ -206,7 +207,7 @@ export function renderFilterDefinition(host, options) {
   for (const scope of draft.scopes) {
     const content = element("div", { className: "mf-content" });
     content.append(element("div", { className: "mf-heading" }, [
-      labeled("Name", input(`Scope ${scope.id} name`, scope.label, value => { scope.label = value; onChange(); })),
+      labeled("Name", validationKey(input(`Scope ${scope.id} name`, scope.label, value => { scope.label = value; onChange(); }), `scope:${scope.id}:name`)),
     ]));
     content.append(labeled("Evaluation reach", select(`Evaluation reach for ${scope.label}`, [["required", "Always evaluate"], ["conditional", "When its source participates"]], scope.kind, value => { scope.rowBehavior ||= scope.kind === "required" ? "require_matching" : "keep_unmatched"; scope.kind = value; refresh(); }), "scopes"));
     content.append(note(scope.kind === "required" ? "Includes the related source even when none of its columns are selected." : "Evaluates only when a query uses or traverses a bound source. It does not force that source into the query."));
@@ -223,7 +224,7 @@ export function renderFilterDefinition(host, options) {
       const prefix = `${scope.label || "Scope"} / ${alternative.label || "Alternative"}`;
       const alternativeBody = element("div", { className: "mf-content" });
       if (scope.alternatives.length > 1) alternativeBody.append(element("div", { className: "mf-heading" }, [
-        labeled("Option name", input(`${prefix} name`, alternative.label, value => { alternative.label = value; onChange(); }), "alternatives"),
+        labeled("Option name", validationKey(input(`${prefix} name`, alternative.label, value => { alternative.label = value; onChange(); }), `option:${alternative.id}:name`), "alternatives"),
         action("delete", `Delete alternative ${prefix}`, () => {
           scope.alternatives.splice(alternativeIndex, 1);
           if (draft.selections[scope.id]?.alternativeId === alternative.id) delete draft.selections[scope.id];
@@ -243,7 +244,7 @@ export function renderFilterDefinition(host, options) {
             loadOptions: search => options.onLoadDomain({ draft, domain: defaultDomain, search }),
             onChange: value => { parameter.defaultValue = value; onChange(); } })
           : literalControl(`${prefix} input ${parameter.id} default`, parameter.defaultValue, value => { parameter.defaultValue = value; onChange(); }, multiple, parameter.type === "date" ? "YYYY-MM-DD, today, or today - 365" : "Required at run time if blank");
-        parameterRow.append(labeled("Input name", input(`${prefix} input ${parameter.id} name`, parameter.label, value => { parameter.label = value; onChange(); })),
+        parameterRow.append(labeled("Input name", validationKey(input(`${prefix} input ${parameter.id} name`, parameter.label, value => { parameter.label = value; onChange(); }), `input:${parameter.id}:name`)),
           labeled("Type", select(`${prefix} input ${parameter.id} type`, [["source", "Choose from source"], ["text", "Text"], ["uuid", "UUID"], ["integer", "Integer (whole number)"], ["number", "Number (decimal)"], ["boolean", "Boolean (true / false)"], ["date", "Date"]], parameter.type, value => { parameter.type = value; refresh(); })),
           labeled(multiple ? "Default values (optional)" : "Default (optional)", defaultControl, "parameters"),
           action("delete", `Delete input ${parameter.label}`, () => {
@@ -280,12 +281,13 @@ export function renderFilterDefinition(host, options) {
         };
         parameterRow.append(labeled("Use searchable domain values", domainToggle, "parameters"));
         if (parameter.domain) {
-          parameterRow.append(domainControls(parameter.domain, { draft, catalog, prefix: `${prefix} input ${parameter.id}`, refresh }));
+          parameterRow.append(domainControls(parameter.domain, { draft, catalog, prefix: `${prefix} input ${parameter.id}`, refresh, inputId: parameter.id }));
           parameterRow.append(note(`Report users search this list and select ${multiple ? "one or more values" : "one value"}. The same list is used for defaults. A display label can show a readable name while the filter receives the ID.`));
         }
         if (parameter.type === "source") parameterRow.append(note("Users choose a distinct value from the first bound source column. For a required parent organization, use Required scope and bind org_hier.parent_id with Equals. Leave the default blank to require a choice."));
         parameterRow.append(note(bound.length ? `Bound to ${bound.length} condition${bound.length === 1 ? "" : "s"}: ${bound.map(c => c.table ? `${draft.nodes.find(n => n.id === c.table)?.label || c.table}.${c.column}` : "Awaiting source selection").join(", ")}` : "Not bound to a source yet. Use Bind source below."));
         const bind = element("button", { className: "ui-button", text: "Bind source", attrs: { type: "button", "aria-label": `Bind source to ${parameter.label}`, "data-ui-tooltip": "Add a source-column condition that uses this parameter's value." } });
+        validationKey(bind, `input:${parameter.id}:binding`);
         bind.onclick = () => {
           alternative.conditions.push({ table: "", column: "", operator: multiple ? "in" : "eq", parameterId: parameter.id });
           refresh();
@@ -300,13 +302,13 @@ export function renderFilterDefinition(host, options) {
         alternative.inputs.push({ id: id(), label: "Parameter", type: "text", defaultValue: "" }); refresh();
       }), "Add parameter input"]));
       if (alternative.inputs.length) alternativeBody.append(inputBody);
-      alternativeBody.append(helpHeading("Source conditions", "bindings"), note("All conditions below must match. Null checks need no value; other comparisons use a fixed value, another column on the same source, or a report input."), conditionsEditor(alternative.conditions, { draft, catalog, onChange, refresh, inputs: alternative.inputs, prefix, onLoadDomain: options.onLoadDomain }));
+      alternativeBody.append(helpHeading("Source conditions", "bindings"), note("All conditions below must match. Null checks need no value; other comparisons use a fixed value, another column on the same source, or a report input."), conditionsEditor(alternative.conditions, { draft, catalog, onChange, refresh, inputs: alternative.inputs, prefix, validationPrefix:`condition:${scope.id}:${alternative.id}`, onLoadDomain: options.onLoadDomain }));
       if (!alternative.inputs.length) alternativeBody.append(section("Add report inputs (optional)", [inputBody], false));
       content.append(scope.alternatives.length > 1 ? section(`${alternativeIndex ? "OR · " : ""}${alternative.label || "Alternative"}`, [alternativeBody]) : alternativeBody);
     }
-    content.append(section("Offer alternative choices (optional)", [helpHeading("Alternative choices", "alternatives"), note("Let the report user choose one set of rules, such as As of date OR All history."), element("div", { className: "mf-add" }, [action("add", `Add alternative to ${scope.label}`, () => {
+    content.append(section("Offer alternative choices (optional)", [helpHeading("Alternative choices", "alternatives"), note("Let the report user choose one set of rules, such as As of date OR All history."), element("div", { className: "mf-add" }, [validationKey(action("add", `Add alternative to ${scope.label}`, () => {
       scope.alternatives.push({ id: id(), label: "Alternative", inputs: [], conditions: [] }); refresh();
-    }), "Add OR alternative"])], scope.alternatives.length > 1));
+    }), `scope:${scope.id}:alternatives`), "Add OR alternative"])], scope.alternatives.length > 1));
     host.append(content);
   }
 }

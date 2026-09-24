@@ -32,6 +32,7 @@ const $ = id => document.getElementById(id), API = "/api/v1/schemoo";
 const MODEL_EXECUTION_TIMEOUT_MS = 900_000;
 let catalog, draft, canvas, plan, diagnostics = {}, selected, storageKey, timer, version = 0, busy = false;
 let model, saving = false, dirty = false, conflicted = false, catalogTicket = 0;
+let initialLayout;
 let inspectorTab = "model", selectedFilterId = null;
 let sourceAdditions = {tables:[],columns:[],relationships:[],initialized:false};
 const expandedFilterColumns = new Set();
@@ -94,7 +95,7 @@ function renderObjectSourceIssues(){
 }
 function save() {
   if (!model || !draft) return;
-  dirty = Object.values(changedParts(model, draft, $("model-name").value.trim())).some(Boolean);
+  dirty = Object.values(changedParts(model, draft, $("model-name").value.trim(), initialLayout)).some(Boolean);
   $("save-model").disabled = saving || conflicted || !dirty;
   $("draft-status").textContent = conflicted ? "Save conflict · reload to continue" : saving ? "Saving model…" : dirty ? "Unsaved changes" : `Saved · revision ${model.revision} · read-only preview`;
   previewLibrary.render();
@@ -687,7 +688,7 @@ async function loadModel(id) {
     nextCatalog = await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(nextModel.connectionId)}&namespace=${encodeURIComponent(nextModel.namespace)}`,{timeoutMs:MODEL_EXECUTION_TIMEOUT_MS});
   } catch (error) { $("workbench").inert=!model; throw error; }
   if (ticket !== catalogTicket) return;
-  model=nextModel; catalog=nextCatalog; draft=joinModel(model); selected=null; plan=null; diagnostics={}; conflicted=false;
+  model=nextModel; catalog=nextCatalog; draft=joinModel(model); initialLayout=undefined; selected=null; plan=null; diagnostics={}; conflicted=false;
   sourceAdditions=reconcileSourceCatalog(draft,catalog);
   if (columnEditor) disposeSelects(columnEditor.element);
   columnEditor=null; expandedFilterColumns.clear();
@@ -706,7 +707,7 @@ async function loadModel(id) {
     onCreateConnection:edge=>{draft.edges.push(edge);selected={edge:edge.id};refreshForms();changed();inspectSelection();}});
   const url=new URL(location.href); url.searchParams.set("model",model.id); history.replaceState(null,"",url);
   $("results").replaceChildren(element("p", {className:"empty",text:"Run a read-only preview."})); $("result-status").textContent="Nothing run yet";
-  refreshForms();changed();$("workbench").inert=false;
+  refreshForms();canvas.render();initialLayout=splitDraft(draft).layout;changed();$("workbench").inert=false;
   void previewLibrary.load(model.id);
   void assistant.modelChanged();
   if (model.catalogFingerprint !== catalog.fingerprint && !sourceAdditionText()) showError("The source schema changed. Your model is preserved. Review the labeled source changes before saving. Reload never replaces your model with a fresh import.");
@@ -717,7 +718,7 @@ async function saveModel() {
   if (!model || saving || busy || conflicted || previewLibrary.isPending()) return;
   if (!$("model-name").value.trim()) { showError("Give the model a name before saving."); $("model-name").focus(); return; }
   saving=true; $("workbench").inert=true; $("model-name").disabled=true; save(); showError();
-  const parts=splitDraft(draft), differences=changedParts(model,draft,$("model-name").value.trim());
+  const parts=splitDraft(draft), differences=changedParts(model,draft,$("model-name").value.trim(),initialLayout);
   // Capture every expected revision before saving: a semantic response must not
   // silently authorize overwriting a layout/Explore edit from another tab.
   const expected={definition:model.revision,layout:model.layoutRevision,explore:model.exploreRevision};
@@ -737,6 +738,7 @@ async function saveModel() {
     if (differences.layout) acceptSaved(await requestJson(`${API}/models/${model.id}/layout`, {method:"PUT",body:{expectedRevision:expected.layout,layout:parts.layout}}),"layout");
     if (differences.explore) acceptSaved(await requestJson(`${API}/models/${model.id}/explore`, {method:"PUT",body:{expectedRevision:expected.explore,explore:parts.explore}}),"explore");
     draft=joinModel(model); sourceAdditions={tables:[],columns:[],relationships:[],initialized:false}; refreshForms(); canvas.render({cycleEdges:diagnostics.cycleEdges || [],usedEdges:plan?.usedRelationships || [],sourceIssues:diagnostics.issues || diagnostics.sourceIssues || []});
+    initialLayout=splitDraft(draft).layout;
     version++; await compile(version);
   } catch(error) {
     conflicted=error.status===409;
