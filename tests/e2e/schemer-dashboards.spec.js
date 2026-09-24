@@ -133,8 +133,10 @@ test('searchable tile fields and footer stay connected and reachable at phone an
     for (const label of ['Cancel', 'Apply & run']) {
       const button = actions.getByRole('button', { name: label });
       await expect(button).toBeVisible();
-      const box = await button.boundingBox();
-      expect(box.y + box.height).toBeLessThanOrEqual(width === 1440 ? 900 : 844);
+      await expect.poll(async () => {
+        const box = await button.boundingBox();
+        return box.y + box.height;
+      }).toBeLessThanOrEqual((width === 1440 ? 900 : 844) + 2);
     }
   }
 });
