@@ -27,6 +27,9 @@
 .quick-start-copy p { max-width: 620px; margin: 8px 0 0; color: #a1acba; font-size: 12px; line-height: 1.6; }
 .quick-start-copy .quick-start-tip { position: relative; padding-left: 13px; color: #c2ab77; font-size: 11px; }
 .quick-start-tip::before { position: absolute; top: .65em; left: 1px; width: 4px; height: 4px; border-radius: 50%; background: #c7a657; content: ""; }
+.quick-start-action-summary { display: none; margin-top: 15px; padding: 11px 13px; border: 1px solid #354050; border-radius: 6px; background: #141b24; }
+.quick-start-action-summary strong { color: #d8e0ea; font-size: 11px; }
+.quick-start-action-summary ol { display: grid; gap: 7px; margin: 9px 0 0; padding-left: 18px; color: #acb9c9; font-size: 11px; line-height: 1.45; }
 .quick-start-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--line); background: #11161d; }
 .quick-start-progress { display: flex; gap: 5px; }
 .quick-start-progress i { width: 6px; height: 6px; border-radius: 50%; background: #3c4653; }
@@ -48,8 +51,10 @@
   .quick-start-footer { gap: 8px; padding: 10px; }
   .quick-start-actions .ui-button { min-height: 38px; }
   .quick-start-cursor span { max-width: 112px; overflow-wrap: anywhere; white-space: normal; }
+  .quick-start-action-summary { display: block; }
 }
 @media (prefers-reduced-motion: reduce) {
   .quick-start-cursor, .quick-start-cursor svg { transition-duration: 0s; }
   .quick-start-cursor.clicking::after { animation: none; }
+  .quick-start-action-summary { display: block; }
 }

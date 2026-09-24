@@ -14,15 +14,15 @@ const topbar = (name = 'Choose a model', target = 'Choose a saved model or creat
     ${iconButton('refresh', 'Reload saved model and source')}
     ${iconButton('delete', 'Delete model')}
   </div></header>`;
-const toolbar = (status = 'Choose a model', runTarget = '') => `
+const toolbar = (status = 'Choose a model', runTarget = '', queryTarget = '') => `
   <footer class="smq-toolbar"><div class="smq-tools">
     ${iconButton('fit', 'Fit model')}${iconButton('zoom-in', 'Zoom in')}${iconButton('zoom-out', 'Zoom out')}
-    <i></i>${iconButton('schemas', 'Edit model')}${iconButton('relationship', 'Draw connection')}${iconButton('rows', 'Explore model')}${iconButton('sql', 'Show query preview')}
+    <i></i>${iconButton('schemas', 'Edit model')}${iconButton('relationship', 'Draw connection')}${iconButton('rows', 'Explore model')}${iconButton('sql', 'Show query preview', queryTarget)}
   </div><span class="smq-draft-status">${status}</span>
   <button class="smq-primary smq-run" type="button"${runTarget ? ` data-quick-start-target="${runTarget}"` : ''}>${icon('run')} Run preview</button></footer>`;
 const graph = (nodeTarget = '') => `<div class="smq-canvas"><span class="smq-graph-status">2 model objects · 1 connection</span>
   <div class="smq-graph-line"></div><div class="smq-node smq-node-orders"${nodeTarget ? ` data-quick-start-target="${nodeTarget}"` : ''}><b>orders</b><span>id <em>bigint</em></span><span>customer_id <em>bigint</em></span><span>status <em>text</em></span></div>
-  <div class="smq-node smq-node-customers"><b>customers</b><span>id <em>bigint</em></span><span>name <em>text</em></span></div>
+  <div class="smq-node smq-node-customers"><b>customers</b><span>id <em>bigint</em></span><span>full_name <em>text</em></span></div>
   <small class="smq-canvas-help">Drag background to pan · click a connection to edit</small></div>`;
 const inspectorTabs = target => `<header class="smq-inspector-header"><nav>${tab('Model', target === 'model' ? 'model-tab' : '')}${tab('Filters', target === 'filters' ? 'filters-tab' : '')}${tab('Preview', target === 'preview' ? 'preview-tab' : '')}</nav>${iconButton('close', 'Close inspector')}</header>`;
 
@@ -32,27 +32,27 @@ const createScene = `<div class="smq-stage smq-stage-create">
     <header><strong>Semantic models</strong>${iconButton('close', 'Close model library')}</header>
     <div class="smq-library-content"><div class="smq-library-hint">No saved models yet. Create one from an existing PostgreSQL connection.</div>
       <div class="smq-create-form"><h3>Create a model</h3>
-        <label>Model name <span class="smq-input smq-model-name" data-quick-start-target="model-name"><i>Organization model</i><b>Sales model</b></span></label>
-        <label>Connection <span class="smq-input smq-select smq-connection" data-quick-start-target="source-connection"><i>Choose connection</i><b>Warehouse · analytics · analyst</b></span></label>
-        <label class="smq-schema-field">Source schema <span class="smq-input smq-select smq-schema" data-quick-start-target="source-schema"><i>Choose schema</i><b>public</b></span></label>
+        <label>Model name <span class="smq-input smq-model-name" data-quick-start-target="model-name"><i>Organization model</i><b>Orders model</b></span></label>
+        <label>Connection <span class="smq-input smq-select smq-connection" data-quick-start-target="source-connection"><i>Choose connection</i><b>Bookstore DB · schemii_test</b></span></label>
+        <label class="smq-schema-field">Source schema <span class="smq-input smq-select smq-schema" data-quick-start-target="source-schema"><i>Choose schema</i><b>bookstore</b></span></label>
         <button class="smq-primary smq-create" type="button" data-quick-start-target="create-model">Create model</button>
       </div>
     </div>
   </section></div>`;
 
 const modelScene = `<div class="smq-stage smq-stage-model">
-  ${topbar('Sales model', 'Warehouse · analytics.public')}
+  ${topbar('Orders model', 'Bookstore DB · schemii_test.bookstore')}
   <div class="smq-workbench">${graph('orders-node')}
     <aside class="smq-inspector">${inspectorTabs('model')}
       <div class="smq-pane smq-pane-model"><div class="smq-model-start"><strong>Starting object</strong><label>Start from<span class="smq-input smq-select smq-model-root" data-quick-start-target="model-start"><i>customers</i><b>orders</b></span></label></div><p>Choose the starting table and relationship paths here.</p><section><strong>Connections <em>1</em></strong><small>Toggle each connection independently.</small><div class="smq-connection-row"><span class="smq-connection-toggle" data-quick-start-target="connection-toggle">✓</span><span>orders.customer_id → customers.id</span></div></section></div>
     </aside>
     <aside class="smq-table-inspector"><header><small>MODEL TABLE</small><strong>orders</strong>${iconButton('close', 'Close table inspector')}</header>
-      <div><h3>Exposed columns</h3><p>Choose fields Schemer users may use.</p><label><span class="smq-check checked"></span>id <small>bigint</small></label><label><span class="smq-check checked"></span>customer_id <small>bigint</small></label><label data-quick-start-target="expose-column"><span class="smq-check smq-status-check"></span>status <small>text</small></label></div>
+      <div><h3>Exposed columns</h3><p>Imported fields start exposed. Uncheck fields Schemer users do not need.</p><label><span class="smq-check checked"></span>id <small>bigint</small></label><label data-quick-start-target="expose-column"><span class="smq-check checked smq-customer-check"></span>customer_id <small>bigint</small></label><label><span class="smq-check checked"></span>status <small>text</small></label></div>
     </aside>
   </div>${toolbar('Draft unchanged')}</div>`;
 
 const filterScene = `<div class="smq-stage smq-stage-filter">
-  ${topbar('Sales model', 'Warehouse · analytics.public')}
+  ${topbar('Orders model', 'Bookstore DB · schemii_test.bookstore')}
   <div class="smq-workbench">${graph()}
     <aside class="smq-inspector">${inspectorTabs('filters')}
       <div class="smq-pane smq-pane-model"><p>Choose the starting table and relationship paths here.</p><section><strong>Connections · 1</strong></section></div>
@@ -66,20 +66,20 @@ const filterScene = `<div class="smq-stage smq-stage-filter">
   </section><div class="smq-saved-badge">Saved model · filter ready for preview</div></div>`;
 
 const previewScene = `<div class="smq-stage smq-stage-preview">
-  ${topbar('Sales model', 'Warehouse · analytics.public')}
+  ${topbar('Orders model', 'Bookstore DB · schemii_test.bookstore')}
   <div class="smq-workbench smq-preview-workbench">${graph()}
     <aside class="smq-inspector">${inspectorTabs('preview')}
       <div class="smq-pane smq-pane-model"><p>Choose the starting table and relationship paths here.</p><section><strong>Connections · 1</strong></section></div>
-      <div class="smq-pane smq-pane-preview"><div class="smq-preview-context"><strong>Working preview</strong><small>Query choices only</small></div><span class="smq-input smq-select smq-preview-root">orders</span>
-        <h3>Preview outputs <em class="smq-output-count">0</em></h3><p>Test exposed fields and measures without changing model exposure.</p>
-        <label>Add by table<span class="smq-add-by-table"><span class="smq-input smq-select">orders · 3 exposed columns</span><button class="smq-icon smq-output-add" type="button" title="Add table columns to preview" data-quick-start-target="add-outputs">${icon('add')}</button></span></label>
-        <div class="smq-output-list"><div>id <small>Plain field</small></div><div>customer_id <small>Plain field</small></div><div>status <small>Plain field</small></div></div>
+      <div class="smq-pane smq-pane-preview"><div class="smq-preview-scroll"><div class="smq-preview-context"><strong>Working preview</strong><small>Query choices only</small></div><span class="smq-input smq-select smq-preview-root">orders</span>
+        <h3>Preview outputs <em class="smq-output-count">1</em></h3><p>Imported previews keep their initial output until you remove it.</p>
+        <label>Add by table<span class="smq-add-by-table"><span class="smq-input smq-select">orders · 2 exposed columns</span><button class="smq-icon smq-output-add" type="button" title="Add table columns to preview" data-quick-start-target="add-outputs">${icon('add')}</button></span></label>
+        <div class="smq-output-list"><div>customers · full_name <small>Plain field</small></div><div class="smq-new-output">orders · id <small>Plain field</small></div><div class="smq-new-output">orders · status <small>Plain field</small></div></div></div>
       </div>
     </aside>
   </div><section class="smq-query-dock"><header><button class="smq-sql-tab">Generated SQL</button><button class="smq-results-tab" data-quick-start-target="results-tab">Results</button><small class="smq-result-status">Nothing run yet</small></header>
-    <pre class="smq-sql">SELECT orders.id, orders.customer_id, orders.status\nFROM public.orders;</pre>
-    <div class="smq-results"><div><b>id</b><b>customer_id</b><b>status</b></div><div><span>101</span><span>19</span><span>open</span></div><div><span>102</span><span>27</span><span>shipped</span></div></div>
-  </section>${toolbar('All changes saved', 'run-preview')}</div>`;
+    <pre class="smq-sql"><span class="smq-sql-before">SELECT customers.full_name\nFROM bookstore.orders JOIN bookstore.customers ...</span><span class="smq-sql-after">SELECT customers.full_name, orders.id, orders.status\nFROM bookstore.orders JOIN bookstore.customers ...</span></pre>
+    <div class="smq-results"><div><b>full_name</b><b>id</b><b>status</b></div><div><span>Alex Morgan</span><span>1</span><span>shipped</span></div><div><span>Sam Rivera</span><span>2</span><span>paid</span></div></div>
+  </section>${toolbar('All changes saved', 'run-preview', 'show-query')}</div>`;
 
 export const guide = {
   name: 'Schemoo',
@@ -87,7 +87,7 @@ export const guide = {
     {
       title: 'Create a semantic model',
       text: 'Open the model library from the folder button in the top bar. Enter a model name, choose an existing PostgreSQL connection, choose its source schema, then create the model. Schemoo imports its visible tables and relationships.',
-      tip: 'Add the connection in Schemii first if the list is empty.',
+      tip: 'Use the Bookstore DB connection and bookstore schema from the Schemii guide, or your own PostgreSQL source.',
       scene: createScene,
       states: ['library', 'named', 'connection', 'schema', 'created'],
       actions: [
@@ -103,24 +103,25 @@ export const guide = {
     },
     {
       title: 'Set the starting object and usable paths',
-      text: 'The model opens on the Model tab. Choose Start from under Starting object, then toggle connection paths. Select a table on the canvas to choose which columns Schemer users can use. Preview outputs are separate choices.',
-      tip: 'Disabled connections appear dashed on the canvas; cycles are highlighted red.',
+      text: 'The model opens on the Model tab. Choose Start from under Starting object. Disable paths you do not need; keep the path to any table you want in Preview. Select a table to control which columns Schemer users can use.',
+      tip: 'Imported columns start exposed. Disabled connections appear dashed; cycles are highlighted red.',
       scene: modelScene,
-      states: ['starting', 'path', 'table', 'exposed'],
+      states: ['starting', 'path-disabled', 'path-restored', 'table', 'restricted'],
       actions: [
         { target: 'model-start', caption: 'Choose the model starting object on the Model tab', state: 'starting' },
-        { target: 'connection-toggle', caption: 'Disable an unneeded connection path from the Model tab', state: 'path' },
+        { target: 'connection-toggle', caption: 'Disable a connection path to see its effect', state: 'path-disabled' },
+        { target: 'connection-toggle', caption: 'Restore this path because the preview uses customers', state: 'path-restored' },
         { target: 'orders-node', caption: 'Select a table on the canvas', state: 'table' },
-        { target: 'expose-column', caption: 'Expose a column to Schemer', state: 'exposed' },
+        { target: 'expose-column', caption: 'Hide customer_id from Schemer while keeping status exposed', state: 'restricted' },
       ],
       idleText: 'Watch the model inspector and table column controls.',
-      staticText: 'Model tab → Start from → connection checkbox → exposed columns.',
-      completeText: 'The status column is exposed in the model draft.',
+      staticText: 'Model tab → Start from → connection checkbox → hide an unneeded exposed column.',
+      completeText: 'customer_id is hidden; status stays available for filtering.',
     },
     {
       title: 'Add a filter and save the model',
       text: 'Use Filters to add a reusable rule. Choose a fixed rule or report parameter, bind it to a source column, and apply it to the draft. Then use the Save model button in the top bar. Preview execution uses the saved model.',
-      tip: 'Apply to model changes the draft. Save model persists it before Run preview.',
+      tip: 'Save this fixed rule before preview. To use the next guide’s shared filter, also add an optional Order status report parameter bound to orders.status and save again.',
       scene: filterScene,
       states: ['filters', 'dialog', 'fixed', 'configured', 'applied', 'saved'],
       actions: [
@@ -137,18 +138,19 @@ export const guide = {
     },
     {
       title: 'Build and run a preview',
-      text: 'Open Preview to build the working query from the model’s starting object. Use Add by table to include exposed columns; Generated SQL updates as you choose outputs. Run preview executes the saved model, then Results shows its rows.',
-      tip: 'Preview outputs affect the test query without changing exposed model columns.',
+      text: 'Open Preview to build the working query from the model’s starting object. The imported preview may already contain an output. Open Show query preview, then scroll to Add by table; Generated SQL updates as you choose outputs. Run preview executes the saved model and opens Results.',
+      tip: 'Remove the imported output if you do not need it. Preview choices do not change exposed model columns.',
       scene: previewScene,
-      states: ['preview', 'outputs', 'run', 'results'],
+      states: ['preview', 'query', 'outputs', 'run', 'results'],
       actions: [
         { target: 'preview-tab', caption: 'Open Preview', state: 'preview' },
+        { target: 'show-query', caption: 'Open Show query preview to see Generated SQL', state: 'query' },
         { target: 'add-outputs', caption: 'Add exposed columns to the preview', state: 'outputs' },
         { target: 'run-preview', caption: 'Run the saved model', state: 'run' },
         { target: 'results-tab', caption: 'Inspect the Results tab', state: 'results' },
       ],
       idleText: 'Watch a saved model produce a read-only preview.',
-      staticText: 'Preview → Add by table → Run preview → Results.',
+      staticText: 'Preview → Show query preview → Add by table → Run preview → Results.',
       completeText: 'Preview rows are available in Results.',
     },
   ],
@@ -156,9 +158,9 @@ export const guide = {
 
 const labels = [
   ['Open models', 'Model name', 'Source connection', 'Source schema', 'Create model'],
-  ['Start from', 'Connection checkbox', 'orders', 'Expose status'],
+  ['Start from', 'Connection checkbox', 'Connection checkbox', 'orders', 'Hide customer_id'],
   ['Filters', 'Add model filter', 'Fixed rule', 'Source column', 'Apply to model', 'Save model'],
-  ['Preview', 'Add table columns', 'Run preview', 'Results'],
+  ['Preview', 'Show query preview', 'Add table columns', 'Run preview', 'Results'],
 ];
 guide.steps.forEach((step, stepIndex) => step.actions.forEach((action, actionIndex) => {
   action.label = labels[stepIndex][actionIndex];

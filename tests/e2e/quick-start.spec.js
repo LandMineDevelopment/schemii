@@ -137,3 +137,66 @@ test("Schemoo teaches the model starting object before preview outputs", async (
   await expect(dialog.locator(".quick-start-page:visible .smq-pane-preview")).toContainText("Preview outputs");
   await expect(dialog.locator(".quick-start-page:visible .smq-pane-preview")).not.toContainText("Start from");
 });
+
+test("guide cursor clears when the clicked control disappears", async ({ page }) => {
+  for (const product of ["Schemoo", "Schemer"]) {
+    await page.goto(product === "Schemoo" ? "/schemoo" : "/schemer");
+    if (product === "Schemoo") await page.getByRole("button", { name: "Close model library" }).click();
+    await page.locator("#quick-start-button").click();
+    const scene = page.getByRole("dialog", { name: `Welcome to ${product}` })
+      .locator(".quick-start-page:visible .quick-start-scene");
+    await expect(scene.locator(":scope > :first-child")).toHaveClass(/demo-(created|saved)/, { timeout: 20000 });
+    await expect(scene.locator(".quick-start-cursor")).not.toHaveClass(/visible/);
+  }
+});
+
+test("mobile and reduced-motion guides expose a readable action list", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/schemoo");
+  await page.getByRole("button", { name: "Close model library" }).click();
+  await page.locator("#quick-start-button").click();
+  const dialog = page.getByRole("dialog", { name: "Welcome to Schemoo" });
+  for (const [index, count] of [5, 5, 6, 5].entries()) {
+    const summary = dialog.locator(".quick-start-page:visible .quick-start-action-summary");
+    await expect(summary).toBeVisible();
+    await expect(summary.locator("li")).toHaveCount(count);
+    const size = await summary.locator("li").first().evaluate(item => parseFloat(getComputedStyle(item).fontSize));
+    expect(size).toBeGreaterThanOrEqual(11);
+    if (index < 3) await dialog.getByRole("button", { name: "Next" }).click();
+  }
+  await expect(dialog.locator(".quick-start-page:visible .quick-start-action-summary"))
+    .toContainText("Show query preview");
+});
+
+test("guides use one bookstore orders model and show the extra Schemer filter setup", async ({ page }) => {
+  await page.goto("/schemoo");
+  await page.getByRole("button", { name: "Close model library" }).click();
+  await page.locator("#quick-start-button").click();
+  const schemoo = page.getByRole("dialog", { name: "Welcome to Schemoo" });
+  await expect(schemoo.locator(".quick-start-page:visible .smq-schema")).toContainText("bookstore");
+  await schemoo.getByRole("button", { name: "Next" }).click();
+  await expect(schemoo.locator(".quick-start-page:visible .smq-table-inspector"))
+    .toContainText("Imported fields start exposed");
+  await schemoo.getByRole("button", { name: "Next" }).click();
+  await expect(schemoo.locator(".quick-start-page:visible .quick-start-tip"))
+    .toContainText("optional Order status report parameter");
+  await schemoo.getByRole("button", { name: "Next" }).click();
+  await expect(schemoo.locator(".quick-start-page:visible .smq-output-count")).toHaveText("1");
+  await expect(schemoo.locator(".quick-start-page:visible .smq-output-list"))
+    .toContainText("customers · full_name");
+  await expect(schemoo.locator(".quick-start-page:visible .quick-start-action-summary"))
+    .toContainText("Show query preview");
+
+  await page.goto("/schemer");
+  await page.locator("#quick-start-button").click();
+  const schemer = page.getByRole("dialog", { name: "Welcome to Schemer" });
+  await schemer.getByRole("button", { name: "Next" }).click();
+  await expect(schemer.locator(".quick-start-page:visible .qs-r-editor-fields"))
+    .toContainText("orders.status");
+  await schemer.getByRole("button", { name: "Next" }).click();
+  await expect(schemer.locator(".quick-start-page:visible .quick-start-tip"))
+    .toContainText("Add a separate optional Order status report parameter");
+  await expect(schemer.locator(".quick-start-page:visible .qs-r-filter-value"))
+    .toContainText("shipped");
+});
