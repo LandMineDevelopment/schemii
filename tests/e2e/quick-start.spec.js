@@ -124,3 +124,16 @@ test("animated cursor follows its control when the guide is resized", async ({ p
     return Math.hypot(cursor.offsetLeft - x, cursor.offsetTop - y);
   })).toBeLessThan(3);
 });
+
+test("Schemoo teaches the model starting object before preview outputs", async ({ page }) => {
+  await page.goto("/schemoo");
+  await page.getByRole("button", { name: "Close model library" }).click();
+  await page.locator("#quick-start-button").click();
+  const dialog = page.getByRole("dialog", { name: "Welcome to Schemoo" });
+  await dialog.getByRole("button", { name: "Next" }).click();
+  await expect(dialog.locator(".quick-start-page:visible .smq-pane-model [data-quick-start-target='model-start']")).toBeVisible();
+  await dialog.getByRole("button", { name: "Next" }).click();
+  await dialog.getByRole("button", { name: "Next" }).click();
+  await expect(dialog.locator(".quick-start-page:visible .smq-pane-preview")).toContainText("Preview outputs");
+  await expect(dialog.locator(".quick-start-page:visible .smq-pane-preview")).not.toContainText("Start from");
+});

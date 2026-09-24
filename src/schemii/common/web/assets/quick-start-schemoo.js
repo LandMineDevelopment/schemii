@@ -44,7 +44,7 @@ const modelScene = `<div class="smq-stage smq-stage-model">
   ${topbar('Sales model', 'Warehouse · analytics.public')}
   <div class="smq-workbench">${graph('orders-node')}
     <aside class="smq-inspector">${inspectorTabs('model')}
-      <div class="smq-pane smq-pane-model"><p>Choose the starting table and relationship paths here.</p><section><strong>Connections <em>1</em></strong><small>Toggle each connection independently.</small><div class="smq-connection-row"><span class="smq-connection-toggle" data-quick-start-target="connection-toggle">✓</span><span>orders.customer_id → customers.id</span></div></section></div>
+      <div class="smq-pane smq-pane-model"><div class="smq-model-start"><strong>Starting object</strong><label>Start from<span class="smq-input smq-select smq-model-root" data-quick-start-target="model-start"><i>customers</i><b>orders</b></span></label></div><p>Choose the starting table and relationship paths here.</p><section><strong>Connections <em>1</em></strong><small>Toggle each connection independently.</small><div class="smq-connection-row"><span class="smq-connection-toggle" data-quick-start-target="connection-toggle">✓</span><span>orders.customer_id → customers.id</span></div></section></div>
     </aside>
     <aside class="smq-table-inspector"><header><small>MODEL TABLE</small><strong>orders</strong>${iconButton('close', 'Close table inspector')}</header>
       <div><h3>Exposed columns</h3><p>Choose fields Schemer users may use.</p><label><span class="smq-check checked"></span>id <small>bigint</small></label><label><span class="smq-check checked"></span>customer_id <small>bigint</small></label><label data-quick-start-target="expose-column"><span class="smq-check smq-status-check"></span>status <small>text</small></label></div>
@@ -70,7 +70,7 @@ const previewScene = `<div class="smq-stage smq-stage-preview">
   <div class="smq-workbench smq-preview-workbench">${graph()}
     <aside class="smq-inspector">${inspectorTabs('preview')}
       <div class="smq-pane smq-pane-model"><p>Choose the starting table and relationship paths here.</p><section><strong>Connections · 1</strong></section></div>
-      <div class="smq-pane smq-pane-preview"><label>Start from<span class="smq-input smq-select smq-root" data-quick-start-target="start-from"><i>Choose a model object</i><b>orders</b></span></label>
+      <div class="smq-pane smq-pane-preview"><div class="smq-preview-context"><strong>Working preview</strong><small>Query choices only</small></div><span class="smq-input smq-select smq-preview-root">orders</span>
         <h3>Preview outputs <em class="smq-output-count">0</em></h3><p>Test exposed fields and measures without changing model exposure.</p>
         <label>Add by table<span class="smq-add-by-table"><span class="smq-input smq-select">orders · 3 exposed columns</span><button class="smq-icon smq-output-add" type="button" title="Add table columns to preview" data-quick-start-target="add-outputs">${icon('add')}</button></span></label>
         <div class="smq-output-list"><div>id <small>Plain field</small></div><div>customer_id <small>Plain field</small></div><div>status <small>Plain field</small></div></div>
@@ -102,18 +102,19 @@ export const guide = {
       completeText: 'The imported model opens on the canvas.',
     },
     {
-      title: 'Review connections and exposed columns',
-      text: 'The model opens on the Model tab. Toggle a connection to include or exclude its path, then select a table on the canvas to choose which columns Schemer users can use. Column exposure and preview outputs are separate choices.',
+      title: 'Set the starting object and usable paths',
+      text: 'The model opens on the Model tab. Choose Start from under Starting object, then toggle connection paths. Select a table on the canvas to choose which columns Schemer users can use. Preview outputs are separate choices.',
       tip: 'Disabled connections appear dashed on the canvas; cycles are highlighted red.',
       scene: modelScene,
-      states: ['path', 'table', 'exposed'],
+      states: ['starting', 'path', 'table', 'exposed'],
       actions: [
+        { target: 'model-start', caption: 'Choose the model starting object on the Model tab', state: 'starting' },
         { target: 'connection-toggle', caption: 'Disable an unneeded connection path from the Model tab', state: 'path' },
         { target: 'orders-node', caption: 'Select a table on the canvas', state: 'table' },
         { target: 'expose-column', caption: 'Expose a column to Schemer', state: 'exposed' },
       ],
       idleText: 'Watch the model inspector and table column controls.',
-      staticText: 'Model tab → connection checkbox → table on canvas → exposed columns.',
+      staticText: 'Model tab → Start from → connection checkbox → exposed columns.',
       completeText: 'The status column is exposed in the model draft.',
     },
     {
@@ -136,19 +137,18 @@ export const guide = {
     },
     {
       title: 'Build and run a preview',
-      text: 'In Preview, choose Start from and add outputs from exposed columns. Generated SQL updates as you edit preview selections. Run preview executes the saved model; switch to Results to inspect the returned rows.',
+      text: 'Open Preview to build the working query from the model’s starting object. Use Add by table to include exposed columns; Generated SQL updates as you choose outputs. Run preview executes the saved model, then Results shows its rows.',
       tip: 'Preview outputs affect the test query without changing exposed model columns.',
       scene: previewScene,
-      states: ['preview', 'root', 'outputs', 'run', 'results'],
+      states: ['preview', 'outputs', 'run', 'results'],
       actions: [
         { target: 'preview-tab', caption: 'Open Preview', state: 'preview' },
-        { target: 'start-from', caption: 'Start from orders', state: 'root' },
         { target: 'add-outputs', caption: 'Add exposed columns to the preview', state: 'outputs' },
         { target: 'run-preview', caption: 'Run the saved model', state: 'run' },
         { target: 'results-tab', caption: 'Inspect the Results tab', state: 'results' },
       ],
       idleText: 'Watch a saved model produce a read-only preview.',
-      staticText: 'Preview → Start from → outputs → Run preview → Results.',
+      staticText: 'Preview → Add by table → Run preview → Results.',
       completeText: 'Preview rows are available in Results.',
     },
   ],
@@ -156,9 +156,9 @@ export const guide = {
 
 const labels = [
   ['Open models', 'Model name', 'Source connection', 'Source schema', 'Create model'],
-  ['Connection checkbox', 'orders', 'Expose status'],
+  ['Start from', 'Connection checkbox', 'orders', 'Expose status'],
   ['Filters', 'Add model filter', 'Fixed rule', 'Source column', 'Apply to model', 'Save model'],
-  ['Preview', 'Start from', 'Add table columns', 'Run preview', 'Results'],
+  ['Preview', 'Add table columns', 'Run preview', 'Results'],
 ];
 guide.steps.forEach((step, stepIndex) => step.actions.forEach((action, actionIndex) => {
   action.label = labels[stepIndex][actionIndex];
