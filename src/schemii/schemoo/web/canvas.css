@@ -11,6 +11,8 @@
 .sc-node-header { position: relative; display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 4px; width: 100%; height: 59px; min-height: 59px; padding: 8px 12px; border: 0; border-bottom: 1px solid #354153; border-radius: 0; background: #1a202c; color: inherit; text-align: left; cursor: grab; touch-action: none; font-family: inherit; }
 .sc-node-header:hover { background: #27263c; }
 .sc-node-header:active { cursor: grabbing; }
+.sc-node-fields { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; scrollbar-color: #63718b #151c28; }
+.sc-node-fields:focus-visible { outline: 2px solid #bc9dff; outline-offset: -2px; }
 .sc-node-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sc-node-detail { font-size: 10px; color: #a2a6b4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sc-column { box-sizing: border-box; display: grid; grid-template-columns: 14px 12px minmax(0, 1fr) 78px; align-items: center; gap: 7px; height: 30px; min-height: 30px; margin: 0; padding: 0 10px; border-bottom: 1px solid #2a34404d; cursor: pointer; }

@@ -73,6 +73,16 @@ test("opening persisted model is independent and changes target only their owned
   assert.equal(splitDraft(editing).definition.root,"people");
   assert.equal(splitDraft(editing).explore.root,"another_node");
 });
+test("generated layout is clean until the author moves a source", () => {
+  const model={...splitDraft(draft()),name:"HR"};
+  model.layout={positions:[]};
+  const editing=joinModel(model);
+  editing.nodes[0].x=50; editing.nodes[0].y=60;
+  const initialLayout=splitDraft(editing).layout;
+  assert.deepEqual(changedParts(model,editing,"HR",initialLayout),{definition:false,layout:false,explore:false});
+  editing.nodes[0].x=70;
+  assert.equal(changedParts(model,editing,"HR",initialLayout).layout,true);
+});
 test("missing source metadata does not discard model nodes or alias layout", () => {
   const model={...splitDraft(draft()),name:"HR"};
   model.definition.nodes.push({id:"role_alias",table:"deleted_table",label:"Past role"});

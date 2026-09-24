@@ -6,7 +6,7 @@ import { nodeColumns } from "./model-columns.js";
 import { columnFilterBindings } from "./model-filter-links.js";
 import { createIconElement } from "/assets/common/ui.js";
 
-const WIDTH = 286, HEADER = 60, ROW = 30;
+const WIDTH = 286, HEADER = 60, ROW = 30, VISIBLE_ROWS = 10;
 const svgNode = (tag, attrs = {}) => {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
@@ -44,7 +44,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
   const viewport = new GraphViewport({ host, stage, minZoom: 0.08, maxZoom: 1.8,
     canStartPan: event => !event.target.closest(".sc-node, .sc-edge, .sc-connection-tools") });
   viewport.handleWheel = event => {
-    if (event.target.closest(".sc-node") && event.shiftKey) return;
+    if (event.target.closest(".sc-node-fields") && !event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     const zoom = viewport.getView().zoom;
     viewport.zoomAt(zoom * (Math.exp(-event.deltaY * 0.0015) - 1), event.clientX, event.clientY);
@@ -53,7 +53,14 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
   let filterNodes = new Set(), sourceIssueNodes = new Set(), sourceIssueEdges = new Set();
   let destroyed = false, initialFit = true, fitFrame;
   const columns = node => nodeColumns(getDraft(), catalog, node);
-  const height = node => HEADER + columns(node).length * ROW + 2;
+  const height = node => HEADER + Math.min(columns(node).length, VISIBLE_ROWS) * ROW + 2;
+  const fieldLists = new Map();
+  const port = (node, column) => {
+    const index = columns(node).findIndex(candidate => candidate.name === column);
+    if (index < 0) return HEADER / 2;
+    const offset = fieldLists.get(node.id)?.scrollTop || 0;
+    return Math.max(HEADER + ROW / 2, Math.min(height(node) - ROW / 2, HEADER + (index + .5) * ROW - offset));
+  };
   const position = node => viewport.dragPosition(node.id) || { x: node.x, y: node.y };
 
   function ensureLayout() {
@@ -77,7 +84,6 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       const source=nodes.get(target.derivation?.connection?.target || target.derivation?.source);if(!source)continue;
       const a=position(source),b=position(target),right=b.x>=a.x;
       const pair=target.derivation.connection?.columns[0];
-      const port=(node,column)=>{const index=columns(node).findIndex(c=>c.name===column);return index<0?HEADER/2:HEADER+(index+.5)*ROW;};
       const x1=a.x+(right?WIDTH:0),x2=b.x+(right?0:WIDTH),y1=a.y+port(source,pair?.target),y2=b.y+port(target,pair?.source);
       const d=`M ${x1} ${y1} C ${(x1+x2)/2} ${y1}, ${(x1+x2)/2} ${y2}, ${x2} ${y2}`;
       const group=svgNode("g",{class:"sc-edge sc-derived-edge",tabindex:"0",role:"button","aria-label":pair ? `${target.label}.${pair.source} connects to ${source.label}.${pair.target}` : `${target.label} calculated from ${source.label}`});
@@ -96,7 +102,6 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       const self = source.id === target.id;
       const right = self || b.x >= a.x;
       const x1 = a.x + (right ? WIDTH : 0), x2 = b.x + (right && !self ? 0 : WIDTH);
-      const port = (node, name) => HEADER + Math.max(0, columns(node).findIndex(c => c.name === name)) * ROW + ROW / 2;
       const y1 = a.y + port(source, relation.sourceColumn), y2 = b.y + port(target, relation.targetColumn);
       const bend = Math.max(65, Math.abs(x2 - x1) * 0.45);
       const d = self
@@ -137,6 +142,10 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
     }
     viewport.cancelInteractions();
     ensureLayout();
+    const scrollPositions = new Map([...fieldLists].map(([id, list]) => [id, list.scrollTop]));
+    const focusedRow = document.activeElement?.closest?.(".sc-column");
+    const focusKey = focusedRow && [focusedRow.closest(".sc-node")?.dataset.nodeId, focusedRow.dataset.columnName];
+    fieldLists.clear();
     cards.replaceChildren();
     const draft = getDraft();
     const exposed = new Set(exposedFields(draft, catalog).map(field => JSON.stringify([field.table, field.column])));
@@ -178,8 +187,14 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
         drawEdges(); onChange?.({ layoutOnly: true });
       });
       card.append(header);
+      const fields = el("div", "sc-node-fields");
+      fields.tabIndex = 0;
+      fields.setAttribute("role", "group");
+      fields.setAttribute("aria-label", `${node.label || node.table} fields; scroll to see all ${columns(node).length} fields`);
+      fields.addEventListener("scroll", drawEdges, { passive: true });
       for (const column of columns(node)) {
         const row = el(connecting ? "div" : "label", "sc-column"), input = document.createElement("input");
+        row.dataset.columnName = column.name;
         input.type = "checkbox";
         if(connecting) {
           input.disabled=true;
@@ -209,9 +224,16 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
           marker.append(createIconElement("filter"));
           badges.append(marker);
         }
-        row.append(input, badges, name, type); card.append(row);
+        row.append(input, badges, name, type); fields.append(row);
       }
+      card.append(fields);
+      fieldLists.set(node.id, fields);
       cards.append(card);
+      fields.scrollTop = scrollPositions.get(node.id) || 0;
+    }
+    if (focusKey) {
+      const row = [...fieldLists.get(focusKey[0])?.children || []].find(candidate => candidate.dataset.columnName === focusKey[1]);
+      (connecting ? row : row?.querySelector("input"))?.focus({ preventScroll: true });
     }
     drawEdges();
     if (initialFit) { initialFit = false; fitFrame = requestAnimationFrame(fit); }

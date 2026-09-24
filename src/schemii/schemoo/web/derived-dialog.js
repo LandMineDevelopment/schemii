@@ -7,6 +7,7 @@ import { conditionSources } from "./derived-conditions.js";
 import { helpHeading } from "./help.js";
 import { suggestSummaryConnection } from "./summary-connection.js";
 import { summaryLookup } from "./summary-lookup.js";
+import { validationKey, clearEditorValidation, showEditorValidation } from "./editor-validation.js";
 
 const arithmetic = [["add", "Add (+)"], ["subtract", "Subtract (−)"], ["multiply", "Multiply (×)"], ["divide", "Divide (÷)"]];
 const summaries = [["list", "Text list"], ["count", "Count non-null values"], ["count_distinct", "Count distinct values"], ["sum", "Sum"], ["avg", "Average"], ["min", "Minimum"], ["max", "Maximum"]];
@@ -27,6 +28,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
   const body = element("div", { className: "derived-body" });
   const error = element("p", { attrs: { role: "alert" }, className: "warning" });
   const name = element("input", { attrs: { "aria-label": "Calculated source name", maxlength: 100 } });
+  validationKey(name, "derived:name");
   name.value = existing?.label || initial?.label || `${physical.find(n => n.id === source)?.label} calculations`;
   const button = (text, fn) => { const b = element("button", { type: "button", className: "ui-button", text }); b.onclick = fn; return b; };
   const newOutput = () => ({ id: uid("field"), label: "", operation: definition.kind === "row" ? "add" : "list", column: "", nodeId: source, distinct: false, delimiter: ", " });
@@ -37,6 +39,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
   };
   if (!definition.outputs.length) definition.outputs.push(newOutput());
   function render() {
+    clearEditorValidation(body, error);
     disposeSelects(body); body.replaceChildren();
     body.append(labeled("Name on the canvas", name), labeled("Calculation kind", modelSelect("Calculation kind", [["row", "Row calculation · same record"], ["aggregate", "Grouped summary · one row per group"]], definition.kind, kind => {
       definition.kind = kind; definition.outputs = []; definition.outputs.push(newOutput()); definition.groupBy = [];
@@ -49,7 +52,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
     })));
     body.append(note(definition.kind === "row" ? "Calculated directly in SELECT. No extra table, join, or stored data. Missing inputs and division by zero produce NULL." : "Choose the records to summarize, then the columns that define each group. This summary is calculated before connecting it to the report. No database object is created."));
     if (definition.kind === "aggregate") {
-      const keys = element("fieldset", { className: "derived-keys" }, [element("legend", { text: "One summary row per · grouping columns" })]);
+      const keys = validationKey(element("fieldset", { className: "derived-keys" }, [element("legend", { text: "One summary row per · grouping columns" })]), "derived:grouping");
       for (const column of columns(source)) {
         const input = element("input", { attrs: { type: "checkbox" } }); input.checked = definition.groupBy.includes(column.name);
         input.onchange = () => {
@@ -68,6 +71,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
       remove.disabled = definition.outputs.length === 1;
       remove.onclick = () => { definition.outputs.splice(index,1); render(); };
       const title = element("input", { attrs: { "aria-label": `Field ${index+1} name`, placeholder: "e.g. Certification names", maxlength: 100 } }); title.value = output.label;
+      validationKey(title, `derived:output:${index}:name`);
       title.oninput = () => { output.label = title.value; };
       card.append(element("header", {}, [element("strong", { text: `Field ${index+1}` }), remove]), labeled("Field name", title), labeled("Operation", modelSelect(`Field ${index+1} operation`, definition.kind === "row" ? arithmetic : summaries, output.operation, value => { output.operation = value; render(); })));
       if (definition.kind === "aggregate") {
@@ -81,8 +85,8 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
       }
       const numeric = definition.kind === "row" || ["sum","avg"].includes(output.operation);
       const choices = columns(output.nodeId || source).filter(c => !numeric || /^(smallint|integer|bigint|numeric|decimal|real|double precision)/.test(c.dataType)).map(c => [c.name,`${c.name} · ${c.dataType}`]);
-      card.append(labeled("Source column", modelSelect(`Field ${index+1} column`, choices, output.column, value => { output.column=value; })));
-      if (definition.kind === "row") card.append(labeled("Second column", modelSelect(`Field ${index+1} second column`, choices, output.operand || "", value => { output.operand=value; })));
+      card.append(labeled("Source column", validationKey(modelSelect(`Field ${index+1} column`, choices, output.column, value => { output.column=value; }), `derived:output:${index}:column`)));
+      if (definition.kind === "row") card.append(labeled("Second column", validationKey(modelSelect(`Field ${index+1} second column`, choices, output.operand || "", value => { output.operand=value; }), `derived:output:${index}:operand`)));
       if (output.operation === "list") {
         const delimiter = element("input", { attrs: { "aria-label": `Field ${index+1} separator`, maxlength: 20 } }); delimiter.value = output.delimiter;
         delimiter.oninput = () => { output.delimiter=delimiter.value; };
@@ -95,7 +99,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
         disposeSelects(conditions); conditions.replaceChildren(helpHeading("Conditions (optional)", "calculatedConditions"), note(definition.kind === "aggregate"
           ? "Only matching records contribute to this field. Other fields and the connected report row remain unchanged. All conditions below must match."
           : "Calculate this field only when all conditions match; otherwise return NULL. The source row remains in the report."));
-        conditions.append(conditionsEditor(output.conditions ||= [], {draft,catalog,onChange:()=>{error.textContent="";},refresh:renderConditions,prefix:`Field ${index+1}`,allowedSources:conditionSources(draft,definition,output),defaultSource:output.nodeId || source,allowToday:true,onLoadDomain}));
+        conditions.append(conditionsEditor(output.conditions ||= [], {draft,catalog,onChange:()=>clearEditorValidation(body,error),refresh:renderConditions,prefix:`Field ${index+1}`,validationPrefix:`derived:output:${index}:condition`,allowedSources:conditionSources(draft,definition,output),defaultSource:output.nodeId || source,allowToday:true,onLoadDomain}));
       };
       renderConditions(); card.append(conditions);
       body.append(card);
@@ -108,7 +112,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
           const suggested=suggestSummaryConnection(draft,catalog,source,target);
           definition.connection.columns=definition.groupBy.map(key=>suggested.find(pair=>pair.source===key) || {source:key,target:""});render();
         })), note("Map every grouping column to a unique record in the connected table. Existing foreign keys prefill the mapping when unambiguous; you can change it.")]);
-      for (const pair of definition.connection.columns) connection.append(labeled(`${pair.source} →`,modelSelect(`Connect ${pair.source} to column`,columns(target).map(c=>[c.name,`${c.name} · ${c.dataType}`]),pair.target,column=>{pair.target=column;updateSummary();})));
+      for (const pair of definition.connection.columns) connection.append(labeled(`${pair.source} →`,validationKey(modelSelect(`Connect ${pair.source} to column`,columns(target).map(c=>[c.name,`${c.name} · ${c.dataType}`]),pair.target,column=>{pair.target=column;updateSummary();}), `derived:mapping:${pair.source}`)));
       const summary=note("");summary.setAttribute("role","status");
       function updateSummary(){
         const label=id=>physical.find(n=>n.id===id)?.label || id;
@@ -117,19 +121,30 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
       updateSummary();connection.append(summary,note("Source-only fields need no lookup joins. Related names or conditions may require a lookup before grouping. Model filters still apply."));body.append(connection);
     }
   }
+  body.addEventListener("input", () => clearEditorValidation(body,error));
+  body.addEventListener("change", () => clearEditorValidation(body,error));
   const apply = button("Apply to model", () => {
-    if (!name.value.trim() || definition.outputs.some(o => !o.label.trim() || !o.column || (definition.kind === "row" && !o.operand)) || (definition.kind === "aggregate" && !definition.groupBy.length)) {
-      error.textContent = "Provide a name, source columns for every field, and grouping columns for summaries."; return;
+    const issues=[];
+    const add=(key,message)=>issues.push({key,message});
+    if (!name.value.trim()) add("derived:name", "Give the calculated source a name.");
+    if (definition.kind === "aggregate" && !definition.groupBy.length) add("derived:grouping", "Choose at least one grouping column.");
+    for (const [index,output] of definition.outputs.entries()) {
+      if (!output.label.trim()) add(`derived:output:${index}:name`, `Give field ${index+1} a name.`);
+      const sourceColumns=columns(output.nodeId || source);
+      if (!sourceColumns.some(column=>column.name===output.column)) add(`derived:output:${index}:column`, `Choose a valid source column for field ${index+1}.`);
+      if (definition.kind === "row" && !sourceColumns.some(column=>column.name===output.operand)) add(`derived:output:${index}:operand`, `Choose a valid second column for field ${index+1}.`);
     }
-    if(definition.kind === "aggregate" && definition.connection.columns.some(pair=>!pair.target)){error.textContent="Choose the destination column for every summary grouping column.";return;}
-    for(const output of definition.outputs) for(const condition of output.conditions || []) {
+    if(definition.kind === "aggregate") for(const pair of definition.connection.columns) if(!columns(target).some(column=>column.name===pair.target)) add(`derived:mapping:${pair.source}`,`Choose a destination column for ${pair.source}.`);
+    for(const [index,output] of definition.outputs.entries()) for(const [conditionIndex,condition] of (output.conditions || []).entries()) {
+      const key=`derived:output:${index}:condition:${conditionIndex}`;
       const comparisonIssue = columnComparisonIssue(condition, draft, catalog);
-      if (comparisonIssue) { error.textContent = comparisonIssue; return; }
+      if (comparisonIssue) add(`${key}:comparison`, comparisonIssue);
       const allowed=conditionSources(draft,definition,output);
-      if(!allowed.has(condition.table) || !columns(condition.table).some(c=>c.name===condition.column)) {error.textContent="Choose a valid condition column on this field's source or lookup path.";return;}
-      if(["in","not_in"].includes(condition.operator) && (!Array.isArray(condition.value) || !condition.value.length)) {error.textContent="Choose at least one value for an IN / NOT IN condition.";return;}
-      if(!["is_null","not_null"].includes(condition.operator) && condition.valueSource!=="today" && condition.compareColumn == null && condition.value == null) {error.textContent="Choose a comparison value, column, Today, or a null-check comparison for every condition.";return;}
+      if(!allowed.has(condition.table) || !columns(condition.table).some(c=>c.name===condition.column)) add(`${key}:field`, `Choose a valid condition column for field ${index+1}.`);
+      if(["in","not_in"].includes(condition.operator) && (!Array.isArray(condition.value) || !condition.value.length)) add(`${key}:value`, `Choose at least one value for field ${index+1}'s list condition.`);
+      if(!["is_null","not_null"].includes(condition.operator) && condition.valueSource!=="today" && condition.compareColumn == null && condition.value == null) add(`${key}:value`, `Choose a comparison value for field ${index+1}'s condition.`);
     }
+    if (showEditorValidation(body,error,issues)) return;
     const parent = physical.find(n => n.id === (definition.kind === "aggregate" ? target : source));
     const savedDefinition=structuredClone(definition);
     // Editing a label/condition must not change the grain of an existing

@@ -60,10 +60,10 @@ export function joinModel(model) {
   });
 }
 
-export function changedParts(model, draft, name) {
+export function changedParts(model, draft, name, initialLayout = model.layout) {
   const parts = splitDraft(draft);
   return Object.fromEntries(Object.keys(parts).map(key => [key,
-    stableJson(parts[key]) !== stableJson(model[key]) || (key === "definition" && name !== model.name),
+    stableJson(parts[key]) !== stableJson(key === "layout" ? initialLayout : model[key]) || (key === "definition" && name !== model.name),
   ]));
 }
 

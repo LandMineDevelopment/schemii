@@ -59,35 +59,42 @@ export function filtersAffectingNode(draft, nodeId) {
 }
 
 /** Authoring hints only. Server validation remains authoritative. */
-export function modelFilterIssue(scope, draft, catalog) {
-  if (!scope.label?.trim()) return "Give this filter a name.";
-  if (!scope.alternatives?.length) return "Add at least one option.";
-  for (const option of scope.alternatives) {
-    if (!option.label?.trim()) return "Give each option a name.";
+export function modelFilterIssues(scope, draft, catalog) {
+  const issues = [];
+  const add = (key, message) => issues.push({key, message});
+  if (!scope.label?.trim()) add(`scope:${scope.id}:name`, "Give this filter a name.");
+  if (!scope.alternatives?.length) add(`scope:${scope.id}:alternatives`, "Add at least one option.");
+  for (const option of scope.alternatives || []) {
+    if (!option.label?.trim()) add(`option:${option.id}:name`, "Give this option a name.");
     for (const input of option.inputs || []) {
-      if (!input.label?.trim()) return "Give each report input a name.";
+      if (!input.label?.trim()) add(`input:${input.id}:name`, "Give this report input a name.");
       if (input.domain) {
         const domain = input.domain;
         const table = domain.nodeId != null ? draft.nodes.find(n => n.id === domain.nodeId)?.table : domain.table;
         const columns = catalog.tables.find(t => t.name === table)?.columns || [];
-        if (!columns.some(c => c.name === domain.column) || (domain.labelColumn && !columns.some(c => c.name === domain.labelColumn))) return "Choose a valid domain value column and display label. Its source may have been removed.";
+        if (!columns.some(c => c.name === domain.column)) add(`input:${input.id}:domain`, "Choose a valid domain value column.");
+        if (domain.labelColumn && !columns.some(c => c.name === domain.labelColumn)) add(`input:${input.id}:domain-label`, "Choose a valid domain display label.");
       }
-      if (!(option.conditions || []).some(c => c.parameterId === input.id)) return `Bind “${input.label}” to a source, or remove that unused input for a fixed rule.`;
+      if (!(option.conditions || []).some(c => c.parameterId === input.id)) add(`input:${input.id}:binding`, `Bind “${input.label || "this input"}” to a source, or remove it.`);
     }
-    for (const c of option.conditions || []) {
+    for (const [index, c] of (option.conditions || []).entries()) {
+      const key = `condition:${scope.id}:${option.id}:${index}`;
       const comparisonIssue = columnComparisonIssue(c, draft, catalog);
-      if (comparisonIssue) return comparisonIssue;
-      if (["in", "not_in"].includes(c.operator) && !c.parameterId && (!Array.isArray(c.value) || !c.value.length)) return "Choose at least one value for IN / NOT IN.";
-      if (c.domain && c.value == null) return "Choose a fixed value from the domain list.";
+      if (comparisonIssue) add(`${key}:comparison`, comparisonIssue);
+      if (["in", "not_in"].includes(c.operator) && !c.parameterId && (!Array.isArray(c.value) || !c.value.length)) add(`${key}:value`, "Choose at least one value for IN / NOT IN.");
+      if (c.domain && c.value == null) add(`${key}:value`, "Choose a fixed value from the domain list.");
       if (c.domain) {
         const table = c.domain.nodeId != null ? draft.nodes.find(n => n.id === c.domain.nodeId)?.table : c.domain.table;
         const columns = catalog.tables.find(t => t.name === table)?.columns || [];
-        if (!columns.some(column => column.name === c.domain.column) || (c.domain.labelColumn && !columns.some(column => column.name === c.domain.labelColumn))) return "Choose a valid fixed-value domain source and display label.";
+        if (!columns.some(column => column.name === c.domain.column) || (c.domain.labelColumn && !columns.some(column => column.name === c.domain.labelColumn))) add(`${key}:value`, "Choose a valid fixed-value domain source and display label.");
       }
       const node = draft.nodes.find(n => n.id === c.table);
-      if (!catalog.tables.find(t => t.name === node?.table)?.columns.some(column => column.name === c.column)) return "Choose a valid source column for every condition.";
-      if (c.parameterId && !(option.inputs || []).some(p => p.id === c.parameterId)) return "A condition refers to a removed input. Choose its value source again.";
+      if (!catalog.tables.find(t => t.name === node?.table)?.columns.some(column => column.name === c.column)) add(`${key}:field`, "Choose a valid source column for this condition.");
+      if (c.parameterId && !(option.inputs || []).some(p => p.id === c.parameterId)) add(`${key}:value-source`, "Choose a value source; the referenced input was removed.");
     }
   }
-  return "";
+  return issues;
+}
+export function modelFilterIssue(scope, draft, catalog) {
+  return modelFilterIssues(scope, draft, catalog)[0]?.message || "";
 }
