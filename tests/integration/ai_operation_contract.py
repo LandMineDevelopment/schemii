@@ -15,6 +15,7 @@ from schemii.common.metadata.factory import create_metadata_repositories
 from schemii.common.metadata.migrations import MIGRATION_PACKAGE as COMMON
 from schemii.schemii.metadata import MIGRATION_PACKAGE as SCHEMII
 from schemii.schemoo.metadata.migrations import MIGRATION_PACKAGE as SCHEMOO
+from schemii.schemer.metadata.migrations import MIGRATION_PACKAGE as SCHEMER
 from schemii.schemii.ai.action_policy import required_action_ids
 from schemii.schemii.ai.models import AiCapabilities
 from schemii.schemii.ai.repository import AiNotFoundError, PostgresAiRepository
@@ -24,7 +25,7 @@ from schemii.schemii.workspaces.postgres_store import PostgresWorkspaceRepositor
 
 
 def main():
-    metadata = create_metadata_repositories(os.environ, migration_packages=(COMMON, SCHEMII, SCHEMOO))
+    metadata = create_metadata_repositories(os.environ, migration_packages=(COMMON, SCHEMII, SCHEMOO, SCHEMER))
     if metadata.storage != 'postgresql' or metadata.connection_factory is None:
         raise RuntimeError('AI operation contract requires the launcher PostgreSQL metadata stack')
     factory = metadata.connection_factory

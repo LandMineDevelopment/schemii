@@ -24,3 +24,14 @@ test('administrator policy fixes shared Codex reasoning without changing persona
   assert.equal(reasoningForSelection(status, { providerId: 'openai-codex', reasoningLevels: ['low'] }, 'low'), 'low');
   assert.equal(reasoningLabel('high'), 'High');
 });
+
+test('shared Codex uses each model’s granted reasoning levels when a role has multiple policies', () => {
+  const status = { providers: [{ id: 'instance-codex', adminManaged: true }] };
+  const luna = { id: 'gpt-6-luna', providerId: 'instance-codex', reasoningLevels: ['default'] };
+  const other = { id: 'gpt-5.5', providerId: 'instance-codex', reasoningLevels: ['medium'] };
+  const flexible = { id: 'gpt-6-sol', providerId: 'instance-codex', reasoningLevels: ['low', 'high'] };
+  assert.equal(reasoningForSelection(status, luna, 'medium'), 'default');
+  assert.equal(reasoningForSelection(status, other, 'default'), 'medium');
+  assert.equal(reasoningForSelection(status, flexible, 'high'), 'high');
+  assert.equal(reasoningForSelection(status, flexible, 'default'), 'low');
+});

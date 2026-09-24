@@ -16,6 +16,7 @@ COOKIE = 'schemii_session'
 SESSION_SECONDS = 12 * 60 * 60
 PROVISIONER_ROLE_ID = 'role_application_provisioners'
 BOOTSTRAP_PRODUCTS_ROLE_ID = 'role_bootstrap_products'
+DIRECT_ROLE_PREFIX = 'role_personal_'
 PRODUCT_CAPABILITIES = ('schemii:access', 'schemoo:access', 'schemer:access')
 SCHEMER_AUTHOR = 'schemer:author'
 PROVISION_CAPABILITY = 'accounts:provision'
@@ -35,6 +36,41 @@ def password_matches(password, stored):
 
 def public_user(user):
     return {key: user[key] for key in ('id','username','display_name','is_admin','disabled')}
+
+
+def direct_role_id(user_id):
+    return DIRECT_ROLE_PREFIX + user_id
+
+
+def assign_direct_access(state, user_id, username, access):
+    """Reuse the role authorization path for permissions assigned to one person."""
+    role_id = direct_role_id(user_id)
+    if not any(access[key] for key in ('capabilities','connections','dashboards')):
+        state['roles'].pop(role_id, None)
+        return
+    state['roles'][role_id] = dict(id=role_id, name=f'Direct access: {username}',
+        capabilities=access['capabilities'], user_ids=[user_id],
+        connections=access['connections'], dashboards=access['dashboards'])
+
+
+def assign_roles(state, user_id, role_ids):
+    """Change only this person's memberships; role scopes remain shared."""
+    selected = set(role_ids)
+    if len(selected) != len(role_ids) or PROVISIONER_ROLE_ID in selected or any(
+            role_id.startswith(DIRECT_ROLE_PREFIX) for role_id in selected):
+        raise HTTPException(422, 'Invalid role selection')
+    if selected - state['roles'].keys():
+        raise HTTPException(422, 'Unknown role')
+    for role_id, role in state['roles'].items():
+        if role_id == PROVISIONER_ROLE_ID or role_id.startswith(DIRECT_ROLE_PREFIX):
+            continue
+        members = role['user_ids']
+        if role_id in selected and user_id not in members:
+            if len(members) >= 1000:
+                raise HTTPException(409, f'Role “{role["name"]}” already has 1000 members')
+            members.append(user_id)
+        elif role_id not in selected and user_id in members:
+            role['user_ids'] = [member for member in members if member != user_id]
 
 
 class AuthService:
@@ -159,6 +195,11 @@ class AuthService:
                     id=BOOTSTRAP_PRODUCTS_ROLE_ID, name='Bootstrap product access',
                     capabilities=[*PRODUCT_CAPABILITIES, SCHEMER_AUTHOR],
                     user_ids=[user_id], connections=[], dashboards=[])
+            else:
+                assign_roles(state, user_id, getattr(data, 'role_ids', []))
+                direct = getattr(data, 'direct_access', None)
+                if direct is not None:
+                    assign_direct_access(state, user_id, username, direct.model_dump())
             state['audit'].append((actor or user_id,'account.create',user_id))
         return public_user(user)
 
@@ -195,6 +236,9 @@ class AuthService:
 
     def update_user(self, user_id, data, actor):
         updates = data.model_dump(exclude_unset=True)
+        role_ids = updates.pop('role_ids', None)
+        updates.pop('direct_access', None)
+        direct_access = data.direct_access.model_dump() if data.direct_access is not None else None
         if 'password' in updates: updates['password_hash'] = password_hash(updates.pop('password'))
         with self.store.transaction(write=True) as state:
             user = state['users'].get(user_id)
@@ -214,8 +258,32 @@ class AuthService:
                 if next_user['is_admin']: provisioners['user_ids'].append(user_id)
             if next_user['disabled'] or 'password_hash' in updates:
                 state['sessions'] = {key:s for key,s in state['sessions'].items() if s['user_id'] != user_id}
+            if role_ids is not None:
+                assign_roles(state, user_id, role_ids)
+            if direct_access is not None:
+                assign_direct_access(state, user_id, user['username'], direct_access)
             state['audit'].append((actor,'account.update',user_id))
         return public_user(next_user)
+
+    def delete_user(self, user_id, actor):
+        """Remove sign-in and grants while preserving the person's owned work."""
+        with self.store.transaction(write=True) as state:
+            user = state['users'].get(user_id)
+            if user is None:
+                raise HTTPException(404, 'Account not found')
+            if user['is_admin'] and not user['disabled'] and not any(
+                    other['id'] != user_id and other['is_admin'] and not other['disabled']
+                    for other in state['users'].values()):
+                raise HTTPException(409, 'Keep at least one active administrator')
+            del state['users'][user_id]
+            state['roles'].pop(direct_role_id(user_id), None)
+            state['sessions'] = {key: session for key, session in state['sessions'].items()
+                                 if session['user_id'] != user_id}
+            state['attempts'].pop(user['username'], None)
+            for role in state['roles'].values():
+                if user_id in role['user_ids']:
+                    role['user_ids'] = [member for member in role['user_ids'] if member != user_id]
+            state['audit'].append((actor, 'account.delete', user_id))
 
     def audit(self, actor, action, target):
         if self.store.factory:

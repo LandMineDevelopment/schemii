@@ -1,4 +1,4 @@
-import { managedProviderForModel, populateScopedReasoningOptions, reasoningForSelection } from "./ai-reasoning.js";
+import { populateScopedReasoningOptions, reasoningForSelection } from "./ai-reasoning.js";
 import { assistantDownloadLink } from "./ai-download.js";
 import { requestJson } from "./http.js";
 import { element } from "./dom.js";
@@ -94,8 +94,8 @@ export function createProductAssistant({
     send.hidden = running;
     cancel.hidden = !running; cancel.disabled = busy;
     modelSelect.disabled = busy;
-    reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1 || Boolean(managedProviderForModel(runtime, selected()));
-    settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1 || Boolean(managedProviderForModel(runtime, selected()));
+    reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1;
+    settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1;
     fresh.disabled = busy || running || !getSubjectId() || !selected(); history.disabled = busy || !getSubjectId();
     saveSettings.disabled = busy;
     permissionEditor?.setBusy(busy);
@@ -293,7 +293,7 @@ export function createProductAssistant({
 
   reasoningSelect.onchange = () => void guard(async () => {
     const reasoningEffort = reasoningSelect.value, choice = selected();
-    if (!choice || busy || active(chat) || managedProviderForModel(runtime, choice)) return;
+    if (!choice || busy || active(chat)) return;
     busy = true; controls();
     try {
       const body = { providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort, expectedRevision: chat?.revision };

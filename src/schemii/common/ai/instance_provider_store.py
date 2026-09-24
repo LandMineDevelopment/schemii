@@ -66,6 +66,25 @@ def _public_grant(grant: tuple[str, str, str | None, str | None], *, provider_id
     return result
 
 
+def _role_grant(role_id: str, product: str, connection_owner_id: str | None,
+                connection_id: str | None) -> tuple[str, str, str | None, str | None]:
+    if not isinstance(role_id, str) or not role_id or "\0" in role_id:
+        raise ValueError("A valid role ID is required")
+    _, product, owner, connection = _grant(role_id, product, connection_owner_id, connection_id)
+    return role_id, product, owner, connection
+
+
+def _public_role_grant(key: tuple[str, str, str, str | None, str | None, str | None, str | None],
+                       revision: int) -> dict[str, Any]:
+    provider, role, product, owner, connection, model, effort = key
+    result: dict[str, Any] = {"roleId": role, "product": product,
+                              "connectionOwnerId": owner, "connectionId": connection,
+                              "revision": revision}
+    if provider == _CODEX:
+        result.update(modelId=model, reasoningEffort=effort)
+    return result
+
+
 def _policy(provider_id: str, model_id: str, reasoning_effort: str) -> tuple[str | None, str | None]:
     _provider(provider_id)
     if provider_id == _PROVIDER:
@@ -117,7 +136,8 @@ class MemoryInstanceAiProviderStore(_Encryption):
         self._lock = RLock()
         self._rows: dict[str, dict[str, Any]] = {
             provider: {"encrypted": None, "generation": 0} for provider in _PROVIDERS}
-        self._grants: dict[tuple[str, str, str, str | None, str | None], dict[str, Any]] = {}
+        self._grants: dict[tuple[str, str, str, str | None, str | None, str | None, str | None], dict[str, Any]] = {}
+        self._role_grants: dict[tuple[str, str, str, str | None, str | None, str | None, str | None], int] = {}
         self._grant_revision = 0
 
     @property
@@ -181,53 +201,115 @@ class MemoryInstanceAiProviderStore(_Encryption):
                 self._grants.items(), key=lambda item: tuple(value or "" for value in item[0]))
                 if key[0] == provider_id]
 
+    def list_role_grants(self, provider_id: str = _PROVIDER) -> list[dict[str, Any]]:
+        provider_id = _provider(provider_id)
+        with self._lock:
+            return [_public_role_grant(key, revision) for key, revision in sorted(
+                self._role_grants.items(), key=lambda item: tuple(value or "" for value in item[0]))
+                if key[0] == provider_id]
+
+    def upsert_role_grant(self, role_id: str, product: str, connection_owner_id: str | None = None,
+                          connection_id: str | None = None, *, provider_id: str = _PROVIDER,
+                          model_id: str = "gpt-6-luna", reasoning_effort: str = "default") -> dict[str, Any]:
+        scope = _role_grant(role_id, product, connection_owner_id, connection_id)
+        model, effort = _policy(provider_id, model_id, reasoning_effort)
+        key = (_provider(provider_id), *scope, model, effort)
+        with self._lock:
+            self._grant_revision += 1
+            self._role_grants[key] = self._grant_revision
+            return _public_role_grant(key, self._grant_revision)
+
+    def delete_role_grant(self, role_id: str, product: str, connection_owner_id: str | None = None,
+                          connection_id: str | None = None, *, provider_id: str = _PROVIDER,
+                          model_id: str | None = None, reasoning_effort: str | None = None) -> bool:
+        scope = _role_grant(role_id, product, connection_owner_id, connection_id)
+        with self._lock:
+            matches = [key for key in self._role_grants if key[:5] == (_provider(provider_id), *scope)
+                       and (model_id is None or key[5] == model_id)
+                       and (reasoning_effort is None or key[6] == reasoning_effort)]
+            for key in matches:
+                del self._role_grants[key]
+            return bool(matches)
+
     @staticmethod
-    def _grant_public(key: tuple[str, str, str, str | None, str | None],
+    def _grant_public(key: tuple[str, str, str, str | None, str | None, str | None, str | None],
                       value: dict[str, Any]) -> dict[str, Any]:
-        return _public_grant(key[1:], provider_id=key[0],
+        return _public_grant(key[1:5], provider_id=key[0],
                              model_id=value["modelId"], reasoning_effort=value["reasoningEffort"],
                              revision=value["revision"])
+
+    def _direct_keys(self, provider_id, scope):
+        return [key for key in self._grants if key[:5] == (provider_id, *scope)]
 
     def upsert_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
                      connection_id: str | None = None, *, provider_id: str = _PROVIDER,
                      model_id: str = "gpt-6-luna", reasoning_effort: str = "default") -> dict[str, Any]:
-        grant = (_provider(provider_id), *_grant(user_id, product, connection_owner_id, connection_id))
+        scope = _grant(user_id, product, connection_owner_id, connection_id)
         model_id, reasoning_effort = _policy(provider_id, model_id, reasoning_effort)
+        grant = (_provider(provider_id), *scope, model_id, reasoning_effort)
         with self._lock:
+            for key in self._direct_keys(provider_id, scope):
+                del self._grants[key]
             self._grant_revision += 1
             value = {"modelId": model_id, "reasoningEffort": reasoning_effort,
                      "revision": self._grant_revision}
             self._grants[grant] = value
             return self._grant_public(grant, value)
 
+    def add_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
+                  connection_id: str | None = None, *, provider_id: str = _CODEX,
+                  model_id: str, reasoning_effort: str) -> dict[str, Any]:
+        if provider_id != _CODEX:
+            raise ValueError("Only Codex supports multiple direct policies")
+        scope = _grant(user_id, product, connection_owner_id, connection_id)
+        model, effort = _policy(provider_id, model_id, reasoning_effort)
+        key = (provider_id, *scope, model, effort)
+        with self._lock:
+            self._grant_revision += 1
+            value = {"modelId": model, "reasoningEffort": effort, "revision": self._grant_revision}
+            self._grants[key] = value
+            return self._grant_public(key, value)
+
+    def delete_model_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
+                           connection_id: str | None = None, *, model_id: str,
+                           reasoning_effort: str) -> bool:
+        scope = _grant(user_id, product, connection_owner_id, connection_id)
+        model, effort = _policy(_CODEX, model_id, reasoning_effort)
+        key = (_CODEX, *scope, model, effort)
+        with self._lock:
+            return self._grants.pop(key, None) is not None
+
     def delete_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
                      connection_id: str | None = None, *, provider_id: str = _PROVIDER) -> bool:
-        grant = (_provider(provider_id), *_grant(user_id, product, connection_owner_id, connection_id))
+        scope = _grant(user_id, product, connection_owner_id, connection_id)
         with self._lock:
-            if grant not in self._grants:
-                return False
-            del self._grants[grant]
-            return True
+            keys = self._direct_keys(_provider(provider_id), scope)
+            for key in keys:
+                del self._grants[key]
+            return bool(keys)
 
     def has_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
                   connection_id: str | None = None, *, provider_id: str = _PROVIDER) -> bool:
-        grant = (_provider(provider_id), *_grant(user_id, product, connection_owner_id, connection_id))
+        scope = _grant(user_id, product, connection_owner_id, connection_id)
         with self._lock:
-            return grant in self._grants
+            return bool(self._direct_keys(_provider(provider_id), scope))
 
     def get_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
                   connection_id: str | None = None, *, provider_id: str = _PROVIDER) -> dict[str, Any] | None:
-        grant = (_provider(provider_id), *_grant(user_id, product, connection_owner_id, connection_id))
+        scope = _grant(user_id, product, connection_owner_id, connection_id)
         with self._lock:
-            value = self._grants.get(grant)
-            return self._grant_public(grant, value) if value else None
+            keys = self._direct_keys(_provider(provider_id), scope)
+            key = max(keys, key=lambda item: self._grants[item]["revision"]) if keys else None
+            return self._grant_public(key, self._grants[key]) if key else None
 
     def resolve(self, user_id: str, product: str, connection_owner_id: str | None = None,
                 connection_id: str | None = None, *, provider_id: str = _PROVIDER) -> dict[str, Any] | None:
-        grant = (_provider(provider_id), *_grant(user_id, product, connection_owner_id, connection_id))
+        scope = _grant(user_id, product, connection_owner_id, connection_id)
         with self._lock:
             row = self._rows[provider_id]
-            value = self._grants.get(grant)
+            keys = self._direct_keys(_provider(provider_id), scope)
+            key = max(keys, key=lambda item: self._grants[item]["revision"]) if keys else None
+            value = self._grants[key] if key else None
             if value is None or row["encrypted"] is None:
                 return None
             result = {"credential": self._decrypt(provider_id, row["encrypted"]),
@@ -320,6 +402,64 @@ class PostgresInstanceAiProviderStore(_Encryption):
             rows = cursor.fetchall()
         return [self._grant_public(row, provider_id) for row in rows]
 
+    def list_role_grants(self, provider_id: str = _PROVIDER) -> list[dict[str, Any]]:
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute("""SELECT role_id, product, connection_owner_id, connection_id,
+                       model_id, reasoning_effort, revision
+                FROM metadata.ai_instance_provider_role_grants WHERE provider_id = %s
+                ORDER BY role_id, product, connection_owner_id NULLS FIRST,
+                         connection_id NULLS FIRST, model_id NULLS FIRST,
+                         reasoning_effort NULLS FIRST""", (_provider(provider_id),))
+            rows = cursor.fetchall()
+        return [_public_role_grant((provider_id, row["role_id"], row["product"],
+                                   row["connection_owner_id"], row["connection_id"],
+                                   row["model_id"], row["reasoning_effort"]), row["revision"])
+                for row in rows]
+
+    def upsert_role_grant(self, role_id: str, product: str, connection_owner_id: str | None = None,
+                          connection_id: str | None = None, *, provider_id: str = _PROVIDER,
+                          model_id: str = "gpt-6-luna", reasoning_effort: str = "default") -> dict[str, Any]:
+        scope = _role_grant(role_id, product, connection_owner_id, connection_id)
+        model, effort = _policy(provider_id, model_id, reasoning_effort)
+        if provider_id == _CODEX:
+            columns = ("provider_id, role_id, product, connection_owner_id, connection_id, "
+                       "model_id, reasoning_effort" if connection_id else
+                       "provider_id, role_id, product, model_id, reasoning_effort")
+            predicate = "connection_id IS NOT NULL" if connection_id else "connection_id IS NULL"
+        else:
+            columns = ("provider_id, role_id, product, connection_owner_id, connection_id" if connection_id
+                       else "provider_id, role_id, product")
+            predicate = "connection_id IS NOT NULL" if connection_id else "connection_id IS NULL"
+        conflict = f"({columns}) WHERE {predicate} AND provider_id = '{provider_id}'"
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(f"""INSERT INTO metadata.ai_instance_provider_role_grants
+                (provider_id, role_id, product, connection_owner_id, connection_id, model_id, reasoning_effort)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT {conflict} DO UPDATE
+                SET revision = nextval('metadata.ai_instance_provider_grant_revision_seq')
+                RETURNING revision""", (_provider(provider_id), *scope, model, effort))
+            revision = cursor.fetchone()["revision"]
+        return _public_role_grant((provider_id, *scope, model, effort), revision)
+
+    def delete_role_grant(self, role_id: str, product: str, connection_owner_id: str | None = None,
+                          connection_id: str | None = None, *, provider_id: str = _PROVIDER,
+                          model_id: str | None = None, reasoning_effort: str | None = None) -> bool:
+        scope = _role_grant(role_id, product, connection_owner_id, connection_id)
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            query = """DELETE FROM metadata.ai_instance_provider_role_grants
+                WHERE provider_id = %s AND role_id = %s AND product = %s
+                  AND connection_owner_id IS NOT DISTINCT FROM %s
+                  AND connection_id IS NOT DISTINCT FROM %s"""
+            params = [_provider(provider_id), *scope]
+            if model_id is not None:
+                query += " AND model_id = %s"
+                params.append(model_id)
+            if reasoning_effort is not None:
+                query += " AND reasoning_effort = %s"
+                params.append(reasoning_effort)
+            cursor.execute(query, params)
+            return cursor.rowcount > 0
+
     @staticmethod
     def _grant_public(row: Any, provider_id: str) -> dict[str, Any]:
         return _public_grant((row["user_id"], row["product"], row["connection_owner_id"],
@@ -332,24 +472,70 @@ class PostgresInstanceAiProviderStore(_Encryption):
                      model_id: str = "gpt-6-luna", reasoning_effort: str = "default") -> dict[str, Any]:
         grant = _grant(user_id, product, connection_owner_id, connection_id)
         model_id, reasoning_effort = _policy(provider_id, model_id, reasoning_effort)
-        conflict = ("(provider_id, user_id, product) WHERE connection_id IS NULL"
+        conflict = ("(provider_id, user_id, product) WHERE connection_id IS NULL AND provider_id = 'opencode'"
                     if connection_id is None else
                     "(provider_id, user_id, product, connection_owner_id, connection_id) "
-                    "WHERE connection_id IS NOT NULL")
+                    "WHERE connection_id IS NOT NULL AND provider_id = 'opencode'")
         with self._connection_factory() as connection, connection.cursor() as cursor:
-            cursor.execute(f"""INSERT INTO metadata.ai_instance_provider_grants
-                (provider_id, user_id, product, connection_owner_id, connection_id,
-                 model_id, reasoning_effort)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT {conflict}
-                DO UPDATE SET model_id = EXCLUDED.model_id,
-                    reasoning_effort = EXCLUDED.reasoning_effort,
-                    revision = nextval('metadata.ai_instance_provider_grant_revision_seq')
-                RETURNING user_id, product, connection_owner_id, connection_id,
-                          model_id, reasoning_effort, revision""",
-                (_provider(provider_id), *grant, model_id, reasoning_effort))
+            if provider_id == _CODEX:
+                cursor.execute("""DELETE FROM metadata.ai_instance_provider_grants
+                    WHERE provider_id = %s AND user_id = %s AND product = %s
+                      AND connection_owner_id IS NOT DISTINCT FROM %s
+                      AND connection_id IS NOT DISTINCT FROM %s""", (_provider(provider_id), *grant))
+                cursor.execute("""INSERT INTO metadata.ai_instance_provider_grants
+                    (provider_id, user_id, product, connection_owner_id, connection_id,
+                     model_id, reasoning_effort) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING user_id, product, connection_owner_id, connection_id,
+                              model_id, reasoning_effort, revision""",
+                    (provider_id, *grant, model_id, reasoning_effort))
+            else:
+                cursor.execute(f"""INSERT INTO metadata.ai_instance_provider_grants
+                    (provider_id, user_id, product, connection_owner_id, connection_id,
+                     model_id, reasoning_effort)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT {conflict}
+                    DO UPDATE SET revision = nextval('metadata.ai_instance_provider_grant_revision_seq')
+                    RETURNING user_id, product, connection_owner_id, connection_id,
+                              model_id, reasoning_effort, revision""",
+                    (_provider(provider_id), *grant, model_id, reasoning_effort))
             row = cursor.fetchone()
         return self._grant_public(row, provider_id)
+
+    def add_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
+                  connection_id: str | None = None, *, provider_id: str = _CODEX,
+                  model_id: str, reasoning_effort: str) -> dict[str, Any]:
+        if provider_id != _CODEX:
+            raise ValueError("Only Codex supports multiple direct policies")
+        grant = _grant(user_id, product, connection_owner_id, connection_id)
+        model, effort = _policy(provider_id, model_id, reasoning_effort)
+        columns = ("provider_id, user_id, product, connection_owner_id, connection_id, "
+                   "model_id, reasoning_effort" if connection_id else
+                   "provider_id, user_id, product, model_id, reasoning_effort")
+        predicate = "connection_id IS NOT NULL" if connection_id else "connection_id IS NULL"
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(f"""INSERT INTO metadata.ai_instance_provider_grants
+                (provider_id, user_id, product, connection_owner_id, connection_id, model_id, reasoning_effort)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT ({columns}) WHERE {predicate} AND provider_id = 'openai-codex'
+                DO UPDATE SET revision = nextval('metadata.ai_instance_provider_grant_revision_seq')
+                RETURNING user_id, product, connection_owner_id, connection_id,
+                          model_id, reasoning_effort, revision""",
+                (provider_id, *grant, model, effort))
+            row = cursor.fetchone()
+        return self._grant_public(row, provider_id)
+
+    def delete_model_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
+                           connection_id: str | None = None, *, model_id: str,
+                           reasoning_effort: str) -> bool:
+        grant = _grant(user_id, product, connection_owner_id, connection_id)
+        model, effort = _policy(_CODEX, model_id, reasoning_effort)
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute("""DELETE FROM metadata.ai_instance_provider_grants
+                WHERE provider_id = 'openai-codex' AND user_id = %s AND product = %s
+                  AND connection_owner_id IS NOT DISTINCT FROM %s
+                  AND connection_id IS NOT DISTINCT FROM %s
+                  AND model_id = %s AND reasoning_effort = %s""", (*grant, model, effort))
+            return cursor.rowcount > 0
 
     def delete_grant(self, user_id: str, product: str, connection_owner_id: str | None = None,
                      connection_id: str | None = None, *, provider_id: str = _PROVIDER) -> bool:
@@ -381,7 +567,8 @@ class PostgresInstanceAiProviderStore(_Encryption):
                 FROM metadata.ai_instance_provider_grants
                 WHERE provider_id = %s AND user_id = %s AND product = %s
                   AND connection_owner_id IS NOT DISTINCT FROM %s
-                  AND connection_id IS NOT DISTINCT FROM %s""", (_provider(provider_id), *grant))
+                  AND connection_id IS NOT DISTINCT FROM %s
+                ORDER BY revision DESC LIMIT 1""", (_provider(provider_id), *grant))
             row = cursor.fetchone()
         return self._grant_public(row, provider_id) if row else None
 
@@ -398,7 +585,8 @@ class PostgresInstanceAiProviderStore(_Encryption):
                 WHERE credential.provider_id = %s AND credential.ciphertext IS NOT NULL
                   AND access_grant.user_id = %s AND access_grant.product = %s
                   AND access_grant.connection_owner_id IS NOT DISTINCT FROM %s
-                  AND access_grant.connection_id IS NOT DISTINCT FROM %s""", (_provider(provider_id), *grant))
+                  AND access_grant.connection_id IS NOT DISTINCT FROM %s
+                ORDER BY access_grant.revision DESC LIMIT 1""", (_provider(provider_id), *grant))
             row = cursor.fetchone()
         if row is None:
             return None

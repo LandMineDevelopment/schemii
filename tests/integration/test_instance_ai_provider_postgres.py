@@ -63,6 +63,7 @@ def test_instance_codex_credential_policy_and_revision_are_durable(postgres_meta
         username="it_codex_" + uuid4().hex, display_name="Codex integration user",
         password="integration-password-123"))
     user_id = user["id"]
+    role_id = "role_it_ai_" + uuid4().hex
     credential = {"type": "oauth", "refresh": "fixture-refresh-secret"}
     try:
         assert store.set_credential("openai-codex", credential)["connected"]
@@ -80,6 +81,22 @@ def test_instance_codex_credential_policy_and_revision_are_durable(postgres_meta
         assert store.get_grant(user_id, "schemii", provider_id="openai-codex") == first
         assert store.resolve(user_id, "schemii") is None
         assert store.resolve(user_id, "schemii", provider_id="openai-codex")["credential"] == credential
+
+        second = store.add_grant(user_id, "schemii", model_id="gpt-6-sol",
+                                 reasoning_effort="high")
+        assert len(store.list_grants("openai-codex")) == 2
+        assert store.delete_model_grant(user_id, "schemii", model_id="gpt-6-sol",
+                                        reasoning_effort="high")
+        assert store.list_grants("openai-codex") == [first]
+        assert second["revision"] > first["revision"]
+        with factory() as connection:
+            connection.execute("INSERT INTO metadata.auth_roles (id, name) VALUES (%s, %s)",
+                               (role_id, role_id))
+        role_grant = store.upsert_role_grant(role_id, "schemii", provider_id="openai-codex",
+                                             model_id="gpt-6-sol", reasoning_effort="high")
+        assert store.list_role_grants("openai-codex") == [role_grant]
+        assert store.delete_role_grant(role_id, "schemii", provider_id="openai-codex",
+                                       model_id="gpt-6-sol", reasoning_effort="high")
 
         refreshed = {"type": "oauth", "refresh": "fixture-rotated-secret"}
         generation = store.generation("openai-codex")
@@ -99,5 +116,6 @@ def test_instance_codex_credential_policy_and_revision_are_durable(postgres_meta
     finally:
         store.clear_credential("openai-codex")
         with factory() as connection:
+            connection.execute("DELETE FROM metadata.auth_roles WHERE id=%s", (role_id,))
             connection.execute("DELETE FROM metadata.auth_accounts WHERE user_id=%s", (user_id,))
             connection.execute("DELETE FROM metadata.users WHERE id=%s", (user_id,))

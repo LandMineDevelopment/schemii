@@ -140,3 +140,38 @@ def test_codex_credentials_and_policy_reject_invalid_values() -> None:
         store.upsert_grant(ALICE, "schemii", provider_id="openai-codex", model_id="")
     with pytest.raises(ValueError, match="bounded Codex model"):
         store.upsert_grant(ALICE, "schemii", provider_id="openai-codex", reasoning_effort="")
+
+
+def test_multiple_direct_and_role_codex_policies_are_exact_and_independent() -> None:
+    store = MemoryInstanceAiProviderStore()
+    first = store.upsert_grant(ALICE, "schemii", SOURCE_OWNER, SOURCE,
+                               provider_id="openai-codex", model_id="gpt-6-luna",
+                               reasoning_effort="default")
+    second = store.add_grant(ALICE, "schemii", SOURCE_OWNER, SOURCE,
+                             model_id="gpt-6-sol", reasoning_effort="high")
+    role = store.upsert_role_grant("role_readers", "schemii", SOURCE_OWNER, SOURCE,
+                                   provider_id="openai-codex", model_id="gpt-6-sol",
+                                   reasoning_effort="minimal")
+    assert {grant["modelId"] for grant in store.list_grants("openai-codex")} == {
+        "gpt-6-luna", "gpt-6-sol"}
+    assert store.list_role_grants("openai-codex") == [role]
+    assert store.delete_model_grant(ALICE, "schemii", SOURCE_OWNER, SOURCE,
+                                    model_id="gpt-6-sol", reasoning_effort="high")
+    assert store.list_grants("openai-codex") == [first]
+    assert store.list_role_grants("openai-codex") == [role]
+    assert store.delete_role_grant("role_readers", "schemii", SOURCE_OWNER, SOURCE,
+                                   provider_id="openai-codex", model_id="gpt-6-sol",
+                                   reasoning_effort="minimal")
+    assert store.list_role_grants("openai-codex") == []
+    assert second["revision"] > first["revision"]
+
+
+def test_legacy_codex_upsert_replaces_scope_but_preserves_role_policies() -> None:
+    store = MemoryInstanceAiProviderStore()
+    store.add_grant(ALICE, "schemii", model_id="gpt-6-luna", reasoning_effort="low")
+    store.add_grant(ALICE, "schemii", model_id="gpt-6-sol", reasoning_effort="high")
+    store.upsert_role_grant("role_readers", "schemii", provider_id="openai-codex",
+                            model_id="gpt-6-sol", reasoning_effort="minimal")
+    replaced = store.upsert_grant(ALICE, "schemii", provider_id="openai-codex")
+    assert store.list_grants("openai-codex") == [replaced]
+    assert len(store.list_role_grants("openai-codex")) == 1

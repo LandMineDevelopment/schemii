@@ -151,146 +151,160 @@ test("shared Codex settings show the administrator's locked model and reasoning 
   await expect(page.locator("#ai-settings-reasoning")).toBeDisabled();
 });
 
-test("administrator shares Codex and controls model and reasoning for one grant", async ({ page, request }) => {
-  const authStatus = await (await request.get("/api/v1/auth/status")).json();
-  test.skip(!authStatus.enabled, "Account administration is disabled for this installation.");
-  const users = await (await request.get("/api/v1/admin/accounts")).json();
-  const person = users.find(user => user.is_admin && !user.disabled);
-  const connectionId = `pg_${"b".repeat(32)}`;
-  const connection = { userId: person.id, product: "schemoo", connectionOwnerId: person.id,
-    connectionId, ownership: "user", name: "Model database", database: "reports", username: "browser" };
+async function mockAdminPerson(page, person, connection) {
+  let user = { ...person, role_ids: [], direct_access: { capabilities: ['schemii:access', 'schemoo:access'], connections: [], dashboards: [] } };
+  await page.route('**/api/v1/admin/accounts**', route => {
+    if (route.request().method() === 'PATCH') user = { ...user, ...route.request().postDataJSON() };
+    return route.fulfill({ json: route.request().method() === 'GET' ? [user] : user });
+  });
+  await page.route('**/api/v1/admin/roles', route => route.fulfill({ json: [] }));
+  await page.route('**/api/v1/admin/resources', route => route.fulfill({ json: { connections: [{ ...connection, id: connection.connectionId, owner_id: connection.connectionOwnerId }], dashboards: [] } }));
+  await page.route('**/api/v1/admin/schemii-connections', route => route.fulfill({ json: { connections: [] } }));
+}
+
+async function editAdminPerson(page, person) {
+  await page.getByRole('link', { name: 'Users', exact: true }).click();
+  await page.getByRole('button', { name: `Edit ${person.username}`, exact: true }).click();
+  await page.getByRole('tab', { name: 'AI', exact: true }).click();
+}
+
+test('administrator connects Codex then stages exact model policies from a user page', async ({ page, request }) => {
+  const authStatus = await (await request.get('/api/v1/auth/status')).json();
+  test.skip(!authStatus.enabled, 'Account administration is disabled for this installation.');
+  const person = (await (await request.get('/api/v1/admin/accounts')).json()).find(user => user.is_admin && !user.disabled);
+  const connectionId = `pg_${'b'.repeat(32)}`;
+  const connection = { userId: person.id, product: 'schemoo', connectionOwnerId: person.id,
+    connectionId, ownership: 'user', name: 'Model database', database: 'reports', username: 'browser' };
+  await mockAdminPerson(page, person, connection);
   const models = [
-    { id: "gpt-6-luna", name: "GPT-6 Luna", reasoningLevels: ["low", "medium", "high"] },
-    { id: "gpt-6-sol", name: "GPT-6 Sol", reasoningLevels: ["medium", "high"] },
-    { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", reasoningLevels: ["medium"] },
+    { id: 'gpt-6-luna', name: 'GPT-6 Luna', reasoningLevels: ['low', 'medium', 'high'] },
+    { id: 'gpt-6-sol', name: 'GPT-6 Sol', reasoningLevels: ['medium', 'high'] },
+    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', reasoningLevels: ['medium'] },
   ];
-  const state = { connected: false, sourceConnected: true, grants: [], connections: [connection], models,
+  const state = { connected: false, sourceConnected: true, grants: [], roleGrants: [], connections: [connection], models,
     verifiedModels: [], catalogCheckedAt: null, testCalls: 0, copiedBody: null };
-  await page.route("**/api/v1/admin/ai/shared-codex**", route => {
+  await page.route('**/api/v1/admin/ai/shared-codex**', route => {
     const path = new URL(route.request().url()).pathname, method = route.request().method();
-    if (path.endsWith("/shared-codex") && method === "GET") return route.fulfill({ json: state });
-    if (path.endsWith("/credential") && method === "PUT") {
-      state.copiedBody = route.request().postDataJSON(); state.connected = true;
-      return route.fulfill({ json: { connected: true } });
+    if (path.endsWith('/shared-codex') && method === 'GET') return route.fulfill({ json: state });
+    if (path.endsWith('/credential')) {
+      if (method === 'PUT') state.copiedBody = route.request().postDataJSON();
+      state.connected = method === 'PUT'; return route.fulfill({ json: { connected: state.connected } });
     }
-    if (path.endsWith("/credential") && method === "DELETE") {
-      state.connected = false; return route.fulfill({ json: { connected: false } });
-    }
-    if (path.endsWith("/test") && method === "POST") {
+    if (path.endsWith('/test') && method === 'POST') {
       state.testCalls++; state.verifiedModels = models.slice(0, 2); state.catalogCheckedAt = new Date().toISOString();
       return route.fulfill({ json: { connected: true, checkedAt: state.catalogCheckedAt, models: state.verifiedModels } });
     }
-    if (path.endsWith("/grants")) {
+    if (path.endsWith('/grants') && method === 'POST') {
+      const grant = route.request().postDataJSON(); state.grants.push(grant); return route.fulfill({ json: grant });
+    }
+    if (path.endsWith('/model-grants') && method === 'DELETE') {
       const grant = route.request().postDataJSON();
-      state.grants = method === "PUT" ? [grant] : [];
-      return route.fulfill({ json: method === "PUT" ? grant : { deleted: true } });
+      state.grants = state.grants.filter(item => item.modelId !== grant.modelId || item.reasoningEffort !== grant.reasoningEffort);
+      return route.fulfill({ json: { deleted: true } });
     }
     throw new Error(`Unexpected shared Codex admin request: ${method} ${path}`);
   });
-  await page.goto("/admin");
-  const panel = page.getByRole("region", { name: "Shared ChatGPT Codex for this installation" });
-  await panel.getByRole("button", { name: "Share my Codex sign-in" }).click();
+  await page.goto('/admin#ai');
+  const panel = page.getByRole('region', { name: 'Shared ChatGPT Codex for this installation' });
+  await panel.getByRole('button', { name: 'Share my Codex sign-in' }).click();
   await expect.poll(() => state.copiedBody).toEqual({});
-  await expect(panel).toContainText("Installation connection stored");
-  await panel.getByRole("button", { name: "Grant shared Codex access" }).click();
-  let editor = page.getByRole("dialog", { name: "Grant shared Codex access" });
-  await expect(editor.getByLabel("Allowed model").locator("option")).toHaveCount(3);
-  await expect(editor.getByRole("button", { name: "Add grant" })).toBeDisabled();
-  await editor.getByRole("button", { name: "Cancel" }).click();
-  await panel.getByRole("button", { name: "Test shared Codex connection" }).click();
+  await expect(panel).toContainText('Installation connection stored');
+  await editAdminPerson(page, person);
+  await page.getByRole('button', { name: 'Add AI policy', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Stage AI policy' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Cancel policy' }).click();
+  await page.getByRole('link', { name: 'AI Connections', exact: true }).click();
+  await panel.getByRole('button', { name: 'Test shared Codex connection' }).click();
   await expect.poll(() => state.testCalls).toBe(1);
-  await expect(panel).toContainText("Verified for this account: GPT-6 Luna, GPT-6 Sol");
-  await panel.getByRole("button", { name: "Grant shared Codex access" }).click();
-  editor = page.getByRole("dialog", { name: "Grant shared Codex access" });
-  await expect(editor.getByLabel("Allowed model").locator("option")).toHaveCount(2);
-  await editor.getByLabel("Person").selectOption(person.id);
-  await editor.getByLabel("Application").selectOption("schemoo");
-  await expect(editor.getByLabel("Allowed model")).toHaveValue("gpt-6-luna");
-  await editor.getByLabel("Reasoning level").selectOption("high");
-  await editor.getByRole("button", { name: "Add grant" }).click();
-  await expect.poll(() => state.grants[0]).toEqual({ userId: person.id, product: "schemoo", connectionOwnerId: person.id,
-    connectionId, modelId: "gpt-6-luna", reasoningEffort: "high" });
-  await expect(panel).toContainText("GPT-6 Luna · High reasoning");
-  await panel.getByRole("button", { name: "Change model and reasoning" }).click();
-  editor = page.getByRole("dialog", { name: "Change shared Codex policy" });
-  await editor.getByLabel("Allowed model").selectOption("gpt-6-sol");
-  await editor.getByLabel("Reasoning level").selectOption("medium");
-  await editor.getByRole("button", { name: "Save policy" }).click();
-  await expect.poll(() => state.grants[0].modelId).toBe("gpt-6-sol");
-  await expect(panel).toContainText("GPT-6 Sol · Medium reasoning");
+  await expect(panel).toContainText('Verified for this account: GPT-6 Luna, GPT-6 Sol');
+  await editAdminPerson(page, person);
+  await page.getByRole('button', { name: 'Add AI policy', exact: true }).click();
+  await expect(page.getByLabel('Allowed model').locator('option')).toHaveCount(2);
+  await page.getByLabel('App and database scope').selectOption(JSON.stringify(['schemoo', person.id, connectionId]));
+  await page.getByLabel('Reasoning level', { exact: true }).selectOption('high');
+  await page.getByRole('button', { name: 'Stage AI policy' }).click();
+  expect(state.grants).toHaveLength(0);
+  await page.getByRole('button', { name: 'Save user', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
+  await expect.poll(() => state.grants[0]).toEqual({ userId: person.id, product: 'schemoo', connectionOwnerId: person.id,
+    connectionId, modelId: 'gpt-6-luna', reasoningEffort: 'high' });
+  await editAdminPerson(page, person);
+  await page.getByRole('button', { name: 'Add AI policy', exact: true }).click();
+  await page.getByLabel('App and database scope').selectOption(JSON.stringify(['schemoo', person.id, connectionId]));
+  await page.getByLabel('Allowed model').selectOption('gpt-6-sol');
+  await page.getByLabel('Reasoning level', { exact: true }).selectOption('medium');
+  await page.getByRole('button', { name: 'Stage AI policy' }).click();
+  await page.getByRole('button', { name: 'Save user', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
+  await expect.poll(() => state.grants.length).toBe(2);
   state.verifiedModels = models.slice(0, 1);
-  await page.reload();
-  await expect(panel).toContainText("This model is no longer verified");
-  await panel.getByRole("button", { name: "Change model and reasoning" }).click();
-  editor = page.getByRole("dialog", { name: "Change shared Codex policy" });
-  await expect(editor.getByRole("button", { name: "Save policy" })).toBeDisabled();
-  await expect(editor.getByLabel("Allowed model").locator("option").first()).toHaveAttribute("disabled", "");
-  await editor.getByLabel("Allowed model").selectOption("gpt-6-luna");
-  await editor.getByRole("button", { name: "Save policy" }).click();
-  await expect.poll(() => state.grants[0].modelId).toBe("gpt-6-luna");
-  await panel.getByRole("button", { name: "Revoke" }).click();
-  await page.getByRole("dialog", { name: "Revoke shared Codex access?" }).getByRole("button", { name: "Revoke access" }).click();
-  await expect.poll(() => state.grants).toHaveLength(0);
-  await panel.getByRole("button", { name: "Remove shared Codex connection" }).click();
-  await page.getByRole("dialog", { name: "Remove shared Codex connection?" }).getByRole("button", { name: "Remove connection" }).click();
-  await expect(panel).toContainText("No installation connection stored");
+  await editAdminPerson(page, person); await page.reload();
+  await page.getByRole('tab', { name: 'AI', exact: true }).click();
+  const sol = page.locator('.account-row').filter({ hasText: 'gpt-6-sol' });
+  await expect(sol).toContainText('model not verified');
+  await sol.getByRole('button', { name: 'Remove policy' }).click();
+  expect(state.grants).toHaveLength(2);
+  await page.getByRole('button', { name: 'Save user', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
+  await expect.poll(() => state.grants.map(grant => grant.modelId)).toEqual(['gpt-6-luna']);
+  await page.getByRole('link', { name: 'AI Connections', exact: true }).click();
+  await panel.getByRole('button', { name: 'Remove shared Codex connection' }).click();
+  await page.getByRole('dialog', { name: 'Remove shared Codex connection?' }).getByRole('button', { name: 'Remove connection' }).click();
+  await expect(panel).toContainText('No installation connection stored');
 });
 
-test("administrator saves an installation Zen key and grants one app and database", async ({ page, request }) => {
-  const authStatus = await (await request.get("/api/v1/auth/status")).json();
-  test.skip(!authStatus.enabled, "Account administration is disabled for this installation.");
-  const users = await (await request.get("/api/v1/admin/accounts")).json();
-  const person = users.find(user => user.is_admin && !user.disabled);
-  const connectionId = `pg_${"a".repeat(32)}`;
-  const connection = { userId: person.id, product: "schemoo", connectionOwnerId: person.id,
-    connectionId, ownership: "user", name: "Browser database", database: "reports", username: "browser" };
-  const state = { connected: false, generation: 0, grants: [], connections: [connection], keySent: null };
-  await page.route("**/api/v1/admin/ai/zen**", route => {
-    const url = new URL(route.request().url()), method = route.request().method();
-    if (url.pathname.endsWith("/zen") && method === "GET") return route.fulfill({ json: {
-      connected: state.connected, generation: state.generation, grants: state.grants, connections: state.connections,
-    } });
-    if (url.pathname.endsWith("/credential") && method === "PUT") {
-      state.keySent = route.request().postDataJSON().apiKey; state.connected = true; state.generation++;
-      return route.fulfill({ json: { connected: true, generation: state.generation } });
+test('administrator connects Zen then stages a user app and database grant', async ({ page, request }) => {
+  const authStatus = await (await request.get('/api/v1/auth/status')).json();
+  test.skip(!authStatus.enabled, 'Account administration is disabled for this installation.');
+  const person = (await (await request.get('/api/v1/admin/accounts')).json()).find(user => user.is_admin && !user.disabled);
+  const connectionId = `pg_${'a'.repeat(32)}`;
+  const connection = { userId: person.id, product: 'schemoo', connectionOwnerId: person.id,
+    connectionId, ownership: 'user', name: 'Browser database', database: 'reports', username: 'browser' };
+  await mockAdminPerson(page, person, connection);
+  const state = { connected: false, generation: 0, grants: [], roleGrants: [], connections: [connection], keySent: null };
+  await page.route('**/api/v1/admin/ai/shared-codex', route => route.fulfill({ json: { connected: false, grants: [], roleGrants: [], connections: [] } }));
+  await page.route('**/api/v1/admin/ai/zen**', route => {
+    const path = new URL(route.request().url()).pathname, method = route.request().method();
+    if (path.endsWith('/zen') && method === 'GET') return route.fulfill({ json: { ...state, keySent: undefined } });
+    if (path.endsWith('/credential')) {
+      if (method === 'PUT') state.keySent = route.request().postDataJSON().apiKey;
+      state.connected = method === 'PUT'; state.generation++;
+      return route.fulfill({ json: { connected: state.connected, generation: state.generation } });
     }
-    if (url.pathname.endsWith("/credential") && method === "DELETE") {
-      state.connected = false; state.generation++;
-      return route.fulfill({ json: { connected: false, generation: state.generation } });
+    if (path.endsWith('/grants')) {
+      const grant = route.request().postDataJSON(); state.grants = method === 'PUT' ? [grant] : [];
+      return route.fulfill({ json: method === 'PUT' ? grant : { deleted: true } });
     }
-    if (url.pathname.endsWith("/grants")) {
-      const grant = route.request().postDataJSON();
-      if (method === "PUT") state.grants = [grant];
-      else state.grants = [];
-      return route.fulfill({ json: method === "PUT" ? grant : { deleted: true } });
-    }
-    throw new Error(`Unexpected Zen admin request: ${method} ${url.pathname}`);
+    throw new Error(`Unexpected Zen admin request: ${method} ${path}`);
   });
-  await page.goto("/admin");
-  const panel = page.getByRole("region", { name: "OpenCode Zen for this installation" });
-  await expect(panel).toContainText("No installation key stored");
-  const key = panel.getByLabel("Zen API key");
-  await expect(key).toHaveAttribute("type", "password");
-  await key.fill("browser-test-key");
-  await panel.getByRole("button", { name: "Save installation key" }).click();
-  await expect.poll(() => state.keySent).toBe("browser-test-key");
-  await expect(panel).toContainText("Installation key stored");
-  await expect(page.locator("body")).not.toContainText("browser-test-key");
-  await expect(panel.getByLabel("Replace Zen API key")).toBeEmpty();
-
-  await panel.getByRole("button", { name: "Grant Zen access" }).click();
-  const editor = page.getByRole("dialog", { name: "Grant Zen access" });
-  await editor.getByLabel("Person").selectOption(person.id);
-  await editor.getByLabel("Application").selectOption("schemoo");
-  await expect(editor.getByLabel("Database profile")).toHaveValue("0");
-  await editor.getByRole("button", { name: "Add grant" }).click();
-  await expect.poll(() => state.grants).toEqual([{ userId: person.id, product: "schemoo",
-    connectionOwnerId: person.id, connectionId }]);
-  await expect(panel).toContainText("Browser database · reports");
-  await panel.getByRole("button", { name: "Revoke" }).click();
-  await page.getByRole("dialog", { name: "Revoke Zen access?" }).getByRole("button", { name: "Revoke access" }).click();
+  await page.goto('/admin#ai');
+  const panel = page.getByRole('region', { name: 'OpenCode Zen for this installation' });
+  await expect(panel).toContainText('No installation key stored');
+  await panel.getByText('Connect OpenCode Zen', { exact: true }).click();
+  const key = panel.getByLabel('Zen API key');
+  await expect(key).toHaveAttribute('type', 'password'); await key.fill('browser-test-key');
+  await panel.getByRole('button', { name: 'Save installation key' }).click();
+  await expect.poll(() => state.keySent).toBe('browser-test-key');
+  await expect(panel).toContainText('Installation key stored');
+  await expect(page.locator('body')).not.toContainText('browser-test-key');
+  await expect(panel.getByLabel('Replace Zen API key')).toBeEmpty();
+  await editAdminPerson(page, person);
+  await page.getByRole('button', { name: 'Add AI policy', exact: true }).click();
+  await page.getByLabel('AI connection', { exact: true }).selectOption('zen');
+  await page.getByLabel('App and database scope').selectOption(JSON.stringify(['schemoo', person.id, connectionId]));
+  await page.getByRole('button', { name: 'Stage AI policy' }).click();
+  expect(state.grants).toHaveLength(0);
+  await page.getByRole('button', { name: 'Save user', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
+  await expect.poll(() => state.grants).toEqual([{ userId: person.id, product: 'schemoo', connectionOwnerId: person.id, connectionId }]);
+  await editAdminPerson(page, person);
+  await page.getByRole('button', { name: 'Remove policy', exact: true }).click();
+  await page.getByRole('button', { name: 'Save user', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();
   await expect.poll(() => state.grants).toHaveLength(0);
-  await panel.getByRole("button", { name: "Remove installation key" }).click();
-  await page.getByRole("dialog", { name: "Remove installation Zen key?" }).getByRole("button", { name: "Remove key" }).click();
-  await expect(panel).toContainText("No installation key stored");
+  await page.getByRole('link', { name: 'AI Connections', exact: true }).click();
+  await panel.getByText('Replace or remove connection', { exact: true }).click();
+  await panel.getByRole('button', { name: 'Remove installation key' }).click();
+  await page.getByRole('dialog', { name: 'Remove installation Zen key?' }).getByRole('button', { name: 'Remove key' }).click();
+  await expect(panel).toContainText('No installation key stored');
 });

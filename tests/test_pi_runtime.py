@@ -1,5 +1,6 @@
 import io
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -553,6 +554,113 @@ def test_shared_codex_grant_revision_fences_running_turn():
                     zen_scope=lambda: ("schemii", None, None))
     assert caught.value.code == "permission_changed"
     assert len(requests) == 1
+
+
+def test_role_policy_requires_active_same_role_app_and_database_authority():
+    from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
+
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "instance"})
+    source = "pg_" + "a" * 32
+    scope = lambda: ("schemii", SCHEMII_CONNECTION_OWNER_ID, source)
+    role = {"user_ids": ["alice"], "capabilities": ["schemii:access"],
+            "connections": [{"owner_id": SCHEMII_CONNECTION_OWNER_ID,
+                             "connection_id": source, "allow_authoring": True}],
+            "dashboards": []}
+    roles = {"role_shared": role}
+
+    class Auth:
+        enabled = True
+        store = None
+
+        def __init__(self):
+            self.store = self
+
+        def user(self, user_id):
+            return {"id": user_id} if user_id == "alice" else None
+
+        def capabilities(self, user_id):
+            return ["schemii:access"] if user_id == "alice" else []
+
+        @contextmanager
+        def transaction(self):
+            yield {"roles": roles}
+
+    instance.upsert_role_grant("role_shared", "schemii", SCHEMII_CONNECTION_OWNER_ID,
+                               source, provider_id="openai-codex", model_id="gpt-6-luna",
+                               reasoning_effort="high")
+    runtime, _, requests = setup([{"type": "result", "text": "late", "generation": 1}],
+        before=lambda _: role["user_ids"].clear())
+    runtime.instance_store = instance
+    runtime.auth = Auth()
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna",
+                           "reasoningLevels": ["default", "high"]}]
+    runtime._supported_until = float("inf")
+    provider = runtime.status("alice", zen_scope=scope)["providers"][-1]
+    assert provider["available"] and provider["models"][0]["reasoningLevels"] == ["high"]
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "shared", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                    zen_scope=scope, reasoning_effort="high")
+    assert caught.value.code == "permission_changed" and len(requests) == 1
+    assert not runtime.status("alice", zen_scope=scope)["providers"][-1]["available"]
+
+
+def test_direct_and_role_codex_policies_are_a_union_per_exact_scope():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "instance"})
+    instance.upsert_grant("alice", "schemii", provider_id="openai-codex",
+                          model_id="gpt-6-luna", reasoning_effort="default")
+    instance.add_grant("alice", "schemii", model_id="gpt-6-sol", reasoning_effort="high")
+    instance.upsert_role_grant("role_ai", "schemii", provider_id="openai-codex",
+                               model_id="gpt-6-luna", reasoning_effort="high")
+    runtime, _, _ = setup([])
+    runtime.instance_store = instance
+    @contextmanager
+    def read_roles():
+        yield {"roles": {"role_ai": {"user_ids": ["alice"],
+                                    "capabilities": ["schemii:access"],
+                                    "connections": [], "dashboards": []}}}
+    runtime.auth = SimpleNamespace(enabled=True, user=lambda owner: {"id": owner},
+                                   capabilities=lambda owner: ["schemii:access"],
+                                   store=SimpleNamespace(transaction=read_roles))
+    runtime._supported = [
+        {"providerId": "openai-codex", "id": "gpt-6-luna", "reasoningLevels": ["default", "high"]},
+        {"providerId": "openai-codex", "id": "gpt-6-sol", "reasoningLevels": ["default", "high"]}]
+    runtime._supported_until = float("inf")
+    scope = lambda: ("schemii", None, None)
+    provider = runtime.status("alice", zen_scope=scope)["providers"][-1]
+    assert [(model["id"], model["reasoningLevels"]) for model in provider["models"]] == [
+        ("gpt-6-luna", ["default", "high"]), ("gpt-6-sol", ["high"])]
+    assert "selectedModelId" not in provider
+    assert runtime.require_instance_policy("alice", "instance-codex", "gpt-6-sol", "high", scope)
+    assert runtime.require_instance_policy("alice", "instance-codex", "gpt-6-luna", "high", scope)
+    with pytest.raises(PiError) as caught:
+        runtime.require_instance_policy("alice", "instance-codex", "gpt-6-sol", "default", scope)
+    assert caught.value.code == "instance_policy_changed"
+
+
+def test_zen_role_grant_is_enforced_and_revocation_removes_access():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_key("fixture-zen-key")
+    instance.upsert_role_grant("role_ai", "schemii")
+    roles = {"role_ai": {"user_ids": ["alice"], "capabilities": ["schemii:access"],
+                         "connections": [], "dashboards": []}}
+
+    @contextmanager
+    def read_roles():
+        yield {"roles": roles}
+
+    runtime, _, _ = setup([])
+    runtime.instance_store = instance
+    runtime.auth = SimpleNamespace(enabled=True, user=lambda owner: {"id": owner},
+                                   capabilities=lambda owner: ["schemii:access"],
+                                   store=SimpleNamespace(transaction=read_roles))
+    scope = lambda: ("schemii", None, None)
+    assert runtime.require_instance_access("alice", scope) == scope()
+    instance.delete_role_grant("role_ai", "schemii")
+    with pytest.raises(PiError) as caught:
+        runtime.require_instance_access("alice", scope)
+    assert caught.value.code == "instance_access_denied"
 
 
 def test_shared_codex_admin_connection_test_uses_live_catalog_without_prompt():

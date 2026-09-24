@@ -152,6 +152,87 @@ def test_provisioner_revocation_applies_to_existing_session(client):
     assert client.get('/api/v1/auth/me').json()['capabilities']==[]
 
 
+def test_admin_assigns_user_roles_without_changing_role_scopes(client,app):
+    from types import SimpleNamespace
+    app.state.services=SimpleNamespace()
+    bootstrap(client)
+    viewer_role=client.post('/api/v1/admin/roles',json=dict(
+        name='View reports',capabilities=['schemer:access'])).json()
+    author_role=client.post('/api/v1/admin/roles',json=dict(
+        name='Author reports',capabilities=['schemer:access','schemer:author'])).json()
+    created=client.post('/api/v1/admin/accounts',json=dict(
+        username='assigned',display_name='Assigned',password='assigned-password-123',
+        role_ids=[viewer_role['id']]))
+    assert created.status_code==201
+    user=created.json()
+    assert app.state.auth.capabilities(user['id'])==['schemer:access']
+    assert client.post('/api/v1/admin/accounts',json=dict(
+        username='invalid-role',display_name='Invalid',password='invalid-password-123',
+        role_ids=['role_application_provisioners'])).status_code==422
+    assert client.patch('/api/v1/admin/accounts/'+user['id'],json={
+        'role_ids':[author_role['id']]}).status_code==200
+    assert app.state.auth.capabilities(user['id'])==['schemer:access','schemer:author']
+    roles={role['id']:role for role in client.get('/api/v1/admin/roles').json()}
+    assert roles[viewer_role['id']]['user_ids']==[]
+    assert roles[author_role['id']]['user_ids']==[user['id']]
+    assert roles[author_role['id']]['capabilities']==['schemer:access','schemer:author']
+    assert client.patch('/api/v1/admin/accounts/'+user['id'],json={
+        'role_ids':['role_missing']}).status_code==422
+    assert app.state.auth.capabilities(user['id'])==['schemer:access','schemer:author']
+
+
+def test_direct_app_access_needs_no_database_and_is_separate_from_roles(client,app):
+    from types import SimpleNamespace
+    app.state.services=SimpleNamespace()
+    bootstrap(client)
+    created=client.post('/api/v1/admin/accounts',json=dict(
+        username='direct',display_name='Direct',password='direct-password-123',
+        direct_access={'capabilities':['schemii:access']}))
+    assert created.status_code==201
+    user=created.json()
+    row=next(item for item in client.get('/api/v1/admin/accounts').json() if item['id']==user['id'])
+    assert row['role_ids']==[]
+    assert row['direct_access']=={'capabilities':['schemii:access'],'connections':[],'dashboards':[]}
+    assert all(role['id']!='role_personal_'+user['id'] for role in client.get('/api/v1/admin/roles').json())
+    admin_cookie=client.cookies.get(COOKIE)
+    assert client.post('/api/v1/auth/login',json=dict(
+        username='direct',password='direct-password-123')).status_code==200
+    user_cookie=client.cookies.get(COOKIE)
+    assert client.get('/api/v1/schemii/workspaces').status_code==200
+    assert client.get('/api/v1/schemoo/models').status_code==403
+    client.cookies.set(COOKIE,admin_cookie)
+    assert client.patch('/api/v1/admin/accounts/'+user['id'],json={
+        'direct_access':{'capabilities':['schemer:access']}}).status_code==200
+    assert client.put('/api/v1/admin/roles/role_personal_'+user['id'],json={
+        'name':'Forged', 'capabilities':['schemii:access']}).status_code==403
+    client.cookies.set(COOKIE,user_cookie)
+    assert client.get('/api/v1/schemii/workspaces').status_code==403
+    assert client.get('/api/v1/schemer/dashboards').status_code==200
+    assert client.post('/api/v1/schemer/dashboards').status_code==403
+
+
+def test_admin_removes_account_sessions_and_memberships(client,app):
+    from types import SimpleNamespace
+    app.state.services=SimpleNamespace()
+    bootstrap(client)
+    assert client.delete('/api/v1/admin/accounts/user_local_prototype').status_code==409
+    user=client.post('/api/v1/admin/accounts',json=dict(
+        username='temporary',display_name='Temporary',password='temporary-password-123')).json()
+    role=client.post('/api/v1/admin/roles',json=dict(
+        name='Temporary report access',capabilities=['schemer:access'],user_ids=[user['id']])).json()
+    admin_cookie=client.cookies.get(COOKIE)
+    assert client.post('/api/v1/auth/login',json=dict(
+        username='temporary',password='temporary-password-123')).status_code==200
+    temporary_cookie=client.cookies.get(COOKIE)
+    client.cookies.set(COOKIE,admin_cookie)
+    assert client.delete('/api/v1/admin/accounts/'+user['id']).status_code==204
+    assert app.state.auth.resolve(temporary_cookie) is None
+    assert all(item['id'] != user['id'] for item in client.get('/api/v1/admin/accounts').json())
+    assert user['id'] not in next(item for item in client.get('/api/v1/admin/roles').json()
+                                  if item['id']==role['id'])['user_ids']
+    assert client.delete('/api/v1/admin/accounts/'+user['id']).status_code==404
+
+
 def test_schemer_viewer_cannot_edit_and_author_can(client,app):
     app.state.services=type('Services',(),{})()
     bootstrap(client)
