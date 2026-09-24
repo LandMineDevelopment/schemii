@@ -48,8 +48,8 @@
 .quick-start-scene--schemoo .smq-pane section > small { display: block; margin: 5px 0; color: #738296; }
 .quick-start-scene--schemoo .smq-connection-row { display: flex; align-items: center; gap: 5px; margin-top: 5px; padding: 5px; border-top: 1px solid #323e4c; color: #b6c1ce; font: 7px ui-monospace, monospace; }
 .quick-start-scene--schemoo .smq-connection-toggle { display: grid; width: 12px; height: 12px; flex: none; place-items: center; border: 1px solid #a887ef; border-radius: 3px; color: #1b1031; background: #a887ef; font: 9px ui-sans-serif, system-ui, sans-serif; }
-.quick-start-scene--schemoo .smq-stage-model.demo-path .smq-connection-toggle { border-color: #69778a; color: transparent; background: #0d151e; }
-.quick-start-scene--schemoo .smq-stage-model.demo-path .smq-graph-line { height: 0; border-top: 2px dashed #708096; background: none; box-shadow: none; }
+.quick-start-scene--schemoo .smq-stage-model.demo-path-disabled:not(.demo-path-restored) .smq-connection-toggle { border-color: #69778a; color: transparent; background: #0d151e; }
+.quick-start-scene--schemoo .smq-stage-model.demo-path-disabled:not(.demo-path-restored) .smq-graph-line { height: 0; border-top: 2px dashed #708096; background: none; box-shadow: none; }
 .quick-start-scene--schemoo .smq-input { display: flex; height: 24px; align-items: center; justify-content: space-between; gap: 5px; min-width: 0; margin-top: 4px; padding: 4px 7px; overflow: hidden; border: 1px solid #4d5969; border-radius: 4px; color: #d6dfeb; background: #0e151e; white-space: nowrap; }
 .quick-start-scene--schemoo .smq-input i { color: #718093; font-style: normal; }
 .quick-start-scene--schemoo .smq-input b { display: none; overflow: hidden; font-weight: 500; text-overflow: ellipsis; }
@@ -78,9 +78,9 @@
 .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-library, .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-library-shade { visibility: hidden; opacity: 0; }
 .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-brand strong { color: #e6d8ff; }
 .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-brand strong { font-size: 0; }
-.quick-start-scene--schemoo .smq-stage-create.demo-created .smq-brand strong::after { content: 'Sales model'; font-size: 11px; }
+.quick-start-scene--schemoo .smq-stage-create.demo-created .smq-brand strong::after { content: 'Orders model'; font-size: 11px; }
 .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-top-target { font-size: 0; }
-.quick-start-scene--schemoo .smq-stage-create.demo-created .smq-top-target::after { content: 'Warehouse · analytics.public'; font-size: 8px; }
+.quick-start-scene--schemoo .smq-stage-create.demo-created .smq-top-target::after { content: 'Bookstore DB · schemii_test.bookstore'; font-size: 8px; }
 .quick-start-scene--schemoo .smq-saved-badge { position: absolute; z-index: 7; top: 46%; left: 50%; width: max-content; max-width: 85%; padding: 9px 13px; visibility: hidden; opacity: 0; border: 1px solid #5d4f80; border-radius: 6px; color: #e7d7ff; background: #211a31; box-shadow: 0 12px 32px #0009; transform: translate(-50%, 9px); transition: visibility 0s .2s, opacity .2s, transform .25s; }
 .quick-start-scene--schemoo .smq-stage-filter.demo-saved .smq-saved-badge { visibility: visible; opacity: 1; transform: translate(-50%, 0); transition-delay: 0s; }
 
@@ -108,8 +108,10 @@
 .quick-start-scene--schemoo .smq-table-inspector label { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid #303b48; }
 .quick-start-scene--schemoo .smq-table-inspector label small { margin-left: auto; color: #78889a; }
 .quick-start-scene--schemoo .smq-check { display: block; width: 12px; height: 12px; flex: none; border: 1px solid #69778a; border-radius: 3px; background: #0d151e; }
-.quick-start-scene--schemoo .smq-check.checked, .quick-start-scene--schemoo .smq-stage-model.demo-exposed .smq-status-check { border-color: #a887ef; background: #a887ef; }
-.quick-start-scene--schemoo .smq-check.checked::after, .quick-start-scene--schemoo .smq-stage-model.demo-exposed .smq-status-check::after { display: block; color: #1b1031; content: '✓'; font-size: 10px; font-weight: 800; line-height: 11px; text-align: center; }
+.quick-start-scene--schemoo .smq-check.checked { border-color: #a887ef; background: #a887ef; }
+.quick-start-scene--schemoo .smq-check.checked::after { display: block; color: #1b1031; content: '✓'; font-size: 10px; font-weight: 800; line-height: 11px; text-align: center; }
+.quick-start-scene--schemoo .smq-stage-model.demo-restricted .smq-customer-check { border-color: #69778a; background: #0d151e; }
+.quick-start-scene--schemoo .smq-stage-model.demo-restricted .smq-customer-check::after { display: none; }
 
 /* Filter modal: choice, condition editor, draft, then persistence. */
 .quick-start-scene--schemoo .smq-no-filter { display: block; }
@@ -153,8 +155,10 @@
 .quick-start-scene--schemoo .smq-stage-filter.demo-applied .smq-top-actions .smq-icon:nth-child(2) { opacity: 1; }
 .quick-start-scene--schemoo .smq-stage-filter.demo-saved .smq-top-actions .smq-icon:nth-child(2) { border-color: #3a4554; color: #bfc8d6; box-shadow: none; }
 
-/* Preview: the SQL dock appears when outputs are selected, then Results opens. */
+/* Preview: Show query preview opens the dock; adding outputs updates its SQL. */
 .quick-start-scene--schemoo .smq-stage-preview .smq-preview-workbench { transition: flex-basis .3s; }
+.quick-start-scene--schemoo .smq-preview-scroll { transition: transform .35s cubic-bezier(.22,1,.36,1); }
+.quick-start-scene--schemoo .smq-stage-preview.demo-query .smq-preview-scroll { transform: translateY(-60px); }
 .quick-start-scene--schemoo .smq-pane-preview label { margin-bottom: 8px; }
 .quick-start-scene--schemoo .smq-pane-preview h3 em { color: #b695ed; font-style: normal; }
 .quick-start-scene--schemoo .smq-preview-context { display: flex; align-items: center; justify-content: space-between; gap: 4px; color: #e9edf3; }
@@ -163,24 +167,28 @@
 .quick-start-scene--schemoo .smq-add-by-table { display: flex; gap: 4px; align-items: end; }
 .quick-start-scene--schemoo .smq-add-by-table .smq-input { flex: 1; }
 .quick-start-scene--schemoo .smq-output-add { width: 24px; height: 24px; margin-top: 4px; }
-.quick-start-scene--schemoo .smq-output-list { display: none; border-top: 1px solid #303b48; }
+.quick-start-scene--schemoo .smq-output-list { border-top: 1px solid #303b48; }
 .quick-start-scene--schemoo .smq-output-list div { display: flex; justify-content: space-between; padding: 4px; border-bottom: 1px solid #303b48; }
+.quick-start-scene--schemoo .smq-output-list div.smq-new-output { display: none; }
 .quick-start-scene--schemoo .smq-output-list small { color: #8c99a9; }
-.quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-output-list { display: block; animation: smq-panel-in .22s both; }
+.quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-output-list div.smq-new-output { display: flex; animation: smq-panel-in .22s both; }
 .quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-output-count { font-size: 0; }
-.quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-output-count::after { content: '3'; font-size: 8px; }
+.quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-output-count::after { content: '5'; font-size: 8px; }
 .quick-start-scene--schemoo .smq-query-dock { display: flex; height: 0; flex: none; flex-direction: column; overflow: hidden; border-top: 0 solid #364252; background: #151b24; transition: height .35s cubic-bezier(.22,1,.36,1), border-width .2s; }
-.quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-query-dock { height: 92px; border-top-width: 1px; }
+.quick-start-scene--schemoo .smq-stage-preview.demo-query .smq-query-dock { height: 92px; border-top-width: 1px; }
 .quick-start-scene--schemoo .smq-query-dock header { display: flex; height: 27px; flex: none; align-items: center; gap: 4px; padding: 3px 6px; border-bottom: 1px solid #364252; }
 .quick-start-scene--schemoo .smq-query-dock button { min-height: 19px; padding: 2px 5px; border: 1px solid #465267; border-radius: 4px; background: #1b2430; }
 .quick-start-scene--schemoo .smq-query-dock .smq-sql-tab { border-color: #8169b0; color: #dac7ff; background: #302743; }
 .quick-start-scene--schemoo .smq-query-dock small { margin-left: auto; color: #8c9aad; }
 .quick-start-scene--schemoo .smq-stage-preview.demo-run .smq-result-status { color: #9ddbb0; font-size: 0; }
-.quick-start-scene--schemoo .smq-stage-preview.demo-run .smq-result-status::after { content: '3 rows'; font-size: 8px; }
+.quick-start-scene--schemoo .smq-stage-preview.demo-run .smq-result-status::after { content: '100 rows'; font-size: 8px; }
 .quick-start-scene--schemoo .smq-sql { flex: 1; margin: 0; padding: 6px 8px; overflow: hidden; color: #b8cae0; background: #0c131b; font: 7px/1.5 ui-monospace, monospace; }
+.quick-start-scene--schemoo .smq-sql-after { display: none; }
+.quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-sql-before { display: none; }
+.quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-sql-after { display: inline; }
 .quick-start-scene--schemoo .smq-results { display: none; flex: 1; overflow: hidden; background: #0c131b; font: 7px ui-monospace, monospace; }
-.quick-start-scene--schemoo .smq-results > div { display: grid; grid-template-columns: 1fr 1fr 1fr; }
-.quick-start-scene--schemoo .smq-results :is(b, span) { padding: 5px 8px; border-right: 1px solid #384453; border-bottom: 1px solid #384453; }
+.quick-start-scene--schemoo .smq-results > div { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.quick-start-scene--schemoo .smq-results :is(b, span) { overflow: hidden; padding: 5px 3px; border-right: 1px solid #384453; border-bottom: 1px solid #384453; text-overflow: ellipsis; white-space: nowrap; }
 .quick-start-scene--schemoo .smq-results b { color: #d7dfec; background: #222b38; }
 .quick-start-scene--schemoo .smq-stage-preview.demo-results .smq-sql { display: none; }
 .quick-start-scene--schemoo .smq-stage-preview.demo-results .smq-results { display: block; animation: smq-panel-in .22s both; }
@@ -228,10 +236,13 @@
   .quick-start-scene--schemoo .smq-rule-choices, .quick-start-scene--schemoo .smq-rule-editor { padding: 5px 7px; }
   .quick-start-scene--schemoo .smq-filter-dialog > footer { padding: 4px 6px; }
   .quick-start-scene--schemoo .smq-query-dock header { height: 23px; }
-  .quick-start-scene--schemoo .smq-stage-preview.demo-outputs .smq-query-dock { height: 76px; }
+  .quick-start-scene--schemoo .smq-stage-preview.demo-query .smq-query-dock { height: 76px; }
   .quick-start-scene--schemoo .smq-output-list div { padding: 3px; }
+  .quick-start-scene--schemoo .smq-results :is(b, span) { padding-block: 3px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .quick-start-scene--schemoo :is(.smq-library, .smq-library-shade, .smq-filter-dialog, .smq-filter-shade, .smq-table-inspector, .smq-query-dock, .smq-created-badge, .smq-saved-badge, .smq-node, .smq-input b) { animation: none !important; transition: none !important; }
+  .quick-start-scene--schemoo *,
+  .quick-start-scene--schemoo *::before,
+  .quick-start-scene--schemoo *::after { animation: none !important; transition: none !important; }
 }
