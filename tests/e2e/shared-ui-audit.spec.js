@@ -35,6 +35,8 @@ for (const route of ['/system-map', '/api-map', '/db-map']) {
         dialog.locator('#close-entry-dialog'),
         dialog.locator('#dialog-entry-search'),
       ]) await expectInsideVisualViewport(locator);
+      const searchFontSize = await dialog.locator('#dialog-entry-search').evaluate(element => parseFloat(getComputedStyle(element).fontSize));
+      expect(searchFontSize).toBeGreaterThanOrEqual(12);
       const search = dialog.locator('#dialog-entry-search');
       await search.fill('zzzz-no-matching-route');
       await expect(dialog.locator('.entry-empty')).toBeVisible();
@@ -99,6 +101,19 @@ test('conditional schema rows follow the selected form state', async ({ page }) 
     expect(query.helperTop).toBeGreaterThanOrEqual(query.textareaBottom);
     await expectInsideVisualViewport(viewDialog.getByRole('button', { name: 'Create view' }));
   }
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.evaluate(() => {
+    const style = document.documentElement.style;
+    style.setProperty('--ui-type-label', '15px');
+    style.setProperty('--ui-type-control', '15px');
+    style.setProperty('--ui-type-helper', '14px');
+  });
+  const enlargedQuery = await viewDialog.locator('.design-view-query').evaluate(element => ({
+    textareaBottom: element.querySelector('textarea').getBoundingClientRect().bottom,
+    helperTop: element.querySelector('small').getBoundingClientRect().top,
+  }));
+  expect(enlargedQuery.helperTop).toBeGreaterThanOrEqual(enlargedQuery.textareaBottom);
+  await expectInsideVisualViewport(viewDialog.getByRole('button', { name: 'Create view' }));
   const editorSurfaces = await page.evaluate(() => {
     const view = getComputedStyle(document.querySelector('#design-view-definition'));
     const routine = getComputedStyle(document.querySelector('.design-routine-source textarea'));

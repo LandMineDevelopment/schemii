@@ -1187,7 +1187,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   font: var(--ui-type-control)/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   tab-size: 2;
 }
-.design-view-query { min-height: 290px; }
+.design-view-query { min-height: max-content; }
 .design-view-query textarea::placeholder { color: #8793a1; opacity: 1; }
 .design-routine-source textarea,
 .design-check-body textarea,
@@ -1197,8 +1197,8 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .editor-dialog .ui-dialog__actions > .ui-button { min-height: 40px; white-space: normal; }
 
 @media (max-width: 680px) {
-  .design-view-fields { grid-template-rows: auto auto minmax(325px, 1fr); }
-  .design-view-query { min-height: 325px; grid-template-rows: auto minmax(250px, 1fr) auto; }
+  .design-view-fields { grid-template-rows: auto auto auto; }
+  .design-view-query { grid-template-rows: auto minmax(250px, 1fr) auto; }
   .design-column-row { grid-template-columns: 32px minmax(0, 1fr) auto auto; }
   .design-column-name { grid-column: 2 / -1; }
   .design-column-type { grid-column: 2 / -1; }
