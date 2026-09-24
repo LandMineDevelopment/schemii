@@ -146,6 +146,11 @@ test("guide cursor clears when the clicked control disappears", async ({ page })
     const scene = page.getByRole("dialog", { name: `Welcome to ${product}` })
       .locator(".quick-start-page:visible .quick-start-scene");
     await expect(scene.locator(":scope > :first-child")).toHaveClass(/demo-(created|saved)/, { timeout: 20000 });
+    if (product === "Schemoo") {
+      const target = scene.locator(".smq-top-target");
+      expect(await target.evaluate(element => getComputedStyle(element, "::after").content))
+        .toContain("Bookstore DB · schemii_test.bookstore");
+    }
     await expect(scene.locator(".quick-start-cursor")).not.toHaveClass(/visible/);
   }
 });
@@ -167,6 +172,11 @@ test("mobile and reduced-motion guides expose a readable action list", async ({ 
   }
   await expect(dialog.locator(".quick-start-page:visible .quick-start-action-summary"))
     .toContainText("Show query preview");
+  const previewStage = dialog.locator(".quick-start-page:visible .smq-stage-preview");
+  await previewStage.evaluate(stage => stage.classList.add("demo-preview", "demo-query", "demo-results"));
+  const results = previewStage.locator(".smq-results");
+  await expect(results).toBeVisible();
+  expect(await results.evaluate(element => getComputedStyle(element).animationName)).toBe("none");
 });
 
 test("guides use one bookstore orders model and show the extra Schemer filter setup", async ({ page }) => {

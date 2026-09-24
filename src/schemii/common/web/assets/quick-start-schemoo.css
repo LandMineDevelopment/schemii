@@ -80,7 +80,7 @@
 .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-brand strong { font-size: 0; }
 .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-brand strong::after { content: 'Orders model'; font-size: 11px; }
 .quick-start-scene--schemoo .smq-stage-create.demo-created .smq-top-target { font-size: 0; }
-.quick-start-scene--schemoo .smq-stage-create.demo-created .smq-top-target::after { content: 'Warehouse · analytics.public'; font-size: 8px; }
+.quick-start-scene--schemoo .smq-stage-create.demo-created .smq-top-target::after { content: 'Bookstore DB · schemii_test.bookstore'; font-size: 8px; }
 .quick-start-scene--schemoo .smq-saved-badge { position: absolute; z-index: 7; top: 46%; left: 50%; width: max-content; max-width: 85%; padding: 9px 13px; visibility: hidden; opacity: 0; border: 1px solid #5d4f80; border-radius: 6px; color: #e7d7ff; background: #211a31; box-shadow: 0 12px 32px #0009; transform: translate(-50%, 9px); transition: visibility 0s .2s, opacity .2s, transform .25s; }
 .quick-start-scene--schemoo .smq-stage-filter.demo-saved .smq-saved-badge { visibility: visible; opacity: 1; transform: translate(-50%, 0); transition-delay: 0s; }
 
@@ -241,5 +241,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .quick-start-scene--schemoo :is(.smq-library, .smq-library-shade, .smq-filter-dialog, .smq-filter-shade, .smq-table-inspector, .smq-query-dock, .smq-preview-scroll, .smq-created-badge, .smq-saved-badge, .smq-node, .smq-input b) { animation: none !important; transition: none !important; }
+  .quick-start-scene--schemoo *,
+  .quick-start-scene--schemoo *::before,
+  .quick-start-scene--schemoo *::after { animation: none !important; transition: none !important; }
 }
