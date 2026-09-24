@@ -168,7 +168,9 @@ def dashboard_context(dashboard_id: str, request: Request,
     from schemii.schemoo.service import load_model, model_catalog, document
     with dashboard_errors():
         dashboard, services, permissions = prepare_dashboard(request, principal.user_id, dashboard_id)
-        model = load_model(services, principal.user_id, dashboard.model_id, dashboard.model_revision)
+        # Context is a read of the current model so Schemer can offer an explicit
+        # dashboard update when its saved model revision is stale.
+        model = load_model(services, principal.user_id, dashboard.model_id)
         catalog = model_catalog(services, principal.user_id, model, fresh=True)
         return {"model": document(model), "catalog": catalog, "permissions": permissions}
 

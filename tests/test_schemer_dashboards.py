@@ -144,6 +144,73 @@ def test_dashboard_api_round_trip_and_owner_isolation():
         assert client.get(path).status_code == 404
 
 
+def test_context_loads_current_model_without_updating_pinned_dashboard(monkeypatch):
+    from fastapi.testclient import TestClient
+    from schemii.main import create_app, create_services
+    from schemii.common.metadata.models import Principal, get_current_principal
+    from schemii.schemoo import service as model_service
+    from schemii.schemoo.models import ModelCreate, ModelUpdate
+
+    services = create_services()
+    app = create_app(services=services)
+    owner = "user_local_prototype"
+    with TestClient(app, base_url="http://localhost") as client:
+        connection = client.post("/api/v1/connections", json={
+            "name": "Warehouse", "host": "localhost", "database": "warehouse", "username": "reader",
+        }).json()
+        model = services.models.create(owner, ModelCreate(
+            name="People", connection_id=connection["id"], database="warehouse", namespace="public",
+        ))
+        for _ in range(3):
+            model = services.models.update(owner, model.id, ModelUpdate(
+                expected_revision=model.revision, name=model.name, definition=model.definition,
+            ))
+        assert model.revision == 4
+        body = {"name": "Dashboard", "modelId": model.id, "modelRevision": 4}
+        created = client.post("/api/v1/schemer/dashboards", json=body)
+        assert created.status_code == 201, created.text
+        dashboard = created.json()
+        path = "/api/v1/schemer/dashboards/" + dashboard["id"]
+
+        model = services.models.update(owner, model.id, ModelUpdate(
+            expected_revision=4, name="People v5", definition=model.definition,
+        ))
+        catalog_requests = []
+
+        def catalog(_services, _owner, current, *, fresh=False):
+            catalog_requests.append((current.revision, fresh))
+            return {"database": "warehouse", "namespace": "public", "tables": [], "relationships": []}
+
+        monkeypatch.setattr(model_service, "model_catalog", catalog)
+        context = client.get(path + "/context")
+        assert context.status_code == 200, context.text
+        assert context.json()["model"]["revision"] == 5
+        assert context.json()["model"]["name"] == "People v5"
+        assert context.json()["permissions"]["edit"] is True
+        assert catalog_requests == [(5, True)]
+        assert client.get(path).json()["modelRevision"] == 4
+
+        stale_update = client.put(path, json={**body, "expectedRevision": dashboard["revision"]})
+        assert stale_update.status_code == 409
+        assert stale_update.json()["error"]["code"] == "model_revision_conflict"
+        stale_lookup = client.post(path + "/parameter-values", json={
+            "expectedRevision": 4, "scopeId": "unused", "alternativeId": "unused",
+            "parameterId": "unused", "consoleId": "con_" + "a" * 32,
+        })
+        assert stale_lookup.status_code == 409
+        assert stale_lookup.json()["error"]["code"] == "model_revision_conflict"
+        updated = client.put(path, json={**body, "modelRevision": 5,
+                                         "expectedRevision": dashboard["revision"]})
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["modelRevision"] == 5
+        assert updated.json()["revision"] == dashboard["revision"] + 1
+
+        app.dependency_overrides[get_current_principal] = lambda: Principal(
+            user_id="someone_else", authentication_source="local_prototype")
+        assert client.get(path + "/context").status_code == 404
+        app.dependency_overrides.clear()
+
+
 class RecordingCursor:
     def __init__(self, rows):
         self.rows = iter(rows)
