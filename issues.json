@@ -1,0 +1,78 @@
+[
+  {
+    "title": "Diagnostics: keep the mobile entry picker and its Close/search controls on screen",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/48",
+    "priority": "High \u2014 mobile workflow blocked",
+    "screenshots": [
+      "maps-mobile-picker-viewport.png",
+      "maps-desktop-system-map-picker.png"
+    ]
+  },
+  {
+    "title": "Schemii: honor hidden state for conditional checkbox rows",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/49",
+    "priority": "Medium \u2014 misleading controls in two workflows",
+    "screenshots": [
+      "schema-desktop-new-view.png",
+      "schema-mobile-connection-editor.png"
+    ]
+  },
+  {
+    "title": "UI: use a consistent readable type scale across schema forms, reports and diagnostics",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/50",
+    "priority": "Medium \u2014 pervasive readability and style inconsistency",
+    "screenshots": [
+      "schema-mobile-new-table.png",
+      "schema-desktop-new-view.png",
+      "report-desktop-style-defect.png",
+      "maps-mobile-source-code.png"
+    ]
+  },
+  {
+    "title": "Accounts: prevent mobile navigation from overlapping the Schemii wordmark",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/51",
+    "priority": "Medium \u2014 mobile navigation layout",
+    "screenshots": [
+      "admin-small-mobile-header-viewport.png",
+      "admin-mobile-account.png",
+      "admin-desktop-header-viewport.png"
+    ]
+  },
+  {
+    "title": "Schemer: keep searchable-select arrows attached to their input fields",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/52",
+    "priority": "Medium \u2014 control geometry/style",
+    "screenshots": [
+      "report-desktop-style-defect.png",
+      "report-mobile-style-defect.png"
+    ]
+  },
+  {
+    "title": "Schemoo: focus and reveal invalid fields when model-editor validation fails",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/53",
+    "priority": "Medium \u2014 error recovery",
+    "screenshots": [
+      "model-mobile-filter-validation.png",
+      "model-mobile-derived-validation.png",
+      "model-desktop-filter-validation.png"
+    ]
+  },
+  {
+    "title": "Schemoo: opening a model without saved positions should not create unsaved changes",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/54",
+    "priority": "Medium \u2014 misleading unsaved state",
+    "screenshots": [
+      "model-desktop-model.png",
+      "model-mobile-model.png"
+    ]
+  },
+  {
+    "title": "Authentication: show actionable feedback for rejected sign-in credentials",
+    "url": "https://github.com/LandMineDevelopment/schemii/issues/55",
+    "priority": "Medium \u2014 sign-in recovery",
+    "screenshots": [
+      "desktop-login-error.png",
+      "small-mobile-login-error.png"
+    ]
+  }
+]

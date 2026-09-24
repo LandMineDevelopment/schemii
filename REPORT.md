@@ -4,7 +4,19 @@ The most disruptive confirmed defect is the mobile diagnostics chooser: search a
 
 ## Issues
 
-Issue links are added after filing. Each issue includes actual screenshots, reproducible steps, expected behavior, a concrete fix and acceptance checks. The existing tall-model canvas finding is updated rather than duplicated.
+Eight new issues filed; existing #17 updated. Every finding includes screenshots and concrete fix/acceptance criteria.
+
+| Priority | Finding | GitHub issue |
+|---|---|---|
+| High | Diagnostics: keep the mobile entry picker and its Close/search controls on screen | [#48](https://github.com/LandMineDevelopment/schemii/issues/48) |
+| Medium | Schemii: honor hidden state for conditional checkbox rows | [#49](https://github.com/LandMineDevelopment/schemii/issues/49) |
+| Medium | UI: use a consistent readable type scale across schema forms, reports and diagnostics | [#50](https://github.com/LandMineDevelopment/schemii/issues/50) |
+| Medium | Accounts: prevent mobile navigation from overlapping the Schemii wordmark | [#51](https://github.com/LandMineDevelopment/schemii/issues/51) |
+| Medium | Schemer: keep searchable-select arrows attached to their input fields | [#52](https://github.com/LandMineDevelopment/schemii/issues/52) |
+| Medium | Schemoo: focus and reveal invalid fields when model-editor validation fails | [#53](https://github.com/LandMineDevelopment/schemii/issues/53) |
+| Medium | Schemoo: opening a model without saved positions should not create unsaved changes | [#54](https://github.com/LandMineDevelopment/schemii/issues/54) |
+| Medium | Authentication: show actionable feedback for rejected sign-in credentials | [#55](https://github.com/LandMineDevelopment/schemii/issues/55) |
+| Medium, existing | Tall-model canvas becomes unreadable when fitted | [#17, fresh screenshot evidence](https://github.com/LandMineDevelopment/schemii/issues/17#issuecomment-5805147384) |
 
 ## Completed coverage
 
@@ -40,3 +52,7 @@ This is a broad functional-surface and workflow audit, not exhaustive validation
 2. Standardize readable form typography and connected dropdown geometry; repair mobile account navigation.
 3. Improve model validation recovery and initial dirty-state handling; make invalid sign-in feedback actionable.
 4. Address the existing large-model canvas presentation issue.
+
+## Delivery
+
+315 screenshots retained in the published gallery on `audit/ui-2026-09-23`. Original screenshot evidence is pinned to commit `f717a878dcc4a42c562a1965b8753381132aa958`. No application PR was created: this is an audit/evidence branch. GitHub issues are referenced by their canonical URLs; the installed T3 tools do not provide native issue-to-chat linking, so these are references, not verified native issue badges.
