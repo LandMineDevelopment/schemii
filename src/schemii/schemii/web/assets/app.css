@@ -837,15 +837,6 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
 .type-domain-checks { display: grid; gap: 5px; }
 .type-domain-checks > strong { color: #707d8d; font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
 .type-domain-checks > code { padding: 7px 8px; border: 1px solid #29333f; border-radius: 5px; color: #afbbc7; background: #0a0f14; font: 8px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
-.intro-dialog { width: min(720px, calc(100vw - 28px)); }
-.intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow-y: auto; background: var(--line); }
-.intro-grid article { position: relative; min-height: 145px; padding: 22px; background: #10151c; }
-.intro-grid article > span { color: #554721; font: 800 28px ui-monospace, monospace; }
-.intro-grid h3 { margin: -4px 0 6px; color: #d9e0e8; font-size: 12px; }
-.intro-grid p { margin: 0; color: #768291; font-size: 9px; line-height: 1.6; }
-.runtime-note { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; padding: 11px 15px; border-top: 1px solid #5d4c25; color: #9c8e69; background: #1d1910; }
-.runtime-note strong { color: var(--accent); font-size: 8px; text-transform: uppercase; letter-spacing: .06em; }
-.runtime-note span { font-size: 8px; line-height: 1.45; }
 .unavailable-dialog { width: min(520px, calc(100vw - 28px)); }
 .unavailable-copy { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 14px; padding: 23px 20px; }
 .unavailable-mark { display: grid; width: 50px; height: 50px; place-items: center; border: 1px solid #5b4b27; border-radius: 10px; color: var(--accent); background: #211b0f; font: 800 9px ui-monospace, monospace; }
@@ -1045,9 +1036,6 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .relationship-mapping-row { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
   .span-2 { grid-column: span 1; }
   .compact-search { min-width: 100%; }
-  .intro-grid { grid-template-columns: 1fr; }
-  .intro-grid article { min-height: 110px; }
-  .runtime-note { grid-template-columns: 1fr; }
   .unavailable-copy { grid-template-columns: 1fr; }
 }
 

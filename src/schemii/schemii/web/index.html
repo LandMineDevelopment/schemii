@@ -13,6 +13,8 @@
     <link rel="stylesheet" href="assets/app.css" />
     <link rel="stylesheet" href="/assets/common/transient-cue.css" />
     <link rel="stylesheet" href="assets/ai-assistant.css" />
+    <link rel="stylesheet" href="/assets/common/quick-start.css" />
+    <link rel="stylesheet" href="/assets/common/quick-start-schemii.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -45,7 +47,7 @@
           <details class="ui-menu">
             <summary class="ui-icon-button" data-ui-icon="help" title="Help" aria-label="Help"></summary>
             <div class="ui-menu__surface">
-              <button id="introduction-button" type="button">Show introduction</button>
+              <button id="introduction-button" type="button" data-quick-start-product="schemii">Quick start guide</button>
             </div>
           </details>
         </nav>
@@ -577,20 +579,6 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       </div>
     </dialog>
 
-    <dialog class="ui-dialog intro-dialog" id="introduction-dialog" aria-labelledby="introduction-title">
-      <div class="ui-dialog__shell">
-        <header class="ui-dialog__head"><div><small>Active frontend</small><h2 id="introduction-title">Explore a live PostgreSQL schema</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close introduction"></button></header>
-        <div class="intro-grid">
-          <article><span>01</span><h3>Connect</h3><p>Create a PostgreSQL connection. Credentials remain server-side and are never returned to this page.</p></article>
-          <article><span>02</span><h3>Open</h3><p>Create a workspace for an exact database and namespace, then load its live catalog.</p></article>
-          <article><span>03</span><h3>Inspect</h3><p>Drag table cards, follow foreign-key lines, inspect database objects, and browse view or routine definitions.</p></article>
-          <article><span>04</span><h3>Recover</h3><p>If a layout revision conflicts, local positions remain on screen until you explicitly reload the server layout.</p></article>
-        </div>
-        <div class="runtime-note"><strong>Durable server storage</strong><span>Connections, workspaces, and layouts survive application rebuilds and restarts. Live catalogs are still read directly from PostgreSQL.</span></div>
-        <footer class="ui-dialog__actions"><button class="ui-button compact primary" type="button" data-close-dialog>Start exploring</button></footer>
-      </div>
-    </dialog>
-
     <dialog class="ui-dialog unavailable-dialog" id="unavailable-dialog" aria-labelledby="unavailable-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Backend capability unavailable</small><h2 id="unavailable-title">Capability unavailable</h2></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close capability notice"></button></header>
@@ -700,5 +688,6 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
     <script type="module" src="/assets/common/user-activity.js"></script>
     <script type="module" src="assets/app.js"></script>
     <script type="module" src="assets/ai-assistant.js"></script>
+    <script type="module" src="/assets/common/quick-start-entry.js"></script>
   </body>
 </html>
