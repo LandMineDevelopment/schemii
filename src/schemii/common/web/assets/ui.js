@@ -428,6 +428,7 @@ export function installVisualViewportSizing(documentRef = document) {
     const offsetTop = visualViewport?.offsetTop || 0;
     style.setProperty("--ui-visual-viewport-height", `${height}px`);
     style.setProperty("--ui-visual-viewport-center-y", `${offsetTop + height / 2}px`);
+    style.setProperty("--ui-visual-viewport-bottom", `${Math.max(0, windowRef.innerHeight - offsetTop - height)}px`);
   };
   update();
   windowRef.addEventListener("resize", update);
@@ -440,6 +441,7 @@ export function installVisualViewportSizing(documentRef = document) {
       visualViewport?.removeEventListener("scroll", update);
       style.removeProperty("--ui-visual-viewport-height");
       style.removeProperty("--ui-visual-viewport-center-y");
+      style.removeProperty("--ui-visual-viewport-bottom");
     },
   });
 }

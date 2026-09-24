@@ -292,6 +292,7 @@
 .code-toolbar .ui-icon-button.compact::before { position: absolute; inset: -3px; content: ""; }
 .code-block pre { max-height: 420px; margin: 0; overflow: auto; color: #c7d1dc; background: #090d12; tab-size: 4; }
 .code-block pre code { display: block; width: max-content; min-width: 100%; padding: 8px; font: 9px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.code-block pre code { font-size: var(--ui-type-control); }
 .token-keyword { color: #c99af2; }
 .token-definition { color: #82d2ff; font-weight: 700; }
 .token-string { color: #a8d279; }
@@ -371,3 +372,35 @@
 @media (prefers-reduced-motion: reduce) {
   .api-canvas-node, .api-edge { transition: none; }
 }
+
+/* The map inspector uses the same reading scale as the shared forms. */
+.eyebrow,
+.api-node-kind,
+.operation-metadata dt,
+.detail-section h3,
+.stage-detail-heading h4,
+.stage-detail-section h4,
+.shape-line em { font-size: var(--ui-type-label); }
+.group-node p,
+.operation-description,
+.none-reported,
+.contract-item p,
+.response-item p,
+.stage-summary-copy p,
+.shape-description,
+.shape-facts,
+.source-docstring,
+.inspection-unavailable,
+.code-intro { font-size: var(--ui-type-helper); }
+.operation-copy strong,
+.api-node-path,
+.api-node-title,
+.detail-operation code,
+.operation-metadata dd,
+.contract-item code,
+.response-item strong,
+.stage-summary-copy strong,
+.shape-line code,
+.source-card > summary strong { font-size: var(--ui-type-control); }
+.source-card > summary { min-height: 40px; }
+.stage-summary-copy { min-width: 0; }

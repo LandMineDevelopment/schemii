@@ -188,12 +188,14 @@ test("dialog viewport sizing follows the actually visible mobile viewport", () =
   const sizing = installVisualViewportSizing(documentRef);
   assert.equal(values.get("--ui-visual-viewport-height"), "620px");
   assert.equal(values.get("--ui-visual-viewport-center-y"), "328px");
+  assert.equal(values.get("--ui-visual-viewport-bottom"), "162px");
 
   windowRef.visualViewport.height = 540;
   windowRef.visualViewport.offsetTop = 30;
   visualListeners.get("resize")();
   assert.equal(values.get("--ui-visual-viewport-height"), "540px");
   assert.equal(values.get("--ui-visual-viewport-center-y"), "300px");
+  assert.equal(values.get("--ui-visual-viewport-bottom"), "230px");
 
   sizing.destroy();
   assert.equal(values.size, 0);

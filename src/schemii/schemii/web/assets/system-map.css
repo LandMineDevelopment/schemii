@@ -779,8 +779,8 @@
     overflow: visible;
   }
   .entry-rail { display: none; }
-  .entry-dialog[open] { position: fixed; inset: auto 0 0; width: 100%; max-width: none; max-height: 88dvh; margin: 0; border-width: 1px 0 0; border-radius: 14px 14px 0 0; }
-  .entry-dialog > .ui-dialog__shell { height: 88dvh; max-height: 88dvh; }
+  .entry-dialog[open] { position: fixed; inset: auto 0 var(--ui-visual-viewport-bottom); width: 100%; max-width: none; max-height: min(88dvh, calc(var(--ui-visual-viewport-height) - 8px)); margin: 0; border-width: 1px 0 0; border-radius: 14px 14px 0 0; transform: none; }
+  .entry-dialog > .ui-dialog__shell { height: min(88dvh, calc(var(--ui-visual-viewport-height) - 8px)); max-height: inherit; }
   .entry-dialog .ui-dialog__head { padding: 12px 13px 10px; }
   .entry-dialog .ui-dialog__head p { font-size: 8px; }
   .entry-dialog-tools { grid-template-columns: minmax(0, 1fr) auto; gap: 7px; padding: 8px; }
@@ -864,4 +864,61 @@
   .flow-title-row .method-badge { min-width: 40px; }
   .flow-card-head strong { font-size: 8px; }
   .context-chip { max-width: 105px; }
+}
+
+/* Route names, explanations, and source remain legible at normal zoom. */
+.browse-picker > span,
+.entry-picker > span,
+.depth-control > span,
+.outcome-control span,
+.entry-group-heading strong,
+.entry-feature-heading strong,
+.journey-stage-label,
+.journey-stage-copy small,
+.journey-stage-action,
+.flow-kind,
+.flow-disclosure,
+.inspector-section h3 { font-size: var(--ui-type-label); }
+.browse-picker select,
+.entry-picker-value strong,
+.entry-search input,
+.entry-button-copy strong,
+.entry-dialog-list .entry-button-copy strong,
+.flow-card-head strong,
+.relationship-button code { font-size: var(--ui-type-control); }
+.entry-picker-value small,
+.entry-button-copy small,
+.entry-dialog-list .entry-button-copy small,
+.entry-feature-heading small,
+.entry-group-heading small,
+.flow-heading p,
+.journey-guide p,
+.journey-stage-copy > span,
+.journey-related-hint,
+.journey-detail header p,
+.narrative-step-copy > span,
+.narrative-step-detail > p,
+.flow-card-detail > p,
+.inspector-summary p,
+.flow-footer p,
+.entry-dialog .ui-dialog__head p { font-size: var(--ui-type-helper); }
+.entry-dialog-list .entry-button { min-height: 64px; }
+.entry-dialog-list .entry-button-copy small,
+.entry-button-copy small { color: #9aa6b4; }
+.flow-heading p { white-space: normal; }
+.flow-card-head strong { white-space: normal; overflow-wrap: anywhere; }
+.flow-card-meta code,
+.flow-card-meta small,
+.flow-detail-fact code,
+.data-flow .code-block pre code { font-size: var(--ui-type-helper); }
+.entry-dialog-list { overflow-y: auto; overscroll-behavior: contain; }
+
+@media (max-width: 720px) {
+  .browse-picker { grid-column: 1 / -1; grid-template-columns: auto minmax(0, 1fr); grid-row: 1; }
+  .entry-picker { grid-column: 1 / -1; grid-template-columns: auto minmax(0, 1fr); grid-row: 2; }
+  .flow-search { grid-row: 3; }
+  .depth-control,
+  .outcome-control { grid-row: 4; }
+  .entry-dialog .ui-dialog__head { flex: none; }
+  .entry-dialog-tools { flex: none; }
 }
