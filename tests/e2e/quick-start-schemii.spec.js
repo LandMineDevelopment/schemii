@@ -39,6 +39,23 @@ test("Schemii relationship stays attached and the migration changes can be inspe
 
   for (let index = 0; index < 2; index++) await dialog.getByRole("button", { name: "Next" }).click();
   const migration = dialog.locator(".quick-start-page:visible .quick-start-scene");
+  if (page.viewportSize().width <= 600) {
+    await page.waitForFunction(() => {
+      const guide = document.querySelector(".quick-start-page:not([hidden])");
+      const mock = guide?.querySelector(".qs-s-migration-demo");
+      const cursor = guide?.querySelector(".quick-start-cursor");
+      return mock?.classList.contains("demo-expanded")
+        && cursor?.querySelector("span")?.textContent === "Relationship change";
+    });
+    const clearance = await migration.evaluate(scene => {
+      const cursor = scene.querySelector(".quick-start-cursor");
+      const label = cursor.querySelector("span").getBoundingClientRect();
+      const sql = scene.querySelector(".qs-s-relationship-sql").getBoundingClientRect();
+      return { high: cursor.classList.contains("tooltip-high"), gap: sql.top - label.bottom };
+    });
+    expect(clearance.high).toBe(true);
+    expect(clearance.gap).toBeGreaterThan(0);
+  }
   await expect(migration.locator(".qs-s-create-sql")).toBeHidden();
   await expect(migration.locator(".qs-s-relationship-sql")).toBeVisible();
   await expect(migration.locator("[data-quick-start-target='migration-relationship-change']")).toBeInViewport();

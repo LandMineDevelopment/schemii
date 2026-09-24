@@ -16,6 +16,7 @@
 .quick-start-cursor span { position: absolute; top: 21px; left: 17px; width: max-content; max-width: 180px; padding: 5px 8px; border: 1px solid #e4bd68; border-radius: 4px; color: #251a06; background: #f5d68c; box-shadow: 0 5px 15px #0009; font: 700 9px ui-sans-serif, system-ui, sans-serif; white-space: nowrap; }
 .quick-start-cursor.tooltip-left span { right: 13px; left: auto; }
 .quick-start-cursor.tooltip-above span { top: auto; bottom: 13px; }
+.quick-start-cursor.tooltip-high span { top: auto; bottom: 52px; }
 @keyframes quick-start-click { from { opacity: 1; transform: scale(.45); } to { opacity: 0; transform: scale(1.7); } }
 .quick-start-playback { display: flex; min-height: 39px; align-items: center; justify-content: space-between; gap: 10px; margin-top: 9px; padding: 4px 4px 4px 9px; border: 1px solid #383b39; border-radius: 6px; background: #171a1b; }
 .quick-start-status { min-width: 0; color: #d2c19a; font-size: 11px; line-height: 1.35; }

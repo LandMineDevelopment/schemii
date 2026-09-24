@@ -177,6 +177,11 @@ test("mobile and reduced-motion guides expose a readable action list", async ({ 
   const results = previewStage.locator(".smq-results");
   await expect(results).toBeVisible();
   expect(await results.evaluate(element => getComputedStyle(element).animationName)).toBe("none");
+  const resultBounds = await results.evaluate(element => ({
+    visibleBottom: element.getBoundingClientRect().bottom,
+    lastRowBottom: element.lastElementChild.getBoundingClientRect().bottom,
+  }));
+  expect(resultBounds.lastRowBottom).toBeLessThanOrEqual(resultBounds.visibleBottom + 1);
 });
 
 test("guides use one bookstore orders model and show the extra Schemer filter setup", async ({ page }) => {

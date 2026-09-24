@@ -12,9 +12,10 @@ function positionCursor(scene, cursor, target, label) {
   const control = target.getBoundingClientRect();
   const x = control.left - bounds.left + control.width / 2;
   const y = control.top - bounds.top + control.height / 2;
-  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
+  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above", "tooltip-high");
   cursor.classList.toggle("tooltip-left", x > bounds.width * .69);
-  cursor.classList.toggle("tooltip-above", y > bounds.height * .72 || target.dataset.quickStartTooltip === "above");
+  cursor.classList.toggle("tooltip-above", y > bounds.height * .72);
+  cursor.classList.toggle("tooltip-high", target.dataset.quickStartTooltip === "high");
   cursor.querySelector("span").textContent = label;
   cursor.style.left = `${x}px`;
   cursor.style.top = `${y}px`;

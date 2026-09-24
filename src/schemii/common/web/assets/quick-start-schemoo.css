@@ -238,6 +238,7 @@
   .quick-start-scene--schemoo .smq-query-dock header { height: 23px; }
   .quick-start-scene--schemoo .smq-stage-preview.demo-query .smq-query-dock { height: 76px; }
   .quick-start-scene--schemoo .smq-output-list div { padding: 3px; }
+  .quick-start-scene--schemoo .smq-results :is(b, span) { padding-block: 3px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
