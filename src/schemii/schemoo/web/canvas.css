@@ -48,7 +48,6 @@
 .sc-derived-edge { color: #aa8bef; }
 .sc-derived-edge .sc-edge-line { stroke-dasharray: 3 4; }
 .mf-dialog.derived-dialog { max-width: 740px; }
-.derived-dialog .warning:empty { display: none; }
 .derived-body { overflow-y: auto; min-height: 0; display: grid; gap: 16px; padding: 22px; }
 .derived-output { border: 1px solid #354153; border-radius: 9px; background: #141a23; padding: 16px; display: grid; gap: 12px; }
 .derived-output header { display: flex; align-items: center; justify-content: space-between; }

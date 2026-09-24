@@ -22,22 +22,26 @@ export function showEditorValidation(body, summary, issues, scrollBody = body) {
   clearEditorValidation(body, summary);
   if (!issues.length) return false;
   summary.textContent = [...new Set(issues.map(issue => issue.message))].join(" ");
-  let first;
+  const controls = new Map();
   for (const issue of issues) {
     const root = [...body.querySelectorAll("[data-validation-key]")].find(candidate => candidate.dataset.validationKey === issue.key);
     if (!root) continue;
     const control = root.matches("input, select, textarea, button") ? root : root.querySelector("input, select, textarea, button");
     if (!control) continue;
+    if (!controls.has(control)) controls.set(control, { root, messages: [] });
+    if (!controls.get(control).messages.includes(issue.message)) controls.get(control).messages.push(issue.message);
+  }
+  const first = controls.keys().next().value;
+  for (const [control, { root, messages }] of controls) {
     const error = document.createElement("p");
     error.className = "mf-inline-error";
     error.id = `mf-editor-error-${++nextErrorId}`;
-    error.textContent = issue.message;
+    error.textContent = messages.join(" ");
     control.setAttribute("aria-invalid", "true");
     control.setAttribute("aria-describedby", [control.getAttribute("aria-describedby"), error.id].filter(Boolean).join(" "));
     control.dataset.validationErrorId = error.id;
     const wrapper = root.closest(".mf-label, .stack, .derived-keys") || root.parentElement;
     wrapper.append(error);
-    first ||= control;
   }
   if (first) {
     for (let ancestor = first.closest("details"); ancestor && body.contains(ancestor); ancestor = ancestor.parentElement.closest("details")) ancestor.open = true;

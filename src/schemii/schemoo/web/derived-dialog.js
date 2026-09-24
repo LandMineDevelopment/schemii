@@ -26,7 +26,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
   const columns = id => catalog.tables.find(t => t.name === physical.find(n => n.id === id)?.table)?.columns || [];
   const dialog = element("dialog", { className: "mf-dialog derived-dialog", attrs: { "aria-label": existing ? "Edit calculated source" : "Add calculated source" } });
   const body = element("div", { className: "derived-body" });
-  const error = element("p", { attrs: { role: "alert" }, className: "warning" });
+  const error = element("p", { attrs: { role: "alert" }, className: "mf-dialog-error" });
   const name = element("input", { attrs: { "aria-label": "Calculated source name", maxlength: 100 } });
   validationKey(name, "derived:name");
   name.value = existing?.label || initial?.label || `${physical.find(n => n.id === source)?.label} calculations`;

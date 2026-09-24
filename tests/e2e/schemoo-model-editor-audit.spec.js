@@ -30,6 +30,21 @@ test("missing saved positions stay clean; tall fields scroll with visible relati
   const list = card.locator(".sc-node-fields");
   expect(await card.evaluate(node => node.getBoundingClientRect().height)).toBeLessThan(370);
   expect(await list.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  const bounds = await list.boundingBox();
+  if (test.info().project.name === "android-chromium") {
+    const session = await page.context().newCDPSession(page);
+    const x = bounds.x + bounds.width * .7, start = bounds.y + bounds.height * .8, end = bounds.y + bounds.height * .2;
+    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: start }] });
+    for (let step = 1; step <= 8; step++) {
+      await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: start + (end - start) * step / 8 }] });
+    }
+    await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await session.detach();
+  } else {
+    await page.mouse.move(bounds.x + bounds.width * .7, bounds.y + bounds.height * .5);
+    await page.mouse.wheel(0, 420);
+  }
+  await expect.poll(() => list.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
   const before = await page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy");
   await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
   await expect.poll(() => page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy")).not.toBe(before);
@@ -37,6 +52,34 @@ test("missing saved positions stay clean; tall fields scroll with visible relati
   await page.keyboard.press("Space");
   await expect(page.locator('input[aria-label="Expose people.field_35"]')).toBeFocused();
   await expect(page.locator("#save-model")).toBeEnabled();
+});
+
+test("multiple issues on one input keep one description and clear after correction", async ({ page }) => {
+  await page.route("**/editor-validation-fixture", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><body>
+    <div id="body"><div class="mf-label"><input aria-label="Source value" aria-describedby="hint" data-validation-key="source"><span id="hint">Existing hint</span></div></div>
+    <p id="summary" role="alert"></p>
+    <script type="module">import { clearEditorValidation, showEditorValidation } from "/schemoo-assets/editor-validation.js";
+      const body=document.querySelector("#body"), summary=document.querySelector("#summary");
+      body.addEventListener("input",()=>clearEditorValidation(body,summary));
+      window.editorValidation={body,summary,showEditorValidation,clearEditorValidation};</script></body></html>` }));
+  await page.goto("/editor-validation-fixture");
+  await page.waitForFunction(() => !!window.editorValidation);
+  await page.evaluate(() => {
+    const {body,summary,showEditorValidation}=window.editorValidation;
+    showEditorValidation(body,summary,[{key:"source",message:"Choose a value."},{key:"source",message:"The selected domain is unavailable."}]);
+  });
+  const input=page.getByRole("textbox", { name: "Source value" });
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator(".mf-inline-error")).toHaveCount(1);
+  const describedBy=(await input.getAttribute("aria-describedby")).split(" ");
+  expect(describedBy).toHaveLength(2);
+  expect(describedBy[0]).toBe("hint");
+  await expect(page.locator(`#${describedBy[1]}`)).toContainText("The selected domain is unavailable.");
+  await input.fill("corrected");
+  await expect(input).toHaveAttribute("aria-describedby", "hint");
+  await expect(input).not.toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator(".mf-inline-error")).toHaveCount(0);
 });
 
 test("fixed filter validation reveals and associates the missing source field", async ({ page }) => {
