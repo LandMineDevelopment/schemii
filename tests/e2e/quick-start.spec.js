@@ -194,7 +194,10 @@ test("guides use one bookstore orders model and show the extra Schemer filter se
   await schemoo.getByRole("button", { name: "Next" }).click();
   await expect(schemoo.locator(".quick-start-page:visible .smq-output-count")).toHaveText("1");
   await expect(schemoo.locator(".quick-start-page:visible .smq-output-list"))
-    .toContainText("customers · full_name");
+    .toContainText("authors · name");
+  await expect(schemoo.locator(".quick-start-page:visible .smq-add-by-table"))
+    .toContainText("4 exposed columns");
+  await expect(schemoo.locator(".quick-start-page:visible .smq-new-output")).toHaveCount(4);
   await expect(schemoo.locator(".quick-start-page:visible .quick-start-action-summary"))
     .toContainText("Show query preview");
 

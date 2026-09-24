@@ -72,13 +72,13 @@ const previewScene = `<div class="smq-stage smq-stage-preview">
       <div class="smq-pane smq-pane-model"><p>Choose the starting table and relationship paths here.</p><section><strong>Connections · 1</strong></section></div>
       <div class="smq-pane smq-pane-preview"><div class="smq-preview-scroll"><div class="smq-preview-context"><strong>Working preview</strong><small>Query choices only</small></div><span class="smq-input smq-select smq-preview-root">orders</span>
         <h3>Preview outputs <em class="smq-output-count">1</em></h3><p>Imported previews keep their initial output until you remove it.</p>
-        <label>Add by table<span class="smq-add-by-table"><span class="smq-input smq-select">orders · 2 exposed columns</span><button class="smq-icon smq-output-add" type="button" title="Add table columns to preview" data-quick-start-target="add-outputs">${icon('add')}</button></span></label>
-        <div class="smq-output-list"><div>customers · full_name <small>Plain field</small></div><div class="smq-new-output">orders · id <small>Plain field</small></div><div class="smq-new-output">orders · status <small>Plain field</small></div></div></div>
+        <label>Add by table<span class="smq-add-by-table"><span class="smq-input smq-select">orders · 4 exposed columns</span><button class="smq-icon smq-output-add" type="button" title="Add table columns to preview" data-quick-start-target="add-outputs">${icon('add')}</button></span></label>
+        <div class="smq-output-list"><div>authors · name <small>Plain field</small></div><div class="smq-new-output">orders · id <small>Plain field</small></div><div class="smq-new-output">orders · status <small>Plain field</small></div><div class="smq-new-output">orders · ordered_at <small>Plain field</small></div><div class="smq-new-output">orders · shipped_at <small>Plain field</small></div></div></div>
       </div>
     </aside>
   </div><section class="smq-query-dock"><header><button class="smq-sql-tab">Generated SQL</button><button class="smq-results-tab" data-quick-start-target="results-tab">Results</button><small class="smq-result-status">Nothing run yet</small></header>
-    <pre class="smq-sql"><span class="smq-sql-before">SELECT customers.full_name\nFROM bookstore.orders JOIN bookstore.customers ...</span><span class="smq-sql-after">SELECT customers.full_name, orders.id, orders.status\nFROM bookstore.orders JOIN bookstore.customers ...</span></pre>
-    <div class="smq-results"><div><b>full_name</b><b>id</b><b>status</b></div><div><span>Alex Morgan</span><span>1</span><span>shipped</span></div><div><span>Sam Rivera</span><span>2</span><span>paid</span></div></div>
+    <pre class="smq-sql"><span class="smq-sql-before">SELECT authors.name\nFROM bookstore.orders JOIN ...</span><span class="smq-sql-after">SELECT authors.name, orders.id, orders.status,\n       orders.ordered_at, orders.shipped_at ...</span></pre>
+    <div class="smq-results"><div><b>name</b><b>id</b><b>status</b><b>ordered_at</b><b>shipped_at</b></div><div><span>Maya Chen</span><span>1</span><span>shipped</span><span>Jun 2</span><span>Jun 3</span></div><div><span>Priya Raman</span><span>1</span><span>shipped</span><span>Jun 2</span><span>Jun 3</span></div></div>
   </section>${toolbar('All changes saved', 'run-preview', 'show-query')}</div>`;
 
 export const guide = {
