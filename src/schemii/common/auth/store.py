@@ -50,6 +50,9 @@ class AuthStore:
                     if user == before['users'].get(user['id']): continue
                     cursor.execute("INSERT INTO metadata.users(id,display_name) VALUES(%s,%s) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name", (user['id'], user['display_name']))
                     cursor.execute("INSERT INTO metadata.auth_accounts(user_id,username,password_hash,is_admin,disabled) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,is_admin=excluded.is_admin,disabled=excluded.disabled", tuple(user[k] for k in ('id','username','password_hash','is_admin','disabled')))
+                for user_id in before['users'].keys() - state['users'].keys():
+                    # Preserve metadata.users and owned work; dependent sign-in grants cascade.
+                    cursor.execute('DELETE FROM metadata.auth_accounts WHERE user_id=%s',(user_id,))
                 for username in before['attempts'].keys() - state['attempts'].keys():
                     cursor.execute('DELETE FROM metadata.auth_login_attempts WHERE username=%s',(username,))
                 for username, attempt in state['attempts'].items():
@@ -66,14 +69,29 @@ class AuthStore:
                     cursor.execute('DELETE FROM metadata.auth_roles WHERE id=%s',(role_id,))
                 for role in state['roles'].values():
                     if role == before['roles'].get(role['id']): continue
-                    cursor.execute('DELETE FROM metadata.auth_roles WHERE id=%s',(role['id'],))
-                    cursor.execute('INSERT INTO metadata.auth_roles VALUES(%s,%s,%s::jsonb)', (role['id'],role['name'],json.dumps(role['capabilities'])))
-                    for user in role['user_ids']:
-                        cursor.execute('INSERT INTO metadata.auth_user_roles VALUES(%s,%s)',(user,role['id']))
-                    for grant in role['connections']:
-                        cursor.execute('INSERT INTO metadata.auth_role_connections VALUES(%s,%s,%s,%s)',(role['id'],grant['connection_id'],grant['owner_id'],grant['allow_authoring']))
-                    for grant in role['dashboards']:
-                        cursor.execute('INSERT INTO metadata.auth_role_dashboards VALUES(%s,%s,%s,%s,%s,%s,%s)',(role['id'],*[grant[k] for k in ('dashboard_id','owner_id','connection_id','connection_owner_id','can_export','can_drill')]))
+                    previous = before['roles'].get(role['id'])
+                    if previous:
+                        if (role['name'],role['capabilities']) != (previous['name'],previous['capabilities']):
+                            cursor.execute('UPDATE metadata.auth_roles SET name=%s,capabilities=%s::jsonb WHERE id=%s',
+                                           (role['name'],json.dumps(role['capabilities']),role['id']))
+                    else:
+                        cursor.execute('INSERT INTO metadata.auth_roles VALUES(%s,%s,%s::jsonb)',
+                                       (role['id'],role['name'],json.dumps(role['capabilities'])))
+                    for user_id in set(previous['user_ids']) - set(role['user_ids']) if previous else ():
+                        cursor.execute('DELETE FROM metadata.auth_user_roles WHERE role_id=%s AND user_id=%s',(role['id'],user_id))
+                    for user_id in set(role['user_ids']) - set(previous['user_ids'] if previous else []):
+                        cursor.execute('INSERT INTO metadata.auth_user_roles(user_id,role_id) VALUES(%s,%s)',(user_id,role['id']))
+                    for key, table, columns in [
+                        ('connections','auth_role_connections',('connection_id','owner_id','allow_authoring')),
+                        ('dashboards','auth_role_dashboards',('dashboard_id','owner_id','connection_id','connection_owner_id','can_export','can_drill')),
+                    ]:
+                        if previous and role[key] == previous[key]:
+                            continue
+                        cursor.execute('DELETE FROM metadata.'+table+' WHERE role_id=%s',(role['id'],))
+                        placeholders=','.join(['%s']*(len(columns)+1))
+                        for grant in role[key]:
+                            cursor.execute('INSERT INTO metadata.'+table+' VALUES('+placeholders+')',
+                                           (role['id'],*[grant[column] for column in columns]))
                 for audit in state['audit']:
                     cursor.execute('INSERT INTO metadata.auth_audit(actor_id,action,target_id) VALUES(%s,%s,%s)',audit)
 

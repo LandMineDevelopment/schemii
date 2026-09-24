@@ -146,7 +146,7 @@ test('Zen actual SDK accepts ordinary JSON Schema defs and oneOf without TypeBox
   });
   const events = [];
   await new TurnService().run(input({ providerId: 'opencode', modelId: 'big-pickle',
-    credential: { type: 'api_key', key: 'public' }, context: { ...context,
+    credential: { type: 'api_key', key: 'owner-zen-key' }, context: { ...context,
       tools: [{ name: 'propose', description: 'Propose a change', parameters }] } }),
   { emit: event => events.push(event) });
   assert.deepEqual(outgoing.tools[0].function.parameters, parameters);
@@ -154,7 +154,7 @@ test('Zen actual SDK accepts ordinary JSON Schema defs and oneOf without TypeBox
   assert.deepEqual(events.at(-1).toolCalls, [{ id: 'call1', name: 'propose', arguments: { action: { name: 'test' } } }]);
 });
 
-test('Zen uses explicit public auth through actual SDK without ambient keys', async t => {
+test('Zen uses the supplied instance key through the actual SDK without ambient keys', async t => {
   const previous = process.env.OPENCODE_API_KEY;
   process.env.OPENCODE_API_KEY = 'ambient-private-key';
   t.after(() => { if (previous === undefined) delete process.env.OPENCODE_API_KEY;
@@ -162,9 +162,9 @@ test('Zen uses explicit public auth through actual SDK without ambient keys', as
   t.mock.method(globalThis, 'fetch', async (url, init) => {
     const request = new Request(url, init);
     assert.equal(request.url, 'https://opencode.ai/zen/v1/chat/completions');
-    assert.equal(request.headers.get('authorization'), 'Bearer public');
+    assert.equal(request.headers.get('authorization'), 'Bearer instance-zen-key');
     const chunks = [
-      { id: 'chat', choices: [{ index: 0, delta: { role: 'assistant', content: 'Public answer' }, finish_reason: null }] },
+      { id: 'chat', choices: [{ index: 0, delta: { role: 'assistant', content: 'Zen answer' }, finish_reason: null }] },
       { id: 'chat', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
     ];
     return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n',
@@ -172,9 +172,9 @@ test('Zen uses explicit public auth through actual SDK without ambient keys', as
   });
   const events = [];
   await new TurnService().run(input({ providerId: 'opencode', modelId: 'big-pickle',
-    credential: { type: 'api_key', key: 'public' } }), { emit: event => events.push(event) });
+    credential: { type: 'api_key', key: 'instance-zen-key' } }), { emit: event => events.push(event) });
   assert.equal(events.at(-1).type, 'result');
-  assert.equal(events.at(-1).text, 'Public answer');
+  assert.equal(events.at(-1).text, 'Zen answer');
 });
 
 test('turn request limits validate and context overflow is a safe terminal', async () => {
@@ -204,9 +204,10 @@ test('provider HTTP limits and account failures have useful fixed messages witho
   t.mock.method(globalThis, 'fetch', async () => Response.json({ error: {
     message: 'PRIVATE-ACCOUNT-TOKEN', type: 'provider-secret-diagnostic',
   } }, { status }));
-  for (const [httpStatus, code] of [[429, 'rate_limited'], [401, 'credentials_required'], [402, 'billing_required']]) {
+  for (const [httpStatus, code] of [[429, 'rate_limited'], [401, 'credentials_required'],
+    [402, 'billing_required'], [403, 'provider_access_denied']]) {
     status = httpStatus;
-    for (const extra of [{}, { providerId: 'opencode', modelId: 'big-pickle', credential: { type: 'api_key', key: 'public' } }]) {
+    for (const extra of [{}, { providerId: 'opencode', modelId: 'big-pickle', credential: { type: 'api_key', key: 'owner-zen-key' } }]) {
       const events = [];
       await new TurnService().run(input(extra), { emit: event => events.push(event) });
       assert.equal(events.at(-1).type, 'error');

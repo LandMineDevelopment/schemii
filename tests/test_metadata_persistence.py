@@ -36,8 +36,10 @@ def test_metadata_storage_mode_is_explicit_and_memory_is_test_selectable() -> No
     assert repositories.storage == "memory"
     assert repositories.durable is False
     from schemii.common.ai.credential_store import MemoryAiCredentialStore
+    from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
 
     assert isinstance(repositories.ai_credentials, MemoryAiCredentialStore)
+    assert isinstance(repositories.ai_instance_providers, MemoryInstanceAiProviderStore)
     repositories.check_readiness()
 
     with pytest.raises(ValueError, match="must not be set"):
@@ -71,6 +73,7 @@ def test_metadata_configuration_requires_absolute_secret_files() -> None:
 def test_postgres_factory_composes_encrypted_ai_credentials(monkeypatch, tmp_path) -> None:
     import schemii.common.metadata.factory as factory_module
     from schemii.common.ai.credential_store import PostgresAiCredentialStore
+    from schemii.common.ai.instance_provider_store import PostgresInstanceAiProviderStore
 
     key_file = tmp_path / "key"
     key_file.write_text(base64.b64encode(bytes(range(32))).decode("ascii") + "\n")
@@ -92,6 +95,8 @@ def test_postgres_factory_composes_encrypted_ai_credentials(monkeypatch, tmp_pat
 
     store = repositories.ai_credentials
     assert isinstance(store, PostgresAiCredentialStore)
+    assert isinstance(repositories.ai_instance_providers, PostgresInstanceAiProviderStore)
+    assert repositories.ai_instance_providers._connection_factory is repositories.connection_factory
     assert store._connection_factory is repositories.connection_factory
     encrypted = store._encrypt("owner", "primary", "openai", {"apiKey": "secret"})
     assert CredentialCipher(bytes(range(32))).decrypt(
@@ -229,6 +234,13 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         36,
         37,
         38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
     ]
     assert {migration.name: migration.checksum for migration in migrations} == {
         "0001_connections.sql": "c00ad440b1237618dab9515c9113bcde5ef63721d642f0764e6eb9ae1bdadc65",
@@ -268,6 +280,13 @@ def test_composed_metadata_history_preserves_deployed_names_and_checksums() -> N
         "0036_optional_dashboard_filters.sql": "4ac962febf95b1b3f1bc48a8c40fc27ecb95b0127837fdd6e442088a7c2085ec",
         "0037_accounts_roles.sql": "25f5b50adb361727a65f595be3fe680a7d930eff2f1c7e8c0476fd1972e46917",
         "0038_report_execution_identity.sql": "f36f89d5c959a1e37cb52da1312adc1303806d76534466838c52f53b7e58137f",
+        "0039_product_access_roles.sql": "1f306b654fefc5e315543ad0d500713903fa6e2d810b9e28be515a794bd763ae",
+        "0040_managed_model_sources.sql": "94cbe715704ed81c5201d61f493ae3450c5a7466eb422f224c3e5380477dd4b9",
+        "0041_managed_schemii_targets.sql": "d06b6707a1e591b5a1785abbe02f008904ddd0bed94d0280166d822d5c6dacd7",
+        "0042_schemii_connection_ownership.sql": "21684a726de90bb8b5cafbcaf111dbfd5e0edc353d2a60ad538b7c3452c0aa62",
+        "0043_ai_zen_credentials.sql": "4178342000f173ca17e8054fb0a63cdab576da41a07ff5f77cecf90859159e95",
+        "0044_ai_shared_codex.sql": "ee350801467bb5fbf250010d5291da6ca1b814e2b0d72b2ca1edb06ee87e8b4a",
+        "0045_ai_instance_role_grants.sql": "75040d3a40204826854676e4805a73d556cd637a9888476dcbe71f51bbbdcaa0",
         "0034_ai_console_app_actions.sql": "507abfedba95dbfcede1f994af7823a7b596edd9a2973cbfd4927c50cbd0eff0",
     }
     assert migrations[1].name == "0002_schemii_workspaces.sql"

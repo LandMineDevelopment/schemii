@@ -13,6 +13,7 @@ from .models import (
     PostgresConnectionProfile,
     PostgresConnectionUpdate,
     ResolvedPostgresConnection,
+    SCHEMII_CONNECTION_OWNER_ID,
 )
 from .policy import AllowAllConnectionTargetPolicy, ConnectionTargetPolicy
 from .store import (
@@ -21,6 +22,7 @@ from .store import (
     ConnectionMutationGuardRegistrar,
     ConnectionMutationOperation,
     ConnectionRepository,
+    ConnectionNotFoundError,
 )
 
 
@@ -70,6 +72,7 @@ class ConnectionService:
         self._dependency_providers = dependency_providers
         self._target_policy = target_policy or AllowAllConnectionTargetPolicy()
         self._locks = tuple(threading.RLock() for _ in range(64))
+        self._auth: Any | None = None
         if isinstance(repository, ConnectionMutationGuardRegistrar):
             repository.set_mutation_guard(self._transactional_guard())
 
@@ -79,6 +82,15 @@ class ConnectionService:
             current for current in self._dependency_providers
             if current.dependency_name != provider.dependency_name
         ) + (provider,)
+
+    def set_authority(self, auth: Any) -> None:
+        """Install the account authority after the application is assembled."""
+        self._auth = auth
+
+    def for_product(self, product: str) -> ProductConnectionAccess:
+        if product not in {"schemii", "schemoo", "schemer"}:
+            raise ValueError("Unknown product")
+        return ProductConnectionAccess(self, product)
 
     def _transactional_guard(self) -> ConnectionMutationGuard:
         def guard(
@@ -106,6 +118,27 @@ class ConnectionService:
 
     def list(self, owner_id: str) -> list[PostgresConnectionProfile]:
         return self._repository.list(owner_id)
+
+    def list_schemii_owned(self) -> list[PostgresConnectionProfile]:
+        """Inventory the application-owned pool, never a person's private profiles."""
+        return self._repository.list(SCHEMII_CONNECTION_OWNER_ID)
+
+    def create_schemii_owned(self, request: PostgresConnectionCreate) -> PostgresConnectionProfile:
+        """Store a database-admin-provisioned read-only login in the shared pool."""
+        if request.password is None:
+            raise ValueError("Schemii-owned profiles require an explicit credential")
+        return self.create(SCHEMII_CONNECTION_OWNER_ID, request)
+
+    def get_schemii_owned(self, connection_id: str) -> PostgresConnectionProfile:
+        return self.get(SCHEMII_CONNECTION_OWNER_ID, connection_id)
+
+    def update_schemii_owned(
+        self, connection_id: str, request: PostgresConnectionUpdate,
+    ) -> PostgresConnectionProfile:
+        return self.update(SCHEMII_CONNECTION_OWNER_ID, connection_id, request)
+
+    def delete_schemii_owned(self, connection_id: str, expected_revision: int) -> None:
+        self.delete(SCHEMII_CONNECTION_OWNER_ID, connection_id, expected_revision)
 
     def get(self, owner_id: str, connection_id: str) -> PostgresConnectionProfile:
         return self._repository.get(owner_id, connection_id)
@@ -210,3 +243,84 @@ class ConnectionService:
             if dependencies:
                 raise ConnectionInUseError(dependencies)
             self._repository.delete(owner_id, connection_id, expected_revision)
+
+
+class ProductConnectionAccess:
+    """Resolve an actor's private or explicitly role-managed database identity.
+
+    Resource owners remain the signed-in actor. Managed credentials remain with
+    their original owner and are only resolved while the matching product grant
+    is active. Callers persist ``profile.owner_id`` beside ``profile.id``.
+    """
+
+    def __init__(self, connections: ConnectionService, product: str) -> None:
+        self._connections = connections
+        self.product = product
+
+    def _authority(self, actor_id: str) -> Any | None:
+        auth = self._connections._auth
+        if auth is None or not auth.enabled:
+            return None
+        capabilities = set(auth.capabilities(actor_id))
+        required = {f"{self.product}:access"}
+        if self.product == "schemer":
+            required.add("schemer:author")
+        if not required.issubset(capabilities):
+            raise ConnectionNotFoundError("PostgreSQL connection was not found")
+        return auth
+
+    def _owner(self, actor_id: str, connection_id: str) -> str:
+        auth = self._authority(actor_id)
+        try:
+            personal = self._connections.get(actor_id, connection_id)
+        except ConnectionNotFoundError:
+            if auth is None:
+                raise
+        else:
+            if personal.ownership != "user":
+                raise ConnectionNotFoundError("PostgreSQL connection was not found")
+            return actor_id
+        grant = auth.connection_access(actor_id, connection_id, self.product)
+        if grant is None:
+            raise ConnectionNotFoundError("PostgreSQL connection was not found")
+        shared = self._connections.get(grant["owner_id"], connection_id)
+        if shared.ownership != "schemii":
+            raise ConnectionNotFoundError("PostgreSQL connection was not found")
+        return grant["owner_id"]
+
+    def list(self, actor_id: str) -> list[PostgresConnectionProfile]:
+        auth = self._authority(actor_id)
+        profiles = {
+            profile.id: profile.model_copy(update={"owner_id": actor_id})
+            for profile in self._connections.list(actor_id)
+            if profile.ownership == "user"
+        }
+        if auth is not None:
+            for grant in auth.connection_grants(actor_id):
+                connection_id = grant["connection_id"]
+                if connection_id in profiles:
+                    continue
+                if auth.connection_access(actor_id, connection_id, self.product) is None:
+                    continue
+                owner_id = grant["owner_id"]
+                try:
+                    profile = self._connections.get(owner_id, connection_id)
+                except ConnectionNotFoundError:
+                    continue
+                if profile.ownership != "schemii":
+                    continue
+                profiles[connection_id] = profile.model_copy(update={"owner_id": owner_id})
+        return sorted(profiles.values(), key=lambda item: (item.name.casefold(), item.id))
+
+    def get(self, actor_id: str, connection_id: str) -> PostgresConnectionProfile:
+        owner_id = self._owner(actor_id, connection_id)
+        profile = self._connections.get(owner_id, connection_id)
+        return profile.model_copy(update={"owner_id": owner_id})
+
+    @contextmanager
+    def use(
+        self, actor_id: str, connection_id: str
+    ) -> Iterator[ResolvedPostgresConnection]:
+        owner_id = self._owner(actor_id, connection_id)
+        with self._connections.use(owner_id, connection_id) as resolved:
+            yield resolved.model_copy(update={"owner_id": owner_id})

@@ -12,11 +12,18 @@ Schemii is a local, self-hosted PostgreSQL design and analytics workbench made u
 - **Schemoo** defines durable semantic models over an explicit saved connection and schema, including relationships, derived fields, and required or optional model scopes.
 - **Schemer** turns a Schemoo model into saved dashboards. Dashboard authors select the model scopes they expose; report users can activate those optional filters, explore streamed results, and drill into contributing rows cached in their browser.
 
-The launcher runs an authenticated private deployment with local accounts, roles, and managed report connections. It does not add public ingress. See [Accounts and database roles](docs/accounts-and-roles.md) for setup, permissions, and rollout scope. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
+All three products have an AI assistant with the same conversation, provider,
+approval, and permission controls. Each assistant has its own product tools and
+action settings. Schemer conversations belong to one dashboard. A dashboard
+author can ask for saved dashboard changes; a view-only user can ask about the
+dashboard and run permitted report reads through their assigned database role.
+Assistant settings cannot add edit, export, or drill rights to a shared report.
+
+The launcher runs an authenticated private deployment with local accounts, per-product roles, and role-managed PostgreSQL connections. It does not add public ingress. See [Accounts and database roles](docs/accounts-and-roles.md) for setup, permissions, and rollout scope. Query result rows are transient, while product configuration and encrypted connection credentials are stored in the private metadata database. Model publication, ETL, and materialization are separate concerns rather than implicit dashboard behavior.
 
 ## Installation
 
-Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
+Prerequisites are Git, Docker Engine with the Compose plugin, and OpenSSL. Backup and recovery commands additionally require Python 3.10 or later on the host. On Linux, the account that starts the stack needs permission to use Docker. Optional local certificate trust for Chromium browsers needs `certutil` from `libnss3-tools`. Tailscale is optional and only needed for the private tailnet preview route.
 
 ```bash
 git clone git@github.com:LandMineDevelopment/schemii.git
@@ -63,7 +70,7 @@ src/schemii/
 The application API authenticates users and applies role permissions:
 
 - `GET /api/v1/session` returns the authenticated principal. `/login`, `/account`, and `/admin` provide account setup, sign-in, password changes, and role management.
-- `/api/v1/connections` manages owner-scoped, durable PostgreSQL connection profiles.
+- `/api/v1/connections` manages owner-owned profiles and lists role-managed profiles for the selected product; only the profile owner can edit or delete one.
 - `/api/v1/schemii/workspaces` manages each user's durable local and PostgreSQL-backed designs plus presentation preferences.
 - `POST /api/v1/schemii/workspaces/postgres` opens the user's existing design for one exact saved connection and namespace, or imports it once from a bounded PostgreSQL catalog snapshot when none exists.
 - `PATCH /api/v1/schemii/workspaces/{id}` renames the owner's saved workspace with a revision check, without renaming its PostgreSQL database/schema or changing its saved design.
@@ -143,7 +150,7 @@ Connection profiles, workspaces, desired designs, import provenance, creation-ti
 
 Each profile targets exactly one PostgreSQL host. TLS certificate and hostname verification (`verify-full`) is the default; weaker libpq SSL modes must be selected explicitly for environments that require them.
 
-The local deployment's `internal-only` egress mode admits connection profiles only when their normalized host is listed in the operator-owned `SCHEMII_ALLOWED_TARGET_HOSTS` setting. The list contains private network identities, not user-entered patterns or inferred address ranges, and is checked when a profile is created, updated, and every time its credential is resolved for use. The metadata PostgreSQL identity is denied independently. Deployments must therefore control DNS for each allowed alias; an alternate alias or literal address is rejected unless the operator explicitly adds it.
+Both `internal-only` and authenticated `external` target modes admit connection profiles only when their normalized host is listed in the operator-owned `SCHEMII_ALLOWED_TARGET_HOSTS` setting. The list contains operator-approved host identities, not user-entered patterns or inferred address ranges, and is checked when a profile is created, updated, and every time its credential is resolved for use. The metadata PostgreSQL identity is denied independently. Deployments must therefore control DNS for each allowed alias; an alternate alias or literal address is rejected unless the operator explicitly adds it.
 
 A workspace is either a database-independent editable design or a new editable design imported from PostgreSQL. Targets cannot be attached, replaced, or detached after creation. A PostgreSQL import atomically records the catalog baseline, design revision, layout, provenance, and lossiness report, so existing local work cannot be overwritten. The saved connection's PostgreSQL grants—not a Schemii workspace mode—determine which database operations are permitted. Local designs can be exported as SQL for use outside Schemii. Database-backed workspaces inspect columns, constraints, relationships, indexes, triggers, functions, views, materialized views, enums, and domains from bounded PostgreSQL snapshots. Capabilities that remain planned are registered for review in the API map and return an explicit `501 planned_capability`.
 
@@ -187,7 +194,7 @@ certutil -A -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"
 
 Restart the browser or T3Code after changing trust. Remove the exception with `certutil -D -d "sql:$HOME/.pki/nssdb" -n "Schemii localhost (exact certificate)"`. Other clients can either trust `.schemii/tls/localhost.crt` through their own certificate store or retain their normal self-signed-certificate warning.
 
-Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. `SCHEMII_ALLOWED_TARGET_HOSTS` is deployment-owned and must contain only PostgreSQL aliases reachable on the intended private target network. Database identity and password overrides are initialization inputs and must continue to match retained local state. The Compose ingress remains loopback-only because this prototype intentionally has no application authentication.
+Runtime configuration is grouped at the top of `start.sh` and may also be supplied through `SCHEMII_TEST_APP_PORT`, `SCHEMII_TEST_POSTGRES_DB`, `SCHEMII_TEST_POSTGRES_USER`, `SCHEMII_TEST_POSTGRES_PASSWORD`, `SCHEMII_STARTUP_TIMEOUT`, `SCHEMII_TLS_DIRECTORY`, `SCHEMII_TLS_CERTIFICATE_DAYS`, and `SCHEMII_SECRET_DIRECTORY`. `SCHEMII_ALLOWED_TARGET_HOSTS` is deployment-owned and must contain only PostgreSQL aliases reachable on the intended private target network. Database identity and password overrides are initialization inputs and must continue to match retained local state. The authenticated Compose deployment keeps ingress loopback-only; the configured Tailscale Serve route provides private remote access. See [the friends rollout guide](docs/friends-rollout.md) for account, role, and database onboarding.
 
 Non-secret administrator policy is loaded once at startup from the absolute path in `SCHEMII_CONFIG_FILE`; the local stack mounts [`dev/schemii.toml`](dev/schemii.toml). The file owns process connection admission, bounded catalog materialization, operation timeouts, Console statement/session/memory policy, query-history and saved-query retention, migration review/lease timing, and per-user metadata resource limits. Invalid, unknown, or internally conflicting settings fail startup instead of being silently ignored. These are Schemii safety ceilings; PostgreSQL permissions and stricter database-side limits remain authoritative.
 
@@ -201,13 +208,17 @@ database access, shell tools or persistent chat storage. The browser talks only
 to Schemii's same-origin API. Pi returns structured proposals; Schemii owns tool
 validation, permissions, execution and user approval.
 
-AI settings support ChatGPT Codex device sign-in, OpenAI API keys, and verified
-free OpenCode Zen models. The server periodically refreshes free-model availability;
-it never silently substitutes a model. Conversations can switch models between
-turns. Credentials are encrypted and owner-scoped, with configurable inactivity
-expiration. See [AI runtime documentation](ai/prototype/README.md) for retention,
-provider privacy, deployment limitations and sidecar tests. The current supported
-deployment remains a single API process with the local development principal.
+AI settings support ChatGPT Codex device sign-in and personal OpenAI API keys.
+Administrators can store one encrypted, installation-owned OpenCode Zen key and
+grant access by user, app, and exact database profile. Detached Schemii workspaces
+have a separate grant. Zen rejects external inference with the public credential.
+The assistant never silently substitutes a model. Conversations can switch models
+between turns. Personal credentials are encrypted and owner-scoped, with
+configurable inactivity expiration; the instance Zen key is encrypted separately
+and is never committed to Git. See the
+[AI runtime documentation](ai/prototype/README.md) for retention, provider privacy,
+deployment limitations and sidecar tests. The current supported
+deployment remains a single API process with authenticated, owner-scoped accounts.
 
 Each turn receives the current owner-scoped workspace, desired design, bounded chat
 history, and—only when granted—a freshly inspected live catalog. Design proposals
@@ -301,6 +312,17 @@ For an already configured installation, provide explicit test credentials with
 never claim or reset an existing administrator. First-admin setup is allowed only
 with the explicit bootstrap flag and a fresh installation. Session state is stored
 under ignored, private `artifacts/playwright-auth/` and is not a CI artifact.
+
+To verify Schemer against a connected real provider, run the opt-in smoke test
+after `./start.sh`. The admin test account needs an active ChatGPT Codex connection.
+The test selects a currently available model, creates a disposable report, checks
+that `get_dashboard` succeeds and the answer names its saved tile, then removes
+the chat and report fixtures:
+
+```bash
+SCHEMII_LIVE_AI=1 SCHEMII_E2E_CREDENTIALS_FILE=/path/to/private-credentials.json \
+  npx playwright test tests/e2e/schemer-ai-live.spec.js --project=desktop-chromium
+```
 
 Playwright keeps screenshots and traces only for failures under `artifacts/`.
 CI runs the complete suite against its disposable stack with

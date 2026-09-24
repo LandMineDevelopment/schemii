@@ -77,7 +77,7 @@ def _workspaces(request: Request) -> WorkspaceRepository:
 
 
 def _connections(request: Request) -> ConnectionService:
-    return request.app.state.services.connections
+    return request.app.state.services.connections.for_product("schemii")
 
 
 def _designs(request: Request) -> DesignRepository:
@@ -199,6 +199,8 @@ def open_postgres_workspace(
                 body.namespace,
             )
             if existing is not None:
+                if (existing.connection_owner_id or principal.user_id) != (getattr(connection, "owner_id", None) or principal.user_id):
+                    raise ApiProblem(409, "workspace_target_changed", "The saved workspace uses a different PostgreSQL identity")
                 workspace = existing
                 created = False
             else:
@@ -215,6 +217,7 @@ def open_postgres_workspace(
                         WorkspaceCreateRecord(
                             name=f"{connection.database}.{body.namespace}",
                             connection_id=connection.id,
+                            connection_owner_id=getattr(connection, "owner_id", None) or principal.user_id,
                             database=connection.database,
                             namespace=body.namespace,
                         ),
@@ -314,6 +317,8 @@ def update_workspace_layout(
             principal.user_id,
             workspace.connection_id,
         ) as connection:
+            if (getattr(connection, "owner_id", None) or principal.user_id) != (getattr(workspace, "connection_owner_id", None) or principal.user_id):
+                raise ApiProblem(409, "workspace_target_changed", "The workspace connection identity changed")
             if connection.revision != body.expected_connection_revision:
                 raise ApiProblem(
                     409,
@@ -449,6 +454,8 @@ def get_workspace_catalog(
             principal.user_id,
             workspace.connection_id,
         ) as connection:
+            if (getattr(connection, "owner_id", None) or principal.user_id) != (getattr(workspace, "connection_owner_id", None) or principal.user_id):
+                raise ApiProblem(409, "workspace_target_changed", "The workspace connection identity changed")
             if connection.database != workspace.database:
                 raise ApiProblem(
                     409,

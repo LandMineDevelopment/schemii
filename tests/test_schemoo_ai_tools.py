@@ -34,7 +34,11 @@ def services():
                     {"name": "name", "dataType": "text"}]}]}
     return SimpleNamespace(models=InMemoryModelRepository(),
                            model_catalogs=SimpleNamespace(get=catalog),
-                           connections=SimpleNamespace(list=lambda owner: [SimpleNamespace(
+                           connections=SimpleNamespace(get=lambda owner, connection_id: SimpleNamespace(
+                               id=CONNECTION_ID, database="warehouse", owner_id=owner)
+                               if owner == "alice" and connection_id == CONNECTION_ID
+                               else (_ for _ in ()).throw(ConnectionNotFoundError("Connection not found")),
+                               list=lambda owner: [SimpleNamespace(
                                id=CONNECTION_ID, name="Warehouse", database="warehouse", revision=1,
                                password="never share", host="private-host", username="private-user")]
                                if owner == "alice" else []),
@@ -230,7 +234,7 @@ def test_execution_runs_reserved_job_and_returns_actual_receipt_without_rows(ser
         assert owner == "alice" and kwargs["connection_id"] == CONNECTION_ID
         assert kwargs["database"] == "warehouse"
         return receipt
-    def execute(owner, execution_id):
+    def execute(owner, execution_id, **kwargs):
         jobs.append((owner, execution_id))
     def owned(owner, execution_id):
         assert jobs == [(owner, execution_id)]

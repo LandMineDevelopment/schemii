@@ -18,11 +18,12 @@ from schemii.common.api import (
 )
 from schemii.common.api.models import ApiErrorResponse
 from schemii.common.api.routes import router as runtime_router
-from schemii.common.api.runtime import RuntimeConfig, TargetEgressMode
+from schemii.common.api.runtime import RuntimeConfig
 from schemii.common.admin_config import AdminConfig
 from schemii.common.ai.credential_lifecycle import CredentialExpiryWorker, router as activity_router
 from schemii.common.ai.model_catalog import ModelCatalogWorker, ZenModelCatalog
-from schemii.common.ai.routes import router as ai_provider_router
+from schemii.common.ai.routes import (router as ai_provider_router,
+    admin_router as ai_provider_admin_router, shared_codex_router as ai_shared_codex_admin_router)
 from schemii.common.connections.routes import router as connections_router
 from schemii.common.connections.policy import (
     CompositeConnectionTargetPolicy,
@@ -51,6 +52,7 @@ from schemii.schemii.console.repository import (
     PostgresConsoleRepository,
 )
 from schemii.schemii.console.service import ConsoleService
+from schemii.schemii.console.connection_dependencies import PostgresConsoleConnectionDependencies
 from schemii.schemii.migrations.repository import (
     InMemoryMigrationRepository,
     PostgresMigrationRepository,
@@ -145,16 +147,16 @@ def create_services(
               if metadata.connection_factory is not None else InMemoryModelRepository(
               maximum_models_per_owner=selected_admin.resources.maximum_models_per_user,
               maximum_document_bytes=selected_admin.resources.maximum_model_document_bytes))
-    target_policy = metadata.target_policy
-    if selected_runtime.target_egress_mode is TargetEgressMode.INTERNAL_ONLY:
-        target_policy = CompositeConnectionTargetPolicy(
-            (
-                target_policy,
-                InternalOnlyConnectionTargetPolicy.from_hosts(
-                    selected_runtime.allowed_target_hosts
-                ),
-            )
+    # External routing never grants arbitrary database access. Both deployment
+    # modes require exact operator-approved identities and deny the control plane.
+    target_policy = CompositeConnectionTargetPolicy(
+        (
+            metadata.target_policy,
+            InternalOnlyConnectionTargetPolicy.from_hosts(
+                selected_runtime.allowed_target_hosts
+            ),
         )
+    )
     connections = ConnectionService(
         metadata.connections,
         (workspaces, models),
@@ -234,6 +236,8 @@ def create_services(
         if metadata.connection_factory is not None
         else InMemoryConsoleRepository()
     )
+    if metadata.connection_factory is not None:
+        connections.register_dependency_provider(PostgresConsoleConnectionDependencies(metadata.connection_factory))
     console = ConsoleService(
         repository=console_repository,
         connections=connections,
@@ -291,6 +295,8 @@ COMMON_ROUTERS: tuple[APIRouter, ...] = (
     runtime_router,
     connections_router,
     ai_provider_router,
+    ai_provider_admin_router,
+    ai_shared_codex_admin_router,
 )
 
 
@@ -389,13 +395,15 @@ def create_app(
         await asyncio.to_thread(application.state.bulk_jobs.repository.recover)
         await asyncio.to_thread(application.state.ai_service.recover_interrupted)
         await asyncio.to_thread(application.state.schemoo_ai.store.prune, True)
+        await asyncio.to_thread(application.state.schemer_ai.store.prune, True)
         async def maintain_chats():
             while True:
                 await asyncio.sleep(60)
                 try:
                     await asyncio.to_thread(application.state.schemoo_ai.maintain)
+                    await asyncio.to_thread(application.state.schemer_ai.maintain)
                 except Exception:
-                    logging.getLogger(__name__).exception("Schemoo chat maintenance failed")
+                    logging.getLogger(__name__).exception("Product chat maintenance failed")
         chat_maintenance=asyncio.create_task(maintain_chats())
         active_services.migrations.set_execution_waker(migration_worker.notify)
         await migration_worker.start()
@@ -449,6 +457,17 @@ def create_app(
     from schemii.common.auth.routes import router as auth_router
     from schemii.common.auth.middleware import AuthenticationMiddleware
     application.state.auth = AuthService(active_services.metadata.connection_factory)
+    if hasattr(active_services.connections, "set_authority"):
+        active_services.connections.set_authority(application.state.auth)
+    schemii_connections = (active_services.connections.for_product("schemii")
+                           if hasattr(active_services.connections, "for_product")
+                           else active_services.connections)
+    # These long-lived services also run outside HTTP requests. Give them an
+    # explicit product scope so queued work rechecks the role before opening DB.
+    if active_services.migrations is not None:
+        active_services.migrations._connections = schemii_connections
+    if active_services.console is not None:
+        active_services.console._connections = schemii_connections
     from schemii.common.auth.dependencies import AccountConnectionDependencies
     if application.state.auth.enabled:
         active_services.connections.register_dependency_provider(AccountConnectionDependencies(application.state.auth))
@@ -456,6 +475,8 @@ def create_app(
     application.include_router(auth_router)
     from schemii.common.auth.resources import router as account_resources_router
     application.include_router(account_resources_router)
+    from schemii.common.auth.managed_connections import router as managed_connections_router
+    application.include_router(managed_connections_router)
     application.state.services = active_services
     application.state.pi_client = PiClient.from_env()
     application.state.ai_model_catalog = (
@@ -467,11 +488,11 @@ def create_app(
         else None
     )
     from schemii.schemii.console.raw_session import RawSessionService, router as raw_console_router
-    application.state.raw_console = RawSessionService(active_services.console, active_services.connections, active_services.postgres)
+    application.state.raw_console = RawSessionService(active_services.console, schemii_connections, active_services.postgres)
     application.include_router(raw_console_router)
     application.state.bulk_jobs = BulkJobService(
         JobRepository(active_services.metadata.connection_factory),
-        active_services.console, active_services.connections, active_services.postgres,
+        active_services.console, schemii_connections, active_services.postgres,
     )
     workspace_bulk_guard = getattr(active_services.workspaces, "set_mutation_guard", None)
     if callable(workspace_bulk_guard):
@@ -489,7 +510,9 @@ def create_app(
     from schemii.common.ai.pi import PiRuntime
     ai_runtime = (
         PiRuntime(application.state.pi_client, active_services.metadata.ai_credentials,
-                  application.state.ai_model_catalog, active_services.admin_config.ai)
+                  application.state.ai_model_catalog, active_services.admin_config.ai,
+                  instance_store=active_services.metadata.ai_instance_providers,
+                  auth=application.state.auth)
         if application.state.pi_client is not None else None
     )
     application.state.ai_service = AiService(
@@ -499,16 +522,23 @@ def create_app(
         active_services,
     )
     application.state.ai_service.raw_console = application.state.raw_console
-    from schemii.schemoo.conversation_store import ConversationStore
-    from schemii.schemoo.conversations import Conversations
+    from schemii.common.ai.conversation_store import ConversationStore
+    from schemii.common.ai.conversations import Conversations
     from schemii.schemoo import ai_tools
     from schemii.schemoo.ai_routes import router as schemoo_ai_router
+    from schemii.schemer import ai_tools as schemer_ai_tools
+    from schemii.schemer.ai_routes import router as schemer_ai_router
     application.state.ai_runtime = ai_runtime
     application.state.schemoo_ai = Conversations(
         ConversationStore(active_services.metadata.connection_factory,active_services.admin_config.ai,"schemoo"),
         ai_runtime,active_services,ai_tools,
     )
+    application.state.schemer_ai = Conversations(
+        ConversationStore(active_services.metadata.connection_factory,active_services.admin_config.ai,"schemer","dashboardId"),
+        ai_runtime,active_services,schemer_ai_tools,
+    )
     application.include_router(schemoo_ai_router)
+    application.include_router(schemer_ai_router)
     application.state.migration_worker = migration_worker
     install_api_middleware(application)
     install_api_error_handlers(application)

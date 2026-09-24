@@ -29,7 +29,7 @@ router = APIRouter(
 
 def _service(request: Request) -> RelationBrowserService:
     services = request.app.state.services
-    return RelationBrowserService(workspaces=services.workspaces, connections=services.connections, postgres=services.postgres)
+    return RelationBrowserService(workspaces=services.workspaces, connections=services.connections.for_product("schemii"), postgres=services.postgres)
 
 
 def _problem(error: Exception) -> ApiProblem:

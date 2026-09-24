@@ -236,12 +236,12 @@ def test_native_result_route_defaults_are_values_for_direct_ai_calls():
     service.close_result(LOCAL_PROTOTYPE_USER_ID, None, receipt.id, result.id)
 
 
-def test_report_access_keeps_credential_owner_out_of_public_profile():
+def test_report_result_requires_authorized_report_route():
     from types import SimpleNamespace
     api, _, service, args = setup_target()
     profile = service._connections.get(LOCAL_PROTOTYPE_USER_ID, args['connection_id'])
-    assert not hasattr(profile, 'owner_id')
-    access = SimpleNamespace(connection_owner_id=LOCAL_PROTOTYPE_USER_ID,
+    assert profile.owner_id == LOCAL_PROTOTYPE_USER_ID
+    access = SimpleNamespace(connection_owner_id=LOCAL_PROTOTYPE_USER_ID, resource_id='dashboard_test',
                              get=service._connections.get, use=service._connections.use)
     receipt = service.reserve_read_target(LOCAL_PROTOTYPE_USER_ID, connection_access=access, **args)
     service.run(LOCAL_PROTOTYPE_USER_ID, receipt.id, connection_access=access)

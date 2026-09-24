@@ -1,10 +1,12 @@
 import io
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from schemii.common.ai.credential_store import MemoryAiCredentialStore
+from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
 from schemii.common.ai.pi import PiError, PiRuntime
 
 
@@ -44,13 +46,15 @@ def run(runtime, **kwargs):
     return runtime.run("alice", "turn1", "openai-codex", "model", "system", "hello", [], **kwargs)
 
 
-def test_owner_specific_availability_and_verified_free_intersection():
+def test_owner_specific_availability_requires_a_zen_key_and_verified_free_model():
     runtime, _, _ = setup([])
     alice = runtime.status("alice")["providers"]
     bob = runtime.status("bob")["providers"]
     assert alice[0]["available"]
     assert not bob[0]["available"]
-    assert [m["id"] for m in bob[2]["models"]] == ["free"]
+    assert [provider["id"] for provider in bob] == ["openai-codex", "openai", "opencode", "instance-codex"]
+    assert not bob[2]["available"]
+    assert [model["id"] for model in bob[2]["models"]] == ["free"]
     assert "personal" in bob[2]["privacy"]
 
 
@@ -326,20 +330,78 @@ def test_same_identity_reentrant_turn_is_rejected_until_save_finishes():
     assert run(runtime).text == "Hi"
 
 
-def test_free_turn_uses_explicit_public_auth_and_never_an_owners_paid_key():
-    runtime, _, requests = setup([{"type": "result", "text": "Free reply"}])
-    reply = runtime.run("bob", "free-turn", "opencode", "free", "system", "hello", [])
-    assert reply.text == "Free reply"
-    assert requests[0]["credential"] == {"type": "api_key", "key": "public"}
-    assert requests[0]["credentialId"] == "zen-public"
-
-
-def test_unknown_free_model_cannot_reach_transport():
+@pytest.mark.parametrize("model_id", ["free", "not-verified"])
+def test_zen_models_cannot_reach_transport_without_an_owner_key(model_id):
     runtime, _, requests = setup([])
     with pytest.raises(PiError) as caught:
-        runtime.run("alice", "turn", "opencode", "not-verified", "system", "hello", [])
+        runtime.run("alice", "turn", "opencode", model_id, "system", "hello", [])
     assert caught.value.code == "model_unavailable"
     assert requests == []
+
+
+def test_zen_turn_uses_only_instance_key_after_exact_grant_for_a_verified_free_model():
+    runtime, store, requests = setup([{"type": "result", "text": "Zen reply", "generation": 1}])
+    instance = MemoryInstanceAiProviderStore()
+    runtime.instance_store = instance
+    instance.set_key("instance-zen-key")
+    instance.upsert_grant("alice", "schemii")
+    status = runtime.status("alice")["providers"][2]
+    assert status["authenticated"] and status["available"]
+    assert runtime.status("alice", zen_scope=lambda: ("schemoo", "alice", "pg_" + "a" * 32))["providers"][2]["available"] is False
+    assert runtime.status("alice", zen_scope=lambda: ("schemii", None, None))["providers"][2]["available"] is True
+    assert [model["id"] for model in status["models"]] == ["free"]
+    scope = lambda: ("schemii", None, None)
+    assert runtime.run("alice", "zen-turn", "opencode", "free", "system", "hello", [], zen_scope=scope).text == "Zen reply"
+    assert requests[0]["credentialId"] == "instance-opencode"
+    assert requests[0]["credential"] == {"type": "api_key", "key": "instance-zen-key"}
+    assert requests[0]["generation"] == 1
+    assert all(path != "/models/refresh" for path, _ in runtime.client.calls)
+    with pytest.raises(PiError, match="not available"):
+        runtime.run("alice", "zen-turn-2", "opencode", "not-verified", "system", "hello", [], zen_scope=scope)
+    assert len(requests) == 1
+
+
+def test_zen_exact_grant_is_checked_before_transport_and_after_revocation():
+    instance = MemoryInstanceAiProviderStore()
+    runtime, _, requests = setup([{"type": "result", "text": "reply", "generation": 1}])
+    runtime.instance_store = instance
+    instance.set_key("instance-zen-key")
+    instance.upsert_grant("alice", "schemoo", "alice", "pg_" + "a" * 32)
+    scope = lambda: ("schemoo", "alice", "pg_" + "b" * 32)
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "turn1", "opencode", "free", "system", "hello", [], zen_scope=scope)
+    assert caught.value.code == "instance_access_denied"
+    assert not requests
+    instance.delete_grant("alice", "schemoo", "alice", "pg_" + "a" * 32)
+    assert not runtime.status("alice")["providers"][2]["available"]
+
+
+def test_zen_private_terminal_credential_is_not_saved_to_owner_store():
+    credential = {"type": "api_key", "key": "instance-zen-key"}
+    runtime, owner_store, _ = setup([{
+        "type": "result", "text": "reply", "generation": 1, "credential": credential,
+    }])
+    instance = MemoryInstanceAiProviderStore()
+    runtime.instance_store = instance
+    instance.set_key(credential["key"])
+    instance.upsert_grant("alice", "schemii")
+    assert runtime.run("alice", "turn", "opencode", "free", "system", "hello", [],
+                       zen_scope=lambda: ("schemii", None, None)).text == "reply"
+    assert owner_store.get("alice", "instance-opencode") is None
+
+
+def test_zen_revoked_grant_stops_a_running_turn_before_accepting_reply():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_key("instance-zen-key")
+    instance.upsert_grant("alice", "schemii")
+    runtime, _, _ = setup([{"type": "result", "text": "late", "generation": 1,
+                            "credential": {"type": "api_key", "key": "instance-zen-key"}}],
+                           before=lambda _: instance.delete_grant("alice", "schemii"))
+    runtime.instance_store = instance
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "turn", "opencode", "free", "system", "hello", [],
+                    zen_scope=lambda: ("schemii", None, None))
+    assert caught.value.code == "permission_changed"
 
 
 def test_disconnect_fences_database_even_if_sidecar_is_unavailable():
@@ -444,3 +506,179 @@ def test_reasoning_effort_catalog_validation_and_transport():
         run(runtime, reasoning_effort="max")
     assert error.value.code == "reasoning_unsupported"
     assert len(requests) == 2
+
+
+def test_shared_codex_uses_admin_policy_and_refreshes_only_instance_credential():
+    rotated = {"type": "oauth", "refresh": "rotated"}
+    runtime, owner_store, requests = setup([{"type": "result", "text": "shared reply",
+        "generation": 1, "credential": rotated}])
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna",
+                           "reasoningLevels": ["default", "low", "high"]}]
+    runtime._supported_until = float("inf")
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "original"})
+    instance.upsert_grant("alice", "schemii", provider_id="openai-codex",
+                          model_id="gpt-6-luna", reasoning_effort="high")
+    runtime.instance_store = instance
+    scope = lambda: ("schemii", None, None)
+    provider = runtime.status("alice", zen_scope=scope)["providers"][-1]
+    assert provider["adminManaged"] is True and provider["available"] is True
+    assert provider["selectedModelId"] == "gpt-6-luna"
+    assert provider["models"][0]["reasoningLevels"] == ["high"]
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "bad", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                    zen_scope=scope, reasoning_effort="low")
+    assert caught.value.code == "instance_policy_changed" and requests == []
+    reply = runtime.run("alice", "shared", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                        zen_scope=scope, reasoning_effort="high")
+    assert reply.text == "shared reply"
+    assert requests[0]["providerId"] == "openai-codex"
+    assert requests[0]["credentialId"] == "instance-codex"
+    assert requests[0]["reasoningEffort"] == "high"
+    assert instance.credential("openai-codex")["credential"] == rotated
+    assert owner_store.get("alice", "codex-prototype")["credential"]["refresh"] == "old"
+
+
+def test_shared_codex_grant_revision_fences_running_turn():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "original"})
+    instance.upsert_grant("alice", "schemii", provider_id="openai-codex")
+    runtime, _, requests = setup([{"type": "result", "text": "late", "generation": 1}],
+        before=lambda _: instance.upsert_grant("alice", "schemii", provider_id="openai-codex"))
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna",
+                           "reasoningLevels": ["default"]}]
+    runtime._supported_until = float("inf")
+    runtime.instance_store = instance
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "shared", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                    zen_scope=lambda: ("schemii", None, None))
+    assert caught.value.code == "permission_changed"
+    assert len(requests) == 1
+
+
+def test_role_policy_requires_active_same_role_app_and_database_authority():
+    from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
+
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "instance"})
+    source = "pg_" + "a" * 32
+    scope = lambda: ("schemii", SCHEMII_CONNECTION_OWNER_ID, source)
+    role = {"user_ids": ["alice"], "capabilities": ["schemii:access"],
+            "connections": [{"owner_id": SCHEMII_CONNECTION_OWNER_ID,
+                             "connection_id": source, "allow_authoring": True}],
+            "dashboards": []}
+    roles = {"role_shared": role}
+
+    class Auth:
+        enabled = True
+        store = None
+
+        def __init__(self):
+            self.store = self
+
+        def user(self, user_id):
+            return {"id": user_id} if user_id == "alice" else None
+
+        def capabilities(self, user_id):
+            return ["schemii:access"] if user_id == "alice" else []
+
+        @contextmanager
+        def transaction(self):
+            yield {"roles": roles}
+
+    instance.upsert_role_grant("role_shared", "schemii", SCHEMII_CONNECTION_OWNER_ID,
+                               source, provider_id="openai-codex", model_id="gpt-6-luna",
+                               reasoning_effort="high")
+    runtime, _, requests = setup([{"type": "result", "text": "late", "generation": 1}],
+        before=lambda _: role["user_ids"].clear())
+    runtime.instance_store = instance
+    runtime.auth = Auth()
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna",
+                           "reasoningLevels": ["default", "high"]}]
+    runtime._supported_until = float("inf")
+    provider = runtime.status("alice", zen_scope=scope)["providers"][-1]
+    assert provider["available"] and provider["models"][0]["reasoningLevels"] == ["high"]
+    with pytest.raises(PiError) as caught:
+        runtime.run("alice", "shared", "instance-codex", "gpt-6-luna", "system", "hello", [],
+                    zen_scope=scope, reasoning_effort="high")
+    assert caught.value.code == "permission_changed" and len(requests) == 1
+    assert not runtime.status("alice", zen_scope=scope)["providers"][-1]["available"]
+
+
+def test_direct_and_role_codex_policies_are_a_union_per_exact_scope():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "instance"})
+    instance.upsert_grant("alice", "schemii", provider_id="openai-codex",
+                          model_id="gpt-6-luna", reasoning_effort="default")
+    instance.add_grant("alice", "schemii", model_id="gpt-6-sol", reasoning_effort="high")
+    instance.upsert_role_grant("role_ai", "schemii", provider_id="openai-codex",
+                               model_id="gpt-6-luna", reasoning_effort="high")
+    runtime, _, _ = setup([])
+    runtime.instance_store = instance
+    @contextmanager
+    def read_roles():
+        yield {"roles": {"role_ai": {"user_ids": ["alice"],
+                                    "capabilities": ["schemii:access"],
+                                    "connections": [], "dashboards": []}}}
+    runtime.auth = SimpleNamespace(enabled=True, user=lambda owner: {"id": owner},
+                                   capabilities=lambda owner: ["schemii:access"],
+                                   store=SimpleNamespace(transaction=read_roles))
+    runtime._supported = [
+        {"providerId": "openai-codex", "id": "gpt-6-luna", "reasoningLevels": ["default", "high"]},
+        {"providerId": "openai-codex", "id": "gpt-6-sol", "reasoningLevels": ["default", "high"]}]
+    runtime._supported_until = float("inf")
+    scope = lambda: ("schemii", None, None)
+    provider = runtime.status("alice", zen_scope=scope)["providers"][-1]
+    assert [(model["id"], model["reasoningLevels"]) for model in provider["models"]] == [
+        ("gpt-6-luna", ["default", "high"]), ("gpt-6-sol", ["high"])]
+    assert "selectedModelId" not in provider
+    assert runtime.require_instance_policy("alice", "instance-codex", "gpt-6-sol", "high", scope)
+    assert runtime.require_instance_policy("alice", "instance-codex", "gpt-6-luna", "high", scope)
+    with pytest.raises(PiError) as caught:
+        runtime.require_instance_policy("alice", "instance-codex", "gpt-6-sol", "default", scope)
+    assert caught.value.code == "instance_policy_changed"
+
+
+def test_zen_role_grant_is_enforced_and_revocation_removes_access():
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_key("fixture-zen-key")
+    instance.upsert_role_grant("role_ai", "schemii")
+    roles = {"role_ai": {"user_ids": ["alice"], "capabilities": ["schemii:access"],
+                         "connections": [], "dashboards": []}}
+
+    @contextmanager
+    def read_roles():
+        yield {"roles": roles}
+
+    runtime, _, _ = setup([])
+    runtime.instance_store = instance
+    runtime.auth = SimpleNamespace(enabled=True, user=lambda owner: {"id": owner},
+                                   capabilities=lambda owner: ["schemii:access"],
+                                   store=SimpleNamespace(transaction=read_roles))
+    scope = lambda: ("schemii", None, None)
+    assert runtime.require_instance_access("alice", scope) == scope()
+    instance.delete_role_grant("role_ai", "schemii")
+    with pytest.raises(PiError) as caught:
+        runtime.require_instance_access("alice", scope)
+    assert caught.value.code == "instance_access_denied"
+
+
+def test_shared_codex_admin_connection_test_uses_live_catalog_without_prompt():
+    runtime, _, requests = setup([])
+    instance = MemoryInstanceAiProviderStore()
+    instance.set_credential("openai-codex", {"type": "oauth", "refresh": "old"})
+    runtime.instance_store = instance
+    runtime._supported = [{"providerId": "openai-codex", "id": "gpt-6-luna"}]
+    runtime._supported_until = float("inf")
+    def call(path, body=None):
+        assert path == "/models/refresh"
+        assert body["providerId"] == "openai-codex"
+        return {"type": "result", "generation": 1,
+                "credential": {"type": "oauth", "refresh": "new"},
+                "models": [{"providerId": "openai-codex", "id": "gpt-6-luna"}]}
+    runtime.client.call = call
+    result = runtime.test_instance_codex()
+    assert [model["id"] for model in result["models"]] == ["gpt-6-luna"]
+    assert [model["id"] for model in runtime.instance_codex_catalog()["verifiedModels"]] == ["gpt-6-luna"]
+    assert instance.credential("openai-codex")["credential"]["refresh"] == "new"
+    assert requests == []

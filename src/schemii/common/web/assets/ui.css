@@ -25,6 +25,11 @@
   --pane-header-height: 52px;
   --ui-visual-viewport-height: 100vh;
   --ui-visual-viewport-center-y: 50vh;
+  --ui-visual-viewport-bottom: 0px;
+  --ui-type-body: 12px;
+  --ui-type-control: 12px;
+  --ui-type-label: 12px;
+  --ui-type-helper: 11px;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -52,11 +57,11 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .ui-brand-copy strong { overflow: hidden; font-size: 13px; letter-spacing: .02em; text-overflow: ellipsis; white-space: nowrap; }
 .ui-brand-copy small { overflow: hidden; color: var(--faint); font-size: 8px; text-overflow: ellipsis; text-transform: uppercase; letter-spacing: .12em; white-space: nowrap; }
 
-.ui-button { display: inline-flex; min-height: 34px; align-items: center; justify-content: center; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 5px; color: #aeb8c4; text-align: center; text-decoration: none; background: var(--panel-2); font-size: 9px; cursor: pointer; }
+.ui-button { display: inline-flex; min-height: 34px; align-items: center; justify-content: center; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 5px; color: #aeb8c4; text-align: center; text-decoration: none; background: var(--panel-2); font-size: var(--ui-type-control); cursor: pointer; }
 .ui-button:hover { color: var(--text); border-color: #505b6a; background: var(--panel-3); }
 .ui-button:active { transform: translateY(1px); }
 .ui-button:disabled, .ui-button[aria-disabled="true"] { opacity: .42; cursor: not-allowed; transform: none; }
-.ui-button.compact { min-height: 30px; padding: 0 8px; font-size: 8px; }
+.ui-button.compact { min-height: 30px; padding: 0 8px; font-size: var(--ui-type-control); }
 .ui-button.primary, .ui-button-primary { color: var(--accent-ink); border-color: var(--accent); background: var(--accent); font-weight: 700; }
 .ui-button.primary:hover, .ui-button-primary:hover { background: var(--accent-bright); }
 .ui-button.danger, .ui-button-danger { color: #ffd9dc; border-color: #7b363e; background: #5a252c; }
@@ -106,8 +111,8 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .ui-segmented button { min-height: 28px; padding: 0 8px; border: 0; border-radius: 4px; color: #7e8b9a; background: transparent; font-size: 8px; cursor: pointer; }
 .ui-segmented button:hover { color: var(--text); background: var(--panel-3); }
 .ui-segmented button[aria-pressed="true"], .ui-segmented button.active { color: var(--accent); background: #211b0f; box-shadow: inset 0 0 0 1px #4f4225; }
-.ui-search { display: grid; min-width: 0; gap: 5px; color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: .09em; }
-.ui-search input { width: 100%; height: 34px; min-width: 0; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: #0c1117; font-size: 9px; }
+.ui-search { display: grid; min-width: 0; gap: 5px; color: var(--muted); font-size: var(--ui-type-label); text-transform: uppercase; letter-spacing: .09em; }
+.ui-search input { width: 100%; height: 34px; min-width: 0; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: #0c1117; font-size: var(--ui-type-control); }
 .ui-search input::placeholder { color: #4d5866; }
 .ui-eyebrow { display: block; color: var(--faint); font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .14em; }
 
@@ -147,9 +152,9 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .ui-dialog__head > div { display: grid; min-width: 0; gap: 3px; }
 .ui-dialog__head small { color: var(--faint); font-size: 7px; font-weight: 750; text-transform: uppercase; letter-spacing: .14em; }
 .ui-dialog__head h2 { margin: 0; color: #edf1f5; font-size: 17px; }
-.ui-dialog__head p { max-width: 580px; margin: 3px 0 0; color: #747f8d; font-size: 9px; line-height: 1.5; }
+.ui-dialog__head p { max-width: 580px; margin: 3px 0 0; color: var(--muted); font-size: var(--ui-type-helper); line-height: 1.5; }
 .ui-dialog__actions { display: flex; min-height: 54px; align-items: center; justify-content: flex-end; gap: 7px; padding: 10px 14px max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: #11171e; }
-.ui-dialog__actions > .ui-button { min-height: 32px; font-size: 8px; }
+.ui-dialog__actions > .ui-button { min-height: 32px; font-size: var(--ui-type-control); }
 .ui-dialog__actions > .ui-button:first-child[hidden] + .ui-button { margin-left: auto; }
 .ui-confirmation { width: min(480px, calc(100vw - 28px)); overflow: auto; }
 .ui-confirmation__body { padding: 4px 18px 14px; overflow-wrap: anywhere; line-height: 1.5; }

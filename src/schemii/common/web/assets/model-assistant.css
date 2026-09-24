@@ -1,7 +1,6 @@
 @import url("/assets/common/ai-permissions.css");
 @import url("/assets/common/ai-chat.css");
 
-.model-ai-context { grid-area:context; }
 .model-ai-notice { grid-area:notice; }
 .model-ai-scroll { grid-area:body; }
 .model-ai-composer { grid-area:composer; }
@@ -9,11 +8,8 @@
 .model-ai [hidden] { display:none !important; }
 .model-ai-status[data-state="working"], .model-ai-status[data-state="waiting_approval"] { color:#cbbdff; background:#211d32; border-color:#5b4d8c; }
 .model-ai-status[data-state="failed"] { color:#f1a0a8; border-color:#73404a; background:#29171c; }
-.model-ai-context { padding:10px 13px; border-bottom:1px solid #272e3a; background:#11161d; }
-.model-ai-context select { width:100%; height:36px; padding:0 9px; color:#ccd4df; background:#090e14; border:1px solid #343e4c; border-radius:6px; font:10px/1.2 Inter,ui-sans-serif,system-ui,sans-serif; }
 .model-ai-dialog select, .model-ai-dialog input { min-width:0; padding:9px; color:#dbe1e9; background:#0b1017; border:1px solid #384353; border-radius:6px; font:inherit; }
-.model-ai-context select:focus-visible, .model-ai-dialog :is(select,input):focus-visible { outline:0; border-color:#806bd0; box-shadow:0 0 0 2px rgba(128,107,208,.13); }
-.model-ai-disclosure { margin:8px 0 0; color:#657181; font-size:9px; line-height:1.45; }
+.model-ai-dialog :is(select,input):focus-visible { outline:0; border-color:#806bd0; box-shadow:0 0 0 2px rgba(128,107,208,.13); }
 .model-ai-notice { margin:0; padding:8px 14px; font-size:10px; line-height:1.4; color:#968cb1; background:#191626; border-bottom:1px solid #403852; }
 .model-ai-notice[data-error="true"], .model-ai-failure { color:#ffb3bd; background:#2a1921; }
 .model-ai-failure { padding:12px; border:1px solid #73404a; border-radius:8px; font-size:11px; line-height:1.6; }
@@ -73,6 +69,5 @@
 .model-ai-history small { display:block; color:#99a8bd; font-size:10px; margin-top:7px; overflow-wrap:anywhere; }
 @media (max-width:640px) { .model-ai-messages { padding:13px; } .model-ai-permissions label { grid-template-columns:minmax(0,1fr) 115px; } }
 
-.model-ai-model-options { display:grid; grid-template-columns:minmax(0,1fr) 112px; gap:8px; align-items:end; }
 .model-ai-reasoning { display:grid; gap:4px; color:#98a4b3; font-size:10px; }
 .model-ai-reasoning select { min-width:0; height:36px; padding:0 9px; color:#ccd4df; background:#090e14; border:1px solid #343e4c; border-radius:6px; }

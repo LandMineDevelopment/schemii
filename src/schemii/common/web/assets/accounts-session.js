@@ -1,3 +1,4 @@
+import { safeReturnPath } from './login-return.js';
 import { requestJson } from './http.js';
 let pending;
 const channel = typeof window !== 'undefined' && typeof BroadcastChannel === 'function' ? new BroadcastChannel('schemii-session') : null;
@@ -12,7 +13,27 @@ export function sessionChanged() {
 export function currentAccount() {
   return pending ||= requestJson('/api/v1/auth/me');
 }
-export function canAuthor(account) { return !!(account?.is_admin || account?.capabilities?.includes('author')); }
+export function canAccessProduct(account, product) {
+  if (!['schemii', 'schemoo', 'schemer'].includes(product)) return false;
+  return !!account?.capabilities?.includes(`${product}:access`);
+}
+export function canAuthor(account, product = 'schemer') {
+  return canAccessProduct(account, product) && (product !== 'schemer' || account.capabilities.includes('schemer:author'));
+}
+export function landingPath(account) {
+  for (const [product, path] of [['schemii', '/'], ['schemoo', '/schemoo'], ['schemer', '/schemer']]) {
+    if (canAccessProduct(account, product)) return path;
+  }
+  return account?.is_admin ? '/admin' : '/account';
+}
+export function signInDestination(account, search = globalThis.location?.search || '') {
+  const next = safeReturnPath(new URLSearchParams(search).get('next'));
+  if (!next) return landingPath(account);
+  const path = new URL(next, 'https://app.invalid').pathname;
+  const product = { '/': 'schemii', '/schemoo': 'schemoo', '/schemer': 'schemer' }[path];
+  if (product ? canAccessProduct(account, product) : path === '/account' || account?.is_admin) return next;
+  return landingPath(account);
+}
 export async function signOut() {
   await requestJson('/api/v1/auth/logout', { method: 'POST', body: {} });
   // Product preferences and saved data remain on the server. No session data survives logout.

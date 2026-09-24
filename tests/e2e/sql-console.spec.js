@@ -41,6 +41,69 @@ test("workspace toolbar follows Tables, Views, and SQL contexts", async ({ page,
   await expect(toolbar.getByRole("button", { name: "Undo design change" })).toBeHidden();
 });
 
+for (const loadingPhase of ["workspaces", "design snapshot"]) {
+  test(`a layer chosen while ${loadingPhase} loads survives startup and browser history`, async ({ page, request }) => {
+    const workspace = await databaseWorkspace(request);
+    const endpoint = loadingPhase === "workspaces"
+      ? "**/api/v1/schemii/workspaces"
+      : `**/api/v1/schemii/workspaces/${workspace.id}/design/snapshot`;
+    let release, observed;
+    const held = new Promise(resolve => { release = resolve; });
+    const requested = new Promise(resolve => { observed = resolve; });
+    await page.route(endpoint, async route => {
+      observed();
+      await held;
+      await route.continue();
+    });
+    try {
+      await page.goto(`/?workspace=${workspace.id}&layer=tables`);
+      await requested;
+      const toolbar = page.locator("#tool-rail");
+      await page.getByRole("button", { name: "Views", exact: true }).click();
+      await expect(toolbar).toHaveAttribute("aria-label", "Views tools");
+      release();
+      await expect(toolbar.getByRole("button", { name: "Create view", exact: true })).toBeEnabled();
+      await expect(toolbar).toHaveAttribute("aria-label", "Views tools");
+      await expect(page).toHaveURL(new RegExp(`workspace=${workspace.id}.*layer=views`));
+
+      await page.getByRole("button", { name: "SQL", exact: true }).click();
+      await expect(toolbar).toHaveAttribute("aria-label", "SQL tools");
+      await page.goBack();
+      await expect(toolbar).toHaveAttribute("aria-label", "Views tools");
+      await page.goForward();
+      await expect(toolbar).toHaveAttribute("aria-label", "SQL tools");
+    } finally { release(); }
+  });
+}
+
+for (const landing of ["empty", "stale"]) {
+  for (const layer of ["SQL", "Views"]) {
+    test(`a layer chosen on an ${landing} workspace landing survives delayed startup (${layer})`, async ({ page }) => {
+      let release, observed;
+      const held = new Promise(resolve => { release = resolve; });
+      const requested = new Promise(resolve => { observed = resolve; });
+      await page.route("**/api/v1/schemii/workspaces", async route => {
+        observed();
+        await held;
+        await route.fulfill({ json: { workspaces: [] } });
+      });
+      try {
+        await page.goto(landing === "empty" ? "/" : `/?workspace=ws_${"f".repeat(32)}&layer=tables`);
+        await requested;
+        const toolbar = page.locator("#tool-rail");
+        await page.getByRole("button", { name: layer, exact: true }).click();
+        await expect(toolbar).toHaveAttribute("aria-label", `${layer} tools`);
+        release();
+        await expect(page.locator("#catalog-state")).toContainText("Open a schema workspace");
+        await expect(page.locator("#workspace-title")).toHaveText("No workspace open");
+        await expect(toolbar).toHaveAttribute("aria-label", `${layer} tools`);
+        await expect(page.getByRole("button", { name: layer, exact: true })).toHaveAttribute("aria-pressed", "true");
+        await expect(page).not.toHaveURL(/workspace=/);
+      } finally { release(); }
+    });
+  }
+}
+
 test("safe-read Console runs the cursor statement and renders PostgreSQL column types", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=sql`);
@@ -112,6 +175,30 @@ test("a SQL deep link preloads one browser-local workspace draft", async ({ page
   await page.getByRole("tab", { name: /^Result 3 SELECT/ }).click();
   await expect(page.locator(".sql-result-card tbody")).toContainText("This row exists only inside");
   await expect(page.locator("#sql-transaction-status")).toContainText("No transaction open");
+});
+
+test("SQL typed before workspace startup completes is kept with the requested workspace", async ({ page, request }) => {
+  const workspace = await databaseWorkspace(request);
+  let release, observed;
+  const held = new Promise(resolve => { release = resolve; });
+  const requested = new Promise(resolve => { observed = resolve; });
+  await page.route("**/api/v1/schemii/workspaces", async route => {
+    observed();
+    await held;
+    await route.continue();
+  });
+  try {
+    await page.goto(`/?workspace=${workspace.id}&layer=sql`);
+    await requested;
+    const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
+    const sql = "SELECT 2468 AS entered_during_startup;";
+    await editor.fill(sql);
+    release();
+    await expect(page.getByRole("heading", { name: "SQL Console" })).toBeVisible();
+    await expect(editor).toHaveValue(sql);
+    await page.getByRole("button", { name: "Run current statement" }).click();
+    await expect(page.locator(".sql-result-card tbody")).toContainText("2468");
+  } finally { release(); }
 });
 
 test("selection, cursor, and Run all target the intended statements", async ({ page, request }) => {

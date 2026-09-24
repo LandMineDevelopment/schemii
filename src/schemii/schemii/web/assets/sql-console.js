@@ -20,6 +20,20 @@ export function formatConsoleCell(value) {
   return formatDataCell(value);
 }
 
+export function formatConsoleActivitySummary(activity, execution = null, runningElapsedMs = null) {
+  const rawExecution = Boolean(execution?.sessionId);
+  const phase = rawExecution ? execution.status : (activity.phase ?? execution?.status ?? activity.status);
+  const elapsedMs = rawExecution
+    ? (TERMINAL_EXECUTION_STATUSES.has(execution.status) ? execution.elapsedMs : runningElapsedMs)
+    : activity.elapsedMs;
+  return [
+    phase,
+    typeof elapsedMs === "number" && Number.isFinite(elapsedMs) && elapsedMs >= 0
+      ? formatElapsed(elapsedMs) : null,
+    "Query activity",
+  ].filter(Boolean).join(" · ");
+}
+
 function newConsoleId() {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
@@ -252,11 +266,15 @@ export function createSqlConsole({
         if ((exportWatch.started && activity.phase !== "exporting") || (!exportWatch.started && Date.now() > exportWatch.deadline)) exportWatch = null;
         updateControls();
       }
-      activitySummary.textContent = `${activity.phase} · ${(activity.elapsedMs / 1000).toFixed(1)} s · Query activity`;
+      const currentExecution = execution?.id === executionId ? execution : null;
+      activitySummary.textContent = formatConsoleActivitySummary(activity, currentExecution, elapsedTimer.value());
       const parts = [
         activity.statementIndex == null ? null : `Statement ${activity.statementIndex + 1}`,
-        `${activity.completedStatementIndexes?.length || 0} statements completed`,
-        `${activity.fetchedRows ?? 0} rows fetched`,
+        Array.isArray(activity.completedStatementIndexes)
+          ? `${activity.completedStatementIndexes.length} statements completed`
+          : Number.isInteger(currentExecution?.completedStatements)
+            ? `${currentExecution.completedStatements} statements completed` : null,
+        activity.fetchedRows == null ? null : `${activity.fetchedRows} rows fetched`,
         activity.transactionStatus ? `Transaction: ${activity.transactionStatus}` : null,
         activity.databaseState,
         activity.waitEvent ? `Waiting: ${activity.waitEventType || "database"} / ${activity.waitEvent}` : null,
@@ -301,6 +319,7 @@ export function createSqlConsole({
   let pendingInitialDraft = typeof initialDraft === "string" && initialDraft.trim()
     ? initialDraft
     : null;
+  let hasPendingUnscopedDraft = false;
 
   function workspace() {
     const current = getWorkspace();
@@ -1391,8 +1410,12 @@ export function createSqlConsole({
         ? consoleIdForWorkspace(nextId)
         : newConsoleId();
       if (queryTabs) {
+        const usePendingUnscopedDraft = nextId && hasPendingUnscopedDraft;
+        const initialWorkspaceDraft = usePendingUnscopedDraft
+          ? draft.value
+          : pendingInitialDraft;
         const fallbackDraft = nextId
-          ? pendingInitialDraft ?? storedValue(consoleStorageKey(nextId, "draft")) ?? ""
+          ? initialWorkspaceDraft ?? storedValue(consoleStorageKey(nextId, "draft")) ?? ""
           : "";
         if (nextId) loadBrowserWorkspace(nextId, fallbackDraft);
         else {
@@ -1403,12 +1426,13 @@ export function createSqlConsole({
           renderQueryTabs();
           renderQueryDrawer();
         }
-        if (nextId && pendingInitialDraft !== null) {
+        if (nextId && initialWorkspaceDraft !== null) {
           const query = activeQuery();
-          if (query) query.sql = pendingInitialDraft;
-          draft.value = pendingInitialDraft;
+          if (query) query.sql = initialWorkspaceDraft;
+          draft.value = initialWorkspaceDraft;
           persistQueries();
-          pendingInitialDraft = null;
+          if (usePendingUnscopedDraft) hasPendingUnscopedDraft = false;
+          else pendingInitialDraft = null;
         }
       } else {
         queries = nextId
@@ -1561,6 +1585,9 @@ export function createSqlConsole({
     draft.addEventListener(eventName, updateControls);
   }
   draft.addEventListener("input", persistDraft);
+  draft.addEventListener("input", () => {
+    if (!workspaceId) hasPendingUnscopedDraft = true;
+  });
   draft.addEventListener("keydown", event => {
     if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
     event.preventDefault();

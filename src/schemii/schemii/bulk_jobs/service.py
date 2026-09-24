@@ -271,7 +271,7 @@ class BulkJobService:
                 self.console._validate_settings_revision(owner, value["settingsRevision"])
                 statements = self.validate_batch(value["batches"][index]["sql"], self.console.settings(owner).statement_limit)
                 with self.connections.use(owner, target.connection_id) as resolved:
-                    if resolved.revision != target.connection_revision or resolved.database != target.database:
+                    if resolved.revision != target.connection_revision or resolved.database != target.database or (getattr(resolved, "owner_id", None) or owner) != (target.connection_owner_id or owner):
                         raise ApiProblem(409, "bulk_target_changed", "The saved database target changed.")
                     transaction = self.postgres.open_console_transaction(resolved, target.namespace)
                     def started(value):

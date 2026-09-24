@@ -3,7 +3,8 @@ import { createIconButton } from "/assets/common/ui.js";
 import { renderFilterDefinition } from "./filter-controls.js";
 import { disposeSelects } from "./select.js";
 import { helpButton, helpHeading } from "./help.js";
-import { modelFilterIssue, describeFilterCondition } from "./model-filter-links.js";
+import { modelFilterIssue, modelFilterIssues, describeFilterCondition } from "./model-filter-links.js";
+import { clearEditorValidation, showEditorValidation } from "./editor-validation.js";
 export { modelFilterIssue } from "./model-filter-links.js";
 
 const uid = () => crypto.randomUUID();
@@ -41,9 +42,7 @@ export function openModelFilter(options, existing = null, returnTarget = null) {
   const overview = element("aside", { className: "mf-dialog-summary", attrs: { "aria-label": "Filter summary" } });
   const error = element("p", { className: "mf-dialog-error", attrs: { role: "alert" } });
   const apply = button("Apply to model", () => {
-    const message = modelFilterIssue(scope, local, catalog);
-    error.textContent = message;
-    if (message) return;
+    if (showEditorValidation(editor, error, modelFilterIssues(scope, local, catalog), content)) return;
     if (existing) draft.scopes[draft.scopes.indexOf(existing)] = scope;
     else (draft.scopes ||= []).push(scope);
     if (local.selections?.[scope.id]) {
@@ -57,7 +56,7 @@ export function openModelFilter(options, existing = null, returnTarget = null) {
     dialog.close();
   }, true);
   const update = () => {
-    error.textContent = "";
+    clearEditorValidation(editor, error);
     overview.replaceChildren(helpHeading("What this enforces", "scopes"), summary(scope, local));
     options.onSelect?.(scope);
   };

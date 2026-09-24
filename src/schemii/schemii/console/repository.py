@@ -1133,16 +1133,16 @@ class PostgresConsoleRepository:
                     """
                     INSERT INTO schemii.console_transactions (
                         id, owner_id, workspace_id, console_id, workspace_revision,
-                        connection_id, connection_revision, database_name, namespace,
+                        connection_owner_id, connection_id, connection_revision, database_name, namespace,
                         backend_pid, status, created_at, updated_at, expires_at,
                         maximum_expires_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                               %s, 'open', %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
                         identifier, owner_id, workspace_id, console_id,
-                        workspace_revision, target.connection_id,
+                        workspace_revision, target.connection_owner_id or owner_id, target.connection_id,
                         target.connection_revision, target.database, target.namespace,
                         backend_pid, created_at, created_at, expires_at,
                         maximum_expires_at,
@@ -1705,6 +1705,7 @@ class PostgresConsoleRepository:
                 connection_revision=int(row["connection_revision"]),
                 database=row["database_name"],
                 namespace=row["namespace"],
+                connection_owner_id=(row.get("connection_owner_id") if row.get("connection_owner_id") != row["owner_id"] else None),
             ),
             backend_pid=int(row["backend_pid"]),
             maximum_expires_at=row["maximum_expires_at"],

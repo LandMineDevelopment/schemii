@@ -1,38 +1,6 @@
 @import url("/assets/common/ai-permissions.css");
 @import url("/assets/common/ai-chat.css");
 
-.ai-assistant__context {
-  grid-area: context;
-  display: grid;
-  padding: 10px 13px;
-  grid-template-columns: minmax(0, 1.3fr) minmax(90px, .65fr) minmax(90px, .7fr);
-  gap: 8px;
-  border-bottom: 1px solid #272e3a;
-  background: #11161d;
-}
-
-.ai-assistant__context label { display: grid; min-width: 0; gap: 4px; color: #737f8f; font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
-.ai-assistant__context select,
-.ai-permissions-summary {
-  width: 100%;
-  min-width: 0;
-  height: 36px;
-  padding: 0 9px;
-  color: #ccd4df;
-  background: #090e14;
-  border: 1px solid #343e4c;
-  border-radius: 6px;
-  outline: 0;
-  font: 10px/1.2 Inter, ui-sans-serif, system-ui, sans-serif;
-}
-
-.ai-assistant__context select:focus,
-.ai-permissions-summary:focus-visible { border-color: #806bd0; box-shadow: 0 0 0 2px rgba(128, 107, 208, .13); }
-.ai-permissions-summary { display: grid; height: 36px; align-self: end; align-content: center; gap: 2px; cursor: pointer; text-align: left; }
-.ai-permissions-summary span { color: #737f8f; font-size: 7px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
-.ai-permissions-summary strong { overflow: hidden; color: #cfc7e9; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.ai-assistant__context p { margin: 0; grid-column: 1 / -1; color: #657181; font-size: 9px; line-height: 1.45; }
-
 .ai-assistant__notice {
   grid-area: notice;
   padding: 8px 14px;
@@ -185,7 +153,6 @@
 
 
 @media (max-width: 640px) {
-  .ai-assistant__context { grid-template-columns: minmax(0, 1fr) 90px 90px; }
   .ai-assistant__body { padding: 13px; }
   .ai-settings-body { padding: 14px; }
   .ai-history-item { grid-template-columns: minmax(0, 1fr) auto auto; }

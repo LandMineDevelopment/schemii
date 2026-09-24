@@ -17,6 +17,7 @@ from .models import (
     PostgresConnectionProfile,
     PostgresConnectionUpdate,
     ResolvedPostgresConnection,
+    ownership_for_owner,
 )
 
 MAX_CONNECTIONS_PER_OWNER = 100
@@ -151,6 +152,8 @@ class InMemoryConnectionRepository:
             connection_id = f"pg_{secrets.token_hex(16)}"
             profile = PostgresConnectionProfile(
                 id=connection_id,
+                owner_id=owner_id,
+                ownership=ownership_for_owner(owner_id),
                 revision=1,
                 **request.model_dump(exclude={"password"}),
                 credential_stored=request.password is not None,
@@ -187,6 +190,8 @@ class InMemoryConnectionRepository:
             )
             updated = PostgresConnectionProfile(
                 id=record.profile.id,
+                owner_id=record.profile.owner_id,
+                ownership=record.profile.ownership,
                 revision=record.profile.revision + 1,
                 **metadata.model_dump(),
                 credential_stored=password is not None,
@@ -209,6 +214,8 @@ class InMemoryConnectionRepository:
             record = self._record(owner_id, connection_id)
             return ResolvedPostgresConnection(
                 id=record.profile.id,
+                owner_id=record.profile.owner_id,
+                ownership=record.profile.ownership,
                 revision=record.profile.revision,
                 **self._metadata(record.profile),
                 password=record.password,

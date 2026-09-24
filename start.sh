@@ -21,11 +21,12 @@ SCHEMII_RESET_MIGRATION_DEMO="${SCHEMII_RESET_MIGRATION_DEMO-0}"
 SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
 SCHEMII_LAUNCH_ACTION=start
+SCHEMII_RECOVERY_DIRECTORY=
 SCHEMII_LOG_SERVICE=
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -40,6 +41,16 @@ list_demo_scenarios() {
 
 if (( $# > 0 )); then
   case "$1" in
+    --backup)
+      (( $# <= 2 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION=backup
+      SCHEMII_RECOVERY_DIRECTORY="${2-}"
+      ;;
+    --verify-backup|--restore-backup-new)
+      (( $# == 2 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION="${1#--}"
+      SCHEMII_RECOVERY_DIRECTORY="$2"
+      ;;
     --ai-prototype)
       (( $# == 1 )) || { usage >&2; exit 2; }
       SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
@@ -208,6 +219,13 @@ compose_args=(
 # Optional machine-local target networks; never part of the portable base stack.
 if [[ -f "${ROOT_DIR}/.schemii/compose.local.yaml" ]]; then
   compose_args+=(--file "${ROOT_DIR}/.schemii/compose.local.yaml")
+fi
+
+if [[ "$SCHEMII_LAUNCH_ACTION" == "backup" || "$SCHEMII_LAUNCH_ACTION" == "verify-backup" || "$SCHEMII_LAUNCH_ACTION" == "restore-backup-new" ]]; then
+  # Recovery deliberately runs before secret generation or normal stack mutation.
+  source "$ROOT_DIR/dev/recovery/recovery.sh"
+  recovery_main
+  exit 0
 fi
 
 if [[ "$SCHEMII_LAUNCH_ACTION" == "remove-legacy-ai-data" ]]; then

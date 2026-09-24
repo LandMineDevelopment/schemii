@@ -25,6 +25,12 @@ def test_credentials_are_owner_scoped_encrypted_and_listing_has_no_secrets():
     assert store.get("alice", "primary")["credential"]["apiKey"] == "secret-key"
 
 
+def test_owner_credential_store_rejects_instance_zen_keys():
+    store = MemoryAiCredentialStore()
+    with pytest.raises(ValueError, match="Unsupported"):
+        store.begin_login("alice", "opencode", "opencode")
+
+
 def test_logout_and_new_login_fence_late_completions():
     store = MemoryAiCredentialStore()
     first = store.begin_login("alice", "primary", "openai-codex")

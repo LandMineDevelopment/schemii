@@ -256,6 +256,31 @@ class AiService:
                 "The selected AI model is unavailable. Connect its provider or choose another model; your conversation is retained.",
             )
 
+    def _zen_scope(self, owner: str, workspace_id: str) -> tuple[str, str | None, str | None]:
+        workspace = self.services.workspaces.get(owner, workspace_id)
+        if workspace.connection_id is None:
+            return ("schemii", None, None)
+        profile = self.services.connections.for_product("schemii").get(owner, workspace.connection_id)
+        identity = (profile.owner_id or owner, profile.id)
+        if (workspace.connection_owner_id or owner, workspace.connection_id) != identity:
+            raise PiError("permission_changed", status=409)
+        return ("schemii", *identity)
+
+    def _require_instance_access(self, owner: str, provider_id: str, model_id: str,
+                                 reasoning_effort: str, workspace_id: str) -> None:
+        if provider_id in {"opencode", "instance-codex"}:
+            if self.runtime is None:
+                raise AiServiceError(503, "ai_runtime_unavailable", "The AI runtime is unavailable")
+            try:
+                scope = lambda: self._zen_scope(owner, workspace_id)
+                if provider_id == "opencode":
+                    self.runtime.require_instance_access(owner, scope)
+                else:
+                    self.runtime.require_instance_policy(owner, provider_id, model_id,
+                                                         reasoning_effort, scope)
+            except PiError as error:
+                raise AiServiceError(error.status, error.code, str(error)) from error
+
     def _require_reasoning(self, owner, provider_id, model_id, effort):
         if effort == "default":
             return
@@ -277,7 +302,9 @@ class AiService:
     def create_chat(self, owner: str, workspace_id: str, body: Any) -> Any:
         self.services.workspaces.get(owner, workspace_id)
         self._require_available_model(owner, body.provider_id, body.model_id)
-        self._require_reasoning(owner, body.provider_id, body.model_id, getattr(body, "reasoning_effort", "default"))
+        effort = getattr(body, "reasoning_effort", "default")
+        self._require_instance_access(owner, body.provider_id, body.model_id, effort, workspace_id)
+        self._require_reasoning(owner, body.provider_id, body.model_id, effort)
         return self.repository.create_chat(
             owner,
             workspace_id,
@@ -295,6 +322,7 @@ class AiService:
         if (current_chat.provider_id, current_chat.model_id) != (body.provider_id, body.model_id):
             self._require_available_model(owner, body.provider_id, body.model_id)
         effort = getattr(body, "reasoning_effort", None) or current_chat.reasoning_effort
+        self._require_instance_access(owner, body.provider_id, body.model_id, effort, current_chat.workspace_id)
         if (current_chat.provider_id, current_chat.model_id, current_chat.reasoning_effort) != (body.provider_id, body.model_id, effort):
             self._require_reasoning(owner, body.provider_id, body.model_id, effort)
         settings, saved_chat, started_new = self.repository.save_preferences(
@@ -346,6 +374,8 @@ class AiService:
                 "This conversation is not allowed to send query rows to the model",
             )
         self._require_available_model(owner, chat.provider_id, chat.model_id)
+        self._require_instance_access(owner, chat.provider_id, chat.model_id,
+                                      chat.reasoning_effort, chat.workspace_id)
         self._require_reasoning(owner, chat.provider_id, chat.model_id, chat.reasoning_effort)
         if chat.provider_id == "opencode" and not getattr(body, "acknowledge_provider_data_policy", False):
             raise AiServiceError(422, "ai_provider_consent_required",
@@ -466,6 +496,8 @@ class AiService:
             record_stage("context", "completed", "Workspace context ready")
             record_stage("model", "running", f"Waiting for {chat.model_id}")
             self._require_available_model(owner, chat.provider_id, chat.model_id)
+            self._require_instance_access(owner, chat.provider_id, chat.model_id,
+                                          chat.reasoning_effort, chat.workspace_id)
             session_id = turn_id
             self.repository.set_chat_runtime(
                 owner, chat_id, external_session_id=session_id

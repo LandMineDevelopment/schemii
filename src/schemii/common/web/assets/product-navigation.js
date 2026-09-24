@@ -1,5 +1,6 @@
+import { loginUrl } from './login-return.js';
 import { createIconElement } from "./ui.js";
-import { currentAccount, canAuthor, signOut } from "./accounts-session.js";
+import { currentAccount, canAccessProduct, landingPath, signOut } from "./accounts-session.js";
 
 const PRODUCTS = Object.freeze([
   { id: "schemii", name: "Schemii", description: "Schema design", href: "/" },
@@ -8,11 +9,12 @@ const PRODUCTS = Object.freeze([
 ]);
 
 /** Install the common product switcher without advertising unavailable routes. */
-export function installProductNavigation(host, { activeProduct } = {}) {
+export function installProductNavigation(host, { activeProduct = null, account: providedAccount = null } = {}) {
   if (!(host instanceof HTMLElement)) throw new TypeError("A product navigation host is required");
-  if (!PRODUCTS.some(product => product.id === activeProduct)) {
+  if (activeProduct !== null && !PRODUCTS.some(product => product.id === activeProduct)) {
     throw new TypeError(`Unknown active product: ${activeProduct}`);
   }
+  if (activeProduct === null && !providedAccount) throw new TypeError("An account is required outside a product");
 
   const menu = document.createElement("details");
   menu.className = "ui-menu ui-product-navigation";
@@ -43,16 +45,18 @@ export function installProductNavigation(host, { activeProduct } = {}) {
 
   menu.append(trigger, surface);
   host.replaceChildren(menu);
-  void currentAccount().then(account => {
-    if (!canAuthor(account)) {
-      for (const item of surface.querySelectorAll('a')) if (item.getAttribute('href') !== '/schemer') item.remove();
-      if (activeProduct !== 'schemer') location.replace('/schemer');
+  void (providedAccount ? Promise.resolve(providedAccount) : currentAccount()).then(account => {
+    for (const product of PRODUCTS) {
+      if (!canAccessProduct(account, product.id)) surface.querySelector(`a[href="${product.href}"]`)?.remove();
     }
-    for (const [label, href] of [[account.user.display_name || account.user.username, '/account'], ...(account.is_admin ? [['Administration', '/admin']] : [])]) {
-      const item = document.createElement('a'); item.href = href; item.className = 'ui-product-navigation__item'; item.textContent = label; surface.append(item);
+    if (activeProduct && !canAccessProduct(account, activeProduct)) { location.replace(landingPath(account)); return; }
+    for (const [label, href] of [[activeProduct ? account.user.display_name || account.user.username : 'Account', '/account'], ...(account.is_admin ? [['Administration', '/admin']] : [])]) {
+      const item = document.createElement('a'); item.href = href; item.className = 'ui-product-navigation__item'; item.textContent = label;
+      if (location.pathname === href) item.setAttribute('aria-current', 'page');
+      surface.append(item);
     }
     const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = 'Sign out';
     logout.onclick = async () => { logout.disabled = true; try { await signOut(); } catch (error) { logout.textContent = error.message; logout.disabled = false; } }; surface.append(logout);
-  }).catch(error => { if (error.status === 401) location.replace('/login'); });
+  }).catch(error => { if (error.status === 401) location.replace(loginUrl()); });
   return menu;
 }

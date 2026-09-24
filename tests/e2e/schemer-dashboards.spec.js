@@ -102,6 +102,45 @@ test('a changed Schemoo model blocks query refresh until the dashboard is revali
   expect(errors).toEqual([]);
 });
 
+test('searchable tile fields and footer stay connected and reachable at phone and desktop widths', async ({ page }) => {
+  await mock(page);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  const controls = editor.locator('.ui-searchable-select');
+  await expect(controls.first()).toBeVisible();
+
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: width === 1440 ? 900 : 844 });
+    const geometry = await controls.evaluateAll(elements => elements.filter(element => element.offsetParent !== null).map(element => {
+      const wrapper = element.getBoundingClientRect();
+      const input = element.querySelector('input').getBoundingClientRect();
+      const toggle = element.querySelector('.ui-searchable-select__toggle').getBoundingClientRect();
+      return {
+        wrapper: { left: wrapper.left, right: wrapper.right },
+        input: { left: input.left, right: input.right },
+        toggle: { left: toggle.left, right: toggle.right },
+      };
+    }));
+    expect(geometry.length).toBeGreaterThanOrEqual(2);
+    for (const { wrapper, input, toggle } of geometry) {
+      expect(Math.abs(wrapper.left - input.left)).toBeLessThan(2);
+      expect(Math.abs(wrapper.right - input.right)).toBeLessThan(2);
+      expect(toggle.left).toBeGreaterThanOrEqual(input.left);
+      expect(toggle.right).toBeLessThanOrEqual(input.right + 2);
+    }
+    const actions = editor.locator('.ui-dialog__actions');
+    for (const label of ['Cancel', 'Apply & run']) {
+      const button = actions.getByRole('button', { name: label });
+      await expect(button).toBeVisible();
+      await expect.poll(async () => {
+        const box = await button.boundingBox();
+        return box.y + box.height;
+      }).toBeLessThanOrEqual((width === 1440 ? 900 : 844) + 2);
+    }
+  }
+});
+
 test('refresh checks for a Schemoo model update before it reruns dashboard queries', async ({ page }) => {
   const { fixture, requests, errors } = await mock(page);
   await page.goto('/schemer');

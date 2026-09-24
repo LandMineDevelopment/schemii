@@ -51,6 +51,8 @@
 .mf-dialog-footer { border-top: 1px solid var(--line); }
 .mf-dialog-error { color: var(--danger); margin: 0 0 4px; font-size: 12px; }
 .mf-dialog-error:empty { display: none; }
+.mf-inline-error { color: #ffb5bd; font-size: 12px; line-height: 1.4; margin: 3px 0 0; }
+.mf-dialog [aria-invalid="true"] { outline: 2px solid #e8818d; outline-offset: 1px; }
 .mf-rule-choices { grid-column: 1 / -1; padding: 28px; display: grid; gap: 16px; max-width: 760px; margin: 0 auto; }
 .mf-rule-choices > button { text-align: left; white-space: normal; display: block; padding: 20px; height: auto; font-size: 16px; border-radius: 8px; }
 .mf-rule-choices > button .mf-help { margin: 8px 0 0; }

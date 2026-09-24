@@ -1,5 +1,8 @@
 :root { --dashboard-header:64px; }
 .filter-summary { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; margin:-8px 0 20px; min-width:0; }
+.app-header-actions { display:flex; align-items:center; gap:10px; min-width:0; }
+.dashboard-heading > div:first-child { min-width:0; }
+.dashboard-heading :is(#dashboard-source,#dashboard-name,#dashboard-status) { overflow-wrap:anywhere; }
 .filter-summary-chip { max-width:min(100%,280px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:3px 8px; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--muted); font-size:11px; }
 .filter-summary-pending { color:var(--accent-bright); font-size:11px; }
 #toggle-dashboard-filters[aria-expanded=true] { border-color:var(--accent); color:var(--accent-bright); }
@@ -100,4 +103,12 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
   .bar-group-control { width:100%; justify-content:space-between; }
   .bar-group-control select { max-width:70%; }
   .grouped-bars .bar-value-row { grid-template-columns:minmax(58px,90px) minmax(0,1fr) minmax(32px,auto); gap:7px; }
+}
+
+/* The editor footer remains reachable when labels or browser text are enlarged. */
+.tile-editor .ui-dialog__actions { flex-wrap: wrap; }
+.tile-editor .ui-dialog__actions > .ui-button { min-height: 40px; font-size: var(--ui-type-control); white-space: normal; }
+@media (max-width: 600px) {
+  .tile-editor-body { min-height: 0; }
+  .tile-editor .ui-dialog__actions > .ui-button { flex: 1 1 auto; }
 }

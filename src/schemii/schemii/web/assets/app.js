@@ -113,7 +113,6 @@ const elements = {
   saveLayoutButton: byId("save-layout-button"),
   downloadCatalogButton: byId("download-catalog-button"),
   exportDesignSqlButton: byId("export-design-sql-button"),
-  introductionButton: byId("introduction-button"),
   mainLayout: byId("main-layout"),
   toolRail: byId("tool-rail"),
   canvas: byId("canvas"),
@@ -402,7 +401,6 @@ const elements = {
   redoDesignButton: byId("redo-design-button"),
   resetDesignButton: byId("reset-design-button"),
   postgresButton: byId("postgres-button"),
-  introductionDialog: byId("introduction-dialog"),
   unavailableDialog: byId("unavailable-dialog"),
   unavailableTitle: byId("unavailable-title"),
   unavailableDescription: byId("unavailable-description"),
@@ -580,6 +578,7 @@ const state = {
   canvasResizeFrame: null,
   preferenceTimer: null,
   navigationGeneration: 0,
+  layerNavigationGeneration: 0,
   restoringNavigation: false,
 };
 syncWorkspaceToolbar(elements.toolRail, state.activeLayer);
@@ -1065,7 +1064,7 @@ function currentWorkspaceNavigation() {
 }
 
 function syncWorkspaceNavigation(historyMode = "replace") {
-  if (!historyMode || state.restoringNavigation) return;
+  if (!historyMode || !state.startupComplete || state.restoringNavigation) return;
   const next = workspaceNavigationHref(window.location.href, currentWorkspaceNavigation());
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next === current) return;
@@ -1127,7 +1126,7 @@ function applyWorkspaceNavigation(navigation) {
   }
 }
 
-async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } = {}) {
+async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, layerGeneration = state.layerNavigationGeneration } = {}) {
   const generation = ++state.navigationGeneration;
   const wasRestoring = state.restoringNavigation;
   state.restoringNavigation = true;
@@ -1136,7 +1135,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } =
     if (!navigation.workspaceId) {
       if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
       clearActiveWorkspace({ historyMode: null });
-      setLayer("tables", { historyMode: null });
+      if (layerGeneration === state.layerNavigationGeneration) setLayer("tables", { historyMode: null });
       restored = true;
       return true;
     }
@@ -1145,7 +1144,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } =
     if (!workspace) {
       if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
       clearActiveWorkspace({ historyMode: null });
-      setLayer("tables", { historyMode: null });
+      if (layerGeneration === state.layerNavigationGeneration) setLayer("tables", { historyMode: null });
       if (notifyMissing) showToast("The workspace saved in this browser URL no longer exists.", { error: true });
       restored = true;
       return true;
@@ -1154,7 +1153,9 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true } =
       if (!await openWorkspace(workspace, { historyMode: null })) return false;
     }
     if (generation !== state.navigationGeneration || !state.catalog) return false;
-    applyWorkspaceNavigation(navigation);
+    // A layer chosen during loading is newer than the URL being restored.
+    applyWorkspaceNavigation(layerGeneration === state.layerNavigationGeneration
+      ? navigation : { ...navigation, layer: state.activeLayer, tableId: null, table: null, viewId: null, view: null, viewKind: null });
     restored = true;
     return true;
   } finally {
@@ -1306,6 +1307,7 @@ async function loadRuntime() {
     if (!request.isCurrent()) return;
     state.session = session;
     state.readiness = readiness;
+    renderConnections();
   } catch (error) {
     if (!request.isCurrent()) return;
     state.runtimeError = error;
@@ -1320,6 +1322,8 @@ async function loadRuntime() {
 
 async function bootstrap() {
   const requestedNavigation = readWorkspaceNavigation(window.location.href);
+  const layerGeneration = state.layerNavigationGeneration;
+  setLayerState(requestedNavigation.layer);
   state.startupComplete = false;
   state.connectionsLoading = true;
   state.workspacesLoading = true;
@@ -1328,7 +1332,7 @@ async function bootstrap() {
   renderWorkspaces();
   await Promise.all([loadRuntime(), loadConnections(), loadWorkspaces()]);
   state.startupComplete = true;
-  await restoreWorkspaceNavigation(requestedNavigation, { notifyMissing: true });
+  await restoreWorkspaceNavigation(requestedNavigation, { notifyMissing: true, layerGeneration });
   renderCatalogState();
   updateHeader();
 }
@@ -1404,12 +1408,13 @@ function renderConnections() {
     return;
   }
   for (const connection of state.connections) {
+    const managed = Boolean(connection.ownerId && state.session?.userId && connection.ownerId !== state.session.userId);
     const card = element("article", { className: "manager-card" });
     const copy = element("div");
     copy.append(
       element("strong", { text: connection.name }),
       element("p", { text: `${connection.username}@${connection.host}:${connection.port}/${connection.database}` }),
-      element("small", { text: `${connection.sslMode} · credential ${connection.credentialStored ? "stored" : "not stored"} · revision ${connection.revision}` }),
+      element("small", { text: `${connection.sslMode} · ${managed ? "shared by your organization" : `credential ${connection.credentialStored ? "stored" : "not stored"}`} · revision ${connection.revision}` }),
     );
     const testState = state.connectionTests.get(connection.id);
     if (testState?.loading) copy.append(element("p", { className: "connection-test", text: "Testing this PostgreSQL connection…" }));
@@ -1437,7 +1442,8 @@ function renderConnections() {
       className: "compact danger",
     });
     remove.addEventListener("click", () => confirmDeleteConnection(connection));
-    actions.append(test, edit, remove);
+    actions.append(test);
+    if (!managed) actions.append(edit, remove);
     card.append(copy, actions);
     elements.connectionsList.append(card);
   }
@@ -2462,7 +2468,8 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
       canvasPositions: designPositions(design, layout),
     });
     const navigation = readWorkspaceNavigation(window.location.href);
-    if (navigation.workspaceId === workspaceId) {
+    // An enclosing navigation restore owns the final selection after loading.
+    if (!state.restoringNavigation && navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
       syncWorkspaceNavigation("replace");
     }
@@ -2540,7 +2547,8 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
     }
     renderWorkspaces();
     const navigation = readWorkspaceNavigation(window.location.href);
-    if (navigation.workspaceId === workspaceId) {
+    // An enclosing navigation restore owns the final selection after loading.
+    if (!state.restoringNavigation && navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
       syncWorkspaceNavigation("replace");
     }
@@ -5234,6 +5242,7 @@ function setLayerState(layer) {
 }
 
 function setLayer(layer, { historyMode = "push" } = {}) {
+  if (historyMode === "push") state.layerNavigationGeneration++;
   setLayerState(layer);
   if (layer === "views") renderViews();
   if (layer === "tables") window.requestAnimationFrame(() => canvas.refreshGeometry());
@@ -5367,10 +5376,6 @@ function bindEvents() {
   elements.undoDesignButton.addEventListener("click", () => executeDesignHistoryMove("undo"));
   elements.redoDesignButton.addEventListener("click", () => executeDesignHistoryMove("redo"));
   elements.resetDesignButton.addEventListener("click", requestDesignBaselineReset);
-  elements.introductionButton.addEventListener("click", () => {
-    closeDetailsMenus();
-    openDialog(elements.introductionDialog);
-  });
   elements.fitButton.addEventListener("click", () => {
     if (!canvas.fit()) showToast("No live tables are available to fit.");
     else scheduleCanvasViewPersistence();
