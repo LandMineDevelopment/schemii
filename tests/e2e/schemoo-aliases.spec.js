@@ -85,6 +85,37 @@ test("creating and deleting aliases preserves the user's zoom and pan", async ({
   await expect(stage).not.toHaveAttribute("style", view);
 });
 
+test("redrawing model cards during a background drag preserves the pan", async ({ page }) => {
+  await page.goto(`/schemoo?model=${modelId}`);
+  await expect(page.locator(".sc-node")).toHaveCount(12);
+  await expect(page.locator("#plan-status")).not.toHaveText("Checking model and required parameters…");
+
+  const host = page.locator("#canvas-host");
+  const stage = page.locator(".sc-stage");
+  const background = await host.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    for (let y = box.top + 60; y < box.bottom - 80; y += 30) {
+      for (let x = box.left + 12; x < box.right - 80; x += 30) {
+        const target = document.elementFromPoint(x, y);
+        if (target && element.contains(target) && !target.closest(".sc-node, .sc-edge, .sc-connection-tools, button")) return { x, y };
+      }
+    }
+    throw new Error("No visible canvas background available for panning");
+  });
+  const before = await stage.getAttribute("style");
+  await page.mouse.move(background.x, background.y);
+  await page.mouse.down();
+  await expect(host).toHaveClass(/panning/);
+
+  // A field edit redraws every model card synchronously, like validation does.
+  await page.locator('[data-node-id="certification_dim"] input[aria-label="Expose certification_dim.id"]').evaluate(input => input.click());
+  await expect(host).toHaveClass(/panning/);
+  await page.mouse.move(background.x + 36, background.y + 40, { steps: 5 });
+  await page.mouse.up();
+  await expect(host).not.toHaveClass(/panning/);
+  await expect(stage).not.toHaveAttribute("style", before);
+});
+
 test("table inspector owns columns and aliases while Model and Filters have separate panels", async ({ page }) => {
   await page.goto(`/schemoo?model=${modelId}`);
   await expect(page.locator(".sc-node")).toHaveCount(12);

@@ -140,7 +140,9 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
         if(issue.table)for(const node of getDraft().nodes)if(node.table===issue.table)sourceIssueNodes.add(node.id);
       }
     }
-    viewport.cancelInteractions();
+    // Redrawing cards detaches node drag handles, but the host stays mounted.
+    // Keep host pan and pinch gestures active while validation refreshes.
+    if (viewport.drag) viewport.cancelInteractions();
     ensureLayout();
     const scrollPositions = new Map([...fieldLists].map(([id, list]) => [id, list.scrollTop]));
     const focusedRow = document.activeElement?.closest?.(".sc-column");
