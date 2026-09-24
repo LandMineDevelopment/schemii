@@ -1,23 +1,14 @@
 import { expect, test } from '@playwright/test';
 
 async function expectInsideVisualViewport(locator) {
-  const position = await locator.evaluate(element => {
+  await expect.poll(() => locator.evaluate(element => {
     const rect = element.getBoundingClientRect();
     const viewport = window.visualViewport;
-    return {
-      top: rect.top,
-      bottom: rect.bottom,
-      left: rect.left,
-      right: rect.right,
-      viewportTop: viewport?.offsetTop ?? 0,
-      viewportBottom: (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight),
-      viewportWidth: viewport?.width ?? window.innerWidth,
-    };
-  });
-  expect(position.top).toBeGreaterThanOrEqual(position.viewportTop - 2);
-  expect(position.bottom).toBeLessThanOrEqual(position.viewportBottom + 2);
-  expect(position.left).toBeGreaterThanOrEqual(-2);
-  expect(position.right).toBeLessThanOrEqual(position.viewportWidth + 2);
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const viewportBottom = viewportTop + (viewport?.height ?? window.innerHeight);
+    const viewportWidth = viewport?.width ?? window.innerWidth;
+    return Math.max(viewportTop - rect.top, rect.bottom - viewportBottom, -rect.left, rect.right - viewportWidth);
+  })).toBeLessThanOrEqual(2);
 }
 
 for (const route of ['/system-map', '/api-map', '/db-map']) {
