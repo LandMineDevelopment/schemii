@@ -12,13 +12,36 @@ function positionCursor(scene, cursor, target, label) {
   const control = target.getBoundingClientRect();
   const x = control.left - bounds.left + control.width / 2;
   const y = control.top - bounds.top + control.height / 2;
-  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above");
+  cursor.classList.remove("clicking", "tooltip-left", "tooltip-above", "tooltip-high");
   cursor.classList.toggle("tooltip-left", x > bounds.width * .69);
   cursor.classList.toggle("tooltip-above", y > bounds.height * .72);
+  cursor.classList.toggle("tooltip-high", target.dataset.quickStartTooltip === "high");
   cursor.querySelector("span").textContent = label;
   cursor.style.left = `${x}px`;
   cursor.style.top = `${y}px`;
   cursor.classList.add("visible");
+}
+
+function targetIsVisible(scene, target) {
+  const bounds = scene.getBoundingClientRect();
+  const control = target.getBoundingClientRect();
+  const x = control.left + control.width / 2;
+  const y = control.top + control.height / 2;
+  if (!control.width || !control.height || x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return false;
+  for (let element = target; element && element !== scene; element = element.parentElement) {
+    const style = getComputedStyle(element);
+    if (style.display === "none" || style.visibility !== "visible" || Number(style.opacity) < .05) return false;
+  }
+  // The illustration is inert so its controls cannot be focused. Temporarily
+  // lift inert only for hit testing; restore it before the browser can paint.
+  const inert = scene.inert;
+  scene.inert = false;
+  try {
+    const top = document.elementFromPoint(x, y);
+    return !!top && (target.contains(top) || (top !== scene && top !== scene.firstElementChild && top.contains(target)));
+  } finally {
+    scene.inert = inert;
+  }
 }
 
 function createPlayback(page, step) {
@@ -35,27 +58,26 @@ function createPlayback(page, step) {
   let active = false;
   let currentTarget = null;
   let currentLabel = "";
-  new ResizeObserver(() => {
+  const hideCursor = () => { cursor.classList.remove("visible", "clicking"); currentTarget = null; };
+  const syncCursor = () => {
     if (!active || !currentTarget || !cursor.classList.contains("visible")) return;
-    if (!currentTarget.getClientRects().length || getComputedStyle(currentTarget).visibility === "hidden") {
-      cursor.classList.remove("visible", "clicking");
-      currentTarget = null;
-      return;
-    }
+    if (!targetIsVisible(scene, currentTarget)) return hideCursor();
     const clicking = cursor.classList.contains("clicking");
     positionCursor(scene, cursor, currentTarget, currentLabel);
     if (clicking) cursor.classList.add("clicking");
-  }).observe(scene);
+  };
+  new ResizeObserver(syncCursor).observe(scene);
+  new MutationObserver(syncCursor).observe(mock, { attributes: true, childList: true, subtree: true });
+  scene.addEventListener("transitionend", syncCursor);
   const clear = () => { clearTimeout(timer); timer = undefined; };
   const queue = (callback, delay) => { clear(); timer = setTimeout(callback, delay); };
-  const hideCursor = () => { cursor.classList.remove("visible", "clicking"); currentTarget = null; };
   const reset = (staticState = false) => {
     clear();
     actionIndex = 0;
     phase = "idle";
     mock.classList.remove(...step.states.map(state => `demo-${state}`));
     if (staticState) mock.classList.add(...step.states.map(state => `demo-${state}`));
-    cursor.classList.remove("visible", "clicking", "tooltip-left", "tooltip-above");
+    cursor.classList.remove("visible", "clicking", "tooltip-left", "tooltip-above", "tooltip-high");
     currentTarget = null;
     status.textContent = staticState ? step.staticText : step.idleText;
   };
@@ -74,6 +96,7 @@ function createPlayback(page, step) {
     currentTarget = target;
     currentLabel = action.label;
     positionCursor(scene, cursor, target, action.label);
+    syncCursor();
     status.textContent = `Next: ${action.caption}`;
     phase = "moving";
     queue(() => {
@@ -82,6 +105,7 @@ function createPlayback(page, step) {
       queue(() => {
         mock.classList.add(`demo-${action.state}`);
         cursor.classList.remove("clicking");
+        syncCursor();
         status.textContent = action.caption;
         actionIndex += 1;
         phase = "waiting";
@@ -135,7 +159,7 @@ export function installQuickStart(product, trigger) {
     const page = document.createElement("section");
     page.className = "quick-start-page";
     page.hidden = index !== 0;
-    page.innerHTML = `<div class="quick-start-scene quick-start-scene--${product}" aria-hidden="true" inert>${step.scene}<div class="quick-start-cursor">${POINTER}<span></span></div></div><div class="quick-start-playback"><span class="quick-start-status" role="status" aria-live="polite"></span><div class="quick-start-playback-actions"><button type="button" class="ui-button quick-start-replay">Replay</button><button type="button" class="ui-button quick-start-toggle" aria-pressed="true">Pause demo</button></div></div><div class="quick-start-copy"><span>${String(index + 1).padStart(2, "0")}</span><div><h3>${step.title}</h3><p>${step.text}</p><p class="quick-start-tip">${step.tip}</p></div></div>`;
+    page.innerHTML = `<div class="quick-start-scene quick-start-scene--${product}" aria-hidden="true" inert>${step.scene}<div class="quick-start-cursor">${POINTER}<span></span></div></div><div class="quick-start-playback"><span class="quick-start-status" role="status" aria-live="polite"></span><div class="quick-start-playback-actions"><button type="button" class="ui-button quick-start-replay">Replay</button><button type="button" class="ui-button quick-start-toggle" aria-pressed="true">Pause demo</button></div></div><div class="quick-start-copy"><span>${String(index + 1).padStart(2, "0")}</span><div><h3>${step.title}</h3><p>${step.text}</p><p class="quick-start-tip">${step.tip}</p><div class="quick-start-action-summary"><strong>Actions shown</strong><ol>${step.actions.map(action => `<li>${action.caption}</li>`).join("")}</ol></div></div></div>`;
     pages.append(page);
     return createPlayback(page, step);
   });
