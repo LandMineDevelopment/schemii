@@ -1,12 +1,16 @@
 import { renderAdminWorkspace } from './admin-workspace.js';
 import { loginUrl } from './login-return.js';
-import { requestJson } from './http.js';
+import { ApiError, requestJson } from './http.js';
 import { element as el } from './dom.js';
+import { installDetailsMenu } from './ui.js';
+import { installProductNavigation } from './product-navigation.js';
 import { confirmAction } from './confirmation.js';
 import { reasoningLabel, reasoningLevels } from './ai-reasoning.js';
 import { canAccessProduct, signInDestination, signOut, sessionChanged } from './accounts-session.js';
 const main = document.getElementById('accounts-main');
 const nav = document.getElementById('account-navigation');
+const mobileNav = document.getElementById('account-mobile-navigation');
+let mobileNavMenuController = null;
 const AUTH = '/api/v1/auth', ADMIN = '/api/v1/admin';
 const button = (text, action, primary = false) => { const b = el('button', { type: 'button', className: `ui-button${primary ? ' primary' : ''}`, text }); b.onclick = action; return b; };
 const link = (text, href) => el('a', { className: 'ui-button', text, attrs: { href } });
@@ -15,13 +19,22 @@ function field(label, { value = '', type = 'text', autocomplete, required = true
   return { input, node: el('label', { className: 'account-field' }, [label, input]) };
 }
 function check(label, checked = false) { const input = el('input', { attrs: { type: 'checkbox' } }); input.checked = checked; return { input, node: el('label', { className: 'account-check' }, [input, label]) }; }
-function formWithSubmit(label, submit, fields) {
+function formWithSubmit(label, submit, fields, errorMessage = error => error.message) {
   const error = el('p', { className: 'account-error', attrs: { role: 'alert' } });
   const form = el('form', { className: 'account-form' }, fields);
   const save = el('button', { type: 'submit', className: 'ui-button primary', text: label });
   form.append(error, save);
-  form.onsubmit = async event => { event.preventDefault(); save.disabled = true; error.textContent = ''; try { await submit(); } catch (e) { error.textContent = e.message; } finally { save.disabled = false; } };
+  form.onsubmit = async event => { event.preventDefault(); save.disabled = true; error.textContent = ''; try { await submit(); } catch (e) { error.textContent = errorMessage(e); } finally { save.disabled = false; } };
   return form;
+}
+function signInErrorMessage(error) {
+  if (error instanceof ApiError) {
+    if (error.code === 'invalid_credentials' && error.status === 401) return 'Incorrect username or password. Check both fields and try again.';
+    if (error.code === 'sign_in_rate_limited' && error.status === 429) return 'Too many sign-in attempts. Try again in 15 minutes.';
+    if (error.code === 'network_error' || error.code === 'request_timeout') return 'Could not reach the sign-in service. Check your connection and try again.';
+    if (error.status >= 500) return 'The sign-in service is unavailable. Try again shortly.';
+  }
+  return error.message;
 }
 function heading(title, description) { return [el('small', { className: 'eyebrow', text: 'Schemii · Account access' }), el('h1', { text: title }), el('p', { text: description })]; }
 async function login(status) {
@@ -34,7 +47,7 @@ async function login(status) {
   panel.append(formWithSubmit(setup ? 'Create administrator account' : 'Sign in', async () => {
     const account = await requestJson(`${AUTH}/${setup ? 'setup' : 'login'}`, { method: 'POST', body: { username: username.input.value.trim(), password: password.input.value, ...(setup ? { display_name: display.input.value.trim(), setup_token: token.input.value } : {}) } });
     sessionChanged(); location.replace(signInDestination(account));
-  }, [...(setup ? [token.node, display.node] : []), username.node, password.node]));
+  }, [...(setup ? [token.node, display.node] : []), username.node, password.node], setup ? undefined : signInErrorMessage));
   main.replaceChildren(panel);
 }
 function accountPage(account) {
@@ -275,12 +288,15 @@ async function initialize() {
     if (!status.authenticated) { if (location.pathname !== '/login') { location.replace(loginUrl()); return; } await login(status); return; }
     const account = await requestJson(`${AUTH}/me`);
     if (location.pathname === '/login') { location.replace(signInDestination(account)); return; }
+    nav.replaceChildren();
     for (const [product, label, href] of [['schemii', 'Schemii', '/'], ['schemoo', 'Schemoo', '/schemoo'], ['schemer', 'Schemer', '/schemer']]) {
       if (canAccessProduct(account, product)) nav.append(link(label, href));
     }
     nav.append(link('Account', '/account'));
     if (account.is_admin) nav.append(link('Administration', '/admin'));
     nav.append(button('Sign out', async () => { try { await signOut(); } catch (e) { main.prepend(el('p', { className: 'account-error', text: e.message, attrs: { role: 'alert' } })); } }));
+    mobileNavMenuController?.destroy();
+    mobileNavMenuController = installDetailsMenu(installProductNavigation(mobileNav, { account }));
     if (location.pathname === '/admin') { if (!account.is_admin) throw new Error('Administrator access is required.'); await adminPage(); } else accountPage(account);
   } catch (e) { main.replaceChildren(...heading('Account unavailable', e.message), button('Try again', initialize)); }
 }

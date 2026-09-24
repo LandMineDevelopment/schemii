@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+from schemii.common.api.errors import install_api_error_handlers
 from schemii.common.auth.middleware import AuthenticationMiddleware
 from schemii.common.auth.routes import router
 from schemii.common.auth.service import AuthService, COOKIE
@@ -14,6 +15,7 @@ def app():
     application=FastAPI()
     application.state.auth=AuthService(enabled=True,setup_token='setup-secret')
     application.include_router(router)
+    install_api_error_handlers(application)
     application.add_middleware(AuthenticationMiddleware)
     @application.get('/api/v1/private')
     def private(): return {'secret':True}
@@ -84,11 +86,33 @@ def test_password_change_revokes_sessions_and_logout(client,app):
     assert client.get('/api/v1/auth/me').status_code==401
 
 
+def test_rejected_sign_in_is_actionable_and_does_not_reveal_account_existence(client):
+    bootstrap(client)
+    wrong=client.post('/api/v1/auth/login',json=dict(username='admin',password='incorrect-password'))
+    unknown=client.post('/api/v1/auth/login',json=dict(username='missing',password='incorrect-password'))
+    for response in (wrong,unknown):
+        assert response.status_code==401
+        problem=response.json()['error']
+        assert problem['requestId']==response.headers['x-request-id']
+        assert {key:value for key,value in problem.items() if key!='requestId'} == {
+            'code':'invalid_credentials',
+            'message':'Incorrect username or password. Check both fields and try again.',
+            'retryable':False,
+            'details':{},
+        }
+        assert 'incorrect-password' not in response.text
+    assert client.post('/api/v1/auth/login',json=dict(
+        username='admin',password='long-password-123')).status_code==200
+
+
 def test_login_attempts_are_bounded(client):
     bootstrap(client)
     for _ in range(10):
         assert client.post('/api/v1/auth/login',json=dict(username='admin',password='wrong')).status_code==401
-    assert client.post('/api/v1/auth/login',json=dict(username='admin',password='wrong')).status_code==429
+    limited=client.post('/api/v1/auth/login',json=dict(username='admin',password='wrong'))
+    assert limited.status_code==429
+    assert limited.json()['error']['code']=='sign_in_rate_limited'
+    assert limited.json()['error']['message']=='Too many sign-in attempts. Try again in 15 minutes.'
 
 
 def test_role_changes_take_effect_without_new_session(client,app):

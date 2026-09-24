@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from schemii.common.api.errors import ApiProblem
 from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
 from .store import AuthStore
 
@@ -210,7 +211,7 @@ class AuthService:
             state['attempts'] = {k:v for k,v in state['attempts'].items() if v['expires_at'] > now}
             attempt = state['attempts'].setdefault(username, {'attempts':0,'expires_at':now+900})
             if attempt['attempts'] >= 10:
-                raise HTTPException(429,'Too many sign-in attempts. Try again in 15 minutes.')
+                raise ApiProblem(429, 'sign_in_rate_limited', 'Too many sign-in attempts. Try again in 15 minutes.')
             attempt['attempts'] += 1
             state['audit'].append((None,'session.attempt',None))
         # Hash outside the write transaction so expensive password work does not hold DB locks.
@@ -221,7 +222,7 @@ class AuthService:
         with self.store.transaction(write=True) as state:
             user = state['users'].get(candidate['id']) if candidate else None
             if not matches or not user or user['disabled'] or user['password_hash'] != stored:
-                raise HTTPException(401,'Invalid username or password')
+                raise ApiProblem(401, 'invalid_credentials', 'Incorrect username or password. Check both fields and try again.')
             state['attempts'].pop(username, None)
             token = secrets.token_urlsafe(32)
             now = time.time()
