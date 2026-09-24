@@ -40,6 +40,7 @@ test("Schemii relationship stays attached and the migration changes can be inspe
   for (let index = 0; index < 2; index++) await dialog.getByRole("button", { name: "Next" }).click();
   const migration = dialog.locator(".quick-start-page:visible .quick-start-scene");
   if (page.viewportSize().width <= 600) {
+    await dialog.locator(".quick-start-page:visible .quick-start-toggle").click();
     await page.waitForFunction(() => {
       const guide = document.querySelector(".quick-start-page:not([hidden])");
       const mock = guide?.querySelector(".qs-s-migration-demo");

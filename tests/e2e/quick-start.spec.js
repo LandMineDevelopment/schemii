@@ -217,4 +217,9 @@ test("guides use one bookstore orders model and show the extra Schemer filter se
     .toContainText("Add a separate optional Order status report parameter");
   await expect(schemer.locator(".quick-start-page:visible .qs-r-filter-value"))
     .toContainText("shipped");
+  await schemer.getByRole("button", { name: "Next" }).click();
+  await expect(schemer.locator(".quick-start-page:visible .qs-r-detail-rows thead th"))
+    .toHaveText(["orders.id"]);
+  await expect(schemer.locator(".quick-start-page:visible .qs-r-detail-rows .qs-r-chip"))
+    .toHaveText("status: shipped");
 });

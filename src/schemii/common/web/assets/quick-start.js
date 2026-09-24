@@ -77,7 +77,7 @@ function createPlayback(page, step) {
     phase = "idle";
     mock.classList.remove(...step.states.map(state => `demo-${state}`));
     if (staticState) mock.classList.add(...step.states.map(state => `demo-${state}`));
-    cursor.classList.remove("visible", "clicking", "tooltip-left", "tooltip-above");
+    cursor.classList.remove("visible", "clicking", "tooltip-left", "tooltip-above", "tooltip-high");
     currentTarget = null;
     status.textContent = staticState ? step.staticText : step.idleText;
   };
