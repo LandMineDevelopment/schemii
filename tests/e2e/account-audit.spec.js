@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
-import { accountCredentials } from './helpers/account-auth.js';
 test.use({ trace: 'off', video: 'off' });
 
 test('account navigation fits narrow screens and keeps every destination reachable', async ({ page, request }) => {
@@ -55,40 +54,51 @@ test('account navigation fits narrow screens and keeps every destination reachab
 test('sign-in explains invalid credentials and distinguishes service failures', async ({ page, request }) => {
   const status = await (await request.get('/api/v1/auth/status')).json();
   test.skip(!status.enabled, 'Account authentication is disabled for this installation.');
-  const credentials = await accountCredentials();
-  await page.context().clearCookies();
-  await page.goto('/login');
-  const username = page.getByRole('textbox', { name: 'Username', exact: true });
-  const password = page.getByLabel('Password', { exact: true });
-  const submit = page.getByRole('button', { name: 'Sign in', exact: true });
-  const error = page.getByRole('alert');
+  const username = `qa_recovery_${randomUUID().replaceAll('-', '')}`;
+  const password = `QA-${randomUUID()}`;
+  const created = await request.post('/api/v1/admin/accounts', { data: {
+    username, display_name: 'QA sign-in recovery', password, is_admin: false,
+  } });
+  expect(created.ok()).toBeTruthy();
+  const user = await created.json();
+  try {
+    await page.context().clearCookies();
+    await page.goto('/login');
+    const usernameField = page.getByRole('textbox', { name: 'Username', exact: true });
+    const passwordField = page.getByLabel('Password', { exact: true });
+    const submit = page.getByRole('button', { name: 'Sign in', exact: true });
+    const error = page.getByRole('alert');
 
-  for (const width of [1440, 390, 320]) {
-    await page.setViewportSize({ width, height: 844 });
-    await username.fill(`missing_${randomUUID().slice(0, 8)}`);
-    await password.fill('nonempty-password');
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await usernameField.fill(`missing_${randomUUID().slice(0, 8)}`);
+      await passwordField.fill('nonempty-password');
+      await submit.click();
+      await expect(error).toHaveText('Incorrect username or password. Check both fields and try again.');
+      await expect(error).toBeInViewport();
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+
+    await page.route('**/api/v1/auth/login', route => route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'service_unavailable', message: 'The request could not be completed', retryable: true } }),
+    }));
     await submit.click();
-    await expect(error).toHaveText('Incorrect username or password. Check both fields and try again.');
-    await expect(error).toBeInViewport();
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect(error).toHaveText('The sign-in service is unavailable. Try again shortly.');
+    await page.unroute('**/api/v1/auth/login');
+
+    await page.route('**/api/v1/auth/login', route => route.abort('failed'));
+    await submit.click();
+    await expect(error).toHaveText('Could not reach the sign-in service. Check your connection and try again.');
+    await page.unroute('**/api/v1/auth/login');
+
+    await usernameField.fill(username);
+    await passwordField.fill(password);
+    await submit.click();
+    await expect(page).toHaveURL(/\/account$/);
+  } finally {
+    const disabled = await request.patch(`/api/v1/admin/accounts/${user.id}`, { data: { disabled: true } });
+    expect(disabled.ok()).toBeTruthy();
   }
-
-  await page.route('**/api/v1/auth/login', route => route.fulfill({
-    status: 503,
-    contentType: 'application/json',
-    body: JSON.stringify({ error: { code: 'service_unavailable', message: 'The request could not be completed', retryable: true } }),
-  }));
-  await submit.click();
-  await expect(error).toHaveText('The sign-in service is unavailable. Try again shortly.');
-  await page.unroute('**/api/v1/auth/login');
-
-  await page.route('**/api/v1/auth/login', route => route.abort('failed'));
-  await submit.click();
-  await expect(error).toHaveText('Could not reach the sign-in service. Check your connection and try again.');
-  await page.unroute('**/api/v1/auth/login');
-
-  await username.fill(credentials.username);
-  await password.fill(credentials.password);
-  await submit.click();
-  await expect(page).not.toHaveURL(/\/login$/);
 });
