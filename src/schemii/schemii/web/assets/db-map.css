@@ -91,3 +91,15 @@
   .db-caller-card > header { align-items: stretch; flex-direction: column; }
   .db-caller-card > header .ui-button { width: fit-content; }
 }
+
+.db-detail-signature,
+.db-signature code,
+.db-parameter-list dt,
+.db-parameter-list dd,
+.db-query-facts dd,
+.db-downstream-list strong,
+.db-downstream-list code { font-size: var(--ui-type-control); }
+.db-parameter-list small,
+.db-query-facts dt,
+.db-downstream-list small { font-size: var(--ui-type-helper); }
+.db-story .stage-summary-copy strong { font-size: var(--ui-type-control); }
