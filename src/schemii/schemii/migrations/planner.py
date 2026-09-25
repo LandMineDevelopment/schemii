@@ -36,6 +36,7 @@ from .models import (
     MigrationStep,
     MigrationWarning,
 )
+from .checks import equivalent_check_expressions
 from .type_changes import TypeChangeDecision, classify_type_change
 from .conversions import CompiledConversion
 
@@ -173,9 +174,20 @@ def _unordered_dependency_path(path: str) -> bool:
     return True
 
 
-def _equivalent_value(path: str, left: Any, right: Any) -> bool:
+def _equivalent_value(
+    path: str,
+    left: Any,
+    right: Any,
+    check_column_types: Mapping[str, Mapping[str, str]] | None = None,
+) -> bool:
     if left is _MISSING or right is _MISSING:
         return left is right
+    if isinstance(left, str) and isinstance(right, str) and path.endswith(".expression"):
+        match = re.fullmatch(r"tables\[([^]]+)\]\.checks\[[^]]+\]\.expression", path)
+        if match and check_column_types and match[1] in check_column_types:
+            return equivalent_check_expressions(
+                left, right, check_column_types[match[1]]
+            )
     if (
         path.endswith(".columns")
         and _id_list(left)
@@ -188,6 +200,7 @@ def _equivalent_value(path: str, left: Any, right: Any) -> bool:
                 f"{path}[{identifier}]",
                 left_items[identifier],
                 right_items[identifier],
+                check_column_types,
             )
             for identifier in left_items
         )
@@ -204,12 +217,15 @@ def _equivalent_value(path: str, left: Any, right: Any) -> bool:
                 f"{path}.{key}" if path else key,
                 left[key],
                 right[key],
+                check_column_types,
             )
             for key in left
         )
     if isinstance(left, list) and isinstance(right, list):
         return len(left) == len(right) and all(
-            _equivalent_value(f"{path}[{index}]", left_item, right_item)
+            _equivalent_value(
+                f"{path}[{index}]", left_item, right_item, check_column_types
+            )
             for index, (left_item, right_item) in enumerate(zip(left, right))
         )
     return left == right
@@ -250,15 +266,20 @@ class ColumnOrderDifference:
 
 
 class _Merger:
-    def __init__(self, resolutions: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        resolutions: dict[str, str] | None = None,
+        check_column_types: Mapping[str, Mapping[str, str]] | None = None,
+    ) -> None:
         self.external: list[MigrationExternalChange] = []
         self.conflicts: list[MigrationConflict] = []
         self.resolutions = resolutions or {}
+        self.check_column_types = check_column_types or {}
 
     def merge(self, baseline: Any, desired: Any, live: Any, path: str) -> Any:
         if desired is _MISSING and live is _MISSING:
             return _MISSING
-        if _equivalent_value(path, desired, live):
+        if _equivalent_value(path, desired, live, self.check_column_types):
             return _copy(desired)
 
         if baseline is not _MISSING:
@@ -306,11 +327,11 @@ class _Merger:
                     result.append(merged)
             return result
 
-        if _equivalent_value(path, desired, baseline):
-            if not _equivalent_value(path, live, baseline):
+        if _equivalent_value(path, desired, baseline, self.check_column_types):
+            if not _equivalent_value(path, live, baseline, self.check_column_types):
                 self._external(path, baseline, live)
             return _copy(live)
-        if _equivalent_value(path, live, baseline):
+        if _equivalent_value(path, live, baseline, self.check_column_types):
             return _copy(desired)
 
         return self._conflict(path, baseline, desired, live, "direct")
@@ -497,7 +518,22 @@ def reconcile_designs(
     resolutions: dict[str, str] | None = None,
 ) -> ReconciliationResult:
     live, warnings, complete = catalog_design(catalog, baseline, desired)
-    merger = _Merger(resolutions)
+    check_column_types: dict[str, dict[str, str]] = {}
+    live_tables = _by_id(live.tables)
+    for table in desired.tables:
+        live_table = live_tables.get(table.id)
+        if live_table is None:
+            continue
+        live_columns = {column.name: column for column in live_table.columns}
+        check_column_types[table.id] = {
+            column.name: column.data_type
+            for column in table.columns
+            if column.name in live_columns
+            and classify_type_change(
+                column.data_type, live_columns[column.name].data_type
+            ).disposition == "equivalent"
+        }
+    merger = _Merger(resolutions, check_column_types)
     merged_document = merger.merge(
         baseline.model_dump(mode="json"),
         desired.model_dump(mode="json"),
@@ -669,8 +705,18 @@ def _same_except_dependency_order(left: Any, right: Any, *fields: str) -> bool:
     return left_value == right_value
 
 
-def _same_check(left: Any, right: Any) -> bool:
-    return _same_except_dependency_order(left, right, "column_ids")
+def _same_check(left: Any, right: Any, column_types: Mapping[str, str]) -> bool:
+    if type(left) is not type(right):
+        return False
+    left_value = left.model_dump(mode="json")
+    right_value = right.model_dump(mode="json")
+    left_expression = left_value.pop("expression")
+    right_expression = right_value.pop("expression")
+    left_value["column_ids"] = sorted(left_value["column_ids"])
+    right_value["column_ids"] = sorted(right_value["column_ids"])
+    return left_value == right_value and equivalent_check_expressions(
+        left_expression, right_expression, column_types
+    )
 
 
 def _same_index(left: DesignIndex, right: DesignIndex) -> bool:
@@ -1324,7 +1370,9 @@ def compile_migration_steps(
                     category == "checks"
                     and old is not None
                     and new is not None
-                    and _same_check(old, new)
+                    and _same_check(
+                        old, new, {column.name: column.data_type for column in after.columns}
+                    )
                 ):
                     continue
                 if old is not None:
