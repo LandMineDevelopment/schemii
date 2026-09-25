@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from schemii.common.postgres.models import PostgresColumn, PostgresTable, build_postgres_catalog
+from schemii.common.postgres.models import (
+    PostgresCheckConstraint,
+    PostgresColumn,
+    PostgresTable,
+    build_postgres_catalog,
+)
 from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
     DesignCheckConstraint,
@@ -19,12 +24,14 @@ from schemii.schemii.designs.models import (
     SchemiiDesignContent,
 )
 from schemii.schemii.migrations.planner import (
+    catalog_design,
     column_order_differences,
     compile_migration_steps,
     preserve_column_display_order,
     reconcile_designs,
     tables_requiring_empty_for_required_columns,
 )
+from schemii.schemii.migrations.checks import equivalent_check_expressions
 from schemii.schemii.migrations.type_changes import classify_type_change
 
 
@@ -62,6 +69,97 @@ def _table(
 
 def _routine(definition: str) -> DesignFunction:
     return DesignFunction.model_validate({"id": _id("function", "a"), "definition": definition})
+
+
+def test_postgresql_check_rewrites_do_not_create_migration_or_drift() -> None:
+    catalog = build_postgres_catalog(
+        database="analytics",
+        namespace="public",
+        server_version="17.2",
+        server_version_num=170002,
+        server_timezone="UTC",
+        tables=(PostgresTable(
+            namespace="public",
+            name="salary_bands",
+            kind="table",
+            is_partition=False,
+            columns=(
+                PostgresColumn(name="minimum_salary", ordinal=1, data_type="numeric", nullable=True),
+                PostgresColumn(name="maximum_salary", ordinal=2, data_type="numeric", nullable=True),
+                PostgresColumn(name="employment_status", ordinal=3, data_type="text", nullable=True),
+            ),
+            checks=(
+                PostgresCheckConstraint(
+                    name="salary_range_check",
+                    table="salary_bands",
+                    columns=("minimum_salary", "maximum_salary"),
+                    definition=(
+                        "CHECK (((minimum_salary >= (0)::numeric) AND "
+                        "(maximum_salary >= minimum_salary)))"
+                    ),
+                    validated=True,
+                ),
+                PostgresCheckConstraint(
+                    name="employment_status_check",
+                    table="salary_bands",
+                    columns=("employment_status",),
+                    definition=(
+                        "CHECK ((employment_status = ANY (ARRAY['active'::text, "
+                        "'leave'::text, 'terminated'::text])))"
+                    ),
+                    validated=True,
+                ),
+            ),
+        ),),
+        relationships=(),
+        functions=(),
+        views=(),
+        materialized_views=(),
+        captured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    live, warnings, complete = catalog_design(catalog)
+    assert complete and warnings == []
+    desired = live.model_copy(deep=True)
+    checks = {check.name: check for check in desired.tables[0].checks}
+    checks["salary_range_check"].expression = (
+        "minimum_salary >= 0 AND maximum_salary >= minimum_salary"
+    )
+    checks["employment_status_check"].expression = (
+        "employment_status IN ('active', 'leave', 'terminated')"
+    )
+
+    steps, blockers = compile_migration_steps("public", live, desired)
+    review = reconcile_designs(live, desired, catalog)
+
+    assert steps == []
+    assert blockers == []
+    assert review.conflicts == []
+    assert review.external_changes == []
+    assert review.merged is not None
+
+    checks["salary_range_check"].expression = (
+        "minimum_salary >= 1 AND maximum_salary >= minimum_salary"
+    )
+    checks["employment_status_check"].expression = (
+        "employment_status IN ('active', 'inactive', 'terminated')"
+    )
+    changed_steps, changed_blockers = compile_migration_steps("public", live, desired)
+
+    assert changed_blockers == []
+    assert [step.operation for step in changed_steps] == ["drop", "drop", "create", "create"]
+
+
+def test_check_comparison_keeps_casts_that_change_arithmetic() -> None:
+    assert not equivalent_check_expressions(
+        "minimum_salary / 2 > 0",
+        "minimum_salary / CAST(2 AS numeric) > 0",
+        {"minimum_salary": "numeric"},
+    )
+    assert not equivalent_check_expressions(
+        "minimum_salary >= 1.234",
+        "minimum_salary >= CAST(1.234 AS numeric(3, 2))",
+        {"minimum_salary": "numeric"},
+    )
 
 
 @pytest.mark.parametrize(
