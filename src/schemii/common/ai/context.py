@@ -28,7 +28,7 @@ _FACT_KEYS = frozenset({
     "errorCode", "errorMessage", "statusCode", "resourceKind", "resourceId", "outcome", "meaning", "valid",
     "layoutRevision", "exploreRevision", "expectedRevision", "operationSucceeded",
     "approvalRequired", "requiredPermission", "requiredActions", "rerun", "rerunOf",
-    "rowCount", "totalRows", "offset", "hasMore", "id", "modelId", "operationId",
+    "rowCount", "totalRows", "offset", "hasMore", "nextCursor", "id", "modelId", "operationId",
     "proposalId", "previewId", "runId", "runIds", "executionId", "queryId", "workspaceId", "resultId",
 })
 _RECEIPT_NOTICE = (
@@ -70,7 +70,7 @@ def bounded_tool_receipt(value):
         elif isinstance(item, dict):
             # Outcome information comes before incidental labels/references.
             keys = sorted(item, key=lambda key: key not in {
-                "error", "status", "code", "message", "errorCode", "errorMessage", "operation"})
+                "error", "status", "code", "message", "errorCode", "errorMessage", "operation", "nextCursor"})
             for key in keys:
                 child = item[key]
                 if key in _BULK_KEYS:
@@ -80,7 +80,10 @@ def bounded_tool_receipt(value):
                     if len(facts) >= 48:
                         omitted = True
                         break
-                    text = child[:240] if isinstance(child, str) else child
+                    # A continuation token must survive intact or it cannot be
+                    # used. The action schema caps its length at 512 characters.
+                    limit = 512 if key == "nextCursor" else 240
+                    text = child[:limit] if isinstance(child, str) else child
                     omitted |= text != child
                     facts.append({"path": f"{path}.{key}".lstrip("."), "value": text})
                 elif key in _FACT_KEYS and isinstance(child, list) and all(
