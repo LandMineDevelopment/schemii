@@ -78,7 +78,7 @@ class ConversationStore:
                 limit_event=LimitEventNotice(f"{self.product}_ai_chat", "ai.context_bytes + ai.proposal_bytes_per_turn", limit, observed))
         if cursor is None: self.memory[owner,value["id"]] = deepcopy(value)
         else:
-            cursor.execute("INSERT INTO metadata.ai_conversations(id,owner_id,product,subject_id,document,updated_at) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at", (value["id"],owner,self.product,value[self.subject_key],Jsonb(value),value["updatedAt"]))
+            cursor.execute("INSERT INTO metadata.ai_conversations(id,owner_id,product,subject_id,document,updated_at) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET subject_id=excluded.subject_id,document=excluded.document,updated_at=excluded.updated_at", (value["id"],owner,self.product,value[self.subject_key],Jsonb(value),value["updatedAt"]))
 
     def create(self, owner, value):
         self.prune()

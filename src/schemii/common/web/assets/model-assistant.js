@@ -29,6 +29,7 @@ export function createProductAssistant({
   trigger, getSubjectId, onSubjectChanged, api, productLabel, subjectLabel,
   subjectKey, subjectQueryKey, revisionKey, title, emptyTitle, emptyDescription,
   examplePrompts, resultOperations = [], resultPrompt, getAvailableActions, permissionScopeNote,
+  allowEmptySubject = false,
 }) {
   let chat = null, settings = null, runtime = null, available = [], pollTimer, loginTimer, login = null;
   let busy = false, opened = false, contextId = null, generation = 0, transcriptKey = "";
@@ -37,6 +38,8 @@ export function createProductAssistant({
   const panel = element("aside", { className: "model-ai", attrs: { id: "model-ai", "aria-label": title, "aria-hidden": "true", inert: "" } });
   const status = element("span", { className: "model-ai-status", text: "Ready", attrs: { role: "status" } });
   const modelSelect = element("select", { attrs: { "aria-label": "Assistant model" } });
+  const sourceSelect = element("select", { attrs: { "aria-label": "Source connection for the first model" } });
+  const sourceField = element("label", {}, [el("span", "Source connection"), sourceSelect]);
   const reasoningSelect = element("select", { attrs: { "aria-label": "Assistant reasoning level" } });
   const settingsReasoning = element("select", { attrs: { "aria-label": "Reasoning level" } });
   const notice = element("p", { className: "model-ai-notice", hidden: true, attrs: { role: "status" } });
@@ -59,7 +62,7 @@ export function createProductAssistant({
   }), "new-chat");
   const retry = button("Refresh", () => void guard(async () => { if (chat) await refresh(); else await load(); }));
   const form = element("form", { className: "model-ai-composer" }, [input, element("div", {}, [el("small", "Enter to send · Shift + Enter for a new line"), cancel, send])]);
-  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", `${productLabel.toUpperCase()} / AI`), el("h2", title)]), status, history, fresh, settingsButton, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [element("label", {}, [el("span", "Model"), modelSelect]), element("label", {}, [el("span", "Reasoning"), reasoningSelect]), permissions, disclosure]), notice, scroll, form);
+  panel.append(element("header", { className: "model-ai-head" }, [element("div", {}, [el("small", `${productLabel.toUpperCase()} / AI`), el("h2", title)]), status, history, fresh, settingsButton, button("Close assistant", close, "close")]), element("div", { className: "model-ai-context" }, [sourceField, element("label", {}, [el("span", "Model"), modelSelect]), element("label", {}, [el("span", "Reasoning"), reasoningSelect]), permissions, disclosure]), notice, scroll, form);
   document.body.append(panel);
   const modelPicker = enhanceModelPicker(modelSelect, { refresh: () => refreshProviders({ refresh: true }) });
   const settingsDialog = dialog("Assistant settings"), historyDialog = dialog("Conversation history");
@@ -77,6 +80,20 @@ export function createProductAssistant({
     try { return await fn(); } catch (error) { tell(error.message, true); return null; }
   }
   function selected() { return available.find(item => modelValue(item.providerId, item.id) === modelSelect.value); }
+  function hasContext() { return allowEmptySubject || Boolean(getSubjectId()); }
+  function subject() { return getSubjectId() || ""; }
+  function needsSource() { return allowEmptySubject && !subject(); }
+  function sourceReady() { return !needsSource() || Boolean(sourceSelect.value); }
+  async function loadSources() {
+    if (!needsSource()) return;
+    const { connections } = await requestJson("/api/v1/connections?product=schemoo");
+    const previous = sourceSelect.value;
+    sourceSelect.replaceChildren(element("option", { text: "Choose connection", attrs: { value: "" } }),
+      ...connections.map(item => element("option", { text: `${item.name} · ${item.database}`, attrs: { value: item.id } })));
+    sourceSelect.value = connections.some(item => item.id === previous) ? previous : connections.length === 1 ? connections[0].id : "";
+    controls();
+  }
+  sourceSelect.onchange = controls;
   function populateModels() {
     const selectedProvider = chat?.providerId || settings?.providerId;
     const selectedId = chat?.aiModelId || settings?.aiModelId || settings?.modelId;
@@ -90,13 +107,15 @@ export function createProductAssistant({
     const running = active(chat);
     status.textContent = busy ? "Loading" : ({ working: "Working", waiting_approval: "Review batch", failed: "Needs attention" }[chat?.status] || "Ready");
     status.dataset.state = chat?.status || "idle";
-    send.disabled = busy || running || !getSubjectId() || !selected() || !input.value.trim();
+    sourceField.hidden = !needsSource();
+    sourceSelect.disabled = busy || Boolean(chat);
+    send.disabled = busy || running || !hasContext() || !sourceReady() || !selected() || !input.value.trim();
     send.hidden = running;
     cancel.hidden = !running; cancel.disabled = busy;
     modelSelect.disabled = busy;
     reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1;
     settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1;
-    fresh.disabled = busy || running || !getSubjectId() || !selected(); history.disabled = busy || !getSubjectId();
+    fresh.disabled = busy || running || !hasContext() || !sourceReady() || !selected(); history.disabled = busy || !hasContext();
     saveSettings.disabled = busy;
     permissionEditor?.setBusy(busy);
     messages.querySelectorAll(".model-ai-approval button").forEach(control => { control.disabled = busy; });
@@ -199,20 +218,23 @@ export function createProductAssistant({
     if (nearBottom) scroll.scrollTop = scroll.scrollHeight;
   }
   async function accept(next) {
-    if (!next || next[subjectKey] !== contextId) return;
+    const adopted = allowEmptySubject && !contextId && next?.[subjectKey] && next.id === chat?.id;
+    if (!next || (next[subjectKey] !== contextId && !adopted)) return;
+    if (adopted) contextId = next[subjectKey];
     if (next.id === chat?.id && next.revision < chat.revision) return;
     const newlyFailed = next.status === "failed" && (chat?.id !== next.id || chat?.status !== "failed");
     const previous = revisions.get(next.id);
-    const mutations = (next.activity || []).filter(item => item.status === "succeeded" && (!item[subjectKey] || item[subjectKey] === contextId) && settings?.actions?.some(action => action.id === item.operation && action.mutates && action.group !== "Results"));
+    const mutations = (next.activity || []).filter(item => item.status === "succeeded" && (!item[subjectKey] || item[subjectKey] === contextId || adopted && item.operation === "create_model") && settings?.actions?.some(action => action.id === item.operation && action.mutates && action.group !== "Results"));
     const observed = observedMutations.get(next.id);
     const newlySaved = observed ? mutations.filter(item => !observed.has(item.id)) : [];
     observedMutations.set(next.id, new Set(mutations.map(item => item.id)));
     chat = next;
+    if (needsSource() && next.sourceConnectionId) sourceSelect.value = next.sourceConnectionId;
     populateModels();
     if (next[revisionKey] !== undefined) {
       revisions.set(next.id, next[revisionKey]);
     }
-    if ((previous !== undefined && next[revisionKey] !== undefined && previous !== next[revisionKey]) || newlySaved.length) {
+    if (adopted || (previous !== undefined && next[revisionKey] !== undefined && previous !== next[revisionKey]) || newlySaved.length) {
       const message = await onSubjectChanged?.(contextId, next[revisionKey], newlySaved);
       if (message) tell(message);
     }
@@ -227,15 +249,16 @@ export function createProductAssistant({
     if (generation === ticket && chat?.id === id) await accept(next);
   }
   async function newChat() {
-    const choice = selected(); if (!choice || !getSubjectId()) throw new Error(`Choose a saved ${subjectLabel} and connect an AI provider first.`);
-    const next = await requestJson(`${api}/chats`, { method: "POST", body: { [subjectKey]: getSubjectId(), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForSelection(runtime, choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
+    const choice = selected(); if (!choice || !hasContext()) throw new Error(`Choose a saved ${subjectLabel} and connect an AI provider first.`);
+    const next = await requestJson(`${api}/chats`, { method: "POST", body: { [subjectKey]: subject(), ...(needsSource() ? { sourceConnectionId: sourceSelect.value } : {}), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForSelection(runtime, choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
     generation++; input.value = ""; transcriptKey = ""; await accept(next); tell("Started a new conversation. Previous conversations remain in history.");
   }
   async function load() {
-    const id = getSubjectId(); if (!id) { tell(`Open or create a saved ${subjectLabel} to start a conversation.`); render(); return; }
+    const id = subject(); if (!hasContext()) { tell(`Open or create a saved ${subjectLabel} to start a conversation.`); render(); return; }
     const ticket = ++generation; contextId = id;
+    await loadSources();
     const [nextSettings, nextRuntime, list] = await Promise.all([requestJson(`${api}/settings`), requestJson(aiStatusPath(productLabel.toLowerCase(), id)), requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(id)}`)]);
-    if (ticket !== generation || getSubjectId() !== id) return;
+    if (ticket !== generation || subject() !== id) return;
     settings = nextSettings; runtime = nextRuntime;
     if (chat?.[subjectKey] !== id) chat = null;
     populateModels();
@@ -265,7 +288,7 @@ export function createProductAssistant({
   input.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); } });
   panel.addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); close(); } });
   form.onsubmit = async event => {
-    event.preventDefault(); const text = input.value.trim(); if (!text || busy || active(chat) || !selected() || !getSubjectId()) return;
+    event.preventDefault(); const text = input.value.trim(); if (!text || busy || active(chat) || !selected() || !hasContext() || !sourceReady()) return;
     const providerId = chat?.providerId || selected().providerId;
     const provider = runtime?.providers?.find(item => item.id === providerId);
     const acknowledgment = providerId === "opencode";
@@ -384,10 +407,10 @@ export function createProductAssistant({
   async function showHistory() {
     historyDialog.showModal(); historyBody.replaceChildren(el("p", "Loading conversations…"));
     try {
-      const list = await requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(getSubjectId())}`);
+      const list = await requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(subject())}`);
       historyBody.replaceChildren();
       for (const item of list.chats || []) {
-        const openChat = button(item.title || "Untitled conversation", () => void guard(async () => { generation++; clearTimeout(pollTimer); await accept(await requestJson(`${api}/chats/${encodeURIComponent(item.id)}`)); populateModels(); historyDialog.close(); input.value = ""; input.focus(); controls(); }));
+        const openChat = button(item.title || "Untitled conversation", () => void guard(async () => { generation++; clearTimeout(pollTimer); if (needsSource() && item.sourceConnectionId) sourceSelect.value = item.sourceConnectionId; await accept(await requestJson(`${api}/chats/${encodeURIComponent(item.id)}`)); populateModels(); historyDialog.close(); input.value = ""; input.focus(); controls(); }));
         const remove = button(`Delete ${item.title || "conversation"}`, async () => {
           if (!confirm(`Delete “${item.title || "this conversation"}” and its saved messages? This cannot be undone.`)) return;
           remove.disabled = true;
@@ -413,6 +436,7 @@ export function createModelAssistant({ trigger, getModelId, onModelChanged, api 
   const assistant = createProductAssistant({
     trigger, getSubjectId: getModelId, onSubjectChanged: onModelChanged, api,
     productLabel: "Schemoo", subjectLabel: "model", subjectKey: "modelId",
+    allowEmptySubject: true,
     subjectQueryKey: "model_id", revisionKey: "modelRevision", title: "Model assistant",
     emptyTitle: "Shape your semantic model",
     emptyDescription: "Explore tables and relationships, explain a filter, or describe a model change. Your saved model provides the context.",

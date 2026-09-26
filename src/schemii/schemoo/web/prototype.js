@@ -636,6 +636,10 @@ const assistant = createModelAssistant({
   trigger: assistantButton,
   getModelId: () => model?.id || null,
   onModelChanged: async (id, revision, operations) => {
+    if (!model && id && operations?.some(item => item.operation === "create_model")) {
+      await loadModel(id);
+      return "Your first model is open. Continue building it in this conversation.";
+    }
     if (id !== model?.id) return;
     if (operations?.length && operations.every(item => ["create_preview", "update_preview", "delete_preview"].includes(item.operation))) {
       if (previewLibrary.isPending()) return "Saved previews changed. Refresh the preview list after your current operation finishes.";
@@ -750,6 +754,7 @@ $("model-name").oninput=save;
 $("save-model").onclick=saveModel;
 function openLibrary() {
   return openModelLibrary(loadModel, {
+    onAssistant: () => assistant.open(),
     canDelete: () => !busy && !saving && !previewLibrary.isPending(),
     onDeleted: deleted => { if (deleted.id === model?.id) clearDeletedModel(); },
   });
