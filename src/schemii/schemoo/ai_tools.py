@@ -25,7 +25,7 @@ from schemii.common.admin_config import AiPolicy
 from schemii.common.metadata.models import Principal
 from schemii.common.query_executions import routes as query_routes
 from . import routes
-from .models import Contract, ExploreUpdate, LayoutUpdate, ModelDuplicate, ModelPatch, ModelUpdate, PreviewCreate, PreviewUpdate
+from .models import Contract, ExploreState, ExploreUpdate, LayoutUpdate, ModelDuplicate, ModelPatch, ModelUpdate, PreviewCreate, PreviewUpdate, SelectedField
 from .service import load_model, model_catalog, validate_model_definition
 
 
@@ -93,6 +93,11 @@ model revision. Model schema changes reconcile saved tests; inspect the returned
 configuration rather than assuming an old selection is still available.
 Validate draft definitions before saving
 substantial rule changes and plan the saved model before preview execution.
+For validation or planning requested with a root, output fields, aggregates, or
+row limit, put those exact exploration inputs in each action's explore object.
+Validation does not inherit fields from a later plan or from the user's prose.
+Inspect the model to resolve field bindings; if required details remain unknown,
+ask before proposing the action. Never invent output fields to satisfy validation.
 Handle stale revisions by inspecting current state, never by guessing the next
 revision. Batch at most eight independent actions in execution order. A batch is
 not a transaction: stop after failure and report what actually succeeded. Dependent
@@ -201,6 +206,19 @@ class PageArguments(ResultReference):
     cursor: str | None = Field(default=None, min_length=1, max_length=512)
 
 
+class AiQueryExplore(ExploreState):
+    fields: list[SelectedField] = Field(min_length=1, max_length=64,
+        description="Select every requested output field and aggregate for this action. Never infer missing fields from a later action.")
+
+
+class AiPlanRequest(routes.PlanRequest):
+    explore: AiQueryExplore
+
+
+class AiValidateRequest(routes.ValidateRequest):
+    explore: AiQueryExplore
+
+
 def _bound(model):
     fields = {"model_id": (ModelReference.model_fields["model_id"].annotation,
                             deepcopy(ModelReference.model_fields["model_id"]))}
@@ -249,8 +267,10 @@ ACTIONS = {
         description="Rename or replace one saved test configuration using its own current preview revision as expectedRevision, not the model revision."),
     "delete_preview": _descriptor("Delete a saved preview", "/models/{model_id}/previews/{preview_id}", "DELETE", group="Previews", mutates=True,
         description="Delete one saved test using its own current revision. Does not delete the model or change PostgreSQL data."),
-    "validate_model": _descriptor("Validate model rules", "/models/{model_id}/validate", "POST"),
-    "plan_model": _descriptor("Plan model query", "/models/{model_id}/plan", "POST"),
+    "validate_model": _descriptor("Validate model rules", "/models/{model_id}/validate", "POST",
+        description="Validate the supplied definition and explore configuration. Include the user's requested root, every output field and aggregate, and limit in explore; fields do not carry over from another action."),
+    "plan_model": _descriptor("Plan model query", "/models/{model_id}/plan", "POST",
+        description="Plan the supplied explore configuration. Include the user's requested root, every output field and aggregate, and limit in this action's explore."),
     "execute_model": _descriptor("Run model preview", "/models/{model_id}/executions", "POST", group="Queries",
         description="Execute the saved model's compiled read query. Returns a completed receipt; read rows separately."),
     "explain_model": _descriptor("Explain query plans", "/models/{model_id}/explain", "POST", group="Queries"),
@@ -278,7 +298,7 @@ _BODIES = {
     "create_model": routes.CreateRequest, "update_model": ModelUpdate, "patch_model": ModelPatch,
     "update_layout": LayoutUpdate, "update_explore": ExploreUpdate,
     "create_preview": PreviewCreate, "update_preview": PreviewUpdate,
-    "validate_model": routes.ValidateRequest, "plan_model": routes.PlanRequest,
+    "validate_model": AiValidateRequest, "plan_model": AiPlanRequest,
     "explain_model": routes.ExecutionRequest, "analyze_model": routes.ExecutionRequest,
     "execute_model": routes.ExecutionRequest, "parameter_values": routes.ParameterValuesRequest,
     "domain_values": routes.AuthorDomainRequest,
