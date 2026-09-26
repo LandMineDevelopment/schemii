@@ -30,7 +30,9 @@ function expectNoOverlaps(cards) {
 
 test("Fit repairs saved overlap, keeps target clickable, and persists layout", async ({ page, request }) => {
   const saved = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
-  const target = saved.layout.positions.find(position => position.id === "certification_dim");
+  // Imported catalog fixtures omit positions for some nodes. Give the target
+  // an explicit saved position so the alias starts at that exact same spot.
+  const target = { id: "certification_dim", x: 440, y: 90 };
   const aliasId = "qa_overlap_alias";
   const definition = { ...saved.definition, nodes: [...saved.definition.nodes,
     { id: aliasId, table: "certification_dim", label: "QA overlap alias" }] };
@@ -40,7 +42,8 @@ test("Fit repairs saved overlap, keeps target clickable, and persists layout", a
   expect(updated.ok(), await updated.text()).toBeTruthy();
   const response = await request.put(`/api/v1/schemoo/models/${modelId}/layout`, { data: {
     expectedRevision: saved.layoutRevision,
-    layout: { positions: [...saved.layout.positions, { id: aliasId, x: target.x, y: target.y }] },
+    layout: { positions: [...saved.layout.positions.filter(position => position.id !== target.id),
+      target, { id: aliasId, x: target.x, y: target.y }] },
   } });
   expect(response.ok(), await response.text()).toBeTruthy();
   const beforeRepair = await response.json();
@@ -79,7 +82,7 @@ test("Fit repairs saved overlap, keeps target clickable, and persists layout", a
   await expect(page.locator(".sc-edge")).toHaveCount(count + 1);
 });
 
-test("new alias and calculated source land clear of existing cards", async ({ page }) => {
+test("new alias and calculated source land clear of existing cards and save", async ({ page, request }) => {
   await page.goto(`/schemoo?model=${modelId}`);
   await expect(page.locator(".sc-node")).toHaveCount(12);
   await page.locator('[data-node-id="certification_dim"] .sc-node-header').click();
@@ -104,4 +107,11 @@ test("new alias and calculated source land clear of existing cards", async ({ pa
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
   expect(await cardGeometry(page)).toEqual(fitted);
   await expect(page.locator(".sc-derived-edge")).toHaveCount(1);
+  await page.getByRole("button", { name: "Save model", exact: true }).click();
+  await expect(page.locator("#draft-status")).toContainText("Saved");
+  const persisted = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  expect(persisted.definition.nodes).toHaveLength(14);
+  expect(persisted.definition.nodes.every(node => !Object.hasOwn(node, "distance"))).toBe(true);
+  await page.reload();
+  await expect(page.locator(".sc-node")).toHaveCount(14);
 });

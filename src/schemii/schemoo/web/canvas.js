@@ -83,7 +83,8 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
       candidates.push({ x, y, distance: (x - desired.x) ** 2 + (y - desired.y) ** 2 });
     }
     candidates.sort((a, b) => a.distance - b.distance || a.y - b.y || a.x - b.x);
-    return candidates.find(clear) || desired;
+    const selected = candidates.find(clear) || desired;
+    return { x: selected.x, y: selected.y };
   }
 
   function repairOverlaps() {
