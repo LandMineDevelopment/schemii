@@ -217,6 +217,33 @@ def test_plan_rejects_sql_owner_injection_and_replacement_rules(services, model,
     assert '"People.name"' in plan["sql"]
 
 
+@pytest.mark.parametrize("operation", ["validate_model", "plan_model"])
+@pytest.mark.parametrize("explore", [None, {"root": "accounts"},
+    {"root": "accounts", "fields": []}])
+def test_ai_query_actions_require_explicit_output_fields(operation, explore):
+    args = {"expectedRevision": 1}
+    if explore is not None:
+        args["explore"] = explore
+    with pytest.raises(ValidationError):
+        ai_tools.validate_action({"operation": operation, "args": args})
+    assert ai_tools.AiQueryExplore.model_json_schema()["properties"]["fields"]["minItems"] == 1
+
+
+@pytest.mark.parametrize("operation", ["validate_model", "plan_model"])
+def test_ai_query_actions_keep_requested_root_fields_aggregates_and_limit(operation):
+    explore = {"root": "accounts", "fields": [
+        {"table": "accounts", "column": "name"},
+        {"table": "accounts", "column": "region"},
+        {"table": "orders", "column": "id", "aggregate": "count"},
+        {"table": "orders", "column": "total", "aggregate": "sum"}], "limit": 10}
+    normalized = ai_tools.validate_action({"operation": operation, "args": {
+        "expectedRevision": 1, "explore": explore}})
+    actual = normalized["args"]["explore"]
+    assert actual["root"] == "accounts" and actual["limit"] == 10
+    assert actual["fields"] == [{**field, "aggregate": field.get("aggregate", "none")}
+                                for field in explore["fields"]]
+
+
 def test_unknown_operations_and_batch_limits_rejected():
     with pytest.raises(ValidationError):
         ai_tools.validate_action({"operation": "execute_sql", "args": {"sql": "SELECT 1"}})
