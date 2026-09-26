@@ -6,7 +6,7 @@ import { join, resolve, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
 import { deploymentLockPath } from './deployment.mjs';
-import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts } from './leases.mjs';
+import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock } from './leases.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
 const catalog=()=>readJSON(join(root,'testing/personas.json'));
 const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spawn(file,args,{cwd:root,stdio:'inherit',...options});child.once('error',rej);child.once('close',code=>code===0?res():rej(blocked(`${file} exited ${code}; inspect the exact diagnostic above.`)));});
@@ -232,6 +232,15 @@ async function requireStoppedOwner(dir) {
 }
 async function main() {
   const {command,options:o}=parse(process.argv.slice(2));
+  if(!o.help&&['resume','stop','cleanup'].includes(command)) {
+    if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||''))throw invalid('--run must identify a valid QA run.');
+    // Re-read the manifest and process ownership only after locking. Concurrent
+    // recovery and cleanup must not act on a previous controller generation.
+    return withFileLock(join(runPath(o.run),'lifecycle.lock'),()=>execute(command,o));
+  }
+  return execute(command,o);
+}
+async function execute(command,o) {
   if(['help','--help','-h'].includes(command)||o.help){console.log(help);return;}
   if(['export-credentials','import-credentials'].includes(command)) {
     const exporting=command==='export-credentials', key=exporting?'output':'input';
@@ -286,23 +295,28 @@ async function main() {
     let run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
     await writeJSON(join(dir,'manifest.json'),run);
     await writeJSON(join(dir,'controller-owner.json'),{pid:process.pid,birthTick:await birthTick(process.pid)});
-    let result;
-    try {
-      if(config.persona) {
-        const selected=await reserveAvailable({runId:id,runDir:dir,candidates:config.poolCandidates,count:config.accounts.length});
-        config=await selection(o,selected);
-        run={...run,...config};await writeJSON(join(dir,'manifest.json'),run);
-      }else await reserveAccounts({runId:id,runDir:dir,accounts:run.accounts});
-      result=await startBroker(run,dir);
-    }catch(e){
-      // Release only if startup never transferred ownership, or its recorded
-      // controller and browsers are confirmed stopped. Otherwise preserve leases.
-      const owner=await readJSON(join(dir,'controller-owner.json'));
-      if(owner.pid===process.pid)await releaseAccounts({runId:id});
-      else try{await requireStoppedOwner(dir);await releaseAccounts({runId:id});}catch{}
-      run.status='blocked';run.error=e.message;run.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),run);
-      throw e;
-    }
+    const result=await withFileLock(join(dir,'lifecycle.lock'),async()=>{
+      try {
+        if(config.persona) {
+          const selected=await reserveAvailable({runId:id,runDir:dir,candidates:config.poolCandidates,count:config.accounts.length});
+          config=await selection(o,selected);
+          run={...run,...config};await writeJSON(join(dir,'manifest.json'),run);
+        }else await reserveAccounts({runId:id,runDir:dir,accounts:run.accounts});
+        return await startBroker(run,dir);
+      }catch(e){
+        // Release only if startup never transferred ownership, or its recorded
+        // controller and browsers are confirmed stopped. Otherwise preserve leases.
+        const owner=await readJSON(join(dir,'controller-owner.json'));
+        let mayUpdate=owner.pid===process.pid;
+        if(!mayUpdate)try{await requireStoppedOwner(dir);mayUpdate=true;}catch{}
+        if(mayUpdate) {
+          await releaseAccounts({runId:id});
+          const latest=await readJSON(join(dir,'manifest.json'));
+          latest.status='blocked';latest.error=e.message;latest.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),latest);
+        }
+        throw e;
+      }
+    });
     console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
   if(['action','checkpoint','finish','heartbeat'].includes(command)) {

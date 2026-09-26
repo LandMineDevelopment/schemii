@@ -1,4 +1,5 @@
 import { mkdir, open, readFile, unlink, access, readdir, link } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
@@ -12,6 +13,24 @@ function names(accounts) {
 }
 function directory(root){return join(dirname(deploymentLockPath(root)),'qa-account-leases');}
 function file(dir,username){return join(dir,`${username}.json`);}
+
+// flock belongs to this open file description, so the parent retains it after
+// the helper exits. Async acquisition also permits concurrent callers in one
+// Node process without blocking the holder's event loop.
+export async function withFileLock(path, task) {
+  const handle=await open(path,'a',0o600);
+  try {
+    await new Promise((resolve,reject)=>{
+      const child=spawn('flock',['--exclusive','3'],{stdio:['ignore','ignore','pipe',handle.fd]});
+      child.once('error',reject);
+      child.once('close',code=>code===0?resolve():reject(new Error(`Cannot acquire QA lifecycle lock (flock exit ${code}).`)));
+    });
+    return await task();
+  }finally {await handle.close();}
+}
+function withReservations(root, task) {
+  return withFileLock(join(dirname(deploymentLockPath(root)),'qa-account-reservations.lock'),task);
+}
 
 // Publish a complete, durable record without ever exposing a partial JSON file.
 // The hard link is exclusive: concurrent coordinators cannot replace its owner.
@@ -35,7 +54,7 @@ async function publishReservation(dir, record) {
 
 // A crashed controller deliberately leaves its reservations behind. Only a
 // coordinator that has verified its recorded processes are stopped may release.
-export async function reserveAccounts({runId,runDir,accounts,root=defaultRoot}) {
+async function reserveAccountsUnlocked({runId,runDir,accounts,root=defaultRoot}) {
   if(!runId||!runDir)throw new Error('Account reservation requires run identity.');
   const dir=directory(root), created=[];
   await mkdir(dir,{recursive:true,mode:0o700});
@@ -44,13 +63,13 @@ export async function reserveAccounts({runId,runDir,accounts,root=defaultRoot}) 
       if(await publishReservation(dir,{runId,runDir:resolve(runDir),username}))created.push(username);
     }
   }catch(error){
-    await releaseAccounts({runId,accounts:created,root});
+    await releaseAccountsUnlocked({runId,accounts:created,root});
     throw error;
   }
   return {runId,accounts:names(accounts),created};
 }
 
-export async function releaseAccounts({runId,accounts,root=defaultRoot}) {
+async function releaseAccountsUnlocked({runId,accounts,root=defaultRoot}) {
   const dir=directory(root);
   if(accounts===undefined) {
     let files;
@@ -82,18 +101,28 @@ export async function availableAccounts(accounts,{root=defaultRoot}={}) {
 
 // Selection itself acquires each reservation; an availability listing is never
 // treated as permission to use an account. Partial batches roll back on failure.
-export async function reserveAvailable({runId,runDir,candidates,count,root=defaultRoot}) {
+async function reserveAvailableUnlocked({runId,runDir,candidates,count,root=defaultRoot}) {
   names(candidates);
   if(!Number.isInteger(count)||count<1)throw new Error('Reservation count must be a positive integer.');
   const selected=[],created=[];
   try {
     for(const candidate of candidates) {
       try {
-        const result=await reserveAccounts({runId,runDir,accounts:[candidate],root});
+        const result=await reserveAccountsUnlocked({runId,runDir,accounts:[candidate],root});
         selected.push(candidate);created.push(...result.created);
         if(selected.length===count)return selected;
       }catch(error){if(error.code!=='QA_ACCOUNT_BUSY')throw error;}
     }
     throw new Error(`Only ${selected.length} of ${count} requested persona accounts are available. Finish another run or provision a larger pool.`);
-  }catch(error){await releaseAccounts({runId,accounts:created,root});throw error;}
+  }catch(error){await releaseAccountsUnlocked({runId,accounts:created,root});throw error;}
+}
+
+export function reserveAccounts(options) {
+  return withReservations(options.root || defaultRoot,()=>reserveAccountsUnlocked(options));
+}
+export function reserveAvailable(options) {
+  return withReservations(options.root || defaultRoot,()=>reserveAvailableUnlocked(options));
+}
+export function releaseAccounts(options) {
+  return withReservations(options.root || defaultRoot,()=>releaseAccountsUnlocked(options));
 }

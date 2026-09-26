@@ -57,7 +57,9 @@ source matches. Runs hold shared deployment leases, so rebuilding or resetting
 requires all runs to stop. Use the updated launcher in every checkout; old copies
 cannot enforce this contract. A crashed run retains account reservations until
 cleanup verifies its recorded processes have stopped; reservations are never
-silently stolen.
+silently stolen. Concurrent resume/cleanup commands are serialized per run, and
+account allocation/release uses a repository-wide lock so cleanup cannot remove
+a newly assigned account lease.
 
 ```bash
 ./test.sh report --run RUN_ID

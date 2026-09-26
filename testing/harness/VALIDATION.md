@@ -122,3 +122,29 @@ Limits: viewer fixtures currently cover empty/denied-authoring behavior, not a
 seeded shared dashboard; no saved app models are seeded. Reset restores QA source
 data, not app metadata objects created by testers. Unrelated legacy QA accounts
 and existing demos remain retained.
+
+## Final review hardening
+
+Review found two process-level races: duplicate cleanup could remove a newly
+reassigned account reservation, and simultaneous resume/cleanup could use stale
+controller ownership. Account mutations now share an OS lock; each run serializes
+its startup, resume and cleanup ownership transitions, with fresh state reads.
+An isolated manual check passed twice with 150 allocation/use/release cycles
+across ten processes and concurrent duplicate cleanup, with no stolen/leaked
+leases. Ten lifecycle mutations serialized correctly, and a stopped holder's
+OS lock could be reacquired. Ten actual CLI cleanups in an isolated checkout
+completed safely; old cleanup preserved a reassigned reservation, and a queued
+resume re-read changed live ownership and refused startup. Two simultaneous
+cleanups of a retained completed run were also idempotent. Help output and Node
+syntax checks passed.
+
+The database verifier now checks exact totals-view results, read access to the
+view and absence of sequence grants. The reset check perturbs each independently
+and restores the baseline between cases. Initial live verification caught a
+PostgreSQL evaluation-order error in the new sequence privilege predicate before
+any perturbation; relation-type CASE guards corrected it.
+
+Final live checks passed: all four independent drift cases were detected, the
+normal reset restored checksum `f7a9a1e37ea763d729b1e17ae5090bfd`, and all
+120 spaces passed the strengthened verifier. Credential hashes were unchanged
+and no account reservations remained. No application suite was run.

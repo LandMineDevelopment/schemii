@@ -46,6 +46,33 @@ if [ "$action" = check-reset ]; then
   before=$(sed -n 's/.*"lastVerifiedDataDigest":"\([0-9a-f]*\)".*/\1/p' "$tmp/before.json")
   [ "${#before}" = 32 ] || fail 'baseline check did not report a data checksum'
   restore_needed=1
+  # Check view drift independently, before table/sequence drift can mask it.
+  psql_base -q --set schema="$space" > "$tmp/perturb-view.log" <<'SQL'
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('schemii:qa:reset'), hashtext(:'schema'));
+SELECT format('SET LOCAL search_path TO %I, pg_catalog', :'schema') \gexec
+CREATE OR REPLACE VIEW customer_totals AS SELECT c.id,c.name,c.region,count(o.id) AS order_count,coalesce(sum(o.amount),0)+1 AS total FROM customers c LEFT JOIN orders o ON o.customer_id=c.id GROUP BY c.id,c.name,c.region;
+COMMIT;
+SQL
+  if /opt/testing/manage.sh verify "$space" > "$tmp/view-drift.log" 2>&1; then
+    fail 'fixture verifier failed to detect deliberate view-only drift'
+  fi
+  /opt/testing/manage.sh reset "$space" > "$tmp/reset-view.json"
+  # Verify the reader can consume the view, and cannot advance its sequence.
+  psql_base -q --set schema="$space" --set role="$space" > "$tmp/perturb-view-grant.log" <<'SQL'
+SELECT format('REVOKE SELECT ON %I.customer_totals FROM %I', :'schema', :'role') \gexec
+SQL
+  if /opt/testing/manage.sh verify "$space" > "$tmp/view-grant-drift.log" 2>&1; then
+    fail 'fixture verifier failed to detect a missing view SELECT grant'
+  fi
+  /opt/testing/manage.sh reset "$space" > "$tmp/reset-view-grant.json"
+  psql_base -q --set schema="$space" --set role="$space" > "$tmp/perturb-sequence-grant.log" <<'SQL'
+SELECT format('GRANT USAGE ON SEQUENCE %I.orders_id_seq TO %I', :'schema', :'role') \gexec
+SQL
+  if /opt/testing/manage.sh verify "$space" > "$tmp/sequence-grant-drift.log" 2>&1; then
+    fail 'fixture verifier failed to detect an unexpected sequence grant'
+  fi
+  /opt/testing/manage.sh reset "$space" > "$tmp/reset-sequence-grant.json"
   psql_base -q --set schema="$space" > "$tmp/perturb.log" <<'SQL'
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtext('schemii:qa:reset'), hashtext(:'schema'));
@@ -66,7 +93,7 @@ SQL
   after=$(sed -n 's/.*"lastVerifiedDataDigest":"\([0-9a-f]*\)".*/\1/p' "$tmp/after.json")
   [ "$before" = "$after" ] || fail 'reset did not restore the original baseline checksum'
   restore_needed=0
-  printf '{"action":"check-reset","space":"%s","outcome":"passed","driftDetected":true,"beforeDigest":"%s","afterDigest":"%s","credentials":"preserved-and-authenticated"}\n' "$space" "$before" "$after"
+  printf '{"action":"check-reset","space":"%s","outcome":"passed","driftDetected":true,"viewDriftDetected":true,"viewGrantDriftDetected":true,"sequenceGrantDriftDetected":true,"beforeDigest":"%s","afterDigest":"%s","credentials":"preserved-and-authenticated"}\n' "$space" "$before" "$after"
   exit 0
 fi
 if [ "$action" = prepare ]; then
@@ -144,11 +171,15 @@ WITH expected_orders AS (
  SELECT n::bigint AS id,(n % 32)+1 AS customer_id, DATE '2025-01-01' + (n % 90) AS ordered_on,(ARRAY['pending','paid','cancelled'])[(n % 3)+1] AS status,((n*137)%100000)::numeric(10,2)/100 AS amount,CASE WHEN n % 7 = 0 THEN NULL ELSE 'Fixture order ' || n END AS notes FROM generate_series(1,513) n
 ), expected_customers AS (
  SELECT n AS id,'Customer ' || lpad(n::text,3,'0') AS name,CASE WHEN n % 2 = 0 THEN 'east' ELSE 'west' END AS region FROM generate_series(1,32) n
+), expected_totals AS (
+ SELECT c.id,c.name,c.region,count(o.id) AS order_count,coalesce(sum(o.amount),0) AS total FROM expected_customers c LEFT JOIN expected_orders o ON o.customer_id=c.id GROUP BY c.id,c.name,c.region
 )
 SELECT CASE WHEN
  (SELECT count(*) FROM orders)=513 AND (SELECT count(*) FROM customers)=32
  AND NOT EXISTS ((SELECT * FROM orders EXCEPT SELECT * FROM expected_orders) UNION ALL (SELECT * FROM expected_orders EXCEPT SELECT * FROM orders))
  AND NOT EXISTS ((SELECT * FROM customers EXCEPT SELECT * FROM expected_customers) UNION ALL (SELECT * FROM expected_customers EXCEPT SELECT * FROM customers))
+ AND (SELECT count(*) FROM customer_totals)=32
+ AND NOT EXISTS ((SELECT id,name,region,order_count,total FROM customer_totals EXCEPT SELECT * FROM expected_totals) UNION ALL (SELECT * FROM expected_totals EXCEPT SELECT id,name,region,order_count,total FROM customer_totals))
  AND (SELECT count(*)=1 AND min(version)=1 FROM fixture_version)
  AND (SELECT last_value=513 AND is_called FROM orders_id_seq)
  AND (SELECT array_agg(relname::text ORDER BY relname) FROM pg_class WHERE relnamespace=to_regnamespace(:'schema') AND relkind IN ('r','p','v','m','S','f'))=ARRAY['customer_totals','customers','fixture_version','orders','orders_id_seq']
@@ -156,7 +187,8 @@ SELECT CASE WHEN
  AND has_schema_privilege(:'role', :'schema', 'USAGE')
  AND NOT has_schema_privilege(:'role', :'schema', 'CREATE')
  AND NOT has_database_privilege(:'role', current_database(), 'CREATE')
- AND NOT EXISTS (SELECT FROM pg_tables WHERE schemaname=:'schema' AND (NOT has_table_privilege(:'role', quote_ident(schemaname)||'.'||quote_ident(tablename),'SELECT') OR has_table_privilege(:'role', quote_ident(schemaname)||'.'||quote_ident(tablename),'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')))
+ AND NOT EXISTS (SELECT FROM pg_class WHERE relnamespace=to_regnamespace(:'schema') AND CASE WHEN relkind IN ('r','p','v','m') THEN NOT has_table_privilege(:'role',oid,'SELECT') OR has_table_privilege(:'role',oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE false END)
+ AND NOT EXISTS (SELECT FROM pg_class WHERE relnamespace=to_regnamespace(:'schema') AND CASE WHEN relkind='S' THEN has_sequence_privilege(:'role',oid,'USAGE,SELECT,UPDATE') ELSE false END)
  AND NOT EXISTS (SELECT FROM pg_namespace WHERE nspname LIKE 'qa\_%' ESCAPE '\' AND nspname <> :'schema' AND has_schema_privilege(:'role',oid,'USAGE'))
  THEN 'verified' ELSE 'invalid' END;
 SQL
