@@ -52,7 +52,9 @@ two tester slots. Extra browser tabs never increase that capacity or isolate log
 `--controller codex` launches separate installed Codex CLI processes, one per
 ready lane, independently of T3's subagent slots. Each receives its own scoped
 browser handle. The user's installed model configuration remains in effect unless
-`--agent-model MODEL` explicitly selects another model. `--agent-timeout` is
+`--agent-model MODEL` explicitly selects another model;
+`--agent-reasoning EFFORT` selects its reasoning effort. Both overrides require the
+Codex controller and persist across resume; omitted values inherit installed defaults. `--agent-timeout` is
 30–3600 seconds, default 600. Local CLI/version/login checks happen before
 preparation; actual inference starts only when workers are dispatched.
 

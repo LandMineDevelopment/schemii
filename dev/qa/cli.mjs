@@ -31,7 +31,8 @@ Selection: --accounts USER1,USER2 OR --agents 1..10
            --tracks lifecycle,canvas,rules,query,chat --parallel 1..10
            --viewports desktop,mobile --fixtures /path/manifest.json
            --credentials-file /private/accounts.json --headless
-Workers:   --controller t3|codex --agent-model MODEL --agent-timeout SECONDS
+Workers:   --controller t3|codex --agent-model MODEL --agent-reasoning EFFORT
+           --agent-timeout SECONDS
            Default controller: t3. Default timeout: 600 (range 30..3600).
 Run:       --run RUN_ID
 Claim:     --lane LANE_ID --agent AGENT_ID
@@ -41,13 +42,14 @@ Checkpoint:--session-file FILE --scenario ID --functional passed|failed|blocked
 
 All actions emit JSON. Browser backend: isolated (one Chromium process per lane).
 T3 dispatch is an explicit handoff; Codex dispatch launches independent CLI workers.
-Worker model follows the installed Codex configuration unless explicitly selected.
+Worker model and reasoning follow the installed Codex configuration unless selected.
+Reasoning: none|minimal|low|medium|high|xhigh|max|ultra; model support varies.
 Exit codes: 0 success, 1 failure, 2 invalid args, 3 awaiting agent dispatch,
 4 blocked prerequisite. No application test suite is invoked.
 `;
 function invalid(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
 function blocked(message) { return Object.assign(new Error(message), { exitCode: 4 }); }
-const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-timeout'];
+const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout'];
 const commandOptions = {
   help: [], '--help': [], '-h': [],
   plan: [...selectionOptions,'headless'],
@@ -90,6 +92,9 @@ async function selection(o) {
   const accounts = list(o.accounts, defaultAccounts);
   if (o.agents !== undefined && Number(o.agents) !== accounts.length) throw new Error('--agents must match the number of selected --accounts.');
   const agentModel = o['agent-model'] || null;
+  const agentReasoning = o['agent-reasoning'] ?? null;
+  if (agentReasoning !== null && !['none','minimal','low','medium','high','xhigh','max','ultra'].includes(agentReasoning)) throw new Error('--agent-reasoning must be none, minimal, low, medium, high, xhigh, max, or ultra (supported levels depend on the model).');
+  if (controller !== 'codex' && (agentModel !== null || agentReasoning !== null)) throw new Error('--agent-model and --agent-reasoning require --controller codex; T3 agents use their own runtime settings.');
   if (agentModel !== null && !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(agentModel)) throw new Error('--agent-model must be a model identifier.');
   if (o['agent-timeout'] !== undefined && !/^[0-9]+$/.test(o['agent-timeout'])) throw new Error('--agent-timeout must be an integer number of seconds.');
   const agentTimeout = Number(o['agent-timeout'] || 600);
@@ -138,7 +143,7 @@ async function selection(o) {
   for (const l of lanes) {
     if (!l.scenarios.length || new Set(l.scenarios.map(x=>x.id)).size !== l.scenarios.length || l.scenarios.some(x=>!/^[a-z0-9-]+$/.test(x.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
   }
-  return { accounts, agents:accounts.length, parallel, controller, agentModel, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
+  return { accounts, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
     baseURL:'https://localhost:8001',previewURL:'https://omarchy.taile4f57f.ts.net',
     fixtureMode:o.fixtures ? 'declared-retained-resources' : 'harness-only-no-app-data-writes',
     fixturePath:o.fixtures ? resolve(o.fixtures) : null };
@@ -216,7 +221,7 @@ async function main() {
       await access(chromium.executablePath());
       if(!config.headless&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new Error('No display available. Use explicit --headless for functional-only browser operation.');
     } catch(error) { throw blocked(`Prerequisite check failed: ${error instanceof SyntaxError ? 'Malformed private credential JSON.' : error.message}`); }
-    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
+    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
     const id=`qa-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,dir=runPath(id);
     await privateDir(dir);
     const runtime=join('/tmp',`schemii-qa-${process.getuid()}`,id);

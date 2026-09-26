@@ -39,11 +39,12 @@ ${JSON.stringify(brief, null, 2)}
 
 /** One installed Codex process per lane; no dependency on T3 subagent capacity. */
 export class CodexWorkers {
-  constructor({ root, runDir, model, timeoutSeconds = 600, onEvent = () => {}, onExit = () => {} }) {
+  constructor({ root, runDir, model, reasoning, timeoutSeconds = 600, onEvent = () => {}, onExit = () => {} }) {
     if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new Error('Agent timeout must be positive');
     this.root = resolve(root);
     this.runDir = resolve(runDir);
     this.model = model;
+    this.reasoning = reasoning;
     this.timeoutSeconds = timeoutSeconds;
     this.onEvent = onEvent;
     this.onExit = onExit;
@@ -88,6 +89,7 @@ export class CodexWorkers {
       if (this.closing || handle.reason) throw new Error('Worker pool stopped before agent launch');
       const args = ['--no-daemon', '-a', 'never', 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '-c', 'sandbox_workspace_write.writable_roots=[]', '-c', 'sandbox_workspace_write.exclude_slash_tmp=true', '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true', '--skip-git-repo-check', '-C', directory, '-o', join(directory, 'agent-final.txt')];
       if (this.model) args.push('-m', this.model);
+      if (this.reasoning) args.push('-c', `model_reasoning_effort=${JSON.stringify(this.reasoning)}`);
       args.push('-');
       const child = spawn('codex', args, { cwd: directory, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
       handle.child = child;

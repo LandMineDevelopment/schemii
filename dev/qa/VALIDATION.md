@@ -67,3 +67,14 @@ Isolation here separates cooperative testers' app sessions and ownership. It is
 not an adversarial OS security boundary: workers share the host user. Explicit
 stop/timeout drains tracked owned process groups; arbitrary background children
 created after an unexpected worker exit are not comprehensively guaranteed.
+
+## Model and reasoning selection follow-up
+
+Manual CLI checks covered all recognized reasoning values, omitted defaults,
+invalid effort rejection, and rejection of overrides with the T3 controller.
+A temporary executable captured the actual worker spawn arguments for model +
+reasoning, reasoning only, and inherited defaults. This verified `-m MODEL` and
+`-c model_reasoning_effort="EFFORT"` forwarding without an application suite or
+new model request. Provider support for each model/effort combination is not
+implied by CLI enum validation. Requested settings persist in the manifest and
+appear in doctor/status/report output.

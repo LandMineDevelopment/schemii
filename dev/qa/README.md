@@ -19,7 +19,12 @@ This is cooperative session isolation, not an OS security boundary between agent
 all run under the same host user. Prompts restrict workers to harness actions.
 
 The Codex worker uses the user's installed model configuration unless
-`--agent-model MODEL` explicitly selects a model. `--agent-timeout` sets its
+`--agent-model MODEL` explicitly selects a model. `--agent-reasoning EFFORT`
+sets `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
+The selected model must support that level; provider rejection remains a failure,
+with no automatic downgrade. Omitted settings inherit the installed configuration.
+Both overrides require `--controller codex`, apply to every worker in the run,
+and are retained for resume and displayed in status/report output. `--agent-timeout` sets its
 maximum lifetime in seconds (30–3600; default 600). Starting ten processes is not
 proof that ten AI turns ran concurrently; the manifest records peak live worker
 processes and observed active turns, while scenario results record actual work.
@@ -62,6 +67,15 @@ For up to ten independent Codex testers:
   --products schemoo --tracks harness --viewports desktop,mobile
 ./test.sh run --run RUN_ID
 ```
+
+To select model and reasoning, add these flags to `prepare` (also accepted by
+`plan` and `doctor`):
+
+```bash
+--controller codex --agent-model gpt-6-astra --agent-reasoning high
+```
+
+`run` uses the settings saved during preparation.
 
 `--agents N` selects `qa_subagent_01` through `qa_subagent_N`; explicit `--accounts`
 may select another set. If both are supplied, their counts must match. Codex

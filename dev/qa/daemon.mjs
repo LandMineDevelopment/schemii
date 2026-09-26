@@ -28,7 +28,7 @@ const fleet = new BrowserFleet({baseURL:run.baseURL,runDir:dir,headless:run.head
   event(dir,{...data,source:'browser'}).catch(()=>{});
   if(data.kind==='disconnected'&&!stopping){ const l=run.lanes.find(x=>x.id===data.lane);if(l){l.status='paused';tokens.delete(l.id);l.generation++;void persist();} }
 }});
-const workers = new CodexWorkers({root,runDir:dir,model:run.agentModel,timeoutSeconds:run.agentTimeout || 600,
+const workers = new CodexWorkers({root,runDir:dir,model:run.agentModel,reasoning:run.agentReasoning,timeoutSeconds:run.agentTimeout || 600,
   onEvent: async data => {
     const l=lane(data.laneId);
     if(l.status==='claimed')l.heartbeatAt=stamp();
