@@ -57,6 +57,13 @@ export function createProductAssistant({
   const history = button("Conversation history", () => void showHistory(), "history");
   const fresh = button("New conversation", () => void guard(async () => {
     if (busy) return;
+    if (needsSource()) {
+      generation++; clearTimeout(pollTimer); chat = null; transcriptKey = ""; input.value = "";
+      sourceSelect.value = sourceSelect.options.length === 2 ? sourceSelect.options[1].value : "";
+      tell("Choose a source connection, then send a message to start a new conversation.");
+      render(); sourceSelect.focus();
+      return;
+    }
     busy = true; controls();
     try { await newChat(); input.focus(); } finally { busy = false; render(); }
   }), "new-chat");
@@ -115,7 +122,7 @@ export function createProductAssistant({
     modelSelect.disabled = busy;
     reasoningSelect.disabled = busy || running || reasoningSelect.options.length <= 1;
     settingsReasoning.disabled = busy || running || settingsReasoning.options.length <= 1;
-    fresh.disabled = busy || running || !hasContext() || !sourceReady() || !selected(); history.disabled = busy || !hasContext();
+    fresh.disabled = busy || running || !hasContext() || (!chat && !sourceReady()) || !selected(); history.disabled = busy || !hasContext();
     saveSettings.disabled = busy;
     permissionEditor?.setBusy(busy);
     messages.querySelectorAll(".model-ai-approval button").forEach(control => { control.disabled = busy; });
