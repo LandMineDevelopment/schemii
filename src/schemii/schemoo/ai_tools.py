@@ -454,3 +454,16 @@ def zen_scope(services, owner, model_id, request=None):
     if (model.connection_owner_id or owner, model.connection_id) != identity:
         raise PiError("permission_changed", status=409)
     return ("schemoo", *identity)
+
+
+def bootstrap_scope(services, owner, connection_id):
+    """Use only a connection currently visible to this Schemoo actor."""
+    from schemii.common.ai.pi import PiError
+
+    if not connection_id:
+        raise PiError("instance_access_denied", status=403)
+    try:
+        profile = services.connections.for_product("schemoo").get(owner, connection_id)
+    except Exception as error:
+        raise PiError("instance_access_denied", status=403) from error
+    return ("schemoo", profile.owner_id or owner, profile.id)
