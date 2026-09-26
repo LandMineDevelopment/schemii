@@ -6,7 +6,7 @@ import { nodeColumns } from "./model-columns.js";
 import { columnFilterBindings } from "./model-filter-links.js";
 import { createIconElement } from "/assets/common/ui.js";
 
-const WIDTH = 286, HEADER = 60, ROW = 30, VISIBLE_ROWS = 10;
+const WIDTH = 286, HEADER = 60, ROW = 30, VISIBLE_ROWS = 10, CARD_GAP = 24;
 const svgNode = (tag, attrs = {}) => {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
@@ -62,6 +62,49 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
     return Math.max(HEADER + ROW / 2, Math.min(height(node) - ROW / 2, HEADER + (index + .5) * ROW - offset));
   };
   const position = node => viewport.dragPosition(node.id) || { x: node.x, y: node.y };
+
+  // Search the nearby card edges so a new or displaced card moves only as far
+  // as needed. The same geometry is used for drawing, Fit, and placement.
+  function openPosition(node, desired, occupied) {
+    const nodeHeight = height(node);
+    const clear = candidate => occupied.every(other =>
+      candidate.x + WIDTH + CARD_GAP <= other.x || other.x + WIDTH + CARD_GAP <= candidate.x ||
+      candidate.y + nodeHeight + CARD_GAP <= other.y || other.y + height(other) + CARD_GAP <= candidate.y);
+    if (clear(desired)) return desired;
+    const xOptions = new Set([desired.x]), yOptions = new Set([desired.y]);
+    for (const other of occupied) {
+      xOptions.add(other.x - WIDTH - CARD_GAP);
+      xOptions.add(other.x + WIDTH + CARD_GAP);
+      yOptions.add(other.y - nodeHeight - CARD_GAP);
+      yOptions.add(other.y + height(other) + CARD_GAP);
+    }
+    const candidates = [];
+    for (const x of xOptions) for (const y of yOptions) {
+      candidates.push({ x, y, distance: (x - desired.x) ** 2 + (y - desired.y) ** 2 });
+    }
+    candidates.sort((a, b) => a.distance - b.distance || a.y - b.y || a.x - b.x);
+    return candidates.find(clear) || desired;
+  }
+
+  function repairOverlaps() {
+    const nodes = getDraft().nodes;
+    // Preserve original source locations first. Aliases are appended later and
+    // remain the movable party even when a saved draft has a different order.
+    const ordered = [...nodes].sort((a, b) => Number(isAlias(a)) - Number(isAlias(b)));
+    const occupied = [];
+    let changed = false;
+    for (const node of ordered) {
+      const next = openPosition(node, { x: node.x, y: node.y }, occupied);
+      if (next.x !== node.x || next.y !== node.y) {
+        node.x = next.x; node.y = next.y;
+        const card = [...cards.children].find(item => item.dataset.nodeId === node.id);
+        if (card) { card.style.left = `${node.x}px`; card.style.top = `${node.y}px`; }
+        changed = true;
+      }
+      occupied.push(node);
+    }
+    if (changed) { drawEdges(); onChange?.({ layoutOnly: true }); }
+  }
 
   function ensureLayout() {
     const nodes = getDraft().nodes;
@@ -245,6 +288,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
     if (destroyed) return;
     ensureLayout(); const nodes = getDraft().nodes;
     if (!nodes.length) return;
+    repairOverlaps();
     viewport.fitBounds({ minX: Math.min(...nodes.map(n => n.x)) - 20, minY: Math.min(...nodes.map(n => n.y)),
       maxX: Math.max(...nodes.map(n => n.x + WIDTH)) + 120, maxY: Math.max(...nodes.map(n => n.y + height(n))) }, { maxZoom: 1 });
   }
@@ -265,7 +309,13 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
     if (event.target === host && event.key.toLowerCase() === "f") { event.preventDefault(); fit(); }
   };
   host.addEventListener("keydown", keyboard);
-  return { render, fit, startConnection:()=>connectionMode(true), highlightFilters(ids) {
+  return { render, fit,
+    placeNode(node, source) {
+      ensureLayout();
+      const desired = { x: (source?.x ?? 0) + WIDTH + CARD_GAP, y: source?.y ?? 0 };
+      Object.assign(node, openPosition(node, desired, getDraft().nodes));
+    },
+    startConnection:()=>connectionMode(true), highlightFilters(ids) {
       filterNodes=new Set(ids);
       for(const card of cards.children)card.classList.toggle("sc-filter-bound",filterNodes.has(card.dataset.nodeId));
     }, zoomBy: factor => viewport.zoomBy(viewport.getView().zoom * (factor - 1)),
