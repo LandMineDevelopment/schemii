@@ -723,3 +723,48 @@ def test_lazy_read_progress_completes_only_after_last_page():
     last = service.page(owner, workspace["id"], receipt.id, receipt.results[0].id, first.next_cursor)
     assert last.next_cursor is None
     assert service.activity(owner, receipt.id)["completedStatementIndexes"] == [0]
+
+
+@pytest.mark.parametrize("fail_first_fetch", [False, True])
+def test_forward_only_first_page_is_claimed_before_fetch(fail_first_fetch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    gateway = RetainedReadGateway()
+    api, _ = console_client(gateway)
+    workspace = target_workspace(api)
+    service = api.app.state.services.console
+    owner = "user_local_prototype"
+    receipt = service.reserve(owner, workspace["id"],
+        ConsoleExecutionCreate.model_validate(execution_body(workspace, "SELECT 1")))
+    service.run(owner, receipt.id)
+    receipt = service.get_owned(owner, receipt.id)
+    result_id = receipt.results[0].id
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def fetch(index, offset, size):
+        calls.append((index, offset, size))
+        started.set()
+        assert release.wait(2)
+        if fail_first_fetch:
+            raise RuntimeError("fetch failed after it may have advanced")
+        return tuple((row,) for row in range(size))
+
+    gateway.sessions[0].page = fetch
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(service.page, owner, workspace["id"], receipt.id, result_id, None)
+        assert started.wait(1)
+        with pytest.raises(ConsoleServiceError) as repeated:
+            service.page(owner, workspace["id"], receipt.id, result_id, None)
+        assert repeated.value.status == 410
+        assert repeated.value.code == "console_result_gone"
+        release.set()
+        if fail_first_fetch:
+            with pytest.raises(RuntimeError, match="fetch failed"):
+                first.result(timeout=2)
+        else:
+            assert first.result(timeout=2).next_cursor
+    with pytest.raises(ConsoleServiceError) as repeated:
+        service.page(owner, workspace["id"], receipt.id, result_id, None)
+    assert repeated.value.code == "console_result_gone"
+    assert len(calls) == 1
