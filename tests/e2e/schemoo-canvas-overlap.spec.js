@@ -42,6 +42,7 @@ test("Fit repairs saved overlap, keeps target clickable, and persists layout", a
   ensureAliasConnections(definition, await catalogResponse.json());
   const updated = await request.put(`/api/v1/schemoo/models/${modelId}`, { data: {
     expectedRevision: saved.revision, name: saved.name, definition,
+    catalogFingerprint: saved.catalogFingerprint,
   } });
   expect(updated.ok(), await updated.text()).toBeTruthy();
   const response = await request.put(`/api/v1/schemoo/models/${modelId}/layout`, { data: {
