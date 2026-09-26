@@ -254,7 +254,7 @@ class Conversations:
             if (value["providerId"], value["aiModelId"], value.get("reasoningEffort", "default")) != (body["providerId"], body["aiModelId"], effort):
                 self._require_reasoning(owner, body["providerId"], body["aiModelId"], effort)
             self._require_instance_policy(owner, body["providerId"], body["aiModelId"], effort,
-                value[self.subject_key], scope)
+                value[self.subject_key], scope, value.get("sourceConnectionId"))
             def change(current):
                 current.update(modes=modes,providerId=body["providerId"],aiModelId=body["aiModelId"],reasoningEffort=effort)
                 if current["status"] in {"working","waiting_approval"}:
