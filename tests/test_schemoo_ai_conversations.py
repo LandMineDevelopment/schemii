@@ -117,6 +117,46 @@ def test_plan_receipt_does_not_persist_preview_definition(monkeypatch):
     assert "action" not in receipt and "preview-only-field" not in json.dumps(receipt)
 
 
+def test_result_page_receipts_keep_only_live_cursor_across_user_turns(monkeypatch):
+    monkeypatch.setitem(Adapter.ACTIONS, "get_result_page", {
+        "id": "get_result_page", "label": "Analyze result rows", "mutates": False,
+        "readsRows": True, "group": "Results"})
+    execution_id, result_id = "cex_" + "a" * 32, "res_" + "b" * 32
+    first = {"operation": "get_result_page", "args": {
+        "executionId": execution_id, "resultId": result_id}}
+    second = {"operation": "get_result_page", "args": {
+        "executionId": execution_id, "resultId": result_id, "cursor": "next-page"}}
+    service, store, runtime, adapter, chat = setup([
+        call(first), PiReply("First page analyzed.", ()),
+        call(second), PiReply("Second page analyzed.", ())],
+        modes={"get_result_page": "automatic"})
+
+    def page(services, owner, model_id, action):
+        adapter.executed.append(deepcopy(action))
+        return {"executionId": execution_id, "resultId": result_id,
+            "nextCursor": "next-page" if "cursor" not in action["args"] else None,
+            "rows": [[SECRET_ROW]], "columns": [{"name": "private-column"}]}
+
+    adapter.execute_action = page
+    after_first = send(service, chat, "Read page one")
+    saved = store.get("alice", chat["id"])
+    assert saved["activity"][0]["page"] == {"executionId": execution_id,
+        "resultId": result_id, "nextCursor": "next-page"}
+    assert "action" not in saved["activity"][0]
+    assert SECRET_ROW not in json.dumps(saved) and "private-column" not in json.dumps(saved)
+
+    after_second = send(service, after_first, "Continue to page two")
+    assert adapter.executed == [first, second]
+    saved = store.get("alice", chat["id"])
+    assert saved["activity"][0]["page"] == {"executionId": execution_id,
+        "resultId": result_id, "nextCursor": None, "cursorConsumed": True}
+    assert saved["activity"][1]["page"] == {"executionId": execution_id,
+        "resultId": result_id, "nextCursor": None}
+    assert SECRET_ROW not in json.dumps(saved) and "next-page" not in json.dumps(saved)
+    assert "next-page" in json.dumps(runtime.requests[2])
+    assert after_second["status"] == "idle"
+
+
 def test_progress_tracks_real_work_without_metadata_storage():
     service, store, runtime, adapter, chat = setup([call("inspect"), PiReply("Done", ())])
     original = adapter.execute_action

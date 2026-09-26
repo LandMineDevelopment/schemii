@@ -75,6 +75,26 @@ def test_fresh_oversized_rows_become_explicit_missing_evidence_not_false_summary
     assert "not a full result" in text
 
 
+def test_nested_result_page_cursor_survives_compaction_without_rows():
+    cursor = "c" * 512
+    result = {"results": [{"operation": "get_result_page", "result": {
+        "executionId": "cex_" + "a" * 32, "resultId": "res_" + "b" * 32,
+        "nextCursor": cursor, "rows": [["private-page-cell"]],
+        "columns": [{"name": "private-column"}]}}]}
+    receipt = bounded_tool_receipt(result)
+    facts = {item["path"]: item["value"] for item in receipt["facts"]}
+    assert facts["results[0].result.nextCursor"] == cursor
+    assert "private-page-cell" not in json.dumps(receipt)
+    assert "private-column" not in json.dumps(receipt)
+
+    messages = [{"role": "user", "content": "Continue the result"}] + group(result=result)
+    compacted = compact_tool_context("system", messages, [], 5000)
+    assert len(compacted) == 2
+    text = compacted[-1]["content"]
+    assert cursor in text
+    assert "private-page-cell" not in text and "private-column" not in text
+
+
 def test_approval_pending_or_mismatched_native_call_groups_are_never_compacted():
     for messages in (group()[:1], group()[:1] + [group("different")[1]]):
         assert compact_tool_context("system", messages, [], 2000) == messages

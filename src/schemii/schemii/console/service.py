@@ -109,6 +109,7 @@ class _TransientConsoleResult:
     page_size: int
     expires_at: datetime
     read_session: PostgresConsoleReadSession | None = None
+    first_page_requested: bool = False
     active_exports: int = 0
     pending_close: bool = False
 
@@ -1007,6 +1008,13 @@ class ConsoleService:
                 raise ConsoleServiceError(422, "console_page_size_limit",
                     f"Rows per batch must be between 1 and {min(result.page_size, self._row_page_size)}")
             offset = 0
+            if cursor is None and result.read_session is not None and result.first_page_requested:
+                raise ConsoleServiceError(410, "console_result_gone",
+                    "The first page was already requested. Continue with its next cursor or run the query again.")
+            if cursor is None and result.read_session is not None:
+                # Claim before releasing the lock: a forward-only read cannot
+                # safely be replayed even if the first fetch later fails.
+                result.first_page_requested = True
             if cursor is not None:
                 value = self._result_cursors.pop(cursor, None)
                 if value is None or value[0] != result_id or value[2] <= now:
