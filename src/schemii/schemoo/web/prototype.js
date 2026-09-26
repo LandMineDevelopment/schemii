@@ -239,7 +239,7 @@ function editDerived(owner, existing, initial) {
     const exposure=exposedFields(draft,catalog);
     const previous=new Set(existing?.derivation.outputs.map(output=>output.id) || []);
     if(existing) draft.nodes[draft.nodes.indexOf(existing)]=node;
-    else draft.nodes.push(node);
+    else { canvas?.placeNode(node, draft.nodes.find(candidate => candidate.id === node.derivation.source)); draft.nodes.push(node); }
     const available=new Set(nodeColumns(draft,catalog,node).map(c=>c.name));
     draft.fields=draft.fields.filter(f=>f.table!==node.id || available.has(f.column));
     draft.exposedFields=exposure.filter(f=>f.table!==node.id || available.has(f.column));
@@ -406,8 +406,8 @@ function renderTableColumns() {
   }
 }
 function addAlias(table, label, source = draft.nodes.find(n => n.table === table)) {
-  const copy = { id: `alias_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`, table, label,
-    x: (source?.x || 0)+300, y: source?.y || 0 };
+  const copy = { id: `alias_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`, table, label };
+  canvas?.placeNode(copy, source);
   draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog); selected={node:copy.id}; refreshForms(); changed();
   inspectSelection();
   $("table-pane").scrollTop=0;
