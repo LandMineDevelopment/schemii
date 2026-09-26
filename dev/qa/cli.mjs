@@ -1,0 +1,275 @@
+#!/usr/bin/env node
+import { spawn, execFileSync } from 'node:child_process';
+import net from 'node:net';
+import { readFile, writeFile, open, rm, access } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
+import { deploymentLockPath } from './deployment.mjs';
+
+const help = `Usage: ./test.sh COMMAND [options]
+
+  plan       Show account/track assignments without mutations
+  doctor     Check installed browser, credentials and display prerequisites
+  prepare    Start canonical app once, open isolated browsers, prove readiness
+  run        Dispatch ready lanes through T3 or start isolated Codex workers
+  claim      Bind a lane to an agent; returns private session-file path
+  action     Drive only that agent's browser through its session file
+  checkpoint Record a scenario's function/style results and evidence
+  heartbeat  Renew an agent’s ownership lease using its session file
+  finish     Release a completed lane after all scenarios have results
+  status     Read durable progress
+  report     Generate an HTML report
+  advance    Prepare the next wave after all active lanes finish
+  recover    Close/reopen one lane, invalidate old handles, repeat preflight
+  resume     Restart an interrupted broker; reauthenticate unfinished lanes
+  stop       Close all browser processes and release the deployment lease
+  cleanup    Stop owned browsers; preserve accounts, data and evidence
+
+Selection: --accounts USER1,USER2 OR --agents 1..10
+           --products schemoo,schemer
+           --tracks lifecycle,canvas,rules,query,chat --parallel 1..10
+           --viewports desktop,mobile --fixtures /path/manifest.json
+           --credentials-file /private/accounts.json --headless
+Workers:   --controller t3|codex --agent-model MODEL --agent-timeout SECONDS
+           Default controller: t3. Default timeout: 600 (range 30..3600).
+Run:       --run RUN_ID
+Claim:     --lane LANE_ID --agent AGENT_ID
+Action:    --session-file FILE --kind snapshot --args-json '{"...":"..."}'
+Checkpoint:--session-file FILE --scenario ID --functional passed|failed|blocked
+           --visual passed|failed|blocked --note TEXT --evidence FILE1,FILE2
+
+All actions emit JSON. Browser backend: isolated (one Chromium process per lane).
+T3 dispatch is an explicit handoff; Codex dispatch launches independent CLI workers.
+Worker model follows the installed Codex configuration unless explicitly selected.
+Exit codes: 0 success, 1 failure, 2 invalid args, 3 awaiting agent dispatch,
+4 blocked prerequisite. No application test suite is invoked.
+`;
+function invalid(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
+function blocked(message) { return Object.assign(new Error(message), { exitCode: 4 }); }
+const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-timeout'];
+const commandOptions = {
+  help: [], '--help': [], '-h': [],
+  plan: [...selectionOptions,'headless'],
+  doctor: [...selectionOptions,'credentials-file','headless'],
+  prepare: [...selectionOptions,'credentials-file','headless'],
+  run: ['run'], claim: ['run','lane','agent'],
+  action: ['session-file','kind','args-json'],
+  checkpoint: ['session-file','scenario','functional','visual','note','evidence'],
+  finish: ['session-file'], heartbeat: ['session-file'],
+  status: ['run'], report: ['run'], advance: ['run'], recover: ['run','lane'],
+  resume: ['run'], stop: ['run'], cleanup: ['run'],
+};
+function parse(argv) {
+  const [command = 'help', ...rest] = argv, options = {};
+  if (!Object.hasOwn(commandOptions, command)) throw invalid(`Unknown command: ${command}`);
+  const allowed = new Set([...commandOptions[command], 'json', 'help']);
+  for (let i = 0; i < rest.length; i++) {
+    const key = rest[i].replace(/^--/, '');
+    if (!rest[i].startsWith('--') || !allowed.has(key) || key in options) throw invalid(`Invalid or repeated option for ${command}: ${rest[i]}`);
+    if (['headless','json','help'].includes(key)) options[key] = true;
+    else { if (!rest[i+1] || rest[i+1].startsWith('--') || !rest[i+1].trim()) throw invalid(`--${key} needs a value.`); options[key] = rest[++i]; }
+  }
+  return { command, options };
+}
+const list = (s, fallback) => (s || fallback).split(',').map(x => x.trim()).filter(Boolean);
+const trackSteps = {
+  lifecycle: 'Create a disposable object in your assigned namespace; save, reload, rename, duplicate and delete only the copy. Capture desktop/mobile states.',
+  canvas: 'On an owned scratch model, inspect fit/zoom, drag, relationships and overlaps; save and reload. Retained models must not be overwritten.',
+  rules: 'Use an owned scratch model to exercise valid and invalid filters/parameters, save/reload and visible validation recovery.',
+  query: 'Use assigned data to verify known results, paging, cancellation and actual exported contents. Pagination needs more than one real page.',
+  chat: 'Perform every scoped model action through in-app AI chat. Verify provider/model first, approvals, results, persistence and recovery. No editor/API substitute counts.',
+  harness: 'Inspect the assigned app in your own browser, capture desktop and mobile evidence, and verify ordinary controls. This is a harness walkthrough, not full app acceptance.',
+};
+async function selection(o) {
+  if (o.browser && o.browser !== 'isolated') throw new Error('Only --browser isolated can guarantee independent sessions. Native T3 context control is unavailable.');
+  const controller = o.controller || 't3';
+  if (!['t3','codex'].includes(controller)) throw new Error('--controller must be t3 or codex.');
+  if (o.agents !== undefined && !/^(?:[1-9]|10)$/.test(o.agents)) throw new Error('--agents must be an integer from 1 through 10.');
+  const defaultAccounts = Array.from({length: Number(o.agents || 2)}, (_,i)=>`qa_subagent_${String(i+1).padStart(2,'0')}`).join(',');
+  const accounts = list(o.accounts, defaultAccounts);
+  if (o.agents !== undefined && Number(o.agents) !== accounts.length) throw new Error('--agents must match the number of selected --accounts.');
+  const agentModel = o['agent-model'] || null;
+  if (agentModel !== null && !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(agentModel)) throw new Error('--agent-model must be a model identifier.');
+  if (o['agent-timeout'] !== undefined && !/^[0-9]+$/.test(o['agent-timeout'])) throw new Error('--agent-timeout must be an integer number of seconds.');
+  const agentTimeout = Number(o['agent-timeout'] || 600);
+  if (!Number.isInteger(agentTimeout) || agentTimeout < 30 || agentTimeout > 3600) throw new Error('--agent-timeout must be 30 through 3600 seconds.');
+  if (new Set(accounts.map(a => a.toLowerCase())).size !== accounts.length || accounts.some(a => !/^[a-zA-Z0-9_.@-]{1,64}$/.test(a))) throw new Error('Accounts must be unique usernames.');
+  if (o.parallel !== undefined && !/^(?:[1-9]|10)$/.test(o.parallel)) throw new Error('--parallel must be an integer from 1 through 10.');
+  const parallel = Number(o.parallel || Math.min(2, accounts.length));
+  if (!Number.isInteger(parallel) || parallel < 1 || parallel > 10 || parallel > accounts.length) throw new Error('Parallelism must be 1–10 and no greater than the selected accounts.');
+  const products = list(o.products, 'schemoo');
+  if (products.some(x => !['schemii','schemoo','schemer'].includes(x))) throw new Error('Unknown product.');
+  const tracks = list(o.tracks, 'harness');
+  if (tracks.some(x => !trackSteps[x])) throw new Error('Unknown track.');
+  if (tracks.length > accounts.length) throw new Error('Select at least one account per track; otherwise selected tracks would be omitted.');
+  const viewports = list(o.viewports, 'desktop,mobile');
+  if (viewports.some(x => !['desktop','mobile'].includes(x))) throw new Error('Viewports must be desktop,mobile.');
+  for (const [name, values] of Object.entries({ accounts, products, tracks, viewports })) {
+    if (!values.length || new Set(values).size !== values.length) throw new Error(`${name} must be a nonempty list without duplicates.`);
+  }
+  const fixture = o.fixtures ? await readJSON(resolve(o.fixtures)) : { lanes: {} };
+  if (!fixture.lanes || Array.isArray(fixture.lanes)) throw new Error('Fixture manifest needs a lanes object keyed by username.');
+  const lanes = accounts.map((username, i) => {
+    const spec = fixture.lanes[username] || {}, track = tracks[i % tracks.length];
+    if (track !== 'harness' && (!spec.checks?.length || !spec.resources)) throw new Error(`${username}: feature tracks require fixture resources and effective-access checks.`);
+    const checks = spec.checks || [];
+    for (const c of checks) {
+      if (typeof c.path !== 'string' || !c.path.startsWith('/api/v1/') || c.path.includes('..') || c.path.includes('://')) throw new Error('Fixture checks must be same-origin /api/v1/ GET paths.');
+      if (!c.equals && !c.minLength && c.status === undefined) throw new Error('Each fixture check requires an expected status or value.');
+    }
+    const baseScenarios = spec.scenarios || [{id:track,title:`${track} walkthrough`,instructions:trackSteps[track]}];
+    if (!Array.isArray(baseScenarios) || !baseScenarios.length || baseScenarios.some(s => !s || !/^[a-z0-9-]+$/.test(s.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
+    const scenarios = baseScenarios.flatMap(s => {
+      if (Object.hasOwn(s, 'product') && !products.includes(s.product)) throw new Error(`Scenario ${s.id} product must be one of the selected products.`);
+      return (s.product ? [s.product] : products).flatMap(product => viewports.map(viewportName => ({
+        ...s, id: `${s.id}-${product}-${viewportName}`,
+        title: `${s.title || s.id} · ${product} · ${viewportName}`,
+        product, viewportName,
+        viewport: viewportName === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
+        functional:'not-run', visual:'not-run', evidence:[],
+      })));
+    });
+    return { id: `lane-${i+1}`, username, products, track, status: 'queued', generation: 0,
+      viewport: viewports[0] === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
+      viewports, resources: spec.resources || {}, checks, url: spec.url,
+      scenarios };
+  });
+  for (const l of lanes) {
+    if (!l.scenarios.length || new Set(l.scenarios.map(x=>x.id)).size !== l.scenarios.length || l.scenarios.some(x=>!/^[a-z0-9-]+$/.test(x.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
+  }
+  return { accounts, agents:accounts.length, parallel, controller, agentModel, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
+    baseURL:'https://localhost:8001',previewURL:'https://omarchy.taile4f57f.ts.net',
+    fixtureMode:o.fixtures ? 'declared-retained-resources' : 'harness-only-no-app-data-writes',
+    fixturePath:o.fixtures ? resolve(o.fixtures) : null };
+}
+async function rpc(config, request) {
+  return new Promise((resolvePromise,reject) => {
+    let data = '';
+    const socket = net.createConnection(config.socket);
+    socket.setTimeout(180000);
+    socket.on('connect',()=>socket.write(JSON.stringify({...request,token:config.token,generation:config.generation,laneId:request.laneId || config.laneId})+'\n'));
+    socket.on('data',chunk=>{ data += chunk; if(data.includes('\n')) {socket.end();try {const r=JSON.parse(data.split('\n')[0]);if(!r.ok)reject(Object.assign(new Error(r.error), {code:r.code,exitCode:r.exitCode}));else resolvePromise(r.result);}catch(e){reject(e);} }});
+    socket.on('error',reject);socket.on('timeout',()=>socket.destroy(new Error('Controller request timed out. Check status before repeating an action.')));
+    socket.on('end',()=>{ if(!data.includes('\n'))reject(new Error('Controller disconnected. Do not repeat writes without checking saved state.')); });
+  });
+}
+async function startBroker(run, dir, resume=false) {
+  const lock = await deploymentLockPath(root);
+  const log = await open(join(dir,'controller.log'),'a',0o600);
+  const child = spawn('bash',['-c','exec 3> "$1"; flock --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_FD=3; exec node "$2" "$3" "$4"','qa-controller',lock,join(root,'dev/qa/daemon.mjs'),run.id,resume?'resume':'prepare'],{cwd:root,detached:true,stdio:['ignore',log.fd,log.fd]});
+  child.unref(); await log.close();
+  await writeJSON(join(dir,'controller-owner.json'),{pid:child.pid,birthTick:await birthTick(child.pid)});
+  for(let i=0;i<360;i++) {
+    await new Promise(r=>setTimeout(r,1000));
+    const state=await readJSON(join(dir,'manifest.json'));
+    if(['ready','blocked','complete','passed','finished-with-gaps'].includes(state.status)) return state;
+    try{process.kill(child.pid,0);}catch{ throw blocked('Controller stopped before readiness. Inspect controller.log; another run may hold the deployment lease.'); }
+  }
+  throw blocked('Preparation is still running. Use status; do not start another run.');
+}
+async function birthTick(pid) {
+  try {
+    const content=await readFile(`/proc/${pid}/stat`,'utf8');
+    const fields=content.slice(content.lastIndexOf(')')+2).split(' ');
+    return fields[0]==='Z' ? null : fields[19];
+  } catch(error) { if(error.code==='ENOENT')return null;throw error; }
+}
+async function requireStoppedOwner(dir) {
+  let owner;
+  try { owner=await privateJSON(join(dir,'controller-owner.json')); }
+  catch(error) { if(error.code==='ENOENT')throw blocked('Controller ownership record is missing; inspect surviving browser processes before recovery.');throw error; }
+  const actual=await birthTick(owner.pid);
+  if(actual&&actual===owner.birthTick)throw blocked('Controller process is still running but unavailable; wait for it to stop before recovery or cleanup.');
+  const savedRun=await readJSON(join(dir,'manifest.json'));
+  for(const lane of savedRun.lanes||[]) {
+    for(const kind of ['browser','worker']) {
+      if(lane[`${kind}LaunchPending`])throw blocked(`${kind} launch ownership for ${lane.id} is unresolved; inspect that owned ${kind} and confirm it stopped before recovery or cleanup.`);
+      const owned=lane[kind];
+      if(!owned)continue;
+      if(!Number.isSafeInteger(owned.pid)||owned.pid<1||typeof owned.birthTick!=='string'||!/^\d+$/.test(owned.birthTick))throw blocked(`${kind} ownership record for ${lane.id} is incomplete; verify that its ${kind} stopped before recovery or cleanup.`);
+      const actualBirth=await birthTick(owned.pid);
+      if(actualBirth&&actualBirth===owned.birthTick)throw blocked(`${kind} PID ${owned.pid} for ${lane.id} is still live; stop that owned ${kind} before resume or cleanup.`);
+    }
+  }
+}
+async function main() {
+  const {command,options:o}=parse(process.argv.slice(2));
+  if(['help','--help','-h'].includes(command)||o.help){console.log(help);return;}
+  if(['plan','doctor','prepare'].includes(command)) {
+    let config;
+    try { config=await selection(o); } catch(error) { throw invalid(error.message); }
+    if(command==='plan'){console.log(JSON.stringify(config,null,2));return;}
+    if(!o['credentials-file'])throw invalid('--credentials-file is required; existing passwords are never guessed or reset.');
+    const credentialPath=resolve(o['credentials-file']);
+    try {
+      const available=await credentials(credentialPath);
+      if(new Set([...available.keys()].map(a=>a.toLowerCase())).size!==available.size) throw new Error('Credential usernames must be unique case-insensitively.');
+      for(const a of config.accounts)if(!available.has(a))throw new Error(`Credential missing for ${a}.`);
+      if(config.controller==='codex') {
+        for(const args of [['--version'],['login','status']]) {
+          try { execFileSync('codex',args,{stdio:'ignore',timeout:15000}); }
+          catch { throw new Error(args[0]==='--version' ? 'Codex CLI is unavailable; install it before using --controller codex.' : 'Codex CLI login is unavailable; run codex login before preparing workers.'); }
+        }
+      }
+      const {chromium}=await import('@playwright/test');
+      await access(chromium.executablePath());
+      if(!config.headless&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new Error('No display available. Use explicit --headless for functional-only browser operation.');
+    } catch(error) { throw blocked(`Prerequisite check failed: ${error instanceof SyntaxError ? 'Malformed private credential JSON.' : error.message}`); }
+    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
+    const id=`qa-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,dir=runPath(id);
+    await privateDir(dir);
+    const runtime=join('/tmp',`schemii-qa-${process.getuid()}`,id);
+    await privateDir(runtime);
+    const control={socket:join(runtime,'controller.sock'),token:randomBytes(32).toString('hex')};
+    await writeJSON(join(dir,'control.json'),control);
+    await writeJSON(join(dir,'private.json'),{credentialPath});
+    const run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
+    await writeJSON(join(dir,'manifest.json'),run);
+    const result=await startBroker(run,dir);
+    console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
+  }
+  if(['action','checkpoint','finish','heartbeat'].includes(command)) {
+    if(!o['session-file'])throw invalid('--session-file is required.');
+    if(command==='action'&&!o.kind)throw invalid('--kind is required.');
+    if(command==='checkpoint'&&(!o.scenario||!['passed','failed','blocked'].includes(o.functional)||!['passed','failed','blocked'].includes(o.visual)))throw invalid('Checkpoint requires --scenario and passed|failed|blocked values for --functional and --visual.');
+    const session=await privateJSON(resolve(o['session-file']));
+    let args={};
+    try { args=o['args-json']?JSON.parse(o['args-json']):{}; } catch { throw invalid('--args-json must contain valid JSON.'); }
+    if(!args||typeof args!=='object'||Array.isArray(args))throw invalid('--args-json must be an object.');
+    const result=await rpc(session,{command,kind:o.kind,args,scenario:o.scenario,functional:o.functional,visual:o.visual,note:o.note,evidence:list(o.evidence,'')});
+    console.log(JSON.stringify(result,null,2));return;
+  }
+  if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||''))throw invalid('--run must identify a valid QA run.');
+  if(['claim','recover'].includes(command)&&!o.lane)throw invalid('--lane is required.');
+  if(command==='claim'&&!o.agent)throw invalid('--agent is required.');
+  const dir=runPath(o.run),run=await readJSON(join(dir,'manifest.json'));
+  if(command==='status'){console.log(JSON.stringify(run,null,2));return;}
+  if(command==='report') {const path=join(dir,'report.html');await writeFile(path,reportHTML(run),{mode:0o600});console.log(JSON.stringify({report:path,status:run.status}));return;}
+  if(command==='resume') {
+    if(['complete','passed','finished-with-gaps'].includes(run.status)) {
+      const report=join(dir,'report.html');
+      await writeFile(report,reportHTML(run),{mode:0o600});
+      console.log(JSON.stringify({status:run.status,report,message:'Completed run preserved; use prepare for a new run.'}));
+      return;
+    }
+    const control=await privateJSON(join(dir,'control.json'));
+    try{await rpc(control,{command:'ping'});throw new Error('Controller is still live. Use recover for a paused lane or advance for the next wave.');}catch(e){if(!['ENOENT','ECONNREFUSED'].includes(e.code))throw e;}
+    await requireStoppedOwner(dir);
+    await rm(control.socket,{force:true});
+    run.status='preparing';run.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),run);
+    const resumed=await startBroker(run,dir,true);
+    console.log(JSON.stringify(resumed,null,2));if(resumed.status==='blocked')process.exitCode=4;return;
+  }
+  if(!['run','claim','advance','recover','stop','cleanup'].includes(command))throw new Error(`Unknown command: ${command}`);
+  const control=await privateJSON(join(dir,'control.json'));
+  let result;
+  try { result=await rpc(control,{command:command==='run'&&run.controller==='codex'?'launch-codex':command,laneId:o.lane,agent:o.agent}); }
+  catch(error) {
+    if(!['stop','cleanup'].includes(command)||!['ENOENT','ECONNREFUSED'].includes(error.code))throw error;
+    await requireStoppedOwner(dir);
+    result={status:run.status,preserved:'QA accounts, app data, credentials, evidence and reports',controller:'already stopped'};
+  }
+  console.log(JSON.stringify(result,null,2));if(command==='run'&&run.controller!=='codex'&&result.status==='awaiting-agent-dispatch')process.exitCode=3;
+}
+main().catch(error=>{console.error(JSON.stringify({error:error.message}));process.exitCode=error.exitCode||1;});

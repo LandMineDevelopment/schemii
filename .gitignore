@@ -40,3 +40,6 @@ postgres-data/
 *.tgz
 *.gz
 *.zip
+
+# Retained manual QA credentials.
+secrets/

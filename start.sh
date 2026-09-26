@@ -110,6 +110,25 @@ fail() {
   exit 1
 }
 
+# A QA coordinator holds this lease for its whole run, including manual testing.
+# Resolve through Git so all linked worktrees protect the same deployment.
+# FD 3 is deliberately inherited across the launcher's stale-group re-exec.
+if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
+  command -v git >/dev/null 2>&1 || fail "Git is required to resolve the shared deployment lease"
+  command -v flock >/dev/null 2>&1 || fail "flock is required to serialize local application lifecycle changes"
+  SCHEMII_QA_LOCK_DIRECTORY="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)" || fail "could not resolve the shared deployment lease directory"
+  SCHEMII_QA_LOCK_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-deployment.lock"
+  if [[ -n "${SCHEMII_QA_LEASE_FD+x}" ]]; then
+    [[ "$SCHEMII_QA_LEASE_FD" == "3" ]] || fail "SCHEMII_QA_LEASE_FD must identify inherited descriptor 3"
+    [[ "$(readlink -- "/proc/$$/fd/3" 2>/dev/null || true)" == "$SCHEMII_QA_LOCK_FILE" ]] || fail "inherited QA deployment lease does not match this repository"
+    flock --nonblock 3 || fail "inherited QA deployment lease is not available"
+  else
+    exec 3>"$SCHEMII_QA_LOCK_FILE"
+    flock --nonblock 3 || fail "the deployment is leased by another launch or QA run; finish that run before rebuilding or resetting"
+    export SCHEMII_QA_LEASE_FD=3
+  fi
+fi
+
 if [[ ! "$SCHEMII_TEST_APP_PORT" =~ ^[0-9]+$ ]] || (( 10#$SCHEMII_TEST_APP_PORT < 1024 || 10#$SCHEMII_TEST_APP_PORT > 65535 )); then
   fail "SCHEMII_TEST_APP_PORT must be an integer from 1024 through 65535"
 fi
