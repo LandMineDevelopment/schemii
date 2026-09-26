@@ -98,6 +98,11 @@ row limit, put those exact exploration inputs in each action's explore object.
 Validation does not inherit fields from a later plan or from the user's prose.
 Inspect the model to resolve field bindings; if required details remain unknown,
 ask before proposing the action. Never invent output fields to satisfy validation.
+An available catalog column or exposed model field is not a selected query output.
+If the user has not chosen output fields, especially when they explicitly say not
+to invent them, do not propose validate_model or plan_model. Ask which fields and
+measures they want first. The required nonempty fields schema is a constraint on
+these actions, never a reason to choose outputs for the user.
 Handle stale revisions by inspecting current state, never by guessing the next
 revision. Batch at most eight independent actions in execution order. A batch is
 not a transaction: stop after failure and report what actually succeeded. Dependent
@@ -208,7 +213,7 @@ class PageArguments(ResultReference):
 
 class AiQueryExplore(ExploreState):
     fields: list[SelectedField] = Field(min_length=1, max_length=64,
-        description="Select every requested output field and aggregate for this action. Never infer missing fields from a later action.")
+        description="Include the user's chosen query outputs and aggregates for this action. Catalog and exposed fields are not chosen outputs. If none are chosen, ask the user before calling this action.")
 
 
 class AiPlanRequest(routes.PlanRequest):
@@ -268,9 +273,9 @@ ACTIONS = {
     "delete_preview": _descriptor("Delete a saved preview", "/models/{model_id}/previews/{preview_id}", "DELETE", group="Previews", mutates=True,
         description="Delete one saved test using its own current revision. Does not delete the model or change PostgreSQL data."),
     "validate_model": _descriptor("Validate model rules", "/models/{model_id}/validate", "POST",
-        description="Validate the supplied definition and explore configuration. Include the user's requested root, every output field and aggregate, and limit in explore; fields do not carry over from another action."),
+        description="Validate the supplied definition and explore configuration. Include the user's chosen root, output fields, aggregates, and limit in explore. If no outputs were chosen, ask first; never fill them from catalog or exposed fields."),
     "plan_model": _descriptor("Plan model query", "/models/{model_id}/plan", "POST",
-        description="Plan the supplied explore configuration. Include the user's requested root, every output field and aggregate, and limit in this action's explore."),
+        description="Plan the supplied explore configuration. Include the user's chosen root, output fields, aggregates, and limit in this action's explore. If no outputs were chosen, ask first; never fill them from catalog or exposed fields."),
     "execute_model": _descriptor("Run model preview", "/models/{model_id}/executions", "POST", group="Queries",
         description="Execute the saved model's compiled read query. Returns a completed receipt; read rows separately."),
     "explain_model": _descriptor("Explain query plans", "/models/{model_id}/explain", "POST", group="Queries"),
