@@ -16,3 +16,14 @@ These requirements are mandatory for every agent and every session in this repos
 - Do not claim the current source is available at a URL until that deployment has been rebuilt and checked through the canonical HTTPS origin.
 
 The launcher may use Docker on the host as an implementation detail. Application containers must never receive the Docker socket.
+
+## Manual UI QA
+
+For coordinated or parallel UI testing, read `testing/README.md` and `testing/harness/README.md` and use `./test.sh`.
+The explicitly selected isolated browser backend uses one browser process/context
+per account; ordinary T3 tabs do not prove session isolation. Follow the prepare,
+dispatch, claim, evidence, finish and stop workflow. Verify runtime agent capacity,
+keep each worker on its assigned session handle and resources, and reserve an
+independent verification slot. Do not rebuild while a run holds the deployment
+lease. The harness never treats a pending agent handoff or a browser probe as an
+application acceptance pass. Keep credentials and controller/session files private.

@@ -1,0 +1,5 @@
+# Applied after local overlays; the launcher preserves their resolved allowlist.
+services:
+  schemii:
+    environment:
+      SCHEMII_ALLOWED_TARGET_HOSTS: ${SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS:?launcher must resolve existing target hosts}

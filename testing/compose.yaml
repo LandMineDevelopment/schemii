@@ -1,0 +1,36 @@
+# Included by start.sh whenever the private testing registry exists.
+services:
+  qa-postgres:
+    image: schemii-testing-database
+    build:
+      context: ./testing/database
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_DB: schemii_qa
+      POSTGRES_USER: qa_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/qa_database_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    volumes:
+      - schemii-testing-postgres:/var/lib/postgresql/data
+      - ${SCHEMII_QA_STATE_DIRECTORY:?testing state directory required}/database-admin-password:/run/secrets/qa_database_admin_password:ro
+      - ${SCHEMII_QA_STATE_DIRECTORY:?testing state directory required}/database-credentials.tsv:/run/secrets/qa_database_credentials:ro
+    networks:
+      - database
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U qa_admin -d schemii_qa"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 1g
+    cpus: 2.0
+    pids_limit: 256
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  schemii-testing-postgres:

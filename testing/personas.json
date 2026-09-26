@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "fixtureVersion": "qa-v1",
+  "personas": [
+    {
+      "id": "no_access",
+      "capabilities": [],
+      "isAdmin": false,
+      "product": null,
+      "defaultProducts": [
+        "schemoo"
+      ],
+      "description": "Authenticated with no product access"
+    },
+    {
+      "id": "modeler",
+      "capabilities": [
+        "schemoo:access"
+      ],
+      "isAdmin": false,
+      "product": "schemoo",
+      "defaultProducts": [
+        "schemoo"
+      ],
+      "description": "Schemoo modeling with its own QA schema"
+    },
+    {
+      "id": "designer",
+      "capabilities": [
+        "schemii:access"
+      ],
+      "isAdmin": false,
+      "product": "schemii",
+      "defaultProducts": [
+        "schemii"
+      ],
+      "description": "Schemii design with its own QA schema"
+    },
+    {
+      "id": "report_author",
+      "capabilities": [
+        "schemer:access",
+        "schemer:author"
+      ],
+      "isAdmin": false,
+      "product": "schemer",
+      "defaultProducts": [
+        "schemer"
+      ],
+      "description": "Schemer report author with its own QA schema"
+    },
+    {
+      "id": "report_viewer",
+      "capabilities": [
+        "schemer:access"
+      ],
+      "isAdmin": false,
+      "product": "schemer",
+      "viewerOnly": true,
+      "defaultProducts": [
+        "schemer"
+      ],
+      "description": "Schemer viewer empty state; shared dashboard fixtures are not seeded"
+    },
+    {
+      "id": "administrator",
+      "capabilities": [],
+      "isAdmin": true,
+      "product": null,
+      "defaultProducts": [
+        "schemoo"
+      ],
+      "description": "Account administration only; no implicit product access"
+    }
+  ]
+}
