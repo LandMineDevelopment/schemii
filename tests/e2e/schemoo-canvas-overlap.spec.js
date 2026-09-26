@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { ensureAliasConnections } from "../../src/schemii/schemoo/web/alias-model.js";
 import { chooseModelOption } from "./helpers/schemoo-select.js";
 import { createOrganizationModel, deleteModel } from "./helpers/schemoo-model.js";
 
@@ -36,6 +37,9 @@ test("Fit repairs saved overlap, keeps target clickable, and persists layout", a
   const aliasId = "qa_overlap_alias";
   const definition = { ...saved.definition, nodes: [...saved.definition.nodes,
     { id: aliasId, table: "certification_dim", label: "QA overlap alias" }] };
+  const catalogResponse = await request.get(`/api/v1/schemoo/catalog?connection_id=${saved.connectionId}&namespace=${saved.namespace}`);
+  expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+  ensureAliasConnections(definition, await catalogResponse.json());
   const updated = await request.put(`/api/v1/schemoo/models/${modelId}`, { data: {
     expectedRevision: saved.revision, name: saved.name, definition,
   } });
