@@ -16,7 +16,7 @@ export function refreshModelLibraryActions() {
   if (!document.getElementById("model-library")?.open) return;
   for (const refresh of refreshActions) refresh();
 }
-export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete = () => true } = {}) {
+export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete = () => true, onAssistant = null } = {}) {
   const ticket = ++libraryTicket;
   refreshActions = [];
   const dialog = document.getElementById("model-library"), content = document.getElementById("library-content");
@@ -28,6 +28,11 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
     content.replaceChildren();
     const status = element("p", { className: "hint", attrs: { role: "status" } });
     const choose = async model => { try { if (await onOpen(model.id) !== false) dialog.close(); } catch (error) { status.textContent = error.message; } };
+    if (!models.length && onAssistant) {
+      const assistant = element("button", { type: "button", className: "ui-button primary", text: "Create with model assistant" });
+      assistant.onclick = () => { dialog.close(); onAssistant(); };
+      content.append(element("p", { className: "hint", text: "Describe the model you want and let the assistant create it." }), assistant);
+    }
     if (models.length) {
       const list = element("div", { className: "model-list" });
       for (const model of models) {

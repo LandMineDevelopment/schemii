@@ -16,7 +16,8 @@ class Preferences(BaseModel):
     aiModelId: str | None=Field(default=None,max_length=256)
 
 class ChatCreate(Preferences):
-    modelId: str=Field(pattern=r"^model_[0-9a-f]{32}$")
+    modelId: str=Field(default="", pattern=r"^(?:model_[0-9a-f]{32})?$")
+    sourceConnectionId: str | None=Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
     providerId: str=Field(min_length=1,max_length=128)
     aiModelId: str=Field(min_length=1,max_length=256)
 
