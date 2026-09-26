@@ -1,9 +1,14 @@
+> Implementation update: the suite now lives in `testing/`. Its portable fixture
+> database, retained persona pools, credential transfer and concurrent-run
+> ownership are documented in [testing/README.md](../../testing/README.md).
+> The earlier ten-agent validation remains in the harness validation record.
+
 # Repeatable manual UI QA with parallel AI agents
 
 Tracking issue: [#73](https://github.com/LandMineDevelopment/schemii/issues/73).
 Status: implementation in progress. The runner supports up to ten independent
 Codex workers; this document does not certify a successful ten-agent run or app
-acceptance. See the [operating runbook](../../dev/qa/README.md) and each run's report
+acceptance. See the [operating runbook](../../testing/harness/README.md) and each run's report
 for commands, evidence, and remaining gaps.
 
 ## Outcome and scope
@@ -152,7 +157,7 @@ for isolated projects/resources; changing ports alone does not isolate cookies.
 
 ## References
 
-- [Runner operating guide](../../dev/qa/README.md)
+- [Runner operating guide](../../testing/harness/README.md)
 - [Launcher](../../start.sh)
 - [Demo scenario provenance](../../dev/postgres/demo-scenarios/README.md)
 - [Playwright browser-context isolation](https://playwright.dev/docs/browser-contexts)

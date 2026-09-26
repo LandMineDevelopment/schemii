@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, closeSync } from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
+import { writeJSON } from './store.mjs';
 
 function git(root, args) {
   return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
@@ -82,35 +83,58 @@ export async function startDeployment({
   if (process.env.SCHEMII_QA_LEASE_FD !== '3' || readlinkSync('/proc/self/fd/3') !== lockPath) {
     throw new Error('startDeployment requires the coordinator deployment lease on inherited descriptor 3');
   }
-  await mkdir(runDir, { recursive: true, mode: 0o700 });
-  const before = sourceIdentity(root);
-  const logPath = path.join(runDir, 'start.log');
-  const log = await open(logPath, 'w', 0o600);
-  let result;
-  try {
-    result = await new Promise((resolve, reject) => {
-      const child = spawn('./start.sh', [], {
-        cwd: root,
-        env: { ...process.env, SCHEMII_QA_LEASE_FD: '3' },
-        stdio: ['ignore', log.fd, log.fd, 3],
-      });
-      child.once('error', reject);
-      child.once('close', (code, signal) => resolve({ code, signal }));
-    });
-  } finally { await log.close(); }
-  if (result.code !== 0) throw await launcherFailure(logPath, result.code, result.signal);
-
-  const endpoints = await Promise.all([
-    checkHTTPS(localURL, true),
-    checkHTTPS(`${localURL}/api-map`, true, 0, true),
-    checkHTTPS(previewURL, false),
-    checkHTTPS(`${previewURL}/api-map`, false, 0, true),
-  ]);
-  const after = sourceIdentity(root);
-  if (before.commit !== after.commit || before.fingerprint !== after.fingerprint) {
-    throw new Error('Source changed during deployment; finish the run and prepare again before assigning testers');
+  const gatePath = path.join(path.dirname(lockPath), 'qa-startup.lock');
+  if (readlinkSync('/proc/self/fd/4') !== gatePath || !['exclusive','shared'].includes(process.env.SCHEMII_QA_LEASE_MODE)) {
+    throw new Error('startDeployment requires the startup gate on descriptor 4 and an explicit deployment lease mode');
   }
-  const deployment = { identity: after, endpoints, logPath, verifiedAt: new Date().toISOString() };
-  await writeFile(path.join(runDir, 'deployment.json'), `${JSON.stringify(deployment, null, 2)}\n`, { mode: 0o600 });
-  return deployment;
+  try {
+    await mkdir(runDir, { recursive: true, mode: 0o700 });
+    const before = sourceIdentity(root);
+    const logPath = path.join(runDir, 'start.log');
+    const ledgerPath = path.join(path.dirname(lockPath), 'qa-deployment.json');
+    const reused = process.env.SCHEMII_QA_LEASE_MODE === 'shared';
+    if (reused) {
+      let prior;
+      try { prior = JSON.parse(await readFile(ledgerPath, 'utf8')); }
+      catch { throw new Error('The active deployment has no readable QA identity; stop its owner and prepare again.'); }
+      if (prior.identity?.fingerprint !== before.fingerprint || prior.identity?.commit !== before.commit) {
+        throw new Error('Another run holds a different source deployment; finish it before rebuilding this checkout.');
+      }
+    } else {
+      const log = await open(logPath, 'w', 0o600);
+      let result;
+      try {
+        result = await new Promise((resolve, reject) => {
+          const child = spawn('./start.sh', [], {
+            cwd: root,
+            env: { ...process.env, SCHEMII_QA_LEASE_FD: '3', SCHEMII_QA_GATE_FD: '4' },
+            stdio: ['ignore', log.fd, log.fd, 3, 4],
+          });
+          child.once('error', reject);
+          child.once('close', (code, signal) => resolve({ code, signal }));
+        });
+      } finally { await log.close(); }
+      if (result.code !== 0) throw await launcherFailure(logPath, result.code, result.signal);
+    }
+
+    const endpoints = await Promise.all([
+      checkHTTPS(localURL, true),
+      checkHTTPS(`${localURL}/api-map`, true, 0, true),
+      checkHTTPS(previewURL, false),
+      checkHTTPS(`${previewURL}/api-map`, false, 0, true),
+    ]);
+    const after = sourceIdentity(root);
+    if (before.commit !== after.commit || before.fingerprint !== after.fingerprint) {
+      throw new Error('Source changed during deployment; finish the run and prepare again before assigning testers');
+    }
+    const deployment = { identity: after, endpoints, ...(reused ? {} : {logPath}), reused, verifiedAt: new Date().toISOString() };
+    if (!reused) await writeJSON(ledgerPath, deployment);
+    await writeFile(path.join(runDir, 'deployment.json'), `${JSON.stringify(deployment, null, 2)}\n`, { mode: 0o600 });
+    // Gate prevents a concurrent launcher taking the lock during EX -> SH conversion.
+    execFileSync('flock', ['-s', '3'], { stdio: ['ignore','pipe','pipe',3] });
+    return deployment;
+  } finally {
+    try { execFileSync('flock', ['-u', '4'], { stdio: ['ignore','pipe','pipe','ignore',4] }); }
+    finally { closeSync(4); }
+  }
 }

@@ -1,8 +1,11 @@
 # Manual UI QA runner
 
+Start with the [testing suite setup and persona pools](../README.md).
+
 `./test.sh` is the supported entrypoint. It runs **separate Chromium processes and
 contexts against one application**, with one retained QA account per lane. It does
-not launch the application test suite, replace the HTTPS app, or create accounts.
+not launch the application test suite or replace the HTTPS app. The separate
+`setup` command provisions retained persona accounts and the portable QA database.
 
 The browser backend is explicitly `isolated`: visible Playwright-controlled
 windows, not additional T3 preview tabs. Choose an agent controller:
@@ -82,14 +85,16 @@ may select another set. If both are supplied, their counts must match. Codex
 preflight checks the installed CLI and login status locally without starting an
 AI request. Actual workers require the user's authenticated Codex access.
 
-Accounts 06–10 currently have Schemoo-only access and no database fixtures. Use
+The legacy qa_subagent_06–10 accounts have Schemoo-only access and no database fixtures.
+The suite persona pool is separate: see `../README.md` for its stable database spaces. Use
 those accounts for the read-only Schemoo harness track; database/query/chat
 acceptance needs separately verified permissions, resources, and prerequisites.
 The runner does not create these accounts or broaden their grants.
 
 Preparation starts the app **only through `./start.sh`**, checks local and tailnet
 HTTPS plus API maps, records source fingerprint and launcher success, and holds a
-shared-worktree deployment lock. It opens one browser process per active lane,
+shared-worktree deployment lease. Concurrent runs reuse the verified same-source
+deployment and reserve different accounts; rebuilds and resets need an exclusive lease. It opens one browser process per active lane,
 checks identity and product capabilities, and runs harmless browser probes for
 click/type, screenshots, dialogs, drag and downloads. It verifies different cookie
 values and storage markers, logs each account out in turn, verifies the others

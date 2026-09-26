@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec node "$ROOT_DIR/dev/qa/cli.mjs" "$@"
+exec "$ROOT_DIR/testing/test.sh" "$@"

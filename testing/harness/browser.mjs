@@ -76,8 +76,15 @@ export class BrowserFleet {
     const identity = await response.json();
     if (identity.user?.username !== handle.lane.username.toLowerCase()) throw new Error(`Identity mismatch for lane ${handle.lane.id}`);
     const capabilities = identity.capabilities ?? [];
+    if (handle.lane.expectedCapabilities) {
+      const expected=[...handle.lane.expectedCapabilities].sort();
+      if(JSON.stringify([...capabilities].sort())!==JSON.stringify(expected))throw new Error(`Lane ${handle.lane.id} effective permissions differ from its persona.`);
+    }
     for (const product of handle.lane.products ?? []) {
-      if (!capabilities.includes(`${product}:access`)) throw new Error(`Lane ${handle.lane.id} lacks ${product}:access`);
+      const allowed=capabilities.includes(`${product}:access`);
+      if ((handle.lane.deniedProducts || []).includes(product)) {
+        if(allowed)throw new Error(`Lane ${handle.lane.id} unexpectedly has ${product}:access`);
+      }else if(!allowed)throw new Error(`Lane ${handle.lane.id} lacks ${product}:access`);
     }
     return { username: identity.user.username, capabilities };
   }

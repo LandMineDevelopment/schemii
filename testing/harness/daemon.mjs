@@ -1,10 +1,11 @@
 import net from 'node:net';
-import { chmod, readFile, writeFile, rm, stat, realpath } from 'node:fs/promises';
-import { join, resolve, relative, isAbsolute, dirname } from 'node:path';
+import { releaseAccounts } from './leases.mjs';
+import { chmod, writeFile, rm, stat, realpath } from 'node:fs/promises';
+import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
-import { startDeployment, sourceIdentity, deploymentLockPath } from './deployment.mjs';
+import { startDeployment, sourceIdentity } from './deployment.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp } from './store.mjs';
 
 process.umask(0o077);
@@ -154,10 +155,10 @@ async function workerRequest(req){
         const captures=(l.captures||[]).filter(c=>evidence.includes(c.path));
         const matched=captures.some(c=>{
           const pathname=new URL(c.url).pathname;
-          const productMatches=s.product==='schemii'?pathname==='/':(pathname===`/${s.product}`||pathname.startsWith(`/${s.product}/`));
+          const productMatches=(s.product==='schemii'?pathname==='/':(pathname===`/${s.product}`||pathname.startsWith(`/${s.product}/`))) || ((l.deniedProducts || []).includes(s.product)&&pathname==='/account');
           return productMatches&&c.viewport.width===s.viewport.width&&c.viewport.height===s.viewport.height;
         });
-        if(!matched)throw new Error('Visual pass requires an application screenshot from this scenario product and exact viewport; probe images do not count.');
+        if(!matched)throw new Error('Visual pass requires a screenshot from this scenario product (or its expected access-denial account page) and exact viewport; probe images do not count.');
       }
       s.attempts ||= [];
       s.attempts.push({functional:req.functional,visual:req.visual,note:req.note,evidence,reviewer:l.agent,at:stamp()});
@@ -169,6 +170,7 @@ async function workerRequest(req){
     if(req.command==='finish') {
       if(l.scenarios.some(s=>s.functional==='not-run'||s.visual==='not-run'))throw new Error('Every scenario needs explicit results; use blocked for unavailable checks.');
       l.status='complete';l.generation++;tokens.delete(l.id);await fleet.closeLane(l.id);
+      await releaseAccounts({runId:id,accounts:[l.username]});
       if(run.lanes.every(x=>x.status==='complete')){
         run.status=terminalStatus();
         run.summary='All assigned scenarios recorded. Review functional and visual results separately.';
@@ -218,7 +220,7 @@ async function controllerRequest(req){
 async function shutdown(reason){
   if(stopping)return;stopping=true;
   for(const l of run.lanes){if(['claimed','ready','preparing'].includes(l.status))l.status='paused';l.generation++;tokens.delete(l.id);}
-  await workers.close();await fleet.close();run.status=['passed','finished-with-gaps'].includes(run.status)?run.status:'stopped';run.summary=`Browser controller stopped (${reason}); retained accounts and resources preserved.`;
+  await workers.close();await fleet.close();await releaseAccounts({runId:id,accounts:run.lanes.map(l=>l.username)});run.status=['passed','finished-with-gaps'].includes(run.status)?run.status:'stopped';run.summary=`Browser controller stopped (${reason}); retained accounts and resources preserved.`;
   await event(dir,{kind:'stopped',reason});await persist();
   setTimeout(()=>{server.close();void rm(control.socket,{force:true}).finally(()=>process.exit(0));},200).unref();
 }
@@ -236,34 +238,16 @@ const server=net.createServer(socket=>{
 await new Promise((res,rej)=>{server.once('error',rej);server.listen(control.socket,res);});await chmod(control.socket,0o600);
 process.on('SIGTERM',()=>void shutdown('SIGTERM'));process.on('SIGINT',()=>void shutdown('SIGINT'));
 try{
-  // Durable cross-worktree ownership prevents a crashed run's browsers from
-  // becoming invisible merely by creating a new run ID.
-  const registry=join(dirname(deploymentLockPath(root)), 'qa-active-run.json');
-  try {
-    const prior=await readJSON(registry);
-    if(prior.dir!==dir) {
-      const previous=await readJSON(join(prior.dir,'manifest.json'));
-      for(const l of previous.lanes) {
-        if(l.browserLaunchPending||l.workerLaunchPending)throw new Error('Previous run has uncertain process launch ownership; inspect it before starting a new run.');
-        for(const owned of [l.browser,l.worker]) if(owned?.pid) {
-          let proc;
-          try{proc=await readFile(`/proc/${owned.pid}/stat`,'utf8');}catch(e){if(e.code!=='ENOENT')throw e;}
-          if(proc&&proc.slice(proc.lastIndexOf(')')+2).split(' ')[19]===owned.birthTick)throw new Error(`Previous run owned PID ${owned.pid} is still live. Close that owned process before starting a new run.`);
-        }
-      }
-    }
-  }catch(e){if(e.code!=='ENOENT')throw e;}
-  await writeJSON(registry,{dir,runId:id,pid:process.pid});
   if(mode==='resume'){
     await checkSource();
     for(const l of run.lanes)if(l.status!=='complete'){l.status='queued';l.generation++;tokens.delete(l.id);}
-    // Resume rebuilds via the supported launcher before reusing fixture references.
+    // Resume verifies the active deployment or rebuilds through the supported launcher.
   }
   run.deployment=await startDeployment({root,runDir:dir});
   if(stopping)throw new Error('Controller was stopped during startup.');
   for(const l of run.lanes)if(l.status==='preparing')l.status='queued';
   await prepareWave();starting=false;
-}catch(e){starting=false;run.status='blocked';run.error=safeError(e);await persist();await fleet.close();server.close();await rm(control.socket,{force:true});process.exitCode=4;}
+}catch(e){starting=false;run.status='blocked';run.error=safeError(e);await persist();await workers.close();await fleet.close();await releaseAccounts({runId:id,accounts:run.lanes.map(l=>l.username)});server.close();await rm(control.socket,{force:true});process.exitCode=4;}
 if(run.status!=='blocked')setInterval(()=>{
   for(const l of run.lanes)if(l.status==='claimed'&&Date.now()-Date.parse(l.heartbeatAt)>LEASE_MS){
     l.status='paused';l.generation++;tokens.delete(l.id);

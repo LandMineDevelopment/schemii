@@ -2,13 +2,24 @@
 import { spawn, execFileSync } from 'node:child_process';
 import net from 'node:net';
 import { readFile, writeFile, open, rm, access } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
 import { deploymentLockPath } from './deployment.mjs';
+import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts } from './leases.mjs';
+const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
+const catalog=()=>readJSON(join(root,'testing/personas.json'));
+const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spawn(file,args,{cwd:root,stdio:'inherit',...options});child.once('error',rej);child.once('close',code=>code===0?res():rej(blocked(`${file} exited ${code}; inspect the exact diagnostic above.`)));});
 
 const help = `Usage: ./test.sh COMMAND [options]
 
+  setup      Create/extend stable persona credentials, prepare QA DB, provision accounts
+  export-credentials Export a private portable credential bundle (--output FILE)
+  import-credentials Import into empty private state (--input FILE)
+  personas   List available permission personas
+  reset      Restore registered QA data spaces; preserve credentials and app accounts
+  check-reset Exercise and restore one registered fixture space
+  verify-data Verify the stable baseline and PostgreSQL isolation
   plan       Show account/track assignments without mutations
   doctor     Check installed browser, credentials and display prerequisites
   prepare    Start canonical app once, open isolated browsers, prove readiness
@@ -26,7 +37,9 @@ const help = `Usage: ./test.sh COMMAND [options]
   stop       Close all browser processes and release the deployment lease
   cleanup    Stop owned browsers; preserve accounts, data and evidence
 
-Selection: --accounts USER1,USER2 OR --agents 1..10
+Setup:     --copies-per-persona 20 --admin-credentials /private/admin.json
+Data:      --space qa_modeler_001|all
+Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
            --products schemoo,schemer
            --tracks lifecycle,canvas,rules,query,chat --parallel 1..10
            --viewports desktop,mobile --fixtures /path/manifest.json
@@ -49,9 +62,11 @@ Exit codes: 0 success, 1 failure, 2 invalid args, 3 awaiting agent dispatch,
 `;
 function invalid(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
 function blocked(message) { return Object.assign(new Error(message), { exitCode: 4 }); }
-const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout'];
+const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona'];
 const commandOptions = {
-  help: [], '--help': [], '-h': [],
+  help: [], '--help': [], '-h': [], personas: [],
+  setup: ['copies-per-persona','admin-credentials'], reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
+  'export-credentials': ['output'], 'import-credentials': ['input'],
   plan: [...selectionOptions,'headless'],
   doctor: [...selectionOptions,'credentials-file','headless'],
   prepare: [...selectionOptions,'credentials-file','headless'],
@@ -83,13 +98,27 @@ const trackSteps = {
   chat: 'Perform every scoped model action through in-app AI chat. Verify provider/model first, approvals, results, persistence and recovery. No editor/API substitute counts.',
   harness: 'Inspect the assigned app in your own browser, capture desktop and mobile evidence, and verify ordinary controls. This is a harness walkthrough, not full app acceptance.',
 };
-async function selection(o) {
+async function selection(o, reservedAccounts) {
   if (o.browser && o.browser !== 'isolated') throw new Error('Only --browser isolated can guarantee independent sessions. Native T3 context control is unavailable.');
   const controller = o.controller || 't3';
   if (!['t3','codex'].includes(controller)) throw new Error('--controller must be t3 or codex.');
   if (o.agents !== undefined && !/^(?:[1-9]|10)$/.test(o.agents)) throw new Error('--agents must be an integer from 1 through 10.');
   const defaultAccounts = Array.from({length: Number(o.agents || 2)}, (_,i)=>`qa_subagent_${String(i+1).padStart(2,'0')}`).join(',');
-  const accounts = list(o.accounts, defaultAccounts);
+  let persona=null,poolCandidates=[];
+  if(o.persona) {
+    if(o.accounts)throw new Error('--persona and --accounts are mutually exclusive.');
+    persona=(await catalog()).personas.find(p=>p.id===o.persona);
+    if(!persona)throw new Error('Unknown persona; use ./test.sh personas.');
+    let registry;
+    try{registry=await privateJSON(join(stateDir,'registry.json'));}catch(e){if(e.code!=='ENOENT')throw e;}
+    poolCandidates=(registry?.slots || []).filter(s=>s.persona===persona.id&&s.accountId&&s.provisioned).map(s=>s.username);
+    if(!registry)poolCandidates=Array.from({length:20},(_,i)=>`qa_${persona.id}_${String(i+1).padStart(3,'0')}`);
+    const candidates=reservedAccounts || await availableAccounts(poolCandidates);
+    if(candidates.length<Number(o.agents||2))throw new Error('Not enough available provisioned accounts for this persona. Run setup, increase its copies, or clean up completed runs.');
+    if(!o.products)o={...o,products:persona.defaultProducts.join(',')};
+    if(!o.fixtures)try{await access(join(stateDir,'fixtures.json'));o={...o,fixtures:join(stateDir,'fixtures.json')};}catch(e){if(e.code!=='ENOENT')throw e;}
+  }
+  const accounts=reservedAccounts || (persona?(await availableAccounts(poolCandidates)).slice(0,Number(o.agents||2)):list(o.accounts,defaultAccounts));
   if (o.agents !== undefined && Number(o.agents) !== accounts.length) throw new Error('--agents must match the number of selected --accounts.');
   const agentModel = o['agent-model'] || null;
   const agentReasoning = o['agent-reasoning'] ?? null;
@@ -138,14 +167,16 @@ async function selection(o) {
     return { id: `lane-${i+1}`, username, products, track, status: 'queued', generation: 0,
       viewport: viewports[0] === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
       viewports, resources: spec.resources || {}, checks, url: spec.url,
+      persona:persona?.id || spec.persona || null, expectedCapabilities:spec.expectedCapabilities, deniedProducts:spec.deniedProducts || [],
       scenarios };
   });
   for (const l of lanes) {
     if (!l.scenarios.length || new Set(l.scenarios.map(x=>x.id)).size !== l.scenarios.length || l.scenarios.some(x=>!/^[a-z0-9-]+$/.test(x.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
   }
-  return { accounts, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
+  return { accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
     baseURL:'https://localhost:8001',previewURL:'https://omarchy.taile4f57f.ts.net',
     fixtureMode:o.fixtures ? 'declared-retained-resources' : 'harness-only-no-app-data-writes',
+    fixtureVersion:fixture.version || fixture.fixtureVersion || null,
     fixturePath:o.fixtures ? resolve(o.fixtures) : null };
 }
 async function rpc(config, request) {
@@ -162,7 +193,8 @@ async function rpc(config, request) {
 async function startBroker(run, dir, resume=false) {
   const lock = await deploymentLockPath(root);
   const log = await open(join(dir,'controller.log'),'a',0o600);
-  const child = spawn('bash',['-c','exec 3> "$1"; flock --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_FD=3; exec node "$2" "$3" "$4"','qa-controller',lock,join(root,'dev/qa/daemon.mjs'),run.id,resume?'resume':'prepare'],{cwd:root,detached:true,stdio:['ignore',log.fd,log.fd]});
+  const gate=join(dirname(lock),'qa-startup.lock');
+  const child = spawn('bash',['-c','exec 4> "$1"; flock --wait 180 4 || exit 4; exec 3> "$2"; if flock --nonblock 3; then export SCHEMII_QA_LEASE_MODE=exclusive; else flock --shared --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_MODE=shared; fi; export SCHEMII_QA_LEASE_FD=3 SCHEMII_QA_GATE_FD=4; exec node "$3" "$4" "$5"','qa-controller',gate,lock,join(root,'testing/harness/daemon.mjs'),run.id,resume?'resume':'prepare'],{cwd:root,detached:true,stdio:['ignore',log.fd,log.fd]});
   child.unref(); await log.close();
   await writeJSON(join(dir,'controller-owner.json'),{pid:child.pid,birthTick:await birthTick(child.pid)});
   for(let i=0;i<360;i++) {
@@ -201,16 +233,38 @@ async function requireStoppedOwner(dir) {
 async function main() {
   const {command,options:o}=parse(process.argv.slice(2));
   if(['help','--help','-h'].includes(command)||o.help){console.log(help);return;}
+  if(['export-credentials','import-credentials'].includes(command)) {
+    const exporting=command==='export-credentials', key=exporting?'output':'input';
+    if(!o[key])throw invalid(`--${key} is required.`);
+    await runCommand('python',['testing/provision.py',exporting?'export':'import',`--${key}`,resolve(o[key]),'--state-dir',stateDir]);return;
+  }
+  if(command==='personas'){console.log(JSON.stringify(await catalog(),null,2));return;}
+  if(command==='setup') {
+    if(!o['admin-credentials'])throw invalid('--admin-credentials is required; existing admin passwords are never guessed or reset.');
+    const copies=o['copies-per-persona'] || '20';
+    if(!/^[1-9][0-9]{0,2}$/.test(copies)||Number(copies)>100)throw invalid('--copies-per-persona must be 1 through 100.');
+    await privateJSON(resolve(o['admin-credentials']));
+    await runCommand('./testing/setup.sh',[copies,resolve(o['admin-credentials']),stateDir]);
+    return;
+  }
+  if(['reset','verify-data','check-reset'].includes(command)) {
+    if(['reset','check-reset'].includes(command)&&!o.space)throw invalid('reset requires --space ACCOUNT or --space all.');
+    const space=o.space || 'all';
+    if(space!=='all'&&!/^qa_[a-z_]+_[0-9]{3}$/.test(space))throw invalid('Invalid registered testing space.');
+    if(command==='check-reset'&&space==='all')throw invalid('check-reset requires one registered account, not all.');
+    await runCommand('./start.sh',[command==='reset'?'--reset-testing':command==='check-reset'?'--check-testing-reset':'--verify-testing',space]);return;
+  }
   if(['plan','doctor','prepare'].includes(command)) {
     let config;
     try { config=await selection(o); } catch(error) { throw invalid(error.message); }
     if(command==='plan'){console.log(JSON.stringify(config,null,2));return;}
+    if(o.persona&&!o['credentials-file'])o['credentials-file']=join(stateDir,'credentials.json');
     if(!o['credentials-file'])throw invalid('--credentials-file is required; existing passwords are never guessed or reset.');
     const credentialPath=resolve(o['credentials-file']);
     try {
       const available=await credentials(credentialPath);
       if(new Set([...available.keys()].map(a=>a.toLowerCase())).size!==available.size) throw new Error('Credential usernames must be unique case-insensitively.');
-      for(const a of config.accounts)if(!available.has(a))throw new Error(`Credential missing for ${a}.`);
+      for(const a of config.persona?config.poolCandidates:config.accounts)if(!available.has(a))throw new Error(`Credential missing for ${a}.`);
       if(config.controller==='codex') {
         for(const args of [['--version'],['login','status']]) {
           try { execFileSync('codex',args,{stdio:'ignore',timeout:15000}); }
@@ -229,9 +283,26 @@ async function main() {
     const control={socket:join(runtime,'controller.sock'),token:randomBytes(32).toString('hex')};
     await writeJSON(join(dir,'control.json'),control);
     await writeJSON(join(dir,'private.json'),{credentialPath});
-    const run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
+    let run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
     await writeJSON(join(dir,'manifest.json'),run);
-    const result=await startBroker(run,dir);
+    await writeJSON(join(dir,'controller-owner.json'),{pid:process.pid,birthTick:await birthTick(process.pid)});
+    let result;
+    try {
+      if(config.persona) {
+        const selected=await reserveAvailable({runId:id,runDir:dir,candidates:config.poolCandidates,count:config.accounts.length});
+        config=await selection(o,selected);
+        run={...run,...config};await writeJSON(join(dir,'manifest.json'),run);
+      }else await reserveAccounts({runId:id,runDir:dir,accounts:run.accounts});
+      result=await startBroker(run,dir);
+    }catch(e){
+      // Release only if startup never transferred ownership, or its recorded
+      // controller and browsers are confirmed stopped. Otherwise preserve leases.
+      const owner=await readJSON(join(dir,'controller-owner.json'));
+      if(owner.pid===process.pid)await releaseAccounts({runId:id});
+      else try{await requireStoppedOwner(dir);await releaseAccounts({runId:id});}catch{}
+      run.status='blocked';run.error=e.message;run.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),run);
+      throw e;
+    }
     console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
   if(['action','checkpoint','finish','heartbeat'].includes(command)) {
@@ -263,6 +334,7 @@ async function main() {
     await requireStoppedOwner(dir);
     await rm(control.socket,{force:true});
     run.status='preparing';run.updatedAt=stamp();await writeJSON(join(dir,'manifest.json'),run);
+    await reserveAccounts({runId:run.id,runDir:dir,accounts:run.lanes.filter(l=>l.status!=='complete').map(l=>l.username)});
     const resumed=await startBroker(run,dir,true);
     console.log(JSON.stringify(resumed,null,2));if(resumed.status==='blocked')process.exitCode=4;return;
   }
@@ -273,6 +345,7 @@ async function main() {
   catch(error) {
     if(!['stop','cleanup'].includes(command)||!['ENOENT','ECONNREFUSED'].includes(error.code))throw error;
     await requireStoppedOwner(dir);
+    await releaseAccounts({runId:run.id});
     result={status:run.status,preserved:'QA accounts, app data, credentials, evidence and reports',controller:'already stopped'};
   }
   console.log(JSON.stringify(result,null,2));if(command==='run'&&run.controller!=='codex'&&result.status==='awaiting-agent-dispatch')process.exitCode=3;

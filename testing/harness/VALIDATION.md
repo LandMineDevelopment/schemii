@@ -78,3 +78,47 @@ reasoning, reasoning only, and inherited defaults. This verified `-m MODEL` and
 new model request. Provider support for each model/effort combination is not
 implied by CLI enum validation. Requested settings persist in the manifest and
 appear in doctor/status/report output.
+
+## Portable persona/database suite extension
+
+Live setup initialized and verified **120 retained accounts/data spaces** across
+six personas, with 60 managed source profiles for the three author personas.
+All product access and denial checks passed. A repeated setup check across one
+account per persona created zero accounts/profiles and kept IDs and credentials.
+The existing machine-local target allowlist was preserved when adding qa-postgres.
+
+`verify-data` checked all 120 schemas: 32 customers and 513 orders each, fixed data,
+constraints, sequences, read-only role privileges, peer isolation and preserved
+login authentication. `check-reset --space qa_modeler_001` deliberately changed
+rows, added a scratch table and advanced the sequence. Verification detected
+drift; the normal reset restored checksum `f7a9a1e37ea763d729b1e17ae5090bfd`.
+Credential-file hashes were unchanged after provisioning, reset and verification.
+A live 120-slot private export/import round trip preserved all application, DB and
+admin credentials while stripping deployment-specific IDs.
+
+Concurrent runs `qa-muiy2a8l-777577df` and `qa-muiy2m25-b43c2629` used modeler
+accounts 001–002 and 003–004. The first deployed and the second reused exactly the
+same source fingerprint. Independent review checked all four worker/browser PID
+pairs, equal effective permissions, separate schemas and account reservations.
+Exclusive deployment locking was rejected while they ran; the startup gate was
+free. Stopping the first run preserved the second run's deployment lease.
+All four workers exited 0 and recorded all eight desktop/mobile checkpoints. Four
+were function/style passes and four retained functional findings with visual
+passes. Independently sampled images supported the narrow empty-library review;
+this is not saved-model/query acceptance.
+
+Run `qa-muiy8k6a-b90e59a1` manually verified the no-access persona at desktop and
+mobile. It stayed authenticated, product/admin APIs denied access, and product
+entry redirected to the account page. Its expected-denial screenshots passed the
+scenario-specific evidence rule without weakening normal product checks.
+All live runs were stopped after verification, with credentials and app data kept.
+
+Manual helper checks covered atomic disjoint pool allocation, case-insensitive
+account collisions, own-only release, insufficient-pool rollback, shared/exclusive
+lock behavior, credential export/import safety and input validation. Bash/Node/
+Python syntax checks passed. No application unit or E2E suite was run.
+
+Limits: viewer fixtures currently cover empty/denied-authoring behavior, not a
+seeded shared dashboard; no saved app models are seeded. Reset restores QA source
+data, not app metadata objects created by testers. Unrelated legacy QA accounts
+and existing demos remain retained.

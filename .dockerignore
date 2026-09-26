@@ -29,3 +29,8 @@ tests
 *.sqlite*
 pgdata
 postgres-data
+
+# Harness/database sources and private run artifacts are not application assets.
+testing
+artifacts
+secrets

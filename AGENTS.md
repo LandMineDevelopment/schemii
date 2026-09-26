@@ -19,7 +19,7 @@ The launcher may use Docker on the host as an implementation detail. Application
 
 ## Manual UI QA
 
-For coordinated or parallel UI testing, read `dev/qa/README.md` and use `./test.sh`.
+For coordinated or parallel UI testing, read `testing/README.md` and `testing/harness/README.md` and use `./test.sh`.
 The explicitly selected isolated browser backend uses one browser process/context
 per account; ordinary T3 tabs do not prove session isolation. Follow the prepare,
 dispatch, claim, evidence, finish and stop workflow. Verify runtime agent capacity,

@@ -22,11 +22,13 @@ SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
 SCHEMII_DEMO_SOURCE_REVISION="${SCHEMII_DEMO_SOURCE_REVISION-unknown+dirty}"
 SCHEMII_LAUNCH_ACTION=start
 SCHEMII_RECOVERY_DIRECTORY=
+SCHEMII_TESTING_SPACE=all
+SCHEMII_QA_STATE_DIRECTORY="${SCHEMII_QA_STATE_DIRECTORY-${ROOT_DIR}/.schemii/testing}"
 SCHEMII_LOG_SERVICE=
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -41,6 +43,17 @@ list_demo_scenarios() {
 
 if (( $# > 0 )); then
   case "$1" in
+    --prepare-testing)
+      (( $# == 1 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION=prepare-testing
+      ;;
+    --reset-testing|--verify-testing|--check-testing-reset)
+      (( $# <= 2 )) || { usage >&2; exit 2; }
+      [[ "$1" != "--reset-testing" || $# == 2 ]] || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION="${1#--}"
+      SCHEMII_TESTING_SPACE="${2-all}"
+      [[ "$SCHEMII_TESTING_SPACE" == "all" || "$SCHEMII_TESTING_SPACE" =~ ^qa_[a-z_]+_[0-9]{3}$ ]] || { printf 'Invalid testing space\n' >&2; exit 2; }
+      ;;
     --backup)
       (( $# <= 2 )) || { usage >&2; exit 2; }
       SCHEMII_LAUNCH_ACTION=backup
@@ -89,7 +102,7 @@ if (( $# > 0 )); then
     --logs)
       (( $# == 2 )) || { usage >&2; exit 2; }
       case "$2" in
-        schemii|ai-prototype-runtime|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed)
+        schemii|ai-prototype-runtime|ingress|metadata-bootstrap|demo-bootstrap|postgres-seed|qa-postgres)
           SCHEMII_LAUNCH_ACTION=logs
           SCHEMII_LOG_SERVICE="$2"
           ;;
@@ -118,7 +131,17 @@ if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
   command -v flock >/dev/null 2>&1 || fail "flock is required to serialize local application lifecycle changes"
   SCHEMII_QA_LOCK_DIRECTORY="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)" || fail "could not resolve the shared deployment lease directory"
   SCHEMII_QA_LOCK_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-deployment.lock"
+  SCHEMII_QA_GATE_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-startup.lock"
+  if [[ -n "${SCHEMII_QA_GATE_FD+x}" ]]; then
+    [[ "$SCHEMII_QA_GATE_FD" == "4" && "$(readlink -- /proc/$$/fd/4 2>/dev/null || true)" == "$SCHEMII_QA_GATE_FILE" ]] || fail "inherited QA startup gate does not match this repository"
+    flock --nonblock 4 || fail "QA startup gate is unavailable"
+  else
+    exec 4>"$SCHEMII_QA_GATE_FILE"
+    flock --nonblock 4 || fail "another launch or QA preparation holds the startup gate"
+    export SCHEMII_QA_GATE_FD=4
+  fi
   if [[ -n "${SCHEMII_QA_LEASE_FD+x}" ]]; then
+    [[ "${SCHEMII_QA_LEASE_MODE-exclusive}" == "exclusive" ]] || fail "a shared QA run cannot rebuild or reset the deployment"
     [[ "$SCHEMII_QA_LEASE_FD" == "3" ]] || fail "SCHEMII_QA_LEASE_FD must identify inherited descriptor 3"
     [[ "$(readlink -- "/proc/$$/fd/3" 2>/dev/null || true)" == "$SCHEMII_QA_LOCK_FILE" ]] || fail "inherited QA deployment lease does not match this repository"
     flock --nonblock 3 || fail "inherited QA deployment lease is not available"
@@ -126,6 +149,7 @@ if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
     exec 3>"$SCHEMII_QA_LOCK_FILE"
     flock --nonblock 3 || fail "the deployment is leased by another launch or QA run; finish that run before rebuilding or resetting"
     export SCHEMII_QA_LEASE_FD=3
+    export SCHEMII_QA_LEASE_MODE=exclusive
   fi
 fi
 
@@ -235,6 +259,12 @@ compose_args=(
   --project-directory "$ROOT_DIR"
   --file "$COMPOSE_FILE"
 )
+# Include the QA service on every launch once initialized; normal --remove-orphans
+# must not remove a portable testing database between runs.
+if [[ -f "${SCHEMII_QA_STATE_DIRECTORY}/registry.json" ]]; then
+  compose_args+=(--file "${ROOT_DIR}/testing/compose.yaml")
+fi
+export SCHEMII_QA_STATE_DIRECTORY
 # Optional machine-local target networks; never part of the portable base stack.
 if [[ -f "${ROOT_DIR}/.schemii/compose.local.yaml" ]]; then
   compose_args+=(--file "${ROOT_DIR}/.schemii/compose.local.yaml")
@@ -415,6 +445,38 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
 fi
 export SCHEMII_DEMO_SCENARIO
 export SCHEMII_DEMO_SOURCE_REVISION
+
+if [[ -f "${SCHEMII_QA_STATE_DIRECTORY}/registry.json" ]]; then
+  # Resolve overlays first so adding the QA target never drops a machine's
+  # existing allowed targets (for example organization-postgres).
+  SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS="$(docker "${compose_args[@]}" config --format json | python -c 'import json,sys; raw=json.load(sys.stdin)["services"]["schemii"]["environment"].get("SCHEMII_ALLOWED_TARGET_HOSTS", ""); hosts=[h.strip() for h in str(raw).split(",") if h.strip()]; print(",".join(dict.fromkeys([*hosts,"qa-postgres"])))')" || fail "could not resolve the testing target allowlist"
+  export SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS
+  compose_args+=(--file "$ROOT_DIR/testing/egress.yaml")
+fi
+
+if [[ "$SCHEMII_LAUNCH_ACTION" == *-testing || "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
+  source "$ROOT_DIR/testing/launcher.sh"
+  # A crashed coordinator can leave account reservations even after its OS lock
+  # closes. Do not reset data until its recorded browsers have been cleaned up.
+  if [[ "$SCHEMII_LAUNCH_ACTION" == "reset-testing" || "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
+    shopt -s nullglob
+    qa_reservations=("${SCHEMII_QA_LOCK_DIRECTORY}/qa-account-leases/"*.json)
+    shopt -u nullglob
+    (( ${#qa_reservations[@]} == 0 )) || fail "testing accounts remain reserved; clean up their owning runs before resetting data"
+    if [[ "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
+      [[ "$SCHEMII_TESTING_SPACE" != all ]] || fail "reset check needs a single testing space"
+      testing_database_manage check-reset "$SCHEMII_TESTING_SPACE"
+    else
+      testing_database_manage reset "$SCHEMII_TESTING_SPACE"
+    fi
+  elif [[ "$SCHEMII_LAUNCH_ACTION" == "verify-testing" ]]; then
+    testing_database_manage verify "$SCHEMII_TESTING_SPACE"
+  else
+    testing_database_start
+    testing_database_manage prepare all
+  fi
+  if [[ "$SCHEMII_LAUNCH_ACTION" != "prepare-testing" ]]; then exit 0; fi
+fi
 
 if [[ "$SCHEMII_LAUNCH_ACTION" == "logs" ]]; then
   exec docker "${compose_args[@]}" logs --no-color --tail 200 "$SCHEMII_LOG_SERVICE"
