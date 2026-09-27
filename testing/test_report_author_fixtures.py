@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from testing import provision
 
@@ -13,12 +13,18 @@ class FixtureUser:
         self.models = {}
         self.dashboards = {}
         self.calls = []
+        self.capabilities = ["schemoo:access", "schemer:access", "schemer:author"]
+        self.missing_details = set()
+        self.revoke_capabilities_on_missing_detail = False
+        self.crash_after_dashboard_delete = False
 
     def call(self, method, path, payload=None, expected=200):
         route = path.split("?", 1)[0]
         self.calls.append((method, path))
         if method == "GET" and route == "/api/v1/schemoo/catalog":
             return {"tables": [{"name": "orders"}]}
+        if method == "GET" and route == "/api/v1/auth/me":
+            return {"user": {"id": self.slot["accountId"]}, "capabilities": list(self.capabilities)}
         if method == "POST" and route.startswith("/api/v1/connections/"):
             return {}
         if method == "GET" and route == "/api/v1/schemoo/models":
@@ -37,7 +43,12 @@ class FixtureUser:
             self.models[model_id] = result
             return result
         if method == "GET" and route.startswith("/api/v1/schemoo/models/"):
-            return self.models[route.rsplit("/", 1)[1]]
+            resource_id = route.rsplit("/", 1)[1]
+            if ("model", resource_id) in self.missing_details or resource_id not in self.models:
+                if self.revoke_capabilities_on_missing_detail:
+                    self.capabilities = []
+                raise provision.QAApiError(404, "model_source_not_found", "missing")
+            return self.models[resource_id]
         if method == "GET" and route == "/api/v1/schemer/dashboards":
             return {"dashboards": list(self.dashboards.values())}
         if method == "POST" and route == "/api/v1/schemer/dashboards":
@@ -53,9 +64,17 @@ class FixtureUser:
             self.dashboards[dashboard_id] = result
             return result
         if method == "GET" and route.startswith("/api/v1/schemer/dashboards/"):
-            return self.dashboards[route.rsplit("/", 1)[1]]
+            resource_id = route.rsplit("/", 1)[1]
+            if ("dashboard", resource_id) in self.missing_details or resource_id not in self.dashboards:
+                if self.revoke_capabilities_on_missing_detail:
+                    self.capabilities = []
+                raise provision.QAApiError(404, "dashboard_not_found", "missing")
+            return self.dashboards[resource_id]
         if method == "DELETE" and route.startswith("/api/v1/schemer/dashboards/"):
             del self.dashboards[route.rsplit("/", 1)[1]]
+            if self.crash_after_dashboard_delete:
+                self.crash_after_dashboard_delete = False
+                raise RuntimeError("simulated process interruption after dashboard DELETE")
             return None
         if method == "DELETE" and route.startswith("/api/v1/schemoo/models/"):
             del self.models[route.rsplit("/", 1)[1]]
@@ -68,7 +87,7 @@ class FixtureUser:
         self.calls.append(("LOGIN", credentials["username"]))
         return {
             "user": {"id": self.slot["accountId"]},
-            "capabilities": ["schemoo:access", "schemer:access", "schemer:author"],
+            "capabilities": list(self.capabilities),
             "is_admin": False,
         }
 
@@ -133,23 +152,35 @@ class ReportAuthorFixturesTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_api_error_summary_keeps_only_redacted_envelope_fields(self):
-        summary = provision.safe_api_error_summary(
-            json.dumps(
-                {
-                    "error": {
-                        "code": "model_source_not_found",
-                        "message": "Authorization: bearer secret-value; detail",
-                    },
-                    "accessToken": "must-not-appear",
-                    "details": {"ownerId": "private-id"},
-                }
-            ).encode()
-        )
+        envelope = json.dumps(
+            {
+                "error": {
+                    "code": "model_source_not_found",
+                    "message": "Authorization: bearer secret-value; detail",
+                },
+                "accessToken": "must-not-appear",
+                "details": {"ownerId": "private-id"},
+            }
+        ).encode()
+        summary = provision.safe_api_error_summary(envelope)
         self.assertIn("code=model_source_not_found", summary)
         self.assertIn("Authorization=[redacted]", summary)
         self.assertNotIn("secret-value", summary)
         self.assertNotIn("must-not-appear", summary)
         self.assertNotIn("private-id", summary)
+
+        client = provision.Client()
+        response = MagicMock()
+        response.status = 404
+        response.read.return_value = envelope
+        response.__enter__.return_value = response
+        client.opener = MagicMock()
+        client.opener.open.return_value = response
+        with self.assertRaises(provision.QAApiError) as caught:
+            client.call("GET", "/api/v1/schemoo/models/model_" + "1" * 32)
+        self.assertEqual(caught.exception.status, 404)
+        self.assertEqual(caught.exception.code, "model_source_not_found")
+        self.assertNotIn("secret-value", str(caught.exception))
 
     def test_qa_v1_registry_migration_preserves_retained_ids_and_credentials(self):
         old_slot = {
@@ -308,6 +339,97 @@ class ReportAuthorFixturesTest(unittest.TestCase):
         ]
         self.assertNotIn("schemooModelId", lane["resources"])
         self.assertNotIn("schemerDashboardId", lane["resources"])
+
+    def test_cleanup_retry_reconciles_a_delete_completed_before_registry_write(self):
+        user = FixtureUser(self.slot)
+        provision.ensure_report_author_fixture(
+            self.directory, self.registry, self.slot, user
+        )
+        dashboard_id = self.slot["reportAuthorFixture"]["dashboardId"]
+        user.crash_after_dashboard_delete = True
+
+        with patch.object(provision, "Client", return_value=user):
+            with self.assertRaisesRegex(RuntimeError, "simulated process interruption"):
+                provision.cleanup_report_author_fixtures(
+                    self.directory, [self.slot["username"]]
+                )
+
+        retained = json.loads((self.directory / "registry.json").read_text())["slots"][0]
+        fixture = retained["reportAuthorFixture"]
+        self.assertNotIn(dashboard_id, user.dashboards)
+        self.assertEqual(fixture["dashboardId"], dashboard_id)
+        self.assertEqual(fixture["cleanupPending"], {"kind": "dashboard", "id": dashboard_id})
+
+        with patch.object(provision, "Client", return_value=user):
+            result = provision.cleanup_report_author_fixtures(
+                self.directory, [self.slot["username"]]
+            )
+
+        self.assertEqual(result["removedDashboards"], 1)
+        self.assertEqual(result["removedModels"], 1)
+        self.assertFalse(user.dashboards)
+        self.assertFalse(user.models)
+        retained = json.loads((self.directory / "registry.json").read_text())["slots"][0]
+        self.assertNotIn("reportAuthorFixture", retained)
+
+    def test_cleanup_preserves_dashboard_ledger_when_404_object_is_still_listed(self):
+        user = FixtureUser(self.slot)
+        provision.ensure_report_author_fixture(
+            self.directory, self.registry, self.slot, user
+        )
+        dashboard_id = self.slot["reportAuthorFixture"]["dashboardId"]
+        user.missing_details.add(("dashboard", dashboard_id))
+
+        with patch.object(provision, "Client", return_value=user):
+            with self.assertRaisesRegex(ValueError, "still appears in the owner list"):
+                provision.cleanup_report_author_fixtures(
+                    self.directory, [self.slot["username"]]
+                )
+
+        retained = json.loads((self.directory / "registry.json").read_text())["slots"][0]
+        self.assertEqual(retained["reportAuthorFixture"]["dashboardId"], dashboard_id)
+        self.assertNotIn("cleanupPending", retained["reportAuthorFixture"])
+        self.assertIn(dashboard_id, user.dashboards)
+        self.assertIn(self.slot["reportAuthorFixture"]["modelId"], user.models)
+
+    def test_cleanup_preserves_model_ledger_when_source_404_is_ambiguous(self):
+        user = FixtureUser(self.slot)
+        provision.ensure_report_author_fixture(
+            self.directory, self.registry, self.slot, user
+        )
+        model_id = self.slot["reportAuthorFixture"]["modelId"]
+        user.missing_details.add(("model", model_id))
+
+        with patch.object(provision, "Client", return_value=user):
+            with self.assertRaisesRegex(ValueError, "still appears in the owner list"):
+                provision.cleanup_report_author_fixtures(
+                    self.directory, [self.slot["username"]]
+                )
+
+        retained = json.loads((self.directory / "registry.json").read_text())["slots"][0]
+        self.assertEqual(retained["reportAuthorFixture"]["modelId"], model_id)
+        self.assertNotIn("dashboardId", retained["reportAuthorFixture"])
+        self.assertNotIn("cleanupPending", retained["reportAuthorFixture"])
+        self.assertIn(model_id, user.models)
+
+    def test_cleanup_keeps_ledger_when_owner_access_is_revoked_during_404_recheck(self):
+        user = FixtureUser(self.slot)
+        provision.ensure_report_author_fixture(
+            self.directory, self.registry, self.slot, user
+        )
+        dashboard_id = self.slot["reportAuthorFixture"]["dashboardId"]
+        user.missing_details.add(("dashboard", dashboard_id))
+        user.revoke_capabilities_on_missing_detail = True
+
+        with patch.object(provision, "Client", return_value=user):
+            with self.assertRaisesRegex(ValueError, "without current owner access"):
+                provision.cleanup_report_author_fixtures(
+                    self.directory, [self.slot["username"]]
+                )
+
+        retained = json.loads((self.directory / "registry.json").read_text())["slots"][0]
+        self.assertEqual(retained["reportAuthorFixture"]["dashboardId"], dashboard_id)
+        self.assertIn(dashboard_id, user.dashboards)
 
     def test_cleanup_refuses_unregistered_accounts_before_api_mutation(self):
         with self.assertRaisesRegex(ValueError, "registered report-author"):

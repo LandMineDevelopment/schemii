@@ -74,6 +74,18 @@ def safe_api_error_summary(content):
     return f" (code={code}, detail={detail})" if detail else f" (code={code})"
 
 
+def safe_api_error_code(content):
+    """Return only a validated API error code; malformed envelopes fail closed."""
+    try:
+        error = json.loads(content).get("error", {})
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return "unknown"
+    if not isinstance(error, dict):
+        return "unknown"
+    code = error.get("code")
+    return code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else "unknown"
+
+
 def registry_load(directory):
     value = json.loads(private_read(directory / "registry.json"))
     return validate_registry(value)
@@ -93,6 +105,9 @@ def validate_registry(value):
             raise ValueError("Invalid or duplicate QA registry slot")
         if not name.startswith("qa_" + slot["persona"] + "_"):
             raise ValueError("QA slot persona does not match its identity")
+        cleanup_started = slot.get("reportAuthorCleanupStarted", False)
+        if not isinstance(cleanup_started, bool) or (cleanup_started and slot["persona"] != "report_author"):
+            raise ValueError("Invalid report-author cleanup state")
         for key in ("password", "dbPassword"):
             if not isinstance(slot.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", slot[key]):
                 raise ValueError("Invalid retained QA credential; refusing regeneration")
@@ -112,13 +127,24 @@ def validate_registry(value):
             raise ValueError("Invalid retained QA writer profile")
         author_fixture = slot.get("reportAuthorFixture")
         if author_fixture is not None:
-            if slot["persona"] != "report_author" or not isinstance(author_fixture, dict) or not set(author_fixture) <= {"modelId", "dashboardId"}:
+            if slot["persona"] != "report_author" or not isinstance(author_fixture, dict) or not set(author_fixture) <= {"modelId", "dashboardId", "cleanupPending"}:
                 raise ValueError("Invalid retained report-author fixture ownership record")
             if "modelId" not in author_fixture or not isinstance(author_fixture["modelId"], str) or not MODEL_ID.fullmatch(author_fixture["modelId"]):
                 raise ValueError("Invalid retained report-author model ID")
             if "dashboardId" in author_fixture and (not isinstance(author_fixture["dashboardId"], str)
                     or not DASHBOARD_ID.fullmatch(author_fixture["dashboardId"])):
                 raise ValueError("Invalid retained report-author dashboard ID")
+            pending = author_fixture.get("cleanupPending")
+            if pending is not None:
+                if not isinstance(pending, dict) or set(pending) != {"kind", "id"} or pending.get("kind") not in {"dashboard", "model"}:
+                    raise ValueError("Invalid retained report-author cleanup marker")
+                key = "dashboardId" if pending["kind"] == "dashboard" else "modelId"
+                pattern = DASHBOARD_ID if pending["kind"] == "dashboard" else MODEL_ID
+                if (not isinstance(pending.get("id"), str) or not pattern.fullmatch(pending["id"])
+                        or author_fixture.get(key) != pending["id"]):
+                    raise ValueError("Report-author cleanup marker does not match its retained object ID")
+                if pending["kind"] == "model" and "dashboardId" in author_fixture:
+                    raise ValueError("Report-author model cleanup cannot precede its dashboard cleanup")
         usernames.add(name)
     # qa-v1 retained the same identities and source IDs. Keep those private
     # records portable while deriving the new permission and object fixtures.
@@ -191,6 +217,55 @@ def _verify_report_author_dashboard(dashboard, slot):
             or dashboard.get("name") != report_author_dashboard_name(slot["username"])
             or dashboard.get("modelId") != fixture["modelId"]):
         raise ValueError(f"Retained report-author dashboard ownership or model drift: {slot['username']}")
+
+
+def _expected_missing_resource(error, kind):
+    expected_code = "dashboard_not_found" if kind == "dashboard" else "model_source_not_found"
+    return error.status == 404 and error.code == expected_code
+
+
+def _confirm_resource_absent(user, slot, kind, resource_id):
+    """Treat an object 404 as absence only after current access and owner list agree."""
+    identity = user.call("GET", "/api/v1/auth/me")
+    capabilities = set(identity.get("capabilities", []))
+    required = {"schemer:access", "schemer:author"} if kind == "dashboard" else {"schemoo:access"}
+    if identity.get("user", {}).get("id") != slot["accountId"] or not required.issubset(capabilities):
+        raise ValueError(f"Cannot confirm retained report-author {kind} absence without current owner access: {slot['username']}")
+    if kind == "dashboard":
+        collection = user.call("GET", "/api/v1/schemer/dashboards")
+        entries = collection.get("dashboards")
+    else:
+        collection = user.call("GET", "/api/v1/schemoo/models")
+        entries = collection.get("models")
+    if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+        raise ValueError(f"Cannot confirm retained report-author {kind} absence from owner list: {slot['username']}")
+    if any(item.get("id") == resource_id for item in entries):
+        raise ValueError(f"Retained report-author {kind} still appears in the owner list: {slot['username']}")
+    return True
+
+
+def _mark_report_author_cleanup(directory, registry, slot, kind, resource_id):
+    fixture = slot["reportAuthorFixture"]
+    pending = fixture.get("cleanupPending")
+    if pending is not None and pending != {"kind": kind, "id": resource_id}:
+        raise ValueError(f"Refusing to replace a different report-author cleanup marker: {slot['username']}")
+    fixture["cleanupPending"] = {"kind": kind, "id": resource_id}
+    write_private(directory / "registry.json", registry)
+
+
+def _forget_report_author_resource(directory, registry, slot, kind, resource_id):
+    fixture = slot["reportAuthorFixture"]
+    key = "dashboardId" if kind == "dashboard" else "modelId"
+    if fixture.get(key) != resource_id:
+        raise ValueError(f"Refusing to clear changed report-author {kind} ownership: {slot['username']}")
+    pending = fixture.get("cleanupPending")
+    if pending is not None and pending != {"kind": kind, "id": resource_id}:
+        raise ValueError(f"Refusing to clear a different report-author cleanup marker: {slot['username']}")
+    del fixture[key]
+    fixture.pop("cleanupPending", None)
+    if kind == "model" and not fixture:
+        del slot["reportAuthorFixture"]
+    write_private(directory / "registry.json", registry)
 
 
 def ensure_report_author_fixture(directory, registry, slot, user):
@@ -267,13 +342,18 @@ def cleanup_report_author_fixtures(directory, selected):
     for slot in slots:
         fixture = slot.get("reportAuthorFixture")
         if not fixture:
-            totals["accounts"].append({"username": slot["username"], "removed": False})
+            was_cleaning = slot.pop("reportAuthorCleanupStarted", False)
+            if was_cleaning:
+                write_private(directory / "registry.json", registry)
+            totals["accounts"].append({"username": slot["username"], "removed": was_cleaning})
             continue
-        if not slot.get("provisioned") or not slot.get("accountId"):
+        if (not slot.get("provisioned") and not slot.get("reportAuthorCleanupStarted")) or not slot.get("accountId"):
             raise ValueError(f"Cannot clean an unprovisioned report-author account: {slot['username']}")
         # Make the account unavailable to future lane selection before the
-        # first API deletion; a partial cleanup must not look ready for use.
+        # first API deletion. Persist this recovery flag with it so an
+        # interrupted cleanup remains retryable even before its first DELETE.
         slot["provisioned"] = False
+        slot["reportAuthorCleanupStarted"] = True
         write_private(directory / "registry.json", registry)
         user = Client()
         try:
@@ -282,23 +362,44 @@ def cleanup_report_author_fixtures(directory, selected):
                 raise ValueError(f"Effective report-author identity drift: {slot['username']}")
             dashboard_id = fixture.get("dashboardId")
             if dashboard_id:
-                dashboard = user.call("GET", f"/api/v1/schemer/dashboards/{dashboard_id}")
-                _verify_report_author_dashboard(dashboard, slot)
-                user.call("DELETE", f"/api/v1/schemer/dashboards/{dashboard_id}?expectedRevision={dashboard['revision']}", expected=204)
-                del fixture["dashboardId"]
-                write_private(directory / "registry.json", registry)
+                try:
+                    dashboard = user.call("GET", f"/api/v1/schemer/dashboards/{dashboard_id}")
+                except QAApiError as error:
+                    if not _expected_missing_resource(error, "dashboard") or not _confirm_resource_absent(user, slot, "dashboard", dashboard_id):
+                        raise
+                    _forget_report_author_resource(directory, registry, slot, "dashboard", dashboard_id)
+                else:
+                    _verify_report_author_dashboard(dashboard, slot)
+                    _mark_report_author_cleanup(directory, registry, slot, "dashboard", dashboard_id)
+                    try:
+                        user.call("DELETE", f"/api/v1/schemer/dashboards/{dashboard_id}?expectedRevision={dashboard['revision']}", expected=204)
+                    except QAApiError as error:
+                        if not _expected_missing_resource(error, "dashboard") or not _confirm_resource_absent(user, slot, "dashboard", dashboard_id):
+                            raise
+                    _forget_report_author_resource(directory, registry, slot, "dashboard", dashboard_id)
                 totals["removedDashboards"] += 1
             model_id = fixture.get("modelId")
             if model_id:
-                model = user.call("GET", f"/api/v1/schemoo/models/{model_id}")
-                _verify_report_author_model(model, slot)
-                user.call("DELETE", f"/api/v1/schemoo/models/{model_id}?expected_revision={model['revision']}", expected=204)
-                del fixture["modelId"]
-                del slot["reportAuthorFixture"]
-                write_private(directory / "registry.json", registry)
+                try:
+                    model = user.call("GET", f"/api/v1/schemoo/models/{model_id}")
+                except QAApiError as error:
+                    if not _expected_missing_resource(error, "model") or not _confirm_resource_absent(user, slot, "model", model_id):
+                        raise
+                    _forget_report_author_resource(directory, registry, slot, "model", model_id)
+                else:
+                    _verify_report_author_model(model, slot)
+                    _mark_report_author_cleanup(directory, registry, slot, "model", model_id)
+                    try:
+                        user.call("DELETE", f"/api/v1/schemoo/models/{model_id}?expected_revision={model['revision']}", expected=204)
+                    except QAApiError as error:
+                        if not _expected_missing_resource(error, "model") or not _confirm_resource_absent(user, slot, "model", model_id):
+                            raise
+                    _forget_report_author_resource(directory, registry, slot, "model", model_id)
                 totals["removedModels"] += 1
         finally:
             user.logout()
+        slot.pop("reportAuthorCleanupStarted", None)
+        write_private(directory / "registry.json", registry)
         totals["accounts"].append({"username": slot["username"], "removed": bool(fixture == {})})
     derived_files(directory, registry)
     return totals
@@ -395,6 +496,15 @@ def initialize(directory, copies):
     return {"slots": len(registry["slots"]), "added": added, "personas": len(PERSONAS), "stateDir": str(directory)}
 
 
+class QAApiError(ValueError):
+    """An HTTP API failure with a validated status and safe envelope code."""
+
+    def __init__(self, status, code, message):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
 class Client:
     def __init__(self):
         self.base = "https://localhost:8001"
@@ -411,10 +521,12 @@ class Client:
             response = error
         with response:
             if response.status != expected:
-                error_summary = safe_api_error_summary(response.read())
+                body = response.read()
+                error_summary = safe_api_error_summary(body)
                 if method == "POST" and path == "/api/v1/admin/schemii-connections" and response.status == 409:
                     raise ValueError("Managed QA connection capacity reached or profile conflict; reduce selected author slots or review existing managed profiles. Saved account/connection IDs and credentials remain intact; the provisioner does not raise global limits")
-                raise ValueError(f"QA API request expected HTTP {expected}, received {response.status}{error_summary}")
+                raise QAApiError(response.status, safe_api_error_code(body),
+                                 f"QA API request expected HTTP {expected}, received {response.status}{error_summary}")
             content = response.read()
             return json.loads(content) if content and expected < 400 else None
 
@@ -445,6 +557,8 @@ def provision(directory, admin_file, selected):
             raise ValueError("Unknown selected QA account")
         # Check all collisions before any account/profile mutation.
         for slot in slots:
+            if slot.get("reportAuthorCleanupStarted"):
+                raise ValueError(f"Report-author cleanup is incomplete; resume cleanup before provisioning: {slot['username']}")
             existing = accounts.get(slot["username"])
             if existing and slot.get("accountId") != existing["id"]:
                 raise ValueError(f"Unowned existing account collision: {slot['username']}; restore registry, do not adopt")
