@@ -6,6 +6,15 @@ builds the portable PostgreSQL fixture image, `personas.json` defines permission
 and `provision.py` preserves identities and uses the application's supported APIs.
 All container lifecycle and database reset operations go through `./start.sh`.
 
+## Running launcher subprocess tests
+
+The launcher subprocess tests in `tests/test_startup.py` use temporary private
+state directories and fake Docker commands. They still acquire the repository's
+shared deployment lease, so do not run them while a live QA run holds that lease.
+If a test is rejected because the deployment is leased, that is expected
+coordination behavior, not a failed application check; finish the QA run and
+rerun the tests after its lease is released.
+
 ## First setup
 
 Supply a private mode-0600 administrator credential JSON (`{ "username": "…",

@@ -10,6 +10,19 @@ ROOT = Path(__file__).resolve().parents[1]
 START = ROOT / "start.sh"
 
 
+def _isolated_launcher_environment(tmp_path: Path, **overrides: str) -> dict[str, str]:
+    """Keep launcher subprocesses away from machine-retained QA and secret state."""
+    environment = {
+        **os.environ,
+        "SCHEMII_QA_STATE_DIRECTORY": str(tmp_path / "qa-state"),
+        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
+        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
+        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
+    }
+    environment.update(overrides)
+    return environment
+
+
 def test_startup_script_owns_the_compose_launch_contract() -> None:
     source = START.read_text(encoding="utf-8")
 
@@ -53,8 +66,10 @@ def test_startup_script_owns_the_compose_launch_contract() -> None:
     assert "flock --nonblock" in source
 
 
-def test_startup_script_rejects_invalid_configuration_before_requesting_privilege() -> None:
-    environment = {**os.environ, "SCHEMII_TEST_APP_PORT": "80"}
+def test_startup_script_rejects_invalid_configuration_before_requesting_privilege(
+    tmp_path: Path,
+) -> None:
+    environment = _isolated_launcher_environment(tmp_path, SCHEMII_TEST_APP_PORT="80")
 
     result = subprocess.run(
         [str(START)],
@@ -71,8 +86,8 @@ def test_startup_script_rejects_invalid_configuration_before_requesting_privileg
     assert "Refreshing this process" not in result.stdout
 
 
-def test_startup_script_rejects_empty_database_configuration() -> None:
-    environment = {**os.environ, "SCHEMII_TEST_POSTGRES_DB": ""}
+def test_startup_script_rejects_empty_database_configuration(tmp_path: Path) -> None:
+    environment = _isolated_launcher_environment(tmp_path, SCHEMII_TEST_POSTGRES_DB="")
 
     result = subprocess.run(
         [str(START)],
@@ -97,14 +112,11 @@ def test_pi_runtime_is_default_and_normal_restart_cannot_redirect_it(tmp_path: P
         encoding="utf-8",
     )
     docker.chmod(0o755)
-    environment = {
-        **os.environ,
-        "PATH": f"{tmp_path}:{os.environ['PATH']}",
-        "COMMAND_LOG": str(command_log),
-        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
-        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
-        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
-    }
+    environment = _isolated_launcher_environment(
+        tmp_path,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        COMMAND_LOG=str(command_log),
+    )
     enabled = subprocess.run(
         [str(START), "--ai-prototype"], cwd=ROOT, env=environment,
         capture_output=True, text=True, timeout=10, check=False,
@@ -142,19 +154,17 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     )
     docker.chmod(0o755)
     tls_directory = tmp_path / "tls"
-    environment = {
-        **os.environ,
-        "PATH": f"{tmp_path}:{os.environ['PATH']}",
-        "COMMAND_LOG": str(command_log),
-        "SCHEMII_TEST_APP_PORT": "8123",
-        "SCHEMII_TEST_POSTGRES_DB": "startup_db",
-        "SCHEMII_TEST_POSTGRES_USER": "startup_user",
-        "SCHEMII_TEST_POSTGRES_PASSWORD": "local-test-password",
-        "SCHEMII_STARTUP_TIMEOUT": "7",
-        "SCHEMII_TLS_DIRECTORY": str(tls_directory),
-        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
-        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
-    }
+    environment = _isolated_launcher_environment(
+        tmp_path,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        COMMAND_LOG=str(command_log),
+        SCHEMII_TEST_APP_PORT="8123",
+        SCHEMII_TEST_POSTGRES_DB="startup_db",
+        SCHEMII_TEST_POSTGRES_USER="startup_user",
+        SCHEMII_TEST_POSTGRES_PASSWORD="local-test-password",
+        SCHEMII_STARTUP_TIMEOUT="7",
+        SCHEMII_TLS_DIRECTORY=str(tls_directory),
+    )
 
     result = subprocess.run(
         [str(START)],
@@ -260,6 +270,66 @@ def test_startup_script_builds_waits_and_reports_compose_state(tmp_path: Path) -
     assert "build schemii opencode" not in second_commands
 
 
+def test_startup_preserves_a_provisioned_qa_overlay_using_resolved_compose_config(
+    tmp_path: Path,
+) -> None:
+    command_log = tmp_path / "commands.log"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "printf 'docker:%s|qa_allowed=%s\\n' \"$*\" \"${SCHEMII_QA_EFFECTIVE_ALLOWED_TARGET_HOSTS-}\" >> \"$COMMAND_LOG\"\n"
+        "case \"$*\" in\n"
+        "  *' config --format json')\n"
+        "    printf '%s\\n' '{\"services\":{\"schemii\":{\"environment\":{\"SCHEMII_ALLOWED_TARGET_HOSTS\":\"organization-postgres\"}}}}'\n"
+        "    ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    qa_state_directory = tmp_path / "qa-state"
+    qa_state_directory.mkdir(mode=0o700)
+    qa_state_directory.chmod(0o700)
+    qa_registry = qa_state_directory / "registry.json"
+    qa_registry.write_text('{"fixture":"synthetic test state"}\n', encoding="utf-8")
+    qa_registry_before = qa_registry.read_bytes()
+
+    environment = _isolated_launcher_environment(
+        tmp_path,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        COMMAND_LOG=str(command_log),
+        SCHEMII_QA_STATE_DIRECTORY=str(qa_state_directory),
+    )
+    result = subprocess.run(
+        [str(START)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    commands = command_log.read_text(encoding="utf-8")
+    command_lines = commands.splitlines()
+    assert any(
+        f"--file {ROOT / 'testing/compose.yaml'}" in line
+        and "config --format json|qa_allowed=" in line
+        for line in command_lines
+    )
+    assert any(
+        f"--file {ROOT / 'testing/egress.yaml'}" in line
+        and "qa_allowed=organization-postgres,qa-postgres" in line
+        for line in command_lines
+    )
+    assert qa_registry.read_bytes() == qa_registry_before
+    writable_credentials = qa_state_directory / "writable-credentials.tsv"
+    assert writable_credentials.read_bytes() == b""
+    assert stat.S_IMODE(writable_credentials.stat().st_mode) == 0o600
+    assert not (qa_state_directory / "database-credentials.tsv").exists()
+
+
 def test_startup_rejects_a_password_change_that_would_desynchronize_persisted_roles(
     tmp_path: Path,
 ) -> None:
@@ -271,15 +341,12 @@ def test_startup_rejects_a_password_change_that_would_desynchronize_persisted_ro
         encoding="utf-8",
     )
     docker.chmod(0o755)
-    environment = {
-        **os.environ,
-        "PATH": f"{tmp_path}:{os.environ['PATH']}",
-        "COMMAND_LOG": str(command_log),
-        "SCHEMII_TEST_POSTGRES_PASSWORD": "replacement-password",
-        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
-        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
-        "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "start.lock"),
-    }
+    environment = _isolated_launcher_environment(
+        tmp_path,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        COMMAND_LOG=str(command_log),
+        SCHEMII_TEST_POSTGRES_PASSWORD="replacement-password",
+    )
     (tmp_path / "secrets").mkdir()
     (tmp_path / "secrets" / "demo_target_password").write_text(
         "original-password\n",
@@ -315,14 +382,12 @@ def test_startup_rejects_a_concurrent_lifecycle_before_mutating_state(
     docker.chmod(0o755)
     lock_file = tmp_path / "start.lock"
     lock_file.touch()
-    environment = {
-        **os.environ,
-        "PATH": f"{tmp_path}:{os.environ['PATH']}",
-        "COMMAND_LOG": str(command_log),
-        "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
-        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
-        "SCHEMII_LAUNCH_LOCK_FILE": str(lock_file),
-    }
+    environment = _isolated_launcher_environment(
+        tmp_path,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        COMMAND_LOG=str(command_log),
+        SCHEMII_LAUNCH_LOCK_FILE=str(lock_file),
+    )
 
     with lock_file.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
