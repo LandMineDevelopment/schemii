@@ -5,7 +5,7 @@ import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
-import { openProductsAfterIsolation } from './readiness.mjs';
+import { assertLaneReadyToClaim, failClosedRecovery, openProductsAfterIsolation } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
@@ -50,7 +50,7 @@ const workers = new CodexWorkers({root,runDir:dir,model:run.agentModel,reasoning
   }
 });
 async function claim(l,agent) {
-  if(l.status!=='ready')throw new Error('Only a preflight-ready lane can be claimed.');
+  assertLaneReadyToClaim(l);
   if(!agent||typeof agent!=='string'||agent.length>200)throw new Error('Claim requires the actual assigned agent ID.');
   if(run.lanes.some(x=>x.status==='claimed'&&x.agent===agent))throw new Error('Agent already owns an active lane.');
   const token=randomBytes(32).toString('hex');tokens.set(l.id,token);l.status='claimed';l.agent=agent;l.heartbeatAt=stamp();
@@ -238,7 +238,26 @@ async function controllerRequest(req){
         });
         run.status='ready';delete run.error;await persist();return {lane:l.id,status:l.status,generation:l.generation};
       }
-      catch(e){await fleet.closeLane(l.id);l.status='blocked';l.error=safeError(e);await persist();throw new Error(safeError(e));}
+      catch(e){
+        const message=safeError(e);
+        return failClosedRecovery({
+          lanes:run.lanes,
+          affectedLaneIds:[l.id,...fleet.lanes.keys()],
+          message,
+          closeFleet:()=>fleet.close(),
+          invalidateLane:active=>{
+            tokens.delete(active.id);active.generation++;active.agent=null;active.heartbeatAt=null;
+            active.browserLaunchPending=false;active.workerLaunchPending=false;
+          },
+          onFailure:({cleanupError})=>{
+            run.status='blocked';run.error=message;
+            run.summary=cleanupError
+              ?'Recovery isolation failed; every active lane was blocked, but browser cleanup reported an error.'
+              :'Recovery isolation failed; every active lane was blocked and must pass recovery before use.';
+          },
+          persist,
+        });
+      }
     }
     if(['stop','cleanup'].includes(req.command)){await shutdown(req.command);return {status:'stopped',preserved:'QA accounts, app data, credentials, evidence and reports'};}
     throw new Error('Unknown controller command.');

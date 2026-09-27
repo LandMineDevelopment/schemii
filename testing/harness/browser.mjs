@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertProviderAvailable } from './prerequisites.mjs';
+import { assertProductNavigationAllowed } from './readiness.mjs';
 
 const COOKIE = 'schemii_session';
 const STORAGE_KEY = '__schemii_qa_isolation__';
@@ -203,13 +204,14 @@ export class BrowserFleet {
   }
 
   async navigateLane(id) {
-    if (!this.#isolationProven) throw new Error('Product navigation requires a completed isolation proof');
     const handle = this.#handle(id);
     const task = handle.queue.then(async () => {
       await this.#identity(handle);
       const product = handle.lane.products?.[0];
       const target = handle.lane.url ?? (product && product !== 'schemii' ? `/${product}` : '/');
-      await handle.page.goto(this.#url(target), { waitUntil: 'domcontentloaded' });
+      const destination = this.#url(target);
+      assertProductNavigationAllowed(destination, this.#isolationProven, this.baseURL);
+      await handle.page.goto(destination, { waitUntil: 'domcontentloaded' });
       this.#event(handle, 'product-opened', { product: product ?? 'schemii' });
       return { lane: id, url: handle.page.url() };
     });
@@ -261,7 +263,12 @@ export class BrowserFleet {
       if (handle.pendingDialog && action !== 'dialog' && action !== 'identity') return { dialog: { type: handle.pendingDialog.type() }, requires: 'dialog accept or dismiss' };
       switch (action) {
         case 'identity': return this.#identity(handle);
-        case 'navigate': return await this.#withDialog(handle, async () => { await page.goto(this.#url(args.url), { waitUntil: 'domcontentloaded' }); return { url: page.url() }; });
+        case 'navigate': return await this.#withDialog(handle, async () => {
+          const destination = this.#url(args.url);
+          assertProductNavigationAllowed(destination, this.#isolationProven, this.baseURL);
+          await page.goto(destination, { waitUntil: 'domcontentloaded' });
+          return { url: page.url() };
+        });
         case 'snapshot': return {
           url: page.url(), title: await page.title(), screenshot: await this.#screenshot(handle),
           accessibility: await page.locator('body').ariaSnapshot(),
