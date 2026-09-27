@@ -264,6 +264,10 @@ class _ConcurrentDesignRepository:
 
 
 class _Connections:
+    def for_product(self, product: str) -> "_Connections":
+        assert product == "schemii"
+        return self
+
     @contextmanager
     def use(self, owner_id: str, connection_id: str) -> Iterator[Any]:
         assert (owner_id, connection_id) == (OWNER_ID, CONNECTION_ID)
@@ -484,7 +488,7 @@ def _service(
         _store_plan(active_repository)
     service = MigrationService(
         repository=active_repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -551,7 +555,7 @@ def test_submission_only_reserves_and_duplicate_authorization_is_idempotent() ->
     gateway = _UncertainGateway()
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -614,7 +618,7 @@ def test_worker_service_error_before_target_start_is_durably_terminal() -> None:
     gateway = _UncertainGateway()
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_MissingWorkspaceRepository(),
         designs=designs,
@@ -642,7 +646,7 @@ def test_required_empty_table_is_rechecked_and_reported_before_ddl() -> None:
     gateway = _PreconditionGateway()
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -905,7 +909,7 @@ def test_committed_sync_advances_baseline_without_overwriting_newer_design() -> 
     )
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=_SuccessfulGateway(),
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -967,7 +971,7 @@ def test_workspace_lifecycle_stays_blocked_until_committed_sync_is_resolved() ->
     plan = _store_plan(repository, workspace_id=workspace.id)
     MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=_SuccessfulGateway(),
         workspaces=workspaces,
         designs=designs,
@@ -1134,7 +1138,7 @@ def test_layout_save_after_reservation_does_not_invalidate_target_authority() ->
     gateway = _SuccessfulGateway()
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=workspaces,
         designs=designs,
@@ -1172,7 +1176,7 @@ def test_target_change_after_reservation_fails_before_target_io() -> None:
     _store_plan(repository)
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=workspaces,
         designs=designs,
@@ -1198,7 +1202,7 @@ def test_plan_creation_ignores_presentation_only_workspace_revision() -> None:
     _seed_baseline(repository)
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_WorkspaceRepository(revision=4),
         designs=designs,
@@ -1225,7 +1229,7 @@ def test_plan_creation_rejects_an_imported_workspace_without_its_atomic_baseline
     designs = _DesignRepository(design_fingerprint(design), content=design)
     service = MigrationService(
         repository=InMemoryMigrationRepository(designs),
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -1411,7 +1415,7 @@ def test_unsupported_object_transition_cannot_reserve_execution(
     gateway = Gateway()
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -1483,7 +1487,7 @@ def test_plan_creation_uses_exact_table_emptiness_for_required_columns(
     gateway = _PlanningEmptinessGateway(catalog, is_empty=is_empty)
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=gateway,
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -1559,7 +1563,7 @@ def test_physical_column_reorder_is_optional_and_only_defaults_for_empty_tables(
     _seed_baseline(repository, catalog=catalog, content=baseline_content)
     service = MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=_PlanningEmptinessGateway(catalog, is_empty=is_empty),
         workspaces=_WorkspaceRepository(),
         designs=designs,
@@ -1609,7 +1613,7 @@ def test_drift_reconciliation_is_blocked_by_unsettled_execution(
     repository.create_plan(drift_plan)
     MigrationService(
         repository=repository,
-        connections=_Connections(),
+        connection_access=_Connections(),
         postgres=_SuccessfulGateway(),
         workspaces=workspaces,
         designs=designs,

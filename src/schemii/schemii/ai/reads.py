@@ -22,7 +22,13 @@ def execute_batch(service, owner, chat, proposal, operation, action):
     current = service.repository.get_chat(owner, chat.id)
     if current.revision != chat.revision or any(not getattr(current.capabilities, capability, False) for capability in required):
         raise _error(403, "ai_permission_changed", "Read permissions changed; no queries were run")
-    queries = ([relation_read_query(service.services, owner, chat.workspace_id, RelationRead.model_validate(item))
+    queries = ([relation_read_query(
+                    service.services,
+                    owner,
+                    chat.workspace_id,
+                    RelationRead.model_validate(item),
+                    connection_access=getattr(service, "connection_access", None),
+                )
                 for item in action["structuredQueries"]] if action.get("structuredQueries")
                else action.get("queries") or [{"label": "Query", "sql": action["sql"]}])
     if len(queries) > service.policy.maximum_read_queries_per_batch:

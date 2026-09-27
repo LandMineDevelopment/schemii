@@ -199,7 +199,7 @@ def test_managed_result_requires_the_reviewed_credential_identity() -> None:
     )
     service = ConsoleService(
         repository=repository,
-        connections=SimpleNamespace(),
+        connection_access=SimpleNamespace(),
         postgres=ConsolePostgresGateway(),
         workspaces=InMemoryWorkspaceRepository(),
     )

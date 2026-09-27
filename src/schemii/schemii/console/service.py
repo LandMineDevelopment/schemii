@@ -15,7 +15,7 @@ import time
 from typing import Callable, Iterator
 
 from schemii.common.connections.models import ResolvedPostgresConnection
-from schemii.common.connections.service import ConnectionService
+from schemii.common.connections.service import ProductConnectionAccess
 from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.query_executions.errors import ConsoleServiceError
 from schemii.common.query_executions.activity import report_progress
@@ -129,7 +129,7 @@ class ConsoleService:
         self,
         *,
         repository: ConsoleRepository,
-        connections: ConnectionService,
+        connection_access: ProductConnectionAccess,
         postgres: PostgresGateway,
         workspaces: WorkspaceRepository,
         result_ttl: timedelta = timedelta(minutes=15),
@@ -166,7 +166,7 @@ class ConsoleService:
         if maximum_saved_queries_per_workspace < 1:
             raise ValueError("Saved query limit must be positive")
         self._repository = repository
-        self._connections = connections
+        self._connections = connection_access
         self._postgres = postgres
         self._workspaces = workspaces
         self._result_ttl = result_ttl
@@ -205,6 +205,11 @@ class ConsoleService:
         register_reclaimer = getattr(self._postgres, "register_retained_connection_reclaimer", None)
         if callable(register_reclaimer):
             register_reclaimer(self._reclaim_read_session)
+
+    def set_connection_access(self, connection_access: ProductConnectionAccess) -> None:
+        """Set the product-scoped access used by console requests and sessions."""
+
+        self._connections = connection_access
 
     def settings(self, owner_id: str) -> ConsoleSettings:
         try:

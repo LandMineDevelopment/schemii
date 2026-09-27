@@ -46,7 +46,7 @@ def application_services(
     postgres = UnusedPostgresGateway()
     migrations = MigrationService(
         repository=InMemoryMigrationRepository(designs),
-        connections=connection_service,
+        connection_access=connection_service,
         postgres=postgres,
         workspaces=workspaces,
         designs=designs,

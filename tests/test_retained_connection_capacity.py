@@ -17,7 +17,7 @@ def reclaimer(gateway, target, leases, busy=()):
     now = datetime(2030, 1, 1, tzinfo=timezone.utc)
     console = ConsoleService(
         repository=InMemoryConsoleRepository(),
-        connections=Mock(),
+        connection_access=Mock(),
         postgres=gateway,
         workspaces=Mock(),
         clock=lambda: now,

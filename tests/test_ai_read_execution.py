@@ -190,7 +190,7 @@ def test_mixed_replay_preserves_all_origin_approval_policies(reads, monkeypatch,
     reads.chat = reads.repo.update_chat_policy("owner", reads.chat.id, reads.chat.revision,
         AiCapabilities(structured_data_read=True, raw_sql_read=True, structured_query=True,
                        read_approval_required=raw_ask, structured_query_approval_required=structured_ask))
-    monkeypatch.setattr(actions, "relation_read_query", lambda *_: {"label": "Structured", "sql": "SELECT 3 AS value"})
+    monkeypatch.setattr(actions, "relation_read_query", lambda *_, **__: {"label": "Structured", "sql": "SELECT 3 AS value"})
     raw = approve(reads, proposal(reads))
     structured_proposal = reads.service._save_tool_proposal("owner", reads.chat, reads.turn.id,
         "schemii_browse_rows", {"queries": [{"relationRef": "rel_" + "a" * 16}]})
