@@ -287,6 +287,27 @@ and durable state transitions rather than source layout or fixed route counts.
 Frontend module tests cover state and rendering contracts without requiring a
 running server.
 
+The incremental static-quality gate uses Ruff `0.16.9` and Mypy `2.3.1`, pinned
+in the optional `quality` dependency group. Install it alongside the test tools,
+then run the same check used in CI with the fetched base branch:
+
+```bash
+.venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev,quality]'
+.venv/bin/python scripts/check_python_quality.py origin/main
+```
+
+Ruff applies its configured lint rules and formatter to all new Python files and
+the selected Schemoo join-type and Schemer time-analysis modules. Other modified
+legacy Python files receive only undefined or unbound-name checks; they are not
+reformatted wholesale. Mypy requires complete function signatures in the two
+selected modules and checks their function bodies. This explicit boundary keeps
+new files in lint and format checks while type coverage expands without forcing
+unrelated changes across the older codebase. CI supplies the pull request base
+commit (or previous push commit) to this script. When a branch-creation push
+has GitHub's all-zero previous SHA, the script uses the checked-out commit's
+parent and prints that fallback; a root commit without a parent fails clearly
+instead of skipping the quality checks.
+
 Real PostgreSQL integration tests require a disposable, externally reachable
 database and are enabled explicitly. The CI workflow provisions that database;
 the local launcher intentionally keeps its databases private.

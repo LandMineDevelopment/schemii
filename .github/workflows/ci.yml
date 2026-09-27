@@ -13,6 +13,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  static-quality:
+    name: Incremental Python static quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --constraint constraints.docker.txt --editable '.[quality]'
+      - name: Check Python quality against the change base
+        env:
+          QUALITY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/check_python_quality.py "$QUALITY_BASE"
+
   test:
     name: Python and browser behavior
     runs-on: ubuntu-24.04
