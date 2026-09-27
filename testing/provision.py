@@ -73,6 +73,20 @@ def validate_registry(value):
         for key in ("password", "dbPassword"):
             if not isinstance(slot.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", slot[key]):
                 raise ValueError("Invalid retained QA credential; refusing regeneration")
+        chat = slot.get("chatProvider")
+        if chat is not None and (
+            not isinstance(chat, dict) or set(chat) != {"providerId", "modelId", "reasoningEffort"}
+            or chat["providerId"] != "instance-codex"
+            or not isinstance(chat["modelId"], str) or not chat["modelId"]
+            or not isinstance(chat["reasoningEffort"], str) or not chat["reasoningEffort"]
+        ):
+            raise ValueError("Invalid retained QA chat provider policy")
+        writer = slot.get("writableConnectionId")
+        if writer is not None and (
+            slot["persona"] != "designer" or not re.fullmatch(r"pg_[0-9a-f]{32}", writer)
+            or slot.get("writableSchema") != "qa_write_designer_" + name[-3:]
+        ):
+            raise ValueError("Invalid retained QA writer profile")
         usernames.add(name)
     return value
 
@@ -133,6 +147,11 @@ def derived_files(directory, registry):
                 "database": "schemii_qa", "host": "qa-postgres", "fixtureVersion": registry["fixtureVersion"],
                 "scope": "viewer empty-state and access denial only" if persona.get("viewerOnly") else "stable QA target; no seeded saved model or dashboard"},
             "checks": checks}
+        if slot.get("writableConnectionId"):
+            lanes[slot["username"]]["resources"].update(
+                writableConnectionId=slot["writableConnectionId"], writableSchema=slot["writableSchema"])
+        if slot.get("chatProvider"):
+            lanes[slot["username"]]["chatProvider"] = slot["chatProvider"]
         if not persona["product"]:
             lanes[slot["username"]]["scenarios"] = [{"id": "access-denial", "title": "Expected product access denial", "instructions": "This persona deliberately lacks product access. Verify the selected product denies entry and exposes no product controls or protected data. An access-denied response is the expected functional result; capture each viewport. Do not require an ordinary product interaction on a denied page."}]
     write_private(directory / "fixtures.json", {"fixtureVersion": registry["fixtureVersion"], "lanes": lanes})
@@ -242,6 +261,8 @@ def provision(directory, admin_file, selected):
                     counts["createdConnections"] += 1
                 client.call("POST", f"/api/v1/admin/schemii-connections/{slot['connectionId']}/test", {})
             grants = [{"connection_id": slot["connectionId"], "owner_id": POOL, "allow_authoring": True}] if needs_profile else []
+            if slot.get("writableConnectionId"):
+                grants.append({"connection_id": slot["writableConnectionId"], "owner_id": POOL, "allow_authoring": True})
             access = {"capabilities": persona["capabilities"], "connections": grants, "dashboards": []}
             expected_capabilities = sorted(persona["capabilities"] + (["accounts:provision"] if persona["isAdmin"] else []))
             if slot.get("accountId"):
@@ -277,6 +298,144 @@ def provision(directory, admin_file, selected):
     return counts
 
 
+def provision_chat(directory, admin_file, username, model_id, reasoning_effort):
+    """Give one retained Schemii designer exact shared-Codex QA scopes."""
+    registry = registry_load(directory)
+    slot = next((item for item in registry["slots"] if item["username"] == username), None)
+    if not slot or slot["persona"] != "designer" or not slot.get("provisioned") or not slot.get("accountId") or not slot.get("connectionId"):
+        raise ValueError("Chat provisioning requires a provisioned designer QA account and connection")
+    policy = {"providerId": "instance-codex", "modelId": model_id, "reasoningEffort": reasoning_effort}
+    if slot.get("chatProvider") and slot["chatProvider"] != policy:
+        raise ValueError("Retained chat model policy differs; review it before changing grants")
+    admin_credentials = json.loads(private_read(admin_file))
+    admin_credentials = admin_credentials.get("admin", admin_credentials)
+    client = Client()
+    created = 0
+    try:
+        if not client.login(admin_credentials).get("is_admin"):
+            raise ValueError("Chat provisioning requires an application administrator")
+        state = client.call("GET", "/api/v1/admin/ai/shared-codex")
+        if not state.get("connected"):
+            raise ValueError("Shared ChatGPT Codex is not connected; connect and test it in admin settings")
+        verified = client.call("POST", "/api/v1/admin/ai/shared-codex/test", {})
+        model = next((item for item in verified.get("models", []) if item.get("id") == model_id), None)
+        if not model or reasoning_effort not in model.get("reasoningLevels", ["default"]):
+            raise ValueError("Shared ChatGPT Codex model or reasoning is not available to this installation")
+        state = client.call("GET", "/api/v1/admin/ai/shared-codex")
+        for connection_owner_id, connection_id in ((None, None), (POOL, slot["connectionId"])):
+            body = {"userId": slot["accountId"], "product": "schemii",
+                    "connectionOwnerId": connection_owner_id, "connectionId": connection_id,
+                    "modelId": model_id, "reasoningEffort": reasoning_effort}
+            existing = [grant for grant in state.get("grants", []) if all(
+                grant.get(key) == body[key] for key in ("userId", "product", "connectionOwnerId", "connectionId"))]
+            if existing:
+                if len(existing) != 1 or any(existing[0].get(key) != body[key] for key in ("modelId", "reasoningEffort")):
+                    raise ValueError("Existing chat grant policy differs; review it before changing grants")
+                continue
+            client.call("PUT", "/api/v1/admin/ai/shared-codex/grants", body)
+            created += 1
+        user = Client()
+        try:
+            identity = user.login(slot)
+            if identity["user"]["id"] != slot["accountId"]:
+                raise ValueError("Retained designer account identity changed")
+            status = user.call("GET", "/api/v1/ai/status")
+            provider = next((item for item in status.get("providers", []) if item.get("id") == "instance-codex"), None)
+            if not provider or not provider.get("available") or not any(
+                item.get("id") == model_id and item.get("status") == "active"
+                for item in provider.get("models", [])
+            ):
+                raise ValueError("Designer chat model is still unavailable after granting access")
+        finally:
+            try:
+                user.logout()
+            except Exception:
+                pass
+        slot["chatProvider"] = policy
+        write_private(directory / "registry.json", registry)
+        derived_files(directory, registry)
+        return {"account": username, "provider": policy, "createdGrants": created, "verified": True}
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+def provision_writer(directory, admin_file, username):
+    """Attach one separately marked QA writer target to a retained designer."""
+    registry = registry_load(directory)
+    slot = next((item for item in registry["slots"] if item["username"] == username), None)
+    if not slot or slot["persona"] != "designer" or not slot.get("provisioned") or not slot.get("accountId"):
+        raise ValueError("Writer provisioning requires a provisioned designer QA account")
+    writer = "qa_write_designer_" + username[-3:]
+    rows = [row.split("\t") for row in private_read(directory / "writable-credentials.tsv").splitlines() if row]
+    if any(len(row) != 4 or not re.fullmatch(r"qa_write_designer_[0-9]{3}", row[0])
+           or row[0] != row[1] or not re.fullmatch(r"[0-9a-f]{64}", row[2])
+           or row[3] != "qa_designer_" + row[0][-3:] for row in rows):
+        raise ValueError("Invalid private QA writer credential registry")
+    match = [row for row in rows if row[0] == writer and row[3] == username]
+    if len(match) != 1 or len({row[0] for row in rows}) != len(rows):
+        raise ValueError("Exact prepared QA writer target is missing or duplicated")
+    if slot.get("writableSchema") not in (None, writer):
+        raise ValueError("Retained writer target differs; review before changing")
+    admin_credentials = json.loads(private_read(admin_file))
+    admin_credentials = admin_credentials.get("admin", admin_credentials)
+    client = Client()
+    created = 0
+    try:
+        if not client.login(admin_credentials).get("is_admin"):
+            raise ValueError("Writer provisioning requires an application administrator")
+        profiles = client.call("GET", "/api/v1/admin/schemii-connections")["connections"]
+        by_id = {profile["id"]: profile for profile in profiles}
+        profile_body = {"name": "QA writable " + username, "host": "qa-postgres", "port": 5432,
+                        "database": "schemii_qa", "username": writer, "sslMode": "disable", "connectTimeout": 10}
+        connection_id = slot.get("writableConnectionId")
+        if connection_id:
+            profile = by_id.get(connection_id)
+            if not profile or any(profile.get(key) != value for key, value in profile_body.items()) or profile.get("ownerId") != POOL or not profile.get("credentialStored"):
+                raise ValueError("Retained QA writer profile drift")
+        else:
+            if any(profile.get("name") == profile_body["name"] for profile in profiles):
+                raise ValueError("Unowned QA writer profile collision; restore the retained registry")
+            profile = client.call("POST", "/api/v1/admin/schemii-connections",
+                                  {**profile_body, "password": match[0][2]}, expected=201)
+            connection_id = profile["id"]
+            slot["writableConnectionId"] = connection_id
+            slot["writableSchema"] = writer
+            write_private(directory / "registry.json", registry)
+            created = 1
+        client.call("POST", f"/api/v1/admin/schemii-connections/{connection_id}/test", {})
+        account = next((item for item in client.call("GET", "/api/v1/admin/accounts")
+                        if item["id"] == slot["accountId"] and item["username"] == username), None)
+        if not account or account["disabled"] or account["role_ids"]:
+            raise ValueError("Retained QA designer identity changed")
+        base_grant = {"connection_id": slot["connectionId"], "owner_id": POOL, "allow_authoring": True}
+        writer_grant = {"connection_id": connection_id, "owner_id": POOL, "allow_authoring": True}
+        expected_base = {"capabilities": ["schemii:access"], "connections": [base_grant], "dashboards": []}
+        expected_full = {"capabilities": ["schemii:access"], "connections": [base_grant, writer_grant], "dashboards": []}
+        if account["direct_access"] == expected_base:
+            client.call("PATCH", f"/api/v1/admin/accounts/{slot['accountId']}", {"direct_access": expected_full})
+        elif account["direct_access"] != expected_full:
+            raise ValueError("Retained QA designer has unrelated access; refusing to replace grants")
+        user = Client()
+        try:
+            identity = user.login(slot)
+            if identity["user"]["id"] != slot["accountId"] or "schemii:access" not in identity["capabilities"]:
+                raise ValueError("QA writer designer login drift")
+            user.call("POST", f"/api/v1/connections/{connection_id}/test?product=schemii", {})
+        finally:
+            user.logout()
+        slot["writableConnectionId"] = connection_id
+        slot["writableSchema"] = writer
+        write_private(directory / "registry.json", registry)
+        derived_files(directory, registry)
+        return {"account": username, "writableSchema": writer, "connectionId": connection_id,
+                "createdProfiles": created, "verified": True}
+    finally:
+        client.logout()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -285,11 +444,19 @@ def main():
     provision_parser = subparsers.add_parser("app", help="Provision and verify accounts through the supported local HTTPS API")
     provision_parser.add_argument("--admin-credentials", type=Path, required=True)
     provision_parser.add_argument("--accounts", help="Optional comma-separated retained usernames")
+    chat_parser = subparsers.add_parser("chat", help="Provision one retained designer for shared-Codex chat testing")
+    chat_parser.add_argument("--admin-credentials", type=Path, required=True)
+    chat_parser.add_argument("--account", required=True)
+    chat_parser.add_argument("--model", default="gpt-6-luna")
+    chat_parser.add_argument("--reasoning", default="default")
+    writer_parser = subparsers.add_parser("writer", help="Provision one exact marked QA writer target in Schemii")
+    writer_parser.add_argument("--admin-credentials", type=Path, required=True)
+    writer_parser.add_argument("--account", required=True)
     export_parser = subparsers.add_parser("export", help="Export private credentials without deployment-specific IDs")
     export_parser.add_argument("--output", type=Path, required=True)
     import_parser = subparsers.add_parser("import", help="Import private credentials into an empty QA state directory")
     import_parser.add_argument("--input", type=Path, required=True)
-    for child in (initialize_parser, provision_parser, export_parser, import_parser):
+    for child in (initialize_parser, provision_parser, chat_parser, writer_parser, export_parser, import_parser):
         child.add_argument("--state-dir", type=Path, default=Path(os.environ.get("SCHEMII_QA_STATE_DIRECTORY", ROOT / ".schemii/testing")))
     args = parser.parse_args()
     if args.command == "init" and not 1 <= args.copies <= 100:
@@ -306,6 +473,10 @@ def main():
             result = initialize(directory, args.copies)
         elif args.command == "app":
             result = provision(directory, args.admin_credentials, selected)
+        elif args.command == "chat":
+            result = provision_chat(directory, args.admin_credentials, args.account, args.model, args.reasoning)
+        elif args.command == "writer":
+            result = provision_writer(directory, args.admin_credentials, args.account)
         elif args.command == "export":
             result = export_credentials(directory, args.output)
         else:

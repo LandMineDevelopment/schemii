@@ -5,13 +5,14 @@ umask 077
 fail() { printf 'QA database error: %s\n' "$1" >&2; exit 1; }
 action=${1:-verify}
 space=${2:-all}
-case "$action" in prepare|reset|verify|check-reset) ;; *) fail 'expected prepare, reset, verify, or check-reset' ;; esac
+case "$action" in prepare|reset|verify|check-reset|writer-prepare|writer-reset|writer-verify) ;; *) fail 'unknown database management action' ;; esac
 [ "$action" != check-reset ] || { [ "$#" = 2 ] && [ "$space" != all ]; } || fail 'check-reset requires one explicit registered space'
 [ "$#" -le 2 ] || fail 'too many arguments'
 export PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=schemii_qa PGUSER=qa_admin
 export PGPASSWORD="$(cat /run/secrets/qa_database_admin_password)"
 registry=/run/secrets/qa_database_credentials
 [ -s "$registry" ] || fail 'credential registry is missing or empty'
+writer_registry=/run/secrets/qa_database_writable_credentials
 tmp=$(mktemp -d)
 restore_needed=0
 cleanup() {
@@ -41,6 +42,153 @@ fi
 psql_base() { psql -X --no-psqlrc --set ON_ERROR_STOP=1 "$@"; }
 # Refuse to operate in any other cluster/database, even if configuration changes.
 [ "$(psql_base -Atc 'SELECT current_database() || chr(9) || current_user')" = "$(printf 'schemii_qa\tqa_admin')" ] || fail 'database identity mismatch'
+case "$action" in writer-*)
+  case "$space" in qa_designer_004|qa_designer_010|qa_designer_011) ;; *) fail 'writable target must be qa_designer_004, qa_designer_010, or qa_designer_011' ;; esac
+  [ -f "$writer_registry" ] && [ ! -L "$writer_registry" ] || fail 'writable credential registry is missing'
+  awk -F '\t' '
+    NF != 4 || ($4 != "qa_designer_004" && $4 != "qa_designer_010" && $4 != "qa_designer_011") ||
+    $1 != "qa_write_" substr($4,4) || $2 != $1 || length($3)!=64 || $3 !~ /^[0-9a-f]+$/ || seen[$4]++ { bad=1 }
+    END { exit bad }
+  ' "$writer_registry" || fail 'writable credential registry is invalid'
+  writer_line=$(awk -F '\t' -v wanted="$space" '$4 == wanted { print $0 }' "$writer_registry")
+  [ -n "$writer_line" ] || fail "no retained writable credential for $space"
+  old_ifs=$IFS
+  IFS=$(printf '\t')
+  read -r writer_role writer_schema writer_password writer_account <<EOF
+$writer_line
+EOF
+  IFS=$old_ifs
+  [ "$writer_account" = "$space" ] || fail 'writable credential account mismatch'
+  awk -F '\t' -v wanted="$space" '$1 == wanted { found=1 } END { exit !found }' "$registry" || fail 'writable target is not a registered QA account'
+  export QA_WRITER_PASSWORD="$writer_password"
+  role_exists=$(psql_base -At --set role="$writer_role" <<'SQL'
+SELECT count(*) FROM pg_roles WHERE rolname = :'role';
+SQL
+)
+  if [ "$role_exists" = 0 ]; then
+    [ "$action" = writer-prepare ] || fail "writable role missing for $space; prepare first"
+    psql_base -q --set role="$writer_role" <<'SQL'
+\getenv role_password QA_WRITER_PASSWORD
+SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L', :'role', :'role_password') \gexec
+SELECT format('GRANT CONNECT ON DATABASE schemii_qa TO %I', :'role') \gexec
+SQL
+  else
+    if ! PGPASSWORD="$writer_password" PGUSER="$writer_role" psql_base -Atc 'SELECT current_user' > "$tmp/writer-identity" 2>/dev/null; then
+      fail "preserved writable credential mismatch for $space"
+    fi
+    [ "$(cat "$tmp/writer-identity")" = "$writer_role" ] || fail 'writable login identity mismatch'
+  fi
+  role_safe=$(psql_base -At --set role="$writer_role" <<'SQL'
+SELECT NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolinherit OR rolreplication OR rolbypassrls) AND rolcanlogin AND NOT EXISTS (SELECT FROM pg_auth_members WHERE member=pg_roles.oid) FROM pg_roles WHERE rolname=:'role';
+SQL
+)
+  [ "$role_safe" = t ] || fail "writable role has unexpected elevated permissions: $space"
+  control_exists=$(psql_base -Atc "SELECT count(*) FROM pg_namespace WHERE nspname='qa_fixture_control'")
+  if [ "$control_exists" = 0 ]; then
+    [ "$action" = writer-prepare ] || fail 'QA fixture control schema is missing; prepare first'
+    psql_base -q <<'SQL'
+BEGIN;
+CREATE SCHEMA qa_fixture_control AUTHORIZATION qa_admin;
+REVOKE ALL ON SCHEMA qa_fixture_control FROM PUBLIC;
+CREATE TABLE qa_fixture_control.writable_targets (
+  account text PRIMARY KEY CHECK (account IN ('qa_designer_004','qa_designer_010','qa_designer_011')),
+  role_name text NOT NULL UNIQUE,
+  schema_name text NOT NULL UNIQUE,
+  fixture_version integer NOT NULL CHECK (fixture_version = 1)
+);
+REVOKE ALL ON qa_fixture_control.writable_targets FROM PUBLIC;
+COMMIT;
+SQL
+  fi
+  control_valid=$(psql_base -Atc "SELECT pg_get_userbyid(nspowner)='qa_admin' AND NOT EXISTS (SELECT FROM aclexplode(nspacl) WHERE grantee=0) FROM pg_namespace WHERE nspname='qa_fixture_control'")
+  [ "$control_valid" = t ] || fail 'QA fixture control schema ownership or permissions changed'
+  marker=$(psql_base -At --set account="$space" --set role="$writer_role" --set schema="$writer_schema" <<'SQL'
+SELECT count(*) FROM qa_fixture_control.writable_targets WHERE account=:'account' AND role_name=:'role' AND schema_name=:'schema' AND fixture_version=1;
+SQL
+)
+  if [ "$marker" = 0 ]; then
+    [ "$action" = writer-prepare ] || fail "writable target marker is missing for $space; prepare first"
+    conflict=$(psql_base -At --set account="$space" --set role="$writer_role" --set schema="$writer_schema" <<'SQL'
+SELECT count(*) FROM qa_fixture_control.writable_targets WHERE account=:'account' OR role_name=:'role' OR schema_name=:'schema';
+SQL
+)
+    [ "$conflict" = 0 ] || fail 'conflicting writable target marker'
+    existing_schema=$(psql_base -At --set schema="$writer_schema" <<'SQL'
+SELECT count(*) FROM pg_namespace WHERE nspname=:'schema';
+SQL
+)
+    [ "$existing_schema" = 0 ] || fail 'unmarked writable target schema already exists'
+    psql_base -q --set account="$space" --set role="$writer_role" --set schema="$writer_schema" <<'SQL'
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('schemii:qa:writer'), hashtext(:'schema'));
+INSERT INTO qa_fixture_control.writable_targets(account,role_name,schema_name,fixture_version) VALUES (:'account',:'role',:'schema',1);
+SELECT format('CREATE SCHEMA %I AUTHORIZATION %I', :'schema', :'role') \gexec
+SELECT format('ALTER ROLE %I IN DATABASE schemii_qa SET search_path TO %I, pg_catalog', :'role', :'schema') \gexec
+COMMIT;
+SQL
+  else
+    [ "$marker" = 1 ] || fail 'duplicate writable target marker'
+    existing_schema=$(psql_base -At --set schema="$writer_schema" <<'SQL'
+SELECT count(*) FROM pg_namespace WHERE nspname=:'schema';
+SQL
+)
+    if [ "$existing_schema" = 1 ]; then
+      owner=$(psql_base -At --set schema="$writer_schema" <<'SQL'
+SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname=:'schema';
+SQL
+)
+      [ "$owner" = "$writer_role" ] || fail 'writable target schema has unexpected owner'
+    elif [ "$action" != writer-reset ]; then
+      fail "writable target schema is missing for $space; reset it"
+    fi
+    if [ "$action" = writer-reset ]; then
+      psql_base -q --set schema="$writer_schema" --set role="$writer_role" <<'SQL'
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('schemii:qa:writer'), hashtext(:'schema'));
+SELECT format('DROP SCHEMA IF EXISTS %I CASCADE', :'schema') \gexec
+SELECT format('CREATE SCHEMA %I AUTHORIZATION %I', :'schema', :'role') \gexec
+SELECT format('ALTER ROLE %I IN DATABASE schemii_qa SET search_path TO %I, pg_catalog', :'role', :'schema') \gexec
+COMMIT;
+SQL
+    fi
+  fi
+  # Preparation must also refuse a marked target that retained test objects or
+  # acquired privileges outside its intended schema.
+  [ "$(psql_base -At --set schema="$writer_schema" --set role="$writer_role" <<'SQL'
+SELECT CASE WHEN
+ (SELECT pg_get_userbyid(nspowner)=:'role' FROM pg_namespace WHERE nspname=:'schema')
+ AND has_schema_privilege(:'role', :'schema', 'USAGE')
+ AND has_schema_privilege(:'role', :'schema', 'CREATE')
+ AND NOT EXISTS (SELECT FROM pg_namespace n, LATERAL aclexplode(n.nspacl) acl WHERE n.nspname=:'schema' AND acl.grantee=0)
+ AND has_database_privilege(:'role', current_database(), 'CONNECT')
+ AND NOT has_database_privilege(:'role', current_database(), 'CREATE')
+ AND NOT EXISTS (
+   SELECT FROM pg_namespace
+   WHERE nspname <> :'schema'
+     AND (has_schema_privilege(:'role',oid,'CREATE')
+       OR (nspname NOT IN ('public','information_schema')
+         AND nspname !~ '^pg_'
+         AND has_schema_privilege(:'role',oid,'USAGE')))
+ )
+ THEN 'verified' ELSE 'invalid' END;
+SQL
+)" = verified ] || fail "writable target permissions differ for $space"
+  login_schema=$(PGPASSWORD="$writer_password" PGUSER="$writer_role" psql_base -Atc 'SELECT current_schema()') || fail 'writable role cannot connect'
+  [ "$login_schema" = "$writer_schema" ] || fail 'writable role search path differs'
+  object_count=$(psql_base -At --set schema="$writer_schema" <<'SQL'
+-- Every object contained in a schema depends on its namespace. This includes
+-- standalone routines, types, domains, and other objects absent from pg_class.
+SELECT count(DISTINCT (classid,objid,objsubid))
+FROM pg_depend
+WHERE refclassid='pg_namespace'::regclass
+  AND refobjid=to_regnamespace(:'schema')
+  AND refobjsubid=0;
+SQL
+)
+  [ "$object_count" = 0 ] || fail "writable target was not emptied for $space"
+  printf '{"action":"%s","account":"%s","role":"%s","schema":"%s","objects":%s,"credentials":"preserved"}\n' "$action" "$space" "$writer_role" "$writer_schema" "$object_count"
+  exit 0
+esac
 if [ "$action" = check-reset ]; then
   /opt/testing/manage.sh verify "$space" > "$tmp/before.json"
   before=$(sed -n 's/.*"lastVerifiedDataDigest":"\([0-9a-f]*\)".*/\1/p' "$tmp/before.json")

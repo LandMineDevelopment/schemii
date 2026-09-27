@@ -384,6 +384,11 @@ function proposalDetailsNode(proposal) {
   const actions = proposal.details?.type === "batch" ? proposal.details.actions || [] : [proposal.details || {}];
   if (proposal.details?.type === "batch" && proposal.actionType === "design_change") {
     const note = document.createElement("p"); note.textContent = `${actions.length} changes saved together in one design revision. If validation fails, none are saved.`; wrapper.append(note);
+    if (actions.length > 1) {
+      const scrollHint = document.createElement("p"); scrollHint.className = "ai-proposal-review__scroll-hint";
+      scrollHint.textContent = "Scroll through every change before saving. The approval buttons stay below this review.";
+      wrapper.append(scrollHint);
+    }
   }
   for (const [index, action] of actions.entries()) {
     if (actions.length > 1) {
@@ -416,18 +421,18 @@ function proposalDetailsNode(proposal) {
     } else if (action.type === "add_table") {
       const heading = document.createElement("small"); heading.textContent = `TABLE ${action.name}`; wrapper.append(heading);
       const list = document.createElement("div"); list.className = "ai-proposal-review__columns";
-      for (const column of action.columns || []) {
-        const row = document.createElement("div");
-        const name = document.createElement("strong"); name.textContent = column.name;
-        const type = document.createElement("code"); type.textContent = column.data_type || column.dataType;
-        const state = document.createElement("span"); state.textContent = column.nullable === false ? "required" : "nullable";
-        row.append(name, type, state); list.append(row);
-      }
+      for (const column of action.columns || []) list.append(columnReviewNode(column));
       wrapper.append(list);
       if (action.keys?.length) {
         const keys = document.createElement("p"); keys.className = "ai-proposal-review__keys";
         keys.textContent = action.keys.map(key => `${key.kind}: ${key.columns.join(", ")}`).join(" · "); wrapper.append(keys);
       }
+    } else if (action.type === "add_column") {
+      const table = design?.content?.tables?.find(item => item.id === action.table_id);
+      const heading = document.createElement("small"); heading.textContent = `COLUMN FOR ${table?.name || action.table_id}`; wrapper.append(heading);
+      const list = document.createElement("div"); list.className = "ai-proposal-review__columns";
+      if (action.column) list.append(columnReviewNode(action.column));
+      wrapper.append(list);
     } else if (action.type === "put_table_member" || action.type === "put_top_level_object") {
       const object = action.object || {};
       const table = design?.content?.tables?.find(item => item.id === action.table_id);
@@ -449,6 +454,33 @@ function proposalDetailsNode(proposal) {
     }
   }
   return wrapper;
+}
+
+function columnReviewNode(column) {
+  const row = document.createElement("div"); row.className = "ai-proposal-review__column";
+  const summary = document.createElement("div"); summary.className = "ai-proposal-review__column-summary";
+  const name = document.createElement("strong"); name.textContent = column.name;
+  const type = document.createElement("code"); type.textContent = column.data_type ?? column.dataType ?? "";
+  const state = document.createElement("span"); state.textContent = column.nullable === false ? "required" : "nullable";
+  summary.append(name, type, state);
+  const details = document.createElement("dl"); details.className = "ai-proposal-review__column-properties";
+  for (const [label, value] of [
+    ["Identity", column.identity ? column.identity.replaceAll("_", " ") : "none"],
+    ["Default", column.default_expression ?? column.defaultExpression ?? "none"],
+    ["Generated", column.generated_expression ?? column.generatedExpression ?? "none"],
+  ]) {
+    const term = document.createElement("dt"); term.textContent = label;
+    const description = document.createElement("dd"); description.textContent = value;
+    details.append(term, description);
+  }
+  const sources = column.generated_source_column_ids ?? column.generatedSourceColumnIds;
+  if (sources?.length) {
+    const term = document.createElement("dt"); term.textContent = "Source columns";
+    const description = document.createElement("dd"); description.textContent = sources.join(", ");
+    details.append(term, description);
+  }
+  row.append(summary, details);
+  return row;
 }
 
 function openProposalReview(proposal) {

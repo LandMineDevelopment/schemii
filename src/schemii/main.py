@@ -29,7 +29,7 @@ from schemii.common.connections.policy import (
     CompositeConnectionTargetPolicy,
     InternalOnlyConnectionTargetPolicy,
 )
-from schemii.common.connections.service import ConnectionService
+from schemii.common.connections.service import ConnectionService, ProductConnectionAccess
 from schemii.common.developer_inspection import install_developer_inspection
 from schemii.common.metadata import MetadataRepositories, create_metadata_repositories
 from schemii.common.metadata.migrations import (
@@ -94,6 +94,27 @@ class ApplicationServices:
     models: ModelRepository | None = None
     model_catalogs: ModelCatalogs | None = None
     dashboards: InMemoryDashboardRepository | PostgresDashboardRepository | None = None
+
+
+@dataclass(frozen=True)
+class _SchemiiAiConnectionAccess:
+    """Keep AI's existing connection interface inside the Schemii grant scope."""
+
+    scoped: ProductConnectionAccess
+
+    def for_product(self, product: str) -> ProductConnectionAccess:
+        if product != "schemii":
+            raise ValueError("Schemii AI cannot use another product's connections")
+        return self.scoped
+
+    def list(self, actor_id: str):
+        return self.scoped.list(actor_id)
+
+    def get(self, actor_id: str, connection_id: str):
+        return self.scoped.get(actor_id, connection_id)
+
+    def use(self, actor_id: str, connection_id: str):
+        return self.scoped.use(actor_id, connection_id)
 
 
 def create_services(
@@ -466,6 +487,7 @@ def create_app(
     # explicit product scope so queued work rechecks the role before opening DB.
     if active_services.migrations is not None:
         active_services.migrations._connections = schemii_connections
+        active_services.migrations.execution_coordinator._connections = schemii_connections
     if active_services.console is not None:
         active_services.console._connections = schemii_connections
     from schemii.common.auth.dependencies import AccountConnectionDependencies
@@ -519,7 +541,7 @@ def create_app(
         active_services.ai_repository
         or InMemoryAiRepository(active_services.admin_config.ai),
         ai_runtime,
-        active_services,
+        replace(active_services, connections=_SchemiiAiConnectionAccess(schemii_connections)),
     )
     application.state.ai_service.raw_console = application.state.raw_console
     from schemii.common.ai.conversation_store import ConversationStore
