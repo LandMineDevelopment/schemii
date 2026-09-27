@@ -475,6 +475,40 @@ def test_analysis_propagates_complex_subquery_types_and_cross_source_lineage() -
     ]
 
 
+def test_analysis_reports_unresolved_relations_and_output_inputs() -> None:
+    analysis = analyze_query_definition("SELECT absent.id FROM absent")
+
+    assert analysis["status"] == "partial"
+    assert analysis["warnings"] == ["unresolved_relation"]
+    assert analysis["sources"] == [
+        {
+            "namespace": "desired",
+            "name": "absent",
+            "kind": "relation",
+            "resolved": False,
+            "aliases": ["absent"],
+            "column_count": 0,
+            "columns": [],
+        }
+    ]
+    assert analysis["outputs"][0]["inputs"] == [
+        {"source": "absent", "column": "id", "resolved": False}
+    ]
+
+
+def test_analysis_preserves_limit_summaries_across_query_story() -> None:
+    analysis = analyze_query_definition(
+        "SELECT state FROM orders ORDER BY state OFFSET 2 LIMIT 5",
+        relations(),
+    )
+
+    assert analysis["limit"] == "5"
+    assert next(
+        item for item in analysis["transformations"] if item["kind"] == "limits"
+    ) == {"kind": "limits", "count": 1, "items": ["5"], "sql": None}
+    assert analysis["query_steps"][0]["limit"] == "5"
+
+
 def test_design_analysis_derives_downstream_consumers_without_persisting_lineage() -> None:
     content = SchemiiDesignContent.model_validate(
         {
