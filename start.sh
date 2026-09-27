@@ -15,7 +15,6 @@ SCHEMII_METADATA_APP_USER="${SCHEMII_METADATA_APP_USER-schemii_metadata_app}"
 SCHEMII_STARTUP_TIMEOUT="${SCHEMII_STARTUP_TIMEOUT-120}"
 SCHEMII_TLS_DIRECTORY="${SCHEMII_TLS_DIRECTORY-${ROOT_DIR}/.schemii/tls}"
 SCHEMII_TLS_CERTIFICATE_DAYS="${SCHEMII_TLS_CERTIFICATE_DAYS-365}"
-SCHEMII_SECRET_DIRECTORY="${SCHEMII_SECRET_DIRECTORY-${ROOT_DIR}/.schemii/secrets}"
 SCHEMII_LAUNCH_LOCK_FILE="${SCHEMII_LAUNCH_LOCK_FILE-${ROOT_DIR}/.schemii/start.lock}"
 SCHEMII_RESET_MIGRATION_DEMO="${SCHEMII_RESET_MIGRATION_DEMO-0}"
 SCHEMII_DEMO_SCENARIO="${SCHEMII_DEMO_SCENARIO-baseline}"
@@ -136,6 +135,17 @@ if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
   command -v git >/dev/null 2>&1 || fail "Git is required to resolve the shared deployment lease"
   command -v flock >/dev/null 2>&1 || fail "flock is required to serialize local application lifecycle changes"
   SCHEMII_QA_LOCK_DIRECTORY="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)" || fail "could not resolve the shared deployment lease directory"
+  if [[ -z "${SCHEMII_SECRET_DIRECTORY+x}" ]]; then
+    # Linked worktrees share the fixed Compose project and its persistent volumes.
+    # Keep their secrets with Git's primary worktree so the first launch from any
+    # linked checkout uses one stable credential owner. Git lists the primary
+    # worktree first, even when this worktree's .git entry is a file.
+    SCHEMII_PRIMARY_WORKTREE_ROOT="$(git --git-dir="$SCHEMII_QA_LOCK_DIRECTORY" worktree list --porcelain \
+      | sed -n '1s/^worktree //p')" || fail "could not resolve the primary Git worktree for shared stack secrets"
+    [[ -n "$SCHEMII_PRIMARY_WORKTREE_ROOT" && -d "$SCHEMII_PRIMARY_WORKTREE_ROOT" ]] \
+      || fail "the primary Git worktree is unavailable; set SCHEMII_SECRET_DIRECTORY to the retained stack secrets"
+    SCHEMII_SECRET_DIRECTORY="${SCHEMII_PRIMARY_WORKTREE_ROOT}/.schemii/secrets"
+  fi
   SCHEMII_QA_LOCK_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-deployment.lock"
   SCHEMII_QA_GATE_FILE="${SCHEMII_QA_LOCK_DIRECTORY}/qa-startup.lock"
   if [[ -n "${SCHEMII_QA_GATE_FD+x}" ]]; then
@@ -157,6 +167,11 @@ if [[ "$SCHEMII_LAUNCH_ACTION" != "logs" ]]; then
     export SCHEMII_QA_LEASE_FD=3
     export SCHEMII_QA_LEASE_MODE=exclusive
   fi
+fi
+
+# The logs-only action historically needs neither Git nor stack secrets.
+if [[ -z "${SCHEMII_SECRET_DIRECTORY+x}" ]]; then
+  SCHEMII_SECRET_DIRECTORY="${ROOT_DIR}/.schemii/secrets"
 fi
 
 if [[ ! "$SCHEMII_TEST_APP_PORT" =~ ^[0-9]+$ ]] || (( 10#$SCHEMII_TEST_APP_PORT < 1024 || 10#$SCHEMII_TEST_APP_PORT > 65535 )); then
