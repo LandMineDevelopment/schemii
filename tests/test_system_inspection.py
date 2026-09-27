@@ -61,6 +61,63 @@ def test_runtime_binding_uses_exact_application_state_receiver_for_scoped_servic
     assert test_resolved.resolution == "runtime-receiver"
 
 
+def test_configured_service_graph_fits_binding_index_without_truncation(
+    monkeypatch, tmp_path,
+):
+    from pathlib import Path
+
+    from schemii.common.api.runtime import RuntimeConfig
+    from schemii.common.metadata.database import MetadataMigrator
+    from schemii.schemii.console.repository import PostgresConsoleRepository
+
+    import schemii.common.metadata.factory as metadata_factory
+
+    monkeypatch.setattr(MetadataMigrator, "migrate", lambda self: 0)
+    monkeypatch.setattr(metadata_factory, "read_encryption_key", lambda path: b"x" * 32)
+    for method in (
+        "recover_interrupted",
+        "recover_transactions",
+        "prune_operational_receipts",
+        "prune_history",
+    ):
+        monkeypatch.setattr(
+            PostgresConsoleRepository,
+            method,
+            lambda self, *args, **kwargs: None,
+        )
+
+    password_file = tmp_path / "metadata-password"
+    password_file.write_text("test-metadata-password", encoding="utf-8")
+    pi_password_file = tmp_path / "pi-password"
+    pi_password_file.write_text("test-pi-password", encoding="utf-8")
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setenv("SCHEMII_DEPLOYMENT_MODE", "authenticated")
+    monkeypatch.setenv("SCHEMII_AUTH_ENABLED", "1")
+    monkeypatch.setenv("SCHEMII_SETUP_TOKEN", "test-setup-token")
+    monkeypatch.setenv("SCHEMII_TARGET_EGRESS_MODE", "internal-only")
+    monkeypatch.setenv(
+        "SCHEMII_ALLOWED_TARGET_HOSTS",
+        "localhost,127.0.0.1,postgres,demo-postgres,metadata-postgres",
+    )
+    monkeypatch.setenv("SCHEMII_STORAGE_MODE", "postgresql")
+    monkeypatch.setenv(
+        "SCHEMII_METADATA_DSN",
+        "host=metadata-postgres port=5432 dbname=schemii_test user=schemii_metadata_app",
+    )
+    monkeypatch.setenv("SCHEMII_METADATA_PASSWORD_FILE", str(password_file))
+    monkeypatch.setenv("SCHEMII_METADATA_ENCRYPTION_KEY_FILE", str(tmp_path / "key"))
+    monkeypatch.setenv("SCHEMII_CONFIG_FILE", str(repository_root / "dev/schemii.toml"))
+    monkeypatch.setenv("SCHEMII_PI_PROTOTYPE_URL", "http://127.0.0.1:4097")
+    monkeypatch.setenv("SCHEMII_PI_PASSWORD_FILE", str(pi_password_file))
+
+    application = create_app(runtime_config=RuntimeConfig.from_env())
+    document = build_developer_system_document(application)
+
+    assert len(document["bindings"]) > 96
+    assert not any(document["analysis"]["truncated"].values())
+    assert all(route["journey"]["status"] == "complete" for route in document["routes"])
+
+
 def test_runtime_binding_tracks_optional_callable_factory_without_hiding_unguarded_calls():
     from schemii.common.auth.service import AuthService
     from schemii.common.metadata.config import MetadataConfig

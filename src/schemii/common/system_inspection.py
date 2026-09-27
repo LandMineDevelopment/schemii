@@ -39,7 +39,9 @@ _MAX_ROUTES = 256
 _MAX_CALLABLES = 1280
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
-_MAX_BINDINGS = 96
+# The authenticated PostgreSQL + Pi composition currently has 98 runtime field
+# bindings. Keep room for that installed graph and modest growth beyond it.
+_MAX_BINDINGS = 128
 # Keep the whole registered application visible as implemented route families grow.
 # This remains a hard bound; it is not a pagination or runtime discovery setting.
 _MAX_OBJECTS = 1792
