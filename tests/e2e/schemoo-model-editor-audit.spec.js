@@ -4,7 +4,7 @@ import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
 const modelId = "model_editor_audit_fixture";
 
-async function openFixture(page, { wideSavedLayout = false } = {}) {
+async function openFixture(page, { wideSavedLayout = false, modelName = "Editor audit fixture" } = {}) {
   const fields = Array.from({ length: 36 }, (_, index) => ({ name: `field_${index}`, dataType: "integer", nullable: false }));
   const catalog = { database: "fixture", namespace: "public", fingerprint: "fixture-v1", notice: "Isolated editor fixture",
     tables: [{ name: "people", primaryKey: ["field_0"], columns: fields }, { name: "teams", primaryKey: ["id"], columns: [{ name: "id", dataType: "integer", nullable: false }] }],
@@ -15,7 +15,7 @@ async function openFixture(page, { wideSavedLayout = false } = {}) {
     draft.nodes[0].x = 0; draft.nodes[0].y = 0;
     draft.nodes[1].x = 2400; draft.nodes[1].y = 0;
   }
-  const saved = { id: modelId, connectionId: "fixture_connection", namespace: "public", name: "Editor audit fixture", revision: 1,
+  const saved = { id: modelId, connectionId: "fixture_connection", namespace: "public", name: modelName, revision: 1,
     layoutRevision: 1, exploreRevision: 1, catalogFingerprint: catalog.fingerprint, ...splitDraft(draft),
     ...(wideSavedLayout ? {} : { layout: { positions: [] } }) };
   await page.route(`**/api/v1/schemoo/models/${modelId}`, route => route.fulfill({ json: saved }));
@@ -40,6 +40,44 @@ test("wide saved models open on a readable starting object; Fit still shows the 
   await page.locator("#fit").click();
   await expect.poll(zoom).toBeLessThan(.5);
   await expect(page.locator("#save-model")).toBeDisabled();
+});
+
+test("long model names show truncation while keeping the full accessible value", async ({ page }) => {
+  const modelName = "QA report-author model qa_reports_orders_dashboard";
+  await openFixture(page, { modelName });
+  const name = page.getByRole("textbox", { name: "Model name", exact: true });
+  const display = page.locator("#model-name-display");
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await expect(name).toBeVisible();
+    await expect(name).toHaveValue(modelName);
+    await expect(page.getByRole("heading", { name: modelName, exact: true })).toBeVisible();
+    await expect(name).toHaveAttribute("title", modelName);
+    const layout = await display.evaluate(text => {
+      const bounds = text.getBoundingClientRect();
+      const brand = text.closest(".brand").getBoundingClientRect();
+      return {
+        overflow: getComputedStyle(text).overflow,
+        textOverflow: getComputedStyle(text).textOverflow,
+        width: bounds.width,
+        overflows: text.scrollWidth > text.clientWidth,
+        insideBrand: bounds.left >= brand.left && bounds.right <= brand.right,
+        viewportWidth: document.documentElement.clientWidth,
+        documentWidth: document.documentElement.scrollWidth,
+      };
+    });
+    expect(layout.overflow).toBe("hidden");
+    expect(layout.textOverflow).toBe("ellipsis");
+    expect(layout.width).toBeGreaterThan(0);
+    expect(layout.overflows).toBe(true);
+    expect(layout.insideBrand).toBe(true);
+    expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
+    await name.focus();
+    await expect(display).toHaveCSS("visibility", "hidden");
+    await expect(name).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
+    await name.blur();
+    await expect(display).toHaveCSS("visibility", "visible");
+  }
 });
 
 test("missing saved positions stay clean; tall fields scroll with visible relationship anchors", async ({ page }) => {

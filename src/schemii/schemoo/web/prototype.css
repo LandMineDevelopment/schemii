@@ -13,8 +13,12 @@ small,.hint,#target,#result-status { color: var(--muted); }
 h1 { margin: 4px 0 0; font-size: 19px; } h2 { margin: 12px 0; font-size: 15px; } h3 { margin: 8px 0; font-size: 13px; }
 .top-actions,.tools,.tabs,.actions { display: flex; align-items: center; gap: 6px; }
 .brand { min-width: 0; }
-#model-name { width: min(280px, 35vw); font: inherit; padding: 3px 5px; border-color: transparent; background: transparent; }
-#model-name:focus { border-color: var(--purple); }
+#model-name-heading { position: relative; width: min(280px, 35vw); }
+#model-name { position: relative; z-index: 1; display: block; width: 100%; min-width: 0; font: inherit; padding: 3px 5px; border-color: transparent; background: transparent; color: transparent; caret-color: transparent; }
+#model-name::placeholder { color: var(--muted); opacity: 1; }
+#model-name:focus { border-color: var(--purple); color: var(--text); caret-color: var(--text); }
+#model-name-display { position: absolute; inset: 0; overflow: hidden; padding: 3px 5px; border: 1px solid transparent; white-space: nowrap; text-overflow: ellipsis; pointer-events: none; }
+#model-name:focus + #model-name-display, #model-name:placeholder-shown + #model-name-display { visibility: hidden; }
 .model-secondary-actions { flex-wrap: wrap; margin-bottom: 12px; }
 #model-library { width: min(620px, 94vw); max-height: 90dvh; padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line-strong); border-radius: 10px; overflow: auto; }
 #model-library::backdrop { background: #06090dc9; }
@@ -28,7 +32,7 @@ h1 { margin: 4px 0 0; font-size: 19px; } h2 { margin: 12px 0; font-size: 15px; }
 .model-list-row .model-option { min-width: 0; overflow-wrap: anywhere; }
 .model-list-row .model-option-delete { width: 44px; height: 44px; min-height: 44px; color: #f08088; }
 .model-create-form { display: grid; gap: 12px; margin-top: 20px; }
-@media (max-width: 650px) { .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; } .topbar #target { order: 3; width: 100%; } #model-name { width: 45vw; } .top-actions { gap: 2px; } }
+@media (max-width: 650px) { .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; } .topbar #target { order: 3; width: 100%; } #model-name-heading { width: 45vw; } .top-actions { gap: 2px; } }
 .ui-button { font-size: 12px; white-space: nowrap; }
 .ui-button.primary { background: var(--purple); border-color: var(--purple); color: #160e2a; }
 .ui-button.active { background: #29223c; color: #cfbbff; border-color: #725b9d; }
