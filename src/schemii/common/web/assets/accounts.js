@@ -6,10 +6,11 @@ import { installDetailsMenu } from './ui.js';
 import { installProductNavigation } from './product-navigation.js';
 import { confirmAction } from './confirmation.js';
 import { reasoningLabel, reasoningLevels } from './ai-reasoning.js';
-import { canAccessProduct, signInDestination, signOut, sessionChanged } from './accounts-session.js';
+import { canAccessProduct, landingPath, signInDestination, signOut, sessionChanged } from './accounts-session.js';
 const main = document.getElementById('accounts-main');
 const nav = document.getElementById('account-navigation');
 const mobileNav = document.getElementById('account-mobile-navigation');
+const brand = document.querySelector('.accounts-header .ui-brand');
 let mobileNavMenuController = null;
 const AUTH = '/api/v1/auth', ADMIN = '/api/v1/admin';
 const button = (text, action, primary = false) => { const b = el('button', { type: 'button', className: `ui-button${primary ? ' primary' : ''}`, text }); b.onclick = action; return b; };
@@ -287,6 +288,7 @@ async function initialize() {
     const status = await requestJson(`${AUTH}/status`);
     if (!status.authenticated) { if (location.pathname !== '/login') { location.replace(loginUrl()); return; } await login(status); return; }
     const account = await requestJson(`${AUTH}/me`);
+    brand.href = landingPath(account);
     if (location.pathname === '/login') { location.replace(signInDestination(account)); return; }
     nav.replaceChildren();
     for (const [product, label, href] of [['schemii', 'Schemii', '/'], ['schemoo', 'Schemoo', '/schemoo'], ['schemer', 'Schemer', '/schemer']]) {

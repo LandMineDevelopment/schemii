@@ -14,8 +14,12 @@ test('products are independent and Schemer editing needs its own capability', ()
   assert.equal(canAccessProduct(schema, 'schemoo'), false);
   assert.equal(canAuthor(schema, 'schemii'), true);
   assert.equal(canAuthor(schema), false);
+  assert.equal(landingPath(schema), '/');
+  assert.equal(landingPath({ capabilities: ['schemoo:access'] }), '/schemoo');
+  assert.equal(landingPath({ capabilities: ['schemer:access'] }), '/schemer');
   const reports = { capabilities: ['schemer:access', 'schemer:author'] };
   assert.equal(canAuthor(reports), true);
   assert.equal(landingPath(reports), '/schemer');
   assert.equal(landingPath({ is_admin: true, capabilities: ['accounts:provision'] }), '/admin');
+  assert.equal(landingPath({ capabilities: [] }), '/account');
 });
