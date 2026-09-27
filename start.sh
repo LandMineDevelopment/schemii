@@ -28,7 +28,7 @@ SCHEMII_LOG_SERVICE=
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
-  printf 'Usage: %s [--prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
+  printf 'Usage: %s [--prepare-testing | --reset-testing SPACE | --check-testing-reset SPACE | --verify-testing [SPACE] | --prepare-testing-writable ACCOUNT | --reset-testing-writable ACCOUNT | --verify-testing-writable ACCOUNT | --backup [NEW_DIRECTORY] | --verify-backup DIRECTORY | --restore-backup-new DIRECTORY | --ai-prototype | --reset-demo [SCENARIO] | --reset-migration-demo | --list-demo-scenarios | --logs SERVICE | --test-ai-prototype | --test-ai-metadata | --remove-legacy-ai-data]\n' "$0"
 }
 
 list_demo_scenarios() {
@@ -53,6 +53,12 @@ if (( $# > 0 )); then
       SCHEMII_LAUNCH_ACTION="${1#--}"
       SCHEMII_TESTING_SPACE="${2-all}"
       [[ "$SCHEMII_TESTING_SPACE" == "all" || "$SCHEMII_TESTING_SPACE" =~ ^qa_[a-z_]+_[0-9]{3}$ ]] || { printf 'Invalid testing space\n' >&2; exit 2; }
+      ;;
+    --prepare-testing-writable|--reset-testing-writable|--verify-testing-writable)
+      (( $# == 2 )) || { usage >&2; exit 2; }
+      SCHEMII_LAUNCH_ACTION="${1#--}"
+      SCHEMII_TESTING_SPACE="$2"
+      [[ "$SCHEMII_TESTING_SPACE" == qa_designer_004 || "$SCHEMII_TESTING_SPACE" == qa_designer_010 || "$SCHEMII_TESTING_SPACE" == qa_designer_011 ]] || { printf 'Invalid writable testing account\n' >&2; exit 2; }
       ;;
     --backup)
       (( $# <= 2 )) || { usage >&2; exit 2; }
@@ -262,6 +268,8 @@ compose_args=(
 # Include the QA service on every launch once initialized; normal --remove-orphans
 # must not remove a portable testing database between runs.
 if [[ -f "${SCHEMII_QA_STATE_DIRECTORY}/registry.json" ]]; then
+  source "$ROOT_DIR/testing/launcher.sh"
+  testing_database_init_writable_registry
   compose_args+=(--file "${ROOT_DIR}/testing/compose.yaml")
 fi
 export SCHEMII_QA_STATE_DIRECTORY
@@ -454,11 +462,11 @@ if [[ -f "${SCHEMII_QA_STATE_DIRECTORY}/registry.json" ]]; then
   compose_args+=(--file "$ROOT_DIR/testing/egress.yaml")
 fi
 
-if [[ "$SCHEMII_LAUNCH_ACTION" == *-testing || "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
+if [[ "$SCHEMII_LAUNCH_ACTION" == *-testing || "$SCHEMII_LAUNCH_ACTION" == *-testing-writable || "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
   source "$ROOT_DIR/testing/launcher.sh"
   # A crashed coordinator can leave account reservations even after its OS lock
   # closes. Do not reset data until its recorded browsers have been cleaned up.
-  if [[ "$SCHEMII_LAUNCH_ACTION" == "reset-testing" || "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
+  if [[ "$SCHEMII_LAUNCH_ACTION" == "reset-testing" || "$SCHEMII_LAUNCH_ACTION" == "reset-testing-writable" || "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
     shopt -s nullglob
     qa_reservations=("${SCHEMII_QA_LOCK_DIRECTORY}/qa-account-leases/"*.json)
     shopt -u nullglob
@@ -466,11 +474,19 @@ if [[ "$SCHEMII_LAUNCH_ACTION" == *-testing || "$SCHEMII_LAUNCH_ACTION" == "chec
     if [[ "$SCHEMII_LAUNCH_ACTION" == "check-testing-reset" ]]; then
       [[ "$SCHEMII_TESTING_SPACE" != all ]] || fail "reset check needs a single testing space"
       testing_database_manage check-reset "$SCHEMII_TESTING_SPACE"
+    elif [[ "$SCHEMII_LAUNCH_ACTION" == "reset-testing-writable" ]]; then
+      testing_database_manage writer-reset "$SCHEMII_TESTING_SPACE"
     else
       testing_database_manage reset "$SCHEMII_TESTING_SPACE"
     fi
   elif [[ "$SCHEMII_LAUNCH_ACTION" == "verify-testing" ]]; then
     testing_database_manage verify "$SCHEMII_TESTING_SPACE"
+  elif [[ "$SCHEMII_LAUNCH_ACTION" == "verify-testing-writable" ]]; then
+    testing_database_manage writer-verify "$SCHEMII_TESTING_SPACE"
+  elif [[ "$SCHEMII_LAUNCH_ACTION" == "prepare-testing-writable" ]]; then
+    testing_database_prepare_writable_credential "$SCHEMII_TESTING_SPACE"
+    testing_database_start
+    testing_database_manage writer-prepare "$SCHEMII_TESTING_SPACE"
   else
     testing_database_start
     testing_database_manage prepare all

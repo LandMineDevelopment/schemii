@@ -15,6 +15,7 @@ services:
       - schemii-testing-postgres:/var/lib/postgresql/data
       - ${SCHEMII_QA_STATE_DIRECTORY:?testing state directory required}/database-admin-password:/run/secrets/qa_database_admin_password:ro
       - ${SCHEMII_QA_STATE_DIRECTORY:?testing state directory required}/database-credentials.tsv:/run/secrets/qa_database_credentials:ro
+      - ${SCHEMII_QA_STATE_DIRECTORY:?testing state directory required}/writable-credentials.tsv:/run/secrets/qa_database_writable_credentials:ro
     networks:
       - database
     healthcheck:

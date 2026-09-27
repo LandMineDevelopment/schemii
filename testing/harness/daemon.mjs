@@ -2,11 +2,11 @@ import net from 'node:net';
 import { releaseAccounts } from './leases.mjs';
 import { chmod, writeFile, rm, stat, realpath } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
-import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp } from './store.mjs';
+import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
 const [id, mode] = process.argv.slice(2), dir = runPath(id);
@@ -107,11 +107,12 @@ async function prepareWave() {
   }finally{await persist();}
 }
 function brief(l) {
-  return {run:id,lane:l.id,username:l.username,products:l.products,track:l.track,resources:l.resources,
+  return {run:id,lane:l.id,username:l.username,products:l.products,track:l.track,url:l.url,resources:l.resources,
     browser:'one independent Chromium process/context; use test.sh action exclusively',viewports:l.viewports,scenarios:l.scenarios,
-    boundaries: run.fixtureMode==='harness-only-no-app-data-writes' ? 'Read-only app walkthrough. Do not save, create, delete or change account settings.' : 'Only assigned disposable resources may be edited. Retained resources are read-only unless the scenario explicitly says otherwise.',
-    instructions:'Never sign into another account, use global T3 tabs, call app APIs, or rebuild/reset the stack. Use your session file for every browser action. Record scenario outcomes and evidence before finish. If a write outcome is uncertain, inspect saved state before repeating. Report findings to coordinator as they arise.',
-    commands:{action:`${root}/test.sh action --session-file SESSION_FILE --kind snapshot`,checkpoint:`${root}/test.sh checkpoint --session-file SESSION_FILE --scenario SCENARIO --functional passed --visual passed --note DESCRIPTION --evidence RELATIVE_PATH`,finish:`${root}/test.sh finish --session-file SESSION_FILE`}};
+    writeAuthorization:l.writeAuthorization,
+    boundaries:l.writeAuthorization?.enabled ? 'Only the exact assigned disposable resources and listed operations may be edited. Retained resources remain read-only.' : 'Read-only app walkthrough. Do not save, create, delete or change account settings.',
+    instructions:'Never sign into another account, use global T3 tabs, call app APIs, or rebuild/reset the stack. Use your session file for every browser action. Record scenario outcomes and evidence before finish. If a write outcome is uncertain, inspect saved state before repeating. Record structured draft findings with owned screenshot evidence as they arise.',
+    commands:{action:`${root}/test.sh action --session-file SESSION_FILE --kind snapshot`,checkpoint:`${root}/test.sh checkpoint --session-file SESSION_FILE --scenario SCENARIO --functional passed --visual passed --note DESCRIPTION --evidence RELATIVE_PATH`,finding:`${root}/test.sh finding --session-file SESSION_FILE --scenario SCENARIO --title TITLE --severity medium --steps STEPS --expected EXPECTED --actual ACTUAL --evidence SCREENSHOT`,finish:`${root}/test.sh finish --session-file SESSION_FILE`}};
 }
 async function ownedEvidence(paths,l){
   const output=[];
@@ -129,6 +130,8 @@ async function workerRequest(req){
     const l=assertLease(req);
     if(req.command==='action') {
       await checkSource();
+      if(req.kind==='upload' && !l.writeAuthorization?.operations?.some(operation=>operation.includes('upload')))
+        throw new Error('File upload requires an explicitly assigned writable fixture operation.');
       try {
         const result=await fleet.action(l.id,req.kind,req.args||{});
         await event(dir,{kind:'action',lane:l.id,agent:l.agent,action:req.kind});
@@ -146,6 +149,16 @@ async function workerRequest(req){
       }
     }
     if(req.command==='heartbeat'){await persist();return {lane:l.id,heartbeatAt:l.heartbeatAt};}
+    if(req.command==='finding') {
+      const s=l.scenarios.find(s=>s.id===req.scenario);if(!s)throw new Error('Finding needs an assigned scenario ID.');
+      const fields=findingInput(req);
+      const evidence=await ownedEvidence(req.evidence,l);
+      if(!evidence.length || !evidence.some(path=>(l.captures||[]).some(c=>c.path===path&&c.generation===l.generation)))throw new Error('Finding needs at least one screenshot captured by this lane in its current session.');
+      const finding={id:`finding-${randomUUID()}`,lane:l.id,username:l.username,scenario:s.id,agent:l.agent,...fields,evidence,verificationStatus:'unverified',at:stamp()};
+      run.findings ||= [];run.findings.push(finding);
+      await event(dir,{kind:'finding',id:finding.id,lane:l.id,scenario:s.id,severity:finding.severity,title:finding.title,evidence});
+      await persist();return finding;
+    }
     if(req.command==='checkpoint') {
       const s=l.scenarios.find(s=>s.id===req.scenario);if(!s)throw new Error('Unknown scenario.');
       for(const key of ['functional','visual'])if(!['passed','failed','blocked'].includes(req[key]))throw new Error(`${key} needs passed, failed, or blocked.`);
@@ -232,7 +245,7 @@ const server=net.createServer(socket=>{
   socket.on('data',chunk=>{
     if(handled)return;input+=chunk;if(input.length>65536){socket.destroy();return;}
     if(!input.includes('\n'))return;handled=true;
-    (async()=>{try{const req=JSON.parse(input.split('\n')[0]);const result=['action','checkpoint','finish','heartbeat'].includes(req.command)?await workerRequest(req):await controllerRequest(req);socket.end(JSON.stringify({ok:true,result})+'\n');}catch(e){socket.end(JSON.stringify({ok:false,error:safeError(e)})+'\n');}})();
+    (async()=>{try{const req=JSON.parse(input.split('\n')[0]);const result=['action','checkpoint','finding','finish','heartbeat'].includes(req.command)?await workerRequest(req):await controllerRequest(req);socket.end(JSON.stringify({ok:true,result})+'\n');}catch(e){socket.end(JSON.stringify({ok:false,error:safeError(e)})+'\n');}})();
   });
 });
 await new Promise((res,rej)=>{server.once('error',rej);server.listen(control.socket,res);});await chmod(control.socket,0o600);

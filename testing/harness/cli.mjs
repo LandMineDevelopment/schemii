@@ -14,6 +14,10 @@ const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spa
 const help = `Usage: ./test.sh COMMAND [options]
 
   setup      Create/extend stable persona credentials, prepare QA DB, provision accounts
+  provision-chat Grant one retained designer access to the tested shared AI model
+  provision-writer Prepare and attach one isolated writable Schemii QA target
+  reset-writer Reset one marked writable QA target after a run
+  verify-writer Verify one marked writable QA target is empty
   export-credentials Export a private portable credential bundle (--output FILE)
   import-credentials Import into empty private state (--input FILE)
   personas   List available permission personas
@@ -27,6 +31,7 @@ const help = `Usage: ./test.sh COMMAND [options]
   claim      Bind a lane to an agent; returns private session-file path
   action     Drive only that agent's browser through its session file
   checkpoint Record a scenario's function/style results and evidence
+  finding    Record a documented issue candidate with lane-owned evidence
   heartbeat  Renew an agent’s ownership lease using its session file
   finish     Release a completed lane after all scenarios have results
   status     Read durable progress
@@ -38,6 +43,9 @@ const help = `Usage: ./test.sh COMMAND [options]
   cleanup    Stop owned browsers; preserve accounts, data and evidence
 
 Setup:     --copies-per-persona 20 --admin-credentials /private/admin.json
+Chat:      --account qa_designer_001 --admin-credentials /private/admin.json
+           [--model gpt-6-luna --reasoning default]
+Writer:    --account qa_designer_010 --admin-credentials /private/admin.json
 Data:      --space qa_modeler_001|all
 Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
            --products schemoo,schemer
@@ -52,6 +60,9 @@ Claim:     --lane LANE_ID --agent AGENT_ID
 Action:    --session-file FILE --kind snapshot --args-json '{"...":"..."}'
 Checkpoint:--session-file FILE --scenario ID --functional passed|failed|blocked
            --visual passed|failed|blocked --note TEXT --evidence FILE1,FILE2
+Finding:   --session-file FILE --scenario ID --title TEXT
+           --severity low|medium|high|critical --steps TEXT
+           --expected TEXT --actual TEXT --evidence FILE1,FILE2
 
 All actions emit JSON. Browser backend: isolated (one Chromium process per lane).
 T3 dispatch is an explicit handoff; Codex dispatch launches independent CLI workers.
@@ -65,7 +76,9 @@ function blocked(message) { return Object.assign(new Error(message), { exitCode:
 const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona'];
 const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
-  setup: ['copies-per-persona','admin-credentials'], reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
+  setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
+  'provision-writer': ['account','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
+  reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
   plan: [...selectionOptions,'headless'],
   doctor: [...selectionOptions,'credentials-file','headless'],
@@ -73,6 +86,7 @@ const commandOptions = {
   run: ['run'], claim: ['run','lane','agent'],
   action: ['session-file','kind','args-json'],
   checkpoint: ['session-file','scenario','functional','visual','note','evidence'],
+  finding: ['session-file','scenario','title','severity','steps','expected','actual','evidence'],
   finish: ['session-file'], heartbeat: ['session-file'],
   status: ['run'], report: ['run'], advance: ['run'], recover: ['run','lane'],
   resume: ['run'], stop: ['run'], cleanup: ['run'],
@@ -146,11 +160,24 @@ async function selection(o, reservedAccounts) {
   if (!fixture.lanes || Array.isArray(fixture.lanes)) throw new Error('Fixture manifest needs a lanes object keyed by username.');
   const lanes = accounts.map((username, i) => {
     const spec = fixture.lanes[username] || {}, track = tracks[i % tracks.length];
+    const writeAuthorization=spec.writeAuthorization || null;
+    if(writeAuthorization !== null) {
+      if(!o.fixtures || writeAuthorization.enabled !== true ||
+        !Array.isArray(writeAuthorization.resources) || !writeAuthorization.resources.length ||
+        !Array.isArray(writeAuthorization.operations) || !writeAuthorization.operations.length ||
+        [...writeAuthorization.resources,...writeAuthorization.operations].some(x=>typeof x!=='string'||!x.trim()||x.length>200))
+        throw new Error(`${username}: writeAuthorization needs a fixture with enabled:true and nonempty resource/operation lists.`);
+    }
     if (track !== 'harness' && (!spec.checks?.length || !spec.resources)) throw new Error(`${username}: feature tracks require fixture resources and effective-access checks.`);
-    const checks = spec.checks || [];
+    const checks = [...(spec.checks || [])];
+    if (track === 'chat') {
+      if (!spec.chatProvider?.providerId || !spec.chatProvider?.modelId)
+        throw new Error(`${username}: chat track needs a provisioned model; run ./test.sh provision-chat first.`);
+      checks.push({path:'/api/v1/ai/status',providerAvailable:spec.chatProvider});
+    }
     for (const c of checks) {
       if (typeof c.path !== 'string' || !c.path.startsWith('/api/v1/') || c.path.includes('..') || c.path.includes('://')) throw new Error('Fixture checks must be same-origin /api/v1/ GET paths.');
-      if (!c.equals && !c.minLength && c.status === undefined) throw new Error('Each fixture check requires an expected status or value.');
+      if (!c.equals && !c.minLength && !c.providerAvailable && c.status === undefined) throw new Error('Each fixture check requires an expected status or value.');
     }
     const baseScenarios = spec.scenarios || [{id:track,title:`${track} walkthrough`,instructions:trackSteps[track]}];
     if (!Array.isArray(baseScenarios) || !baseScenarios.length || baseScenarios.some(s => !s || !/^[a-z0-9-]+$/.test(s.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
@@ -167,7 +194,7 @@ async function selection(o, reservedAccounts) {
     return { id: `lane-${i+1}`, username, products, track, status: 'queued', generation: 0,
       viewport: viewports[0] === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
       viewports, resources: spec.resources || {}, checks, url: spec.url,
-      persona:persona?.id || spec.persona || null, expectedCapabilities:spec.expectedCapabilities, deniedProducts:spec.deniedProducts || [],
+      persona:persona?.id || spec.persona || null, expectedCapabilities:spec.expectedCapabilities, deniedProducts:spec.deniedProducts || [], writeAuthorization,
       scenarios };
   });
   for (const l of lanes) {
@@ -256,6 +283,28 @@ async function execute(command,o) {
     await runCommand('./testing/setup.sh',[copies,resolve(o['admin-credentials']),stateDir]);
     return;
   }
+  if(command==='provision-chat') {
+    if(!o['admin-credentials']||!o.account)throw invalid('--admin-credentials and --account are required.');
+    if(!/^qa_designer_[0-9]{3}$/.test(o.account))throw invalid('--account must name a retained designer QA account.');
+    await privateJSON(resolve(o['admin-credentials']));
+    await runCommand('python',['testing/provision.py','chat','--admin-credentials',resolve(o['admin-credentials']),
+      '--account',o.account,'--model',o.model||'gpt-6-luna','--reasoning',o.reasoning||'default','--state-dir',stateDir]);
+    return;
+  }
+  if(command==='provision-writer') {
+    if(!o['admin-credentials']||!o.account)throw invalid('--admin-credentials and --account are required.');
+    if(!/^qa_designer_[0-9]{3}$/.test(o.account))throw invalid('--account must name a retained designer QA account.');
+    await privateJSON(resolve(o['admin-credentials']));
+    await runCommand('./start.sh',['--prepare-testing-writable',o.account]);
+    await runCommand('python',['testing/provision.py','writer','--admin-credentials',resolve(o['admin-credentials']),
+      '--account',o.account,'--state-dir',stateDir]);
+    return;
+  }
+  if(['reset-writer','verify-writer'].includes(command)) {
+    if(!/^qa_designer_[0-9]{3}$/.test(o.account||''))throw invalid('--account must name a retained designer QA account.');
+    await runCommand('./start.sh',[command==='reset-writer'?'--reset-testing-writable':'--verify-testing-writable',o.account]);
+    return;
+  }
   if(['reset','verify-data','check-reset'].includes(command)) {
     if(['reset','check-reset'].includes(command)&&!o.space)throw invalid('reset requires --space ACCOUNT or --space all.');
     const space=o.space || 'all';
@@ -319,15 +368,16 @@ async function execute(command,o) {
     });
     console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
-  if(['action','checkpoint','finish','heartbeat'].includes(command)) {
+  if(['action','checkpoint','finding','finish','heartbeat'].includes(command)) {
     if(!o['session-file'])throw invalid('--session-file is required.');
     if(command==='action'&&!o.kind)throw invalid('--kind is required.');
     if(command==='checkpoint'&&(!o.scenario||!['passed','failed','blocked'].includes(o.functional)||!['passed','failed','blocked'].includes(o.visual)))throw invalid('Checkpoint requires --scenario and passed|failed|blocked values for --functional and --visual.');
+    if(command==='finding'&&(!o.scenario||!o.title||!['low','medium','high','critical'].includes(o.severity)||!o.steps||!o.expected||!o.actual||!o.evidence))throw invalid('Finding requires --scenario, --title, --severity, --steps, --expected, --actual and --evidence.');
     const session=await privateJSON(resolve(o['session-file']));
     let args={};
     try { args=o['args-json']?JSON.parse(o['args-json']):{}; } catch { throw invalid('--args-json must contain valid JSON.'); }
     if(!args||typeof args!=='object'||Array.isArray(args))throw invalid('--args-json must be an object.');
-    const result=await rpc(session,{command,kind:o.kind,args,scenario:o.scenario,functional:o.functional,visual:o.visual,note:o.note,evidence:list(o.evidence,'')});
+    const result=await rpc(session,{command,kind:o.kind,args,scenario:o.scenario,functional:o.functional,visual:o.visual,note:o.note,evidence:list(o.evidence,''),title:o.title,severity:o.severity,steps:o.steps,expected:o.expected,actual:o.actual});
     console.log(JSON.stringify(result,null,2));return;
   }
   if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||''))throw invalid('--run must identify a valid QA run.');

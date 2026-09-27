@@ -4,11 +4,15 @@ This directory is a self-contained PostgreSQL 17 image build context. It contain
 
 The `qa-postgres` service has its own persistent volume and internal network address, with no published host port. It never mounts or connects to application metadata or the demo database. Database `schemii_qa` contains one private schema and reader login per registered account. These database logins all have identical read-only permissions; application personas independently control feature and connection grants.
 
+Three Schemii lanes can also receive separate, disposable writer identities. `qa_designer_004` is reserved for connection lifecycle, `qa_designer_010` for SQL write/COPY/bulk jobs, and `qa_designer_011` for migration apply. Their roles and schemas are respectively `qa_write_designer_004`, `qa_write_designer_010`, and `qa_write_designer_011`. The original `qa_designer_NNN` database logins and 120 baseline schemas remain read-only. Writer roles can create objects only in their own empty writer schema; they cannot create a database or access peer QA schemas. An administrator-owned marker outside each writer schema records exact fixture ownership so cleanup can safely recreate a schema even if a test deleted all of its objects.
+
 Each baseline contains 32 customers, 513 orders (three statuses, two customer regions, fixed dates and nullable notes), a relational foreign key, an identity sequence, and a customer totals view. Data is deterministic and contains no real customer information.
 
 ## Persistent credentials
 
 The launcher mounts `.schemii/testing/database-admin-password` and `database-credentials.tsv` read-only. Both are mode 0600 and live outside the resettable volume and image. Each tab-separated registry row is `username`, matching schema name, and a 64-character hexadecimal password. Names follow `qa_PERSONA_NNN`. Preserve these files together with the account registry when moving the environment; never commit them. Existing PostgreSQL login credentials are authenticated and verified, never silently replaced.
+
+The launcher also maintains mode-0600 `.schemii/testing/writable-credentials.tsv`. A row is `writer role`, matching writer schema, 64-character hexadecimal password, and parent designer username. The file starts empty and gains a row only when one of the three exact writer targets is prepared. It is mounted read-only into the database container. Provisioning never prints its password, rotates an existing password, or grants write privileges to a baseline login. Preserve it with the other private state and application connection profiles.
 
 ## Operations
 
@@ -18,6 +22,18 @@ The launcher mounts `.schemii/testing/database-admin-password` and `database-cre
 - `reset SPACE|all` transactionally rebuilds only registered fixture schemas, restoring all baseline data, sequences, and permissions. Credentials, roles, application accounts, metadata and saved connection profiles remain intact. An unknown or unmarked schema is refused.
 - `check-reset SPACE` requires one explicit registered space. It first verifies the baseline, then transactionally changes an order, removes another order, creates a scratch table and advances the identity sequence. It also independently perturbs totals-view results, view SELECT access, and sequence permissions, restoring the baseline between checks. It proves that ordinary verification rejects each drift, invokes the normal reset path and verifies the original data checksum and preserved login again. Its exit trap attempts restoration after an interruption or failure; a forced kill or failed database connection still requires explicit reset before reuse.
 - `verify [SPACE|all]` checks baseline version, exact row contents in both directions, row counts, totals-view results and read access, sequence position and denied sequence grants, read-only privileges, separation from peer schemas, and actual login/query access using the preserved password. Drift produces a failing exit status.
+
+For an authorized Schemii writer lane, use only the launcher commands below. Preparing creates the separate role/schema if missing and preserves existing test data. The app provisioner must create that lane's separate Schemii connection profile with host `qa-postgres`, database `schemii_qa`, and the writer credentials from the private TSV. Each profile should default to its matching writer schema through the role's database search path.
+
+```bash
+./start.sh --prepare-testing-writable qa_designer_010
+./start.sh --verify-testing-writable qa_designer_010
+# After the harness has stopped and released every account reservation:
+./start.sh --reset-testing-writable qa_designer_010
+./start.sh --verify-testing-writable qa_designer_010
+```
+
+Use `_004` and `_011` in the same way for their assigned lanes. Reset drops and recreates only the exact marked writer schema in a transaction, leaving it empty. It preserves writer and reader credentials, roles, application accounts and connection profiles. A missing marker, unregistered target, unexpected schema owner, credential mismatch, active harness lease or account reservation causes refusal. Verification authenticates the retained writer login and checks scope/role privileges; the reset JSON reports `objects:0` as the cleanup proof. Application metadata (saved queries, chat history and designs) is outside this database and is handled by the harness's application cleanup contract.
 
 The launcher serializes operations against active testing leases. A PostgreSQL advisory transaction lock additionally serializes changes to each schema. Resetting `all` uses one transaction per space: if an error occurs, earlier completed spaces remain reset and the failing schema rolls back. `prepare` does not repair changed data; explicit reset is required.
 

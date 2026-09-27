@@ -15,6 +15,10 @@ windows, not additional T3 preview tabs. Choose an agent controller:
 - `--controller codex`: `run` starts one independent installed Codex CLI process
   per ready lane, up to `--parallel 10`. These processes are separate from T3's
   subagent slots and each receives only its assigned browser session handle.
+  Lanes without explicit `writeAuthorization` stay read-only. A fixture-backed
+  lane with exact owned resources and operations may perform only those UI writes,
+  including saves, chat turns, approvals, SQL and migrations. This is a cooperative
+  prompt boundary; use disposable per-account resources and inspect the result.
 
 Workers use a workspace-write sandbox rooted at their lane artifact directory,
 with networking enabled so harness commands can reach the local Unix socket.
@@ -148,6 +152,15 @@ provider prerequisites in the manifest and checklist; a successful GET does not
 prove query correctness or a successful chat turn. Use data exceeding the actual
 page size for pagination acceptance.
 
+The `chat` track additionally requires a `chatProvider` entry in its lane
+fixture, for example
+`{"providerId":"instance-codex","modelId":"gpt-6-luna","reasoningEffort":"default"}`.
+The runner checks the authenticated provider and active model during browser
+preflight. For retained designer accounts, `./test.sh provision-chat` grants the
+exact QA scopes and writes this entry into the generated private fixtures.
+Use `--accounts qa_designer_001` with the provisioned account for a chat lane;
+automatic persona selection may choose a different designer.
+
 ## Coordinator runbook
 
 1. Read `plan` and `doctor`. With T3, reserve runtime slots for coordination and
@@ -175,8 +188,7 @@ page size for pagination acceptance.
    The runner enforces session ownership and stale-handle rejection; the
    coordinator is responsible for genuinely independent review and runtime slots.
 7. After all active agents finish, `advance --run RUN_ID` prepares the next wave,
-   then `run --run RUN_ID` dispatches it. Codex workers are currently assigned
-   read-only harness exploration; write-dependent scenarios remain blocked.
+   then `run --run RUN_ID` dispatches it. Do not call `advance` during an active wave.
 8. `report --run RUN_ID` renders a durable HTML report. Review function/style
    separately. Then `stop --run RUN_ID` closes browsers, revokes their app sessions,
    and releases the deployment lock. `cleanup` is idempotent and preserves app
@@ -201,10 +213,14 @@ page size for pagination acceptance.
 
 Available browser actions: `identity`, `snapshot`, `navigate` (same origin),
 `click`, `type`, `press`, `scroll`, `resize`, `screenshot`, `dialog`, `drag`,
-`download`. Locator arguments accept `role`/`name`, `label`, or `selector`.
+`download`, `upload`. Upload accepts `selector`, `fileName` ending in `.csv` or
+`.json`, and UTF-8 `content` up to 1 MiB; it requires an explicitly authorized
+fixture operation. Locator arguments accept `role`/`name`, `label`, or `selector`.
 `press` uses `key`; `scroll` uses `x`/`y`; `drag` uses `from:{x,y}` and `to:{x,y}`;
 `dialog` uses `action:accept|dismiss`; `download` clicks the supplied locator and
-saves the resulting file in the lane directory. There is no arbitrary JavaScript
+may set `browserFallback: true` to exercise an application's browser-download
+path when its native File System Access save picker cannot be automated. The
+action saves the resulting file in the lane directory. There is no arbitrary JavaScript
 or raw app API action. Password fields are masked in screenshots. Native dialogs
 are reported and must be explicitly accepted/dismissed, never automatically
 accepted during application testing.
@@ -217,6 +233,91 @@ results also require an explanatory note. Every scenario must have both results
 before finish; use `blocked` rather than inventing a pass. The runner records
 claims and evidence, but cannot prove a human/agent actually inspected an image.
 Emulated mobile checks are not physical-device approval.
+
+Report an observed defect immediately with `./test.sh finding --session-file FILE
+--scenario ID --title TEXT --severity low|medium|high|critical --steps TEXT
+--expected TEXT --actual TEXT --evidence SCREENSHOT`. The screenshot must have
+been captured by that lane in its current session. Findings persist as unverified
+drafts in the run manifest and HTML report; a separate Sol verifier should
+reproduce candidates in its own account and browser. Checkpoint the scenario
+separately, retaining functional or visual failure even if a workaround succeeds.
+
+For the complete Schemii sweep, first seed exact test-owned local, reader and
+writer workspaces through the application's normal APIs, then generate a
+private manifest:
+
+```bash
+python -m testing.harness.schemii_workspaces --tag UNIQUE \
+  --output artifacts/qa/UNIQUE-workspaces.json
+python testing/harness/schemii_sweep.py --tag UNIQUE \
+  --workspace-fixtures artifacts/qa/UNIQUE-workspaces.json \
+  --output artifacts/qa/UNIQUE-fixtures.json
+```
+
+It assigns ten named designer accounts, 60 prescriptive base scenarios (120
+desktop/mobile outcomes), exact types, baseline values, owned scratch prefixes,
+pre-opened workspace checks, chat provider checks and three isolated writer targets. Provision the target
+accounts and writer profiles first as described in `../README.md`. Use
+`--accounts` in the manifest's insertion order, `--agents 10 --parallel 10
+--controller codex --agent-model gpt-6-luna --agent-reasoning high
+--agent-timeout 3600 --products schemii --tracks lifecycle,canvas,rules,query,chat
+--viewports desktop,mobile --fixtures artifacts/qa/UNIQUE-fixtures.json` for
+`plan`, `doctor` and `prepare`. Do not treat scenario instructions as a pass:
+each agent must record actual result and evidence for every outcome.
+After `report` and `cleanup`, use
+`python -m testing.harness.cleanup_schemii_sweep --run RUN_ID
+--workspace-fixtures artifacts/qa/UNIQUE-workspaces.json` to remove recorded
+seed-owned workspaces and chats plus exact-prefix app objects created after that
+run started. Preexisting and other-tag objects are preserved. Then reset and
+verify the exact writer targets as shown in `../README.md`.
+
+For blocked dependent workflows, start a new wave with a **new** tag after the
+first run has stopped and its app objects and writer schemas have been cleaned:
+
+```bash
+python -m testing.harness.schemii_workspaces --tag UNIQUE2 \
+  --output artifacts/qa/UNIQUE2-workspaces.json
+python -m testing.harness.schemii_preseed \
+  --workspace-fixtures artifacts/qa/UNIQUE2-workspaces.json \
+  --output artifacts/qa/UNIQUE2-workspaces-ready.json
+python -m testing.harness.schemii_followup --tag UNIQUE2 \
+  --workspace-fixtures artifacts/qa/UNIQUE2-workspaces-ready.json \
+  --output artifacts/qa/UNIQUE2-followup-fixtures.json
+```
+
+The preseed step uses normal authenticated app APIs and records its ownership
+incrementally. It replaces only empty desired designs in four exact owned
+workspaces; it never executes SQL or applies a migration. It creates separate
+reader and local-design chats with explicit permissions for `qa_designer_001`.
+That agent completes its scenarios through in-app chat alone. Shared Codex
+inference is single-turn across these QA accounts: other agents may test UI in
+parallel, but must not send competing AI turns. The follow-up generator emits
+ten substantial missions and 100 desktop/mobile outcomes, including exact
+column types and row-specific selectors, catalog paging, real downloaded file
+inspection, isolated migration apply, and cleanup boundaries. Prepare/run it
+with the same ten-account Luna/high harness command above, changing only the
+fixture path. Once the follow-up report is saved and its browsers stopped, run
+the same scoped cleanup helper with its `UNIQUE2-workspaces.json` map, then
+reset and verify all three marked writer schemas and the 120 reader baselines.
+
+Before dispatch, compare the retained account registry with the fixture's
+account list, verify the selected AI model with `./test.sh provision-chat` and
+the harness preflight, verify three empty writer schemas, and reserve a separate
+Sol verifier account/browser. Keep the full run and any focused subset follow-up
+on distinct tags. A subset follow-up uses only its declared accounts and the
+same tag's workspace map for cleanup. Authorize chat-only agents explicitly to
+approve **read-only SELECT** proposals in their assigned reader schema; prohibit
+all reader writes. Without this permission, an Ask-mode approval card blocks the
+exact-answer checkpoint even when the provider and chat work. Give desktop and
+mobile stateful design scenarios separate fresh workspaces or make mobile a
+readback-only scenario; one viewport's saved tables otherwise invalidate the
+other viewport's create test. For design exports, open the header
+`summary[aria-label="Download"]` menu before choosing
+`#download-catalog-button` or `#export-design-sql-button`. For SQL Console COPY
+download, use the harness download action's `browserFallback` on the supported
+browser path and inspect the private downloaded bytes. A hidden menu button,
+native file picker, or unapproved read must be marked blocked with its exact
+precondition, not called an application failure.
 
 ## Recovery and private artifacts
 

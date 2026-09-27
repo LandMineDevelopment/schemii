@@ -134,8 +134,8 @@
 .ai-history-rename-form input:focus { box-shadow: 0 0 0 2px rgba(128, 107, 208, .13); }
 .ai-history-rename-form .ui-icon-button { width: 34px; height: 34px; }
 
-.ai-proposal-dialog .ui-dialog__shell { width: min(620px, calc(100vw - 28px)); max-height: min(760px, calc(100vh - 28px)); overflow: hidden; }
-.ai-proposal-review { min-height: 0; padding: 18px 20px; overflow-y: auto; }
+.ai-proposal-dialog .ui-dialog__shell { width: min(620px, calc(100vw - 28px)); max-height: min(760px, calc(var(--ui-visual-viewport-height) - 28px)); grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+.ai-proposal-review { min-height: 0; padding: 18px 20px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .ai-proposal-review__content { display: grid; gap: 12px; }
 .ai-proposal-review__summary { color: #e2dafa; font-size: 14px; }
 .ai-proposal-review__metadata { display: grid; margin: 0; grid-template-columns: minmax(110px, auto) minmax(0, 1fr); gap: 7px 13px; }
@@ -143,12 +143,17 @@
 .ai-proposal-review__metadata dd { margin: 0; color: #c7cfda; font: 10px ui-monospace, monospace; }
 .ai-proposal-review__content > small { color: #a993ee; font-size: 8px; font-weight: 800; letter-spacing: .09em; }
 .ai-proposal-review__content pre { max-height: 300px; margin: 0; overflow: auto; padding: 12px; color: #c8d1dc; background: #090e14; border: 1px solid #303b48; border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.ai-proposal-review__columns { display: grid; overflow: hidden; border: 1px solid #303a47; border-radius: 7px; }
-.ai-proposal-review__columns > div { display: grid; min-height: 36px; padding: 7px 9px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 9px; border-bottom: 1px solid #29333e; }
+.ai-proposal-review__columns { display: grid; min-width: 0; overflow: hidden; border: 1px solid #303a47; border-radius: 7px; }
+.ai-proposal-review__columns > div { display: grid; min-width: 0; padding: 9px; gap: 7px; border-bottom: 1px solid #29333e; }
 .ai-proposal-review__columns > div:last-child { border-bottom: 0; }
-.ai-proposal-review__columns strong { overflow: hidden; color: #d7dde6; text-overflow: ellipsis; }
-.ai-proposal-review__columns code { overflow: hidden; color: #9db8ce; text-overflow: ellipsis; }
+.ai-proposal-review__column-summary { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: baseline; gap: 8px; }
+.ai-proposal-review__columns strong { min-width: 0; color: #d7dde6; overflow-wrap: anywhere; }
+.ai-proposal-review__columns code { min-width: 0; color: #9db8ce; overflow-wrap: anywhere; }
 .ai-proposal-review__columns span, .ai-proposal-review__keys { color: #747f8e; font-size: 9px; }
+.ai-proposal-review__column-properties { display: grid; min-width: 0; margin: 0; grid-template-columns: minmax(72px, auto) minmax(0, 1fr); gap: 5px 10px; }
+.ai-proposal-review__column-properties dt { color: #8a96a7; font-size: 9px; }
+.ai-proposal-review__column-properties dd { min-width: 0; margin: 0; color: #c7cfda; font: 10px ui-monospace, monospace; overflow-wrap: anywhere; }
+.ai-proposal-review__scroll-hint { margin: 0; color: #a99ace; font-size: 10px; }
 .ai-proposal-review__keys { margin: 0; }
 
 
@@ -157,4 +162,7 @@
   .ai-settings-body { padding: 14px; }
   .ai-history-item { grid-template-columns: minmax(0, 1fr) auto auto; }
   .ai-history-current { display: none; }
+  .ai-proposal-review { padding: 12px; }
+  .ai-proposal-review__column-summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .ai-proposal-review__column-summary code { grid-column: 1 / -1; grid-row: 2; }
 }

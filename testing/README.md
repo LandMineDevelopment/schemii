@@ -10,6 +10,12 @@ All container lifecycle and database reset operations go through `./start.sh`.
 
 Supply a private mode-0600 administrator credential JSON (`{ "username": "…",
 "password": "…" }` or `{ "admin": { ... } }`). Never commit it.
+On this installation, check `.schemii/accounts-test-credentials.json` first;
+the existing QA administrator is `accounts-admin`. Retained designer credentials
+and account/profile IDs are already in `.schemii/testing/credentials.json` and
+`.schemii/testing/registry.json`. Read their presence, ownership and file mode,
+not their passwords, before creating accounts. These paths are installation
+specific; use `--admin-credentials` with the actual private file when different.
 
 ```bash
 ./test.sh setup --copies-per-persona 20 --admin-credentials /private/admin.json
@@ -26,12 +32,65 @@ the empty/denied-authoring state until an explicit dashboard fixture is supplied
 Administrator accounts grant account administration, not implicit product access.
 See [persona details](PERSONAS.md).
 
+## Prepare a live Schemii AI chat lane
+
+The ordinary designer persona has Schemii access but no AI provider grant. After
+connecting an installation-owned ChatGPT Codex credential in the application,
+provision one retained designer explicitly:
+
+```bash
+./start.sh
+./test.sh provision-chat --account qa_designer_001 \
+  --admin-credentials /private/admin.json
+```
+
+The private admin file must be mode 0600. This command tests the shared credential
+against the live model catalog, grants only the selected designer access to
+`gpt-6-luna` at default reasoning in its detached Schemii workspaces and exact
+QA database profile, verifies the designer can select that model, and records the
+choice in the retained fixture manifest. Repeating it preserves matching grants;
+it refuses to replace a different grant policy. The grants are specific to this
+deployment and are not included in the portable credential export.
+
+Select the provisioned account explicitly for a chat run. The chat track now
+checks for an authenticated, active model before dispatch, so a status HTTP 200
+or a disconnected provider cannot count as readiness. A passing preflight still
+does not prove a successful AI turn; the manual agent must send a prompt and
+verify the reply, approvals and saved result.
+
 Setup can extend the pool by increasing copies (up to 100 per persona); it never
 shrinks the pool or rotates existing credentials. The application has a managed
 profile capacity: default 100, including existing non-QA profiles. Larger pools
 must fit that configured capacity; the suite never silently raises it. Unknown
 remote username/profile collisions or changed permissions fail instead of adopting
 or overwriting another user's resources.
+
+## Isolated writable Schemii targets
+
+The 120 retained QA database roles are deliberately read-only. For full SQL
+Console, COPY, connection and migration UI testing, the suite supports three
+separately marked, initially empty writer targets: `qa_designer_004`, `_010`,
+and `_011`. Their exact `qa_write_designer_NNN` roles and schemas live in the
+same dedicated QA database, with distinct private credentials. They never
+replace or broaden the original reader roles/schemas. Prepare and attach each
+writer through the supported launcher and application APIs:
+
+```bash
+./test.sh provision-writer --account qa_designer_004 --admin-credentials /private/admin.json
+./test.sh provision-writer --account qa_designer_010 --admin-credentials /private/admin.json
+./test.sh provision-writer --account qa_designer_011 --admin-credentials /private/admin.json
+```
+
+The command is repeatable only while its marked writer schema is empty and its
+privileges remain isolated; reset and verify a used writer before provisioning
+it again. It refuses unowned profile collisions or unexpected account grants.
+`qa_designer_001` is the chat-only lane; provision
+`qa_designer_002` too for the second AI lane with `provision-chat`. The full
+Schemii assignment generator and ten-agent command are in
+[the harness runbook](harness/README.md). It prescribes exact table types,
+constraints, expected row counts and query totals for agents and the separate
+verifier. All test-created objects use a unique run prefix. The writer fixture
+limits COPY to 1 MiB and generated rows to 5,000 per writer schema.
 
 ## Run the same persona concurrently
 
@@ -70,6 +129,35 @@ Finishing a lane closes its browser and releases that account. Cleanup stops the
 remaining workers/controller and releases its deployment lease. It preserves QA
 accounts, credentials, app models/dashboards and run evidence. It does not delete
 application objects created by tests; declare and manage those fixtures explicitly.
+For a full Schemii sweep, review its report and documented findings before
+cleanup, then call `cleanup` for **every run**, including the independent verifier.
+Only after all runs release their reservations, delete seed-created and
+post-start exact-prefix app objects through the scoped cleanup helper, reset the three exact writer targets,
+verify each is empty, and verify the retained read-only baseline:
+
+```bash
+python -m testing.harness.cleanup_schemii_sweep --run RUN_ID \
+  --workspace-fixtures artifacts/qa/UNIQUE-workspaces.json
+./test.sh reset-writer --account qa_designer_004
+./test.sh reset-writer --account qa_designer_010
+./test.sh reset-writer --account qa_designer_011
+./test.sh verify-writer --account qa_designer_004
+./test.sh verify-writer --account qa_designer_010
+./test.sh verify-writer --account qa_designer_011
+./test.sh verify-data
+```
+
+Writer reset preserves the private credentials, app profiles and account grants,
+and returns the exact marked writer schema to an empty baseline. Harness cleanup
+preserves evidence. Registered reader-schema reset is separate and only needed
+for a changed reader baseline; it also requires no active run or reservation.
+The scoped helper accepts both the full sweep and the follow-up fixture version;
+give it the workspace map for that exact run tag. It also accepts a stopped
+subset-account follow-up and cleans only its listed lanes. Run it a second time
+to confirm zero remaining owned objects. It preserves preexisting and
+other-tag objects. A new follow-up wave uses a fresh tag after this cleanup and
+the writer resets. Its preseed step records four exact two-table desired designs
+and two permissioned chats for the chat-only tester; see the harness runbook.
 
 ## Restore stable data
 

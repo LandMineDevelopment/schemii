@@ -2,6 +2,7 @@ import { chromium } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { assertProviderAvailable } from './prerequisites.mjs';
 
 const COOKIE = 'schemii_session';
 const STORAGE_KEY = '__schemii_qa_isolation__';
@@ -259,10 +260,33 @@ export class BrowserFleet {
         }
         case 'download': {
           const locator = await this.#availableLocator(page, args);
+          if (args.browserFallback === true) {
+            const available = await page.evaluate(() => {
+              // File System Access pickers cannot be driven through a browser
+              // download event. Exercise the app's supported browser fallback.
+              globalThis.showSaveFilePicker = undefined;
+              return typeof globalThis.showSaveFilePicker === 'function';
+            });
+            if (available) throw new Error('Browser download fallback could not disable the native save picker.');
+          }
           const [download] = await Promise.all([page.waitForEvent('download'), locator.click({ noWaitAfter: true })]);
           const filename = path.join(handle.directory, `${randomUUID()}-${path.basename(download.suggestedFilename()).replace(/[^a-zA-Z0-9._-]/g, '_')}`);
           await download.saveAs(filename);
           return { download: filename };
+        }
+        case 'upload': {
+          const filename = String(args.fileName || '');
+          const content = args.content;
+          if (!/^[a-zA-Z0-9_.-]{1,80}\.(csv|json)$/i.test(filename) || typeof content !== 'string')
+            throw new Error('Upload needs a CSV or JSON fileName and text content.');
+          const buffer = Buffer.from(content, 'utf8');
+          if (!buffer.length || buffer.length > 1024 * 1024)
+            throw new Error('Upload content must be 1 through 1048576 bytes.');
+          const locator = page.locator(args.selector || 'input[type="file"]');
+          if (await locator.count() !== 1 || await locator.getAttribute('type') !== 'file')
+            throw new Error('Upload requires one exact file input selector.');
+          await locator.setInputFiles({ name: filename, mimeType: filename.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/json', buffer });
+          return { uploaded: filename, bytes: buffer.length };
         }
         default: throw new Error(`Unsupported browser action: ${action}`);
       }
@@ -278,7 +302,7 @@ export class BrowserFleet {
       const page = await handle.context.newPage();
       try {
         await page.setContent(`<!doctype html><title>QA browser capability check</title>
-          <label>Probe input <input id="input"></label><button id="click">Click probe</button>
+          <label>Probe input <input id="input"></label><input id="upload" type="file"><button id="click">Click probe</button>
           <button id="confirm">Confirm probe</button><a id="download" download="probe.txt">Download probe</a>
           <div id="drag" style="margin:30px;width:160px;height:100px;background:#acf">Drag probe</div>
           <script>document.querySelector('#click').onclick=()=>document.body.dataset.clicked='yes';
@@ -290,6 +314,8 @@ export class BrowserFleet {
         await page.getByLabel('Probe input').fill('qa-input-ok');
         await page.locator('#click').click();
         if (await page.locator('#input').inputValue() !== 'qa-input-ok' || await page.locator('body').getAttribute('data-clicked') !== 'yes') throw new Error('Click/type probe failed');
+        await page.locator('#upload').setInputFiles({name:'probe.csv',mimeType:'text/csv',buffer:Buffer.from('a,b\n1,2\n')});
+        if (await page.locator('#upload').evaluate(input=>input.files?.[0]?.name) !== 'probe.csv') throw new Error('Upload probe failed');
         for (const accept of [false, true]) {
           page.once('dialog', dialog => (accept ? dialog.accept() : dialog.dismiss()));
           await page.locator('#confirm').click();
@@ -303,7 +329,7 @@ export class BrowserFleet {
         await page.mouse.move(box.x + 10, box.y + 10); await page.mouse.down();
         await page.mouse.move(box.x + 100, box.y + 50, { steps: 8 }); await page.mouse.up();
         if (await page.locator('body').getAttribute('data-down') !== 'yes' || await page.locator('body').getAttribute('data-moved') !== 'yes' || await page.locator('body').getAttribute('data-up') !== 'yes') throw new Error('Pointer drag probe failed');
-        return { passed: true, click: true, type: true, dialogs: true, download: filename, drag: true, screenshot: await this.#screenshot(handle, page, 'probe') };
+        return { passed: true, click: true, type: true, upload: true, dialogs: true, download: filename, drag: true, screenshot: await this.#screenshot(handle, page, 'probe') };
       } finally { await page.close(); }
     });
     handle.queue = task.catch(() => {});
@@ -324,7 +350,7 @@ export class BrowserFleet {
         const expectedStatus = check.status ?? 200;
         if (response.status() !== expectedStatus) throw new Error(`Prerequisite ${url.pathname} expected HTTP ${expectedStatus}, received ${response.status()}`);
         const assertions = [];
-        if (Object.keys(check.equals ?? {}).length || Object.keys(check.minLength ?? {}).length) {
+        if (Object.keys(check.equals ?? {}).length || Object.keys(check.minLength ?? {}).length || check.providerAvailable) {
           let document;
           try { document = await response.json(); } catch { throw new Error(`Prerequisite ${url.pathname} did not return JSON`); }
           for (const [field, expected] of Object.entries(check.equals ?? {})) {
@@ -337,6 +363,10 @@ export class BrowserFleet {
             const value = at(document, field);
             if (!(Array.isArray(value) || typeof value === 'string') || value.length < minimum) throw new Error(`Prerequisite ${url.pathname} length assertion failed at ${field}`);
             assertions.push({ field, kind: 'minLength', passed: true });
+          }
+          if (check.providerAvailable) {
+            assertProviderAvailable(document, check.providerAvailable);
+            assertions.push({ field: check.providerAvailable.providerId, kind: 'providerAvailable', passed: true });
           }
         }
         evidence.push({ path: url.pathname, status: response.status(), assertions, passed: true });

@@ -9,13 +9,24 @@ async function birthTick(pid) {
   return text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
 }
 
-function assignment(root, sessionFile, brief) {
+export function workerAssignment(root, sessionFile, brief) {
   const command = `${quote(join(root, 'test.sh'))}`;
   const session = `--session-file ${quote(sessionFile)}`;
+  const authorization = brief.writeAuthorization;
+  const writable = authorization?.enabled === true
+    && Array.isArray(authorization.resources) && authorization.resources.length > 0
+    && authorization.resources.every(value => typeof value === 'string' && value.trim())
+    && Array.isArray(authorization.operations) && authorization.operations.length > 0
+    && authorization.operations.every(value => typeof value === 'string' && value.trim());
+  const writeBoundary = writable
+    ? `This lane may perform application writes through its owned browser session ONLY when the assigned scenario calls for them, against these exact disposable resources: ${JSON.stringify(authorization.resources)}. Allowed operations: ${JSON.stringify(authorization.operations)}. A generic feature name or UI capability does not expand this authorization. Inspect the saved result after each write and before any retry. Do not modify retained data, other accounts, or any resource outside this list. If a requested step falls outside this scope, record it blocked and continue with independent authorized steps.`
+    : 'This lane is read-only. Do not save, create, delete, send AI chat turns, approve proposals, run write SQL, apply migrations, or change account settings or application data. Record write-dependent steps blocked.';
   return `You are one independent manual UI tester assigned exclusively to this lane.
-Use only the harness CLI below for browser interaction. Your session file is a scoped ownership handle: pass its path, never read or print its contents. Never inspect other lanes, credential files, environment secrets, or account passwords. Never use T3 preview, another browser, raw application APIs, network clients, arbitrary browser JavaScript, application tests, or deployment commands. Do not spawn subagents or background processes. Do not modify files, application data, account settings, or source code. Do not create scripts or automate a sequence to manufacture passing results. This is a read-only manual harness walkthrough.
+Use only the harness CLI below for browser interaction. Your session file is a scoped ownership handle: pass its path, never read or print its contents. Never inspect other lanes, credential files, environment secrets, or account passwords. Never use T3 preview, another browser, raw application APIs, network clients, arbitrary browser JavaScript, application tests, or deployment commands. Do not spawn subagents or background processes. Do not modify files or source code, or create scripts to automate a sequence or manufacture passing results. Harness screenshots, downloads, findings, and checkpoints are recorded by the CLI inside your lane artifact directory.
 
-Read the assignment and genuinely inspect each selected scenario and viewport. Use individual CLI actions, inspect returned snapshots, and use your image viewing tool to examine screenshots. Desktop and mobile require separate observations and separate exact scenario IDs; never infer one viewport from another. Report failed or blocked honestly. Harness capability probes are not application acceptance evidence.
+Write boundary: ${writeBoundary}
+
+Read the entire assignment, including each scenario's instructions and expected data. Execute all feasible substeps in each selected scenario: normal flow, validation/error and recovery paths, persistence or reload checks, and relevant cross-feature effects. Use individual CLI actions, inspect returned snapshots and actual data, and use your image viewing tool to examine screenshots. Desktop and mobile require separate observations and separate exact scenario IDs; never infer one viewport from another. Record concrete expected and actual results for each significant step. Report failed or blocked honestly; a later workaround does not turn a failed step into a pass. Harness capability probes are not application acceptance evidence.
 
 Commands (execute the absolute command directly; no shell wrapper scripts):
 ${command} action ${session} --kind identity
@@ -23,14 +34,20 @@ ${command} action ${session} --kind snapshot
 ${command} action ${session} --kind navigate --args-json '{"url":"/"}'
 ${command} action ${session} --kind resize --args-json '{"width":1280,"height":800}'
 ${command} action ${session} --kind click --args-json '{"role":"button","name":"EXACT VISIBLE NAME"}'
+${command} action ${session} --kind type --args-json '{"role":"textbox","name":"EXACT VISIBLE NAME","value":"TEXT"}'
+${command} action ${session} --kind press --args-json '{"key":"Enter"}'
 ${command} action ${session} --kind screenshot
+${command} action ${session} --kind upload --args-json '{"selector":"input[type=file]","fileName":"scratch.csv","content":"sku,qty,price\\nD-400,1,2.00\\n"}'
 ${command} heartbeat ${session}
+${command} finding ${session} --scenario EXACT_SCENARIO_ID --title 'Concise observed defect' --severity medium --steps 'Exact UI steps and input data' --expected 'Expected observable behavior' --actual 'Observed behavior and persistence result' --evidence ABSOLUTE_SCREENSHOT_PATH
 ${command} checkpoint ${session} --scenario EXACT_SCENARIO_ID --functional passed --visual passed --note 'Expected and actual observations for this viewport' --evidence ABSOLUTE_SCREENSHOT_PATH
 ${command} finish ${session}
 
-Start with identity and snapshot. For EVERY scenario, resize to its exact viewport, navigate to its product (schemii: /, schemoo: /schemoo, schemer: /schemer) unless its assignment specifies another URL, perform a harmless ordinary UI interaction appropriate to the scenario, capture a fresh screenshot, view that image, and record expected/actual observations. Inspect style for clipping, overlap, readability, responsive navigation, and visible errors. Use functional/visual passed, failed, or blocked separately. Do not claim visual passed without viewing fresh evidence. If a scenario needs writes or inaccessible prerequisites, record blocked and explain rather than performing writes. If an action returns a pending dialog, use action kind dialog with args-json {"action":"dismiss"} unless a harmless confirmation is explicitly needed. Never blindly retry a potentially mutating click.
+Start with identity and snapshot. For EVERY scenario, resize to its exact viewport and navigate to the exact assignment url when provided, including its workspace query parameter; otherwise navigate to its product (schemii: /, schemoo: /schemoo, schemer: /schemer). Perform the scenario's complete authorized UI workflow, including its stated edge cases, then capture fresh screenshots at material states and view them. Inspect style for clipping, overlap, readability, responsive navigation, and visible errors. Use functional/visual passed, failed, or blocked separately. Do not claim visual passed without viewing fresh evidence. If an action returns a pending dialog, inspect its meaning and accept only when the exact write is authorized; otherwise dismiss it with action kind dialog and args-json {"action":"dismiss"}. Never blindly retry a potentially mutating click. If an outcome is uncertain, inspect current and persisted state before proceeding.
 
-Checkpoint every scenario using its exact ID and its own evidence before finish. If your session becomes stale, stop and report it; never recover or claim another lane yourself. Finish with a concise factual summary of tested scenarios and gaps. Do not claim application-wide correctness.
+For each observed product defect, immediately record a finding with the exact scenario ID, severity low|medium|high|critical, repeatable UI steps, test data, expected and actual behavior, and owned screenshot or download evidence. Use a concise title and do not include credentials. Record the scenario checkpoint separately, keeping functional or visual failure even if later steps succeed. A prerequisite blocker without an observed product defect belongs in the checkpoint note. If an issue needs independent reproduction, say so in the finding's actual behavior.
+
+Checkpoint every scenario using its exact ID and its own evidence before finish. The checkpoint note must identify covered substeps, actual results, gaps, and relevant finding titles; a single harmless click or screenshot does not constitute coverage of a multi-step scenario. If your session becomes stale, stop and report it; never recover or claim another lane yourself. Finish with a concise factual summary of tested scenarios, findings, and gaps. Do not claim application-wide correctness.
 
 Assignment:
 ${JSON.stringify(brief, null, 2)}
@@ -130,7 +147,7 @@ export class CodexWorkers {
       if (handle.reason || this.closing) throw new Error('Worker stopped during process startup');
       this.#emit({ laneId, kind: 'worker-started', pid: handle.pid, birthTick: handle.birthTick });
       handle.timer = setTimeout(() => { handle.reason = 'timeout'; void this.stop(laneId); }, this.timeoutSeconds * 1000);
-      child.stdin.end(assignment(this.root, sessionFile, brief));
+      child.stdin.end(workerAssignment(this.root, sessionFile, brief));
       return { pid: handle.pid, birthTick: handle.birthTick, startedAt: handle.startedAt };
     } catch (error) {
       handle.reason ??= 'startup-failed';
