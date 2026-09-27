@@ -306,7 +306,7 @@ def test_system_inspection_preserves_application_route_registration_order() -> N
     document = build_developer_system_document(application)
     expected_route_ids = [
         f"{method.lower()}:{route.path}"
-        for route in system_inspection._public_route_contexts(application)
+        for route in system_inspection.public_route_contexts(application)
         if system_inspection.is_first_party(route.endpoint)
         for method in sorted(route.methods)
     ]
