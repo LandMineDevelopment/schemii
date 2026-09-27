@@ -595,6 +595,23 @@ class _PendingStep:
     order: int = 0
 
 
+@dataclass(slots=True)
+class _MigrationPlan:
+    """Inputs and collected output for one ordered migration-planning pass."""
+
+    namespace: str
+    live: SchemiiDesignContent
+    desired: SchemiiDesignContent
+    empty_tables: AbstractSet[str]
+    live_tables: dict[str, DesignTable]
+    desired_tables: dict[str, DesignTable]
+    desired_columns: dict[str, DesignColumn]
+    safe_type_change_ids: set[str]
+    conversions: Mapping[str, CompiledConversion]
+    pending: list[_PendingStep]
+    blocking: list[MigrationWarning]
+
+
 def _column_definition(column: DesignColumn) -> str:
     parts = [_quote(column.name), column.data_type.strip()]
     if column.generated_expression is not None:
@@ -926,7 +943,7 @@ def _append_column_order_rebuild(
 ) -> None:
     """Rebuild one unchanged table's columns in place inside the migration transaction."""
 
-    live_tables, live_columns = _table_maps(live)
+    live_tables, _ = _table_maps(live)
     desired_tables, desired_columns = _table_maps(desired)
     before = live_tables[table_id]
     after = desired_tables[table_id]
@@ -1098,65 +1115,51 @@ def _append_column_order_rebuild(
         ))
 
 
-def compile_migration_steps(
-    namespace: str,
-    live: SchemiiDesignContent,
-    desired: SchemiiDesignContent,
-    *,
-    empty_tables: AbstractSet[str] = frozenset(),
-    rebuild_table_ids: AbstractSet[str] = frozenset(),
-    populated_rebuild_table_ids: AbstractSet[str] = frozenset(),
-    column_type_conversions: Mapping[str, CompiledConversion] | None = None,
-) -> tuple[list[MigrationStep], list[MigrationWarning]]:
-    """Compile a conservative exact delta from reviewed live to merged desired."""
+def _plan_physical_column_rebuilds(
+    plan: _MigrationPlan,
+    rebuild_table_ids: AbstractSet[str],
+    populated_rebuild_table_ids: AbstractSet[str],
+) -> None:
+    """Plan selected physical-order rebuilds before ordinary object deltas."""
 
-    pending: list[_PendingStep] = []
-    blocking: list[MigrationWarning] = []
-    live_tables, live_columns = _table_maps(live)
-    desired_tables, desired_columns = _table_maps(desired)
-    type_changes = _column_type_changes(live_tables, desired_tables)
-    conversions = column_type_conversions or {}
-    safe_type_change_ids = {
-        column_id
-        for column_id, decision in type_changes.items()
-        if decision.disposition == "safe" or column_id in conversions
-    }
     order_differences = {
         item.table_id: item
-        for item in column_order_differences(namespace, live, desired)
+        for item in column_order_differences(plan.namespace, plan.live, plan.desired)
     }
     for table_id in sorted(rebuild_table_ids):
         difference = order_differences.get(table_id)
         if difference is None:
-            blocking.append(MigrationWarning(
+            plan.blocking.append(MigrationWarning(
                 code="physical_column_order_not_available",
                 message="This table no longer has a physical column-order difference to rebuild.",
                 object_path=f"tables.{table_id}.column_order",
             ))
             continue
         if difference.blocking_reasons:
-            blocking.append(MigrationWarning(
+            plan.blocking.append(MigrationWarning(
                 code="physical_column_order_rebuild_blocked",
                 message=" ".join(difference.blocking_reasons),
                 object_path=f"tables.{difference.table_name}.column_order",
             ))
             continue
         _append_column_order_rebuild(
-            pending,
-            namespace,
-            live,
-            desired,
+            plan.pending,
+            plan.namespace,
+            plan.live,
+            plan.desired,
             table_id,
             contains_data=table_id in populated_rebuild_table_ids,
         )
 
-    live_relationships = _by_id(live.relationships)
-    desired_relationships = _by_id(desired.relationships)
+
+def _plan_relationship_changes(plan: _MigrationPlan) -> None:
+    live_relationships = _by_id(plan.live.relationships)
+    desired_relationships = _by_id(plan.desired.relationships)
     for identifier in sorted(set(live_relationships) | set(desired_relationships)):
         before = live_relationships.get(identifier)
         after = desired_relationships.get(identifier)
         changed_relationship_column = bool(
-            safe_type_change_ids
+            plan.safe_type_change_ids
             & set(
                 [
                     *(before.source_column_ids if before is not None else ()),
@@ -1169,36 +1172,260 @@ def compile_migration_steps(
         if before == after and not changed_relationship_column:
             continue
         if before is not None:
-            table = live_tables[before.source_table_id]
-            pending.append(_PendingStep(
+            table = plan.live_tables[before.source_table_id]
+            plan.pending.append(_PendingStep(
                 10, "relationship", f"relationships.{before.name}", "drop",
-                f"ALTER TABLE {_qualified(namespace, table.name)} DROP CONSTRAINT {_quote(before.name)};",
+                f"ALTER TABLE {_qualified(plan.namespace, table.name)} DROP CONSTRAINT {_quote(before.name)};",
                 destructive=after is None,
             ))
         if after is not None:
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 70, "relationship", f"relationships.{after.name}", "create",
-                _relationship_sql(namespace, after, desired_tables, desired_columns),
+                _relationship_sql(
+                    plan.namespace, after, plan.desired_tables, plan.desired_columns
+                ),
             ))
 
-    for identifier in sorted(set(live_tables) | set(desired_tables)):
-        before = live_tables.get(identifier)
-        after = desired_tables.get(identifier)
+
+def _plan_table_column_changes(
+    plan: _MigrationPlan,
+    before: DesignTable,
+    after: DesignTable,
+    active_name: str,
+) -> None:
+    before_columns = _by_id(before.columns)
+    after_columns = _by_id(after.columns)
+    for column_id in sorted(set(before_columns) | set(after_columns)):
+        old = before_columns.get(column_id)
+        new = after_columns.get(column_id)
+        path_name = new.name if new is not None else old.name
+        path = f"tables.{after.name}.columns.{path_name}"
+        if old is None and new is not None:
+            cannot_populate = (
+                not new.nullable
+                and new.default_expression is None
+                and new.identity is None
+                and new.generated_expression is None
+            )
+            if cannot_populate and before.name not in plan.empty_tables:
+                plan.blocking.append(MigrationWarning(
+                    code="required_column_population_required",
+                    message=(
+                        f"Adding required column {after.name}.{new.name} needs a default, "
+                        "identity, generated expression, or an empty live table"
+                    ),
+                    object_path=path,
+                ))
+                continue
+            plan.pending.append(_PendingStep(
+                45, "column", path, "add",
+                f"ALTER TABLE {_qualified(plan.namespace, active_name)} ADD COLUMN {_column_definition(new)};",
+                data_movement=bool(
+                    new.default_expression is not None
+                    or new.identity is not None
+                    or new.generated_expression is not None
+                ),
+            ))
+            continue
+        if old is not None and new is None:
+            plan.pending.append(_PendingStep(
+                20, "column", path, "drop",
+                f"ALTER TABLE {_qualified(plan.namespace, active_name)} DROP COLUMN {_quote(old.name)};",
+                destructive=True,
+                data_movement=True,
+            ))
+            continue
+        assert old is not None and new is not None
+        current_column_name = old.name
+        if old.name != new.name:
+            plan.pending.append(_PendingStep(
+                42, "column", path, "rename",
+                f"ALTER TABLE {_qualified(plan.namespace, active_name)} RENAME COLUMN {_quote(old.name)} TO {_quote(new.name)};",
+            ))
+            current_column_name = new.name
+        type_change = classify_type_change(old.data_type, new.data_type)
+        conversion = plan.conversions.get(column_id)
+        if type_change.disposition == "safe" or conversion is not None:
+            dependent_generated = sorted(
+                column.name
+                for column in after.columns
+                if column_id in column.generated_source_column_ids
+            )
+            dependent_views = sorted(set(_dependent_view_names(
+                plan.namespace,
+                after.name,
+                plan.live,
+                plan.desired,
+            )) | set(_dependent_view_names(
+                plan.namespace, before.name, plan.live, plan.desired
+            )))
+            if dependent_generated or dependent_views:
+                dependencies = [
+                    *(f"generated column {after.name}.{name}" for name in dependent_generated),
+                    *(f"view {name}" for name in dependent_views),
+                ]
+                plan.blocking.append(MigrationWarning(
+                    code="column_type_dependency_requires_review",
+                    message=(
+                        f"Changing {after.name}.{new.name} requires rebuilding "
+                        + ", ".join(dependencies)
+                    ),
+                    object_path=path,
+                ))
+            else:
+                if conversion is not None:
+                    plan.pending.append(_PendingStep(
+                        5, "table", f"tables.{before.name}", "lock_for_conversion",
+                        f"LOCK TABLE {_qualified(plan.namespace, before.name)} IN ACCESS EXCLUSIVE MODE;",
+                    ))
+                    if conversion.guard_sql:
+                        plan.pending.append(_PendingStep(
+                            46, "column", path, "validate_conversion", conversion.guard_sql,
+                        ))
+                    if old.default_expression is not None:
+                        plan.pending.append(_PendingStep(
+                            47, "column", path, "drop_default_for_conversion",
+                            f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} DROP DEFAULT;",
+                        ))
+                plan.pending.append(_PendingStep(
+                    48,
+                    "column",
+                    path,
+                    "alter_type",
+                    (
+                        f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN "
+                        f"{_quote(current_column_name)} TYPE {conversion.target_type if conversion else new.data_type.strip()}"
+                        + (f" USING {conversion.expression}" if conversion else "") + ";"
+                    ),
+                    destructive=bool(conversion and conversion.review.strategy == "custom"),
+                    data_movement=True,
+                ))
+        elif type_change.disposition == "blocked":
+            plan.blocking.append(MigrationWarning(
+                code="column_type_conversion_required",
+                message=(
+                    f"Changing {after.name}.{new.name} from {old.data_type} to "
+                    f"{new.data_type} requires a reviewed USING expression: "
+                    f"{type_change.reason}"
+                ),
+                object_path=path,
+            ))
+        if (
+            old.identity != new.identity
+            or old.generated_expression != new.generated_expression
+            or not _same_dependency_set(
+                old.generated_source_column_ids,
+                new.generated_source_column_ids,
+            )
+        ):
+            plan.blocking.append(MigrationWarning(
+                code="column_generation_change_unsupported",
+                message=f"Changing generated or identity behavior for {after.name}.{new.name} is not yet lossless",
+                object_path=path,
+            ))
+        if (old.default_expression != new.default_expression or (conversion is not None and old.default_expression is not None)) and new.generated_expression is None:
+            if new.default_expression is None:
+                action = "DROP DEFAULT"
+            else:
+                action = f"SET DEFAULT {new.default_expression.strip()}"
+            plan.pending.append(_PendingStep(
+                50, "column", path, "alter_default",
+                f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};",
+            ))
+        if old.nullable != new.nullable:
+            action = "DROP NOT NULL" if new.nullable else "SET NOT NULL"
+            plan.pending.append(_PendingStep(
+                52, "column", path, "alter_nullability",
+                f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};",
+                data_movement=not new.nullable,
+            ))
+
+
+def _plan_table_constraint_changes(
+    plan: _MigrationPlan,
+    before: DesignTable,
+    after: DesignTable,
+    active_name: str,
+) -> None:
+    for category, before_items, after_items in (
+        ("keys", before.keys, after.keys),
+        ("checks", before.checks, after.checks),
+    ):
+        old_map = _by_id(before_items)
+        new_map = _by_id(after_items)
+        for item_id in sorted(set(old_map) | set(new_map)):
+            old = old_map.get(item_id)
+            new = new_map.get(item_id)
+            if old == new or (
+                category == "checks"
+                and old is not None
+                and new is not None
+                and _same_check(
+                    old, new, {column.name: column.data_type for column in after.columns}
+                )
+            ):
+                continue
+            if old is not None:
+                plan.pending.append(_PendingStep(
+                    15, "constraint", f"tables.{after.name}.{category}.{old.name}", "drop",
+                    f"ALTER TABLE {_qualified(plan.namespace, active_name)} DROP CONSTRAINT {_quote(old.name)};",
+                    destructive=new is None,
+                ))
+            if new is not None:
+                plan.pending.append(_PendingStep(
+                    60, "constraint", f"tables.{after.name}.{category}.{new.name}", "create",
+                    _constraint_sql(plan.namespace, after, new, plan.desired_columns),
+                ))
+
+
+def _plan_table_index_changes(
+    plan: _MigrationPlan,
+    before: DesignTable,
+    after: DesignTable,
+) -> None:
+    old_indexes = _by_id(before.indexes)
+    new_indexes = _by_id(after.indexes)
+    for index_id in sorted(set(old_indexes) | set(new_indexes)):
+        old = old_indexes.get(index_id)
+        new = new_indexes.get(index_id)
+        if old == new or (
+            old is not None
+            and new is not None
+            and _same_index(old, new)
+        ):
+            continue
+        if old is not None:
+            plan.pending.append(_PendingStep(
+                12, "index", f"tables.{after.name}.indexes.{old.name}", "drop",
+                f"DROP INDEX {_qualified(plan.namespace, old.name)};",
+                destructive=new is None,
+            ))
+        if new is not None:
+            plan.pending.append(_PendingStep(
+                65, "index", f"tables.{after.name}.indexes.{new.name}", "create",
+                _create_index(plan.namespace, after, new, plan.desired_columns),
+            ))
+
+
+def _plan_table_changes(plan: _MigrationPlan) -> None:
+    for identifier in sorted(set(plan.live_tables) | set(plan.desired_tables)):
+        before = plan.live_tables.get(identifier)
+        after = plan.desired_tables.get(identifier)
         if before is None and after is not None:
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 40, "table", f"tables.{after.name}", "create",
-                _create_table(namespace, after, desired_columns),
+                _create_table(plan.namespace, after, plan.desired_columns),
             ))
             for index in after.indexes:
-                pending.append(_PendingStep(
+                plan.pending.append(_PendingStep(
                     65, "index", f"tables.{after.name}.indexes.{index.name}", "create",
-                    _create_index(namespace, after, index, desired_columns),
+                    _create_index(plan.namespace, after, index, plan.desired_columns),
                 ))
             continue
         if before is not None and after is None:
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 30, "table", f"tables.{before.name}", "drop",
-                f"DROP TABLE {_qualified(namespace, before.name)};",
+                f"DROP TABLE {_qualified(plan.namespace, before.name)};",
                 destructive=True,
                 data_movement=True,
             ))
@@ -1206,234 +1433,46 @@ def compile_migration_steps(
         assert before is not None and after is not None
         active_name = before.name
         if before.name != after.name:
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 35, "table", f"tables.{before.name}", "rename",
-                f"ALTER TABLE {_qualified(namespace, before.name)} RENAME TO {_quote(after.name)};",
+                f"ALTER TABLE {_qualified(plan.namespace, before.name)} RENAME TO {_quote(after.name)};",
             ))
             active_name = after.name
 
-        before_columns = _by_id(before.columns)
-        after_columns = _by_id(after.columns)
-        for column_id in sorted(set(before_columns) | set(after_columns)):
-            old = before_columns.get(column_id)
-            new = after_columns.get(column_id)
-            path_name = new.name if new is not None else old.name
-            path = f"tables.{after.name}.columns.{path_name}"
-            if old is None and new is not None:
-                cannot_populate = (
-                    not new.nullable
-                    and new.default_expression is None
-                    and new.identity is None
-                    and new.generated_expression is None
-                )
-                if cannot_populate and before.name not in empty_tables:
-                    blocking.append(MigrationWarning(
-                        code="required_column_population_required",
-                        message=(
-                            f"Adding required column {after.name}.{new.name} needs a default, "
-                            "identity, generated expression, or an empty live table"
-                        ),
-                        object_path=path,
-                    ))
-                    continue
-                pending.append(_PendingStep(
-                    45, "column", path, "add",
-                    f"ALTER TABLE {_qualified(namespace, active_name)} ADD COLUMN {_column_definition(new)};",
-                    data_movement=bool(
-                        new.default_expression is not None
-                        or new.identity is not None
-                        or new.generated_expression is not None
-                    ),
-                ))
-                continue
-            if old is not None and new is None:
-                pending.append(_PendingStep(
-                    20, "column", path, "drop",
-                    f"ALTER TABLE {_qualified(namespace, active_name)} DROP COLUMN {_quote(old.name)};",
-                    destructive=True,
-                    data_movement=True,
-                ))
-                continue
-            assert old is not None and new is not None
-            current_column_name = old.name
-            if old.name != new.name:
-                pending.append(_PendingStep(
-                    42, "column", path, "rename",
-                    f"ALTER TABLE {_qualified(namespace, active_name)} RENAME COLUMN {_quote(old.name)} TO {_quote(new.name)};",
-                ))
-                current_column_name = new.name
-            type_change = classify_type_change(old.data_type, new.data_type)
-            conversion = conversions.get(column_id)
-            if type_change.disposition == "safe" or conversion is not None:
-                dependent_generated = sorted(
-                    column.name
-                    for column in after.columns
-                    if column_id in column.generated_source_column_ids
-                )
-                dependent_views = sorted(set(_dependent_view_names(
-                    namespace,
-                    after.name,
-                    live,
-                    desired,
-                )) | set(_dependent_view_names(namespace, before.name, live, desired)))
-                if dependent_generated or dependent_views:
-                    dependencies = [
-                        *(f"generated column {after.name}.{name}" for name in dependent_generated),
-                        *(f"view {name}" for name in dependent_views),
-                    ]
-                    blocking.append(MigrationWarning(
-                        code="column_type_dependency_requires_review",
-                        message=(
-                            f"Changing {after.name}.{new.name} requires rebuilding "
-                            + ", ".join(dependencies)
-                        ),
-                        object_path=path,
-                    ))
-                else:
-                    if conversion is not None:
-                        pending.append(_PendingStep(
-                            5, "table", f"tables.{before.name}", "lock_for_conversion",
-                            f"LOCK TABLE {_qualified(namespace, before.name)} IN ACCESS EXCLUSIVE MODE;",
-                        ))
-                        if conversion.guard_sql:
-                            pending.append(_PendingStep(
-                                46, "column", path, "validate_conversion", conversion.guard_sql,
-                            ))
-                        if old.default_expression is not None:
-                            pending.append(_PendingStep(
-                                47, "column", path, "drop_default_for_conversion",
-                                f"ALTER TABLE {_qualified(namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} DROP DEFAULT;",
-                            ))
-                    pending.append(_PendingStep(
-                        48,
-                        "column",
-                        path,
-                        "alter_type",
-                        (
-                            f"ALTER TABLE {_qualified(namespace, active_name)} ALTER COLUMN "
-                            f"{_quote(current_column_name)} TYPE {conversion.target_type if conversion else new.data_type.strip()}"
-                            + (f" USING {conversion.expression}" if conversion else "") + ";"
-                        ),
-                        destructive=bool(conversion and conversion.review.strategy == "custom"),
-                        data_movement=True,
-                    ))
-            elif type_change.disposition == "blocked":
-                blocking.append(MigrationWarning(
-                    code="column_type_conversion_required",
-                    message=(
-                        f"Changing {after.name}.{new.name} from {old.data_type} to "
-                        f"{new.data_type} requires a reviewed USING expression: "
-                        f"{type_change.reason}"
-                    ),
-                    object_path=path,
-                ))
-            if (
-                old.identity != new.identity
-                or old.generated_expression != new.generated_expression
-                or not _same_dependency_set(
-                    old.generated_source_column_ids,
-                    new.generated_source_column_ids,
-                )
-            ):
-                blocking.append(MigrationWarning(
-                    code="column_generation_change_unsupported",
-                    message=f"Changing generated or identity behavior for {after.name}.{new.name} is not yet lossless",
-                    object_path=path,
-                ))
-            if (old.default_expression != new.default_expression or (conversion is not None and old.default_expression is not None)) and new.generated_expression is None:
-                if new.default_expression is None:
-                    action = "DROP DEFAULT"
-                else:
-                    action = f"SET DEFAULT {new.default_expression.strip()}"
-                pending.append(_PendingStep(
-                    50, "column", path, "alter_default",
-                    f"ALTER TABLE {_qualified(namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};",
-                ))
-            if old.nullable != new.nullable:
-                action = "DROP NOT NULL" if new.nullable else "SET NOT NULL"
-                pending.append(_PendingStep(
-                    52, "column", path, "alter_nullability",
-                    f"ALTER TABLE {_qualified(namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};",
-                    data_movement=not new.nullable,
-                ))
+        _plan_table_column_changes(plan, before, after, active_name)
+        _plan_table_constraint_changes(plan, before, after, active_name)
+        _plan_table_index_changes(plan, before, after)
 
-        for category, before_items, after_items in (
-            ("keys", before.keys, after.keys),
-            ("checks", before.checks, after.checks),
-        ):
-            old_map = _by_id(before_items)
-            new_map = _by_id(after_items)
-            for item_id in sorted(set(old_map) | set(new_map)):
-                old = old_map.get(item_id)
-                new = new_map.get(item_id)
-                if old == new or (
-                    category == "checks"
-                    and old is not None
-                    and new is not None
-                    and _same_check(
-                        old, new, {column.name: column.data_type for column in after.columns}
-                    )
-                ):
-                    continue
-                if old is not None:
-                    pending.append(_PendingStep(
-                        15, "constraint", f"tables.{after.name}.{category}.{old.name}", "drop",
-                        f"ALTER TABLE {_qualified(namespace, active_name)} DROP CONSTRAINT {_quote(old.name)};",
-                        destructive=new is None,
-                    ))
-                if new is not None:
-                    pending.append(_PendingStep(
-                        60, "constraint", f"tables.{after.name}.{category}.{new.name}", "create",
-                        _constraint_sql(namespace, after, new, desired_columns),
-                    ))
 
-        old_indexes = _by_id(before.indexes)
-        new_indexes = _by_id(after.indexes)
-        for index_id in sorted(set(old_indexes) | set(new_indexes)):
-            old = old_indexes.get(index_id)
-            new = new_indexes.get(index_id)
-            if old == new or (
-                old is not None
-                and new is not None
-                and _same_index(old, new)
-            ):
-                continue
-            if old is not None:
-                pending.append(_PendingStep(
-                    12, "index", f"tables.{after.name}.indexes.{old.name}", "drop",
-                    f"DROP INDEX {_qualified(namespace, old.name)};",
-                    destructive=new is None,
-                ))
-            if new is not None:
-                pending.append(_PendingStep(
-                    65, "index", f"tables.{after.name}.indexes.{new.name}", "create",
-                    _create_index(namespace, after, new, desired_columns),
-                ))
-
-    live_types = _by_id(live.types)
-    desired_types = _by_id(desired.types)
+def _plan_type_changes(plan: _MigrationPlan) -> None:
+    live_types = _by_id(plan.live.types)
+    desired_types = _by_id(plan.desired.types)
     for identifier in sorted(set(live_types) | set(desired_types)):
         before = live_types.get(identifier)
         after = desired_types.get(identifier)
         if before == after:
             continue
         if before is None and after is not None:
-            pending.append(_PendingStep(38, "type", f"types.{after.name}", "create", _statement(after.definition)))
+            plan.pending.append(_PendingStep(
+                38, "type", f"types.{after.name}", "create", _statement(after.definition)
+            ))
         elif before is not None and after is None:
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 32, "type", f"types.{before.name}", "drop",
-                f"DROP {'DOMAIN' if before.kind == 'domain' else 'TYPE'} {_qualified(namespace, before.name)};",
+                f"DROP {'DOMAIN' if before.kind == 'domain' else 'TYPE'} {_qualified(plan.namespace, before.name)};",
                 destructive=True,
             ))
         else:
-            blocking.append(MigrationWarning(
+            plan.blocking.append(MigrationWarning(
                 code="type_replacement_unsupported",
                 message=f"Changing type {after.name} requires a specialized PostgreSQL type migration",
                 object_path=f"types.{after.name}",
             ))
 
-    live_functions = _by_id(live.functions)
-    desired_functions = _by_id(desired.functions)
+
+def _plan_function_changes(plan: _MigrationPlan) -> None:
+    live_functions = _by_id(plan.live.functions)
+    desired_functions = _by_id(plan.desired.functions)
     for identifier in sorted(set(live_functions) | set(desired_functions)):
         before: DesignFunction | None = live_functions.get(identifier)
         after: DesignFunction | None = desired_functions.get(identifier)
@@ -1446,7 +1485,7 @@ def compile_migration_steps(
             if (before.kind, before.name, before.identity_arguments) != (
                 after.kind, after.name, after.identity_arguments
             ):
-                blocking.append(MigrationWarning(
+                plan.blocking.append(MigrationWarning(
                     code="routine_identity_change_unsupported",
                     message=(f"Changing the name, kind, or input types of {before.name} "
                              "requires a dependency-aware routine migration; restore the "
@@ -1455,7 +1494,7 @@ def compile_migration_steps(
                 ))
                 continue
             if before.return_type != after.return_type:
-                blocking.append(MigrationWarning(
+                plan.blocking.append(MigrationWarning(
                     code="routine_return_type_change_unsupported",
                     message=(f"Changing the return type of {before.name} requires a "
                              "dependency-aware drop and recreation; restore the original "
@@ -1464,7 +1503,7 @@ def compile_migration_steps(
                 ))
                 continue
             if _routine_parameters_require_migration(before, after):
-                blocking.append(MigrationWarning(
+                plan.blocking.append(MigrationWarning(
                     code="routine_parameter_change_unsupported",
                     message=(f"Changing parameter declarations of {before.name} requires "
                              "a dependency-aware routine migration; restore the original "
@@ -1474,9 +1513,9 @@ def compile_migration_steps(
                 continue
         if before is not None and after is None:
             kind = "PROCEDURE" if before.kind == "procedure" else "FUNCTION"
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 18, before.kind, f"functions.{before.name}({before.identity_arguments})", "drop",
-                f"DROP {kind} {_qualified(namespace, before.name)}({before.identity_arguments.strip()});",
+                f"DROP {kind} {_qualified(plan.namespace, before.name)}({before.identity_arguments.strip()});",
                 destructive=True,
             ))
         if after is not None:
@@ -1485,12 +1524,14 @@ def compile_migration_steps(
             if before is not None:
                 source = _CREATE_ROUTINE.sub(lambda match: f"CREATE OR REPLACE {match.group(1).upper()}", source, count=1)
                 operation = "replace"
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 55, after.kind, f"functions.{after.name}({after.identity_arguments})", operation, source,
             ))
 
-    live_views = _by_id(live.views)
-    desired_views = _by_id(desired.views)
+
+def _plan_view_changes(plan: _MigrationPlan) -> None:
+    live_views = _by_id(plan.live.views)
+    desired_views = _by_id(plan.desired.views)
     for identifier in sorted(set(live_views) | set(desired_views)):
         before: DesignView | None = live_views.get(identifier)
         after: DesignView | None = desired_views.get(identifier)
@@ -1499,7 +1540,7 @@ def compile_migration_steps(
         if before is not None and after is not None and (
             before.kind, before.name
         ) != (after.kind, after.name):
-            blocking.append(MigrationWarning(
+            plan.blocking.append(MigrationWarning(
                 code="view_identity_change_unsupported",
                 message=(f"Changing the name or kind of view {before.name} requires a "
                          "dependency-aware view migration; restore the original name "
@@ -1509,14 +1550,14 @@ def compile_migration_steps(
             continue
         if before is not None and after is None:
             kind = "MATERIALIZED VIEW" if before.kind == "materialized_view" else "VIEW"
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 14, before.kind, f"views.{before.name}", "drop",
-                f"DROP {kind} {_qualified(namespace, before.name)};",
+                f"DROP {kind} {_qualified(plan.namespace, before.name)};",
                 destructive=True,
             ))
         if after is not None:
             if after.kind == "materialized_view" and before is not None:
-                blocking.append(MigrationWarning(
+                plan.blocking.append(MigrationWarning(
                     code="materialized_view_replacement_unsupported",
                     message=f"Replacing materialized view {after.name} requires preservation analysis",
                     object_path=f"views.{after.name}",
@@ -1525,37 +1566,53 @@ def compile_migration_steps(
             prefix = "CREATE OR REPLACE VIEW" if before is not None else (
                 "CREATE MATERIALIZED VIEW" if after.kind == "materialized_view" else "CREATE VIEW"
             )
-            sql = f"{prefix} {_qualified(namespace, after.name)} AS\n{after.definition.strip().rstrip(';')}"
+            sql = f"{prefix} {_qualified(plan.namespace, after.name)} AS\n{after.definition.strip().rstrip(';')}"
             if after.kind == "materialized_view":
                 sql += "\nWITH DATA" if after.populate_on_create else "\nWITH NO DATA"
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 75, after.kind, f"views.{after.name}", "replace" if before else "create", sql + ";",
             ))
 
-    live_triggers = _by_id(live.triggers)
-    desired_triggers = _by_id(desired.triggers)
+
+def _plan_trigger_changes(plan: _MigrationPlan) -> None:
+    live_triggers = _by_id(plan.live.triggers)
+    desired_triggers = _by_id(plan.desired.triggers)
     for identifier in sorted(set(live_triggers) | set(desired_triggers)):
         before: DesignTrigger | None = live_triggers.get(identifier)
         after: DesignTrigger | None = desired_triggers.get(identifier)
         if before == after:
             continue
         if before is not None:
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 11, "trigger", f"triggers.{before.relation_name}.{before.name}", "drop",
-                f"DROP TRIGGER {_quote(before.name)} ON {_qualified(namespace, before.relation_name)};",
+                f"DROP TRIGGER {_quote(before.name)} ON {_qualified(plan.namespace, before.relation_name)};",
                 destructive=after is None,
             ))
         if after is not None:
-            pending.append(_PendingStep(
+            plan.pending.append(_PendingStep(
                 80, "trigger", f"triggers.{after.relation_name}.{after.name}", "create",
                 _statement(after.definition),
             ))
 
+
+def _finalize_migration_plan(plan: _MigrationPlan) -> tuple[list[MigrationStep], list[MigrationWarning]]:
+    """Deduplicate phase/SQL pairs, then order phases before assigning indices.
+
+    Planner phase bands are: 1–10 for locks, rebuild staging, and dependency
+    detachment; 11–35 for removing or renaming existing objects; 38–45 for
+    creating types, tables, and columns; 46–52 for conversion checks and column
+    alterations; 55–65 for routines, constraints, and indexes; and 70–80 for
+    recreating relationships, views, and triggers. Within a phase, stable paths
+    and operation names make output deterministic.
+    """
+
     unique_pending: dict[tuple[int, str], _PendingStep] = {}
-    for item in pending:
+    for item in plan.pending:
         unique_pending.setdefault((item.phase, item.sql), item)
-    pending = list(unique_pending.values())
-    pending.sort(key=lambda item: (item.phase, item.order, item.path, item.operation))
+    ordered = sorted(
+        unique_pending.values(),
+        key=lambda item: (item.phase, item.order, item.path, item.operation),
+    )
     steps = [
         MigrationStep(
             index=index,
@@ -1567,9 +1624,58 @@ def compile_migration_steps(
             requires_lock=item.requires_lock,
             data_movement=item.data_movement,
         )
-        for index, item in enumerate(pending, start=1)
+        for index, item in enumerate(ordered, start=1)
     ]
-    return steps, blocking
+    return steps, plan.blocking
+
+
+def compile_migration_steps(
+    namespace: str,
+    live: SchemiiDesignContent,
+    desired: SchemiiDesignContent,
+    *,
+    empty_tables: AbstractSet[str] = frozenset(),
+    rebuild_table_ids: AbstractSet[str] = frozenset(),
+    populated_rebuild_table_ids: AbstractSet[str] = frozenset(),
+    column_type_conversions: Mapping[str, CompiledConversion] | None = None,
+) -> tuple[list[MigrationStep], list[MigrationWarning]]:
+    """Compile a conservative exact delta from reviewed live to merged desired.
+
+    The passes are grouped by object kind for review. Their phase numbers define
+    execution order; equal-phase ties retain the historical path/operation order
+    during finalization. Physical column rebuilds are collected first because
+    they share those same phase numbers with ordinary changes.
+    """
+
+    live_tables, _ = _table_maps(live)
+    desired_tables, desired_columns = _table_maps(desired)
+    type_changes = _column_type_changes(live_tables, desired_tables)
+    conversions = column_type_conversions or {}
+    plan = _MigrationPlan(
+        namespace=namespace,
+        live=live,
+        desired=desired,
+        empty_tables=empty_tables,
+        live_tables=live_tables,
+        desired_tables=desired_tables,
+        desired_columns=desired_columns,
+        safe_type_change_ids={
+            column_id
+            for column_id, decision in type_changes.items()
+            if decision.disposition == "safe" or column_id in conversions
+        },
+        conversions=conversions,
+        pending=[],
+        blocking=[],
+    )
+    _plan_physical_column_rebuilds(plan, rebuild_table_ids, populated_rebuild_table_ids)
+    _plan_relationship_changes(plan)
+    _plan_table_changes(plan)
+    _plan_type_changes(plan)
+    _plan_function_changes(plan)
+    _plan_view_changes(plan)
+    _plan_trigger_changes(plan)
+    return _finalize_migration_plan(plan)
 
 
 def new_baseline_content(
