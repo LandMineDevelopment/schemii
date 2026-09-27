@@ -1,7 +1,7 @@
 # Shared Pi AI sidecar
 
 Integrated into `architecture/unified-backend`. Original checkpoint: `9f29247`.
-Pi now supplies the application's chat inference and account sign-in transport.
+Pi now supplies the application's chat inference and AI-provider sign-in transport.
 Schemii still owns conversations, permissions, tool execution and proposal review.
 The directory retains its prototype name while this integration is evaluated.
 
@@ -151,9 +151,14 @@ from preloading stale credentials. A crash or lost private connection after remo
 token rotation but before metadata save can still require sign-in again.
 Do not claim multi-replica credential safety yet.
 
-The app still uses its local-prototype principal. Owner isolation is tested using
-distinct test principals, not deployed multiuser authentication. These tests are
-not a load benchmark or general security certification.
+The packaged deployment enables Schemii account authentication: protected API
+requests resolve each user's server-side session and enforce current role
+capabilities. An authentication-disabled local or test request can use the
+`local_prototype` principal; deployed authenticated requests do not use that
+prototype identity. First-time setup retains the historical
+`user_local_prototype` owner ID for stored-object continuity, while browser
+sessions and owner scopes remain per account. These tests do not certify
+deployment security or load behavior.
 
 ## Repeat verification
 
@@ -161,7 +166,8 @@ not a load benchmark or general security certification.
 ./start.sh --test-ai-prototype
 ```
 
-The launcher builds pinned Node and locked Pi AI `0.85.0`. Building needs registry
+The launcher builds pinned Node and locked Pi AI `0.87.1`, as pinned in both
+`package.json` and `package-lock.json`. Building needs registry
 access; the test container has no network, credentials, database mounts or ports.
 It runs nonroot/read-only with temporary storage, 512 MiB memory, one CPU and a PID
 limit. This command does not restart the application.

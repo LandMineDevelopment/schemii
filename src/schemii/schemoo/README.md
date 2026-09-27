@@ -1,9 +1,15 @@
 # Schemoo semantic models
 
 Open `/schemoo` on the unified HTTPS application. Choose an existing personal
-PostgreSQL connection and schema, then create or open a saved model. Multiple
-models may reference the same source without copying credentials or depending on
-a Schemii design workspace. `/schemoo?model=<id>` opens one owner-private model.
+PostgreSQL connection or a Schemii-owned profile granted through a role that
+also grants `schemoo:access`, then choose its schema and create or open a saved
+model. For a managed profile, catalog discovery and previews use its shared
+PostgreSQL identity, and show only objects and columns that identity can read.
+PostgreSQL grants and row-level security still apply. See
+[`docs/accounts-and-roles.md`](../../../docs/accounts-and-roles.md) for managed
+connection behavior. Multiple models may reference the same source without
+copying credentials or depending on a Schemii design workspace.
+`/schemoo?model=<id>` opens one owner-private model.
 
 The server persists current definitions, independent canvas layout, and Explore
 inputs in `schemoo.models` in the metadata database. Each has its own optimistic
@@ -116,18 +122,25 @@ connections before adopting the new signature.
 
 This is an interaction prototype, not a published semantic engine:
 
-- Table sources and existing, single-column, same-schema foreign keys only.
-- Aliases reuse physical sources; they do not create warehouse objects. No
-  recursive hierarchy, composite keys, custom joins, latest-revision selection,
-  model publishing. Organization tree tests use the
-  existing hierarchy closure table, not recursive SQL.
+- PostgreSQL tables, views, and materialized views are read-only sources.
+  Existing single-column, same-schema foreign keys are imported, and models can
+  add single-column equality relationships between catalog columns. These are
+  model joins only; they do not create database constraints. Aliases reuse
+  physical sources. Composite or cross-schema foreign keys, arbitrary SQL join
+  predicates, recursive hierarchy queries, latest-revision selection, and model
+  publishing are unsupported. Organization tree tests use an existing hierarchy
+  closure table rather than recursive SQL.
 - All enabled paths must be acyclic. Disconnected objects may remain unused.
 - LEFT JOINs, source filters, EXISTS/NOT EXISTS, basic aggregates and GROUP BY.
 - These editable private model rules are modeling behavior, not an access-control
   system. PostgreSQL permissions remain authoritative. Value browsing queries
   the chosen physical source rather than enforcing unpublished draft scopes.
-- Fanout is warned about, not automatically repaired. A sum can be multiplied by
-  one-to-many joins; do not treat prototype measures as validated business metrics.
+- Direct `COUNT`, `SUM`, and `AVG` measures warn when joins may repeat their
+  source records, but the requested aggregate still runs and is not repaired.
+  `MIN`, `MAX`, and `COUNT DISTINCT` are invariant to repeated input values.
+  Grouped summaries reject multiplying lookups and incompatible grains using
+  catalog-proven uniqueness, but these safeguards do not validate business
+  metric definitions.
 - Up to 100 unordered preview rows. No full export or materialization.
 - Source changes preserve saved models and surface missing references for repair.
   Incomplete models may be saved but cannot execute invalid queries. Renames are

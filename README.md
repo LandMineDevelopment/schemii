@@ -79,7 +79,10 @@ The application API authenticates users and applies role permissions:
 - `/schemer` opens saved, model-bound analytics dashboards; `/api/v1/schemer/dashboards` manages dashboard and tile configuration.
 - `POST /api/v1/schemer/dashboards/{id}/executions/stream` streams dashboard results from one consistent database snapshot. Tile `/executions/stream` starts an individual refresh or drill-through; tile `/export` downloads a fresh full result as CSV.
 - `/api/v1/common/query-executions/{id}` provides shared read-result paging, cancellation, release, and export without requiring a Schemii workspace.
-- Interactive OpenAPI documentation is available at `/docs`.
+- Interactive OpenAPI documentation is available at `/docs` to authenticated
+  users with the `accounts:provision` capability. `/redoc` and `/openapi.json`
+  use the same gate; ordinary signed-in product users without that capability
+  receive `403`.
 
 Schemoo stores current model rules, independently revisioned canvas layouts, and
 Explore inputs in metadata—not query rows or copied credentials. Existing browser
