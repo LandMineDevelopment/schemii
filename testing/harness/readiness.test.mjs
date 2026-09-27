@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertLaneReadyToClaim, assertProductNavigationAllowed, failClosedRecovery, openProductsAfterIsolation } from './readiness.mjs';
+import { assertLaneReadyToClaim, assertProductNavigationAllowed, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 
 test('a wave starts product streams only after every session passes logout isolation', async () => {
   const events = [];
@@ -69,11 +69,19 @@ test('failed fleet recovery closes and invalidates every active lane before pers
   let cleanupReported = false;
   assert.doesNotThrow(() => assertLaneReadyToClaim(lanes[1]));
 
-  await assert.rejects(failClosedRecovery({
+  const recoveryEvents = [];
+  await assert.rejects(recoverFleetFailClosed({
+    recover: async () => {
+      recoveryEvents.push('worker-stop');
+      recoveryEvents.push('wait-for-operation');
+      recoveryEvents.push('close-requested-lane');
+      throw new Error('requested lane close failed before isolation');
+    },
     lanes,
-    affectedLaneIds: ['recovering', 'peer'],
-    message: 'logout isolation could not be verified',
+    affectedLaneIds: () => ['recovering', 'peer'],
+    messageFor: error => error.message,
     closeFleet: async () => {
+      recoveryEvents.push('close-entire-fleet');
       browserHandles.clear();
       throw new Error('one browser close reported an error');
     },
@@ -89,8 +97,9 @@ test('failed fleet recovery closes and invalidates every active lane before pers
       cleanupReported = Boolean(cleanupError);
     },
     persist: async () => { persisted = true; },
-  }), /logout isolation could not be verified/);
+  }), /requested lane close failed before isolation/);
 
+  assert.deepEqual(recoveryEvents, ['worker-stop', 'wait-for-operation', 'close-requested-lane', 'close-entire-fleet']);
   assert.equal(browserHandles.size, 0, 'all sessions in the failed proof wave are closed');
   assert.equal(tokens.has('recovering'), false);
   assert.equal(tokens.has('peer'), false, 'a ready peer token cannot survive failed fleet proof');
@@ -101,7 +110,7 @@ test('failed fleet recovery closes and invalidates every active lane before pers
   assert.equal(lanes[0].heartbeatAt, null);
   assert.equal(lanes[2].status, 'complete', 'unaffected completed lanes remain unchanged');
   assert.equal(run.status, 'blocked');
-  assert.equal(run.error, 'logout isolation could not be verified');
+  assert.equal(run.error, 'requested lane close failed before isolation');
   assert.equal(cleanupReported, true, 'cleanup failure is exposed to the run summary');
   assert.equal(persisted, true, 'blocked peer state is persisted despite a cleanup error');
 });

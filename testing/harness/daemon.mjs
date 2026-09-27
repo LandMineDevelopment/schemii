@@ -5,7 +5,7 @@ import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
-import { assertLaneReadyToClaim, failClosedRecovery, openProductsAfterIsolation } from './readiness.mjs';
+import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
@@ -227,37 +227,36 @@ async function controllerRequest(req){
       const l=lane(req.laneId);
       if(l.status==='complete'||l.status==='queued')throw new Error('Only an active, blocked or paused lane can be recovered.');
       if(run.lanes.some(x=>x.id!==l.id&&x.status==='claimed'))throw new Error('Pause recovery until other agents finish their wave; isolation probes change logins.');
-      l.status='paused';l.generation++;tokens.delete(l.id);await workers.stop(l.id);await operations.get(l.id);await fleet.closeLane(l.id);
-      try{
-        await checkSource();await readyLane(l);
-        const activeLanes=run.lanes.filter(active=>fleet.lanes.has(active.id));
-        await openProductsAfterIsolation(activeLanes, {
-          parkLanes: () => fleet.parkLanesForIsolation(),
-          proveIsolation: verifyIsolation,
-          navigateLane: laneId => fleet.navigateLane(laneId),
-        });
-        run.status='ready';delete run.error;await persist();return {lane:l.id,status:l.status,generation:l.generation};
-      }
-      catch(e){
-        const message=safeError(e);
-        return failClosedRecovery({
-          lanes:run.lanes,
-          affectedLaneIds:[l.id,...fleet.lanes.keys()],
-          message,
-          closeFleet:()=>fleet.close(),
-          invalidateLane:active=>{
-            tokens.delete(active.id);active.generation++;active.agent=null;active.heartbeatAt=null;
-            active.browserLaunchPending=false;active.workerLaunchPending=false;
-          },
-          onFailure:({cleanupError})=>{
-            run.status='blocked';run.error=message;
-            run.summary=cleanupError
-              ?'Recovery isolation failed; every active lane was blocked, but browser cleanup reported an error.'
-              :'Recovery isolation failed; every active lane was blocked and must pass recovery before use.';
-          },
-          persist,
-        });
-      }
+      return recoverFleetFailClosed({
+        recover:async()=>{
+          l.status='paused';l.generation++;tokens.delete(l.id);
+          await workers.stop(l.id);await operations.get(l.id);await fleet.closeLane(l.id);
+          await checkSource();await readyLane(l);
+          const activeLanes=run.lanes.filter(active=>fleet.lanes.has(active.id));
+          await openProductsAfterIsolation(activeLanes, {
+            parkLanes: () => fleet.parkLanesForIsolation(),
+            proveIsolation: verifyIsolation,
+            navigateLane: laneId => fleet.navigateLane(laneId),
+          });
+          run.status='ready';delete run.error;await persist();
+          return {lane:l.id,status:l.status,generation:l.generation};
+        },
+        lanes:run.lanes,
+        affectedLaneIds:()=>[l.id,...fleet.lanes.keys()],
+        messageFor:safeError,
+        closeFleet:()=>fleet.close(),
+        invalidateLane:active=>{
+          tokens.delete(active.id);active.generation++;active.agent=null;active.heartbeatAt=null;
+          active.browserLaunchPending=false;active.workerLaunchPending=false;
+        },
+        onFailure:({message,cleanupError})=>{
+          run.status='blocked';run.error=message;
+          run.summary=cleanupError
+            ?'Recovery isolation failed; every active lane was blocked, but browser cleanup reported an error.'
+            :'Recovery isolation failed; every active lane was blocked and must pass recovery before use.';
+        },
+        persist,
+      });
     }
     if(['stop','cleanup'].includes(req.command)){await shutdown(req.command);return {status:'stopped',preserved:'QA accounts, app data, credentials, evidence and reports'};}
     throw new Error('Unknown controller command.');

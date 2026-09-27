@@ -27,24 +27,30 @@ export function assertLaneReadyToClaim(lane) {
  * that proof. Persist blocked states even if closing one browser reports an
  * error, so no peer can be claimed from a manifest that still says ready.
  */
-export async function failClosedRecovery({
-  lanes, affectedLaneIds, message, closeFleet, invalidateLane, onFailure, persist,
+export async function recoverFleetFailClosed({
+  recover, lanes, affectedLaneIds, messageFor, closeFleet, invalidateLane, onFailure, persist,
 }) {
-  const affected = new Set(affectedLaneIds);
-  let cleanupError = null;
   try {
-    await closeFleet();
+    return await recover();
   } catch (error) {
-    cleanupError = error;
-  }
+    const message = messageFor(error);
+    const ids = typeof affectedLaneIds === 'function' ? affectedLaneIds() : affectedLaneIds;
+    const affected = new Set(ids);
+    let cleanupError = null;
+    try {
+      await closeFleet();
+    } catch (failure) {
+      cleanupError = failure;
+    }
 
-  for (const lane of lanes) {
-    if (!affected.has(lane.id)) continue;
-    invalidateLane(lane);
-    lane.status = 'blocked';
-    lane.error = message;
+    for (const lane of lanes) {
+      if (!affected.has(lane.id)) continue;
+      invalidateLane(lane);
+      lane.status = 'blocked';
+      lane.error = message;
+    }
+    onFailure({ message, cleanupError });
+    await persist();
+    throw new Error(message);
   }
-  onFailure({ message, cleanupError });
-  await persist();
-  throw new Error(message);
 }
