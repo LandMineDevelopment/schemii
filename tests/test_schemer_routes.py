@@ -10,6 +10,8 @@ import pytest
 from fastapi.testclient import TestClient
 from schemii.main import create_app, create_services
 from schemii.common.api.errors import ApiProblem
+from schemii.common.auth.service import AuthService, password_hash
+from schemii.common.connections.models import PostgresConnectionCreate, SCHEMII_CONNECTION_OWNER_ID
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.console import ConsoleResultColumn
 from schemii.schemer.service import _materialize
@@ -212,3 +214,78 @@ def test_standalone_stream_and_export_are_unbounded_plans_with_short_lived_resul
     assert response.status_code == 200
     assert response.text.splitlines() == ["name", "A", "B", "C", "D"]
     assert console.closed == ["result", "result"]
+
+
+def test_role_managed_author_can_create_update_plan_and_reopen_dashboard():
+    services = create_services()
+    profile = services.connections.create_schemii_owned(PostgresConnectionCreate(
+        name="Managed warehouse", host="localhost", database="warehouse",
+        username="report_reader", password="managed-test-password"))
+    def catalog(scoped, owner, connection_id, namespace, fresh=False):
+        selected = scoped.connections.get(owner, connection_id)
+        return {**deepcopy(CATALOG), "connectionId": connection_id, "database": selected.database}
+    services = replace(services, model_catalogs=SimpleNamespace(get=catalog))
+    app = create_app(services=services)
+    auth = AuthService(enabled=True, setup_token="unused-test-token")
+    app.state.auth = auth
+    services.connections.set_authority(auth)
+    with auth.store.transaction(write=True) as state:
+        state["users"]["managed-author"] = {
+            "id": "managed-author", "username": "managed-author", "display_name": "Managed author",
+            "password_hash": password_hash("managed-author-test-password"), "is_admin": False, "disabled": False,
+        }
+        state["roles"]["managed-report-author"] = {
+            "id": "managed-report-author", "name": "Managed report author",
+            "capabilities": ["schemoo:access", "schemer:access", "schemer:author"],
+            "user_ids": ["managed-author"], "dashboards": [],
+            "connections": [{"owner_id": SCHEMII_CONNECTION_OWNER_ID,
+                             "connection_id": profile.id, "allow_authoring": True}],
+        }
+
+    with TestClient(app, base_url="https://localhost:8001",
+                    headers={"Origin": "https://localhost:8001"}) as client:
+        assert client.post("/api/v1/auth/login", json={
+            "username": "managed-author", "password": "managed-author-test-password",
+        }).status_code == 200
+        model_response = client.post("/api/v1/schemoo/models", json={
+            "name": "Managed people", "connectionId": profile.id, "namespace": "public",
+            "definition": DEFINITION,
+        })
+        assert model_response.status_code == 201, model_response.text
+        model = model_response.json()
+        report_body = {"modelId": model["id"], "expectedRevision": model["revision"], "explore": EXPLORE}
+        assert client.post("/api/v1/schemer/plan", json=report_body).status_code == 200
+
+        dashboard_body = {
+            "name": "Managed people report", "modelId": model["id"], "modelRevision": model["revision"],
+            "tiles": [{"id": "people", "title": "People", "kind": "detail",
+                       "detailFields": [{"table": "people", "column": "name"}], "limit": 20}],
+        }
+        created = client.post("/api/v1/schemer/dashboards", json=dashboard_body)
+        assert created.status_code == 201, created.text
+        dashboard = created.json()
+        update = {**dashboard_body, "name": "Managed people report updated",
+                  "expectedRevision": dashboard["revision"]}
+        updated = client.put(f"/api/v1/schemer/dashboards/{dashboard['id']}", json=update)
+        assert updated.status_code == 200, updated.text
+        dashboard = updated.json()
+        assert client.get(f"/api/v1/schemer/dashboards/{dashboard['id']}").status_code == 200
+        tile_plan = client.post(
+            f"/api/v1/schemer/dashboards/{dashboard['id']}/tiles/people/plan",
+            json={"expectedRevision": dashboard["revision"]},
+        )
+        assert tile_plan.status_code == 200, tile_plan.text
+        with auth.store.transaction(write=True) as state:
+            state["roles"]["managed-report-author"]["connections"] = []
+        assert client.post("/api/v1/schemer/plan", json=report_body).status_code == 404
+        denied_create = client.post("/api/v1/schemer/dashboards", json=dashboard_body)
+        assert denied_create.status_code == 404
+        denied_update_body = {**dashboard_body, "name": "Managed people report updated",
+                              "expectedRevision": dashboard["revision"]}
+        denied_update = client.put(f"/api/v1/schemer/dashboards/{dashboard['id']}", json=denied_update_body)
+        assert denied_update.status_code == 404
+        denied_run = client.post(
+            f"/api/v1/schemer/dashboards/{dashboard['id']}/tiles/people/plan",
+            json={"expectedRevision": dashboard["revision"]},
+        )
+        assert denied_run.status_code == 404

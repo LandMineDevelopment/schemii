@@ -20,6 +20,9 @@ DEFINITIONS = json.loads((Path(__file__).parent / "personas.json").read_text())
 PERSONAS = {p["id"]: p for p in DEFINITIONS["personas"]}
 POOL = "user_schemii_connection_pool"
 SOURCE_PATHS = {"schemoo": "/api/v1/schemoo/models", "schemii": "/api/v1/schemii/workspaces", "schemer": "/api/v1/schemer/dashboards"}
+SUPPORTED_FIXTURE_VERSIONS = {"qa-v1", DEFINITIONS["fixtureVersion"]}
+MODEL_ID = re.compile(r"^model_[0-9a-f]{32}$")
+DASHBOARD_ID = re.compile(r"^dashboard_[0-9a-f]{32}$")
 
 
 def private_read(path):
@@ -51,6 +54,26 @@ def write_private(path, value, *, replace=True):
             os.unlink(temporary)
 
 
+def safe_api_error_summary(content):
+    """Keep provisioning failures useful without echoing request data or credentials."""
+    try:
+        error = json.loads(content).get("error", {})
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(error, dict):
+        return ""
+    code = error.get("code")
+    code = code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else "unknown"
+    detail = error.get("message")
+    if not isinstance(detail, str):
+        detail = ""
+    detail = detail[:240]
+    detail = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [redacted]", detail)
+    detail = re.sub(r"(?i)\b(password|secret|token|credential|authorization)\b\s*[:=]\s*[^\s,;]+",
+                    r"\1=[redacted]", detail)
+    return f" (code={code}, detail={detail})" if detail else f" (code={code})"
+
+
 def registry_load(directory):
     value = json.loads(private_read(directory / "registry.json"))
     return validate_registry(value)
@@ -59,7 +82,7 @@ def registry_load(directory):
 def validate_registry(value):
     if not isinstance(value, dict):
         raise ValueError("QA registry must be an object")
-    if value.get("version") != 1 or value.get("fixtureVersion") != DEFINITIONS["fixtureVersion"] or not isinstance(value.get("slots"), list):
+    if value.get("version") != 1 or value.get("fixtureVersion") not in SUPPORTED_FIXTURE_VERSIONS or not isinstance(value.get("slots"), list):
         raise ValueError("Unsupported QA registry version; refusing to replace retained identities")
     usernames = set()
     for slot in value["slots"]:
@@ -87,7 +110,19 @@ def validate_registry(value):
             or slot.get("writableSchema") != "qa_write_designer_" + name[-3:]
         ):
             raise ValueError("Invalid retained QA writer profile")
+        author_fixture = slot.get("reportAuthorFixture")
+        if author_fixture is not None:
+            if slot["persona"] != "report_author" or not isinstance(author_fixture, dict) or not set(author_fixture) <= {"modelId", "dashboardId"}:
+                raise ValueError("Invalid retained report-author fixture ownership record")
+            if "modelId" not in author_fixture or not isinstance(author_fixture["modelId"], str) or not MODEL_ID.fullmatch(author_fixture["modelId"]):
+                raise ValueError("Invalid retained report-author model ID")
+            if "dashboardId" in author_fixture and (not isinstance(author_fixture["dashboardId"], str)
+                    or not DASHBOARD_ID.fullmatch(author_fixture["dashboardId"])):
+                raise ValueError("Invalid retained report-author dashboard ID")
         usernames.add(name)
+    # qa-v1 retained the same identities and source IDs. Keep those private
+    # records portable while deriving the new permission and object fixtures.
+    value["fixtureVersion"] = DEFINITIONS["fixtureVersion"]
     return value
 
 
@@ -130,6 +165,145 @@ def import_credentials(directory, source):
     return {"importedSlots": len(registry["slots"]), "stateDir": str(directory), "requiresProvisioning": True}
 
 
+def report_author_model_name(username):
+    return f"QA report-author model {username}"
+
+
+def report_author_dashboard_name(username):
+    return f"QA report-author dashboard {username}"
+
+
+def _verify_report_author_model(model, slot):
+    fixture = slot["reportAuthorFixture"]
+    if (model.get("id") != fixture["modelId"] or model.get("ownerId") != slot.get("accountId")
+            or model.get("name") != report_author_model_name(slot["username"])
+            or model.get("connectionId") != slot.get("connectionId")
+            or model.get("namespace") != slot["schema"]
+            or model.get("definition", {}).get("root") != "orders"
+            or not any(node.get("id") == "orders" and node.get("table") == "orders"
+                       for node in model.get("definition", {}).get("nodes", []))):
+        raise ValueError(f"Retained report-author model ownership or source drift: {slot['username']}")
+
+
+def _verify_report_author_dashboard(dashboard, slot):
+    fixture = slot["reportAuthorFixture"]
+    if (dashboard.get("id") != fixture.get("dashboardId") or dashboard.get("ownerId") != slot.get("accountId")
+            or dashboard.get("name") != report_author_dashboard_name(slot["username"])
+            or dashboard.get("modelId") != fixture["modelId"]):
+        raise ValueError(f"Retained report-author dashboard ownership or model drift: {slot['username']}")
+
+
+def ensure_report_author_fixture(directory, registry, slot, user):
+    """Create or verify the account-owned model/dashboard using app APIs only."""
+    if slot["persona"] != "report_author" or not slot.get("accountId") or not slot.get("connectionId"):
+        raise ValueError("Report-author fixtures require a provisioned account and managed QA source")
+    fixture = slot.setdefault("reportAuthorFixture", {})
+    created = {"models": 0, "dashboards": 0}
+    model_id = fixture.get("modelId")
+    if model_id:
+        model = user.call("GET", f"/api/v1/schemoo/models/{model_id}")
+        _verify_report_author_model(model, slot)
+    else:
+        model_name = report_author_model_name(slot["username"])
+        models = user.call("GET", "/api/v1/schemoo/models")["models"]
+        if any(item.get("name") == model_name for item in models):
+            raise ValueError(f"Unowned report-author model name collision: {slot['username']}; reconcile it before provisioning")
+        catalog = user.call("GET", f"/api/v1/schemoo/catalog?connection_id={slot['connectionId']}&namespace={slot['schema']}")
+        if not any(table.get("name") == "orders" for table in catalog.get("tables", [])):
+            raise ValueError(f"QA source for {slot['username']} is missing the orders table")
+        model = user.call("POST", "/api/v1/schemoo/models", {
+            "name": model_name, "connectionId": slot["connectionId"], "namespace": slot["schema"],
+            "definition": {"root": "orders", "nodes": [{"id": "orders", "table": "orders", "label": "Orders"}],
+                           "edges": [], "scopes": []},
+        }, expected=201)
+        model_id = model["id"]
+        if not MODEL_ID.fullmatch(model_id):
+            raise ValueError(f"Application returned an invalid QA model ID for {slot['username']}")
+        fixture["modelId"] = model_id
+        write_private(directory / "registry.json", registry)
+        created["models"] += 1
+        _verify_report_author_model(model, slot)
+
+    dashboard_id = fixture.get("dashboardId")
+    if dashboard_id:
+        dashboard = user.call("GET", f"/api/v1/schemer/dashboards/{dashboard_id}")
+        _verify_report_author_dashboard(dashboard, slot)
+    else:
+        dashboard_name = report_author_dashboard_name(slot["username"])
+        dashboards = user.call("GET", "/api/v1/schemer/dashboards")["dashboards"]
+        if any(item.get("name") == dashboard_name for item in dashboards):
+            raise ValueError(f"Unowned report-author dashboard name collision: {slot['username']}; reconcile it before provisioning")
+        dashboard = user.call("POST", "/api/v1/schemer/dashboards", {
+            "name": dashboard_name, "modelId": model_id, "modelRevision": model["revision"],
+            "tiles": [{"id": "qa-orders", "title": "Orders · sample", "kind": "detail",
+                       "detailFields": [{"table": "orders", "column": column}
+                                        for column in ("id", "ordered_on", "status", "amount")],
+                       "limit": 100}],
+        }, expected=201)
+        dashboard_id = dashboard["id"]
+        if not DASHBOARD_ID.fullmatch(dashboard_id):
+            raise ValueError(f"Application returned an invalid QA dashboard ID for {slot['username']}")
+        fixture["dashboardId"] = dashboard_id
+        write_private(directory / "registry.json", registry)
+        created["dashboards"] += 1
+        _verify_report_author_dashboard(dashboard, slot)
+
+    # Verify the actual account session can reopen both resources, rather than
+    # treating successful administrator creation as effective user access.
+    user.call("GET", f"/api/v1/schemoo/models/{model_id}")
+    user.call("GET", f"/api/v1/schemer/dashboards/{dashboard_id}")
+    return created
+
+
+def cleanup_report_author_fixtures(directory, selected):
+    selected = list(selected)
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("Choose one or more unique report-author QA accounts")
+    registry = registry_load(directory)
+    slots = [slot for slot in registry["slots"] if slot["username"] in selected]
+    if len(slots) != len(selected) or any(slot["persona"] != "report_author" for slot in slots):
+        raise ValueError("Select only registered report-author QA accounts")
+    totals = {"accounts": [], "removedDashboards": 0, "removedModels": 0}
+    for slot in slots:
+        fixture = slot.get("reportAuthorFixture")
+        if not fixture:
+            totals["accounts"].append({"username": slot["username"], "removed": False})
+            continue
+        if not slot.get("provisioned") or not slot.get("accountId"):
+            raise ValueError(f"Cannot clean an unprovisioned report-author account: {slot['username']}")
+        # Make the account unavailable to future lane selection before the
+        # first API deletion; a partial cleanup must not look ready for use.
+        slot["provisioned"] = False
+        write_private(directory / "registry.json", registry)
+        user = Client()
+        try:
+            identity = user.login(slot)
+            if identity.get("user", {}).get("id") != slot["accountId"] or not {"schemoo:access", "schemer:access", "schemer:author"}.issubset(identity.get("capabilities", [])):
+                raise ValueError(f"Effective report-author identity drift: {slot['username']}")
+            dashboard_id = fixture.get("dashboardId")
+            if dashboard_id:
+                dashboard = user.call("GET", f"/api/v1/schemer/dashboards/{dashboard_id}")
+                _verify_report_author_dashboard(dashboard, slot)
+                user.call("DELETE", f"/api/v1/schemer/dashboards/{dashboard_id}?expectedRevision={dashboard['revision']}", expected=204)
+                del fixture["dashboardId"]
+                write_private(directory / "registry.json", registry)
+                totals["removedDashboards"] += 1
+            model_id = fixture.get("modelId")
+            if model_id:
+                model = user.call("GET", f"/api/v1/schemoo/models/{model_id}")
+                _verify_report_author_model(model, slot)
+                user.call("DELETE", f"/api/v1/schemoo/models/{model_id}?expected_revision={model['revision']}", expected=204)
+                del fixture["modelId"]
+                del slot["reportAuthorFixture"]
+                write_private(directory / "registry.json", registry)
+                totals["removedModels"] += 1
+        finally:
+            user.logout()
+        totals["accounts"].append({"username": slot["username"], "removed": bool(fixture == {})})
+    derived_files(directory, registry)
+    return totals
+
+
 def derived_files(directory, registry):
     slots = registry["slots"]
     write_private(directory / "credentials.json", {"accounts": [{"username": s["username"], "password": s["password"]} for s in slots]})
@@ -142,11 +316,45 @@ def derived_files(directory, registry):
         checks = [{"path": "/api/v1/auth/me", "status": 200, "equals": {"user.username": slot["username"], "is_admin": persona["isAdmin"]}}]
         checks.append({"path": "/api/v1/admin/accounts", "status": 200 if persona["isAdmin"] else 403})
         checks += [{"path": endpoint, "status": 403 if product in denied else 200} for product, endpoint in SOURCE_PATHS.items()]
-        lanes[slot["username"]] = {"persona": slot["persona"], "expectedCapabilities": capabilities, "deniedProducts": denied, "defaultProducts": persona["defaultProducts"],
-            "resources": {"schema": slot["schema"], "connectionId": slot.get("connectionId"), "connectionOwnerId": POOL,
+        resources = {"schema": slot["schema"], "connectionId": slot.get("connectionId"), "connectionOwnerId": POOL,
                 "database": "schemii_qa", "host": "qa-postgres", "fixtureVersion": registry["fixtureVersion"],
-                "scope": "viewer empty-state and access denial only" if persona.get("viewerOnly") else "stable QA target; no seeded saved model or dashboard"},
-            "checks": checks}
+                "scope": "viewer empty-state and access denial only" if persona.get("viewerOnly") else "stable QA target; no seeded saved model or dashboard"}
+        if persona["id"] == "report_author":
+            resources["scope"] = "owned disposable Orders model and dashboard; see testing/PERSONAS.md"
+            author_fixture = slot.get("reportAuthorFixture", {})
+            if author_fixture.get("modelId"):
+                resources["schemooModelId"] = author_fixture["modelId"]
+                resources["schemooModelName"] = report_author_model_name(slot["username"])
+                checks.append({"path": f"/api/v1/schemoo/models/{author_fixture['modelId']}", "status": 200,
+                    "equals": {"id": author_fixture["modelId"], "ownerId": slot.get("accountId"),
+                               "connectionId": slot.get("connectionId"), "namespace": slot["schema"]}})
+            if author_fixture.get("dashboardId"):
+                resources["schemerDashboardId"] = author_fixture["dashboardId"]
+                resources["schemerDashboardName"] = report_author_dashboard_name(slot["username"])
+                checks.append({"path": f"/api/v1/schemer/dashboards/{author_fixture['dashboardId']}", "status": 200,
+                    "equals": {"id": author_fixture["dashboardId"], "ownerId": slot.get("accountId"),
+                               "modelId": author_fixture.get("modelId")}})
+            lane = {"persona": slot["persona"], "expectedCapabilities": capabilities,
+                    "deniedProducts": denied, "defaultProducts": persona["defaultProducts"], "resources": resources,
+                    "checks": checks}
+            if author_fixture.get("modelId") and author_fixture.get("dashboardId"):
+                lane.update(url="/schemer", scenarios=[{
+                        "id": "author-dashboard-lifecycle", "product": "schemer",
+                        "title": "Use the saved QA model and dashboard as a starting point",
+                        "instructions": (f"Open the assigned saved dashboard {resources['schemerDashboardName']} and inspect its Orders tile. "
+                            f"Then use Create dashboard and select the assigned saved model {resources['schemooModelName']}. "
+                            "Create a run-named disposable dashboard, add or rename a tile, save and reload it at the assigned viewport. "
+                            "Delete only the dashboard you created and verify the retained starter dashboard and model remain unchanged. "
+                            "Do not edit or delete the retained starter fixtures.")}], writeAuthorization={
+                                "enabled": True,
+                                "resources": ["the new dashboard created by this run", f"read-only source model {author_fixture['modelId']}"],
+                                "operations": ["create one run-named dashboard through Schemer using the assigned saved model",
+                                               "edit, save, reload, and delete only the dashboard created by this run"],
+                            })
+            lanes[slot["username"]] = lane
+        else:
+            lanes[slot["username"]] = {"persona": slot["persona"], "expectedCapabilities": capabilities, "deniedProducts": denied, "defaultProducts": persona["defaultProducts"],
+                "resources": resources, "checks": checks}
         if slot.get("writableConnectionId"):
             lanes[slot["username"]]["resources"].update(
                 writableConnectionId=slot["writableConnectionId"], writableSchema=slot["writableSchema"])
@@ -203,9 +411,10 @@ class Client:
             response = error
         with response:
             if response.status != expected:
+                error_summary = safe_api_error_summary(response.read())
                 if method == "POST" and path == "/api/v1/admin/schemii-connections" and response.status == 409:
                     raise ValueError("Managed QA connection capacity reached or profile conflict; reduce selected author slots or review existing managed profiles. Saved account/connection IDs and credentials remain intact; the provisioner does not raise global limits")
-                raise ValueError(f"QA API {method} {path} expected {expected}, received {response.status}")
+                raise ValueError(f"QA API request expected HTTP {expected}, received {response.status}{error_summary}")
             content = response.read()
             return json.loads(content) if content and expected < 400 else None
 
@@ -224,7 +433,8 @@ def provision(directory, admin_file, selected):
     identity = client.login(admin_credentials)
     if not identity.get("is_admin"):
         raise ValueError("Provisioning requires an application administrator")
-    counts = {"createdAccounts": 0, "createdConnections": 0, "verified": 0}
+    counts = {"createdAccounts": 0, "createdConnections": 0, "createdModels": 0,
+              "createdDashboards": 0, "updatedAccounts": 0, "verified": 0}
     try:
         accounts = {a["username"]: a for a in client.call("GET", "/api/v1/admin/accounts")}
         profiles = client.call("GET", "/api/v1/admin/schemii-connections")["connections"]
@@ -267,7 +477,20 @@ def provision(directory, admin_file, selected):
             expected_capabilities = sorted(persona["capabilities"] + (["accounts:provision"] if persona["isAdmin"] else []))
             if slot.get("accountId"):
                 existing = accounts[slot["username"]]
-                if existing["is_admin"] != persona["isAdmin"] or existing["disabled"] or existing["role_ids"] or existing["direct_access"] != access or sorted(existing["effective_capabilities"]) != expected_capabilities:
+                if existing["is_admin"] != persona["isAdmin"] or existing["disabled"] or existing["role_ids"]:
+                    raise ValueError(f"Account permission drift: {slot['username']}")
+                if existing["direct_access"] != access:
+                    legacy_author_access = {"capabilities": ["schemer:access", "schemer:author"],
+                        "connections": grants, "dashboards": []}
+                    if persona["id"] != "report_author" or existing["direct_access"] != legacy_author_access:
+                        raise ValueError(f"Account permission drift: {slot['username']}")
+                    client.call("PATCH", f"/api/v1/admin/accounts/{slot['accountId']}", {"direct_access": access})
+                    accounts = {a["username"]: a for a in client.call("GET", "/api/v1/admin/accounts")}
+                    existing = accounts.get(slot["username"])
+                    if not existing or existing["direct_access"] != access:
+                        raise ValueError(f"Report-author permission migration did not persist: {slot['username']}")
+                    counts["updatedAccounts"] += 1
+                if sorted(existing["effective_capabilities"]) != expected_capabilities:
                     raise ValueError(f"Account permission drift: {slot['username']}")
             else:
                 account = client.call("POST", "/api/v1/admin/accounts", {"username": slot["username"],
@@ -286,6 +509,10 @@ def provision(directory, admin_file, selected):
                     user.call("GET", endpoint, expected=200 if f"{product}:access" in expected_capabilities else 403)
                 if grants:
                     user.call("POST", f"/api/v1/connections/{slot['connectionId']}/test?product={persona['product']}", {})
+                if persona["id"] == "report_author":
+                    created = ensure_report_author_fixture(directory, registry, slot, user)
+                    counts["createdModels"] += created["models"]
+                    counts["createdDashboards"] += created["dashboards"]
             finally:
                 user.logout()
             slot["provisioned"] = True
@@ -452,11 +679,13 @@ def main():
     writer_parser = subparsers.add_parser("writer", help="Provision one exact marked QA writer target in Schemii")
     writer_parser.add_argument("--admin-credentials", type=Path, required=True)
     writer_parser.add_argument("--account", required=True)
+    author_cleanup_parser = subparsers.add_parser("cleanup-author", help="Delete only ledgered report-author starter dashboards and models")
+    author_cleanup_parser.add_argument("--accounts", required=True, help="Comma-separated retained report-author QA usernames")
     export_parser = subparsers.add_parser("export", help="Export private credentials without deployment-specific IDs")
     export_parser.add_argument("--output", type=Path, required=True)
     import_parser = subparsers.add_parser("import", help="Import private credentials into an empty QA state directory")
     import_parser.add_argument("--input", type=Path, required=True)
-    for child in (initialize_parser, provision_parser, chat_parser, writer_parser, export_parser, import_parser):
+    for child in (initialize_parser, provision_parser, chat_parser, writer_parser, author_cleanup_parser, export_parser, import_parser):
         child.add_argument("--state-dir", type=Path, default=Path(os.environ.get("SCHEMII_QA_STATE_DIRECTORY", ROOT / ".schemii/testing")))
     args = parser.parse_args()
     if args.command == "init" and not 1 <= args.copies <= 100:
@@ -477,6 +706,11 @@ def main():
             result = provision_chat(directory, args.admin_credentials, args.account, args.model, args.reasoning)
         elif args.command == "writer":
             result = provision_writer(directory, args.admin_credentials, args.account)
+        elif args.command == "cleanup-author":
+            selected = args.accounts.split(",")
+            if any(not re.fullmatch(r"qa_report_author_[0-9]{3}", name) for name in selected):
+                raise ValueError("--accounts must contain registered report-author QA usernames")
+            result = cleanup_report_author_fixtures(directory, selected)
         elif args.command == "export":
             result = export_credentials(directory, args.output)
         else:

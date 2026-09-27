@@ -6,7 +6,7 @@ import { join, resolve, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
 import { deploymentLockPath } from './deployment.mjs';
-import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock } from './leases.mjs';
+import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock, withAvailableAccounts } from './leases.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
 const catalog=()=>readJSON(join(root,'testing/personas.json'));
 const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spawn(file,args,{cwd:root,stdio:'inherit',...options});child.once('error',rej);child.once('close',code=>code===0?res():rej(blocked(`${file} exited ${code}; inspect the exact diagnostic above.`)));});
@@ -14,6 +14,7 @@ const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spa
 const help = `Usage: ./test.sh COMMAND [options]
 
   setup      Create/extend stable persona credentials, prepare QA DB, provision accounts
+  cleanup-author-fixture Delete selected report-author starter dashboards and models
   provision-chat Grant one retained designer access to the tested shared AI model
   provision-writer Prepare and attach one isolated writable Schemii QA target
   reset-writer Reset one marked writable QA target after a run
@@ -43,6 +44,7 @@ const help = `Usage: ./test.sh COMMAND [options]
   cleanup    Stop owned browsers; preserve accounts, data and evidence
 
 Setup:     --copies-per-persona 20 --admin-credentials /private/admin.json
+Author:    --accounts qa_report_author_001[,qa_report_author_002]
 Chat:      --account qa_designer_001 --admin-credentials /private/admin.json
            [--model gpt-6-luna --reasoning default]
 Writer:    --account qa_designer_010 --admin-credentials /private/admin.json
@@ -77,6 +79,7 @@ const selectionOptions = ['accounts','products','tracks','parallel','viewports',
 const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
+  'cleanup-author-fixture': ['accounts'],
   'provision-writer': ['account','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
@@ -282,6 +285,16 @@ async function execute(command,o) {
     await privateJSON(resolve(o['admin-credentials']));
     await runCommand('./testing/setup.sh',[copies,resolve(o['admin-credentials']),stateDir]);
     return;
+  }
+  if(command==='cleanup-author-fixture') {
+    if(!o.accounts)throw invalid('--accounts is required; name each retained report-author fixture to delete.');
+    const accounts=list(o.accounts,'');
+    if(!accounts.length||accounts.some(account=>!/^qa_report_author_[0-9]{3}$/.test(account))||new Set(accounts).size!==accounts.length)
+      throw invalid('--accounts must contain unique retained report-author QA usernames.');
+    // Wait for the deployment to be idle and hold its exclusive lease; the
+    // account reservation guard closes the race with a newly starting lane.
+    return withFileLock(deploymentLockPath(root),()=>withAvailableAccounts(accounts,()=>
+      runCommand('python',['testing/provision.py','cleanup-author','--accounts',accounts.join(','),'--state-dir',stateDir]),{root}));
   }
   if(command==='provision-chat') {
     if(!o['admin-credentials']||!o.account)throw invalid('--admin-credentials and --account are required.');

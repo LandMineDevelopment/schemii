@@ -27,10 +27,11 @@ Setup creates **six personas × 20 copies = 120 retained accounts/data spaces**:
 no access, modeler, designer, report author, report viewer, and administrator.
 Same-persona copies have identical effective permission definitions and data;
 they have distinct login credentials, schema names and profile IDs. The three
-author personas receive 60 managed source profiles in total. Viewer accounts test
-the empty/denied-authoring state until an explicit dashboard fixture is supplied.
-Administrator accounts grant account administration, not implicit product access.
-See [persona details](PERSONAS.md).
+author personas receive 60 managed source profiles in total. Each report author
+also receives Schemoo access and an account-owned saved Orders model and Schemer
+dashboard on that account's QA schema. Viewer accounts still test the
+empty/denied-authoring state; administrator accounts grant account administration,
+not implicit product access. See [persona details](PERSONAS.md).
 
 ## Prepare a live Schemii AI chat lane
 
@@ -64,6 +65,46 @@ profile capacity: default 100, including existing non-QA profiles. Larger pools
 must fit that configured capacity; the suite never silently raises it. Unknown
 remote username/profile collisions or changed permissions fail instead of adopting
 or overwriting another user's resources.
+
+## Report-author starting point and cleanup
+
+Each retained report author starts with an Orders model and a dashboard showing
+sample order rows. The model and dashboard belong to that QA account and use its
+own `qa_report_author_NNN` profile. Setup verifies access while signed in as the
+author. The dashboard is a saved place to begin; create a run-named dashboard
+through the UI for changes and leave the retained starter objects unchanged.
+
+Plan or prepare one report-author lifecycle lane with desktop and mobile
+evidence:
+
+```bash
+./test.sh plan --persona report_author --agents 1 --parallel 1 \
+  --tracks lifecycle --products schemer --viewports desktop,mobile
+./test.sh doctor --persona report_author --agents 1 --parallel 1 \
+  --tracks lifecycle --products schemer --viewports desktop,mobile --headless
+./test.sh prepare --persona report_author --agents 1 --parallel 1 \
+  --tracks lifecycle --products schemer --viewports desktop,mobile --headless
+./test.sh run --run RUN_ID
+```
+
+The generated private fixture manifest checks effective Schemoo and Schemer
+access, the saved model owner/source, and the dashboard owner/model relationship.
+The lifecycle scenario permits writes only to a new dashboard created by that
+run; its starter model and dashboard remain read-only. Harness cleanup preserves
+both starter objects. To remove selected starter objects after all runs finish,
+delete only their ledgered dashboard and model:
+
+```bash
+./test.sh cleanup-author-fixture --accounts qa_report_author_001
+```
+
+This command waits for the application deployment to be idle, refuses accounts
+reserved by an active or unresolved run, verifies each recorded object belongs
+to the selected account and source, then deletes the dashboard before the model.
+It leaves the QA account, profile, credentials, and database schema in place. A
+later full `setup` provisions fresh starter objects. Objects created by a manual
+run are outside this ownership ledger and must be deleted through the UI that
+created them.
 
 ## Isolated writable Schemii targets
 
