@@ -35,6 +35,32 @@ def test_runtime_binding_resolves_nested_installed_services_without_name_special
     assert index.resolve(unknown.func, callable_subject=record_activity).subject is None
 
 
+def test_runtime_binding_uses_exact_application_state_receiver_for_scoped_services(monkeypatch):
+    from schemii.common.auth.managed_connections import (
+        list_schemii_connections,
+        test_schemii_connection,
+    )
+    from schemii.common.connections.service import ConnectionService
+    from schemii.common.source_inspection import SourceRegistry
+
+    monkeypatch.setattr(ConnectionService, "__hash__", None)
+    application = create_app()
+    services = application.state.services
+    index = system_inspection.RuntimeBindingIndex(
+        services, SourceRegistry(), application_state=application.state._state,
+    )
+    call = ast.parse("_connections(request).list_schemii_owned()").body[0].value
+    resolved = index.resolve(call.func, callable_subject=list_schemii_connections)
+
+    assert resolved.subject is ConnectionService.list_schemii_owned
+    assert resolved.resolution == "runtime-receiver"
+    test_call = ast.parse("_connections(request).use(owner_id, connection_id)").body[0].value
+    test_resolved = index.resolve(test_call.func, callable_subject=test_schemii_connection)
+
+    assert test_resolved.subject is ConnectionService.use
+    assert test_resolved.resolution == "runtime-receiver"
+
+
 def test_runtime_binding_tracks_optional_callable_factory_without_hiding_unguarded_calls():
     from schemii.common.auth.service import AuthService
     from schemii.common.metadata.config import MetadataConfig
