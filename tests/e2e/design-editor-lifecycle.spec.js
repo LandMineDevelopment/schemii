@@ -16,12 +16,15 @@ async function responseJson(response, context) {
 }
 
 async function createWorkspace(request) {
-  const workspace = await responseJson(await request.post(API_ROOT, {
+  return responseJson(await request.post(API_ROOT, {
     data: { name: `E2E draft analysis ${randomUUID()}` },
   }), "Create editor lifecycle workspace");
-  const current = await responseJson(await request.get(`${API_ROOT}/${workspace.id}/design`), "Read empty design");
+}
+
+async function seedWorkspace(request, workspaceId) {
+  const current = await responseJson(await request.get(`${API_ROOT}/${workspaceId}/design`), "Read empty design");
   const tableId = designId("table");
-  await responseJson(await request.put(`${API_ROOT}/${workspace.id}/design`, {
+  await responseJson(await request.put(`${API_ROOT}/${workspaceId}/design`, {
     data: {
       expectedDesignRevision: current.revision,
       content: {
@@ -41,7 +44,6 @@ async function createWorkspace(request) {
       },
     },
   }), "Seed editor lifecycle design");
-  return workspace.id;
 }
 
 const editors = [
@@ -103,10 +105,14 @@ function deferred() {
 }
 
 test("all four design editors fence rapid, stale, and post-close draft analyses", async ({ page, request }) => {
-  const workspaceId = await createWorkspace(request);
+  let workspaceId = null;
   const releasePendingResponses = [];
 
   try {
+    const workspace = await createWorkspace(request);
+    workspaceId = workspace.id;
+    await seedWorkspace(request, workspaceId);
+
     for (const editor of editors) {
       const requests = [];
       const staleStarted = deferred();
@@ -199,15 +205,17 @@ test("all four design editors fence rapid, stale, and post-close draft analyses"
     }
   } finally {
     releasePendingResponses.forEach(release => release());
-    const currentResponse = await request.get(`${API_ROOT}/${workspaceId}`);
-    if (currentResponse.status() !== 404) {
-      if (!currentResponse.ok()) {
-        throw new Error(`Read editor lifecycle workspace for cleanup failed (${currentResponse.status()}): ${await currentResponse.text()}`);
-      }
-      const current = await currentResponse.json();
-      const deleted = await request.delete(`${API_ROOT}/${workspaceId}?expectedRevision=${encodeURIComponent(current.revision)}`);
-      if (!deleted.ok() && deleted.status() !== 404) {
-        throw new Error(`Delete editor lifecycle workspace failed (${deleted.status()}): ${await deleted.text()}`);
+    if (workspaceId) {
+      const currentResponse = await request.get(`${API_ROOT}/${workspaceId}`);
+      if (currentResponse.status() !== 404) {
+        if (!currentResponse.ok()) {
+          throw new Error(`Read editor lifecycle workspace for cleanup failed (${currentResponse.status()}): ${await currentResponse.text()}`);
+        }
+        const current = await currentResponse.json();
+        const deleted = await request.delete(`${API_ROOT}/${workspaceId}?expectedRevision=${encodeURIComponent(current.revision)}`);
+        if (!deleted.ok() && deleted.status() !== 404) {
+          throw new Error(`Delete editor lifecycle workspace failed (${deleted.status()}): ${await deleted.text()}`);
+        }
       }
     }
   }
