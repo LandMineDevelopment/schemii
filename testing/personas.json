@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "fixtureVersion": "qa-v1",
+  "fixtureVersion": "qa-v2",
   "personas": [
     {
       "id": "no_access",
@@ -39,6 +39,7 @@
     {
       "id": "report_author",
       "capabilities": [
+        "schemoo:access",
         "schemer:access",
         "schemer:author"
       ],
@@ -47,7 +48,7 @@
       "defaultProducts": [
         "schemer"
       ],
-      "description": "Schemer report author with its own QA schema"
+      "description": "Schemer report author with Schemoo access and disposable saved model/dashboard fixtures"
     },
     {
       "id": "report_viewer",

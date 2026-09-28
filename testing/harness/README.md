@@ -118,6 +118,14 @@ resources and effective-access checks. The harness preserves retained account
 permissions and resources; it does not guess missing grants or silently seed/reset
 a user's schema. Prepare fixtures separately through supported app workflows.
 
+Normal persona setup creates an account-owned saved Orders model and sample-row
+dashboard for each `report_author`, and grants that persona the Schemoo access
+needed to choose the model. Its generated lifecycle scenario opens those saved
+objects as the starting point and authorizes writes only to a new dashboard the
+lane creates. Keep the starter model/dashboard unchanged; after all runs stop,
+`./test.sh cleanup-author-fixture --accounts qa_report_author_001` removes only
+the selected, ledgered starter objects. See the [persona fixture details](../PERSONAS.md).
+
 A fixture manifest is JSON with `lanes` keyed by username. For example (replace
 IDs and expected values with actual assigned resources):
 

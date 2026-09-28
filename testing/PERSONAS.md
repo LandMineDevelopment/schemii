@@ -6,12 +6,15 @@ persona have identical application capabilities but distinct database schemas,
 passwords, and owned application resources. Runs must lease individual accounts
 before starting browsers; a persona name alone is not an isolation boundary.
 
-`no_access` exercises product denial. `modeler`, `designer`, and `report_author`
-receive their respective product and their own managed QA source. `report_viewer`
-has Schemer access without authoring; its initial coverage is empty-state and
-permission-denial behavior. This setup does not seed shared dashboards or saved
-models. `administrator` can administer accounts but receives no implicit product
-capabilities.
+`no_access` exercises product denial. `modeler` and `designer` receive their
+respective product and their own managed QA source. `report_author` receives
+`schemer:access`, `schemer:author`, and `schemoo:access`, plus an account-owned
+saved Orders model and Schemer dashboard backed by its own managed QA source.
+The model and dashboard are private to that report-author account; they are not
+shared with viewer accounts. `report_viewer` has Schemer access without authoring
+or Schemoo access, so its initial coverage is empty-state and permission-denial
+behavior. `administrator` can administer accounts but receives no implicit
+product capabilities.
 
 Only the three author personas receive managed profiles: 60 profiles at the
 default pool size. All 120 slots still have isolated PostgreSQL identities and
@@ -101,3 +104,29 @@ the complete original state backup instead so its IDs remain consistent.
 Database resets do not remove saved app models, reports, or account-owned history.
 Those resources require separate, ownership-tracked cleanup; provisioning never
 deletes them.
+
+## Report-author starter model and dashboard
+
+Normal `./test.sh setup` creates one disposable, account-owned Schemoo model and
+one Schemer dashboard per report-author slot. The model starts from the QA
+account's `orders` table. The dashboard contains an Orders detail tile with
+sample rows. The report-author persona receives Schemoo access so it can select
+the saved model while creating its own dashboards. Provisioning signs in as the
+author and verifies the effective product routes and both saved-object owners.
+
+The private registry stores each fixture's model and dashboard IDs under
+`reportAuthorFixture`; the generated `fixtures.json` records expected owner,
+connection, namespace, and model relationships for harness preflight. Interrupted
+API creation is never reconciled by name: an object created before its ID was
+recorded is reported as an unowned name collision and must be reconciled
+explicitly.
+
+For lifecycle review, select `--persona report_author --tracks lifecycle
+--products schemer`. The assigned starting dashboard and model are read-only for
+the lane. Create a run-named dashboard through the UI, verify its save/reload
+behavior, and delete that new dashboard before finishing. The explicit
+`./test.sh cleanup-author-fixture --accounts qa_report_author_001` command
+removes only the selected account's ledgered starter dashboard and then its
+model. It refuses an account reserved by a run and preserves the QA account,
+profile, credentials, source schema, and unledgered objects. Running normal
+`setup` later creates fresh starter fixtures.

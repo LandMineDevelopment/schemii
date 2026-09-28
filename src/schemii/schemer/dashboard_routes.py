@@ -8,7 +8,7 @@ from schemii.schemoo.derived import type_family
 from schemii.schemoo.routes import api_errors
 from schemii.schemoo.service import load_model, model_catalog, plan_query
 from .time_analysis import validate_time_analysis
-from .access import available_dashboards, prepare_dashboard
+from .access import available_dashboards, owned_report_services, prepare_dashboard
 from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate
 from .dashboard_store import (DashboardNotFoundError, DashboardConflictError,
                               DashboardLimitError, DashboardStorageUnavailableError)
@@ -112,7 +112,8 @@ def list_dashboards(request: Request, principal: Principal = Depends(get_current
 def create_dashboard(body: DashboardCreate, request: Request,
                      principal: Principal = Depends(get_current_principal)):
     with dashboard_errors():
-        validate_dashboard(request.app.state.services, principal.user_id, body)
+        services = owned_report_services(request, principal.user_id, body.model_id)
+        validate_dashboard(services, principal.user_id, body)
         return request.app.state.services.dashboards.create(principal.user_id, body)
 
 
@@ -129,7 +130,8 @@ def update_dashboard(dashboard_id: str, body: DashboardUpdate, request: Request,
     with dashboard_errors():
         services = request.app.state.services
         services.dashboards.get(principal.user_id, dashboard_id)
-        validate_dashboard(services, principal.user_id, body)
+        scoped = owned_report_services(request, principal.user_id, body.model_id)
+        validate_dashboard(scoped, principal.user_id, body)
         return services.dashboards.update(principal.user_id, dashboard_id, body)
 
 

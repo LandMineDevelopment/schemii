@@ -13,7 +13,8 @@ router = APIRouter(prefix="/api/v1/schemer", tags=["schemer"])
 def plan_report(body: ReportQuery, request: Request,
                 principal: Principal = Depends(get_current_principal)) -> dict:
     with api_errors():
-        _, plan = report_plan(request.app.state.services, principal.user_id, body)
+        services = owned_report_services(request, principal.user_id, body.model_id)
+        _, plan = report_plan(services, principal.user_id, body)
         return plan
 
 

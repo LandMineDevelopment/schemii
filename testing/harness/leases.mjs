@@ -99,6 +99,21 @@ export async function availableAccounts(accounts,{root=defaultRoot}={}) {
   return result;
 }
 
+// Serialize fixture cleanup with new account reservations. The caller keeps
+// this guard while deleting app-owned resources, so a lane cannot start using
+// the same retained account midway through cleanup.
+export function withAvailableAccounts(accounts,task,{root=defaultRoot}={}) {
+  return withReservations(root,async()=>{
+    const available=await availableAccounts(accounts,{root});
+    if(available.length!==accounts.length) {
+      const busy=accounts.filter(account=>!available.includes(account));
+      const error=new Error(`QA account${busy.length===1?'':'s'} ${busy.join(', ')} are reserved by an active or unresolved run; finish or clean up that run first.`);
+      error.code='QA_ACCOUNT_BUSY';throw error;
+    }
+    return task();
+  });
+}
+
 // Selection itself acquires each reservation; an availability listing is never
 // treated as permission to use an account. Partial batches roll back on failure.
 async function reserveAvailableUnlocked({runId,runDir,candidates,count,root=defaultRoot}) {
