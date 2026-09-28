@@ -97,6 +97,7 @@ import {
 import { createMigrationReviewController } from "./migration-review.js";
 import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
+import { createDraftAnalysisLifecycle } from "./draft-analysis.js";
 
 const byId = id => document.getElementById(id);
 const dialogFocus = createDialogFocusController(document);
@@ -518,34 +519,11 @@ const state = {
   selectedViewId: null,
   selectedViewOutputOrdinal: null,
   designViewEditorId: null,
-  designViewPreviewAnalysis: null,
-  designViewPreviewError: null,
-  designViewPreviewLoading: false,
   designViewPreviewOutputOrdinal: null,
-  designViewPreviewTimer: null,
-  designViewPreviewGeneration: 0,
   designRoutineEditorId: null,
-  designRoutineAnalysis: null,
-  designRoutineAnalysisDefinition: null,
-  designRoutineAnalysisError: null,
-  designRoutineAnalysisLoading: false,
-  designRoutineAnalysisTimer: null,
-  designRoutineAnalysisGeneration: 0,
   typeFilter: "all",
   designTypeEditorId: null,
-  designTypeAnalysis: null,
-  designTypeAnalysisDefinition: null,
-  designTypeAnalysisError: null,
-  designTypeAnalysisLoading: false,
-  designTypeAnalysisTimer: null,
-  designTypeAnalysisGeneration: 0,
   designTriggerEditorId: null,
-  designTriggerAnalysis: null,
-  designTriggerAnalysisDefinition: null,
-  designTriggerAnalysisError: null,
-  designTriggerAnalysisLoading: false,
-  designTriggerAnalysisTimer: null,
-  designTriggerAnalysisGeneration: 0,
   activeLayer: "tables",
   viewFilter: "all",
   connectionEditorId: null,
@@ -583,6 +561,26 @@ const state = {
   layerNavigationGeneration: 0,
   restoringNavigation: false,
 };
+
+const designDraftAnalysis = {
+  view: createDraftAnalysisLifecycle({
+    isActive: () => elements.designViewDialog.open,
+    onChange: renderDesignViewPreview,
+  }),
+  type: createDraftAnalysisLifecycle({
+    isActive: () => elements.designTypeDialog.open && Boolean(state.activeWorkspace),
+    onChange: renderDesignTypePreview,
+  }),
+  routine: createDraftAnalysisLifecycle({
+    isActive: () => elements.designRoutineDialog.open && Boolean(state.activeWorkspace),
+    onChange: renderDesignRoutinePreview,
+  }),
+  trigger: createDraftAnalysisLifecycle({
+    isActive: () => elements.designTriggerDialog.open && Boolean(state.activeWorkspace),
+    onChange: renderDesignTriggerPreview,
+  }),
+};
+
 syncWorkspaceToolbar(elements.toolRail, state.activeLayer);
 inspectorPreferenceReady = true;
 
@@ -3052,11 +3050,12 @@ function designViewDraft() {
 }
 
 function renderDesignViewPreview() {
+  const analysisState = designDraftAnalysis.view.snapshot();
   renderDesignViewStory(elements.designViewPreview, {
     view: designViewDraft(),
-    analysis: state.designViewPreviewAnalysis,
-    loading: state.designViewPreviewLoading,
-    error: state.designViewPreviewError,
+    analysis: analysisState.result,
+    loading: analysisState.loading,
+    error: analysisState.error,
     selectedOutputOrdinal: state.designViewPreviewOutputOrdinal,
     onSelectOutput: output => {
       state.designViewPreviewOutputOrdinal = output.ordinal;
@@ -3067,43 +3066,20 @@ function renderDesignViewPreview() {
 }
 
 async function analyzeDesignViewDraft() {
-  window.clearTimeout(state.designViewPreviewTimer);
   const definition = elements.designViewDefinition.value.trim();
-  if (!elements.designViewDialog.open || !definition) {
-    state.designViewPreviewLoading = false;
-    state.designViewPreviewAnalysis = null;
-    state.designViewPreviewError = null;
-    renderDesignViewPreview();
-    return;
-  }
-  const generation = ++state.designViewPreviewGeneration;
   const workspaceId = state.activeWorkspace.id;
-  state.designViewPreviewLoading = true;
-  state.designViewPreviewError = null;
-  renderDesignViewPreview();
-  try {
-    const analysis = await api.analyzeDesignView(workspaceId, {
-      viewId: state.designViewEditorId,
-      name: elements.designViewName.value.trim() || "new_view",
-      definition,
-    });
-    if (generation !== state.designViewPreviewGeneration || !elements.designViewDialog.open) return;
-    state.designViewPreviewAnalysis = analysis;
-  } catch (error) {
-    if (generation !== state.designViewPreviewGeneration || !elements.designViewDialog.open) return;
-    state.designViewPreviewAnalysis = null;
-    state.designViewPreviewError = error;
-  } finally {
-    if (generation === state.designViewPreviewGeneration) {
-      state.designViewPreviewLoading = false;
-      renderDesignViewPreview();
-    }
-  }
+  return api.analyzeDesignView(workspaceId, {
+    viewId: state.designViewEditorId,
+    name: elements.designViewName.value.trim() || "new_view",
+    definition,
+  });
 }
 
 function scheduleDesignViewPreview(delay = 280) {
-  window.clearTimeout(state.designViewPreviewTimer);
-  state.designViewPreviewTimer = window.setTimeout(analyzeDesignViewDraft, delay);
+  designDraftAnalysis.view.schedule(analyzeDesignViewDraft, {
+    wait: delay,
+    canAnalyze: () => Boolean(elements.designViewDefinition.value.trim()),
+  });
 }
 
 function updateDesignViewPopulation() {
@@ -3119,10 +3095,7 @@ function openDesignViewEditor(viewId = null) {
     return;
   }
   state.designViewEditorId = view?.id || null;
-  state.designViewPreviewGeneration += 1;
-  state.designViewPreviewAnalysis = null;
-  state.designViewPreviewError = null;
-  state.designViewPreviewLoading = false;
+  designDraftAnalysis.view.reset();
   state.designViewPreviewOutputOrdinal = null;
   elements.designViewForm.reset();
   replace(elements.designViewStatus);
@@ -3216,20 +3189,21 @@ function renderTypesBrowser() {
 function renderDesignTypePreview() {
   replace(elements.designTypePreview);
   const definition = elements.designTypeDefinition.value.trim();
+  const analysisState = designDraftAnalysis.type.snapshot();
   if (!definition) {
     elements.designTypePreview.append(emptyPanel("TYPE", "Write the type source", "Its enum values or domain contract will appear here."));
     return;
   }
-  if (state.designTypeAnalysisLoading) {
+  if (analysisState.loading) {
     elements.designTypePreview.append(createStatePanel({ mark: "…", title: "Deriving contract", message: "Parsing the PostgreSQL statement without contacting a database.", surface: true }));
     return;
   }
-  if (state.designTypeAnalysisError) {
-    elements.designTypePreview.append(errorPanel(state.designTypeAnalysisError));
+  if (analysisState.error) {
+    elements.designTypePreview.append(errorPanel(analysisState.error));
     return;
   }
-  const contract = state.designTypeAnalysis;
-  if (!contract || state.designTypeAnalysisDefinition !== definition) {
+  const contract = analysisState.result?.analysis;
+  if (!contract || analysisState.result.definition !== definition) {
     elements.designTypePreview.append(createStatePanel({ mark: "SQL", title: "Waiting for valid source", message: "The preview updates after the statement can be parsed.", surface: true }));
     return;
   }
@@ -3269,44 +3243,16 @@ function renderDesignTypePreview() {
 }
 
 async function analyzeDesignTypeDraft() {
-  window.clearTimeout(state.designTypeAnalysisTimer);
   const definition = elements.designTypeDefinition.value.trim();
-  if (!elements.designTypeDialog.open || !definition || !state.activeWorkspace) {
-    state.designTypeAnalysis = null;
-    state.designTypeAnalysisDefinition = null;
-    state.designTypeAnalysisError = null;
-    state.designTypeAnalysisLoading = false;
-    renderDesignTypePreview();
-    return null;
-  }
-  const generation = ++state.designTypeAnalysisGeneration;
-  const workspaceId = state.activeWorkspace.id;
-  state.designTypeAnalysisLoading = true;
-  state.designTypeAnalysisError = null;
-  renderDesignTypePreview();
-  try {
-    const analysis = await api.analyzeDesignType(workspaceId, { definition });
-    if (generation !== state.designTypeAnalysisGeneration || !elements.designTypeDialog.open) return null;
-    state.designTypeAnalysis = analysis;
-    state.designTypeAnalysisDefinition = definition;
-    return analysis;
-  } catch (error) {
-    if (generation !== state.designTypeAnalysisGeneration || !elements.designTypeDialog.open) return null;
-    state.designTypeAnalysis = null;
-    state.designTypeAnalysisDefinition = null;
-    state.designTypeAnalysisError = error;
-    return null;
-  } finally {
-    if (generation === state.designTypeAnalysisGeneration) {
-      state.designTypeAnalysisLoading = false;
-      renderDesignTypePreview();
-    }
-  }
+  const analysis = await api.analyzeDesignType(state.activeWorkspace.id, { definition });
+  return { analysis, definition };
 }
 
 function scheduleDesignTypeAnalysis(delay = 280) {
-  window.clearTimeout(state.designTypeAnalysisTimer);
-  state.designTypeAnalysisTimer = window.setTimeout(analyzeDesignTypeDraft, delay);
+  designDraftAnalysis.type.schedule(analyzeDesignTypeDraft, {
+    wait: delay,
+    canAnalyze: () => Boolean(elements.designTypeDefinition.value.trim()),
+  });
 }
 
 function openDesignTypeEditor(typeId = null) {
@@ -3317,11 +3263,7 @@ function openDesignTypeEditor(typeId = null) {
     return;
   }
   state.designTypeEditorId = designType?.id || null;
-  state.designTypeAnalysisGeneration += 1;
-  state.designTypeAnalysis = null;
-  state.designTypeAnalysisDefinition = null;
-  state.designTypeAnalysisError = null;
-  state.designTypeAnalysisLoading = false;
+  designDraftAnalysis.type.reset();
   elements.designTypeForm.reset();
   replace(elements.designTypeStatus);
   elements.designTypeTitle.textContent = designType ? `Edit ${designType.name}` : "Create enum or domain";
@@ -3396,20 +3338,21 @@ function routineSignature(contract) {
 function renderDesignRoutinePreview() {
   replace(elements.designRoutinePreview);
   const definition = elements.designRoutineDefinition.value.trim();
+  const analysisState = designDraftAnalysis.routine.snapshot();
   if (!definition) {
     elements.designRoutinePreview.append(emptyPanel("FN", "Write the routine source", "Its callable signature and PostgreSQL contract will appear here."));
     return;
   }
-  if (state.designRoutineAnalysisLoading) {
+  if (analysisState.loading) {
     elements.designRoutinePreview.append(createStatePanel({ mark: "…", title: "Deriving contract", message: "Parsing the PostgreSQL statement without contacting a database.", surface: true }));
     return;
   }
-  if (state.designRoutineAnalysisError) {
-    elements.designRoutinePreview.append(errorPanel(state.designRoutineAnalysisError));
+  if (analysisState.error) {
+    elements.designRoutinePreview.append(errorPanel(analysisState.error));
     return;
   }
-  const contract = state.designRoutineAnalysis;
-  if (!contract || state.designRoutineAnalysisDefinition !== definition) {
+  const contract = analysisState.result?.analysis;
+  if (!contract || analysisState.result.definition !== definition) {
     elements.designRoutinePreview.append(createStatePanel({ mark: "SQL", title: "Waiting for valid source", message: "The preview updates after the statement can be parsed.", surface: true }));
     return;
   }
@@ -3432,44 +3375,16 @@ function renderDesignRoutinePreview() {
 }
 
 async function analyzeDesignRoutineDraft() {
-  window.clearTimeout(state.designRoutineAnalysisTimer);
   const definition = elements.designRoutineDefinition.value.trim();
-  if (!elements.designRoutineDialog.open || !definition || !state.activeWorkspace) {
-    state.designRoutineAnalysis = null;
-    state.designRoutineAnalysisDefinition = null;
-    state.designRoutineAnalysisError = null;
-    state.designRoutineAnalysisLoading = false;
-    renderDesignRoutinePreview();
-    return null;
-  }
-  const generation = ++state.designRoutineAnalysisGeneration;
-  const workspaceId = state.activeWorkspace.id;
-  state.designRoutineAnalysisLoading = true;
-  state.designRoutineAnalysisError = null;
-  renderDesignRoutinePreview();
-  try {
-    const analysis = await api.analyzeDesignRoutine(workspaceId, { definition });
-    if (generation !== state.designRoutineAnalysisGeneration || !elements.designRoutineDialog.open) return null;
-    state.designRoutineAnalysis = analysis;
-    state.designRoutineAnalysisDefinition = definition;
-    return analysis;
-  } catch (error) {
-    if (generation !== state.designRoutineAnalysisGeneration || !elements.designRoutineDialog.open) return null;
-    state.designRoutineAnalysis = null;
-    state.designRoutineAnalysisDefinition = null;
-    state.designRoutineAnalysisError = error;
-    return null;
-  } finally {
-    if (generation === state.designRoutineAnalysisGeneration) {
-      state.designRoutineAnalysisLoading = false;
-      renderDesignRoutinePreview();
-    }
-  }
+  const analysis = await api.analyzeDesignRoutine(state.activeWorkspace.id, { definition });
+  return { analysis, definition };
 }
 
 function scheduleDesignRoutineAnalysis(delay = 280) {
-  window.clearTimeout(state.designRoutineAnalysisTimer);
-  state.designRoutineAnalysisTimer = window.setTimeout(analyzeDesignRoutineDraft, delay);
+  designDraftAnalysis.routine.schedule(analyzeDesignRoutineDraft, {
+    wait: delay,
+    canAnalyze: () => Boolean(elements.designRoutineDefinition.value.trim()),
+  });
 }
 
 function openDesignRoutineEditor(routineId = null) {
@@ -3480,11 +3395,7 @@ function openDesignRoutineEditor(routineId = null) {
     return;
   }
   state.designRoutineEditorId = routine?.id || null;
-  state.designRoutineAnalysisGeneration += 1;
-  state.designRoutineAnalysis = null;
-  state.designRoutineAnalysisDefinition = null;
-  state.designRoutineAnalysisError = null;
-  state.designRoutineAnalysisLoading = false;
+  designDraftAnalysis.routine.reset();
   elements.designRoutineForm.reset();
   replace(elements.designRoutineStatus);
   elements.designRoutineTitle.textContent = routine ? `Edit ${routine.name}` : "Create function or procedure";
@@ -3538,20 +3449,21 @@ function triggerIdentity(contract) {
 function renderDesignTriggerPreview() {
   replace(elements.designTriggerPreview);
   const definition = elements.designTriggerDefinition.value.trim();
+  const analysisState = designDraftAnalysis.trigger.snapshot();
   if (!definition) {
     elements.designTriggerPreview.append(emptyPanel("TRG", "Write the trigger source", "Its target, activation rules, and function call will appear here."));
     return;
   }
-  if (state.designTriggerAnalysisLoading) {
+  if (analysisState.loading) {
     elements.designTriggerPreview.append(createStatePanel({ mark: "…", title: "Deriving contract", message: "Parsing the PostgreSQL statement without contacting a database.", surface: true }));
     return;
   }
-  if (state.designTriggerAnalysisError) {
-    elements.designTriggerPreview.append(errorPanel(state.designTriggerAnalysisError));
+  if (analysisState.error) {
+    elements.designTriggerPreview.append(errorPanel(analysisState.error));
     return;
   }
-  const contract = state.designTriggerAnalysis;
-  if (!contract || state.designTriggerAnalysisDefinition !== definition) {
+  const contract = analysisState.result?.analysis;
+  if (!contract || analysisState.result.definition !== definition) {
     elements.designTriggerPreview.append(createStatePanel({ mark: "SQL", title: "Waiting for valid source", message: "The preview updates after the statement can be parsed.", surface: true }));
     return;
   }
@@ -3583,44 +3495,16 @@ function renderDesignTriggerPreview() {
 }
 
 async function analyzeDesignTriggerDraft() {
-  window.clearTimeout(state.designTriggerAnalysisTimer);
   const definition = elements.designTriggerDefinition.value.trim();
-  if (!elements.designTriggerDialog.open || !definition || !state.activeWorkspace) {
-    state.designTriggerAnalysis = null;
-    state.designTriggerAnalysisDefinition = null;
-    state.designTriggerAnalysisError = null;
-    state.designTriggerAnalysisLoading = false;
-    renderDesignTriggerPreview();
-    return null;
-  }
-  const generation = ++state.designTriggerAnalysisGeneration;
-  const workspaceId = state.activeWorkspace.id;
-  state.designTriggerAnalysisLoading = true;
-  state.designTriggerAnalysisError = null;
-  renderDesignTriggerPreview();
-  try {
-    const analysis = await api.analyzeDesignTrigger(workspaceId, { definition });
-    if (generation !== state.designTriggerAnalysisGeneration || !elements.designTriggerDialog.open) return null;
-    state.designTriggerAnalysis = analysis;
-    state.designTriggerAnalysisDefinition = definition;
-    return analysis;
-  } catch (error) {
-    if (generation !== state.designTriggerAnalysisGeneration || !elements.designTriggerDialog.open) return null;
-    state.designTriggerAnalysis = null;
-    state.designTriggerAnalysisDefinition = null;
-    state.designTriggerAnalysisError = error;
-    return null;
-  } finally {
-    if (generation === state.designTriggerAnalysisGeneration) {
-      state.designTriggerAnalysisLoading = false;
-      renderDesignTriggerPreview();
-    }
-  }
+  const analysis = await api.analyzeDesignTrigger(state.activeWorkspace.id, { definition });
+  return { analysis, definition };
 }
 
 function scheduleDesignTriggerAnalysis(delay = 280) {
-  window.clearTimeout(state.designTriggerAnalysisTimer);
-  state.designTriggerAnalysisTimer = window.setTimeout(analyzeDesignTriggerDraft, delay);
+  designDraftAnalysis.trigger.schedule(analyzeDesignTriggerDraft, {
+    wait: delay,
+    canAnalyze: () => Boolean(elements.designTriggerDefinition.value.trim()),
+  });
 }
 
 function defaultTriggerDefinition(relationName) {
@@ -3652,11 +3536,7 @@ function openDesignTriggerEditor(triggerId = null, relationName = null) {
     return;
   }
   state.designTriggerEditorId = trigger?.id || null;
-  state.designTriggerAnalysisGeneration += 1;
-  state.designTriggerAnalysis = null;
-  state.designTriggerAnalysisDefinition = null;
-  state.designTriggerAnalysisError = null;
-  state.designTriggerAnalysisLoading = false;
+  designDraftAnalysis.trigger.reset();
   elements.designTriggerForm.reset();
   replace(elements.designTriggerStatus);
   elements.designTriggerTitle.textContent = trigger ? `Edit ${trigger.name}` : "Create trigger";
@@ -5427,10 +5307,8 @@ function bindEvents() {
   elements.designViewKind.addEventListener("change", updateDesignViewPopulation);
   elements.designViewPopulate.addEventListener("change", renderDesignViewPreview);
   elements.designViewDialog.addEventListener("close", () => {
-    window.clearTimeout(state.designViewPreviewTimer);
-    state.designViewPreviewGeneration += 1;
+    designDraftAnalysis.view.reset();
     state.designViewEditorId = null;
-    state.designViewPreviewLoading = false;
   });
   elements.designKeyForm.addEventListener("submit", submitDesignKey);
   elements.designKeyKind.addEventListener("change", updateGeneratedKeyName);
@@ -5482,13 +5360,8 @@ function bindEvents() {
   elements.designRoutineForm.addEventListener("submit", submitDesignRoutine);
   elements.designRoutineDefinition.addEventListener("input", () => scheduleDesignRoutineAnalysis());
   elements.designRoutineDialog.addEventListener("close", () => {
-    window.clearTimeout(state.designRoutineAnalysisTimer);
-    state.designRoutineAnalysisGeneration += 1;
+    designDraftAnalysis.routine.reset();
     state.designRoutineEditorId = null;
-    state.designRoutineAnalysis = null;
-    state.designRoutineAnalysisDefinition = null;
-    state.designRoutineAnalysisError = null;
-    state.designRoutineAnalysisLoading = false;
   });
   elements.typesButton.addEventListener("click", () => {
     renderTypesBrowser();
@@ -5511,13 +5384,8 @@ function bindEvents() {
   elements.designTypeForm.addEventListener("submit", submitDesignType);
   elements.designTypeDefinition.addEventListener("input", () => scheduleDesignTypeAnalysis());
   elements.designTypeDialog.addEventListener("close", () => {
-    window.clearTimeout(state.designTypeAnalysisTimer);
-    state.designTypeAnalysisGeneration += 1;
+    designDraftAnalysis.type.reset();
     state.designTypeEditorId = null;
-    state.designTypeAnalysis = null;
-    state.designTypeAnalysisDefinition = null;
-    state.designTypeAnalysisError = null;
-    state.designTypeAnalysisLoading = false;
   });
   elements.createTriggerButton.addEventListener("click", () => {
     elements.objectsDialog.close();
@@ -5531,13 +5399,8 @@ function bindEvents() {
     confirmDeleteDesignTrigger({ id: triggerId });
   });
   elements.designTriggerDialog.addEventListener("close", () => {
-    window.clearTimeout(state.designTriggerAnalysisTimer);
-    state.designTriggerAnalysisGeneration += 1;
+    designDraftAnalysis.trigger.reset();
     state.designTriggerEditorId = null;
-    state.designTriggerAnalysis = null;
-    state.designTriggerAnalysisDefinition = null;
-    state.designTriggerAnalysisError = null;
-    state.designTriggerAnalysisLoading = false;
   });
   elements.objectsButton.addEventListener("click", () => {
     if (state.catalog?.source !== "design") loadLiveRelations({ force: true });
