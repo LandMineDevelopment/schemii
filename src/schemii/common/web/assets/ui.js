@@ -90,6 +90,7 @@ export function decorateIconControl(control, {
   control.classList.add("ui-icon-button");
   if (className) control.classList.add(...className.split(/\s+/).filter(Boolean));
   control.dataset.uiIcon = icon;
+  control.classList.add("ui-icon-hydrated");
   control.setAttribute("aria-label", label);
   if (tooltip) control.dataset.uiTooltip = tooltip;
   if (placement) control.dataset.uiTooltipPlacement = placement;
@@ -142,8 +143,6 @@ export function createStatePanel({ surface = false, className = "", ...content }
 }
 
 export function hydrateIconControls(root = document) {
-  // TODO(ui-icon-fallback): Preserve usable icon-control content before JavaScript runs. The HTML controls are currently empty until this hydrator replaces their children; move the essential icon or text fallback into markup and enhance it here without regressing accessible names.
-  // TODO(ui-tooltip-placement): Add an inherited placement contract so a vertical control group can declare `right` once. The control-only `top` default currently makes tool-rail tooltips overlap neighboring controls.
   const controls = [...root.querySelectorAll("[data-ui-icon]")];
   for (const control of controls) {
     const label = control.getAttribute("aria-label");
@@ -159,7 +158,9 @@ export function hydrateIconControls(root = document) {
       icon: control.dataset.uiIcon,
       label,
       tooltip: usesNativeTooltip ? null : tooltip,
-      placement: control.dataset.uiTooltipPlacement || "top",
+      placement: control.dataset.uiTooltipPlacement
+        || control.closest?.("[data-ui-tooltip-placement]")?.dataset.uiTooltipPlacement
+        || "top",
     });
   }
   for (const control of root.querySelectorAll("[data-ui-icon-leading]")) {
@@ -169,6 +170,52 @@ export function hydrateIconControls(root = document) {
     control.prepend(icon);
   }
   return controls;
+}
+
+export function createDialogFocusController(documentRef = document) {
+  const restoreTargets = new WeakMap();
+  const installedDialogs = new WeakSet();
+
+  const usableTarget = target => {
+    if (!target || target.isConnected === false || target.disabled === true) return false;
+    if (target.closest?.("[hidden], [inert]")) return false;
+    const containingDialog = target.closest?.("dialog");
+    if (containingDialog && !containingDialog.open) return false;
+    const openDialogs = [...documentRef.querySelectorAll("dialog[open]")];
+    return openDialogs.length === 0 || openDialogs.some(dialog => dialog.contains(target));
+  };
+
+  const resolveRestoreTarget = dialog => {
+    let target = restoreTargets.get(dialog);
+    let containingDialog = target?.closest?.("dialog");
+    while (containingDialog && !containingDialog.open) {
+      const next = restoreTargets.get(containingDialog);
+      if (!next || next === target) return null;
+      target = next;
+      containingDialog = target.closest?.("dialog");
+    }
+    return target;
+  };
+
+  const onClose = dialog => {
+    const target = resolveRestoreTarget(dialog);
+    restoreTargets.delete(dialog);
+    if (usableTarget(target) && typeof target.focus === "function") target.focus({ preventScroll: true });
+  };
+
+  return Object.freeze({
+    open(dialog) {
+      if (!dialog?.showModal) throw new TypeError("A modal dialog is required");
+      if (dialog.open) return false;
+      if (!installedDialogs.has(dialog)) {
+        dialog.addEventListener("close", () => onClose(dialog));
+        installedDialogs.add(dialog);
+      }
+      restoreTargets.set(dialog, documentRef.activeElement);
+      dialog.showModal();
+      return true;
+    },
+  });
 }
 
 export function setControlLoading(control, loading, { loadingLabel = "Working…" } = {}) {

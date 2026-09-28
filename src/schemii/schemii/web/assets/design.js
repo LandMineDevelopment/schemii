@@ -1,3 +1,5 @@
+import { quoteSqlIdentifier } from "./sql-identifier.js";
+
 function columnMap(design) {
   return new Map(design.content.tables.flatMap(table => (
     table.columns.map(column => [column.id, column])
@@ -322,10 +324,6 @@ export function expressionColumnIds(expression, columns) {
     .map(column => column.id);
 }
 
-function quotedIdentifier(name) {
-  return `"${name.replaceAll('"', '""')}"`;
-}
-
 function rewriteColumnReferences(expression, oldColumns, newColumns, referencedColumnIds) {
   if (!expression) return expression;
   const oldById = new Map(oldColumns.map(column => [column.id, column]));
@@ -342,7 +340,7 @@ function rewriteColumnReferences(expression, oldColumns, newColumns, referencedC
     const rename = renames.find(item => tokenReferencesColumn(token, item.oldName));
     if (!rename) continue;
     const replacement = token.quoted || !/^[a-z_][a-z0-9_$]*$/.test(rename.newName)
-      ? quotedIdentifier(rename.newName)
+      ? quoteSqlIdentifier(rename.newName)
       : rename.newName;
     replacements.push({ start: token.start, end: token.end, replacement });
   }
