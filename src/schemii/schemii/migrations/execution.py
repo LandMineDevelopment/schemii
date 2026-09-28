@@ -8,7 +8,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from schemii.common.connections.service import ConnectionService
+from schemii.common.connections.service import ProductConnectionAccess
 from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.metadata.limit_events import (
     LimitEventNotice,
@@ -76,7 +76,7 @@ class MigrationExecutionCoordinator:
         self,
         *,
         repository: MigrationRepository,
-        connections: ConnectionService,
+        connection_access: ProductConnectionAccess,
         postgres: PostgresGateway,
         workspaces: WorkspaceRepository,
         designs: DesignRepository,
@@ -87,13 +87,24 @@ class MigrationExecutionCoordinator:
         if lease_ttl <= timedelta(0):
             raise ValueError("migration execution lease TTL must be positive")
         self._repository = repository
-        self._connections = connections
+        self._connections = connection_access
         self._postgres = postgres
         self._workspaces = workspaces
         self._designs = designs
         self._lease_ttl = lease_ttl
         self._limit_events = limit_events
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def set_connection_access(self, connection_access: ProductConnectionAccess) -> None:
+        """Set the product-scoped connection access used by queued executions."""
+
+        self._connections = connection_access
+
+    @property
+    def connection_access(self) -> ProductConnectionAccess:
+        """The scoped accessor used by queued executions."""
+
+        return self._connections
 
     @property
     def lease_ttl(self) -> timedelta:

@@ -17,8 +17,13 @@ from schemii.schemii.ai.actions import relation_browser
 from schemii.schemii.ai.models import AiCapabilities
 from schemii.schemii.ai.repository import InMemoryAiRepository
 from schemii.schemii.designs.store import InMemoryDesignRepository
+from schemii.schemii.migrations.repository import InMemoryMigrationRepository
+from schemii.schemii.migrations.service import MigrationService
 from schemii.schemii.workspaces.models import WorkspaceCreateRecord
-from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
+from schemii.schemii.workspaces.store import (
+    InMemoryWorkspaceRepository,
+    WorkspaceMutationBlockedError,
+)
 
 
 def _user(identifier):
@@ -52,10 +57,18 @@ def _application():
     connections = ConnectionService(repository, (workspaces,))
     ai_repository = InMemoryAiRepository()
     postgres = CatalogGateway()
+    # The app must bind even prebuilt services to their owning product scope.
+    migrations = MigrationService(
+        repository=InMemoryMigrationRepository(designs),
+        connection_access=connections.for_product("schemoo"),
+        postgres=postgres,
+        workspaces=workspaces,
+        designs=designs,
+    )
     app = create_app(ApplicationServices(
         metadata=MetadataRepositories(connections=repository), connections=connections,
         postgres=postgres, workspaces=workspaces, designs=designs,
-        ai_repository=ai_repository,
+        migrations=migrations, ai_repository=ai_repository,
     ))
     auth = AuthService(enabled=True, setup_token="unused")
     app.state.auth = auth
@@ -81,24 +94,37 @@ def _application():
     return app, auth, profile, workspace, postgres
 
 
+def test_application_registers_bulk_work_guard_for_workspace_lifecycle():
+    app, _, _, workspace, _ = _application()
+    workspaces = app.state.services.workspaces
+    job_repository = app.state.bulk_jobs.repository
+    job_repository.list = lambda owner, workspace_id: [
+        {"status": "queued"}
+    ] if workspace_id == workspace.id else []
+
+    with pytest.raises(WorkspaceMutationBlockedError):
+        workspaces.delete("reader", workspace.id, workspace.revision)
+
+
 def test_migration_worker_uses_managed_grant_and_rechecks_revocation():
     app, auth, profile, _, _ = _application()
     raw = app.state.services.connections
-    coordinator = app.state.migration_worker._coordinator
+    coordinator = app.state.services.migrations.execution_coordinator
+    scoped = coordinator.connection_access
 
     with pytest.raises(ConnectionNotFoundError):
         with raw.use("reader", profile.id):
             pass
-    with coordinator._connections.use("reader", profile.id) as selected:
+    with scoped.use("reader", profile.id) as selected:
         assert selected.owner_id == SCHEMII_CONNECTION_OWNER_ID
     with pytest.raises(ConnectionNotFoundError):
-        with coordinator._connections.use("stranger", profile.id):
+        with scoped.use("stranger", profile.id):
             pass
 
     with auth.store.transaction(write=True) as state:
         state["roles"]["readers"]["connections"] = []
     with pytest.raises(ConnectionNotFoundError):
-        with coordinator._connections.use("reader", profile.id):
+        with scoped.use("reader", profile.id):
             pass
 
 
@@ -130,7 +156,9 @@ def test_ai_live_context_refresh_and_relation_tools_use_same_revocable_grant():
     refreshed = service._refresh_tool_context("reader", chat,
         'Instructions\nCONTEXT {"workspace": {}, "design": {}}')
     assert json.loads(refreshed.split("\nCONTEXT ", 1)[1])["liveCatalog"]["tables"][0]["name"] == "items"
-    listed = relation_browser(service.services).list(
+    listed = relation_browser(
+        service.services, connection_access=service.connection_access
+    ).list(
         "reader", workspace.id, cursor=None, page_size=20, search=None)
     assert [relation.name for relation in listed.relations] == ["items"]
     assert postgres.resolved_owners == [SCHEMII_CONNECTION_OWNER_ID] * 3
@@ -141,7 +169,9 @@ def test_ai_live_context_refresh_and_relation_tools_use_same_revocable_grant():
         service._refresh_tool_context("reader", chat,
             'Instructions\nCONTEXT {"workspace": {}, "design": {}}')
     with pytest.raises(ConnectionNotFoundError):
-        relation_browser(service.services).list(
+        relation_browser(
+            service.services, connection_access=service.connection_access
+        ).list(
             "reader", workspace.id, cursor=None, page_size=20, search=None)
     with pytest.raises(ConnectionNotFoundError):
         service._zen_scope("reader", workspace.id)

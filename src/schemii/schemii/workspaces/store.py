@@ -223,12 +223,21 @@ class InMemoryWorkspaceRepository:
             max_column_display_order_entries_per_owner
         )
         self._designs = designs
-        self._mutation_guard: Callable[[str, str], bool] | None = None
+        self._mutation_guards: list[Callable[[str, str], bool]] = []
 
     def set_mutation_guard(self, guard: Callable[[str, str], bool]) -> None:
-        """Install the migration authority used by process-local lifecycle changes."""
+        """Replace process-local lifecycle guards with one guard."""
 
-        self._mutation_guard = guard
+        self._mutation_guards = [guard]
+
+    def add_mutation_guard(self, guard: Callable[[str, str], bool]) -> None:
+        """Add a lifecycle guard without replacing guards owned by other services."""
+
+        if guard not in self._mutation_guards:
+            self._mutation_guards.append(guard)
+
+    def _mutation_blocked(self, owner_id: str, workspace_id: str) -> bool:
+        return any(guard(owner_id, workspace_id) for guard in self._mutation_guards)
 
     @contextmanager
     def execution_claim_guard(
@@ -469,9 +478,7 @@ class InMemoryWorkspaceRepository:
             current = self._record(owner_id, workspace_id)
             if current.revision != expected_revision:
                 raise WorkspaceConflictError(current.revision)
-            if self._mutation_guard is not None and self._mutation_guard(
-                owner_id, workspace_id
-            ):
+            if self._mutation_blocked(owner_id, workspace_id):
                 raise WorkspaceMutationBlockedError("deleted")
             if self._designs is not None:
                 discard = getattr(self._designs, "discard_initialization", None)
@@ -502,10 +509,7 @@ class InMemoryWorkspaceRepository:
                         or (getattr(workspace, "connection_owner_id", None) or actor_id) != owner_id
                     ):
                         continue
-                    blocked = bool(
-                        self._mutation_guard is not None
-                        and self._mutation_guard(actor_id, workspace.id)
-                    )
+                    blocked = self._mutation_blocked(actor_id, workspace.id)
                     resources.append(
                         ConnectionDependentResource(
                             provider=self.dependency_name,

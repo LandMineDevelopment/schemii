@@ -116,16 +116,25 @@ class MigrationReconcileAction(MigrationReconciliationRequest):
     execution_id: str = Field(pattern=r"^mex_[0-9a-f]{32}$")
 
 
-def relation_browser(services: Any) -> RelationBrowserService:
+def relation_browser(
+    services: Any,
+    *,
+    connection_access: Any | None = None,
+) -> RelationBrowserService:
     return RelationBrowserService(
         workspaces=services.workspaces,
-        connections=services.connections,
+        connections=(
+            connection_access
+            if connection_access is not None
+            else services.connections
+        ),
         postgres=services.postgres,
     )
 
 
 def relation_read_query(
     services: Any, owner: str, workspace: str, action: RelationRead,
+    *, connection_access: Any | None = None,
 ) -> dict[str, str]:
     """Resolve fresh live facts, then feed the ordinary batched-read pipeline.
 
@@ -133,7 +142,11 @@ def relation_read_query(
     privacy all stay with the existing Console/AI read workflow.
     """
 
-    relation = relation_browser(services).detail(owner, workspace, action.relation_ref).relation
+    relation = relation_browser(
+        services, connection_access=connection_access
+    ).detail(
+        owner, workspace, action.relation_ref
+    ).relation
     names = {column.name for column in relation.columns}
     selected = action.columns if action.columns is not None else [column.name for column in relation.columns]
     if not selected or len(selected) != len(set(selected)) or any(name not in names for name in selected):
@@ -164,8 +177,20 @@ def relation_read_query(
     return {"label": f"{'Count' if action.count_only else 'Rows'} from {relation.name}"[:200], "sql": statement.as_string()}
 
 
-def list_relations(services: Any, owner: str, workspace: str, action: RelationListAction) -> Any:
-    return relation_browser(services).list(owner, workspace, cursor=action.cursor, page_size=action.page_size, search=action.search)
+def list_relations(
+    services: Any,
+    owner: str,
+    workspace: str,
+    action: RelationListAction,
+    *,
+    connection_access: Any | None = None,
+) -> Any:
+    return relation_browser(
+        services, connection_access=connection_access
+    ).list(
+        owner, workspace, cursor=action.cursor, page_size=action.page_size,
+        search=action.search,
+    )
 
 
 def execute_history(

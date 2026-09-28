@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from schemii.common.connections.service import ProductConnectionAccess
 from schemii.common.ai.pi import PiRuntime, PiError
 from schemii.common.ai.limits import record_ai_limit
 from schemii.common.metadata.limit_events import LimitEventNotice
@@ -96,10 +97,19 @@ class AiService:
         repository: AiRepository,
         runtime: PiRuntime | None,
         services: Any,
+        *,
+        connection_access: ProductConnectionAccess | None = None,
     ) -> None:
         self.repository = repository
         self.runtime = runtime
         self.services = services
+        if connection_access is None:
+            connections = getattr(services, "connections", None)
+            for_product = getattr(connections, "for_product", None)
+            connection_access = (
+                for_product("schemii") if callable(for_product) else connections
+            )
+        self.connection_access = connection_access
         self.raw_console = None
         self.policy = services.admin_config.ai
         self._streams: dict[tuple[str, str], dict[str, str]] = {}
@@ -260,7 +270,7 @@ class AiService:
         workspace = self.services.workspaces.get(owner, workspace_id)
         if workspace.connection_id is None:
             return ("schemii", None, None)
-        profile = self.services.connections.for_product("schemii").get(owner, workspace.connection_id)
+        profile = self.connection_access.get(owner, workspace.connection_id)
         identity = (profile.owner_id or owner, profile.id)
         if (workspace.connection_owner_id or owner, workspace.connection_id) != identity:
             raise PiError("permission_changed", status=409)
@@ -474,9 +484,7 @@ class AiService:
                 "queryResult": result_context,
             }
             if chat.capabilities.live_catalog and workspace.connection_id is not None:
-                with self.services.connections.use(
-                    owner, workspace.connection_id
-                ) as connection:
+                with self.connection_access.use(owner, workspace.connection_id) as connection:
                     context["liveCatalog"] = self.services.postgres.introspect(
                         connection, workspace.namespace
                     ).model_dump(by_alias=True)
@@ -700,8 +708,13 @@ class AiService:
             return actions.migration_plan(self.services, owner, chat.workspace_id,
                 actions.MigrationPlanReference.model_validate(arguments)).model_dump(mode="json", by_alias=True)
         if name == "schemii_list_relations":
-            return actions.list_relations(self.services, owner, chat.workspace_id,
-                actions.RelationListAction.model_validate(arguments)).model_dump(mode="json", by_alias=True)
+            return actions.list_relations(
+                self.services,
+                owner,
+                chat.workspace_id,
+                actions.RelationListAction.model_validate(arguments),
+                connection_access=self.connection_access,
+            ).model_dump(mode="json", by_alias=True)
         if name == "schemii_preview_reset":
             return actions.preview_baseline_reset(self.services, owner, chat.workspace_id).model_dump(mode="json", by_alias=True)
         if name == "schemii_migration_status":
@@ -729,7 +742,7 @@ class AiService:
         workspace = self.services.workspaces.get(owner, chat.workspace_id)
         context["workspace"]["revision"] = workspace.revision
         if chat.capabilities.live_catalog and workspace.connection_id is not None:
-            with self.services.connections.use(owner, workspace.connection_id) as connection:
+            with self.connection_access.use(owner, workspace.connection_id) as connection:
                 context["liveCatalog"] = self.services.postgres.introspect(connection, workspace.namespace).model_dump(by_alias=True)
         return instructions + "\nCONTEXT " + json.dumps(context, default=str, separators=(",", ":"))
 

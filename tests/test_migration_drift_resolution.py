@@ -103,7 +103,7 @@ def drift():
     repository = _Repository(PlanRecord(owner_id=OWNER, baseline_id="mbl_" + "5" * 32,
                                       plan=plan, authority=authority))
     gateway = _Gateway(live)
-    service = MigrationService(repository=repository, connections=_Connections(), postgres=gateway,
+    service = MigrationService(repository=repository, connection_access=_Connections(), postgres=gateway,
                                workspaces=_Workspaces(), designs=object(), clock=lambda: NOW)
     request = MigrationDriftResolutionRequest(
         expected_design_revision=7, review_digest=DIGEST,

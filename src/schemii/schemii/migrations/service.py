@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from schemii.common.connections.service import ConnectionService
+from schemii.common.connections.service import ProductConnectionAccess
 from schemii.common.connections.store import ConnectionNotFoundError
 from schemii.common.metadata.limit_events import LimitEventRecorder
 from schemii.common.postgres import PostgresGateway
@@ -86,7 +86,9 @@ def _install_workspace_execution_guards(
     workspaces: WorkspaceRepository,
     repository: MigrationRepository,
 ) -> None:
-    workspace_guard = getattr(workspaces, "set_mutation_guard", None)
+    workspace_guard = getattr(workspaces, "add_mutation_guard", None)
+    if not callable(workspace_guard):
+        workspace_guard = getattr(workspaces, "set_mutation_guard", None)
     if callable(workspace_guard):
         workspace_guard(repository.blocks_workspace_lifecycle)
     claim_guard = getattr(workspaces, "execution_claim_guard", None)
@@ -154,7 +156,7 @@ class MigrationService:
         self,
         *,
         repository: MigrationRepository,
-        connections: ConnectionService,
+        connection_access: ProductConnectionAccess,
         postgres: PostgresGateway,
         workspaces: WorkspaceRepository,
         designs: DesignRepository,
@@ -168,7 +170,7 @@ class MigrationService:
         if execution_lease_ttl <= timedelta(0):
             raise ValueError("migration execution lease TTL must be positive")
         self._repository = repository
-        self._connections = connections
+        self._connections = connection_access
         self._postgres = postgres
         self._workspaces = workspaces
         self._designs = designs
@@ -177,7 +179,7 @@ class MigrationService:
         self._execution_waker: Callable[[], None] | None = None
         self._execution_coordinator = MigrationExecutionCoordinator(
             repository=repository,
-            connections=connections,
+            connection_access=connection_access,
             postgres=postgres,
             workspaces=workspaces,
             designs=designs,
@@ -186,6 +188,12 @@ class MigrationService:
             clock=self._clock,
         )
         _install_workspace_execution_guards(self._workspaces, self._repository)
+
+    def set_connection_access(self, connection_access: ProductConnectionAccess) -> None:
+        """Set the product-scoped access used by this service and its worker."""
+
+        self._connections = connection_access
+        self._execution_coordinator.set_connection_access(connection_access)
 
     @property
     def execution_coordinator(self) -> MigrationExecutionCoordinator:

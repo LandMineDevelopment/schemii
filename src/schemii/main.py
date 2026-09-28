@@ -29,7 +29,7 @@ from schemii.common.connections.policy import (
     CompositeConnectionTargetPolicy,
     InternalOnlyConnectionTargetPolicy,
 )
-from schemii.common.connections.service import ConnectionService, ProductConnectionAccess
+from schemii.common.connections.service import ConnectionService
 from schemii.common.developer_inspection import install_developer_inspection
 from schemii.common.metadata import MetadataRepositories, create_metadata_repositories
 from schemii.common.metadata.migrations import (
@@ -94,27 +94,6 @@ class ApplicationServices:
     models: ModelRepository | None = None
     model_catalogs: ModelCatalogs | None = None
     dashboards: InMemoryDashboardRepository | PostgresDashboardRepository | None = None
-
-
-@dataclass(frozen=True)
-class _SchemiiAiConnectionAccess:
-    """Keep AI's existing connection interface inside the Schemii grant scope."""
-
-    scoped: ProductConnectionAccess
-
-    def for_product(self, product: str) -> ProductConnectionAccess:
-        if product != "schemii":
-            raise ValueError("Schemii AI cannot use another product's connections")
-        return self.scoped
-
-    def list(self, actor_id: str):
-        return self.scoped.list(actor_id)
-
-    def get(self, actor_id: str, connection_id: str):
-        return self.scoped.get(actor_id, connection_id)
-
-    def use(self, actor_id: str, connection_id: str):
-        return self.scoped.use(actor_id, connection_id)
 
 
 def create_services(
@@ -183,6 +162,7 @@ def create_services(
         (workspaces, models),
         target_policy=target_policy,
     )
+    schemii_connections = connections.for_product("schemii")
     migration_repository = (
         PostgresMigrationRepository(
             metadata.connection_factory,
@@ -242,7 +222,7 @@ def create_services(
     )
     migrations = MigrationService(
         repository=migration_repository,
-        connections=connections,
+        connection_access=schemii_connections,
         postgres=postgres,
         workspaces=workspaces,
         designs=designs,
@@ -261,7 +241,7 @@ def create_services(
         connections.register_dependency_provider(PostgresConsoleConnectionDependencies(metadata.connection_factory))
     console = ConsoleService(
         repository=console_repository,
-        connections=connections,
+        connection_access=schemii_connections,
         postgres=postgres,
         workspaces=workspaces,
         result_ttl=timedelta(
@@ -337,6 +317,7 @@ def create_app(
 ) -> FastAPI:
     """Create the API and connect each product router."""
     active_services = services or create_services(runtime_config)
+    schemii_connections = active_services.connections.for_product("schemii")
     if active_services.migrations is None:
         if active_services.metadata.durable:
             raise RuntimeError(
@@ -350,7 +331,7 @@ def create_app(
             active_services,
             migrations=MigrationService(
                 repository=migration_repository,
-                connections=active_services.connections,
+                connection_access=schemii_connections,
                 postgres=active_services.postgres,
                 workspaces=active_services.workspaces,
                 designs=active_services.designs,
@@ -369,7 +350,7 @@ def create_app(
             active_services,
             console=ConsoleService(
                 repository=InMemoryConsoleRepository(),
-                connections=active_services.connections,
+                connection_access=schemii_connections,
                 postgres=active_services.postgres,
                 workspaces=active_services.workspaces,
                 result_ttl=timedelta(
@@ -480,16 +461,16 @@ def create_app(
     application.state.auth = AuthService(active_services.metadata.connection_factory)
     if hasattr(active_services.connections, "set_authority"):
         active_services.connections.set_authority(application.state.auth)
-    schemii_connections = (active_services.connections.for_product("schemii")
-                           if hasattr(active_services.connections, "for_product")
-                           else active_services.connections)
     # These long-lived services also run outside HTTP requests. Give them an
     # explicit product scope so queued work rechecks the role before opening DB.
-    if active_services.migrations is not None:
-        active_services.migrations._connections = schemii_connections
-        active_services.migrations.execution_coordinator._connections = schemii_connections
-    if active_services.console is not None:
-        active_services.console._connections = schemii_connections
+    if services is not None and services.migrations is not None:
+        active_services.migrations.set_connection_access(schemii_connections)
+    if services is not None and services.console is not None:
+        set_console_connection_access = getattr(
+            active_services.console, "set_connection_access", None
+        )
+        if callable(set_console_connection_access):
+            set_console_connection_access(schemii_connections)
     from schemii.common.auth.dependencies import AccountConnectionDependencies
     if application.state.auth.enabled:
         active_services.connections.register_dependency_provider(AccountConnectionDependencies(application.state.auth))
@@ -516,15 +497,17 @@ def create_app(
         JobRepository(active_services.metadata.connection_factory),
         active_services.console, schemii_connections, active_services.postgres,
     )
-    workspace_bulk_guard = getattr(active_services.workspaces, "set_mutation_guard", None)
-    if callable(workspace_bulk_guard):
-        previous_guard = active_services.workspaces._mutation_guard
-        def has_active_workspace_work(owner, workspace):
-            return bool(previous_guard and previous_guard(owner, workspace)) or any(
+    register_workspace_guard = getattr(
+        active_services.workspaces, "add_mutation_guard", None
+    )
+    if callable(register_workspace_guard):
+        def has_active_bulk_work(owner, workspace):
+            return any(
                 job["status"] in {"queued", "running", "cancelling", "reconciliation_required"}
                 for job in application.state.bulk_jobs.repository.list(owner, workspace)
             )
-        workspace_bulk_guard(has_active_workspace_work)
+
+        register_workspace_guard(has_active_bulk_work)
     application.include_router(bulk_jobs_router)
     application.include_router(pi_router)
     application.include_router(activity_router)
@@ -541,7 +524,8 @@ def create_app(
         active_services.ai_repository
         or InMemoryAiRepository(active_services.admin_config.ai),
         ai_runtime,
-        replace(active_services, connections=_SchemiiAiConnectionAccess(schemii_connections)),
+        active_services,
+        connection_access=schemii_connections,
     )
     application.state.ai_service.raw_console = application.state.raw_console
     from schemii.common.ai.conversation_store import ConversationStore

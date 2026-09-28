@@ -146,10 +146,16 @@ def test_migration_service_installs_workspace_lifecycle_guard() -> None:
     authority = ExecutionAuthority()
     MigrationService(
         repository=authority,  # type: ignore[arg-type]
-        connections=SimpleNamespace(),  # type: ignore[arg-type]
+        connection_access=SimpleNamespace(),  # type: ignore[arg-type]
         postgres=SimpleNamespace(),  # type: ignore[arg-type]
         workspaces=workspaces,
         designs=designs,
+    )
+    bulk_work_active = True
+    workspaces.add_mutation_guard(
+        lambda owner_id, workspace_id: (
+            owner_id == OWNER_ID and workspace_id.startswith("ws_") and bulk_work_active
+        )
     )
     bootstrap, _ = _import_records()
     workspace = workspaces.create(OWNER_ID, _request(), bootstrap=bootstrap)
@@ -157,6 +163,11 @@ def test_migration_service_installs_workspace_lifecycle_guard() -> None:
     with pytest.raises(WorkspaceMutationBlockedError):
         workspaces.delete(OWNER_ID, workspace.id, workspace.revision)
     assert workspaces.get(OWNER_ID, workspace.id) == workspace
+
+    # The second guard can clear while migration work remains authoritative.
+    bulk_work_active = False
+    with pytest.raises(WorkspaceMutationBlockedError):
+        workspaces.delete(OWNER_ID, workspace.id, workspace.revision)
 
     authority.active = False
     workspaces.delete(OWNER_ID, workspace.id, workspace.revision)

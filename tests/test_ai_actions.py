@@ -23,7 +23,7 @@ def browser(monkeypatch):
         namespace='odd"schema', name="projects",
         columns=[SimpleNamespace(name=name) for name in ["id", "title", "active"]],
     ))
-    monkeypatch.setattr(actions, "relation_browser", lambda services: service)
+    monkeypatch.setattr(actions, "relation_browser", lambda services, **kwargs: service)
     return service
 
 
