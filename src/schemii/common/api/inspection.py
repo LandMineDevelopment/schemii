@@ -9,7 +9,6 @@ from collections.abc import Iterable
 from typing import Any, get_type_hints
 
 from fastapi import FastAPI
-from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from schemii.common.source_inspection import (
@@ -27,6 +26,7 @@ from schemii.common.source_inspection import (
     python_object_id,
     source_metadata,
 )
+from schemii.common.route_contexts import public_route_contexts
 
 
 DEVELOPER_ROUTES_PATH = "/_developer/routes"
@@ -178,20 +178,6 @@ def _dependencies(dependant: Any, register: Any) -> tuple[list[dict[str, Any]], 
     return dependencies, truncated
 
 
-def _public_route_contexts(application: FastAPI) -> Iterable[Any]:
-    for candidate in application.routes:
-        if isinstance(candidate, APIRoute):
-            if candidate.include_in_schema:
-                yield candidate
-            continue
-        contexts = getattr(candidate, "effective_route_contexts", None)
-        if not callable(contexts):
-            continue
-        for context in contexts():
-            if context.include_in_schema:
-                yield context
-
-
 def build_developer_route_document(application: FastAPI) -> dict[str, Any]:
     """Describe registered first-party routes without inspecting runtime object state."""
 
@@ -209,7 +195,7 @@ def build_developer_route_document(application: FastAPI) -> dict[str, Any]:
     services = application.state.services
     routes: list[dict[str, Any]] = []
     routes_truncated = False
-    for route in _public_route_contexts(application):
+    for route in public_route_contexts(application):
         if len(routes) >= _MAX_ROUTES:
             routes_truncated = True
             break

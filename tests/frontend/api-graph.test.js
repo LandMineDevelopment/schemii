@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ApiGraph,
   buildApiGraphModel,
   reconcileApiGraphPositions,
 } from "../../src/schemii/schemii/web/assets/api-graph.js";
@@ -112,4 +113,26 @@ test("new contract nodes do not overlap positions preserved across refreshes", (
   assert.deepEqual(positions.get(existing.key), { x: 80, y: 90 });
   assert.notDeepEqual(positions.get(added.key), positions.get(existing.key));
   assert.ok(Math.abs(positions.get(added.key).y - positions.get(existing.key).y) >= 128);
+});
+
+test("API canvas arrow keys pan the graph when its host is focused", () => {
+  const listeners = new Map();
+  const host = {
+    ownerDocument: { activeElement: null },
+    clientWidth: 800,
+    clientHeight: 600,
+    style: {},
+    addEventListener(type, callback) { listeners.set(type, callback); },
+    removeEventListener(type) { listeners.delete(type); },
+  };
+  const stage = { style: {} };
+  const graph = new ApiGraph({ host, stage, nodeLayer: {}, lines: {}, zoomOutput: {}, onSelectOperation() {} });
+  host.ownerDocument.activeElement = host;
+  let prevented = false;
+  listeners.get("keydown")({ target: host, key: "ArrowLeft", preventDefault() { prevented = true; } });
+
+  assert.equal(prevented, true);
+  assert.equal(graph.viewport.getView().x, 98);
+  assert.match(stage.style.transform, /translate\(98px, 50px\)/);
+  graph.viewport.destroy();
 });
