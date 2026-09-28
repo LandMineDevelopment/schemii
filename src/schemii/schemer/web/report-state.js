@@ -1,5 +1,6 @@
 import { exposedFields } from '#model/model-state.js';
 import { fieldLabel, nodeColumns } from '#model/model-columns.js';
+import { serializeCsv } from '#common/csv.js';
 
 export function reportDraft(model, explore = model.explore) {
   return structuredClone({ ...model.definition, fields: explore?.fields || [],
@@ -25,6 +26,5 @@ export function aggregateChoices(draft, catalog, field) {
     ...(numeric ? [['sum', 'Sum'], ['avg', 'Average']] : []), ...(comparable ? [['min', 'Minimum'], ['max', 'Maximum']] : [])];
 }
 export function csvContent(result) {
-  const escape = value => `"${String(value ?? '').replaceAll('"', '""')}"`;
-  return [result.columns.map(c => c.name), ...result.rows].map(row => row.map(escape).join(',')).join('\r\n');
+  return serializeCsv(result.columns.map(column => column.name), result.rows);
 }

@@ -26,8 +26,11 @@ test('measures reflect model data types', () => {
   assert.ok(aggregateChoices(draft,catalog,{table:'person',column:'salary'}).some(([key])=>key==='sum'));
   assert.ok(!aggregateChoices(draft,catalog,{table:'person',column:'name'}).some(([key])=>key==='sum'));
 });
-test('CSV preserves quotes, commas, and multiline values', () => {
-  assert.equal(csvContent({columns:[{name:'name'}],rows:[['A,"B"\nC'],[null]]}), '"name"\r\n"A,""B""\nC"\r\n""');
+test('cached result CSV preserves JSON values and quotes multiline text', () => {
+  assert.equal(csvContent({
+    columns:[{name:'payload'},{name:'items'},{name:'name'}],
+    rows:[[{a:1},[1,2],'A,"B"\nC'],[null,null,null]],
+  }), '"payload","items","name"\r\n"{""a"":1}","[1,2]","A,""B""\nC"\r\n"","",""');
 });
 test('Schemer controls use registered shared icons', () => {
   const html=readFileSync(new URL('../../src/schemii/schemer/web/index.html',import.meta.url),'utf8');

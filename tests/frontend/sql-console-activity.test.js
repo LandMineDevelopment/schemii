@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatConsoleActivitySummary } from '../../src/schemii/schemii/web/assets/sql-console.js';
+import { formatConsoleActivitySummary, rawResultCsv } from '../../src/schemii/schemii/web/assets/sql-console.js';
+
+test('raw Console CSV uses the shared serializer for JSON values', () => {
+  assert.equal(rawResultCsv({
+    columns: [{ name: 'payload' }, { name: 'items' }, { name: 'name' }],
+    rows: [[{ a: 1 }, [1, 2], 'A,"B"\nC'], [null, null, null]],
+  }), '"payload","items","name"\r\n"{""a"":1}","[1,2]","A,""B""\nC"\r\n"","",""');
+});
 
 test('managed read activity shows its query phase and server duration', () => {
   assert.equal(formatConsoleActivitySummary({ phase: 'fetching', elapsedMs: 1250 }),

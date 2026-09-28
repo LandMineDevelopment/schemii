@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 const modelId = `model_${'a'.repeat(32)}`, dashboardId = `dashboard_${'b'.repeat(32)}`;
 const field = (column, aggregate = 'none') => ({ table: 'person', column, aggregate });
@@ -9,9 +10,14 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false, multidimensional = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
+  if (jsonCells) {
+    fixture.dashboard.tiles[0].kind = 'detail';
+    fixture.dashboard.tiles[0].dimensions = [];
+    fixture.dashboard.tiles[0].measures = [];
+  }
   if (optionalFilter) fixture.model.definition.scopes.push({ id: 'region', label: 'Region', kind: 'conditional', requirement: 'optional', alternatives: [{ id: 'choose', label: 'Choose region', inputs: [{ id: 'region', label: 'Region', type: 'text', defaultValue: '' }], conditions: [{ table: 'person', column: 'org', operator: 'eq', parameterId: 'region' }] }] });
   const warnings = aggregationWarning ? ["COUNT of Personnel.id may be affected by repeated rows from joins. The selected aggregation runs as configured."] : [];
   const repetitionDiagnostics = aggregationWarning ? [{ code: 'measure_repetition', outputIndex: 1,
@@ -48,6 +54,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     return frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
   }
   function dataFor(tile, drill) {
+    if (jsonCells) return { rows: [[{ a: 1 }, [1, 2], 'A,"B"\nC']], columns: [{ name: 'payload', dataType: 'jsonb' }, { name: 'items', dataType: 'jsonb' }, { name: 'note', dataType: 'text' }], size: tile.limit };
     return drill || tile.kind === 'detail' ? { rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']], columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }], size: tile.limit }
       : multidimensional ? { rows: multidimensional === 'wide' ? Array.from({ length: 150 }, (_, index) => [index, 'Group', index + 1]) : multidimensional === 'many' ? Array.from({ length: 150 }, (_, index) => ['HQ', `Person ${index}`, index + 1]) : [['Branch', 'Alex', 2], ['Branch', 'Blake', 3], ['HQ', 'Alex', 4], ['Remote', 'Alex', 1], ['Remote', 'Blake', 5]], columns: [{ name: 'org', dataType: 'text' }, { name: 'name', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }] }
       : tile.kind === 'kpi' ? { rows: [[3]], columns: [{ name: 'COUNT id', dataType: 'bigint' }], size: tile.limit }
@@ -504,6 +511,25 @@ test('capped previews explain the limit and offer a full-result file download', 
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toBe('schemer-results.csv');
   expect(requests.filter(request => request.path.endsWith('/export'))).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test('cached CSV browser download preserves JSON object and array cells', async ({ page }) => {
+  const { errors } = await mock(page, { jsonCells: true });
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile');
+  await expect(tile.locator('.tile-status')).toContainText('1 rows cached');
+  await tile.getByRole('heading', { name: 'Positions by org' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
+  await expect(expanded.getByRole('button', { name: 'Export cached rows as CSV' })).toBeVisible();
+
+  const downloadPromise = page.waitForEvent('download');
+  await expanded.getByRole('button', { name: 'Export cached rows as CSV' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('schemer-cached-rows.csv');
+  expect(await readFile(await download.path(), 'utf8')).toBe(
+    '"payload","items","note"\r\n"{""a"":1}","[1,2]","A,""B""\nC"',
+  );
   expect(errors).toEqual([]);
 });
 

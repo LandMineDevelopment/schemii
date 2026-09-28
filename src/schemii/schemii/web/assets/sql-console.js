@@ -1,4 +1,5 @@
 import { createQueryPlanView, parseQueryPlan, downloadArtifact } from "#common/query-plan.js";
+import { serializeCsv } from "#common/csv.js";
 import { createElapsedTimer, formatElapsed } from "#common/elapsed-time.js";
 import { ApiError } from "#common/http.js";
 import { element, replace } from "#common/dom.js";
@@ -18,6 +19,10 @@ const POLL_INTERVAL_MS = 350;
 
 export function formatConsoleCell(value) {
   return formatDataCell(value);
+}
+
+export function rawResultCsv(page) {
+  return serializeCsv(page.columns.map(column => column.name), page.rows);
 }
 
 export function formatConsoleActivitySummary(activity, execution = null, runningElapsedMs = null) {
@@ -1306,9 +1311,7 @@ export function createSqlConsole({
   function exportResult(tab) {
     const current = workspace();
     if (tab?.rawSessionId && tab.page) {
-      const csvCell = value => `"${String(value == null ? "" : typeof value === "object" ? JSON.stringify(value) : value).replaceAll('"', '""')}"`;
-      const lines = [tab.page.columns.map(column => csvCell(column.name)), ...tab.page.rows.map(row => row.map(csvCell))].map(row => row.join(",")).join("\r\n");
-      downloadArtifact("displayed-result.csv", new Blob([lines], { type: "text/csv" }));
+      downloadArtifact("displayed-result.csv", new Blob([rawResultCsv(tab.page)], { type: "text/csv" }));
       return;
     }
     if (!current || !tab?.executionId || !tab?.summary?.id || busy || operationActive()) return;
