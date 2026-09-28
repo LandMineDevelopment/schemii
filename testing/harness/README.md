@@ -99,11 +99,14 @@ Preparation starts the app **only through `./start.sh`**, checks local and tailn
 HTTPS plus API maps, records source fingerprint and launcher success, and holds a
 shared-worktree deployment lease. Concurrent runs reuse the verified same-source
 deployment and reserve different accounts; rebuilds and resets need an exclusive lease. It opens one browser process per active lane,
-checks identity and product capabilities, and runs harmless browser probes for
-click/type, screenshots, dialogs, drag and downloads. It verifies different cookie
-values and storage markers, logs each account out in turn, verifies the others
-remain authenticated, and restores that account. Probe results are harness
-readiness evidence, not application acceptance results.
+starts each on `/account`, checks identity and product capabilities, and runs
+harmless browser probes for click/type, screenshots, dialogs, drag and downloads.
+Before any lane enters its assigned product page, the harness parks active,
+unclaimed pages on `/account`, verifies different cookie values and storage
+markers, logs each account out in turn, verifies the other accounts remain
+authenticated, and restores the tested account. This keeps those intentional
+session transitions from interrupting product data streams. Probe results are
+harness readiness evidence, not application acceptance results.
 
 The first wave opens at most `--parallel` browsers. Subsequent waves open only after
 the current wave finishes, so logout/isolation probes cannot interrupt a tester.

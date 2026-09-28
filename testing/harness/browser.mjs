@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertProviderAvailable } from './prerequisites.mjs';
+import { assertProductNavigationAllowed } from './readiness.mjs';
 
 const COOKIE = 'schemii_session';
 const STORAGE_KEY = '__schemii_qa_isolation__';
@@ -35,6 +36,8 @@ function inspectControls(target) {
 /** Live browser handles and credentials never leave this process. */
 export class BrowserFleet {
   #credentials = new Map();
+  #isolationProven = false;
+  #pagesParkedForIsolation = false;
 
   constructor({ baseURL, runDir, headless = false, timeoutMs = 15000, onEvent = () => {}, onLaunch = async () => {} }) {
     this.baseURL = new URL(baseURL).origin;
@@ -102,6 +105,8 @@ export class BrowserFleet {
     const server = await chromium.launchServer({ host: '127.0.0.1', headless: this.headless, timeout: this.timeoutMs });
     const handle = { lane, server, directory, launchId: randomUUID(), queue: Promise.resolve(), pendingDialog: null };
     this.lanes.set(lane.id, handle);
+    this.#isolationProven = false;
+    this.#pagesParkedForIsolation = false;
     this.#credentials.set(lane.id, { username: credentials.username, password: credentials.password });
     try {
       handle.pid = server.process().pid;
@@ -129,8 +134,9 @@ export class BrowserFleet {
       handle.page.on('pageerror', () => this.#event(handle, 'page-error'));
       handle.page.on('console', message => { if (message.type() === 'error') this.#event(handle, 'console-error'); });
       const identity = await this.#login(handle);
-      const product = lane.products?.[0];
-      await handle.page.goto(this.#url(lane.url ?? (product && product !== 'schemii' ? `/${product}` : '/')), { waitUntil: 'domcontentloaded' });
+      // Keep readiness on a page that cannot start a product data stream. The
+      // isolation proof intentionally logs each account out before restoring it.
+      await handle.page.goto(this.#url('/account'), { waitUntil: 'domcontentloaded' });
       this.#event(handle, 'opened', { launchId: handle.launchId });
       return { lane: lane.id, launchId: handle.launchId, pid: handle.pid, birthTick: handle.birthTick, identity, url: handle.page.url() };
     } catch (error) {
@@ -141,7 +147,26 @@ export class BrowserFleet {
 
   // Coordinator must hold the wave barrier: no actions or lane lifecycle changes
   // may start until this fleet-wide authentication exercise finishes.
+  async parkLanesForIsolation() {
+    this.#isolationProven = false;
+    this.#pagesParkedForIsolation = false;
+    const handles = [...this.lanes.values()];
+    if (!handles.length) throw new Error('Isolation needs at least one active lane');
+    // Recovery can happen while other lanes are ready but still unclaimed. Move
+    // every such page off its product before revoking the session cookies.
+    for (const handle of handles) {
+      await handle.queue;
+      if (new URL(handle.page.url()).pathname !== '/account') {
+        await handle.page.goto(this.#url('/account'), { waitUntil: 'domcontentloaded' });
+      }
+    }
+    this.#pagesParkedForIsolation = true;
+  }
+
   async proveIsolation() {
+    this.#isolationProven = false;
+    if (!this.#pagesParkedForIsolation) throw new Error('Lane pages must be parked before the isolation proof');
+    this.#pagesParkedForIsolation = false;
     const handles = [...this.lanes.values()];
     if (!handles.length) throw new Error('Isolation needs at least one active lane');
     if (new Set(handles.map(handle => handle.pid)).size !== handles.length) throw new Error('Browser lanes share a Chromium process');
@@ -174,7 +199,24 @@ export class BrowserFleet {
       }
     }
     const identities = await Promise.all(handles.map(async handle => ({ lane: handle.lane.id, ...await this.#identity(handle) })));
+    this.#isolationProven = true;
     return { passed: true, lanes: handles.length, distinctAccounts: true, distinctLaunches: new Set(handles.map(h => h.launchId)).size === handles.length, distinctProcesses: true, processes: handles.map(({ lane, pid, birthTick }) => ({ lane: lane.id, pid, birthTick })), distinctCookies: true, distinctStorage: true, logoutIsolation: true, identities };
+  }
+
+  async navigateLane(id) {
+    const handle = this.#handle(id);
+    const task = handle.queue.then(async () => {
+      await this.#identity(handle);
+      const product = handle.lane.products?.[0];
+      const target = handle.lane.url ?? (product && product !== 'schemii' ? `/${product}` : '/');
+      const destination = this.#url(target);
+      assertProductNavigationAllowed(destination, this.#isolationProven, this.baseURL);
+      await handle.page.goto(destination, { waitUntil: 'domcontentloaded' });
+      this.#event(handle, 'product-opened', { product: product ?? 'schemii' });
+      return { lane: id, url: handle.page.url() };
+    });
+    handle.queue = task.catch(() => {});
+    return task;
   }
 
   #locator(page, args) {
@@ -221,7 +263,12 @@ export class BrowserFleet {
       if (handle.pendingDialog && action !== 'dialog' && action !== 'identity') return { dialog: { type: handle.pendingDialog.type() }, requires: 'dialog accept or dismiss' };
       switch (action) {
         case 'identity': return this.#identity(handle);
-        case 'navigate': return await this.#withDialog(handle, async () => { await page.goto(this.#url(args.url), { waitUntil: 'domcontentloaded' }); return { url: page.url() }; });
+        case 'navigate': return await this.#withDialog(handle, async () => {
+          const destination = this.#url(args.url);
+          assertProductNavigationAllowed(destination, this.#isolationProven, this.baseURL);
+          await page.goto(destination, { waitUntil: 'domcontentloaded' });
+          return { url: page.url() };
+        });
         case 'snapshot': return {
           url: page.url(), title: await page.title(), screenshot: await this.#screenshot(handle),
           accessibility: await page.locator('body').ariaSnapshot(),
