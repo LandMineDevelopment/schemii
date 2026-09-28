@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildDbGraphModel } from "../../src/schemii/schemii/web/assets/db-graph.js";
+import { CatalogCanvas } from "../../src/schemii/schemii/web/assets/canvas.js";
 import { buildDbMapModel } from "../../src/schemii/schemii/web/assets/db-map.js";
 
 function sourceObject(id, name, kind = "helper") {
@@ -141,4 +142,38 @@ test("DB map rejects non-versioned inspection data instead of guessing", () => {
     () => buildDbMapModel({ schemaVersion: 2 }),
     /unsupported schema version/,
   );
+});
+
+test("catalog canvas arrow keys pan the graph when its host is focused", () => {
+  const listeners = new Map();
+  const host = {
+    ownerDocument: { activeElement: null },
+    clientWidth: 800,
+    clientHeight: 600,
+    style: {},
+    classList: { add() {}, remove() {} },
+    addEventListener(type, callback) { listeners.set(type, callback); },
+    removeEventListener(type) { listeners.delete(type); },
+  };
+  const stage = { style: {} };
+  const canvas = new CatalogCanvas({
+    canvas: host,
+    stage,
+    layer: {},
+    lines: {},
+    zoomOutput: {},
+    onSelect() {},
+    onPositionsChanged() {},
+    onRelationshipVisibilityChanged() {},
+    scheduleFrame() { return 1; },
+    cancelFrame() {},
+  });
+  host.ownerDocument.activeElement = host;
+  let prevented = false;
+  listeners.get("keydown")({ target: host, key: "ArrowDown", preventDefault() { prevented = true; } });
+
+  assert.equal(prevented, true);
+  assert.equal(canvas.viewport.getView().y, 22);
+  assert.match(stage.style.transform, /translate\(75px, 22px\)/);
+  canvas.viewport.destroy();
 });

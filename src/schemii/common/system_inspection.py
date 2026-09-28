@@ -13,10 +13,10 @@ from typing import Any, get_args, get_type_hints
 from starlette.background import BackgroundTasks
 
 from fastapi import FastAPI
-from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from schemii.common.postgres.gateway import PostgresGateway
+from schemii.common.route_contexts import public_route_contexts
 from schemii.common.source_inspection import (
     SourceInspectionLimits,
     SourceControlContext,
@@ -39,7 +39,9 @@ _MAX_ROUTES = 256
 _MAX_CALLABLES = 1280
 _MAX_CALL_DEPTH = 10
 _MAX_CALLS_PER_CALLABLE = 128
-_MAX_BINDINGS = 96
+# The authenticated PostgreSQL + Pi composition currently has 98 runtime field
+# bindings. Keep room for that installed graph and modest growth beyond it.
+_MAX_BINDINGS = 128
 # Keep the whole registered application visible as implemented route families grow.
 # This remains a hard bound; it is not a pagination or runtime discovery setting.
 _MAX_OBJECTS = 1792
@@ -47,20 +49,6 @@ _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 768
 _JOURNEY_STAGES = ("api", "internals", "database", "response")
-
-
-def _public_route_contexts(application: FastAPI) -> Iterable[Any]:
-    for candidate in application.routes:
-        if isinstance(candidate, APIRoute):
-            if candidate.include_in_schema:
-                yield candidate
-            continue
-        contexts = getattr(candidate, "effective_route_contexts", None)
-        if not callable(contexts):
-            continue
-        for context in contexts():
-            if context.include_in_schema:
-                yield context
 
 
 def _annotation_types(annotation: object) -> list[type[object]]:
@@ -125,6 +113,7 @@ class RuntimeBindingIndex:
         self.top_level = dict(vars(services))
         self.application_state = {"services": services, **(application_state or {})}
         self.field_types: dict[tuple[type[object], str], tuple[type[object], ...]] = {}
+        self.runtime_fields: dict[tuple[int, str], tuple[object, ...]] = {}
         self.null_fields: set[tuple[type[object], str]] = set()
         self.contracts_by_type: dict[type[object], set[type[object]]] = {}
         self.instances_by_type: dict[type[object], object] = {}
@@ -188,6 +177,7 @@ class RuntimeBindingIndex:
                 continue
             child_types = tuple(dict.fromkeys(type(child) for child in children))
             self.field_types[(instance_type, attribute)] = child_types
+            self.runtime_fields[(id(instance), attribute)] = tuple(children)
             contracts = tuple(
                 contract for contract in _annotation_types(annotations.get(attribute))
                 if is_first_party(contract) and getattr(contract, "_is_protocol", False)
@@ -315,13 +305,19 @@ class RuntimeBindingIndex:
         if parts and len(parts) >= 4 and parts[1:3] == ["app", "state"]:
             instance = self.application_state.get(parts[3])
             if instance is not None and is_first_party(type(instance)):
-                candidates = (type(instance),)
+                instances = (instance,)
                 for field in parts[4:]:
-                    candidates = tuple(dict.fromkeys(
-                        child for candidate in candidates
-                        for child in self.field_types.get((candidate, field), ())
-                    ))
-                return candidates
+                    next_instances = []
+                    seen_instance_ids = set()
+                    for candidate in instances:
+                        for child in self.runtime_fields.get((id(candidate), field), ()):
+                            if id(child) not in seen_instance_ids:
+                                seen_instance_ids.add(id(child))
+                                next_instances.append(child)
+                    instances = tuple(next_instances)
+                    if not instances:
+                        return ()
+                return tuple(dict.fromkeys(type(candidate) for candidate in instances))
         if isinstance(node, ast.Name) and node.id in {"self", "cls"}:
             owner = self._owner_type(inspect.unwrap(callable_subject))
             return (owner,) if owner is not None else ()
@@ -932,7 +928,7 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
 
     routes: list[dict[str, Any]] = []
     routes_truncated = False
-    for route in _public_route_contexts(application):
+    for route in public_route_contexts(application):
         if len(routes) >= _MAX_ROUTES:
             routes_truncated = True
             break
