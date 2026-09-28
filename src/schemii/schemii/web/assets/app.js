@@ -61,7 +61,7 @@ import { createTransientCueManager } from "/assets/common/transient-cue.js";
 import { createSearchableSelect } from "/assets/common/searchable-select.js";
 import { installSortableList, reorderedValues } from "/assets/common/sortable.js";
 import { assertUnavailableControls, bindUnavailableControls } from "./unavailable.js";
-import { closeDetailsMenus, createIconButton, createIconElement, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
+import { closeDetailsMenus, createDialogFocusController, createIconButton, createIconElement, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
 import {
   extractLinkedSqlDraft,
   readWorkspaceNavigation,
@@ -99,6 +99,7 @@ import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
 
 const byId = id => document.getElementById(id);
+const dialogFocus = createDialogFocusController(document);
 const DEFAULT_CANVAS_VIEW = Object.freeze({ x: 75, y: 70, zoom: 1 });
 const linkedSqlDraft = extractLinkedSqlDraft(window.location.href);
 if (linkedSqlDraft.href) window.history.replaceState(null, "", linkedSqlDraft.href);
@@ -939,8 +940,7 @@ function beginWorkspaceMutation() {
 }
 
 function openDialog(dialog) {
-  // TODO(ui-dialog-focus): Move modal lifecycle into a shared controller that records the invoking control and restores focus after every close path, including programmatic closes and nested editor/confirmation flows.
-  if (!dialog.open) dialog.showModal();
+  dialogFocus.open(dialog);
 }
 
 function showToast(message, { error = false } = {}) {

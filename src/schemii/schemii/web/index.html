@@ -66,11 +66,11 @@
           </button>
         </nav>
 
-        <aside class="tool-rail" id="tool-rail" data-workspace="tables" aria-label="Tables tools">
-          <button id="create-table-button" type="button" data-tool-layers="tables" data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
-          <button id="create-relationship-button" type="button" data-tool-layers="tables" data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" aria-pressed="false" disabled></button>
-          <button id="create-key-button" type="button" data-tool-layers="tables" data-ui-icon="key" title="Create key" aria-label="Create primary or unique key" aria-pressed="false" disabled></button>
-          <button id="create-index-button" type="button" data-tool-layers="tables" data-ui-icon="index" title="Create index" aria-label="Create index" aria-pressed="false" disabled></button>
+        <aside class="tool-rail" id="tool-rail" data-workspace="tables" data-ui-tooltip-placement="right" aria-label="Tables tools">
+          <button id="create-table-button" type="button" data-tool-layers="tables" data-tool-active data-ui-icon="tables" title="Create table" aria-label="Create table" disabled></button>
+          <button id="create-relationship-button" type="button" data-tool-layers="tables" data-tool-active data-ui-icon="relationship" title="Create relationship" aria-label="Create relationship" aria-pressed="false" disabled></button>
+          <button id="create-key-button" type="button" data-tool-layers="tables" data-tool-active data-ui-icon="key" title="Create key" aria-label="Create primary or unique key" aria-pressed="false" disabled></button>
+          <button id="create-index-button" type="button" data-tool-layers="tables" data-tool-active data-ui-icon="index" title="Create index" aria-label="Create index" aria-pressed="false" disabled></button>
 
           <button id="browse-views-tool" type="button" data-tool-layers="views" data-ui-icon="views" title="Browse views" aria-label="Browse views"></button>
           <button id="create-view-tool" type="button" data-tool-layers="views" data-ui-icon="add" title="Create view" aria-label="Create view" disabled></button>
@@ -85,22 +85,22 @@
           <button id="run-all-sql-button" type="button" data-tool-layers="sql" data-ui-icon="run-all" title="Run all statements" aria-label="Run all statements" disabled></button>
           <button class="stop" id="cancel-sql-button" type="button" data-tool-layers="sql" data-ui-icon="stop" title="Stop query" aria-label="Stop query" disabled hidden></button>
 
-          <span class="rail-divider" data-tool-layers="tables views" aria-hidden="true"></span>
-          <button id="undo-design-button" type="button" data-tool-layers="tables views" data-ui-icon="undo" title="Undo design change" aria-label="Undo design change" disabled></button>
-          <button id="redo-design-button" type="button" data-tool-layers="tables views" data-ui-icon="redo" title="Redo design change" aria-label="Redo design change" disabled></button>
-          <button id="reset-design-button" type="button" data-tool-layers="tables views" data-ui-icon="refresh" title="Reset design to baseline" aria-label="Reset design to baseline" disabled></button>
-          <span class="rail-divider" data-tool-layers="tables" aria-hidden="true"></span>
-          <button id="fit-button" type="button" data-tool-layers="tables" data-ui-icon="fit" title="Fit tables" aria-label="Fit tables"></button>
-          <button id="zoom-in-button" type="button" data-tool-layers="tables" data-ui-icon="zoom-in" title="Zoom in" aria-label="Zoom in"></button>
-          <button id="zoom-out-button" type="button" data-tool-layers="tables" data-ui-icon="zoom-out" title="Zoom out" aria-label="Zoom out"></button>
-          <span class="rail-divider" data-tool-layers="tables views" aria-hidden="true"></span>
-          <button id="functions-button" type="button" data-tool-layers="tables views" data-ui-icon="routines" title="Functions and procedures" aria-label="Functions and procedures"></button>
-          <button id="types-button" type="button" data-tool-layers="tables views" data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
-          <button id="objects-button" type="button" data-tool-layers="tables views" data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
-          <span class="rail-divider" data-tool-layers="tables views sql" aria-hidden="true"></span>
-          <button id="review-migration-button" type="button" data-tool-layers="tables views" data-ui-icon="migration" title="Review migration" aria-label="Review migration" disabled></button>
-          <button id="postgres-button" type="button" data-tool-layers="tables views sql" data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
-          <button id="ai-assistant-button" type="button" data-tool-layers="tables views sql" data-ui-icon="assistant" title="AI schema assistant" aria-label="AI schema assistant" aria-expanded="false"></button>
+          <span class="rail-divider" data-tool-layers="tables views" data-tool-active aria-hidden="true"></span>
+          <button id="undo-design-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="undo" title="Undo design change" aria-label="Undo design change" disabled></button>
+          <button id="redo-design-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="redo" title="Redo design change" aria-label="Redo design change" disabled></button>
+          <button id="reset-design-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="refresh" title="Reset design to baseline" aria-label="Reset design to baseline" disabled></button>
+          <span class="rail-divider" data-tool-layers="tables" data-tool-active aria-hidden="true"></span>
+          <button id="fit-button" type="button" data-tool-layers="tables" data-tool-active data-ui-icon="fit" title="Fit tables" aria-label="Fit tables"></button>
+          <button id="zoom-in-button" type="button" data-tool-layers="tables" data-tool-active data-ui-icon="zoom-in" title="Zoom in" aria-label="Zoom in"></button>
+          <button id="zoom-out-button" type="button" data-tool-layers="tables" data-tool-active data-ui-icon="zoom-out" title="Zoom out" aria-label="Zoom out"></button>
+          <span class="rail-divider" data-tool-layers="tables views" data-tool-active aria-hidden="true"></span>
+          <button id="functions-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="routines" title="Functions and procedures" aria-label="Functions and procedures"></button>
+          <button id="types-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
+          <button id="objects-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
+          <span class="rail-divider" data-tool-layers="tables views sql" data-tool-active aria-hidden="true"></span>
+          <button id="review-migration-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="migration" title="Review migration" aria-label="Review migration" disabled></button>
+          <button id="postgres-button" type="button" data-tool-layers="tables views sql" data-tool-active data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
+          <button id="ai-assistant-button" type="button" data-tool-layers="tables views sql" data-tool-active data-ui-icon="assistant" title="AI schema assistant" aria-label="AI schema assistant" aria-expanded="false"></button>
         </aside>
 
         <section class="tables-workspace layer-panel" id="tables-workspace" data-layer-panel="tables" data-change-scope="schema" aria-label="Table diagram">
@@ -122,7 +122,7 @@
               <svg class="relationship-lines" id="relationship-lines" aria-hidden="true"></svg>
               <div id="tables-layer"></div>
             </div>
-            <p class="canvas-hint"><kbd>Drag canvas</kbd> pan <span></span><kbd>Drag table</kbd> move <span></span><kbd>Arrows</kbd> move focused table</p>
+            <p class="canvas-hint"><kbd>Canvas focus + arrows</kbd> pan <span></span><kbd>Table focus + arrows</kbd> move table</p>
             <output class="relationship-output" id="relationship-output" aria-live="polite" hidden></output>
             <output class="zoom-output" id="zoom-output" aria-label="Canvas zoom">100%</output>
           </div>
