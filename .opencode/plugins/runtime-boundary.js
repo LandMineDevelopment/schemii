@@ -14,7 +14,8 @@ const FASTAPI_SERVER = new RegExp(
   String.raw`${COMMAND_BOUNDARY}${WRAPPERS}(?:[^\s/]+\/)*fastapi\s+(?:dev|run)(?:\s|$)`,
 )
 
-export function runtimeBoundaryViolation(command) {
+// OpenCode calls every export in a plugin file as a plugin factory.
+function runtimeBoundaryViolation(command) {
   if (typeof command !== "string") return null
   if (command.includes("/var/run/docker.sock") || /DOCKER_HOST\s*=\s*unix:/.test(command)) {
     return "Direct Docker socket access is forbidden in this repository."
@@ -28,7 +29,7 @@ export function runtimeBoundaryViolation(command) {
   return null
 }
 
-export const RuntimeBoundary = async () => ({
+const RuntimeBoundary = async () => ({
   "tool.execute.before": async (input, output) => {
     if (input.tool !== "bash") return
     const violation = runtimeBoundaryViolation(output.args?.command)
