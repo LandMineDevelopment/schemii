@@ -13,6 +13,7 @@ class ClassList {
 
 class PointerTarget {
   constructor() {
+    this.ownerDocument = { activeElement: null };
     this.listeners = new Map();
     this.capturedPointers = new Set();
     this.classList = new ClassList();
@@ -165,6 +166,31 @@ test("plain wheel movement pans the shared graph viewport", () => {
 
   assert.equal(event.defaultPrevented, true);
   assert.deepEqual(viewport.getView(), { x: 2, y: 55, zoom: 1 });
+});
+
+test("arrow keys pan only while the viewport host itself has focus", () => {
+  const { host, viewport } = fixture();
+  viewport.keyboardPanStep = 32;
+  host.ownerDocument.activeElement = host;
+
+  const movedRight = host.dispatch("keydown", { key: "ArrowRight" });
+  assert.equal(movedRight.defaultPrevented, true);
+  assert.deepEqual(viewport.getView(), { x: -12, y: 30, zoom: 1 });
+  host.dispatch("keydown", { key: "ArrowUp" });
+  assert.deepEqual(viewport.getView(), { x: -12, y: 62, zoom: 1 });
+
+  const childKey = host.dispatch("keydown", { key: "ArrowLeft", target: {} });
+  const modifiedKey = host.dispatch("keydown", { key: "ArrowDown", shiftKey: true, ctrlKey: true });
+  const unrelatedKey = host.dispatch("keydown", { key: "Enter" });
+  assert.equal(childKey.defaultPrevented, undefined);
+  assert.equal(modifiedKey.defaultPrevented, undefined);
+  assert.equal(unrelatedKey.defaultPrevented, undefined);
+  assert.deepEqual(viewport.getView(), { x: -12, y: 62, zoom: 1 });
+
+  host.ownerDocument.activeElement = {};
+  const unfocused = host.dispatch("keydown", { key: "ArrowLeft" });
+  assert.equal(unfocused.defaultPrevented, undefined);
+  viewport.destroy();
 });
 
 test("node dragging uses world coordinates and coalesces pointer frames", () => {

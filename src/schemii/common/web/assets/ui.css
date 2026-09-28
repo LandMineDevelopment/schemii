@@ -74,6 +74,9 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .ui-icon-button svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
 .ui-icon-button.compact { width: 29px; min-width: 29px; height: 29px; min-height: 29px; border-color: var(--line-strong); border-radius: 5px; background: var(--panel-2); }
 .ui-icon-button.compact svg { width: 14px; }
+[data-ui-icon]:not(.ui-icon-hydrated) { display: inline-flex; width: auto; min-width: 34px; max-width: 180px; height: auto; min-height: 34px; align-items: center; justify-content: center; padding: 5px 8px; }
+[data-ui-icon]:not(.ui-icon-hydrated)::before { content: attr(aria-label); display: block; font-size: 9px; line-height: 1.2; text-align: center; overflow-wrap: anywhere; }
+.tool-rail [data-ui-icon]:not(.ui-icon-hydrated) { max-width: 45px; padding: 4px; }
 .ui-control-loading { position: relative; }
 .ui-control-loading svg { opacity: .18; }
 .ui-control-loading::after { width: 11px; height: 11px; grid-area: 1 / 1; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; content: ""; animation: ui-spin .7s linear infinite; }
