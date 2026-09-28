@@ -18,6 +18,7 @@ export class GraphViewport {
     initialView = { x: 0, y: 0, zoom: 1 },
     minZoom = DEFAULT_MIN_ZOOM,
     maxZoom = DEFAULT_MAX_ZOOM,
+    keyboardPanStep = 48,
     canStartPan = () => true,
     scheduleFrame = callback => window.requestAnimationFrame(callback),
     cancelFrame = frame => window.cancelAnimationFrame(frame),
@@ -27,6 +28,7 @@ export class GraphViewport {
     this.zoomOutput = zoomOutput;
     this.minZoom = minZoom;
     this.maxZoom = maxZoom;
+    this.keyboardPanStep = Number.isFinite(keyboardPanStep) && keyboardPanStep > 0 ? keyboardPanStep : 48;
     this.canStartPan = canStartPan;
     this.scheduleFrame = scheduleFrame;
     this.cancelFrame = cancelFrame;
@@ -54,7 +56,6 @@ export class GraphViewport {
     for (const [type, listener] of Object.entries(this.touchListeners)) {
       this.host.addEventListener(type, listener, { capture: true, passive: false });
     }
-    // TODO(graph-viewport-keyboard): Add configurable Arrow-key panning when the focus target is the viewport host itself, without stealing node-drag or form-control keys, and cover both catalog and API canvas consumers with keyboard tests.
     this.listeners = {
       pointerdown: event => this.startPan(event),
       pointermove: event => this.movePan(event),
@@ -62,6 +63,7 @@ export class GraphViewport {
       pointercancel: event => this.endPan(event),
       lostpointercapture: event => this.endPan(event),
       wheel: event => this.handleWheel(event),
+      keydown: event => this.handleKeydown(event),
     };
     for (const [type, listener] of Object.entries(this.listeners)) {
       this.host.addEventListener(type, listener, type === "wheel" ? { passive: false } : undefined);
@@ -176,6 +178,27 @@ export class GraphViewport {
     this.view.x -= event.deltaX;
     this.view.y -= event.deltaY;
     this.applyView();
+  }
+
+  handleKeydown(event) {
+    if (event.target !== this.host
+      || this.host.ownerDocument?.activeElement !== this.host
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || this.drag
+      || this.pan
+      || this.pinch) return;
+    const step = this.keyboardPanStep;
+    const movement = {
+      ArrowLeft: { x: step, y: 0 },
+      ArrowRight: { x: -step, y: 0 },
+      ArrowUp: { x: 0, y: step },
+      ArrowDown: { x: 0, y: -step },
+    }[event.key];
+    if (!movement) return;
+    event.preventDefault();
+    this.setView({ ...this.view, x: this.view.x + movement.x, y: this.view.y + movement.y });
   }
 
   screenToWorld(clientX, clientY) {
