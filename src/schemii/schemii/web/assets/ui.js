@@ -8,6 +8,7 @@ const sharedUi = await import(
 
 export const {
   closeDetailsMenus,
+  createDialogFocusController,
   createIconButton,
   createIconElement,
   createStatePanel,
