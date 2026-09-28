@@ -30,6 +30,14 @@ import { createModelAssistant } from "#common/model-assistant.js";
 
 const $ = id => document.getElementById(id), API = "/api/v1/schemoo";
 const MODEL_EXECUTION_TIMEOUT_MS = 900_000;
+function setModelName(value) {
+  const input = $("model-name");
+  input.value = value;
+  input.title = value;
+  $("model-name-display").textContent = value;
+  if (value) $("model-name-heading").setAttribute("aria-label", value);
+  else $("model-name-heading").removeAttribute("aria-label");
+}
 let catalog, draft, canvas, plan, diagnostics = {}, selected, storageKey, timer, version = 0, busy = false;
 let model, saving = false, dirty = false, conflicted = false, catalogTicket = 0;
 let initialLayout;
@@ -696,7 +704,7 @@ async function loadModel(id) {
   sourceAdditions=reconcileSourceCatalog(draft,catalog);
   if (columnEditor) disposeSelects(columnEditor.element);
   columnEditor=null; expandedFilterColumns.clear();
-  $("model-name").disabled=false; $("model-name").value=model.name;
+  $("model-name").disabled=false; setModelName(model.name);
   $("reload-model").disabled=false; $("delete-model").disabled=false;
   $("target").textContent=`${catalog.database}.${catalog.namespace}`; $("limitations").textContent=catalog.notice;
   storageKey=catalog.workspaceId ? `schemoo-prototype-v2:${catalog.workspaceId}` : null;
@@ -750,7 +758,7 @@ async function saveModel() {
   } finally { saving=false; $("workbench").inert=false; $("model-name").disabled=false; save(); }
 }
 
-$("model-name").oninput=save;
+$("model-name").oninput=()=>{setModelName($("model-name").value);save();};
 $("save-model").onclick=saveModel;
 function openLibrary() {
   return openModelLibrary(loadModel, {
@@ -762,7 +770,7 @@ function openLibrary() {
 function clearDeletedModel() {
   dirty=false; model=null; canvas?.destroy(); canvas=null; draft=null; clearTimeout(timer); version++;
   void previewLibrary.load(null);
-  $("model-name").value=""; $("model-name").disabled=true; $("save-model").disabled=true; $("reload-model").disabled=true; $("delete-model").disabled=true; $("run").disabled=true; $("workbench").inert=true;
+  setModelName(""); $("model-name").disabled=true; $("save-model").disabled=true; $("reload-model").disabled=true; $("delete-model").disabled=true; $("run").disabled=true; $("workbench").inert=true;
   $("target").textContent="Choose a saved model or create one"; $("draft-status").textContent="Model deleted";
   const url=new URL(location.href);url.searchParams.delete("model");history.replaceState(null,"",url);
   void assistant.modelChanged();

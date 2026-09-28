@@ -20,6 +20,7 @@ from schemii.schemii.designs.models import (
     DesignRelationship,
     DesignTable,
     DesignTrigger,
+    DesignType,
     DesignView,
     SchemiiDesignContent,
 )
@@ -191,6 +192,394 @@ def test_routine_identity_and_return_changes_are_blocked(definition: str, code: 
     assert [warning.code for warning in blockers] == [code]
     assert blockers[0].object_path.startswith(f"functions.{desired.functions[0].name}(")
     assert "restore the original" in blockers[0].message
+
+
+def test_mixed_object_plan_matches_pre_refactor_golden() -> None:
+    """Preserve the exact mixed-object plan produced before planner extraction."""
+
+    customer_id = _column("a", "id", "bigint", nullable=False)
+    customer_name = _column("b", "display_name", "varchar(40)")
+    legacy = _column("c", "legacy_code", "text")
+    amount = _column("d", "amount", "bigint")
+    customers = _table(
+        "a",
+        "customers",
+        [customer_id, customer_name, legacy, amount],
+        keys=[DesignKeyConstraint(
+            id=_id("key", "a"),
+            name="customers_pkey",
+            kind="primary",
+            column_ids=[customer_id.id],
+        )],
+        checks=[DesignCheckConstraint(
+            id=_id("check", "a"),
+            name="customers_name_check",
+            expression="display_name <> ''",
+            column_ids=[customer_name.id],
+        )],
+        indexes=[DesignIndex(
+            id=_id("index", "a"),
+            name="customers_display_idx",
+            column_ids=[customer_name.id],
+        )],
+    )
+    order_id = _column("e", "id", "bigint", nullable=False)
+    order_customer_id = _column("f", "customer_id", "bigint")
+    orders = _table(
+        "b",
+        "orders",
+        [order_id, order_customer_id],
+        keys=[DesignKeyConstraint(
+            id=_id("key", "b"),
+            name="orders_pkey",
+            kind="primary",
+            column_ids=[order_id.id],
+        )],
+    )
+    retired = _table("d", "retired_items", [_column("3", "id", "bigint", nullable=False)])
+    relationship = DesignRelationship(
+        id=_id("relationship", "a"),
+        name="orders_customer_fkey",
+        source_table_id=orders.id,
+        source_column_ids=[order_customer_id.id],
+        target_table_id=customers.id,
+        target_column_ids=[customer_id.id],
+    )
+    routine = _routine(
+        "CREATE FUNCTION total_orders() RETURNS bigint LANGUAGE sql AS $$ SELECT 1 $$"
+    )
+    trigger = DesignTrigger.model_validate({
+        "id": _id("trigger", "a"),
+        "definition": (
+            "CREATE TRIGGER orders_audit AFTER UPDATE ON orders "
+            "FOR EACH ROW EXECUTE FUNCTION audit_order();"
+        ),
+    })
+    live = SchemiiDesignContent(
+        types=[DesignType.model_validate({
+            "id": _id("type", "a"),
+            "definition": "CREATE DOMAIN old_code AS text CHECK (VALUE <> '')",
+        })],
+        tables=[customers, orders, retired],
+        relationships=[relationship],
+        functions=[routine],
+        views=[DesignView(
+            id=_id("view", "a"),
+            name="order_totals",
+            kind="view",
+            definition="SELECT customer_id, count(*) AS total FROM orders GROUP BY customer_id",
+        )],
+        triggers=[trigger],
+    )
+
+    desired_customers = customers.model_copy(deep=True)
+    email_id = _id("column", "0")
+    desired_customers.columns = [
+        customer_id.model_copy(deep=True),
+        DesignColumn(id=customer_name.id, name="name", data_type="varchar(80)"),
+        DesignColumn(id=email_id, name="email", data_type="text"),
+        DesignColumn(id=amount.id, name="amount", data_type="integer"),
+    ]
+    desired_customers.checks = [DesignCheckConstraint(
+        id=_id("check", "a"),
+        name="customers_name_check",
+        expression="name <> 'blocked'",
+        column_ids=[customer_name.id],
+    )]
+    desired_customers.indexes = [DesignIndex(
+        id=_id("index", "b"),
+        name="customers_email_idx",
+        column_ids=[email_id],
+    )]
+    log_id = _column("1", "id", "bigint", nullable=False, identity="always")
+    log_event = _column(
+        "2", "event", "text", nullable=False, default_expression="'created'::text"
+    )
+    desired = SchemiiDesignContent(
+        types=[DesignType.model_validate({
+            "id": _id("type", "b"),
+            "definition": "CREATE TYPE order_state AS ENUM ('pending', 'complete')",
+        })],
+        tables=[
+            desired_customers,
+            orders.model_copy(deep=True),
+            _table(
+                "c",
+                "audit_log",
+                [log_id, log_event],
+                keys=[DesignKeyConstraint(
+                    id=_id("key", "c"),
+                    name="audit_log_pkey",
+                    kind="primary",
+                    column_ids=[log_id.id],
+                )],
+                checks=[DesignCheckConstraint(
+                    id=_id("check", "c"),
+                    name="audit_log_event_check",
+                    expression="event <> ''",
+                    column_ids=[log_event.id],
+                )],
+                indexes=[DesignIndex(
+                    id=_id("index", "c"),
+                    name="audit_log_event_idx",
+                    column_ids=[log_event.id],
+                )],
+            ),
+        ],
+        relationships=[relationship.model_copy(update={"on_delete": "CASCADE"})],
+        functions=[_routine(
+            "CREATE FUNCTION total_orders() RETURNS bigint LANGUAGE sql AS $$ SELECT 2 $$"
+        )],
+        views=[DesignView(
+            id=_id("view", "a"),
+            name="order_totals",
+            kind="view",
+            definition=(
+                "SELECT customer_id, count(*) FILTER (WHERE id > 0) AS total "
+                "FROM orders GROUP BY customer_id"
+            ),
+        )],
+        triggers=[DesignTrigger.model_validate({
+            "id": _id("trigger", "a"),
+            "definition": (
+                "CREATE TRIGGER orders_audit AFTER INSERT ON orders "
+                "FOR EACH ROW EXECUTE FUNCTION audit_order();"
+            ),
+        })],
+    )
+
+    steps, blockers = compile_migration_steps("public", live, desired)
+
+    assert [step.model_dump(mode="json") for step in steps] == [
+        {
+            "index": 1,
+            "object_kind": "relationship",
+            "object_path": "relationships.orders_customer_fkey",
+            "operation": "drop",
+            "sql": 'ALTER TABLE "public"."orders" DROP CONSTRAINT "orders_customer_fkey";',
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 2,
+            "object_kind": "trigger",
+            "object_path": "triggers.orders.orders_audit",
+            "operation": "drop",
+            "sql": 'DROP TRIGGER "orders_audit" ON "public"."orders";',
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 3,
+            "object_kind": "index",
+            "object_path": "tables.customers.indexes.customers_display_idx",
+            "operation": "drop",
+            "sql": 'DROP INDEX "public"."customers_display_idx";',
+            "destructive": True,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 4,
+            "object_kind": "constraint",
+            "object_path": "tables.customers.checks.customers_name_check",
+            "operation": "drop",
+            "sql": 'ALTER TABLE "public"."customers" DROP CONSTRAINT "customers_name_check";',
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 5,
+            "object_kind": "column",
+            "object_path": "tables.customers.columns.legacy_code",
+            "operation": "drop",
+            "sql": 'ALTER TABLE "public"."customers" DROP COLUMN "legacy_code";',
+            "destructive": True,
+            "requires_lock": True,
+            "data_movement": True,
+        },
+        {
+            "index": 6,
+            "object_kind": "table",
+            "object_path": "tables.retired_items",
+            "operation": "drop",
+            "sql": 'DROP TABLE "public"."retired_items";',
+            "destructive": True,
+            "requires_lock": True,
+            "data_movement": True,
+        },
+        {
+            "index": 7,
+            "object_kind": "type",
+            "object_path": "types.old_code",
+            "operation": "drop",
+            "sql": 'DROP DOMAIN "public"."old_code";',
+            "destructive": True,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 8,
+            "object_kind": "type",
+            "object_path": "types.order_state",
+            "operation": "create",
+            "sql": "CREATE TYPE order_state AS ENUM ('pending', 'complete');",
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 9,
+            "object_kind": "table",
+            "object_path": "tables.audit_log",
+            "operation": "create",
+            "sql": (
+                'CREATE TABLE "public"."audit_log" (\n'
+                '  "id" bigint GENERATED ALWAYS AS IDENTITY NOT NULL,\n'
+                '  "event" text DEFAULT \'created\'::text NOT NULL,\n'
+                '  CONSTRAINT "audit_log_pkey" PRIMARY KEY ("id"),\n'
+                '  CONSTRAINT "audit_log_event_check" CHECK (event <> \'\')\n'
+                ');'
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 10,
+            "object_kind": "column",
+            "object_path": "tables.customers.columns.name",
+            "operation": "rename",
+            "sql": 'ALTER TABLE "public"."customers" RENAME COLUMN "display_name" TO "name";',
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 11,
+            "object_kind": "column",
+            "object_path": "tables.customers.columns.email",
+            "operation": "add",
+            "sql": 'ALTER TABLE "public"."customers" ADD COLUMN "email" text;',
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 12,
+            "object_kind": "column",
+            "object_path": "tables.customers.columns.name",
+            "operation": "alter_type",
+            "sql": 'ALTER TABLE "public"."customers" ALTER COLUMN "name" TYPE varchar(80);',
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": True,
+        },
+        {
+            "index": 13,
+            "object_kind": "function",
+            "object_path": "functions.total_orders()",
+            "operation": "replace",
+            "sql": (
+                "CREATE OR REPLACE FUNCTION total_orders() RETURNS bigint LANGUAGE sql "
+                "AS $$ SELECT 2 $$;"
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 14,
+            "object_kind": "constraint",
+            "object_path": "tables.customers.checks.customers_name_check",
+            "operation": "create",
+            "sql": (
+                'ALTER TABLE "public"."customers" ADD CONSTRAINT "customers_name_check" '
+                "CHECK (name <> 'blocked');"
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 15,
+            "object_kind": "index",
+            "object_path": "tables.audit_log.indexes.audit_log_event_idx",
+            "operation": "create",
+            "sql": (
+                'CREATE INDEX "audit_log_event_idx" ON "public"."audit_log" '
+                'USING "btree" ("event");'
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 16,
+            "object_kind": "index",
+            "object_path": "tables.customers.indexes.customers_email_idx",
+            "operation": "create",
+            "sql": (
+                'CREATE INDEX "customers_email_idx" ON "public"."customers" '
+                'USING "btree" ("email");'
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 17,
+            "object_kind": "relationship",
+            "object_path": "relationships.orders_customer_fkey",
+            "operation": "create",
+            "sql": (
+                'ALTER TABLE "public"."orders" ADD CONSTRAINT "orders_customer_fkey" '
+                'FOREIGN KEY ("customer_id") REFERENCES "public"."customers" ("id") '
+                'ON UPDATE NO ACTION ON DELETE CASCADE;'
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 18,
+            "object_kind": "view",
+            "object_path": "views.order_totals",
+            "operation": "replace",
+            "sql": (
+                'CREATE OR REPLACE VIEW "public"."order_totals" AS\n'
+                "SELECT customer_id, count(*) FILTER (WHERE id > 0) AS total "
+                "FROM orders GROUP BY customer_id;"
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+        {
+            "index": 19,
+            "object_kind": "trigger",
+            "object_path": "triggers.orders.orders_audit",
+            "operation": "create",
+            "sql": (
+                "CREATE TRIGGER orders_audit AFTER INSERT ON orders "
+                "FOR EACH ROW EXECUTE FUNCTION audit_order();"
+            ),
+            "destructive": False,
+            "requires_lock": True,
+            "data_movement": False,
+        },
+    ]
+    assert [warning.model_dump(mode="json") for warning in blockers] == [{
+        "code": "column_type_conversion_required",
+        "message": (
+            "Changing customers.amount from bigint to integer requires a reviewed USING "
+            "expression: The conversion can narrow, reinterpret, or reject existing values"
+        ),
+        "object_path": "tables.customers.columns.amount",
+    }]
 
 
 @pytest.mark.parametrize("kind", ["function", "procedure"])
