@@ -13,10 +13,10 @@ from typing import Any, get_args, get_type_hints
 from starlette.background import BackgroundTasks
 
 from fastapi import FastAPI
-from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from schemii.common.postgres.gateway import PostgresGateway
+from schemii.common.route_contexts import public_route_contexts
 from schemii.common.source_inspection import (
     SourceInspectionLimits,
     SourceControlContext,
@@ -49,20 +49,6 @@ _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 768
 _JOURNEY_STAGES = ("api", "internals", "database", "response")
-
-
-def _public_route_contexts(application: FastAPI) -> Iterable[Any]:
-    for candidate in application.routes:
-        if isinstance(candidate, APIRoute):
-            if candidate.include_in_schema:
-                yield candidate
-            continue
-        contexts = getattr(candidate, "effective_route_contexts", None)
-        if not callable(contexts):
-            continue
-        for context in contexts():
-            if context.include_in_schema:
-                yield context
 
 
 def _annotation_types(annotation: object) -> list[type[object]]:
@@ -942,7 +928,7 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
 
     routes: list[dict[str, Any]] = []
     routes_truncated = False
-    for route in _public_route_contexts(application):
+    for route in public_route_contexts(application):
         if len(routes) >= _MAX_ROUTES:
             routes_truncated = True
             break

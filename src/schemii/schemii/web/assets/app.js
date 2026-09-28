@@ -72,6 +72,7 @@ import {
 import { renderDesignViewStory } from "./view-story.js";
 import { renderRelationBrowser, renderRelationRows, pagedRowsStatus } from "./relation-browser.js";
 import { createRelationDataSource } from "./relation-data-source.js";
+import { quoteSqlIdentifier } from "./sql-identifier.js";
 import { appendDataGridPage, installAutoPageLoader } from "#common/data-grid.js";
 import { installProductNavigation } from "#common/product-navigation.js";
 import { createViewAnalysisController } from "./view-analysis.js";
@@ -3037,10 +3038,6 @@ async function loadLiveViewLineage(view, key, { force = false } = {}) {
   }
 }
 
-function quotedSqlIdentifier(value) {
-  return `"${String(value).replaceAll('"', '""')}"`;
-}
-
 function designViewDraft() {
   return {
     designId: state.designViewEditorId,
@@ -3139,7 +3136,7 @@ function openDesignViewEditor(viewId = null) {
   elements.designViewPopulate.checked = view?.populateOnCreate !== false;
   const firstTable = state.design.content.tables[0];
   elements.designViewDefinition.value = view?.definition || (firstTable
-    ? `SELECT\n    *\nFROM ${quotedSqlIdentifier(firstTable.name)}`
+    ? `SELECT\n    *\nFROM ${quoteSqlIdentifier(firstTable.name)}`
     : "SELECT\n    1 AS example");
   updateDesignViewPopulation();
   openDialog(elements.designViewDialog);
@@ -3626,10 +3623,6 @@ function scheduleDesignTriggerAnalysis(delay = 280) {
   state.designTriggerAnalysisTimer = window.setTimeout(analyzeDesignTriggerDraft, delay);
 }
 
-function quotedTriggerIdentifier(value) {
-  return `"${value.replaceAll('"', '""')}"`;
-}
-
 function defaultTriggerDefinition(relationName) {
   if (!relationName) return "";
   const triggerRoutine = state.design.content.functions.find(routine => (
@@ -3639,10 +3632,10 @@ function defaultTriggerDefinition(relationName) {
   ));
   const functionName = triggerRoutine?.name || `handle_${relationName.replaceAll(/[^a-zA-Z0-9_]+/g, "_")}_change`;
   return [
-    `CREATE TRIGGER ${quotedTriggerIdentifier(`${relationName}_changed`)}`,
-    `AFTER INSERT OR UPDATE OR DELETE ON ${quotedTriggerIdentifier(relationName)}`,
+    `CREATE TRIGGER ${quoteSqlIdentifier(`${relationName}_changed`)}`,
+    `AFTER INSERT OR UPDATE OR DELETE ON ${quoteSqlIdentifier(relationName)}`,
     "FOR EACH ROW",
-    `EXECUTE FUNCTION ${quotedTriggerIdentifier(functionName)}();`,
+    `EXECUTE FUNCTION ${quoteSqlIdentifier(functionName)}();`,
   ].join("\n");
 }
 
