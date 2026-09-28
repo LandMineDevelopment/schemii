@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -252,6 +253,50 @@ class ReportAuthorFixturesTest(unittest.TestCase):
             "Do not edit or delete the retained starter fixtures",
             lane["scenarios"][0]["instructions"],
         )
+
+    def test_reprovision_rejects_retained_model_definition_drift(self):
+        user = FixtureUser(self.slot)
+        provision.ensure_report_author_fixture(self.directory, self.registry, self.slot, user)
+        model_id = self.slot["reportAuthorFixture"]["modelId"]
+        original = deepcopy(user.models[model_id])
+        changed_definitions = {
+            "missing_orders_node": {**original["definition"], "nodes": []},
+            "changed_node_label": {**original["definition"], "nodes": [
+                {**original["definition"]["nodes"][0], "label": "Other"}]},
+            "added_scope": {**original["definition"], "scopes": [{"id": "extra"}]},
+            "restricted_fields": {**original["definition"], "exposedFields": [
+                {"table": "orders", "column": "id"}]},
+        }
+        for change, definition in changed_definitions.items():
+            with self.subTest(change=change):
+                user.models[model_id] = {**original, "definition": definition}
+                with self.assertRaisesRegex(ValueError, "model definition drift"):
+                    provision.ensure_report_author_fixture(
+                        self.directory, self.registry, self.slot, user
+                    )
+                self.assertEqual(user.models[model_id]["definition"], definition)
+
+    def test_reprovision_rejects_retained_orders_tile_drift(self):
+        user = FixtureUser(self.slot)
+        provision.ensure_report_author_fixture(self.directory, self.registry, self.slot, user)
+        dashboard_id = self.slot["reportAuthorFixture"]["dashboardId"]
+        original = deepcopy(user.dashboards[dashboard_id])
+        tile = original["tiles"][0]
+        changed_tiles = {
+            "removed": [],
+            "kind": [{**tile, "kind": "aggregate"}],
+            "fields": [{**tile, "detailFields": tile["detailFields"][:-1]}],
+            "limit": [{**tile, "limit": 10}],
+            "filter": [{**tile, "reportFilters": [{"id": "changed"}]}],
+        }
+        for change, tiles in changed_tiles.items():
+            with self.subTest(change=change):
+                user.dashboards[dashboard_id] = {**original, "tiles": tiles}
+                with self.assertRaisesRegex(ValueError, "Orders tile drift"):
+                    provision.ensure_report_author_fixture(
+                        self.directory, self.registry, self.slot, user
+                    )
+                self.assertEqual(user.dashboards[dashboard_id]["tiles"], tiles)
 
     def test_provision_migrates_only_the_known_legacy_report_author_grant(self):
         grant = {

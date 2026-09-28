@@ -23,6 +23,7 @@ SOURCE_PATHS = {"schemoo": "/api/v1/schemoo/models", "schemii": "/api/v1/schemii
 SUPPORTED_FIXTURE_VERSIONS = {"qa-v1", DEFINITIONS["fixtureVersion"]}
 MODEL_ID = re.compile(r"^model_[0-9a-f]{32}$")
 DASHBOARD_ID = re.compile(r"^dashboard_[0-9a-f]{32}$")
+REPORT_AUTHOR_DETAIL_COLUMNS = ("id", "ordered_on", "status", "amount")
 
 
 def private_read(path):
@@ -204,11 +205,18 @@ def _verify_report_author_model(model, slot):
     if (model.get("id") != fixture["modelId"] or model.get("ownerId") != slot.get("accountId")
             or model.get("name") != report_author_model_name(slot["username"])
             or model.get("connectionId") != slot.get("connectionId")
-            or model.get("namespace") != slot["schema"]
-            or model.get("definition", {}).get("root") != "orders"
-            or not any(node.get("id") == "orders" and node.get("table") == "orders"
-                       for node in model.get("definition", {}).get("nodes", []))):
+            or model.get("namespace") != slot["schema"]):
         raise ValueError(f"Retained report-author model ownership or source drift: {slot['username']}")
+    definition = model.get("definition")
+    nodes = definition.get("nodes") if isinstance(definition, dict) else None
+    if (not isinstance(nodes, list) or len(nodes) != 1 or not isinstance(nodes[0], dict)
+            or definition.get("root") != "orders"
+            or any(nodes[0].get(key) != value for key, value in
+                   (("id", "orders"), ("table", "orders"), ("label", "Orders")))
+            or nodes[0].get("derivation") is not None
+            or definition.get("edges") != [] or definition.get("scopes") != []
+            or definition.get("exposedFields") is not None):
+        raise ValueError(f"Retained report-author model definition drift: {slot['username']}")
 
 
 def _verify_report_author_dashboard(dashboard, slot):
@@ -217,6 +225,22 @@ def _verify_report_author_dashboard(dashboard, slot):
             or dashboard.get("name") != report_author_dashboard_name(slot["username"])
             or dashboard.get("modelId") != fixture["modelId"]):
         raise ValueError(f"Retained report-author dashboard ownership or model drift: {slot['username']}")
+    tiles = dashboard.get("tiles")
+    if not isinstance(tiles, list) or len(tiles) != 1 or not isinstance(tiles[0], dict):
+        raise ValueError(f"Retained report-author Orders tile drift: {slot['username']}")
+    tile = tiles[0]
+    fields = tile.get("detailFields")
+    if (dashboard.get("optionalFilters", []) != [] or dashboard.get("selections", {}) != {}
+            or tile.get("id") != "qa-orders" or tile.get("title") != "Orders · sample"
+            or tile.get("kind") != "detail" or tile.get("limit") != 100
+            or tile.get("dimensions", []) != [] or tile.get("measures", []) != []
+            or tile.get("selections", {}) != {} or tile.get("reportFilters", []) != []
+            or tile.get("timeAnalysis") is not None
+            or not isinstance(fields, list) or len(fields) != len(REPORT_AUTHOR_DETAIL_COLUMNS)
+            or any(not isinstance(field, dict) or field.get("table") != "orders"
+                   or field.get("column") != column or field.get("aggregate", "none") != "none"
+                   for field, column in zip(fields, REPORT_AUTHOR_DETAIL_COLUMNS))):
+        raise ValueError(f"Retained report-author Orders tile drift: {slot['username']}")
 
 
 def _expected_missing_resource(error, kind):
@@ -312,7 +336,7 @@ def ensure_report_author_fixture(directory, registry, slot, user):
             "name": dashboard_name, "modelId": model_id, "modelRevision": model["revision"],
             "tiles": [{"id": "qa-orders", "title": "Orders · sample", "kind": "detail",
                        "detailFields": [{"table": "orders", "column": column}
-                                        for column in ("id", "ordered_on", "status", "amount")],
+                                        for column in REPORT_AUTHOR_DETAIL_COLUMNS],
                        "limit": 100}],
         }, expected=201)
         dashboard_id = dashboard["id"]
