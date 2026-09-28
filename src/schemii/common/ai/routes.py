@@ -29,12 +29,8 @@ class ApiCredentialCreate(BaseModel):
         return value
 
 
-class ZenGrant(BaseModel):
+class _ConnectionScopeGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    userId: str = Field(min_length=1, max_length=128)
-    product: str = Field(pattern="^(schemii|schemoo|schemer)$")
-    connectionOwnerId: str | None = Field(default=None, max_length=128)
-    connectionId: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
 
     @model_validator(mode="after")
     def valid_scope(self):
@@ -43,6 +39,13 @@ class ZenGrant(BaseModel):
         if self.connectionId is None and self.product != "schemii":
             raise ValueError("Only Schemii supports detached workspaces")
         return self
+
+
+class ZenGrant(_ConnectionScopeGrant):
+    userId: str = Field(min_length=1, max_length=128)
+    product: str = Field(pattern="^(schemii|schemoo|schemer)$")
+    connectionOwnerId: str | None = Field(default=None, max_length=128)
+    connectionId: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
 
 
 class SharedCodexGrant(ZenGrant):
@@ -55,20 +58,11 @@ class SharedCodexExactGrant(ZenGrant):
     reasoningEffort: Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
-class RoleGrant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class RoleGrant(_ConnectionScopeGrant):
     roleId: str = Field(min_length=1, max_length=128)
     product: str = Field(pattern="^(schemii|schemoo|schemer)$")
     connectionOwnerId: str | None = Field(default=None, max_length=128)
     connectionId: str | None = Field(default=None, pattern=r"^pg_[0-9a-f]{32}$")
-
-    @model_validator(mode="after")
-    def valid_scope(self):
-        if (self.connectionOwnerId is None) != (self.connectionId is None):
-            raise ValueError("Both connection identity fields are required")
-        if self.connectionId is None and self.product != "schemii":
-            raise ValueError("Only Schemii supports detached workspaces")
-        return self
 
 
 class SharedCodexRoleGrant(RoleGrant):
