@@ -23,7 +23,7 @@ const el = (tag, className, text) => {
 export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectNode, onSelectEdge, onCreateConnection, connectionButton }) {
   host.classList.add("sc-canvas");
   host.tabIndex = 0;
-  host.setAttribute("aria-label", "Semantic model canvas. Drag background to pan; scroll to zoom.");
+  host.setAttribute("aria-label", "Semantic model canvas. Drag background or focus the canvas and use arrow keys to pan; focus a source and use arrow keys to move it; scroll to zoom.");
   const stage = el("div", "sc-stage"), cards = el("div", "sc-cards");
   const edges = svgNode("svg", { class: "sc-edges", "aria-label": "Model relationships" });
   stage.append(edges, cards);
