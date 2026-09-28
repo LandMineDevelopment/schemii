@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
   closeDetailsMenus,
+  createDialogFocusController,
   createStatePanel,
   DockPane,
   ICONS,
@@ -13,6 +15,7 @@ import {
   isOverflowingText,
   renderStatePanel,
   setControlLoading,
+  hydrateIconControls,
 } from "../../src/schemii/common/web/assets/ui.js";
 
 class ClassList {
@@ -57,6 +60,9 @@ class Target {
   focus() { this.focused = true; this.ownerDocument.activeElement = this; }
   blur() { this.ownerDocument.activeElement = null; }
   click() { for (const callback of this.listeners.get("click") || []) callback({ target: this }); }
+  dispatch(type, event = {}) {
+    for (const callback of this.listeners.get(type) || []) callback({ type, target: this, ...event });
+  }
 }
 
 class ElementTarget extends Target {
@@ -77,8 +83,40 @@ class ElementTarget extends Target {
 function uiDocument() {
   const documentRef = new Target(null);
   documentRef.ownerDocument = documentRef;
-  documentRef.createElement = tagName => new ElementTarget(documentRef, tagName);
+  documentRef.createElement = tagName => tagName === "template"
+    ? new TemplateTarget(documentRef)
+    : new ElementTarget(documentRef, tagName);
   return documentRef;
+}
+
+class TemplateTarget {
+  constructor(documentRef) {
+    this.content = { firstElementChild: null };
+    this.documentRef = documentRef;
+  }
+
+  set innerHTML(_markup) {
+    this.content.firstElementChild = new ElementTarget(this.documentRef, "svg");
+  }
+}
+
+class DialogTarget extends Target {
+  constructor(documentRef) {
+    super(documentRef);
+    this.open = false;
+  }
+
+  showModal() {
+    this.open = true;
+    this.ownerDocument.activeElement = this;
+  }
+
+  close() {
+    this.open = false;
+    this.dispatch("close");
+  }
+
+  contains(target) { return target === this || target.dialog === this; }
 }
 
 function dockFixture() {
@@ -110,6 +148,76 @@ test("shared icon registry preserves the legacy visual vocabulary", () => {
     assert.match(ICONS[name], /^<svg viewBox="0 0 20 20" aria-hidden="true">/);
   }
   assert.equal(Object.isFrozen(ICONS), true);
+});
+
+test("icon controls have a text fallback before hydration and inherit tooltip placement", async () => {
+  const css = await readFile(new URL("../../src/schemii/common/web/assets/ui.css", import.meta.url), "utf8");
+  const html = await readFile(new URL("../../src/schemii/schemii/web/index.html", import.meta.url), "utf8");
+  assert.match(css, /\[data-ui-icon\]:not\(\.ui-icon-hydrated\)::before[^}]*content:\s*attr\(aria-label\)/);
+  assert.match(html, /class="tool-rail"[^>]*data-ui-tooltip-placement="right"/);
+
+  const documentRef = uiDocument();
+  const group = { dataset: { uiTooltipPlacement: "right" } };
+  const inherited = new ElementTarget(documentRef, "button");
+  inherited.dataset.uiIcon = "refresh";
+  inherited.setAttribute("aria-label", "Refresh catalog");
+  inherited.closest = selector => selector === "[data-ui-tooltip-placement]" ? group : null;
+  const explicit = new ElementTarget(documentRef, "button");
+  explicit.dataset.uiIcon = "close";
+  explicit.dataset.uiTooltipPlacement = "left";
+  explicit.setAttribute("aria-label", "Close inspector");
+  explicit.closest = selector => selector === "[data-ui-tooltip-placement]" ? group : null;
+  const root = {
+    querySelectorAll(selector) {
+      if (selector === "[data-ui-icon]") return [inherited, explicit];
+      return [];
+    },
+  };
+
+  hydrateIconControls(root);
+
+  assert.equal(inherited.dataset.uiTooltipPlacement, "right");
+  assert.equal(explicit.dataset.uiTooltipPlacement, "left");
+  assert.equal(inherited.classList.contains("ui-icon-hydrated"), true);
+  assert.equal(inherited.childNodes[0].tagName, "SVG");
+  assert.equal(inherited.getAttribute("aria-label"), "Refresh catalog");
+});
+
+test("modal focus returns through nested and programmatic close paths", () => {
+  const documentRef = uiDocument();
+  const originalTrigger = new Target(documentRef);
+  const editorTrigger = new Target(documentRef);
+  const editor = new DialogTarget(documentRef);
+  const confirmation = new DialogTarget(documentRef);
+  editorTrigger.dialog = editor;
+  documentRef.querySelectorAll = () => [editor, confirmation].filter(dialog => dialog.open);
+  const focus = createDialogFocusController(documentRef);
+
+  originalTrigger.focus();
+  focus.open(editor);
+  editorTrigger.focus();
+  focus.open(confirmation);
+  confirmation.close();
+  assert.equal(documentRef.activeElement, editorTrigger);
+
+  editor.close();
+  assert.equal(documentRef.activeElement, originalTrigger);
+});
+
+test("modal focus restoration skips an invoking control removed before close", () => {
+  const documentRef = uiDocument();
+  const trigger = new Target(documentRef);
+  const dialog = new DialogTarget(documentRef);
+  documentRef.querySelectorAll = () => dialog.open ? [dialog] : [];
+  const focus = createDialogFocusController(documentRef);
+
+  trigger.focus();
+  focus.open(dialog);
+  trigger.isConnected = false;
+  dialog.close();
+
+  assert.equal(dialog.focused, false);
+  assert.equal(documentRef.activeElement, dialog);
 });
 
 test("overflow detection covers clipped inline and wrapped text", () => {
