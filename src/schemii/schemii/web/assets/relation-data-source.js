@@ -1,9 +1,7 @@
-function quoteIdentifier(value) {
-  return `"${String(value).replaceAll('"', '""')}"`;
-}
+import { quoteSqlIdentifier } from "./sql-identifier.js";
 
 export function relationSelectStatement(namespace, relationName, limit = 100) {
-  return `SELECT *\nFROM ${quoteIdentifier(namespace)}.${quoteIdentifier(relationName)}\nLIMIT ${limit};`;
+  return `SELECT *\nFROM ${quoteSqlIdentifier(namespace)}.${quoteSqlIdentifier(relationName)}\nLIMIT ${limit};`;
 }
 
 export function createRelationDataSource({ api, getWorkspace }) {
