@@ -4,6 +4,8 @@ The previous Schemii and Schemer implementation is preserved under [`archive/`](
 
 New unified-backend and Schemii, Schemoo, and Schemer frontend architecture work belongs at the repository root. Archived code should remain unchanged unless an explicit archival correction is required.
 
+The [September 29 project audit](docs/audits/2026-09-29-project-audit.md) provides the prioritized improvement baseline, reconciled backlog, development-history findings, verification results, and cleanup record.
+
 ## Scope
 
 Schemii is a local, self-hosted PostgreSQL design and analytics workbench made up of three connected products:
