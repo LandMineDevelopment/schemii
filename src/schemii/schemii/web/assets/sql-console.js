@@ -384,6 +384,7 @@ export function createSqlConsole({
       : queries[0].id;
     historyItems = [];
     savedQueryItems = [];
+    libraryLoading = false;
     libraryError = null;
     draft.value = activeQuery()?.sql || "";
     persistQueries();
@@ -648,7 +649,8 @@ export function createSqlConsole({
   }
 
   async function refreshLibrary(expectedWorkspaceId = workspaceId, expectedGeneration = generation) {
-    if (!expectedWorkspaceId || !queryTabs) return;
+    const current = workspace();
+    if (!queryTabs || current?.id !== expectedWorkspaceId || !available(current)) return;
     libraryLoading = true;
     libraryError = null;
     renderQueryDrawer();
@@ -1350,7 +1352,7 @@ export function createSqlConsole({
   }
 
   async function restoreTransaction(current, expectedGeneration) {
-    if (!supportsWrite || !current?.id) return;
+    if (!supportsWrite || !available(current)) return;
     const transactionId = storedValue(consoleStorageKey(current.id, "raw-session-id"));
     if (!/^raw_[0-9a-f]{32}$/.test(transactionId || "")) return;
     busy = true;

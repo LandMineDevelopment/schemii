@@ -972,7 +972,7 @@ body { min-width: 0; color: var(--text); background: var(--bg); }
   .sql-body { min-height: 0; }
   .sql-results { min-height: 0; }
   .sql-result-viewport { overflow-x: auto; }
-  .sql-editor-panel footer span { display: none; }
+  .sql-editor-panel footer span { min-width: 0; color: #aeb8c4; font-size: 10px; line-height: 1.4; }
   .sql-pane-heading em { font-size: 7px; }
   .ui-dialog__head p { font-size: 8px; }
   .dialog-toolbar { flex-wrap: wrap; }
