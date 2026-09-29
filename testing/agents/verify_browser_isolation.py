@@ -9,6 +9,7 @@ account, provider turn, credential export, or persistent proof directory is made
 
 import argparse
 import base64
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -226,22 +227,31 @@ def ephemeral_overrides(config: dict) -> dict:
         REQUIRED_TOOLS - set(TEST_ONLY_TOOLS) <= set(allowed),
         "Project browser allowlist lacks a required primitive",
     )
-    overrides = {}
-    for name in servers:
-        # Quoted segments keep dots in an MCP name from becoming key traversal.
-        overrides[f"mcp_servers.{json.dumps(name)}.enabled"] = name == SERVER
-    prefix = f"mcp_servers.{json.dumps(SERVER)}"
-    overrides[f"{prefix}.required"] = True
-    overrides[f"{prefix}.enabled_tools"] = sorted(set(allowed) | set(TEST_ONLY_TOOLS))
-    overrides[f"{prefix}.disabled_tools"] = [
+    # thread/start splits dotted override keys literally; unlike the CLI's TOML
+    # syntax it does not unquote path segments. Override the JSON table instead
+    # so server/plugin names retain their exact identity, including any dots.
+    test_servers = deepcopy(servers)
+    for name, entry in test_servers.items():
+        entry["enabled"] = name == SERVER
+    test_browser = test_servers[SERVER]
+    test_browser["required"] = True
+    test_browser["enabled_tools"] = sorted(set(allowed) | set(TEST_ONLY_TOOLS))
+    test_browser["disabled_tools"] = [
         tool
         for tool in browser.get("disabled_tools", [])
         if tool not in TEST_ONLY_TOOLS
     ]
     # Installed plugins may contribute additional MCP servers. Disable them only
     # in these throwaway thread configs, then verify the actual runtime inventory.
-    for name in config.get("plugins") or {}:
-        overrides[f"plugins.{json.dumps(name)}.enabled"] = False
+    # Codex generates its built-in codex_apps server outside mcp_servers. This
+    # fixed simple key disables it in the test threads without changing the
+    # user's installed Apps or provider settings.
+    overrides = {"mcp_servers": test_servers, "features.apps": False}
+    plugins = deepcopy(config.get("plugins") or {})
+    if plugins:
+        for entry in plugins.values():
+            entry["enabled"] = False
+        overrides["plugins"] = plugins
     return overrides
 
 

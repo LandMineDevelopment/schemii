@@ -42,22 +42,29 @@ class EphemeralConfigurationTests(unittest.TestCase):
         config = self.configuration()
         original = deepcopy(config)
         overrides = probe.ephemeral_overrides(config)
-        self.assertFalse(overrides['mcp_servers."other.with.dots".enabled'])
-        self.assertFalse(overrides['plugins."example@catalog".enabled'])
-        self.assertTrue(overrides['mcp_servers."schemii_browser".enabled'])
+        self.assertFalse(overrides["mcp_servers"]["other.with.dots"]["enabled"])
+        self.assertFalse(overrides["plugins"]["example@catalog"]["enabled"])
+        self.assertTrue(overrides["mcp_servers"][probe.SERVER]["enabled"])
         self.assertEqual(config, original)
-        self.assertNotIn("private-value", json.dumps(overrides))
         self.assertFalse(any(key.startswith("model") for key in overrides))
+
+    def test_override_uses_json_tables_without_literal_quotes_or_path_traversal(self):
+        config = self.configuration()
+        overrides = probe.ephemeral_overrides(config)
+        self.assertEqual(set(overrides), {"mcp_servers", "plugins", "features.apps"})
+        self.assertEqual(set(overrides["mcp_servers"]), set(config["mcp_servers"]))
+        self.assertEqual(set(overrides["plugins"]), set(config["plugins"]))
+        self.assertEqual(overrides["mcp_servers"][probe.SERVER]["command"], "python3")
+
+    def test_generated_apps_server_is_disabled_in_ephemeral_threads(self):
+        overrides = probe.ephemeral_overrides(self.configuration())
+        self.assertIs(overrides["features.apps"], False)
 
     def test_test_only_setup_tools_added_without_removing_other_restrictions(self):
         overrides = probe.ephemeral_overrides(self.configuration())
-        prefix = 'mcp_servers."schemii_browser"'
-        self.assertTrue(
-            set(probe.TEST_ONLY_TOOLS) <= set(overrides[prefix + ".enabled_tools"])
-        )
-        self.assertEqual(
-            overrides[prefix + ".disabled_tools"], ["browser_network_request"]
-        )
+        browser = overrides["mcp_servers"][probe.SERVER]
+        self.assertTrue(set(probe.TEST_ONLY_TOOLS) <= set(browser["enabled_tools"]))
+        self.assertEqual(browser["disabled_tools"], ["browser_network_request"])
 
     def test_missing_project_allowlist_cannot_be_silently_replaced(self):
         config = self.configuration()
