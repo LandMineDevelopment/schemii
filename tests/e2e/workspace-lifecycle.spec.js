@@ -133,6 +133,7 @@ test("detached design never loads Console data in the background", async ({ page
   await expect(page.locator("#toast.error")).toBeHidden();
   await page.getByRole("button", { name: "SQL", exact: true }).click();
   await expect(page.locator("#sql-editor-status")).toHaveText("A database-backed workspace is required to run SQL.");
+  await expect(page.locator("#sql-editor-status")).toBeVisible();
   await expect(page.getByRole("button", { name: "Run current statement" })).toBeDisabled();
   expect(consoleRequests.filter(url => url.includes(`/workspaces/${workspaceId}/console/`))).toEqual([]);
 });
