@@ -1,10 +1,13 @@
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
-from testing.harness.cleanup_schemii_sweep import cleanup, owned_workspaces
+from testing.harness.cleanup_schemii_sweep import cleanup, cleanup_guard, owned_workspaces, process_birth
 from testing.harness.schemii_sweep import ACCOUNTS, WRITERS
 from testing.harness.schemii_workspaces import journal_path, seed
 
@@ -21,6 +24,7 @@ class FakeClient:
     fail_after = None
     fail_after_create = None
     deletes = []
+    delete_failure = None
 
     def login(self, slot):
         self.username = slot["username"]
@@ -55,7 +59,13 @@ class FakeClient:
                 raise RuntimeError("interrupted after create")
             return item
         if method == "DELETE":
+            if self.delete_failure == len(self.deletes) + 1:
+                raise RuntimeError("injected cleanup failure")
             self.deletes.append((self.username, path))
+            collection = (self.chats if "/ai/chats/" in path else self.connections
+                          if path.startswith("/api/v1/connections/") else self.workspaces)
+            object_id = path.split("?")[0].rsplit("/", 1)[1]
+            collection[self.username] = [item for item in collection.get(self.username, []) if item["id"] != object_id]
             return None
         raise AssertionError((method, path))
 
@@ -69,9 +79,14 @@ class SchemiiOwnershipTest(unittest.TestCase):
         FakeClient.fail_after = None
         FakeClient.fail_after_create = None
         FakeClient.deletes = []
+        FakeClient.delete_failure = None
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        self.cleanup_root = patch("testing.harness.cleanup_schemii_sweep.ROOT", self.root)
+        self.cleanup_root.start()
+        self.addCleanup(self.cleanup_root.stop)
         self.slots = []
         for username in ACCOUNTS:
             slot = {"username": username, "provisioned": True, "connectionId": "pg_" + "1" * 32}
@@ -85,6 +100,9 @@ class SchemiiOwnershipTest(unittest.TestCase):
         self.addCleanup(self.client_patch.stop)
 
     def run_data(self, fixture, tag="test1"):
+        run_dir = self.root / "qa-test-run"
+        run_dir.mkdir(exist_ok=True)
+        (run_dir / "controller-owner.json").write_text(json.dumps({"pid": 2147483647, "birthTick": "1"}))
         lanes = []
         for username in ACCOUNTS:
             item = fixture["lanes"][username]
@@ -154,7 +172,7 @@ class SchemiiOwnershipTest(unittest.TestCase):
         run["accounts"] = selected
         run["lanes"] = [lane for lane in run["lanes"] if lane["username"] in selected]
         run_file = self.root / "qa-test-run" / "manifest.json"
-        run_file.parent.mkdir()
+        run_file.parent.mkdir(exist_ok=True)
         run_file.write_text(json.dumps(run))
         with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
                             registry_load=lambda state: {"slots": self.slots}):
@@ -195,8 +213,13 @@ class SchemiiOwnershipTest(unittest.TestCase):
              "createdAt": "2026-09-26T13:00:00Z", "revision": 1},
         ]
         run_file = self.root / "qa-test-run" / "manifest.json"
-        run_file.parent.mkdir()
-        run_file.write_text(json.dumps(self.run_data(fixture)))
+        run_file.parent.mkdir(exist_ok=True)
+        run = self.run_data(fixture)
+        run["lanes"][0]["resources"]["cleanupReceipts"] = [
+            {"kind": "workspace", "id": scratch, "createdAt": "2026-09-26T13:00:00Z"},
+            {"kind": "connection", "id": "pg_scratch", "createdAt": "2026-09-26T13:00:00Z"},
+        ]
+        run_file.write_text(json.dumps(run))
         with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
                             registry_load=lambda state: {"slots": self.slots}):
             totals = cleanup(self.root, output, run_file)
@@ -214,7 +237,7 @@ class SchemiiOwnershipTest(unittest.TestCase):
         output = self.root / "workspaces.json"
         fixture = seed(self.root, "test1", output)
         run_file = self.root / "qa-test-run" / "manifest.json"
-        run_file.parent.mkdir()
+        run_file.parent.mkdir(exist_ok=True)
         run = self.run_data(fixture)
         run["lanes"][0]["resources"]["localWorkspaceId"] = wid(999)
         run_file.write_text(json.dumps(run))
@@ -226,7 +249,7 @@ class SchemiiOwnershipTest(unittest.TestCase):
         output = self.root / "workspaces.json"
         fixture = seed(self.root, "test1", output)
         run_file = self.root / "qa-test-run" / "manifest.json"
-        run_file.parent.mkdir()
+        run_file.parent.mkdir(exist_ok=True)
         run = self.run_data(fixture)
         for lane in run["lanes"]:
             source = fixture["lanes"][lane["username"]]
@@ -237,6 +260,122 @@ class SchemiiOwnershipTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Workspace ownership differs"):
             cleanup(self.root, output, run_file)
         self.assertEqual(FakeClient.deletes, [])
+
+    def prepared_run(self):
+        output = self.root / "workspaces.json"
+        fixture = seed(self.root, "test1", output)
+        run = self.run_data(fixture)
+        run_file = self.root / "qa-test-run" / "manifest.json"
+        run_file.write_text(json.dumps(run))
+        return output, run_file, run
+
+    def test_completed_result_still_rejects_live_controller_and_children(self):
+        output, run_file, run = self.prepared_run()
+        run["status"] = "passed"
+        live = {"pid": os.getpid(), "birthTick": process_birth(os.getpid())}
+        for kind in ("controller", "browser", "worker"):
+            with self.subTest(kind=kind):
+                run_file.with_name("controller-owner.json").write_text(json.dumps(
+                    live if kind == "controller" else {"pid": 2147483647, "birthTick": "1"}))
+                run["lanes"][0].pop("browser", None)
+                run["lanes"][0].pop("worker", None)
+                if kind != "controller":
+                    run["lanes"][0][kind] = live
+                run_file.write_text(json.dumps(run))
+                with self.assertRaisesRegex(ValueError, "still live"):
+                    cleanup(self.root, output, run_file)
+                self.assertEqual(FakeClient.deletes, [])
+
+    def test_missing_or_pending_process_ownership_blocks_before_delete(self):
+        output, run_file, run = self.prepared_run()
+        run_file.with_name("controller-owner.json").unlink()
+        with self.assertRaisesRegex(ValueError, "ownership record is missing"):
+            cleanup(self.root, output, run_file)
+        run_file.with_name("controller-owner.json").write_text(json.dumps({"pid": 2147483647, "birthTick": "1"}))
+        run["lanes"][0]["browserLaunchPending"] = True
+        run_file.write_text(json.dumps(run))
+        with self.assertRaisesRegex(ValueError, "launch ownership is unresolved"):
+            cleanup(self.root, output, run_file)
+        self.assertEqual(FakeClient.deletes, [])
+
+    def test_direct_module_invocation_rejects_live_owner_without_api_calls(self):
+        output, run_file, run = self.prepared_run()
+        run_file.with_name("controller-owner.json").write_text(json.dumps(
+            {"pid": os.getpid(), "birthTick": process_birth(os.getpid())}))
+        code = ("from pathlib import Path; from testing.harness.cleanup_schemii_sweep import cleanup; "
+                f"cleanup(Path({str(self.root)!r}), Path({str(output)!r}), Path({str(run_file)!r}))")
+        result = subprocess.run(["python", "-c", code], capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("still live", result.stderr)
+
+    def test_existing_node_reservation_cannot_interleave_guarded_cleanup(self):
+        _, run_file, _ = self.prepared_run()
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+
+        def guarded():
+            try:
+                with cleanup_guard(run_file):
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError("test guard timed out")
+            except Exception as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=guarded)
+        thread.start()
+        self.assertTrue(entered.wait(5))
+        leases = (Path(__file__).parent / "leases.mjs").resolve().as_uri()
+        script = (f"import {{ reserveAccounts }} from {json.dumps(leases)}; "
+                  f"await reserveAccounts({{root:{json.dumps(str(self.root))},runId:'qa-new-owner',"
+                  f"runDir:{json.dumps(str(self.root / 'qa-new-owner'))},accounts:[{json.dumps(ACCOUNTS[0])}]}});")
+        child = subprocess.Popen(["node", "--input-type=module", "-e", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                child.communicate(timeout=0.25)
+        finally:
+            release.set()
+            thread.join(5)
+        stdout, stderr = child.communicate(timeout=5)
+        self.assertEqual(child.returncode, 0, stderr)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        lease = self.root / ".git/qa-account-leases" / (ACCOUNTS[0] + ".json")
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, "reserved by an active or unresolved run"):
+                with cleanup_guard(run_file):
+                    self.fail("new owner must prevent cleanup")
+            self.assertEqual(json.loads(lease.read_text())["runId"], "qa-new-owner")
+
+    def test_unledgered_name_collision_is_preserved_and_reported(self):
+        output, run_file, _ = self.prepared_run()
+        first = ACCOUNTS[0]
+        fixture = json.loads(output.read_text())
+        ambiguous = {"id": wid(2000), "name": fixture["lanes"][first]["prefix"] + "collision",
+                     "createdAt": "2026-09-26T13:00:00Z", "revision": 1}
+        FakeClient.workspaces[first].append(ambiguous)
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
+                            registry_load=lambda state: {"slots": self.slots}):
+            totals = cleanup(self.root, output, run_file)
+        self.assertEqual(totals["pending"], 1)
+        self.assertIn(ambiguous, FakeClient.workspaces[first])
+        self.assertEqual(json.loads(run_file.with_name("sweep-cleanup.json").read_text())["status"], "cleanup-pending")
+
+    def test_partial_failure_retains_receipts_and_retry_is_idempotent(self):
+        output, run_file, _ = self.prepared_run()
+        FakeClient.delete_failure = 2
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
+                            registry_load=lambda state: {"slots": self.slots}):
+            with self.assertRaisesRegex(RuntimeError, "injected cleanup failure"):
+                cleanup(self.root, output, run_file)
+            receipt = json.loads(run_file.with_name("sweep-cleanup.json").read_text())
+            self.assertEqual(len(receipt["removed"]), 1)
+            self.assertEqual(receipt["status"], "cleanup-pending")
+            FakeClient.delete_failure = None
+            cleanup(self.root, output, run_file)
+            self.assertEqual(cleanup(self.root, output, run_file),
+                             {"chats": 0, "workspaces": 0, "connections": 0, "pending": 0})
+        self.assertEqual(run_file.with_name("sweep-cleanup.json").stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

@@ -7,13 +7,82 @@ This preserves credentials, account grants, existing workspaces and evidence.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
+import fcntl
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 
 from testing.harness.schemii_sweep import ACCOUNTS, ROOT, WRITERS
-from testing.provision import Client, registry_load
+from testing.provision import Client, registry_load, write_private
+
+
+def process_birth(pid: int) -> str | None:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    except FileNotFoundError:
+        return None
+    return None if fields[0] == "Z" else fields[19]
+
+
+def require_stopped(run: dict, run_file: Path) -> None:
+    """Completion is not transport shutdown; verify recorded process identities."""
+    try:
+        owner = json.loads(run_file.with_name("controller-owner.json").read_text())
+    except FileNotFoundError as error:
+        raise ValueError("Controller ownership record is missing; confirm stopped ownership before cleanup") from error
+    records = [("controller", owner)]
+    for lane in run.get("lanes", []):
+        for kind in ("browser", "worker"):
+            if lane.get(kind + "LaunchPending"):
+                raise ValueError(f"{kind} launch ownership is unresolved for {lane.get('id')}")
+            if lane.get(kind) is not None:
+                records.append((f"{kind} for {lane.get('id')}", lane[kind]))
+    for kind, record in records:
+        if (not isinstance(record, dict) or type(record.get("pid")) is not int or record["pid"] < 1
+                or not isinstance(record.get("birthTick"), str) or not record["birthTick"].isdigit()):
+            raise ValueError(f"{kind} ownership record is incomplete; confirm stopped ownership before cleanup")
+        if process_birth(record["pid"]) == record["birthTick"]:
+            raise ValueError(f"Owned {kind} is still live; stop it before cleanup")
+
+
+@contextmanager
+def file_lock(path: Path):
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def cleanup_guard(run_file: Path):
+    """Use the same flock files/order as CLI fixture cleanup and allocation.
+
+    Lifecycle comes first, as in resume/cleanup. Deployment is then exclusive,
+    followed by reservations, as in setup/reset/author cleanup. No reservation
+    is released here, including an old run's or a newly allocated owner's.
+    """
+    common = Path(subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        text=True).strip())
+    with file_lock(run_file.with_name("lifecycle.lock")):
+        run = json.loads(run_file.read_text())
+        require_stopped(run, run_file)
+        with file_lock(common / "qa-deployment.lock"):
+            with file_lock(common / "qa-account-reservations.lock"):
+                run = json.loads(run_file.read_text())
+                require_stopped(run, run_file)
+                for username in run.get("accounts", []):
+                    if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", username):
+                        raise ValueError("Invalid run account")
+                    if os.path.lexists(common / "qa-account-leases" / (username.lower() + ".json")):
+                        raise ValueError(f"Account {username} is reserved by an active or unresolved run; clean up that run first")
+                yield run
 
 
 def timestamp(value: str) -> datetime:
@@ -77,41 +146,92 @@ def owned_workspaces(workspaces: dict, run: dict, run_file: Path) -> dict[str, s
 
 
 def cleanup(state: Path, workspace_file: Path, run_file: Path) -> dict:
+    with cleanup_guard(run_file) as run:
+        return _cleanup(state, workspace_file, run_file, run)
+
+
+def _cleanup(state: Path, workspace_file: Path, run_file: Path, run: dict) -> dict:
     workspaces = json.loads(workspace_file.read_text())
-    run = json.loads(run_file.read_text())
     owned_by_account = owned_workspaces(workspaces, run, run_file)
     started = timestamp(run["createdAt"])
     slots = {slot["username"]: slot for slot in registry_load(state)["slots"]}
-    totals = {"chats": 0, "workspaces": 0, "connections": 0}
+    receipts_by_account = {}
+    for lane in run["lanes"]:
+        username = lane["username"]
+        receipts = lane.get("resources", {}).get("cleanupReceipts", [])
+        if not isinstance(receipts, list):
+            raise ValueError(f"Invalid creation receipts for {username}")
+        receipted = {kind: set() for kind in ("workspace", "connection", "chat")}
+        for receipt in receipts:
+            if (not isinstance(receipt, dict) or receipt.get("kind") not in receipted
+                    or not isinstance(receipt.get("id"), str) or not receipt["id"]
+                    or not isinstance(receipt.get("createdAt"), str)
+                    or timestamp(receipt["createdAt"]) < started):
+                raise ValueError(f"Invalid creation receipt for {username}")
+            receipted[receipt["kind"]].add(receipt["id"])
+        receipts_by_account[username] = receipted
+    totals = {"chats": 0, "workspaces": 0, "connections": 0, "pending": 0}
+    report_file = run_file.with_name("sweep-cleanup.json")
+    report = {"run": run["id"], "tag": workspaces["tag"], "status": "cleanup-pending",
+              "workspaceFixtures": str(workspace_file.resolve()), "removed": [], "unledgered": []}
+    if report_file.exists():
+        previous = json.loads(report_file.read_text())
+        if previous.get("run") != report["run"] or previous.get("tag") != report["tag"]:
+            raise ValueError("Cleanup receipt belongs to a different run/tag")
+        report["removed"] = previous.get("removed", [])
+    write_private(report_file, report)
+
+    def removed(username, kind, object_id):
+        report["removed"].append({"username": username, "kind": kind, "id": object_id})
+        totals[kind + "s"] += 1
+        write_private(report_file, report)
+
     for username in owned_by_account:
         fixture = workspaces["lanes"][username]
         prefix = fixture["prefix"]
         owned_ids = owned_by_account[username]
+        receipted = receipts_by_account[username]
         client = Client()
         client.login(slots[username])
         try:
             current = client.call("GET", "/api/v1/schemii/workspaces")["workspaces"]
             removable = {workspace["id"] for workspace in current
                          if workspace["id"] in owned_ids or
-                         (workspace["name"].startswith(prefix)
+                         (workspace["id"] in receipted["workspace"] and workspace["name"].startswith(prefix)
                           and timestamp(workspace["createdAt"]) >= started)}
+            for workspace in current:
+                if (workspace["name"].startswith(prefix) and workspace["id"] not in removable
+                        and timestamp(workspace["createdAt"]) >= started):
+                    report["unledgered"].append({"username": username, "kind": "workspace", "id": workspace["id"]})
             for chat in client.call("GET", "/api/v1/schemii/ai/chats").get("chats", []):
-                if (chat.get("status") != "deleted" and chat.get("workspaceId") in (owned_ids | removable)
+                if (chat.get("status") != "deleted" and (chat.get("workspaceId") in (owned_ids | removable)
+                        or (chat["id"] in receipted["chat"] and chat.get("workspaceId") in {
+                            fixture.get(key + "WorkspaceId") for key in ("local", "reader", "writer")}))
                         and timestamp(chat["createdAt"]) >= started):
                     client.call("DELETE", "/api/v1/schemii/ai/chats/" + chat["id"])
-                    totals["chats"] += 1
+                    removed(username, "chat", chat["id"])
             for workspace in current:
                 if workspace["id"] in removable:
                     client.call("DELETE", f"/api/v1/schemii/workspaces/{workspace['id']}?expectedRevision={workspace['revision']}", expected=204)
-                    totals["workspaces"] += 1
+                    removed(username, "workspace", workspace["id"])
             connections = client.call("GET", "/api/v1/connections?product=schemii")["connections"]
             for connection in connections:
                 if (connection.get("ownership") == "user" and connection["name"].startswith(prefix)
                         and timestamp(connection["createdAt"]) >= started):
+                    if connection["id"] not in receipted["connection"]:
+                        report["unledgered"].append({"username": username, "kind": "connection", "id": connection["id"]})
+                        continue
                     client.call("DELETE", f"/api/v1/connections/{connection['id']}?expectedRevision={connection['revision']}", expected=204)
-                    totals["connections"] += 1
+                    removed(username, "connection", connection["id"])
+        except Exception as error:
+            report["error"] = str(error)
+            write_private(report_file, report)
+            raise
         finally:
             client.logout()
+    totals["pending"] = len(report["unledgered"])
+    report["status"] = "cleanup-pending" if totals["pending"] else "cleaned"
+    write_private(report_file, report)
     return totals
 
 
@@ -125,6 +245,8 @@ def main() -> None:
         parser.error("--run needs an exact harness run ID")
     result = cleanup(args.state_dir, args.workspace_fixtures, ROOT / "artifacts/qa" / args.run / "manifest.json")
     print(json.dumps({"run": args.run, "removed": result, "credentials": "preserved"}))
+    if result["pending"]:
+        raise SystemExit(4)
 
 
 if __name__ == "__main__":
