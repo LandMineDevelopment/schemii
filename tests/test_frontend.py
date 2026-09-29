@@ -336,14 +336,14 @@ def test_mobile_status_toasts_never_cover_or_capture_workspace_tools() -> None:
 
 
 def test_matching_history_confirmation_does_not_repaint_the_optimistic_catalog() -> None:
-    app = (
-        files("schemii.schemii")
-        .joinpath("web", "assets", "app.js")
-        .read_text(encoding="utf-8")
-    )
+    assets = files("schemii.schemii").joinpath("web", "assets")
+    app = assets.joinpath("app.js").read_text(encoding="utf-8")
+    owner = assets.joinpath("design-history.js").read_text(encoding="utf-8")
 
+    # Retain this existing source guard until the mounted replacement and its
+    # controlled counterexample are verified; these tokens cannot prove focus.
     assert "return { presentation, targets };" in app
-    assert "applyDesignHistoryMutation(mutation, { cue: !previewMatches, render: !previewMatches });" in app
+    assert "applyMutation(mutation, { cue: !previewMatches, render: !previewMatches });" in owner
     assert "state.viewAnalysisCache.clear();\n  if (!state.catalog.tables" not in app
 
 
