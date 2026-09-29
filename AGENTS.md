@@ -27,3 +27,20 @@ keep each worker on its assigned session handle and resources, and reserve an
 independent verification slot. Do not rebuild while a run holds the deployment
 lease. The harness never treats a pending agent handoff or a browser probe as an
 application acceptance pass. Keep credentials and controller/session files private.
+
+## Stock T3 agent workflows
+
+For substantial separable development or coordinated UI QA, use the discoverable
+`stock-t3-agents` skill in `.agents/skills/stock-t3-agents/SKILL.md` and read
+[the assignment protocol](testing/agents/README.md). Use the available native
+tools with the project `developer`, `ui_tester` and `qa_reviewer` roles when
+exposed. Give each spawned task exactly one `SCHEMII_ASSIGNMENT {JSON}` line with
+its actual workspace, narrow ownership and verification steps.
+
+Native children receive no automatic worktrees or isolated browser profiles.
+Assign developers linked worktrees/task branches; coordinated UI acceptance uses
+prepared `./test.sh --controller t3` isolated lanes claimed to actual returned
+agent IDs. Reserve independent review capacity, prevent recursive worker
+delegation, and verify evidence before claiming acceptance. Project configuration
+targets new provider sessions; inspect current capacity and hook trust instead
+of assuming stored settings are active.
