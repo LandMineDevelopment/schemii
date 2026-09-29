@@ -4,6 +4,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -555,6 +556,62 @@ class AssignmentGuardTests(unittest.TestCase):
             capture_output=True,
             cwd=self.repository,
             timeout=5,
+        )
+
+
+class BrowserOutputGuardTests(unittest.TestCase):
+    def screenshot(
+        self, arguments, name="mcp__schemii_browser__browser_take_screenshot"
+    ):
+        return guard.handle_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": name,
+                "tool_input": arguments,
+            },
+            Path.cwd(),
+        )
+
+    def test_automatic_image_output_is_allowed(self):
+        self.assertEqual(self.screenshot({"type": "png"}), {})
+        self.assertEqual(self.screenshot({"filename": None}), {})
+
+    def test_shared_workspace_and_traversing_filenames_are_denied(self):
+        for filename in ("screenshot.png", "../report.png", "/tmp/shared.png", ""):
+            with self.subTest(filename=filename):
+                output = self.screenshot({"filename": filename})
+                self.assertEqual(
+                    output["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
+    def test_dotted_tool_name_also_covers_output_ownership(self):
+        output = self.screenshot(
+            {"filename": "shared.png"}, "mcp.schemii_browser.browser_take_screenshot"
+        )
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_all_filename_tools_are_guarded_and_matched_by_project_hook(self):
+        config = json.loads(
+            (Path(guard.__file__).parents[2] / ".codex/hooks.json").read_text()
+        )
+        matcher = config["hooks"]["PreToolUse"][0]["matcher"]
+        for prefix in ("mcp__schemii_browser__", "mcp.schemii_browser."):
+            for tool in ("take_screenshot", "snapshot", "find", "console_messages"):
+                name = f"{prefix}browser_{tool}"
+                with self.subTest(name=name):
+                    self.assertIsNotNone(re.search(matcher, name))
+                    self.assertEqual(self.screenshot({}, name), {})
+                    output = self.screenshot({"filename": "shared.txt"}, name)
+                    self.assertEqual(
+                        output["hookSpecificOutput"]["permissionDecision"], "deny"
+                    )
+
+    def test_other_servers_keep_their_own_output_contract(self):
+        self.assertEqual(
+            self.screenshot(
+                {"filename": "report.png"}, "mcp__other__browser_take_screenshot"
+            ),
+            {},
         )
 
 
