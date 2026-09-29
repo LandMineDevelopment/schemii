@@ -1,8 +1,11 @@
 # Project audit and improvement baseline
 
-**Date:** September 29, 2026  
-**Application:** Schemii / Schemoo / Schemer  
-**Code-review baseline:** `9a7800a23bd2623ddb73b7cb5ded1c0b9a270657`  
+**Date:** September 29, 2026
+
+**Application:** Schemii / Schemoo / Schemer
+
+**Code-review baseline:** `9a7800a23bd2623ddb73b7cb5ded1c0b9a270657`
+
 **Purpose:** a prioritized, evidence-backed starting point for improvements, including developer workflow and repository housekeeping.
 
 ## Assessment
