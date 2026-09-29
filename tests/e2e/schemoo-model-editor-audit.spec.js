@@ -3,6 +3,39 @@ import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
 const modelId = "model_editor_audit_fixture";
+const keyboardFieldLabel = "Expose people.field_35";
+
+async function recordKeyboardEvents(page) {
+  await page.addInitScript(({ label }) => {
+    window.__schemooKeyboardAudit = { events: [] };
+    for (const type of ["keydown", "keyup", "input", "change"]) {
+      for (const capture of [true, false]) document.addEventListener(type, event => {
+        if (event.target?.getAttribute("aria-label") !== label) return;
+        window.__schemooKeyboardAudit.events.push({
+          type, phase: capture ? "capture" : "bubble", key: event.key ?? null, trusted: event.isTrusted,
+          checked: event.target.checked, connected: event.target.isConnected,
+          focusedField: document.activeElement?.getAttribute("aria-label") === label,
+          draftStatus: document.querySelector("#draft-status")?.textContent ?? null,
+          saveDisabled: document.querySelector("#save-model")?.disabled ?? null,
+        });
+      }, capture);
+    }
+  }, { label: keyboardFieldLabel });
+}
+
+async function keyboardSnapshot(page) {
+  return page.evaluate(label => {
+    const field = document.querySelector(`input[aria-label="${label}"]`);
+    return {
+      field: field ? { checked: field.checked, connected: field.isConnected, disabled: field.disabled,
+        focused: document.activeElement === field } : null,
+      activeElement: { tag: document.activeElement?.tagName, id: document.activeElement?.id },
+      draftStatus: document.querySelector("#draft-status")?.textContent ?? null,
+      saveDisabled: document.querySelector("#save-model")?.disabled ?? null,
+      events: window.__schemooKeyboardAudit?.events ?? [],
+    };
+  }, keyboardFieldLabel);
+}
 
 async function openFixture(page, { wideSavedLayout = false, modelName = "Editor audit fixture" } = {}) {
   const fields = Array.from({ length: 36 }, (_, index) => ({ name: `field_${index}`, dataType: "integer", nullable: false }));
@@ -80,35 +113,64 @@ test("long model names show truncation while keeping the full accessible value",
   }
 });
 
-test("missing saved positions stay clean; tall fields scroll with visible relationship anchors", async ({ page }) => {
-  await openFixture(page);
-  await expect(page.locator("#save-model")).toBeDisabled();
-  const card = page.locator('.sc-node[data-node-id="people"]');
-  const list = card.locator(".sc-node-fields");
-  expect(await card.evaluate(node => node.getBoundingClientRect().height)).toBeLessThan(370);
-  expect(await list.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
-  const bounds = await list.boundingBox();
-  if (test.info().project.name === "android-chromium") {
-    const session = await page.context().newCDPSession(page);
-    const x = bounds.x + bounds.width * .7, start = bounds.y + bounds.height * .8, end = bounds.y + bounds.height * .2;
-    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: start }] });
-    for (let step = 1; step <= 8; step++) {
-      await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: start + (end - start) * step / 8 }] });
+test("missing saved positions stay clean; tall fields scroll with visible relationship anchors", async ({ page }, testInfo) => {
+  await recordKeyboardEvents(page);
+  const observations = {};
+  try {
+    await openFixture(page);
+    await expect(page.locator("#save-model"), "the owned mocked model opens clean").toBeDisabled();
+    await expect(page.locator("#draft-status")).toHaveText("Saved · revision 1 · read-only preview");
+    observations.initial = await keyboardSnapshot(page);
+    const card = page.locator('.sc-node[data-node-id="people"]');
+    const list = card.locator(".sc-node-fields");
+    expect(await card.evaluate(node => node.getBoundingClientRect().height)).toBeLessThan(370);
+    expect(await list.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+    const bounds = await list.boundingBox();
+    if (test.info().project.name === "android-chromium") {
+      const session = await page.context().newCDPSession(page);
+      const x = bounds.x + bounds.width * .7, start = bounds.y + bounds.height * .8, end = bounds.y + bounds.height * .2;
+      await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: start }] });
+      for (let step = 1; step <= 8; step++) {
+        await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: start + (end - start) * step / 8 }] });
+      }
+      await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await session.detach();
+    } else {
+      await page.mouse.move(bounds.x + bounds.width * .7, bounds.y + bounds.height * .5);
+      await page.mouse.wheel(0, 420);
     }
-    await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-    await session.detach();
-  } else {
-    await page.mouse.move(bounds.x + bounds.width * .7, bounds.y + bounds.height * .5);
-    await page.mouse.wheel(0, 420);
+    await expect.poll(() => list.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+    const before = await page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy");
+    await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await expect.poll(() => page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy")).not.toBe(before);
+    const field = list.getByRole("checkbox", { name: keyboardFieldLabel, exact: true });
+    await expect(field, "the intended exposure starts checked before Space").toBeChecked();
+    await field.focus();
+    await expect(field, "Space must reach the intended checkbox").toBeFocused();
+    observations.beforeSpace = await keyboardSnapshot(page);
+    await page.keyboard.press("Space");
+    observations.afterSpace = await keyboardSnapshot(page);
+    await expect(field, "one keyboard Space toggle changes the intended exposure").not.toBeChecked();
+    await expect(field, "canvas redraw retains keyboard focus on the exposure").toBeFocused();
+    await expect(page.locator("#draft-status"), "change reaches the model dirty-state owner").toHaveText("Unsaved changes");
+    await expect(page.locator("#save-model"), "a dirty model enables Save").toBeEnabled();
+    const events = observations.afterSpace.events.filter(event => event.phase === "capture");
+    for (const type of ["keydown", "keyup", "input", "change"]) {
+      expect(events.filter(event => event.type === type), `one trusted ${type} event for the intended field`).toHaveLength(1);
+    }
+    expect(events.every(event => event.trusted)).toBe(true);
+    expect(events.find(event => event.type === "keydown").key).toBe(" ");
+    expect(events.findIndex(event => event.type === "input")).toBeLessThan(events.findIndex(event => event.type === "change"));
+  } finally {
+    observations.final = page.isClosed() ? { pageClosed: true }
+      : await keyboardSnapshot(page).catch(() => ({ snapshotUnavailable: true }));
+    // Only owned fixture state and event metadata: no cookies, headers, account
+    // fields, arbitrary console text or page contents enter attempt evidence.
+    await testInfo.attach("keyboard-toggle-diagnostics", {
+      body: Buffer.from(JSON.stringify({ modelId, transport: "immutable mocked GET/PUT; keyboard and dirty-state evidence only", ...observations }, null, 2)),
+      contentType: "application/json",
+    });
   }
-  await expect.poll(() => list.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
-  const before = await page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy");
-  await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
-  await expect.poll(() => page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy")).not.toBe(before);
-  await list.locator('input[aria-label="Expose people.field_35"]').focus();
-  await page.keyboard.press("Space");
-  await expect(page.locator('input[aria-label="Expose people.field_35"]')).toBeFocused();
-  await expect(page.locator("#save-model")).toBeEnabled();
 });
 
 test("multiple issues on one input keep one description and clear after correction", async ({ page }) => {
