@@ -108,6 +108,35 @@ test.afterEach(async ({ request }) => {
   await cleanupWorkspaces(request, workspaceName);
 });
 
+test("detached design never loads Console data in the background", async ({ page }, testInfo) => {
+  const workspaceName = `E2E local Console ${testInfo.project.name} ${randomUUID().slice(0, 8)}`;
+  workspaceNameToCleanup = workspaceName;
+  const consoleRequests = [];
+  page.on("request", request => {
+    if (/\/console\/(?:saved-queries|history|sessions)/.test(new URL(request.url()).pathname)) {
+      consoleRequests.push(request.url());
+    }
+  });
+
+  const workspaceId = await createDetachedWorkspace(page, workspaceName);
+  await expect(page.locator("#toast.error")).toBeHidden();
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
+  const card = page.locator("#workspaces-dialog .manager-card").filter({ hasText: workspaceName });
+  await card.getByRole("button", { name: "Open", exact: true }).click();
+  await expect(page.locator("#workspace-title")).toHaveText(workspaceName);
+  await expect(page.locator("#toast.error")).toBeHidden();
+
+  await page.reload();
+  await expect(page.locator("#workspace-title")).toHaveText(workspaceName);
+  await expect(page.locator("#toast.error")).toBeHidden();
+  await page.getByRole("button", { name: "SQL", exact: true }).click();
+  await expect(page.locator("#sql-editor-status")).toHaveText("A database-backed workspace is required to run SQL.");
+  await expect(page.getByRole("button", { name: "Run current statement" })).toBeDisabled();
+  expect(consoleRequests.filter(url => url.includes(`/workspaces/${workspaceId}/console/`))).toEqual([]);
+});
+
 test("detached workspace survives navigation and keeps its table/view surfaces assembled", async ({ page, request }, testInfo) => {
   const suffix = randomUUID().slice(0, 8);
   const workspaceName = `E2E ${testInfo.project.name} ${suffix}`;
