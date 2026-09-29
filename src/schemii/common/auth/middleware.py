@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from schemii.common.api.errors import metadata_storage_error_response
+from schemii.common.errors import MetadataStorageUnavailableError
 from schemii.common.metadata.models import Principal
 from .service import COOKIE, PRODUCT_CAPABILITIES, SCHEMER_AUTHOR, PROVISION_CAPABILITY
 
@@ -71,10 +73,16 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             response=await call_next(request)
             response.headers['Cache-Control']='no-store'
             return response
-        user=await asyncio.to_thread(service.resolve,request.cookies.get(COOKIE))
+        try:
+            user=await asyncio.to_thread(service.resolve,request.cookies.get(COOKIE))
+        except MetadataStorageUnavailableError as error:
+            return metadata_storage_error_response(request, error)
         if not user: return JSONResponse({'detail':'Sign in required'},status_code=401)
         request.state.principal=Principal(user_id=user['id'],authentication_source='session')
-        capabilities=await asyncio.to_thread(service.capabilities,user['id'])
+        try:
+            capabilities=await asyncio.to_thread(service.capabilities,user['id'])
+        except MetadataStorageUnavailableError as error:
+            return metadata_storage_error_response(request, error)
         allowed=permits_api(path,request.method,capabilities)
         if not allowed: return JSONResponse({'detail':'Your role does not permit this action'},status_code=403)
         response=await call_next(request)

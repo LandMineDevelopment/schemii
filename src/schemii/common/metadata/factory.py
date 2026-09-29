@@ -86,9 +86,17 @@ class MetadataRepositories:
         repr=False,
         compare=False,
     )
+    close_runtime: Callable[[], None] = field(
+        default=_memory_readiness_probe,
+        repr=False,
+        compare=False,
+    )
 
     def check_readiness(self) -> None:
         self.readiness_probe()
+
+    def close(self) -> None:
+        self.close_runtime()
 
 
 def create_metadata_repositories(
@@ -127,16 +135,38 @@ def create_metadata_repositories(
     from schemii.common.ai.instance_provider_store import PostgresInstanceAiProviderStore
 
     connection_factory = MetadataConnectionFactory(config)
-    MetadataMigrator(
-        connection_factory,
-        packaged_migrations(migration_packages),
-    ).migrate()
+    migration_factory = MetadataConnectionFactory(
+        config,
+        statement_timeout_ms=config.migration_statement_timeout_ms,
+        lock_timeout_ms=config.migration_lock_timeout_ms,
+        idle_transaction_timeout_ms=config.migration_statement_timeout_ms,
+        maximum_connections=1,
+        application_name="schemii-metadata-migrations",
+    )
+    try:
+        MetadataMigrator(
+            migration_factory,
+            packaged_migrations(migration_packages),
+        ).migrate()
+    finally:
+        migration_factory.close()
     cipher = CredentialCipher(read_encryption_key(config.encryption_key_file))
     readiness_factory = MetadataConnectionFactory(
         config,
         statement_timeout_ms=2_000,
+        lock_timeout_ms=1_000,
+        idle_transaction_timeout_ms=2_000,
+        maximum_connections=2,
+        connect_timeout=min(config.connect_timeout, 2),
         application_name="schemii-metadata-readiness",
     )
+
+    def close_runtime() -> None:
+        try:
+            connection_factory.close()
+        finally:
+            readiness_factory.close()
+
     return MetadataRepositories(
         connections=PostgresConnectionRepository(
             connection_factory,
@@ -156,6 +186,7 @@ def create_metadata_repositories(
             host_aliases=config.target_host_aliases,
         ),
         connection_factory=connection_factory,
+        close_runtime=close_runtime,
         ai_credentials=PostgresAiCredentialStore(
             connection_factory, cipher, inactivity_days=credential_inactivity_days,
             expiration_enabled=credential_expiration_enabled,
