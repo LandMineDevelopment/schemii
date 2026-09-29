@@ -80,6 +80,29 @@ class EphemeralConfigurationTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_inventory_reuses_thread_transport_instead_of_schema_discovery(self):
+        server = Mock()
+        server.request.return_value = {
+            "data": [
+                {
+                    "name": probe.SERVER,
+                    "runtimeStatus": "connected",
+                    "tools": {name: {"name": name} for name in probe.REQUIRED_TOOLS},
+                }
+            ],
+            "nextCursor": None,
+        }
+        probe.inventory(server, "thread-one")
+        server.request.assert_called_once_with(
+            "mcpServerStatus/list",
+            {
+                "threadId": "thread-one",
+                "serverName": probe.SERVER,
+                "detail": "full",
+                "limit": 100,
+            },
+        )
+
     def client(self, response):
         client = probe.AppServer.__new__(probe.AppServer)
         client.next_id = 0
@@ -157,6 +180,15 @@ class TransportTests(unittest.TestCase):
 
 
 class IsolationAndOwnershipTests(unittest.TestCase):
+    def test_extra_transport_cannot_be_assigned_as_one_thread_browser(self):
+        sessions = {
+            Path("session-" + "a" * 32): {"state": "running"},
+            Path("session-" + "b" * 32): {"state": "running"},
+        }
+        with patch.object(probe, "owned_sessions", return_value=sessions):
+            with self.assertRaisesRegex(probe.ProbeError, "unexpected number"):
+                probe.wait_session(Path("/unused"), set(), set(), Mock(timeout=1))
+
     def record(self, pid, parent, born):
         return {"pid": pid, "ppid": parent, "birth_tick": born, "rss": 1, "state": "S"}
 
@@ -199,6 +231,24 @@ class IsolationAndOwnershipTests(unittest.TestCase):
             state[field] = value
             with self.subTest(field=field), self.assertRaises(probe.ProbeError):
                 probe.assert_state(state, "owned")
+
+    def test_anonymous_login_destination_keeps_exact_tab_routing(self):
+        destination = probe.LOGIN_URL
+        state = self.state()
+        state["url"] = destination
+        probe.assert_state(state, "owned", url=destination)
+        with self.assertRaises(probe.ProbeError):
+            probe.assert_state(state, "owned")
+        state.update(
+            url=destination + "#probe-tab",
+            title="owned-tab",
+            marker="owned-tab",
+            titles=["owned", "owned-tab"],
+        )
+        probe.assert_state(state, "owned", tab=True, url=destination)
+        state["url"] = probe.URL + "#probe-tab"
+        with self.assertRaises(probe.ProbeError):
+            probe.assert_state(state, "owned", tab=True, url=destination)
 
     def test_cleanup_attempts_every_thread_even_when_one_browser_close_fails(self):
         server = Mock(timeout=1, known_processes=set())

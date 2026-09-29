@@ -27,6 +27,7 @@ SERVER = "schemii_browser"
 PACKAGE = "@playwright/mcp@0.0.83"
 ORIGIN = "https://localhost:8001"
 URL = f"{ORIGIN}/account"
+LOGIN_URL = f"{ORIGIN}/login?next=%2Faccount"
 DOWNLOAD = "probe-download.txt"
 TEST_ONLY_TOOLS = ("browser_evaluate", "browser_run_code_unsafe")
 REQUIRED_TOOLS = frozenset(
@@ -397,8 +398,11 @@ def wait_session(
 
 
 def inventory(server: AppServer, thread: str) -> None:
+    # Installed Codex creates a separate discovery transport for broad listing,
+    # even with threadId. Both fields select this thread's existing connection.
     response = server.request(
-        "mcpServerStatus/list", {"threadId": thread, "detail": "full", "limit": 100}
+        "mcpServerStatus/list",
+        {"threadId": thread, "serverName": SERVER, "detail": "full", "limit": 100},
     )
     entries = response.get("data", [])
     require(
@@ -412,7 +416,7 @@ def inventory(server: AppServer, thread: str) -> None:
     ]
     require(
         len(active) == 1 and active[0].get("name") == SERVER,
-        "Ephemeral thread enabled another MCP server",
+        "Thread-focused MCP inventory returned an unexpected server",
     )
     browser = active[0]
     require(
@@ -431,7 +435,9 @@ def fixture_code(marker: str, key: str) -> str:
     return (
         """async (page) => {
       const marker = MARKER, key = KEY;
-      if (page.url() !== URL) throw new Error('Unexpected canonical page');
+      // The existing anonymous redirect preserves /account as its return URL.
+      if (![ACCOUNT_DESTINATION,LOGIN_DESTINATION].includes(page.url()))
+        throw new Error('Unexpected anonymous canonical destination');
       await page.context().addCookies([{name:key, value:marker, url:ORIGIN,
         httpOnly:true, secure:true, sameSite:'Lax'}]);
       await page.evaluate(({marker,key}) => {
@@ -451,10 +457,11 @@ def fixture_code(marker: str, key: str) -> str:
         document.getElementById('upload').onclick = () => document.getElementById('file').click();
         document.getElementById('download').href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(marker);
       }, {marker,key});
-      return {ready:true};
+      return {ready:true,document_url:page.url()};
     }""".replace("MARKER", json.dumps(marker))
         .replace("KEY", json.dumps(key))
-        .replace("URL", json.dumps(URL))
+        .replace("ACCOUNT_DESTINATION", json.dumps(URL))
+        .replace("LOGIN_DESTINATION", json.dumps(LOGIN_URL))
         .replace("ORIGIN", json.dumps(ORIGIN))
     )
 
@@ -485,7 +492,9 @@ def read_state(server: AppServer, client: dict, key: str) -> dict:
     )
 
 
-def assert_state(state: dict, marker: str, *, tab: bool = False) -> None:
+def assert_state(
+    state: dict, marker: str, *, tab: bool = False, url: str = URL
+) -> None:
     title = marker + ("-tab" if tab else "")
     require(
         state.get("cookie") == marker and state.get("local") == marker,
@@ -504,7 +513,7 @@ def assert_state(state: dict, marker: str, *, tab: bool = False) -> None:
         "Browser tab routing crossed thread ownership",
     )
     require(
-        state.get("url") == URL + ("#probe-tab" if tab else ""),
+        state.get("url") == url + ("#probe-tab" if tab else ""),
         "Browser left the canonical probe page",
     )
 
@@ -741,16 +750,22 @@ def verify(cwd: Path, count: int, timeout: float) -> dict:
                 )
             )
             require(
-                result.get("ready") is True,
+                result.get("ready") is True
+                and result.get("document_url") in (URL, LOGIN_URL),
                 "Synthetic probe fixture did not initialize",
             )
+            client["document_url"] = result["document_url"]
         require(
             len({client["thread"] for client in clients}) == count
             and len(sessions) == count,
             "Thread or stdio artifact ownership was reused",
         )
         for client in reversed(clients):
-            assert_state(read_state(server, client, key), client["marker"])
+            assert_state(
+                read_state(server, client, key),
+                client["marker"],
+                url=client["document_url"],
+            )
         summary["idle_followup_retained"] = True
         summary["processes"] = process_report(server, clients)
         first = clients[0]
@@ -759,7 +774,7 @@ def verify(cwd: Path, count: int, timeout: float) -> dict:
             server,
             first["thread"],
             "browser_tabs",
-            {"action": "new", "url": URL + "#probe-tab"},
+            {"action": "new", "url": first["document_url"] + "#probe-tab"},
         )
         call(
             server,
@@ -771,12 +786,23 @@ def verify(cwd: Path, count: int, timeout: float) -> dict:
                 + "; document.title=marker; document.body.textContent=marker; document.body.dataset.probe=marker; return {ready:true}; }"
             },
         )
-        assert_state(read_state(server, first, key), first["marker"], tab=True)
+        assert_state(
+            read_state(server, first, key),
+            first["marker"],
+            tab=True,
+            url=first["document_url"],
+        )
         for client in clients[1:]:
-            assert_state(read_state(server, client, key), client["marker"])
+            assert_state(
+                read_state(server, client, key),
+                client["marker"],
+                url=client["document_url"],
+            )
         call(server, first["thread"], "browser_tabs", {"action": "select", "index": 0})
         call(server, first["thread"], "browser_tabs", {"action": "close", "index": 1})
-        assert_state(read_state(server, first, key), first["marker"])
+        assert_state(
+            read_state(server, first, key), first["marker"], url=first["document_url"]
+        )
         image_hashes = set()
         downloads = []
         for client in clients:
@@ -829,11 +855,16 @@ def verify(cwd: Path, count: int, timeout: float) -> dict:
             "browser_close did not reset the isolated context",
         )
         require(
-            reset.get("url") == URL and len(reset.get("titles", [])) == 1,
+            reset.get("url") == first["document_url"]
+            and len(reset.get("titles", [])) == 1,
             "Reopened browser did not own a fresh canonical page",
         )
         for client in clients[1:]:
-            assert_state(read_state(server, client, key), client["marker"])
+            assert_state(
+                read_state(server, client, key),
+                client["marker"],
+                url=client["document_url"],
+            )
         summary["close_reset_isolated"] = True
         summary["proven_clients"] = count
         summary["result"] = "passed"
