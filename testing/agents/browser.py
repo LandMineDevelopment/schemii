@@ -23,6 +23,7 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 SESSION_NAME = re.compile(r"session-[0-9a-f]{32}\Z")
 OUTPUT_TTL_SECONDS = 600
 OUTPUT_SWEEP_SECONDS = 30
+GUARDIAN_POLL_SECONDS = 1
 
 
 class ArtifactError(RuntimeError):
@@ -41,7 +42,9 @@ def process_birth_tick(pid: int) -> int | None:
         value = Path(f"/proc/{pid}/stat").read_text()
     except FileNotFoundError:
         return None
-    return int(value.rsplit(")", 1)[1].split()[19])
+    fields = value.rsplit(")", 1)[1].split()
+    # Zombies have exited and cannot write output, even before they are reaped.
+    return None if fields[0] in {"Z", "X", "x"} else int(fields[19])
 
 
 def _open_repository(repository: Path) -> int:
@@ -160,7 +163,7 @@ def _orphan_metadata(descriptor: int, name: str) -> dict | None:
         ):
             return None
         data = json.loads(handle.read(4097))
-    if not isinstance(data, dict) or set(data) != {
+    required = {
         "schema",
         "session_id",
         "package",
@@ -170,7 +173,12 @@ def _orphan_metadata(descriptor: int, name: str) -> dict | None:
         "state",
         "child_pid",
         "child_birth_tick",
-    }:
+    }
+    guardian_fields = {"guardian_pid", "guardian_birth_tick"}
+    if not isinstance(data, dict) or set(data) not in (
+        required,
+        required | guardian_fields,
+    ):
         return None
     if (
         type(data["schema"]) is not int
@@ -184,10 +192,10 @@ def _orphan_metadata(descriptor: int, name: str) -> dict | None:
     if not data["started_at"].endswith("+00:00"):
         return None
     datetime.fromisoformat(data["started_at"])
-    if any(
-        type(data[key]) is not int or data[key] <= 0
-        for key in ("pid", "birth_tick", "child_pid", "child_birth_tick")
-    ):
+    identity_fields = {"pid", "birth_tick", "child_pid", "child_birth_tick"}
+    if guardian_fields <= set(data):
+        identity_fields |= guardian_fields
+    if any(type(data[key]) is not int or data[key] <= 0 for key in identity_fields):
         return None
     return data
 
@@ -202,6 +210,10 @@ def _sweep_orphans(base: int) -> None:
             info = _validate_directory(descriptor, private=True)
             data = _orphan_metadata(descriptor, name)
             if data is None:
+                continue
+            if "guardian_pid" in data and (
+                process_birth_tick(data["guardian_pid"]) == data["guardian_birth_tick"]
+            ):
                 continue
             if (
                 process_birth_tick(data["pid"]) != data["birth_tick"]
@@ -275,22 +287,26 @@ def create_session(repository: Path) -> Session:
             os.close(descriptor)
 
 
-def _record_child(session: Session, pid: int) -> None:
+def _update_metadata(session: Session, **updates) -> None:
     with _artifact_base(session.path.parents[2]) as base:
         descriptor = os.open(session.path.name, DIRECTORY_FLAGS, dir_fd=base)
         try:
             info = _validate_directory(descriptor, private=True)
             if (info.st_dev, info.st_ino) != session.inode:
                 raise ArtifactError("The generated session directory was replaced.")
-            birth_tick = process_birth_tick(pid)
-            if birth_tick is None:
-                raise ArtifactError("The child process owner cannot be verified.")
-            session.metadata.update(
-                state="running", child_pid=pid, child_birth_tick=birth_tick
-            )
+            session.metadata.update(updates)
             _write_metadata(descriptor, session.metadata)
         finally:
             os.close(descriptor)
+
+
+def _record_child(session: Session, pid: int) -> None:
+    birth_tick = process_birth_tick(pid)
+    if birth_tick is None:
+        raise ArtifactError("The child process owner cannot be verified.")
+    _update_metadata(
+        session, state="running", child_pid=pid, child_birth_tick=birth_tick
+    )
 
 
 def cleanup_session(session: Session) -> None:
@@ -333,6 +349,86 @@ def expire_output(session: Session, now: float) -> None:
             if output is not None:
                 os.close(output)
             os.close(descriptor)
+
+
+def _guard_session(session: Session) -> None:
+    """Watch only captured connection owners; finish cleanup even after SIGKILL."""
+    next_expiry = time.monotonic() + OUTPUT_SWEEP_SECONDS
+    while True:
+        supervisor_alive = (
+            process_birth_tick(session.metadata["pid"])
+            == session.metadata["birth_tick"]
+        )
+        child_alive = (
+            process_birth_tick(session.metadata["child_pid"])
+            == session.metadata["child_birth_tick"]
+        )
+        if not supervisor_alive and not child_alive:
+            cleanup_session(session)
+            return
+        if not supervisor_alive and time.monotonic() >= next_expiry:
+            expire_output(session, time.time())
+            next_expiry = time.monotonic() + OUTPUT_SWEEP_SECONDS
+        time.sleep(GUARDIAN_POLL_SECONDS)
+
+
+def _detach_guardian(ready: int) -> None:
+    # Codex terminates the transport process group; this finite helper must survive it.
+    os.setsid()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    null = os.open(os.devnull, os.O_RDWR)
+    for descriptor in (0, 1, 2):
+        os.dup2(null, descriptor)
+    for name in os.listdir("/proc/self/fd"):
+        descriptor = int(name)
+        if descriptor > 2 and descriptor != ready:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    os.write(ready, b"1")
+    os.close(ready)
+
+
+def _stop_guardian(pid: int) -> None:
+    # This is our unreaped fork child, so its PID cannot have been reused.
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+
+
+def _start_guardian(session: Session) -> int:
+    read, ready = os.pipe()
+    try:
+        pid = os.fork()
+    except BaseException:
+        os.close(read)
+        os.close(ready)
+        raise
+    if pid == 0:
+        try:
+            os.close(read)
+            _detach_guardian(ready)
+            _guard_session(session)
+        except BaseException:
+            os._exit(2)
+        os._exit(0)
+    os.close(ready)
+    try:
+        # Wait for the private readiness pipe to close as well as its one-byte ack.
+        with os.fdopen(read, "rb") as handle:
+            acknowledged = handle.read(2)
+        birth_tick = process_birth_tick(pid)
+        if acknowledged != b"1" or birth_tick is None:
+            raise ArtifactError("The connection cleanup guardian could not start.")
+        _update_metadata(session, guardian_pid=pid, guardian_birth_tick=birth_tick)
+        return pid
+    except BaseException:
+        _stop_guardian(pid)
+        raise
 
 
 def command(npx: str, chromium: str, output_directory: Path) -> list[str]:
@@ -395,6 +491,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     session = None
     process = None
+    guardian = None
     handlers = {}
     result = 2
     try:
@@ -418,6 +515,7 @@ def main(argv: list[str] | None = None) -> int:
                 signum, lambda received, frame: _signal_child(process, received)
             )
         _record_child(session, process.pid)
+        guardian = _start_guardian(session)
         while True:
             try:
                 result = process.wait(timeout=OUTPUT_SWEEP_SECONDS)
@@ -434,20 +532,24 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         result = 130
     finally:
-        if process is not None:
-            _stop_child(process)
-        for signum, handler in handlers.items():
-            signal.signal(signum, handler)
-        if session is not None:
-            try:
-                cleanup_session(session)
-            except (ArtifactError, OSError):
-                print(
-                    "Schemii browser MCP could not remove its temporary session output. "
-                    "Unrelated data was preserved.",
-                    file=sys.stderr,
-                )
-                result = 2
+        try:
+            if process is not None:
+                _stop_child(process)
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
+            if session is not None:
+                try:
+                    cleanup_session(session)
+                except (ArtifactError, OSError):
+                    print(
+                        "Schemii browser MCP could not remove its temporary session output. "
+                        "Unrelated data was preserved.",
+                        file=sys.stderr,
+                    )
+                    result = 2
+        finally:
+            if guardian is not None:
+                _stop_guardian(guardian)
     return result
 
 

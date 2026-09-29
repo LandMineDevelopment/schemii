@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -404,6 +406,48 @@ class LifecycleTests(ArtifactFixture):
             self.assertEqual(browser.process_birth_tick(123), 6789)
         with mock.patch.object(Path, "read_text", side_effect=FileNotFoundError()):
             self.assertIsNone(browser.process_birth_tick(123))
+        with mock.patch.object(
+            Path, "read_text", return_value=value.replace(") S ", ") Z ")
+        ):
+            self.assertIsNone(browser.process_birth_tick(123))
+
+    def test_orphan_sweep_preserves_live_guardian_then_recovers_dead_guardian(self):
+        session = self.running_session()
+        browser._update_metadata(session, guardian_pid=500003, guardian_birth_tick=300)
+        self.sweep({500003: 300})
+        self.assertTrue(session.path.exists())
+        self.sweep({})
+        self.assertFalse(session.path.exists())
+
+    def test_orphan_sweep_rejects_partial_and_malformed_guardian_identity(self):
+        for updates in (
+            {"guardian_pid": 500003},
+            {"guardian_pid": 500003, "guardian_birth_tick": True},
+            {"guardian_pid": 0, "guardian_birth_tick": 300},
+            {"guardian_pid": 500003, "guardian_birth_tick": 300, "unknown": "value"},
+        ):
+            with self.subTest(updates=updates):
+                session = self.running_session()
+                browser._update_metadata(session, **updates)
+                self.sweep({})
+                self.assertTrue(session.path.exists())
+
+    def test_guardian_expires_only_own_output_after_supervisor_death_then_exits(self):
+        session = self.running_session()
+        with (
+            mock.patch.object(
+                browser, "process_birth_tick", side_effect=[None, 200, None, None]
+            ),
+            mock.patch.object(browser.time, "monotonic", side_effect=[0, 31, 31]),
+            mock.patch.object(browser.time, "sleep") as sleep,
+            mock.patch.object(browser, "expire_output") as expire,
+            mock.patch.object(browser, "cleanup_session") as cleanup,
+        ):
+            browser._guard_session(session)
+        expire.assert_called_once()
+        self.assertEqual(expire.call_args.args[0], session)
+        sleep.assert_called_once_with(1)
+        cleanup.assert_called_once_with(session)
 
     def test_idle_expiry_removes_only_old_owned_files_and_preserves_metadata(self):
         session = self.running_session()
@@ -459,6 +503,167 @@ class LifecycleTests(ArtifactFixture):
         self.assertTrue(unknown_output.exists())
 
 
+class GuardianProcessTests(ArtifactFixture):
+    def wait_for(self, condition, message):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if condition():
+                return
+            time.sleep(0.02)
+        self.fail(message)
+
+    def launch_stub(self, guardian=True):
+        child = (
+            "from pathlib import Path; import sys; "
+            "(Path(sys.argv[1]) / 'temporary.dat').write_bytes(b'owned temporary output'); "
+            "sys.stdin.buffer.read()"
+        )
+        script = f"""
+import importlib.util
+from pathlib import Path
+import sys
+spec = importlib.util.spec_from_file_location('stub_browser', {str(Path(browser.__file__))!r})
+browser = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(browser)
+browser.REPOSITORY_ROOT = Path(sys.argv[1])
+browser.shutil.which = lambda name: sys.executable
+browser.command = lambda npx, chromium, output: [sys.executable, '-c', {child!r}, str(output)]
+if not {guardian!r}:
+    browser._start_guardian = lambda session: None
+raise SystemExit(browser.main([]))
+"""
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(self.repository)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        captured = {}
+
+        def stop_owned_processes():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            metadata = captured.get("metadata", {})
+            for pid_key, tick_key in (
+                ("child_pid", "child_birth_tick"),
+                ("guardian_pid", "guardian_birth_tick"),
+            ):
+                pid = metadata.get(pid_key)
+                if pid and browser.process_birth_tick(pid) == metadata.get(tick_key):
+                    os.kill(pid, browser.signal.SIGKILL)
+            for handle in (process.stdin, process.stdout, process.stderr):
+                handle.close()
+
+        self.addCleanup(stop_owned_processes)
+
+        def ready():
+            for path in (self.repository / "artifacts" / "native-browsers").glob(
+                "session-*"
+            ):
+                try:
+                    metadata = json.loads((path / "session.json").read_text())
+                except (OSError, ValueError):
+                    continue
+                if (
+                    metadata.get("pid") == process.pid
+                    and metadata.get("state") == "running"
+                ):
+                    if guardian and "guardian_pid" not in metadata:
+                        continue
+                    if (path / "output" / "temporary.dat").exists():
+                        captured.update(path=path, metadata=metadata)
+                        return True
+            return False
+
+        self.wait_for(ready, "Disposable stdio launcher did not become ready")
+        return process, captured["path"], captured["metadata"]
+
+    def test_forced_launcher_death_reproduces_finalizer_gap_without_guardian(self):
+        process, path, metadata = self.launch_stub(guardian=False)
+        os.killpg(process.pid, browser.signal.SIGKILL)
+        process.wait(timeout=5)
+        process.stdin.close()
+        self.wait_for(
+            lambda: browser.process_birth_tick(metadata["child_pid"]) is None,
+            "Disposable server did not exit after stdin closed",
+        )
+        self.assertTrue((path / "output" / "temporary.dat").exists())
+
+    def test_forced_launcher_death_cleans_only_owned_output_and_guardian_exits(self):
+        peer = browser.create_session(self.repository)
+        peer_output = peer.path / "output" / "peer.dat"
+        peer_output.write_bytes(b"live peer output")
+        process, path, metadata = self.launch_stub()
+        guardian = metadata["guardian_pid"]
+        self.assertNotEqual(os.getpgid(guardian), os.getpgid(process.pid))
+        self.assertEqual(os.getsid(guardian), guardian)
+        descriptors = Path(f"/proc/{guardian}/fd")
+        for name in ("0", "1", "2"):
+            self.assertEqual(os.readlink(descriptors / name), os.devnull)
+        for descriptor in descriptors.iterdir():
+            try:
+                target = os.readlink(descriptor)
+            except FileNotFoundError:
+                continue
+            self.assertFalse(target.startswith(("pipe:", "socket:")))
+        os.killpg(process.pid, browser.signal.SIGKILL)
+        process.wait(timeout=5)
+        # The captured child still owns the connection until its inherited stdin closes.
+        time.sleep(1.1)
+        self.assertTrue((path / "output" / "temporary.dat").exists())
+        self.assertEqual(
+            browser.process_birth_tick(guardian), metadata["guardian_birth_tick"]
+        )
+        process.stdin.close()
+        self.wait_for(
+            lambda: not path.exists(), "Guardian did not remove ended connection output"
+        )
+        self.wait_for(
+            lambda: browser.process_birth_tick(guardian) is None,
+            "Connection guardian did not exit after cleanup",
+        )
+        self.assertEqual(peer_output.read_bytes(), b"live peer output")
+        self.assertEqual(process.stdout.read(), b"")
+        self.assertEqual(process.stderr.read(), b"")
+
+    def test_normal_disconnect_cleans_output_and_reaps_guardian(self):
+        process, path, metadata = self.launch_stub()
+        process.stdin.close()
+        self.assertEqual(process.wait(timeout=5), 0)
+        self.assertFalse(path.exists())
+        self.assertIsNone(browser.process_birth_tick(metadata["guardian_pid"]))
+        self.assertFalse(Path(f"/proc/{metadata['guardian_pid']}").exists())
+        self.assertEqual(process.stdout.read(), b"")
+        self.assertEqual(process.stderr.read(), b"")
+
+    def test_guardian_startup_metadata_failure_reaps_its_fork_child(self):
+        session = browser.create_session(self.repository)
+        browser._record_child(session, os.getpid())
+        children = []
+        original_fork = os.fork
+
+        def tracked_fork():
+            pid = original_fork()
+            if pid > 0:
+                children.append(pid)
+            return pid
+
+        with (
+            mock.patch.object(os, "fork", side_effect=tracked_fork),
+            mock.patch.object(
+                browser, "_update_metadata", side_effect=OSError("setup failure")
+            ),
+        ):
+            with self.assertRaises(OSError):
+                browser._start_guardian(session)
+        self.assertEqual(len(children), 1)
+        self.assertIsNone(browser.process_birth_tick(children[0]))
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(children[0], os.WNOHANG)
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -479,6 +684,10 @@ class LauncherTests(unittest.TestCase):
         self.umask = mock.patch.object(browser.os, "umask").start()
         self.signals = mock.patch.object(browser.signal, "signal").start()
         self.killpg = mock.patch.object(browser.os, "killpg").start()
+        self.guardian = mock.patch.object(
+            browser, "_start_guardian", return_value=12346
+        ).start()
+        self.stop_guardian = mock.patch.object(browser, "_stop_guardian").start()
 
     def launch(self, args=None):
         with (
@@ -549,6 +758,8 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.stdout.getvalue(), "")
         self.assertEqual(self.stderr.getvalue(), "")
         self.assertEqual(self.signals.call_count, 4)
+        self.guardian.assert_called_once()
+        self.stop_guardian.assert_called_once_with(12346)
 
     def test_ambient_playwright_overrides_are_removed_only_from_server_environment(
         self,
