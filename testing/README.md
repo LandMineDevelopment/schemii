@@ -1,5 +1,33 @@
 # Portable manual UI testing suite
 
+## Deterministic developer feedback
+
+CI uses Python 3.12 and Node 22. For a fresh checkout, create a virtual environment
+and install the constrained development dependencies:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
+npm test
+.venv/bin/python -m pytest -q
+```
+
+`npm test` needs Node, not an npm dependency installation; its frontend and harness
+tests use built-in Node modules. CI runs it before Python setup. Default pytest
+discovery includes `tests/` and the deterministic provisioning, cleanup and
+native-agent regressions under `testing/`, once each. No launcher rebuild is needed
+for these checks. PostgreSQL cases report skips unless their explicit integration
+credentials are supplied; live browser specs and load experiments are separate
+commands, never implicit pytest discovery. Launcher subprocess tests still acquire
+the shared deployment lease; wait for active manual QA to finish before running
+the broad command.
+
+See [the feedback inventory](../docs/testing-feedback.md) for focused ownership
+commands, unique coverage, cost and the broader pre-merge acceptance path. A fast
+subset or a skipped/live/manual layer is not complete application acceptance.
+
+## Manual fixture setup
+
 Run `./test.sh` from the repository root, or `./testing/test.sh` from anywhere.
 The suite lives here: `harness/` owns browser/agent coordination, `database/`
 builds the portable PostgreSQL fixture image, `personas.json` defines permissions,
