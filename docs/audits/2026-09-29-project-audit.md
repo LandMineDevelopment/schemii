@@ -14,12 +14,13 @@ The project has a capable, increasingly well-defined architecture and substantia
 
 The most useful next investment is a focused reliability and usability pass. Fix actual lifecycle and memory-budget gaps, protect unsaved work, make failures distinguishable from empty/missing data, and finish the report correctness workflows already in the backlog. The evidence does not justify another ground-up rewrite: the September 28 experiment failed the user's capability/visual expectations and was explicitly discarded. Improve one ownership boundary at a time, with a measurable before/after scenario.
 
-Four immediate priorities stand out:
+Five immediate priorities stand out:
 
 1. Expire abandoned raw SQL sessions independently of browser requests, and enforce result-memory limits before client-side materialization.
 2. Protect SQL-object editor drafts and assistant input from silent loss.
 3. Bring the 30 Python QA/provisioning regressions into the normal CI command and make authenticated live tests portable.
 4. Repair dashboard/model incompatibilities atomically and explain the snapshot relationship between a report, its drill-through, and a fresh export.
+5. Shorten development feedback by reducing repeated inspection setup, exposing fast checks immediately, and balancing browser work. Preserve meaningful acceptance coverage; test count alone is not evidence of value.
 
 No critical exploit or confirmed permanent loss of an existing saved dashboard was established. This is a broad engineering audit, not a penetration test or proof that every path is defect-free. The report separates reproduced defects, source-confirmed defects, design/capacity gaps, and unverified candidates.
 
@@ -100,6 +101,7 @@ P1 means address in the next reliability tranche; P2 means the next focused prod
 | A22 | P3 | Entry-point composition and quality coverage remain uneven | Maintainability gap | Incremental | Related resolved refactors |
 | A23 | P3 | Design/history capacity needs a coherent byte budget | Capacity candidate; characterize first | M | New |
 | A24 | P2 | Deleted saved objects have no product recovery path | Current hard-delete contracts + historical loss incident | M–L | New |
+| A25 | P1 | Testing feedback is delayed by repeated setup and uneven CI work | Timed local runs + hosted job/step logs | M | New; see testing analysis below |
 
 ### A01 — Expire raw SQL sessions without another client request
 
@@ -344,11 +346,81 @@ All initial open issues lacked an assignee, and readiness/priority/product often
 
 The latest 100 workflow runs included 46 successes, 20 failures and 34 cancellations. This is **not a flake rate**: known shared baseline defects and deliberate cancel-in-progress/merge-train cancellations explain part of the sample. Judge current exact-head results, then classify any repeat failure before changing tests or adding retries.
 
+## Testing value and development turnaround — A25
+
+Testing is a measured development bottleneck. The largest opportunities are repeated full inspection builds, the placement of fast feedback, browser shard imbalance, and unnecessary application testing for narrowly defined documentation changes. Deleting cheap tests or weakening acceptance would save little and would not address those costs.
+
+This follow-up measured main at `0bd9dac` after the three fixes and the original report merged. Local Python was **3.14.7**, Node **25.2.1**; hosted CI uses Python **3.12** and Node **22**. These are individual runs, not percentile estimates or a controlled cross-machine benchmark. Timing logs and the profile are retained privately; no credentials or raw chat transcripts are published.
+
+### Where the time goes
+
+| Measurement | Observed time | Interpretation |
+| --- | --- | --- |
+| Full default Python, `pytest -q --durations=50` | **222.27s**, 1,557 passed / 71 skipped; earlier run 241.08s | Broad local feedback currently takes roughly four minutes |
+| Four inspection test files | **36 passing cases**; their phases in the slowest-50 list total **149.46s**, at least **67.2%** of full elapsed time | A small portion of the suite repeatedly derives the entire installed application graph |
+| Diagnostic run excluding only those four files | **68.47s**, 1,521 passed / 71 skipped | The remaining suite is much cheaper. This deliberately incomplete run is evidence for separating feedback, not a replacement acceptance command |
+| Node frontend/harness suite | **395 passed**, about **0.63–0.68s locally**; **2s** in the sampled CI job | Cheap, useful feedback; reducing its count is not the turnaround priority |
+| Additional Python provisioning/cleanup tests | **30 passed**, 0.08–0.14s | Fix A04's discovery gap immediately; coverage costs almost nothing |
+| [Combined-main CI, run 36619137643](https://github.com/LandMineDevelopment/schemii/actions/runs/36619137643) | **10m17s** from dispatch to completion; job starts at +11–14s | Android shard 2 is the critical path; its browser step takes **495s**, versus **312s** for Android shard 1 |
+| [Docs-only report CI, run 36619862101](https://github.com/LandMineDevelopment/schemii/actions/runs/36619862101) | **10m47s** overall; all jobs start at +91–92s; **37m57s** summed job execution | README/report edits trigger seven full application jobs, including four independent stack builds |
+
+The diagnostic subset briefly overlapped the separate profiling process. Treat its 68.47s as directional; do not infer an exact optimization saving by subtracting it from the full run. The slowest-50 phase sum independently establishes the inspection concentration.
+
+On the report run, the critical Android shard takes **555s**: **67s launcher**, **26s Chromium installation**, **452s browser testing**, plus checkout/setup overhead. Other browser steps take 285s, 298s and 349s. All four launchers together cost **258 runner-seconds**, but parallel startup means removing all of that would not shorten wall time by 258 seconds. Python takes **372s** inside its **410s** job; Node starts only afterward. Static quality takes **19s** and real PostgreSQL integration **58s**, including a **24s test step**. Queue/dispatch delay, setup, test execution and aggregate runner usage are different metrics; optimize the critical path and early feedback separately.
+
+The longest local test, `test_developer_documents_are_derived_once_for_each_application_run`, takes **13.17s**. Snapshot identity/stability tests each take about **12s**. A separate `cProfile` run of the identity-change test finds two full snapshots, **4,516 source-metadata derivations** and **8,054 `inspect.getsourcelines` calls**. Under instrumentation, snapshot building accounts for 29.81s of the 32.77s process; source metadata accounts for 8.28s and system-document building for 18.45s cumulatively. Those times overlap and profiling increases runtime: they identify work, not additive savings.
+
+**Sources:** [`ci.yml`](../../.github/workflows/ci.yml), [`playwright.config.js`](../../playwright.config.js), [`test_developer_inspection.py`](../../tests/test_developer_inspection.py), [`test_system_inspection.py`](../../tests/test_system_inspection.py), [`test_route_inspection.py`](../../tests/test_route_inspection.py), [`test_database_inspection.py`](../../tests/test_database_inspection.py), [`developer_inspection.py`](../../src/schemii/common/developer_inspection.py), [`source_inspection.py`](../../src/schemii/common/source_inspection.py). The production installation already caches one snapshot per application; this is repeated test/application construction, not evidence that every map request rebuilds it.
+
+### Which tests earn their cost
+
+Value was assessed through sampled assertions, protected failure modes, historical regressions, and coverage boundaries. This is not an exhaustive mutation study. A test is useful when an independently plausible defect makes it fail and the assertion explains which user or safety contract broke.
+
+| Test group | Assessment | Recommended treatment |
+| --- | --- | --- |
+| Migration execution, stale revision/target, uncertain commit, restart and no DDL replay | High value: protects source data and execution ownership, where a plausible regression has serious consequences | Keep explicit race/recovery/real-PostgreSQL coverage; do not replace it with source-string checks |
+| Owner isolation, role/grant changes, revoked sessions and exact managed connections | High value: verifies actual authorization outcomes, including cross-owner and same-role boundaries | Keep denial and revocation cases, not just successful admin flows |
+| Real PostgreSQL metadata migrations, encrypted credentials, rollback/import and backup recovery | High value: in-memory fakes cannot establish database transactions, constraints, encryption/restart durability or restore behavior | Preserve the hosted integration and isolated backup verification; they are relatively inexpensive |
+| SQL compiler, grain/filter/repetition/time and generated SQL/AST contracts | High value: checks permitted query structure, literal safety and expected semantic results | Keep pure compiler/AST checks and synthetic result oracles; complement PostgreSQL-specific type/NULL/calendar semantics with real PostgreSQL execution |
+| Inspection coherence, complete graph, configured services, no external I/O, no secrets and identity changes | Useful product/safety contracts, despite high setup cost | Reuse an immutable baseline document for independent read-only assertions; use small synthetic graphs for algorithm branches. Retain fresh-app/configured-graph, identity-change and derive-once tests |
+| Node state/ordering, cancellation, ownership and fixture-ledger tests | Useful, very cheap feedback; mocked DOM proves the tested component boundary | Run early. Preserve tests that exercise outcomes; distinguish them from physical layout/whole-product acceptance |
+| Mounted browser save/reopen, keyboard focus/disclosure, live permission, paging and migration workflows | High value at integration boundaries; catches defects that module tests cannot observe | Keep representative real transport/persistence paths and mobile interaction/layout cases; balance their scheduling before cutting scope |
+| Literal source/CSS checks presented as visual or interactive guarantees | Limited value for that claim: a string can exist while the control is unreachable, focus is lost, or a draft is discarded | Keep intentional packaging/static contracts, but replace behavioral claims with an executable assertion at their actual boundary |
+| Opt-in/skipped live tests | Potentially valuable, but default green CI does not prove their scenarios | Record prerequisites and run ownership; repair A16 and explicitly track coverage, rather than counting skips as successful acceptance |
+
+High-value examples include [`test_migration_execution.py`](../../tests/test_migration_execution.py) (concurrent claims/restart/no replay), [`test_query_cancellation.py`](../../tests/test_query_cancellation.py) (owner/turn/revocation fencing), [`test_metadata_persistence.py`](../../tests/test_metadata_persistence.py) (real crypto identity binding and deployed migration checksums), [`test_postgres_gateway_execution.py`](../../tests/integration/test_postgres_gateway_execution.py) (real stale fingerprint/precondition and transactional rollback), [`schemer-result-cache.test.js`](../../tests/frontend/schemer-result-cache.test.js) (one execution, abort/late-response and budget enforcement), and [`shared-report-live.spec.js`](../../tests/e2e/shared-report-live.spec.js) (real viewer isolation, RLS, export/drill and revocation). These protect distinct layers; apparent overlap is not automatically duplication.
+
+Concrete weaknesses matter more than aggregate counts:
+
+- [`test_raw_console.py:196`](../../tests/test_raw_console.py#L196) explicitly calls `service.reap()`. It usefully checks idle closure, session removal and exclusion of running work, but mocks the transport's close method; it cannot prove real rollback/lock/capacity release or detect A01's absent lifespan scheduling. Add a lifecycle test that advances time and observes cleanup without another raw-session API call, plus real transport release evidence; retain the unit test for the reaper itself.
+- PR #120 originally checked text in a native disclosure containing both Show and Hide spans. Hidden DOM text could satisfy the assertion. The merged test checks label **visibility**, keyboard Enter behavior and retained focus on the summary. This is a concrete example of improving regression value without adding a broad new suite. Similarly, a CSS-string assertion named “never covers controls” cannot prove mobile geometry; mounted viewport/hit-testing is the useful assertion.
+- [`test_frontend.py:327`](../../tests/test_frontend.py#L327) checks toast/CSS substrings rather than overlap or pointer access; `:338` pins repaint call spellings rather than visible undo/redo outcome. Replace those behavioral claims with mounted scenarios. Conversely, the deployed migration hash manifest in [`test_metadata_persistence.py:245`](../../tests/test_metadata_persistence.py#L245) is an intentional compatibility contract: keep it. Comment/snippet checks on the same immutable files (`:292–333`) offer little additional failure detection and are simplification candidates, not a major speed opportunity.
+- [`test_account_auth.py:72`](../../tests/test_account_auth.py#L72) checks last-admin protection's status and `:80` wrong-current-password status, but neither checks useful error guidance. Both remain green with A06's generic-message failure. Strengthen stable error codes, non-sensitive action guidance and unchanged auth state.
+- [`test_schemer_time_sql_live.py`](../../tests/test_schemer_time_sql_live.py) contains valuable leap-day, DST, missing-period, NULL-partition and numeric-result oracles, but its default skip and existing-workspace/unauthenticated helper prevent ordinary CI coverage. Move pure generated-SQL result cases onto the disposable PostgreSQL integration fixture, preserving one authenticated assembled API case for execution/session cleanup. SQLite-transpiled unit queries remain useful fast checks but cannot certify PostgreSQL-specific calendar/type semantics.
+
+Source analysis is itself a supported inspection feature, so tests of extracted source graphs are meaningful behavioral tests. The weakness is inferring unrelated runtime/UI behavior merely from a literal appearing in an implementation file. Cheap static checks are not automatically useless.
+
+The combined-main hosted run has **one retry-recovered failure**: `schemoo-model-editor-audit.spec.js:83` reached a disabled Save button after keyboard Space and exceeded the 7.5s expectation. It passed on retry; root cause remains unclassified. The report run has no retry-recovered failures. The browser workflow uploads evidence only on final `failure()`, and the successful combined-main run exposes no artifacts, so its failed-attempt trace is not retained as a downloadable CI artifact. Existing CI retries are therefore a separate visibility issue from the local startup stall documented below. Neither sample establishes a general flake rate.
+
+### Improvements in priority order
+
+1. **Expose fast feedback immediately (S).** Run Node before Python, or independently if the extra job/queue cost is acceptable. Include `testing/` in supported Python discovery. Document focused selections by ownership boundary alongside the full acceptance command. A Console edit should get its relevant backend, frontend and mounted regression feedback before waiting for unrelated map generation. Keep full acceptance before merging application changes until a reviewed selection map is proven.
+2. **Reduce repeated inspection setup (M; largest local opportunity).** Share immutable read-only baseline documents within the relevant tests; use explicit fresh applications for route mutations, different runtime bindings, secret values, no-I/O behavior and generation-count assertions. Smaller synthetic graphs should exercise parser/resolver branches, with representative full installed-graph tests retained. Profile before adding caching; any production source-metadata reuse must remain scoped to one snapshot/application and preserve document bounds and changed graph identities. Do not use a global mutable app fixture or hide the inspection suite behind skips.
+3. **Handle narrowly defined documentation changes explicitly (S–M; largest obvious wasted CI work).** Add an always-running change classifier and docs/link checks. An allowlist can recognize report-only Markdown edits and the corresponding report index update; runtime, launcher, dependencies, workflow, testing/harness, configuration and agent-contract changes must select full checks. Unknown paths default to full checks. Preserve stable required-check results if A17 adds branch protection; do not leave required jobs permanently pending through a workflow-level path filter. Docs changes should not rebuild four applications merely to validate links.
+4. **Balance browser work with measured durations (M; largest hosted critical-path opportunity).** The two Android shards are about 1.5–1.6 times apart. Use per-test/file timings to balance work, then compare the same test inventory on the same runner class. Playwright distributes files when full parallelism is disabled, so equal case counts are not equal execution cost ([official sharding contract](https://playwright.dev/docs/test-sharding)). A two-shard ideal balance of the report's Android test-step totals is about **375s**, versus 452s observed: roughly **77s** of test-step opportunity before setup, variability and isolation costs. That is an upper-bound planning calculation, not a promised saving. Increase worker count only after tests have independent accounts, owned objects, ports/fixtures and cleanup; current one-worker shared state is not evidence that parallel execution is safe.
+5. **Retain actionable timing/retry evidence (S).** Publish sanitized structured test durations and first-attempt/retry results on successful runs too. Preserve failed-attempt traces privately with bounded retention. Track first actionable failure, queue delay, setup time, test time, critical shard, first-attempt pass rate and total runner minutes separately. No automatic timeout increases, extra retries or skips to improve headline pass rates.
+6. **Improve assertion value where a real gap is demonstrated (incremental).** Map each expensive scenario to the invariant it uniquely protects. Keep its decisive assertions; replace duplicate setup or weak behavioral assertions. For a proposed retirement, demonstrate a representative defect the surviving test catches, show the duplicate adds no unique boundary, and preserve coverage mapping. Small, targeted mutation exercises for ownership, stale revision, cancellation and draft races are more informative than a test-count target. Do not add a blanket mutation framework/dependency during this audit.
+7. **Remove incidental browser waiting/repetition (S–M).** The guide cursor test in [`quick-start.spec.js:141`](../../tests/e2e/quick-start.spec.js#L141) waits through both products' real demo playback. Adjacent serial start timestamps attribute about **21s** to it per project; this includes surrounding setup/teardown and is not an exact reporter duration. Install the [supported test clock](https://playwright.dev/docs/clock) before navigation and control each phase, preserving disappearing-target/cursor assertions plus a real playback/reduced-motion smoke. Separately, request-only assembled capacity/race/permission cases can run once, following the existing desktop-only 24 MiB COPY transport test; preserve real HTTPS/auth/database outcomes and both device paths for actual UI behavior. This saves work but does not automatically shorten the critical shard.
+
+Initial goals for the improvement work: focused local feedback within **15 seconds** for ordinary bounded changes; Node results before Python completes; at least **50% less inspection-phase cost** with all existing unique guarantees preserved; a balanced browser shard inventory; and report-only CI that validates documentation without launching the app. These are targets to measure, not achieved results. Establish p50/p90 over at least ten comparable successful runs and report first-attempt failures separately. Keep a broad pre-merge lane for application changes and an explicit authenticated live/AI/manual acceptance ledger; a fast green lane must not be presented as full product acceptance.
+
+No tests, retries, timeouts or CI selection rules were removed or changed in this follow-up. The output is an evidence-backed plan for improving turnaround and coverage together.
+
 ## Improvement plan and acceptance gates
 
 | Tranche | Work | Exit gate |
 | --- | --- | --- |
-| 1 — Reliability and saved work | A01/A02/A03/A04; A08; useful account errors A06 | Real database expiry/memory tests; all draft close/send delay cases; all QA regressions in CI; no silent rollback/retry or input loss |
+| 1 — Reliability and saved work | A01/A02/A03/A04; A08; useful account errors A06; A25 feedback/setup | Real database expiry/memory tests; all draft close/send delay cases; all QA regressions in CI; immediate focused checks and reduced repeated setup; no silent rollback/retry or input loss |
 | 2 — Trust and recovery | A05/A07; A11/A24; #2/#5; #77 | Bounded metadata/auth failure; saved-object/source-state distinction and Retry; recoverable saved-object deletion; atomic repair; snapshot/completeness disclosure |
 | 3 — Shared UI detail | A09/A10/A12/A13/A21; #80 | Product-menu matrix, streaming keyboard focus, readable contrast, phone hitboxes/current values, 200% text, software keyboard, proper tabs |
 | 4 — Durable development | A16/A17/A18/A19/A20/A22 | Clean-machine test bootstrap, declared Python minimum, authenticated portable fixtures, required checks policy, evidence/cleanup/recovery acceptance |
@@ -365,6 +437,7 @@ Every acceptance report should identify commit, persona/grant, exact owned fixtu
 | Check | Result / scope |
 | --- | --- |
 | Default Python suite at audit baseline | **1,557 passed, 71 skipped**; 241.08 seconds |
+| Testing-time follow-up at `0bd9dac` | **1,557 passed, 71 skipped**; 222.27s; per-test durations and separate inspection profile collected |
 | Additional Python QA/provisioning suite | **30 passed**; these are currently omitted from default discovery |
 | Node frontend + harness suite | **395 passed**, no failures/skips |
 | Independent #118 review | 8 focused migration tests, clean diff, all 7 hosted checks passed at `22e7133` |
@@ -385,6 +458,7 @@ The user authorized completing and merging ready PRs #118–#120 during this aud
 - [PR #118](https://github.com/LandMineDevelopment/schemii/pull/118): disabled migration Apply styling; merged as `247e117`.
 - [PR #119](https://github.com/LandMineDevelopment/schemii/pull/119): detached Console loading/prerequisite visibility; merged as `d802f8b`.
 - [PR #120](https://github.com/LandMineDevelopment/schemii/pull/120): mobile migration SQL and stronger disclosure test; all seven final-head checks passed; merged as `399733c`.
+- [PR #121](https://github.com/LandMineDevelopment/schemii/pull/121): original audit report; all seven final-head checks passed; merged as `0bd9dac`. Testing turnaround/value analysis was added in a focused follow-up.
 
 Housekeeping is performed only after exact merge/ancestry verification and clean tracked/untracked status. The five commits on `qa/easy-wins-combined` have exact stable-patch equivalents on the pushed fix branches; that temporary combined tree holds no unique committed feature work. Private ignored evidence is archived before removal. No user metadata, source data, secrets, T3 database contents, saved chat associations, or unrelated routes are discarded.
 
