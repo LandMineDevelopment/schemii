@@ -102,11 +102,14 @@ Session ownership metadata sits outside the evicted output directory.
 Always call `browser_close` before a worker finishes. A completed or interrupted
 turn can retain its MCP connection for follow-up; it is not shutdown. Closing the
 native agent/session, when supported, ends the transport and automatically removes
-its temporary directory. The launcher forwards shutdown only to its own captured
+its temporary directory. Stock Codex can kill the launcher before normal cleanup
+finishes. A small connection-owned cleanup process survives that targeted shutdown,
+closes all inherited transport descriptors, waits for its recorded supervisor and
+child identities to end, removes only its own output and exits. Normal disconnect
+also reaps that helper. The launcher forwards shutdown only to its own captured
 process group. On later startup it removes only validated orphan sessions whose
-recorded supervisor and child identities have both stopped; active, unknown,
-symlinked and user-owned directories remain untouched. No background cleanup
-service or permanent browser/controller daemon is added.
+recorded owners have stopped; active, unknown, symlinked and user-owned directories
+remain untouched. No permanent cleanup service or browser/controller daemon is added.
 
 With thirteen available slots, twelve children can each own a browser. For manual
 acceptance reserve one of those children for independent review: at most eleven
