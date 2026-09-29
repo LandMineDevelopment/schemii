@@ -7,5 +7,27 @@ max_depth = 1
 [features]
 hooks = true
 
+# A stdio connection belongs to one Codex thread. The launcher gives that
+# connection an isolated Chromium process and automatically cleaned output.
+# Warm the pinned npm package once as documented in testing/agents/README.md.
+[mcp_servers.schemii_browser]
+command = "bash"
+args = ["-c", "exec python3 \"$(git rev-parse --show-toplevel)/testing/agents/browser.py\""]
+required = true
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+# Normal browser inputs and evidence only. No arbitrary JavaScript or page APIs.
+enabled_tools = [
+  "browser_close", "browser_resize", "browser_console_messages",
+  "browser_handle_dialog", "browser_emulate_media", "browser_file_upload",
+  "browser_drop", "browser_find", "browser_fill_form", "browser_press_key",
+  "browser_type", "browser_mouse_move_xy", "browser_mouse_click_xy",
+  "browser_mouse_drag_xy", "browser_mouse_down", "browser_mouse_up",
+  "browser_mouse_wheel", "browser_navigate", "browser_navigate_back",
+  "browser_take_screenshot", "browser_snapshot", "browser_click",
+  "browser_drag", "browser_hover", "browser_select_option", "browser_tabs",
+  "browser_wait_for",
+]
+
 # Hooks live in hooks.json for installed CLI discovery. Review exact definitions
 # in Codex before activation; failures can fail open. See testing/agents/README.md.

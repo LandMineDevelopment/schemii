@@ -44,3 +44,11 @@ agent IDs. Reserve independent review capacity, prevent recursive worker
 delegation, and verify evidence before claiming acceptance. Project configuration
 targets new provider sessions; inspect current capacity and hook trust instead
 of assuming stored settings are active.
+
+Parent project configuration also supplies each native thread with its own
+`schemii_browser` stdio extension and isolated Chromium context. Follow the
+native-browser runbook, omit browser output filenames and inspect actual images.
+Temporary output expires after ten minutes and is removed on transport shutdown;
+copy only selected evidence to declared task-owned locations. Call `browser_close`
+before finishing; completed/interrupt status is not MCP session shutdown. Keep
+legacy QA ownership and acceptance gates until their native replacement is proven.

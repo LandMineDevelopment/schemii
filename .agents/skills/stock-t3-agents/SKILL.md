@@ -13,6 +13,14 @@ report the discovery limit.
   verification slots. Run `python3 testing/agents/doctor.py` for configuration
   and hook checks; only supply `--runtime-slots N` from the current interface.
   Stored capacity does not increase an already running conversation.
+- Native children inherit `schemii_browser` from parent project configuration;
+  each owns an isolated stdio/browser connection. Use its ordinary UI tools for
+  that child's browser, not shared T3 preview tabs. Verify the configuration and
+  mechanical isolation first; follow the native-browser section of the runbook.
+  Omit browser output filenames, inspect returned images and copy only selected
+  evidence to its assigned task location. Temporary output expires after ten
+  minutes and is removed on connection shutdown; call `browser_close` before
+  finishing and close the native session when a supported control is available.
 - Give each developer a linked worktree/task branch and narrow owned paths.
   Native children share files; verify isolation before editing and preserve
   others' changes. Include exactly one `SCHEMII_ASSIGNMENT {JSON}` line in each

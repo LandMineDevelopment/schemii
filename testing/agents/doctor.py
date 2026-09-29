@@ -10,6 +10,63 @@ import selectors
 import subprocess
 import time
 
+BROWSER_COMMAND = (
+    'exec python3 "$(git rev-parse --show-toplevel)/testing/agents/browser.py"'
+)
+BROWSER_TOOLS = {
+    "browser_close",
+    "browser_resize",
+    "browser_console_messages",
+    "browser_handle_dialog",
+    "browser_emulate_media",
+    "browser_file_upload",
+    "browser_drop",
+    "browser_find",
+    "browser_fill_form",
+    "browser_press_key",
+    "browser_type",
+    "browser_mouse_move_xy",
+    "browser_mouse_click_xy",
+    "browser_mouse_drag_xy",
+    "browser_mouse_down",
+    "browser_mouse_up",
+    "browser_mouse_wheel",
+    "browser_navigate",
+    "browser_navigate_back",
+    "browser_take_screenshot",
+    "browser_snapshot",
+    "browser_click",
+    "browser_drag",
+    "browser_hover",
+    "browser_select_option",
+    "browser_tabs",
+    "browser_wait_for",
+}
+
+
+def browser_policy(config: dict) -> dict:
+    server = (config.get("mcp_servers") or {}).get("schemii_browser") or {}
+    tools = server.get("enabled_tools")
+    valid = bool(
+        server.get("command") == "bash"
+        and server.get("args") == ["-c", BROWSER_COMMAND]
+        and not server.get("url")
+        and server.get("enabled") is not False
+        and server.get("required") is True
+        and isinstance(tools, list)
+        and all(isinstance(tool, str) for tool in tools)
+        and set(tools) == BROWSER_TOOLS
+        and len(tools) == len(BROWSER_TOOLS)
+    )
+    return {
+        "configured": bool(server),
+        "isolated_stdio_policy_valid": valid,
+        "runtime_browser_isolation": "unverified",
+        "artifact_cleanup": "owned_connection_exit; orphan_sweep_on_start"
+        if valid
+        else "unverified",
+    }
+
 
 def inspect_configuration(cwd: Path, timeout: float = 15) -> dict:
     env = dict(os.environ)
@@ -113,12 +170,12 @@ def summarize(data: dict, runtime_slots: int | None) -> dict:
         if "testing/agents/guard.py" in hook.get("command", "")
     ]
 
-    def covers_spawn(hook: dict) -> bool:
+    def covers_tools(hook: dict, names: tuple[str, ...]) -> bool:
         matcher = hook.get("matcher")
         if matcher in {None, "", "*"}:
             return True
         try:
-            return all(re.search(matcher, name) for name in ("spawn_agent", "Agent"))
+            return all(re.search(matcher, name) for name in names)
         except (TypeError, re.error):
             return False
 
@@ -126,7 +183,7 @@ def summarize(data: dict, runtime_slots: int | None) -> dict:
         hook.get("eventName") in {"preToolUse", "PreToolUse"}
         and hook.get("enabled") is True
         and hook.get("trustStatus") in {"trusted", "managed"}
-        and covers_spawn(hook)
+        and covers_tools(hook, ("spawn_agent", "Agent"))
         for hook in guards
     )
     available_total = runtime_slots
@@ -144,6 +201,28 @@ def summarize(data: dict, runtime_slots: int | None) -> dict:
         and (max_workers or 0) >= 10
         and not any(entry.get("errors") for entry in data["hooks"])
     )
+    native_browser = browser_policy(config)
+    native_browser["output_guard_trusted"] = features.get("hooks") is not False and any(
+        hook.get("eventName") in {"preToolUse", "PreToolUse"}
+        and hook.get("enabled") is True
+        and hook.get("trustStatus") in {"trusted", "managed"}
+        and covers_tools(
+            hook,
+            (
+                *(
+                    f"{prefix}browser_{name}"
+                    for prefix in ("mcp__schemii_browser__", "mcp.schemii_browser.")
+                    for name in (
+                        "take_screenshot",
+                        "snapshot",
+                        "find",
+                        "console_messages",
+                    )
+                ),
+            ),
+        )
+        for hook in guards
+    )
     return {
         "native_agents_enabled": native_enabled,
         "engine": "v2" if v2_enabled else "v1",
@@ -152,6 +231,10 @@ def summarize(data: dict, runtime_slots: int | None) -> dict:
         "maximum_workers_with_reviewer_reserved": max_workers,
         "spawn_guard_trusted": active_guard,
         "dispatch_ready": dispatch_ready,
+        "native_browser": native_browser,
+        "native_browser_workers_with_reviewer_reserved": max(0, available_total - 2)
+        if available_total is not None
+        else None,
         "guard_hooks": [
             {
                 "event": hook.get("eventName"),
@@ -170,7 +253,8 @@ def summarize(data: dict, runtime_slots: int | None) -> dict:
             "Reported runtime slots must come from the attached agent interface, not a requested count.",
             "This configuration check does not launch agents or prove simultaneous inference.",
             "Trusted local hooks can fail open and do not cover every hosted tool path.",
-            "Native child agents share the T3 chat browser context; use ./test.sh for isolated parallel UI QA.",
+            "T3 preview tools share the chat browser context; schemii_browser uses a separate stdio connection per native thread when loaded.",
+            "Browser configuration does not prove running tools, account isolation, cleanup or completed UI acceptance; run the dedicated verification first.",
         ],
     }
 
@@ -188,6 +272,11 @@ def main() -> int:
         action="store_true",
         help="Fail unless 10 workers and a trusted guard are available",
     )
+    parser.add_argument(
+        "--require-native-browser-config",
+        action="store_true",
+        help="Fail unless the isolated stdio launcher and UI-only tool policy are configured; does not launch browsers",
+    )
     args = parser.parse_args()
     if args.runtime_slots is not None and args.runtime_slots < 1:
         parser.error("--runtime-slots must be positive")
@@ -199,7 +288,16 @@ def main() -> int:
         print(json.dumps({"status": "blocked", "reason": str(error)}))
         return 2
     print(json.dumps(report, indent=2))
-    return 2 if args.require_ready and not report["dispatch_ready"] else 0
+    return (
+        2
+        if (
+            args.require_ready
+            and not report["dispatch_ready"]
+            or args.require_native_browser_config
+            and not report["native_browser"]["isolated_stdio_policy_valid"]
+        )
+        else 0
+    )
 
 
 if __name__ == "__main__":

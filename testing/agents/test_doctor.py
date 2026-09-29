@@ -1,6 +1,8 @@
+import copy
 import importlib.util
 from pathlib import Path
 import unittest
+import tomllib
 
 
 spec = importlib.util.spec_from_file_location(
@@ -155,6 +157,62 @@ class CapacityReportTests(unittest.TestCase):
     def test_known_capacity_and_covered_trusted_guard_allow_readiness(self):
         config = {"agents": {"enabled": True, "max_concurrent_threads_per_session": 12}}
         self.assertTrue(self.ready_report(config)["dispatch_ready"])
+
+
+class NativeBrowserPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.config = tomllib.loads(
+            (Path(__file__).resolve().parents[2] / ".codex/config.toml").read_text()
+        )
+
+    def test_project_policy_is_configured_without_claiming_runtime_proof(self):
+        result = doctor.browser_policy(self.config)
+        self.assertTrue(result["isolated_stdio_policy_valid"])
+        self.assertEqual(result["runtime_browser_isolation"], "unverified")
+
+    def test_missing_and_remote_shared_servers_do_not_claim_isolation(self):
+        self.assertFalse(doctor.browser_policy({})["isolated_stdio_policy_valid"])
+        self.config["mcp_servers"]["schemii_browser"]["url"] = (
+            "http://localhost:9999/mcp"
+        )
+        self.assertFalse(
+            doctor.browser_policy(self.config)["isolated_stdio_policy_valid"]
+        )
+
+    def test_arbitrary_javascript_or_no_allowlist_prevents_readiness(self):
+        for tools in (
+            None,
+            ["browser_evaluate"],
+            self.config["mcp_servers"]["schemii_browser"]["enabled_tools"]
+            + ["browser_run_code_unsafe"],
+        ):
+            config = copy.deepcopy(self.config)
+            config["mcp_servers"]["schemii_browser"]["enabled_tools"] = tools
+            self.assertFalse(
+                doctor.browser_policy(config)["isolated_stdio_policy_valid"]
+            )
+
+    def test_native_capacity_reserves_independent_review(self):
+        result = doctor.summarize({"config": self.config, "hooks": []}, 13)
+        self.assertEqual(result["native_browser_workers_with_reviewer_reserved"], 11)
+        self.assertFalse(result["dispatch_ready"])
+
+    def test_output_readiness_requires_all_filename_surfaces(self):
+        hook = {
+            "eventName": "PreToolUse",
+            "enabled": True,
+            "trustStatus": "trusted",
+            "command": "python3 testing/agents/guard.py",
+            "matcher": "schemii_browser[._]+browser_take_screenshot$",
+        }
+        hooks = [{"hooks": [hook]}]
+        result = doctor.summarize({"config": self.config, "hooks": hooks}, 13)
+        self.assertFalse(result["native_browser"]["output_guard_trusted"])
+        hook["matcher"] = (
+            "schemii_browser[._]+browser_(take_screenshot|snapshot|find|console_messages)$"
+        )
+        result = doctor.summarize({"config": self.config, "hooks": hooks}, 13)
+        self.assertTrue(result["native_browser"]["output_guard_trusted"])
 
 
 if __name__ == "__main__":

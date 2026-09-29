@@ -37,7 +37,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "(^|[._])spawn_agent$|^Agent$",
+        "matcher": "(^|[._])spawn_agent$|^Agent$|schemii_browser[._]+browser_(take_screenshot|snapshot|find|console_messages)$",
         "hooks": [
           {
             "type": "command",

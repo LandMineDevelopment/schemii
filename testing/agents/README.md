@@ -50,6 +50,69 @@ Role sandbox values are defaults. Parent live permission overrides may supersede
 them, including the reviewer's read-only default. Native children share the host
 filesystem, and filesystem permissions do not isolate browser/MCP sessions.
 
+## A browser for each native agent
+
+The parent project configuration registers `schemii_browser`, a standard local
+Microsoft Playwright MCP extension. Codex 0.159 creates its own stdio connection
+for every native thread, including developer, tester and reviewer children. Each
+connection starts an isolated Chromium process and fresh cookie/storage context;
+there is no shared profile, CDP attachment, HTTP browser server or separate Codex
+worker launcher. These browsers run headlessly and return screenshots to agents;
+they are separate from T3's embedded preview. Stock T3 and its updates stay intact.
+
+Warm the exact package once, then check the configuration:
+
+```bash
+npx --yes --prefer-online @playwright/mcp@0.0.83 --version
+python3 testing/agents/doctor.py --runtime-slots 13 --require-native-browser-config
+python3 testing/agents/verify_browser_isolation.py --clients 12
+```
+
+The launcher requires `chromium` on PATH and starts the cached package offline.
+It never installs a browser, changes system packages or starts the application.
+The pin contains its own Playwright dependency, leaving the application's existing
+E2E package unchanged. A missing dependency blocks startup with a useful reason.
+New provider sessions load the parent configuration. Role-only MCP settings are
+ignored by this installed Codex version; do not assume current documentation for
+newer clients changes that behavior. The current T3 tool surface has no exposed
+MCP-reload control, so use a fresh provider session and confirm actual tools.
+
+The verification command creates twelve ephemeral Codex thread-owned MCP clients
+without AI turns. It checks browser state, output ownership, image transport and
+cleanup. It is mechanical readiness evidence, not twelve AI testers, simultaneous
+inference or application acceptance. Account/grant/fixture, uncertain-write,
+scenario evidence and independent-review checks still matter when replacing the
+legacy execution layer. Keep its saved data until those requirements pass.
+
+Use ordinary UI tools: navigation, input, keyboard/pointer, dialogs, upload and
+screenshots. Arbitrary JavaScript and direct page API tools are excluded from the
+agent tool allowlist; WebMCP is disabled. Omit `filename` for screenshots,
+snapshots, find and console output: automatic captures return inline content or
+remain inside that connection's private output.
+The assignment hook rejects named output paths when loaded and trusted. Inspect
+fresh images; a saved path alone is not visual verification.
+
+Temporary output lives in a unique private `artifacts/native-browsers/session-*`
+directory. A 20 MiB soft file budget removes older output after responses; the
+current response can exceed it. Files also expire after ten minutes, checked at
+least every thirty seconds while the connection runs. Copy only selected report
+or finding evidence to its declared task-owned location before expiry/shutdown.
+Session ownership metadata sits outside the evicted output directory.
+
+Always call `browser_close` before a worker finishes. A completed or interrupted
+turn can retain its MCP connection for follow-up; it is not shutdown. Closing the
+native agent/session, when supported, ends the transport and automatically removes
+its temporary directory. The launcher forwards shutdown only to its own captured
+process group. On later startup it removes only validated orphan sessions whose
+recorded supervisor and child identities have both stopped; active, unknown,
+symlinked and user-owned directories remain untouched. No background cleanup
+service or permanent browser/controller daemon is added.
+
+With thirteen available slots, twelve children can each own a browser. For manual
+acceptance reserve one of those children for independent review: at most eleven
+active testers plus that reviewer. The legacy isolated runner still caps its own
+runs at ten; this is not a limit of the native browser extension.
+
 ## Assign native workers
 
 Prepare a developer's linked Git worktree and task branch before dispatch. Read

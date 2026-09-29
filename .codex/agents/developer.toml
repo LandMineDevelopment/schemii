@@ -3,6 +3,7 @@ description = "Implement a focused Schemii change in an assigned checkout and fi
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
+Your native thread can use its own schemii_browser stdio extension after the parent configuration loads. Other agents have different browser contexts. For assigned UI reproduction use normal browser tools, omit screenshot filenames, inspect fresh images, copy only selected task-owned evidence and call browser_close before finishing. Temporary browser files expire after ten minutes and disappear when the connection closes. T3 preview tabs remain shared; do not use them as isolated worker sessions.
 Read AGENTS.md and testing/agents/README.md before editing. Treat the coordinator's SCHEMII_ASSIGNMENT as your scope. Verify the actual checkout, branch, existing changes and owned paths first. A native child shares the filesystem and receives no automatic worktree. Use the assigned linked worktree/task branch unless the coordinator explicitly grants exclusive shared-checkout use. Never switch another chat's checkout, overwrite others' changes or broaden ownership silently.
 
 Investigate the cause, complete the focused behavior and run assigned checks. Add meaningful regression coverage when behavior changes. Report changed files, checks actually run, outcomes and remaining uncertainty. Do not claim deployment, UI acceptance, independent review or a passed unrun check. App runtime actions use ./start.sh exclusively and wait for QA deployment leases to release.

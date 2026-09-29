@@ -23,6 +23,9 @@ CONTEXT = (
     "For manual UI QA use ./test.sh prepare/run, a ready isolated lane, then claim the "
     "returned actual worker ID before actions; use only that session and record/view "
     "fresh evidence. Native tabs are cooperative and do not prove cookie isolation. "
+    "Use schemii_browser for each native thread's own isolated browser; omit browser output "
+    "filenames so temporary output remains owned and automatically cleaned. Close your "
+    "browser before finishing; completed or interrupted turns do not close MCP sessions. "
     "Keep credentials private; reserve an independent reviewer. This hook is a guardrail, "
     "not a security boundary or an acceptance pass. Read testing/agents/README.md."
 )
@@ -383,6 +386,20 @@ def handle_event(event: object, repository: Path) -> dict:
                 }
             }
         tool = text(event.get("tool_name"), "tool_name", 200)
+        if re.search(
+            r"schemii_browser[._]+browser_(take_screenshot|snapshot|find|console_messages)$",
+            tool,
+        ):
+            arguments = event.get("tool_input")
+            require(
+                isinstance(arguments, dict),
+                "Browser output tool_input must be an object.",
+            )
+            require(
+                arguments.get("filename") is None,
+                "Omit browser output filename: automatic output stays in the connection's private, automatically cleaned directory or is returned inline. Copy only selected evidence before expiry or session shutdown.",
+            )
+            return {}
         if tool != "Agent" and not re.search(r"(?:^|[._])spawn_agent$", tool):
             return {}
         arguments = event.get("tool_input")
