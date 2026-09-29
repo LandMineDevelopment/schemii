@@ -2,6 +2,10 @@
 
 Start with the [testing suite setup and persona pools](../README.md).
 
+For stock T3/Codex native roles, explicit assignments and independent review,
+also read [the agent workflow](../agents/README.md). Its hooks guard dispatch;
+the isolated runner remains responsible for browser lane ownership.
+
 `./test.sh` is the supported entrypoint. It runs **separate Chromium processes and
 contexts against one application**, with one retained QA account per lane. It does
 not launch the application test suite or replace the HTTPS app. The separate

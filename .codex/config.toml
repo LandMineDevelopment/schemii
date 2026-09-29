@@ -1,0 +1,11 @@
+# Stock project configuration; model, reasoning, account and T3 settings inherit.
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 12
+max_depth = 1
+
+[features]
+hooks = true
+
+# Hooks live in hooks.json for installed CLI discovery. Review exact definitions
+# in Codex before activation; failures can fail open. See testing/agents/README.md.
