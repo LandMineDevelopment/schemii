@@ -399,8 +399,15 @@ def main(argv: list[str] | None = None) -> int:
     result = 2
     try:
         session = create_session(REPOSITORY_ROOT)
+        # Ambient MCP settings can override isolation even with fixed CLI flags.
+        server_environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("PLAYWRIGHT_MCP_")
+        }
         process = subprocess.Popen(
             command(npx, chromium, session.path / "output"),
+            env=server_environment,
             stdin=None,
             stdout=None,
             stderr=None,

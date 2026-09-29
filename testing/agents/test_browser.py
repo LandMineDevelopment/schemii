@@ -534,6 +534,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(
             self.popen.call_args.kwargs,
             {
+                "env": mock.ANY,
                 "stdin": None,
                 "stdout": None,
                 "stderr": None,
@@ -548,6 +549,31 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.stdout.getvalue(), "")
         self.assertEqual(self.stderr.getvalue(), "")
         self.assertEqual(self.signals.call_count, 4)
+
+    def test_ambient_playwright_overrides_are_removed_only_from_server_environment(
+        self,
+    ):
+        unrelated = {
+            "PATH": "/synthetic/tools",
+            "UNRELATED_SETTING": "preserve",
+            "PLAYWRIGHT_LANGUAGE": "preserve",
+            "PLAYWRIGHT_MCP": "preserve-exact-prefix-without-underscore",
+        }
+        ambient = {
+            **unrelated,
+            "PLAYWRIGHT_MCP_CDP_ENDPOINT": "http://example.invalid:9222",
+            "PLAYWRIGHT_MCP_CONFIG": "/shared/config.json",
+            "PLAYWRIGHT_MCP_SHARED_BROWSER_CONTEXT": "true",
+            "PLAYWRIGHT_MCP_USER_DATA_DIR": "/shared/profile",
+            "PLAYWRIGHT_MCP_BROWSER": "firefox",
+            "PLAYWRIGHT_MCP_FUTURE_OPTION": "uncontrolled",
+        }
+        with mock.patch.dict(os.environ, ambient, clear=True):
+            self.assertEqual(self.launch(), 0)
+            self.assertEqual(self.popen.call_args.kwargs.get("env"), unrelated)
+            self.assertEqual(dict(os.environ), ambient)
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertEqual(self.stderr.getvalue(), "")
 
     def test_missing_tools_fail_without_creating_artifacts(self):
         for missing in ("npx", "node", "chromium"):
