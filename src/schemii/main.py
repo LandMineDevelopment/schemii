@@ -420,9 +420,16 @@ def create_app(
         )
         if catalog_worker is not None:
             await catalog_worker.start()
+        raw_maintenance_stop = asyncio.Event()
+        raw_maintenance = asyncio.create_task(
+            application.state.raw_console.maintain(raw_maintenance_stop),
+            name="raw-console-maintenance",
+        )
         try:
             yield
         finally:
+            raw_maintenance_stop.set()
+            await raw_maintenance
             chat_maintenance.cancel()
             try:
                 await chat_maintenance

@@ -194,10 +194,9 @@ def test_explicit_begin_publishes_open_transaction_before_next_statement_finishe
 
 
 def test_idle_reaper_uses_disclosed_timeout_and_never_expires_running_work(monkeypatch):
-    from schemii.schemii.console import raw_session as module
     service, idle = policy_fixture()
     _, running = policy_fixture()
-    monkeypatch.setattr(module.time, "monotonic", lambda: 10000)
+    monkeypatch.setattr(service, "_clock", lambda: 10000)
     closed = []
     idle.update(id="raw_idle", used=8199)
     idle["raw"].close = lambda: closed.append("idle")
@@ -207,3 +206,154 @@ def test_idle_reaper_uses_disclosed_timeout_and_never_expires_running_work(monke
     service.reap()
     assert closed == ["idle"]
     assert list(service.sessions) == ["raw_running"]
+
+
+def test_idle_reaper_rechecks_deadline_after_a_concurrent_touch(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    service, session = policy_fixture()
+    session.update(used=0)
+    closed = []
+    session["raw"].close = lambda: closed.append(True)
+    service.sessions[session["id"]] = session
+    monkeypatch.setattr(service, "_clock", lambda: 2000)
+    selected = threading.Event()
+
+    class Registry(OrderedDict):
+        def values(self):
+            selected.set()
+            return super().values()
+
+    service.sessions = Registry(service.sessions)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with session["signalLock"]:
+            future = pool.submit(service.reap)
+            assert selected.wait(1)
+            service.claim(session)
+            service.release(session)
+        future.result(timeout=1)
+    assert closed == []
+    assert session["status"] == "open"
+
+
+def test_expired_object_cannot_be_claimed_and_close_is_idempotent(monkeypatch):
+    service, session = policy_fixture()
+    session.update(used=0)
+    closed = []
+    session["raw"].close = lambda: closed.append(True)
+    service.sessions[session["id"]] = session
+    monkeypatch.setattr(service, "_clock", lambda: 1800)
+    service.reap()
+    with pytest.raises(ApiProblem) as caught:
+        service.claim(session)
+    assert caught.value.status_code == 404
+    service.close_session(session)
+    service.close()
+    service.close()
+    assert closed == [True]
+    assert service.sessions == {}
+
+
+def test_shutdown_cancels_then_waits_for_active_operation_before_close():
+    from concurrent.futures import ThreadPoolExecutor
+    service, session = policy_fixture()
+    service.sessions[session["id"]] = session
+    cancelled = threading.Event()
+    closed = []
+    session["raw"].cancel = cancelled.set
+    session["raw"].close = lambda: closed.append(True)
+    service.claim(session)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(service.close)
+        assert cancelled.wait(1)
+        assert closed == []
+        service.release(session)
+        future.result(timeout=1)
+    service.close()
+    assert closed == [True]
+    assert session["status"] == "closed"
+
+
+def test_shutdown_retires_unstarted_execution_and_late_dispatch_cannot_reopen():
+    service, session = policy_fixture()
+    service.sessions[session["id"]] = session
+    closed = []
+    session["raw"].close = lambda: closed.append(True)
+    session["raw"].cancel = lambda: None
+    body = SqlCreate(sql="INSERT INTO marker VALUES (1)")
+    execution = service.reserve(session, body)
+    service.close()
+    service.run(session, execution, body)
+    service.release(session)
+    assert closed == [True]
+    assert session["raw"].sent == []
+    assert session["status"] == "closed"
+    assert not session["operation"].locked()
+    assert execution["status"] == "cancelled"
+
+
+def test_cancelled_unstarted_copy_releases_lease_once_without_dispatch():
+    service, session = policy_fixture()
+    session["raw"].cancel = lambda: None
+    ticket = dict(status="ready", sql="COPY marker TO STDOUT", commitMode="manual")
+    download = service.download(session, ticket)
+    service.cancel(session)
+    with pytest.raises(ApiProblem):
+        next(download)
+    download.close()
+    assert session["raw"].sent == []
+    assert session["status"] == "open"
+    assert not session["operation"].locked()
+    assert ticket["status"] == "failed"
+
+
+def test_shutdown_waits_for_opening_and_late_connection_is_closed(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import nullcontext
+    from schemii.schemii.console import raw_session as module
+
+    service, _ = policy_fixture()
+    target = SimpleNamespace(connection_id="pg_test", connection_owner_id="me",
+                             connection_revision=1, database="test", namespace="public")
+    service.console._workspace_target = lambda *args: (None, target)
+    service.console._validate_settings_revision = lambda *args: None
+    service.console._maximum_live_read_sessions = 2
+    service.console._maximum_live_read_sessions_per_identity = 2
+    service.console.settings = lambda _: SimpleNamespace(row_page_size=100)
+    service.console._page_memory_bytes = 4096
+    resolved = SimpleNamespace(owner_id="me", revision=1, database="test")
+    service.connections = SimpleNamespace(use=lambda *args: nullcontext(resolved))
+    connecting = threading.Event()
+    finish_connect = threading.Event()
+    closed = []
+    connection = SimpleNamespace(close=lambda: closed.append(True))
+    def connect(*args, **kwargs):
+        connecting.set()
+        assert finish_connect.wait(2)
+        return connection
+    service.postgres = SimpleNamespace(_connect=connect)
+    monkeypatch.setattr(module, "RawSession", lambda *args, **kwargs: connection)
+    body = SimpleNamespace(console_id="con_test", expected_workspace_revision=1,
+                           expected_settings_revision=1)
+    closing = threading.Event()
+    wait_for = service.opening_finished.wait_for
+    def wait_for_opening(predicate):
+        closing.set()
+        return wait_for(predicate)
+    monkeypatch.setattr(service.opening_finished, "wait_for", wait_for_opening)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        opening = pool.submit(service.create, "me", "ws_test", body)
+        assert connecting.wait(1)
+        shutdown = pool.submit(service.close)
+        assert closing.wait(1)
+        with service.lock:
+            assert service.closed
+        assert not shutdown.done()
+        finish_connect.set()
+        with pytest.raises(ApiProblem) as caught:
+            opening.result(timeout=1)
+        assert caught.value.status_code == 503
+        shutdown.result(timeout=1)
+    assert closed == [True]
+    assert service.opening == set()
+    assert service.sessions == {}
