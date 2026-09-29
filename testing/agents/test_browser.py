@@ -231,6 +231,85 @@ class LifecycleTests(ArtifactFixture):
         self.assertEqual(unrelated.read_bytes(), b"keep replacement")
         self.assertTrue((preserved / "output" / "report.csv").exists())
 
+    def test_cleanup_directory_swap_before_recursion_preserves_replacement_data(self):
+        session = self.running_session()
+        retained = session.path.with_name("retained-original")
+        original_remove = browser._remove_contents
+        swapped = False
+
+        def replace_before_recursion(descriptor):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                session.path.rename(retained)
+                session.path.mkdir(mode=0o700)
+                (session.path / "user-data.txt").write_bytes(
+                    b"unrelated replacement data"
+                )
+            return original_remove(descriptor)
+
+        with mock.patch.object(
+            browser, "_remove_contents", side_effect=replace_before_recursion
+        ):
+            with self.assertRaises(browser.ArtifactError):
+                browser.cleanup_session(session)
+        self.assertEqual(
+            (session.path / "user-data.txt").read_bytes(),
+            b"unrelated replacement data",
+        )
+        self.assertTrue(retained.exists())
+        self.assertEqual(list(retained.iterdir()), [])
+
+    def test_cleanup_directory_swap_preserves_empty_replacement(self):
+        session = self.running_session()
+        retained = session.path.with_name("retained-original")
+        original_remove = browser._remove_contents
+        swapped = False
+
+        def replace_before_recursion(descriptor):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                session.path.rename(retained)
+                session.path.mkdir(mode=0o700)
+            return original_remove(descriptor)
+
+        with mock.patch.object(
+            browser, "_remove_contents", side_effect=replace_before_recursion
+        ):
+            with self.assertRaises(browser.ArtifactError):
+                browser.cleanup_session(session)
+        self.assertTrue(session.path.is_dir())
+        self.assertEqual(list(session.path.iterdir()), [])
+        self.assertEqual(list(retained.iterdir()), [])
+
+    def test_nested_cleanup_swap_preserves_replacement_data(self):
+        session = self.running_session()
+        output = session.path / "output"
+        output_inode = output.stat().st_ino
+        retained = session.path / "retained-output"
+        original_remove = browser._remove_contents
+        swapped = False
+
+        def replace_before_recursion(descriptor):
+            nonlocal swapped
+            if os.fstat(descriptor).st_ino == output_inode and not swapped:
+                swapped = True
+                output.rename(retained)
+                output.mkdir(mode=0o700)
+                (output / "user-data.txt").write_bytes(b"unrelated nested data")
+            return original_remove(descriptor)
+
+        with mock.patch.object(
+            browser, "_remove_contents", side_effect=replace_before_recursion
+        ):
+            with self.assertRaises(browser.ArtifactError):
+                browser.cleanup_session(session)
+        self.assertEqual(
+            (output / "user-data.txt").read_bytes(), b"unrelated nested data"
+        )
+        self.assertEqual(list(retained.iterdir()), [])
+
     def test_dead_supervisor_and_dead_child_are_swept(self):
         session = self.running_session()
         self.sweep({})

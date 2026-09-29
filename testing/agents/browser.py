@@ -104,6 +104,34 @@ def _artifact_base(repository: Path):
             os.close(descriptor)
 
 
+def _rmdir_owned(parent: int, name: str, inode: tuple[int, int]) -> None:
+    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != inode:
+        raise ArtifactError("The generated cleanup directory was replaced.")
+    # rmdir cannot recursively remove data if the name changes after this check.
+    os.rmdir(name, dir_fd=parent)
+
+
+def _remove_contents(descriptor: int) -> None:
+    """Remove through the verified directory handle, never its mutable outer name."""
+    for name in os.listdir(descriptor):
+        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child = os.open(name, DIRECTORY_FLAGS, dir_fd=descriptor)
+            try:
+                opened = _validate_directory(child, private=True)
+                inode = (opened.st_dev, opened.st_ino)
+                if inode != (info.st_dev, info.st_ino):
+                    raise ArtifactError("The generated cleanup directory was replaced.")
+                _remove_contents(child)
+                _rmdir_owned(descriptor, name, inode)
+            finally:
+                os.close(child)
+        else:
+            # Unlink symlinks themselves; never follow their targets.
+            os.unlink(name, dir_fd=descriptor)
+
+
 def _remove_session(base: int, name: str, inode: tuple[int, int]) -> None:
     if not SESSION_NAME.fullmatch(name):
         raise ArtifactError("Only generated session names can be removed.")
@@ -112,8 +140,8 @@ def _remove_session(base: int, name: str, inode: tuple[int, int]) -> None:
         info = _validate_directory(descriptor, private=True)
         if (info.st_dev, info.st_ino) != inode:
             raise ArtifactError("The generated session directory was replaced.")
-        # Anchor symlink-resistant deletion to the already verified base on Linux.
-        shutil.rmtree(f"/proc/self/fd/{base}/{name}")
+        _remove_contents(descriptor)
+        _rmdir_owned(base, name, inode)
     finally:
         os.close(descriptor)
 
