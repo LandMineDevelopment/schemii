@@ -214,7 +214,11 @@ function renderSteps(plan) {
     if (step.dataMovement) risks.append(badge("Data movement", "warning"));
     if (step.requiresLock) risks.append(badge("Lock", "warning"));
     if (!risks.childElementCount) risks.append(badge(step.objectKind));
-    summary.append(identity, risks);
+    const disclosure = element("span", { className: "migration-step-disclosure" }, [
+      element("span", { className: "migration-step-show", text: "Show SQL" }),
+      element("span", { className: "migration-step-hide", text: "Hide SQL" }),
+    ]);
+    summary.append(identity, risks, disclosure);
     details.append(summary, element("pre", {}, [element("code", { text: step.sql })]));
     return details;
   });
