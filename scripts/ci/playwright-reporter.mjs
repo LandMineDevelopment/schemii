@@ -16,7 +16,7 @@ export default class TimingReporter {
     const projects = new Set(this.tests.map(test => test.parent.project().name));
     const project = projects.size === 1 ? [...projects][0] : process.env.CI_TELEMETRY_PROJECT;
     this.write = writer(process.env.CI_TELEMETRY_FILE || 'artifacts/ci-timing/browser.jsonl',
-      metadata('browser', project, config.shard?.current || 0));
+      metadata('browser', project, config.shard?.current || Number(process.env.CI_TELEMETRY_SHARD || 0)));
     this.write({ kind: 'start', planned: this.tests.length });
     for (const test of this.tests) this.write({ kind: 'plan', test_id: hash(test.id) });
   }

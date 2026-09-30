@@ -41,7 +41,7 @@ test("saved dashboards protect a model until their author deletes them", async (
   }
 });
 
-test("concurrent live dashboard creation and model deletion never leave an orphan", async ({ request }) => {
+test("concurrent live dashboard creation and model deletion never leave an orphan", { tag: '@request-only' }, async ({ request }) => {
   const sourceId = await createOrganizationModel(request, "Dependency race fixture");
   try {
     const source = await (await request.get(`/api/v1/schemoo/models/${sourceId}`)).json();

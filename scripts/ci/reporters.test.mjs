@@ -74,3 +74,40 @@ test('Playwright cancellation covers planned but unstarted tests once', () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('Playwright custom file shards retain lane identities without native sharding', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'schemii-timing-shard-'));
+  const previousFile = process.env.CI_TELEMETRY_FILE;
+  const previousShard = process.env.CI_TELEMETRY_SHARD;
+  try {
+    process.env.CI_TELEMETRY_FILE = join(directory, 'browser.jsonl');
+    const item = { id: 'owned-case', location: { file: '/tests/e2e/synthetic.spec.js', line: 1 },
+      parent: { project: () => ({ name: 'android-chromium' }) } };
+    for (const [config, value, expected] of [
+      [{ shard: null }, '2', 2],
+      [{ shard: { current: 1 } }, '2', 1],
+      [{ shard: null }, '', 0],
+    ]) {
+      process.env.CI_TELEMETRY_SHARD = value;
+      const instance = new PlaywrightReporter();
+      instance.onBegin(config, { allTests: () => [item] });
+      instance.onTestEnd(item, { status: 'failed', retry: 0, duration: 5 });
+      instance.onEnd({ status: 'failed' });
+      const records = readFileSync(process.env.CI_TELEMETRY_FILE, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.ok(records.every(record => record.shard === expected && record.project === 'android-chromium'));
+      assert.equal(records.find(record => record.kind === 'attempt').outcome, 'failed');
+      assert.equal(records.at(-1).outcome, 'failed');
+    }
+    for (const invalid of ['3', '2/2', 'NaN']) {
+      process.env.CI_TELEMETRY_SHARD = invalid;
+      assert.throws(() => new PlaywrightReporter().onBegin({ shard: null }, { allTests: () => [item] }),
+        /Invalid timing lane/);
+    }
+  } finally {
+    if (previousFile === undefined) delete process.env.CI_TELEMETRY_FILE;
+    else process.env.CI_TELEMETRY_FILE = previousFile;
+    if (previousShard === undefined) delete process.env.CI_TELEMETRY_SHARD;
+    else process.env.CI_TELEMETRY_SHARD = previousShard;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
