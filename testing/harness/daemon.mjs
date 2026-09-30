@@ -5,10 +5,10 @@ import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
-import { assertScenarioPrerequisite } from './prerequisites.mjs';
+import { assertScenarioPrerequisite, readinessChecks } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
-import { nativeMode, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
+import { nativeMode, recoverNativeLane, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
@@ -57,7 +57,7 @@ async function claim(l,agent) {
   assertLaneReadyToClaim(l);
   if(!agent||typeof agent!=='string'||agent.length>200)throw new Error('Claim requires the actual assigned agent ID.');
   if(run.lanes.some(x=>x.status==='claimed'&&x.agent===agent))throw new Error('Agent already owns an active lane.');
-  const token=randomBytes(32).toString('hex');tokens.set(l.id,token);l.status='claimed';l.agent=agent;l.heartbeatAt=stamp();
+  const token=randomBytes(32).toString('hex');tokens.set(l.id,token);l.status='claimed';l.agent=agent;l.heartbeatAt=stamp();l.dispatchedAt ||= stamp();
   const sessionFile=join(dir,l.id,`session-${l.generation}.json`);
   await writeJSON(sessionFile,{socket:control.socket,runId:id,laneId:l.id,generation:l.generation,token});
   if (nativeMode(run)) {
@@ -84,13 +84,15 @@ function assertLease(req) {
 function queueLane(id,fn){const task=(operations.get(id)||Promise.resolve()).then(fn);operations.set(id,task.catch(()=>{}));return task;}
 async function checkSource(){const actual=sourceIdentity(root);if(run.deployment&&actual.fingerprint!==run.deployment.identity.fingerprint)throw new Error('Source changed since startup. Stop and prepare a new run; the tested build is no longer attributable to this checkout.');}
 async function readyLane(l) {
+  const readiness=readinessChecks(l);
   l.status='preparing';l.generation++;tokens.delete(l.id);l.browserLaunchPending=true;await persist();
   if(stopping)throw new Error('Controller is stopping.');
   try{l.browser=await fleet.openLane(l,accounts.get(l.username));await persist();}
   catch(e){await fleet.closeLane(l.id);l.browserLaunchPending=false;await persist();throw e;}
   if(stopping){await fleet.closeLane(l.id);throw new Error('Controller is stopping.');}
   l.probes=await fleet.probeCapabilities(l.id);
-  l.checkResults=await fleet.verifyChecks(l.id,l.checks);
+  l.checkResults=await fleet.verifyChecks(l.id,readiness.checks);
+  l.readinessHistory ||= [];l.readinessHistory.push({...readiness,checks:l.checkResults,generation:l.generation,at:stamp()});
   l.status='ready';l.agent=null;l.heartbeatAt=null;
   await event(dir,{kind:'lane-ready',lane:l.id,generation:l.generation});
 }
@@ -303,11 +305,18 @@ async function controllerRequest(req){
       const l=lane(req.laneId);
       if(l.status==='complete'||l.status==='queued')throw new Error('Only an active, blocked or paused lane can be recovered.');
       if(nativeMode(run)) {
-        if(l.native) { await closeNativeReceipt(l);if((l.native.cleanup.transport!=='stopped'||l.native.cleanup.guardian!=='stopped'||l.native.cleanup.temporaryOutput!=='removed-observed'))throw new Error('Close the old native session transport before reassignment; browser_close alone is insufficient.'); }
-        l.status='paused';l.generation++;tokens.delete(l.id);await operations.get(l.id);await checkSource();
-        // Preflight only this account. Native peers have independent transports.
-        await readyLane(l);await fleet.closeLane(l.id);l.preflightBrowser=l.browser;delete l.browser;l.agent=null;
-        run.status='ready';await persist();return {lane:l.id,status:l.status,generation:l.generation,pending:pendingScenarios(l).map(s=>s.id),reconcile:'Inspect saved state before repeating an uncertain write.'};
+        return recoverNativeLane(run,l,{
+          invalidate:active=>tokens.delete(active.id),persist,
+          drain:()=>operations.get(l.id),
+          // Observe browser_close, then stop only the birth/inode-bound extension.
+          // This cannot close a native agent/thread or manufacture UI readback.
+          closeOldTransport:active=>releaseNativeTransport(active,browserRoot),
+          prepare:async active=>{
+            await checkSource();await readyLane(active);await fleet.closeLane(active.id);
+            active.preflightBrowser=active.browser;delete active.browser;active.agent=null;
+            run.status='ready';
+          },
+        });
       }
       if(run.lanes.some(x=>x.id!==l.id&&x.status==='claimed'))throw new Error('Pause recovery until other agents finish their wave; isolation probes change logins.');
       return recoverFleetFailClosed({

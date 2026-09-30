@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { workspaceNavigationHref } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
-import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, acceptance } from './native.mjs';
+import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -273,4 +273,27 @@ test('latest current-attempt review governs acceptance; duplicate receipts never
   recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'confirmed-defect',note:'Later independent reproduction reveals a defect.'});
   assert.equal(acceptance(f.run).status,'review-pending');assert.equal(acceptance(f.run).reviewed,0);
   assert.match(acceptance(f.run).reasons.join(),/confirmed-defect/);
+});
+
+
+test('native recovery fences interrupted owner before browser-close prerequisite and preserves peers',async()=>{
+  const f=fixture();f.lane.native={sessionId:'owned-connection'};let token='old',persisted=0;
+  await assert.rejects(recoverNativeLane(f.run,f.lane,{
+    invalidate:()=>{token=null;},persist:async()=>{persisted++;},drain:async()=>{},
+    closeOldTransport:async lane=>{assert.equal(lane.status,'paused');assert.equal(lane.generation,3);assert.equal(token,null);throw new Error('browser_close observation required');},
+    prepare:async()=>{throw new Error('must not prepare a live context');},
+  }),/browser_close/);
+  assert.equal(f.lane.status,'paused');assert.equal(f.lane.recovery.status,'blocked');assert.equal(persisted,2);
+  assert.equal(f.reviewer.status,'claimed');assert.equal(f.reviewer.generation,2);assert.equal(f.lane.native.sessionId,'owned-connection');
+});
+
+test('closed native recovery prepares pending-only reconciliation while retaining completed results',async()=>{
+  const f=fixture();f.lane.native={sessionId:'owned-connection'};f.lane.dispatchedAt='previous-owned-claim';
+  f.lane.scenarios.push({...f.scenario,id:'completed-case',functional:'passed',visual:'passed',note:'Saved initial evidence remains retained.'});
+  let closed=false,prepared=false;
+  const result=await recoverNativeLane(f.run,f.lane,{invalidate:()=>{},persist:async()=>{},drain:async()=>{},
+    closeOldTransport:async()=>{closed=true;},prepare:async lane=>{assert.equal(closed,true);prepared=true;lane.status='ready';lane.agent=null;},
+  });
+  assert.equal(prepared,true);assert.deepEqual(result.pending,[f.scenario.id]);assert.equal(result.status,'ready');
+  assert.equal(f.lane.scenarios[1].functional,'passed');assert.equal(f.lane.recovery.reconciliationRequired,true);
 });

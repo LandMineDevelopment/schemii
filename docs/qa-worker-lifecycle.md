@@ -57,3 +57,34 @@ This change covers the demonstrated lease/process defect. It does not establish
 write application acceptance. Those checks require prepared owned fixtures,
 actual native actors, independent review and the supported launcher/deployment
 lease workflow.
+
+## Interrupted native recovery and initial-state checks
+
+`recover` now fences the current native handle and persists paused ownership
+before checking browser/transport closure. It no longer requires waiting for
+lease expiry just to make the owned transport releasable. A live browser blocks
+reassignment, keeps the recorded owner and reports the exact prerequisite. After
+observed `browser_close`, the existing bound extension teardown verifies automatic
+cleanup; preparation rechecks stable identity, grants and resource ownership.
+This does not interrupt or close the native agent/session. The coordinator still
+uses the actual available native controls, and a fresh thread/browser connection
+may require a free runtime slot. In this session the terminated MCP connection
+has no reload control and all native capacity can be occupied; those are real
+constraints, not a reason to invent a lifecycle API or count broker recovery as
+accepted application behavior.
+
+Generated empty-design assertions carry `phase: initial`. They remain mandatory
+until the first actual claim. Once the ledger records a prior claim/attempt,
+recovery rechecks every stable/default fixture assertion while retaining the
+owned saved design. Readiness history records the phase and initial assertions;
+it does not assert those initial values again after an authorized write. Untagged
+custom checks remain required, so this is not a blanket error skip. Retained older
+claim metadata remains readable without rewriting its history.
+
+Recovery briefs contain only pending scenarios plus prior completed outcomes.
+Their required reconciliation reads visible saved state before continuing an
+uncertain write; provider completion, stable GET checks and this code-level
+recovery test cannot substitute for that live UI evidence. Desktop/mobile
+readback dependencies and independent review still apply. The coordinator's
+frozen #147 pilot can test ordinary reload recovery; broker interruption/reclaim
+acceptance requires a newly built deployment and its own actual owned actors.
