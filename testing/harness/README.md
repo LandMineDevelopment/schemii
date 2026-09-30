@@ -383,3 +383,10 @@ extension supervisor and verifies automatic guardian/output cleanup; it does not
 claim to close a native agent/thread. Execution-complete and review-pending are
 separate states. Existing isolated runs/evidence stay available until live native
 application acceptance and cleanup parity are demonstrated.
+
+Both backends keep independently reviewed cases pending while any recorded worker,
+recording stream, browser-closure stage or controller intervention remains
+unresolved, including the reviewer lane. Worker receipts must match their recorded
+PID/birth/generation; delayed old receipts remain history and cannot clear a fresh
+owner's pending cleanup. Verified cleanup retains a failed worker exit as a failure,
+and native transport teardown does not establish native thread termination.
