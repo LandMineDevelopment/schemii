@@ -137,6 +137,11 @@ class RawSessionService:
         self.lock = threading.RLock()
         self.opening = set()
 
+    def observation_snapshot(self):
+        """Read registered handles and in-flight opens without running source SQL."""
+        with self.lock:
+            return {"registeredSessions": len(self.sessions), "openingSessions": len(self.opening)}
+
     def create(self, owner, workspace, body):
         _, target = self.console._workspace_target(owner, workspace, body.expected_workspace_revision)
         self.console._validate_settings_revision(owner, body.expected_settings_revision)

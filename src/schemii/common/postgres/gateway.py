@@ -248,6 +248,7 @@ class _ConnectionCapacity:
         self._maximum_total = maximum_total
         self._maximum_per_identity = maximum_per_identity
         self._total = 0
+        self._connected = 0
         self._by_identity: dict[str, int] = {}
         self._retained_total = 0
         self._retained_by_identity: dict[str, int] = {}
@@ -283,12 +284,26 @@ class _ConnectionCapacity:
                 if remaining <= 0 or not self._condition.wait(remaining):
                     return reached
 
-    def release(self, identity: str, *, retained: bool = False) -> None:
+    def snapshot(self) -> dict[str, int]:
+        """Count reservations separately from established native connections."""
+        with self._condition:
+            return {"permits": self._total, "retainedPermits": self._retained_total,
+                    "ordinaryPermits": self._total - self._retained_total,
+                    "connections": self._connected, "maximum": self._maximum_total,
+                    "maximumPerProfileRevision": self._maximum_per_identity}
+
+    def connected(self) -> None:
+        with self._condition:
+            self._connected += 1
+
+    def release(self, identity: str, *, retained: bool = False, connected: bool = False) -> None:
         with self._condition:
             count = self._by_identity.get(identity, 0)
             if count <= 0:
                 return
             self._total -= 1
+            if connected:
+                self._connected -= 1
             if count == 1:
                 self._by_identity.pop(identity, None)
             else:
@@ -321,7 +336,7 @@ class _LeasedConnection:
         try:
             self._connection.close()
         finally:
-            self._capacity.release(self._identity, retained=self._retained)
+            self._capacity.release(self._identity, retained=self._retained, connected=True)
 
 
 class PsycopgPostgresGateway:
@@ -1047,6 +1062,12 @@ class PsycopgPostgresGateway:
             raise PostgresCatalogValidationError()
         return identity
 
+    def observation_snapshot(self) -> dict[str, dict[str, int]]:
+        """Aggregate each independent admission lane without disclosing profiles."""
+        return {"ordinary": self._connection_capacity.snapshot(),
+                "monitoring": self._monitor_capacity.snapshot(),
+                "control": self._control_capacity.snapshot()}
+
     def register_retained_connection_reclaimer(self, reclaimer) -> None:
         """Register each owner of evictable inactive cursor sessions."""
         if reclaimer not in self._retained_connection_reclaimers:
@@ -1103,6 +1124,7 @@ class PsycopgPostgresGateway:
             raise PostgresConnectionCapacityError(limit_name, limit, observed)
         try:
             opened = factory(**parameters)
+            capacity.connected()
             return _LeasedConnection(opened, capacity, identity, retained=retained)
         except PostgresGatewayError:
             capacity.release(identity, retained=retained)
