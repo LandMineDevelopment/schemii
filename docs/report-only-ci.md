@@ -39,6 +39,13 @@ an earlier source change cannot hide behind a final report commit. A nonancestor
 push, missing/all-zero SHA, ambiguous merge base or invalid diff fails
 classification and selects the full source path. Empty comparisons use source CI.
 
+The classifier runs from the triggering checkout, matching the other CI jobs:
+the prospective GitHub merge revision for pull requests, and the triggering commit
+for push/manual runs. This includes controls added on the base after a PR opened.
+Its Git comparison still uses the event's actual base/head SHAs and unique merge
+base, rather than treating the prospective merge SHA as the PR head. Full history
+remains available; missing base/head objects continue to fail classification.
+
 Markdown validation checks the prospective PR merge checkout, so a base-side
 file removal cannot leave a new report's local link green. It uses the runner's
 standard Python library, without installing Schemii, Node dependencies, a
@@ -90,6 +97,11 @@ separate prerequisite and ownership contracts.
 
 Focused regressions exercise real temporary Git histories for PR/main semantics,
 earlier source commits, rename/delete/mixed/mode changes and README index proof.
+The checkout regression creates a PR predating the classifier, advances its base
+with the real controls and creates a two-parent prospective merge. It derives the
+checkout choice from the actual workflow, proves old-head execution cannot find
+the classifier and checks source/report classification from the merge. Missing
+event base/head objects still produce a failing full-path receipt.
 They inject classifier/link errors, cancelled or missing matrix jobs and
 incomplete timing. Production classifier/validator commands are also executed
 with Python's `-S` option to demonstrate that application packages are unnecessary:
