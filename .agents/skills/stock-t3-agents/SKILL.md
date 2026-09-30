@@ -25,6 +25,12 @@ report the discovery limit.
   Native children share files; verify isolation before editing and preserve
   others' changes. Include exactly one `SCHEMII_ASSIGNMENT {JSON}` line in each
   spawn task, with actual workspace, ownership and focused verification steps.
+- Apply the testing and verification reuse section of `AGENTS.md`. The coordinator
+  owns acceptance scheduling: assign focused checks, record source-bound evidence
+  and inspect existing current-head PR results. Reviewers inspect that evidence
+  and reproduce material gaps; handoffs and merges do not justify another full
+  local suite or a manually dispatched CI run. Use the shared change planner and
+  retain the workflow's required profile and gate.
 - For coordinated UI acceptance, follow the existing harness runbook to prepare
   `./test.sh --controller t3`. Dispatch ready isolated lanes, claim each to the
   actual returned agent ID, then send its private session file. Workers keep that

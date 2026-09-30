@@ -25,6 +25,11 @@ the broad command.
 See [the feedback inventory](../docs/testing-feedback.md) for focused ownership
 commands, unique coverage, cost and the broader pre-merge acceptance path. A fast
 subset or a skipped/live/manual layer is not complete application acceptance.
+Use `python scripts/test-changes.py --base origin/main` for the complete change plan
+and inspect existing source-bound checks before scheduling acceptance. Follow
+[the verification reuse policy](../AGENTS.md): the coordinator assigns focused
+checks, reviewers inspect their actual evidence, and a handoff or merge does not
+justify another local full suite. Required hosted CI runs automatically.
 
 ## Manual fixture setup
 

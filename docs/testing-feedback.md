@@ -131,11 +131,23 @@ under `testing/`; the original omitted provisioning inventory is 30 of those.
 Counts grow as focused regressions land. Report collected, executed and skipped
 counts together; PostgreSQL skips do not prove database behavior.
 
-## Broad pre-merge acceptance
+## Pre-merge acceptance and reuse
 
-Run the full Node and default Python commands, incremental Python static quality
-against the intended change base, the explicitly configured real PostgreSQL
-integration job, and the assembled browser matrix. Browser CI uses the canonical
+Use the complete change plan and the current PR's selected profile. Inspect
+existing checks and their actual source-bound receipts before running acceptance;
+the coordinator schedules missing work once. A new agent, review, handoff, worktree
+or merge does not require another local full suite or a manually dispatched CI run.
+Independent review examines actual evidence and reproduces material findings or
+gaps with focused controls. Record commands, scope, tested source, outcomes and
+evidence locations; distinguish inspected evidence from checks you actually ran.
+Relevant source changes, failures and missing/stale evidence justify fresh checks.
+Passing required hosted checks must belong to the current PR head; preserve failed
+attempts and let GitHub schedule required PR/main acceptance automatically.
+
+For a full profile, acceptance comprises Node and complete Python, incremental
+Python quality against the intended base, explicitly configured real PostgreSQL
+and all six browser legs. A narrower reviewed profile omits only its documented
+unrelated layers. Browser CI uses the canonical
 HTTPS stack through `./start.sh`; it does not replace manual native-agent UI
 acceptance in #73/#137. Backup recovery remains an isolated-database check.
 Live provider/report specs require their own authenticated fixture prerequisites;

@@ -136,6 +136,15 @@ runs at ten; this is not a limit of the native browser extension.
 
 ## Assign native workers
 
+Follow the [shared testing and verification reuse policy](../../AGENTS.md).
+The coordinator owns acceptance scheduling; each assignment names focused checks
+and records their source, command, scope, outcome and evidence. Developers use the
+[change planner and feedback inventory](../../docs/testing-feedback.md). Reviewers
+inspect actual existing evidence independently and reproduce material gaps instead
+of repeating a complete suite by default. New threads, handoffs and merge delivery
+do not justify duplicate local suites or manually dispatched CI. Required current-head
+workflow checks and manual scenario/fixture ownership gates still apply.
+
 Prepare a developer's linked Git worktree and task branch before dispatch. Read
 the existing changes and assign narrow files; never switch another chat's checkout
 or revert others' work. Native spawning does not create a worktree. For a small
