@@ -173,7 +173,16 @@ for (const product of [
           await page.clock.runFor(650);
           await expect(scene.locator(".quick-start-cursor")).toHaveClass(/clicking/);
           await page.clock.runFor(700);
-          if (index < actions.length - 1) await page.clock.runFor(action.delay);
+          if (index < actions.length - 1) {
+            // The fake clock advances JS timers, while CSS transitions use
+            // browser time. Let the newly revealed control finish entering
+            // before scheduling the next cursor; locator visibility alone
+            // allows a control whose ancestor is still transparent.
+            await scene.locator(":scope > :first-child").evaluate(async mock => {
+              await Promise.all(mock.getAnimations({ subtree: true }).map(animation => animation.finished));
+            });
+            await page.clock.runFor(action.delay);
+          }
         }
         expect(actions.at(-1).target).toBe(product.target);
         await expect(scene.locator(":scope > :first-child")).toHaveClass(new RegExp(`demo-${product.state}`));
