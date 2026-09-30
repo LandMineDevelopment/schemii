@@ -83,7 +83,9 @@ test('authenticated owned SQL completion, cancellation and session cleanup', asy
   const authentication = await json(await request.get('/api/v1/auth/status'), 200);
   expect(authentication.enabled).toBe(true);
   expect(authentication.authenticated).toBe(true);
-  const anonymous = await playwright.request.newContext({ baseURL, ignoreHTTPSErrors: true });
+  const anonymous = await playwright.request.newContext({
+    baseURL, ignoreHTTPSErrors: true, storageState: { cookies: [], origins: [] },
+  });
   try {
     expect((await anonymous.get('/api/v1/schemii/workspaces')).status()).toBe(401);
   } finally {
