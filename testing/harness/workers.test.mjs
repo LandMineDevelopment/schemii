@@ -56,7 +56,11 @@ async function probeWorkers(t, { ignoreTermination = false, crashable = false, h
   process.on('SIGTERM',()=>process.exit(0));process.send('ready');
 });process.send('starting');setInterval(()=>{},50);`;
   const script = ignoreTermination
-    ? `const fs=require('node:fs');process.stdin.resume();process.on('SIGTERM',()=>{});fs.writeFileSync('probe.json',JSON.stringify({pid:process.pid}));setInterval(()=>{},50);`
+    ? `const fs=require('node:fs');
+const publish=(file,value)=>{fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);};
+process.stdin.resume();
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>publish(signal+'.json',{pid:process.pid,signal}));
+publish('probe.json',{pid:process.pid});setInterval(()=>{},50);`
     : `const fs=require('node:fs'),{spawn}=require('node:child_process');
 const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',${crashable ? "'inherit','inherit'" : "'ignore','ignore'"},'ipc']});
 const publish=(file,value)=>{fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);};
@@ -167,9 +171,75 @@ test('lease expiry fences immediately and reaps only owned worker before stalled
 test('ignoring owned worker is escalated and reaped within bounded termination',async t=>{
   const {processIdentity}=await import('./native.mjs');const {workers,directory}=await probeWorkers(t,{ignoreTermination:true});
   const lane={id:'lane-1',generation:1};await workers.start({lane,sessionFile:'/private/session',brief});
-  const owner=await readProbe(directory,lane.id),started=Date.now();const result=await workers.stop(lane.id,'lease-expired');
-  assert.equal(result.reason,'lease-expired');assert.equal(result.signal,'SIGKILL');assert.equal(await processIdentity(owner.pid),null);
-  assert.ok(Date.now()-started>=4900);assert.ok(Date.now()-started<7000);assert.equal(workers.handles.size,0);
+  const owner=await readProbe(directory,lane.id),handle=workers.handles.get(lane.id),birth=handle.birthTick;
+  const peerPool=await probeWorkers(t),peer={id:'lane-peer',generation:1};
+  await peerPool.workers.start({lane:peer,sessionFile:'/private/peer',brief});
+  const other=await readProbe(peerPool.directory,peer.id),peerOwner=await processIdentity(other.pid);
+  process.kill(-owner.pid,'SIGINT');
+  assert.deepEqual(await readProbe(directory,lane.id,'SIGINT.json'),{pid:owner.pid,signal:'SIGINT'});
+  assert.equal((await processIdentity(owner.pid))?.birthTick,birth,'fixture must actually ignore SIGINT');
+
+  // Advance only the deadline clock. OS signals, polling timers, /proc birth
+  // checks and ChildProcess exit/recording events remain real. No production
+  // timeout is configurable or shortened for this test.
+  let now=0,killAttempts=0,recordingClosed=false,activeStop;
+  const clock=t.mock.method(Date,'now',()=>now),actualKill=process.kill.bind(process);
+  const signal=t.mock.method(process,'kill',(pid,name)=>{
+    if(pid===-owner.pid&&name==='SIGKILL'){killAttempts++;return true;}
+    return actualKill(pid,name);
+  });
+  void handle.closed.then(()=>{recordingClosed=true;});
+  const observed=async predicate=>{
+    for(let i=0;i<100&&!predicate();i++)await new Promise(resolve=>setTimeout(resolve,10));
+    assert.ok(predicate(),'real drain loop must observe the controlled deadline');
+  };
+  const atDeadline=async (value,reads=1)=>{
+    const calls=clock.mock.callCount();now=value;
+    await observed(()=>clock.mock.callCount()>=calls+reads);
+  };
+  try {
+    const stalled=activeStop=workers.stop(lane.id,'lease-expired');void stalled.catch(()=>{});
+    assert.deepEqual(await readProbe(directory,lane.id,'SIGTERM.json'),{pid:owner.pid,signal:'SIGTERM'});
+    // Wait for the real loop to establish its grace deadline before advancing.
+    await observed(()=>clock.mock.callCount()>=3);
+    // The final-deadline read follows any awaited escalation ownership scan.
+    // Observe both reads before proving that no early SIGKILL was attempted.
+    await atDeadline(4999,2);
+    assert.equal(killAttempts,0,'production must grant the full 5000ms grace');
+    assert.equal((await processIdentity(owner.pid))?.birthTick,birth);
+    await atDeadline(5000);await observed(()=>killAttempts===1);
+    assert.equal((await processIdentity(owner.pid))?.birthTick,birth,'omitted escalation must leave the real fixture alive');
+    assert.equal(recordingClosed,false);assert.equal(workers.handles.has(lane.id),true);
+    await atDeadline(5999);
+    assert.equal(handle.cleanupPending,false,'production must retain the full 1000ms final deadline');
+    await atDeadline(6000);
+    await assert.rejects(stalled,/Owned worker processes remain live after termination/);
+    assert.equal(handle.cleanupPending,true);assert.equal(workers.handles.has(lane.id),true);
+    assert.equal((await processIdentity(other.pid))?.birthTick,peerOwner.birthTick);
+
+    // Restore the real escalation and retry the retained owner. This must reap
+    // the actual leader and drain its recording before releasing its handle.
+    signal.mock.restore();now=0;
+    const calls=clock.mock.callCount(),stopped=activeStop=workers.stop(lane.id,'fixture-owned-cleanup');void stopped.catch(()=>{});
+    await observed(()=>clock.mock.callCount()>=calls+3);
+    await atDeadline(5000);
+    await observed(()=>!workers.handles.has(lane.id));
+    const result=await stopped;
+    assert.equal(result.reason,'lease-expired');assert.equal(result.signal,'SIGKILL');
+    assert.equal(handle.child.signalCode,'SIGKILL');assert.equal(recordingClosed,true);
+    assert.equal(await processIdentity(owner.pid),null);assert.equal(workers.handles.size,0);
+    assert.equal((await processIdentity(other.pid))?.birthTick,peerOwner.birthTick);
+    assert.equal((await processIdentity(other.child))?.parent,other.pid);
+    assert.equal(peerPool.workers.handles.size,1);
+  } finally {
+    signal.mock.restore();
+    // A failed assertion must not switch an in-flight logical deadline to wall
+    // time. Let either captured drain settle before restoring its clock; the
+    // registered fixture close then cleans the restored pool normally.
+    const advance=setInterval(()=>{now+=1000;},10);
+    try { await activeStop?.catch(()=>{t.diagnostic('Controlled drain settled cleanup-pending; restored fixture teardown retains ownership.');}); }
+    finally { clearInterval(advance);clock.mock.restore(); }
+  }
 });
 
 test('stale process identity cannot kill a live worker or peer and retains cleanup ownership',async t=>{
