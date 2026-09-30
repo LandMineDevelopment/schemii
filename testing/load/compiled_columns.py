@@ -13,9 +13,12 @@ def compiled_columns(sql: str) -> list[str]:
     if len(statements) != 1 or not isinstance(statements[0], exp.Select):
         raise ValueError("invalid_compiled_plan")
     columns = [output.alias_or_name for output in statements[0].expressions]
-    if not columns or len(columns) > 64 or any(
-        not name or len(name.encode()) > 63 for name in columns
-    ) or len(set(columns)) != len(columns):
+    if (
+        not columns
+        or len(columns) > 64
+        or any(not name or len(name.encode()) > 63 for name in columns)
+        or len(set(columns)) != len(columns)
+    ):
         raise ValueError("invalid_compiled_columns")
     return columns
 

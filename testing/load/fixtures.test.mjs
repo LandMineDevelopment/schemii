@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import os from 'node:os';
 import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest } from './fixtures.mjs';
 import { NDJSONOracle, CSVOracle } from './protocol.mjs';
-import { privateJSON, writeJSON, root } from '../harness/store.mjs';
+import { privateJSON, writeJSON } from '../harness/store.mjs';
 import { ProtocolFailure } from './protocol.mjs';
 
 async function fixture(t) {
@@ -19,7 +18,9 @@ async function fixture(t) {
   await writeJSON(join(dir, 'registry.json'), { slots });
   const modelStore = new Map(names.map(name => [name, [{ id: `retained-${name}`, name: 'starter' }]]));
   const dashStore = new Map(names.map(name => [name, [{ id: `retained-${name}`, name: 'starter' }]]));
-  const compiled = realPlan();
+  // Fixture lifecycle is an early Node-only unit boundary. The real planner
+  // and Python parser contract run in tests/test_load_planner.py after setup.
+  const compiled = { sql: 'owned-fixture-plan' };
   const state = { crossOwner: false, failAfterCreate: false, drift: false, logouts: 0, logins: 0, intents: 0, serial: 0,
     executionResponse: null, failLogout: false, executionDeletes: 0 };
   class FakeClient {
@@ -68,26 +69,12 @@ async function fixture(t) {
   }
   const credentialMap = new Map(names.map(username => [username, { username, password: 'private-secret' }]));
   return { dir, names, state, modelStore, dashStore, prepare: options => prepareFixtures({ dir, accounts: names,
-    credentialMap, stateDir: dir, kind: 'reports', Client: FakeClient, ...options }),
+    credentialMap, stateDir: dir, kind: 'reports', Client: FakeClient,
+    readColumns: async sql => { assert.equal(sql, compiled.sql); return ['fixture-output.id']; }, ...options }),
     cleanup: () => cleanupFixtures({ dir, credentialMap, Client: FakeClient }) };
 }
-function realPlan(label = 'Orders') {
-  const python = existsSync(join(root, '.venv/bin/python')) ? join(root, '.venv/bin/python') : 'python';
-  const result = spawnSync(python, ['-c', `
-import json,sys
-from schemii.schemoo.models import ModelDefinition,ExploreState
-from schemii.schemoo.service import plan_query
-catalog={'namespace':'fixture','fingerprint':'fixture','tables':[{'name':'orders','columns':[{'name':'id','dataType':'bigint'}]}],'relationships':[]}
-definition=ModelDefinition.model_validate({'root':'orders','nodes':[{'id':'orders','table':'orders','label':sys.argv[1]}],'edges':[],'scopes':[]})
-explore=ExploreState.model_validate({'root':'orders','fields':[{'table':'orders','column':'id'}],'limit':100,'selections':{},'reportFilters':[]})
-print(json.dumps(plan_query(catalog,definition,explore,_bounded=False)))
-`, label], { cwd: root, env: { ...process.env, PYTHONPATH: join(root, 'src') }, encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(result.stdout);
-}
-test('default fixture oracles accept real compiled report and CSV headers without replacing exact header checks', async () => {
-  const compiled = realPlan(), columns = await compiledColumns(compiled.sql);
-  assert.deepEqual(columns, ['Orders.id']);
+test('fixture row oracles preserve supplied compiled headers in NDJSON and CSV', () => {
+  const columns = ['fixture-output.id'];
   const oracles = rowOracles(columns), account = { model: { id: `model_${'a'.repeat(32)}`, revision: 1 }, oracles,
     dashboards: { 1: { id: `dashboard_${'b'.repeat(32)}`, revision: 1 } } };
   const parser = new NDJSONOracle(streamRequest('report-1', account).tiles);
@@ -101,12 +88,31 @@ test('default fixture oracles accept real compiled report and CSV headers withou
   const csv = new CSVOracle(oracles.csv);
   csv.push(Buffer.from(columns.join(',') + '\r\n' + rows.map(row => row.join(',') + '\r\n').join('')));
   assert.equal(csv.finish().rows, 513);
-  const renamed = await compiledColumns(realPlan('Order details').sql);
-  assert.deepEqual(renamed, ['Order details.id']);
+});
+test('production compiled-column reader transports serialized SQL and parser output without invoking project Python', async () => {
+  const columns = await compiledColumns('transport-only SQL', { launch: (_python, args, options) => {
+    assert.match(args[0], /testing\/load\/compiled_columns\.py$/);
+    assert.deepEqual(options.stdio, ['pipe', 'pipe', 'ignore']);
+    return spawn(process.execPath, ['-e', `
+      let input='';process.stdin.on('data',chunk=>input+=chunk);
+      process.stdin.on('end',()=>{
+        if(JSON.parse(input)!=='transport-only SQL')process.exit(2);
+        console.log(JSON.stringify(['transport.column']));
+      });
+    `], options);
+  } });
+  assert.deepEqual(columns, ['transport.column']);
+  await assert.rejects(compiledColumns('transport-only SQL', { launch: (_python, _args, options) =>
+    spawn(process.execPath, ['-e', 'process.stdin.resume();process.stdin.on("end",()=>process.exit(1));'], options) }),
+  { code: 'invalid_compiled_plan' });
 });
 test('owned fixture lifecycle journals each write, checks cross-owner denial and preserves retained objects', async t => {
   const f = await fixture(t), receipt = await f.prepare();
   assert.equal(receipt.crossOwnerVerified, true);
+  for (const account of receipt.accounts) {
+    assert.deepEqual(account.oracles.rows.columns, ['fixture-output.id']);
+    assert.deepEqual(account.oracles.csv.columns, ['fixture-output.id']);
+  }
   assert.equal(f.state.intents, 8);
   assert.equal((await stat(join(f.dir, 'fixtures-private.json'))).mode & 0o077, 0);
   assert.ok((await privateJSON(join(f.dir, 'fixtures-private.json'))).accounts.every(account => account.cookie));

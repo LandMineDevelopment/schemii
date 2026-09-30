@@ -1,22 +1,23 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HTTPClient } from './http.mjs';
 import { oracleFor, ProtocolFailure } from './protocol.mjs';
 import { privateJSON, writeJSON, root } from '../harness/store.mjs';
 
 const bad = code => { throw new ProtocolFailure(code); };
-const fields = [{ table: 'orders', column: 'id' }];
-export const explore = { root: 'orders', fields, limit: 100, selections: {}, reportFilters: [] };
+export const fixtureSpec = JSON.parse(readFileSync(new URL('./fixture-spec.json', import.meta.url), 'utf8'));
+export const explore = fixtureSpec.explore;
+const fields = explore.fields;
 export function rowOracles(columns) {
   return { rows: oracleFor(columns, Array.from({ length: 513 }, (_, i) => [i + 1])),
     csv: oracleFor(columns, Array.from({ length: 513 }, (_, i) => [String(i + 1)])) };
 }
-export async function compiledColumns(sql) {
+export async function compiledColumns(sql, { launch = spawn } = {}) {
   const python = existsSync(join(root, '.venv/bin/python')) ? join(root, '.venv/bin/python') : 'python';
   return new Promise((resolve, reject) => {
-    const child = spawn(python, [join(root, 'testing/load/compiled_columns.py')], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const child = launch(python, [join(root, 'testing/load/compiled_columns.py')], { stdio: ['pipe', 'pipe', 'ignore'] });
     let output = '';
     child.stdout.on('data', chunk => { output += chunk; if (output.length > 16384) child.kill('SIGTERM'); });
     child.once('error', () => reject(new ProtocolFailure('compiled_plan_parser_unavailable')));
@@ -50,7 +51,8 @@ export function streamRequest(workload, account) {
 // Persist the creation intent before sending a write. On uncertain outcomes,
 // reconcile only the exact run name absent from the pre-create owner listing.
 // Retained accounts, source profiles, rows, and starter resources stay borrowed.
-export async function prepareFixtures({ dir, accounts, credentialMap, stateDir, kind = 'cheap', origin, Client = HTTPClient }) {
+export async function prepareFixtures({ dir, accounts, credentialMap, stateDir, kind = 'cheap', origin, Client = HTTPClient,
+  readColumns = compiledColumns }) {
   const file = join(dir, 'fixtures-private.json');
   let receipt;
   try { receipt = await privateJSON(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -81,7 +83,7 @@ export async function prepareFixtures({ dir, accounts, credentialMap, stateDir, 
         if (!existing) { account.pending = { kind: 'model', name: modelName }; await save(); }
         const model = existing || await client.json('POST', '/api/v1/schemoo/models', {
           name: modelName, connectionId: slot.connectionId, database: 'schemii_qa', namespace: slot.schema,
-          definition: { root: 'orders', nodes: [{ id: 'orders', table: 'orders', label: 'Orders' }], edges: [], scopes: [] } }, 201);
+          definition: fixtureSpec.definition }, 201);
         if (model.ownerId !== account.userId || model.connectionId !== slot.connectionId || model.namespace !== slot.schema) bad('model_ownership_changed');
         account.model = { id: model.id, revision: model.revision, name: modelName };
         account.owned.push({ kind: 'model', ...account.model }); account.pending = null; await save();
@@ -89,7 +91,7 @@ export async function prepareFixtures({ dir, accounts, credentialMap, stateDir, 
       if (!account.oracles) {
         const compiled = await client.json('POST', `/api/v1/schemoo/models/${account.model.id}/plan`, {
           expectedRevision: account.model.revision, explore });
-        const columns = await compiledColumns(compiled.sql);
+        const columns = await readColumns(compiled.sql);
         if (columns.length !== fields.length) bad('compiled_column_count');
         account.oracles = rowOracles(columns); await save();
       }

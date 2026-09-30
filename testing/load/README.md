@@ -150,6 +150,7 @@ expiry/20 MiB cleanup contract is separate from durable load evidence.
 
 ```bash
 node --test testing/load/*.test.mjs
+python -m pytest -q tests/test_load_planner.py
 bash -n scripts/install_k6.sh
 node --check testing/load/cli.mjs
 node --check testing/load/controller.mjs
@@ -161,3 +162,8 @@ rows, CSV chunk boundaries and partial files, cross-owner disclosure, uncertain
 fixture writes, ownership drift, retained resource preservation, HTTP accounting,
 generator underdelivery, leak detection, envelope guards and report sanitization.
 They do not start the application or generate load.
+The Node cases need no Python project dependencies and remain in the early CI
+phase. The faithful application planner/header and production Python parser CLI
+checks run in `tests/test_load_planner.py` in the deterministic Python phase after
+dependency installation; fixture inputs come from the same `fixture-spec.json`
+used by real preparation.
