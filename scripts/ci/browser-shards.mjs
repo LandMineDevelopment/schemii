@@ -49,11 +49,18 @@ export function manifestPattern(value) {
   return new RegExp(`(?:^|/)(?:${escaped.join('|')})$`);
 }
 
-export function balanceFiles(files, project, costs = OBSERVED_COSTS) {
+export function validateShardCount(count) {
+  if (![2, 3].includes(count)) throw new Error('Browser shard count must be 2 or 3');
+  return count;
+}
+
+export function balanceFiles(files, project, costs = OBSERVED_COSTS, shardCount = 2) {
+  validateShardCount(shardCount);
   if (!PROJECTS.includes(project)) throw new Error('Unknown browser project');
   if (!Array.isArray(files) || !files.length || new Set(files).size !== files.length) {
     throw new Error('Discovered browser files must be nonempty and unique');
   }
+  if (files.length < shardCount) throw new Error('Every browser shard must own at least one file');
   const known = Object.values(costs).map(cost => cost[project]).filter(cost => cost > 0)
     .sort((a, b) => a - b);
   const fallback = known.length ? known[Math.floor(known.length / 2)] : 1000;
@@ -66,12 +73,15 @@ export function balanceFiles(files, project, costs = OBSERVED_COSTS) {
     if (!Number.isFinite(cost) || cost < 0) throw new Error('Invalid observed file cost');
     return { file, cost };
   }).sort((a, b) => b.cost - a.cost || (a.file < b.file ? -1 : 1));
-  const shards = [{ files: [], estimatedMs: 0 }, { files: [], estimatedMs: 0 }];
+  const shards = Array.from({ length: shardCount }, () => ({ files: [], estimatedMs: 0 }));
   for (const item of weighted) {
-    const [first, second] = shards;
-    const selected = first.estimatedMs < second.estimatedMs
-      || (first.estimatedMs === second.estimatedMs && first.files.length <= second.files.length)
-      ? first : second;
+    let selected = shards[0];
+    for (const candidate of shards.slice(1)) {
+      if (candidate.estimatedMs < selected.estimatedMs
+          || (candidate.estimatedMs === selected.estimatedMs && candidate.files.length < selected.files.length)) {
+        selected = candidate;
+      }
+    }
     selected.files.push(item.file);
     selected.estimatedMs += item.cost;
   }

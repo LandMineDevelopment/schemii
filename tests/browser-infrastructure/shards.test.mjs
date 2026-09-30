@@ -37,7 +37,7 @@ function cases(report) {
   return found;
 }
 
-function proveInventory(cwd, baseline) {
+function proveInventory(cwd, baseline, shardCount = 2) {
   const required = cases(baseline);
   const actual = [];
   for (const project of PROJECTS) {
@@ -45,11 +45,13 @@ function proveInventory(cwd, baseline) {
       cases({ suites: [suite] }).some(item => item.project === project)) };
     const projectFiles = [...new Set(required.filter(item => item.project === project)
       .map(item => `tests/e2e/${item.file}`))].sort();
-    const plan = balanceFiles(projectFiles, project);
+    const plan = balanceFiles(projectFiles, project, OBSERVED_COSTS, shardCount);
+    assert.equal(plan.shards.length, shardCount);
     assert.deepEqual(plan.unknownFiles, projectFiles.filter(file => OBSERVED_COSTS[file]?.[project] === undefined));
     assert.deepEqual(new Set(inventoryFiles(projectReport, cwd)), new Set(projectFiles));
     for (const [index, shard] of plan.shards.entries()) {
-      const selected = discover(cwd, invocation(project, shard.files, index + 1, true));
+      assert.ok(shard.files.length > 0, 'every browser lane must own files');
+      const selected = discover(cwd, invocation(project, shard.files, index + 1, true, process.env, shardCount));
       assert.equal(selected.config.workers, 1);
       assert.equal(selected.config.fullyParallel, false);
       assert.equal(selected.config.shard, null);
@@ -65,7 +67,7 @@ function proveInventory(cwd, baseline) {
 
 test('real Playwright discovery proves exact project/test coverage and transport scope', () => {
   const baseline = discover(root);
-  const required = proveInventory(root, baseline);
+  const required = proveInventory(root, baseline, 3);
   // The pinned JSON reporter removes the leading '@' from tag labels.
   const requests = required.filter(item => item.tags.includes('request-only'));
   assert.equal(requests.length, 7);
@@ -112,14 +114,15 @@ test('a freshly added nested spec is discovered and scheduled exactly once per i
         testMatch:manifestPattern(process.env.SCHEMII_E2E_FILE_MANIFEST),
         projects:[{name:'desktop-chromium'},{name:'android-chromium',grepInvert:/@request-only/}] });
     `);
-    for (const path of ['existing.spec.js', 'nested/brand-new.spec.js']) {
+    for (const path of ['existing.spec.js', 'another.spec.js', 'nested/brand-new.spec.js']) {
       writeFileSync(resolve(directory, 'tests/e2e', path), `
         import { test } from '@playwright/test';
         test('a visible invariant', async () => {});
       `);
     }
-    const required = proveInventory(directory, discover(directory));
+    const baseline = discover(directory);
+    const required = proveInventory(directory, baseline, 3);
     assert.equal(required.filter(item => item.file === 'nested/brand-new.spec.js').length, 2);
-    assert.equal(required.length, 4);
+    assert.equal(required.length, 6);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
