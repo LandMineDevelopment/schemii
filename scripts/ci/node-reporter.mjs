@@ -6,12 +6,18 @@ export default async function* timingReporter(source) {
   const encode = record => JSON.stringify({ ...meta, ...record }) + '\n';
   const planned = new Set();
   let ended = false;
+  let fileFailed = false;
   yield encode({ kind: 'start', planned: null });
   for await (const event of source) {
     const data = event.data || {};
     const file = data.file ? relative(process.cwd(), data.file) : 'unknown';
     const identity = `${file}:${data.line || 0}:${data.column || 0}:${data.name}`;
-    if (data.line === 1 && data.column === 1 && data.name === file) continue;
+    if (data.line === 1 && data.column === 1 && [file, data.file].includes(data.name)) {
+      // A failed file bootstrap may have undiscovered tests. Keep it outside
+      // individual test denominators but let it own the terminal error status.
+      if (event.type === 'test:fail') fileFailed = true;
+      continue;
+    }
     if (event.type === 'test:enqueue' && data.type !== 'suite') {
       const id = hash(identity);
       if (!planned.has(id)) {
@@ -34,7 +40,7 @@ export default async function* timingReporter(source) {
     }
     if (event.type === 'test:summary' && data.file === undefined) {
       ended = true;
-      yield encode({ kind: 'end', outcome: data.counts?.cancelled ? 'cancelled'
+      yield encode({ kind: 'end', outcome: fileFailed ? 'error' : data.counts?.cancelled ? 'cancelled'
         : data.success ? 'passed' : 'failed', wall_ms: milliseconds(data.duration_ms) });
     }
   }

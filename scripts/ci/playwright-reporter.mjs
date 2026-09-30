@@ -3,6 +3,12 @@ import { performance } from 'node:perf_hooks';
 import { attempt, hash, metadata, milliseconds, writer } from './timing.mjs';
 
 export default class TimingReporter {
+  onError() {
+    // Global setup/teardown and runner errors are outside individual attempts.
+    // Retain only their presence, never the Error object or its contents.
+    this.infrastructureFailed = true;
+  }
+
   onBegin(config, suite) {
     this.started = performance.now();
     this.tests = suite.allTests();
@@ -40,7 +46,7 @@ export default class TimingReporter {
         relative(process.cwd(), test.location.file), test.location.line, 0,
         result.status === 'interrupted' ? 'cancelled' : 'not-run', 0, 0, 0));
     }
-    this.write({ kind: 'end', outcome: { passed: 'passed', failed: 'failed',
+    this.write({ kind: 'end', outcome: this.infrastructureFailed ? 'error' : { passed: 'passed', failed: 'failed',
       timedout: 'timed-out', interrupted: 'cancelled' }[result.status],
     wall_ms: milliseconds(performance.now() - this.started) });
   }

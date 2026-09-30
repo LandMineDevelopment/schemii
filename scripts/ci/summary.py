@@ -20,6 +20,7 @@ FIELDS = {
     "end": {"kind", "outcome", "wall_ms"},
 }
 OUTCOMES = {"passed", "failed", "timed-out", "skipped", "cancelled", "not-run"}
+TERMINAL_OUTCOMES = {"passed", "failed", "timed-out", "cancelled", "collection-error", "error"}
 
 
 def number(value, integer=False):
@@ -33,7 +34,8 @@ def valid(record):
         return False
     if record["schema"] != 1 or type(record["schema"]) is not int:
         return False
-    if record["source_sha"] is not None and not re.fullmatch(r"[0-9a-f]{40}", str(record["source_sha"])):
+    if record["source_sha"] is not None and (not isinstance(record["source_sha"], str)
+                                            or not re.fullmatch(r"[0-9a-f]{40}", record["source_sha"])):
         return False
     if not all(number(record[key], True) for key in ("run_id", "run_attempt", "shard")):
         return False
@@ -48,17 +50,19 @@ def valid(record):
         return False
     if kind == "start":
         return record["planned"] is None or number(record["planned"], True)
-    if kind in {"plan", "attempt"} and not re.fullmatch(r"[0-9a-f]{64}", str(record["test_id"])):
+    if kind in {"plan", "attempt"} and (not isinstance(record["test_id"], str)
+                                       or not re.fullmatch(r"[0-9a-f]{64}", record["test_id"])):
         return False
     if kind == "plan":
         return True
     if kind == "attempt":
-        return (bool(re.fullmatch(r"[0-9a-f]{64}", str(record["source_id"])))
+        return (isinstance(record["source_id"], str)
+                and bool(re.fullmatch(r"[0-9a-f]{64}", record["source_id"]))
                 and all(number(record[key], True) for key in ("source_line", "attempt"))
                 and isinstance(record["outcome"], str) and record["outcome"] in OUTCOMES
                 and record["skip"] == ("declared-or-runtime" if record["outcome"] == "skipped" else "none")
                 and all(number(record[key]) for key in ("setup_ms", "execution_ms", "teardown_ms")))
-    return isinstance(record["outcome"], str) and record["outcome"] in OUTCOMES - {"skipped", "not-run"} and number(record["wall_ms"])
+    return isinstance(record["outcome"], str) and record["outcome"] in TERMINAL_OUTCOMES and number(record["wall_ms"])
 
 
 def summarize(records):
@@ -97,7 +101,11 @@ def summarize(records):
             first_failures += first in {"failed", "timed-out"}
         recovered += first in {"failed", "timed-out"} and values[-1]["outcome"] == "passed"
     missing = len(set(plans) - set(attempts))
-    complete = bool(ends) and not missing and not counts["cancelled"] and not counts["not-run"]
+    # Individual test receipts do not establish completion of their enclosing
+    # lifecycle. Cancellation/timeout/collection failure can happen after every
+    # observed test passed, and zero collected tests provide no executed inventory.
+    complete = bool(plans) and bool(ends) and ends[0]["outcome"] in {"passed", "failed"} \
+        and not missing and not counts["cancelled"] and not counts["not-run"]
     if starts[0]["planned"] is not None and starts[0]["planned"] != len(plans):
         complete = False
     return {**meta, "collected": len(plans), "unique_observed": len(attempts),

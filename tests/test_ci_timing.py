@@ -59,6 +59,23 @@ def test_missing_footer_or_missing_planned_test_is_incomplete():
     assert summarize(records())["missing"] == 1
 
 
+@pytest.mark.parametrize("terminal", ["cancelled", "timed-out", "collection-error", "error"])
+@pytest.mark.parametrize("observed_pass", [True, False])
+def test_terminal_shutdown_cannot_be_overridden_by_passes_or_empty_inventory(terminal, observed_pass):
+    evidence = records(attempt(0, "passed")) if observed_pass else [record("start", planned=0),
+                                                                  record("end", outcome="passed", wall_ms=7)]
+    evidence[-1]["outcome"] = terminal
+    result = summarize(evidence)
+    assert result["outcome"] == terminal
+    assert result["complete"] is False
+    assert result["first_attempt_passes"] == int(observed_pass)
+
+
+def test_zero_collected_tests_do_not_establish_complete_acceptance():
+    for terminal in ("passed", "failed"):
+        assert summarize([record("start", planned=0), record("end", outcome=terminal, wall_ms=1)])["complete"] is False
+
+
 @pytest.mark.parametrize("field", ["title", "errors", "stdout", "attachments", "cookies", "Authorization", "fixture"])
 def test_public_schema_rejects_every_unapproved_field(field):
     unsafe = attempt(0, "failed")
@@ -76,20 +93,32 @@ def test_public_schema_rejects_secret_identity_or_skip_metadata_and_nonfinite_du
         assert valid(unsafe) is False
 
 
+@pytest.mark.parametrize("field,digits", [("source_sha", 40), ("test_id", 64), ("source_id", 64)])
+def test_numeric_hash_lookalikes_do_not_bypass_public_identity_types(field, digits):
+    unsafe = attempt(0, "passed")
+    unsafe[field] = int("1" * digits)
+    assert valid(unsafe) is False
+    with pytest.raises(ValueError, match="schema"):
+        summarize(records(unsafe))
+
+
 def test_duplicate_or_missing_retry_index_is_not_complete_evidence():
     for values in [(attempt(0, "failed"), attempt(0, "passed")), (attempt(1, "passed"),)]:
         with pytest.raises(ValueError, match="attempt"):
             summarize(records(*values))
 
 
-def run_pytest(tmp_path, source):
+def run_pytest(tmp_path, source, extra_files=None, options=()):
     test_file = tmp_path / "test_synthetic.py"
     test_file.write_text(source)
+    for name, content in (extra_files or {}).items():
+        (tmp_path / name).write_text(content)
     timing_file = tmp_path / "timing.jsonl"
     env = {**os.environ, "PYTHONPATH": f"{ROOT / 'src'}:{ROOT}", "CI_TELEMETRY_FILE": str(timing_file),
            "CI_TELEMETRY_LANE": "python", "CI_TELEMETRY_SHA": "a" * 40,
            "CI_TELEMETRY_RUN_ID": "1", "CI_TELEMETRY_RUN_ATTEMPT": "1", "SECRET_SENTINEL": SECRET}
-    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "scripts.ci.pytest_timing", str(test_file)],
+    target = tmp_path if extra_files else test_file
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "scripts.ci.pytest_timing", *options, str(target)],
                             cwd=ROOT, env=env, capture_output=True, text=True, timeout=20)
     output = timing_file.read_text()
     assert SECRET not in output
@@ -136,6 +165,54 @@ def test_unstarted():
     assert summary["collected"] == summary["attempts"] == 3
     assert summary["attempt_outcomes"]["cancelled"] == 2
     assert summary["complete"] is False
+
+
+@pytest.mark.parametrize("valid_file,continue_after_error", [(False, False), (True, False), (True, True)])
+def test_real_pytest_import_failure_is_collection_error_with_no_secret_output(tmp_path, valid_file, continue_after_error):
+    extras = {"test_valid.py": "def test_valid():\n    pass\n"} if valid_file else None
+    result, evidence = run_pytest(tmp_path, f"import nonexistent_schemii_telemetry_repro_module  # {SECRET}\n",
+                                 extra_files=extras, options=("--continue-on-collection-errors",) if continue_after_error else ())
+    assert result.returncode == (1 if continue_after_error else 2)
+    summary = summarize(evidence)
+    assert summary["outcome"] == "collection-error"
+    assert summary["complete"] is False
+    assert summary["collected"] == int(valid_file)
+    assert summary["attempt_outcomes"]["cancelled"] == 0
+    assert summary["attempt_outcomes"]["passed"] == int(continue_after_error)
+    assert summary["attempt_outcomes"]["not-run"] == int(valid_file and not continue_after_error)
+
+
+def test_real_pytest_stop_after_last_pass_remains_cancelled_and_incomplete(tmp_path):
+    result, evidence = run_pytest(tmp_path, f'''
+def test_last_pass(request):
+    assert 1 == 1
+    request.session.shouldstop = "{SECRET}"
+''')
+    assert result.returncode == 2
+    summary = summarize(evidence)
+    assert summary["collected"] == summary["attempt_outcomes"]["passed"] == 1
+    assert summary["attempt_outcomes"]["cancelled"] == 0
+    assert summary["outcome"] == "cancelled" and summary["complete"] is False
+
+
+@pytest.mark.parametrize("broken_import,absolute_paths", [(True, False), (True, True), (False, False)])
+def test_real_node_file_failure_is_incomplete_without_hiding_ordinary_test_failure(tmp_path, broken_import, absolute_paths):
+    (tmp_path / "good.mjs").write_text("import {test} from 'node:test'; test('valid', () => {});\n")
+    broken = f"import 'nonexistent_schemii_telemetry_repro_module'; // {SECRET}\n" if broken_import else (
+        f"import {{test}} from 'node:test'; test('failure', () => {{ throw Error('{SECRET}'); }});\n")
+    (tmp_path / "broken.mjs").write_text(broken)
+    output = tmp_path / "node.jsonl"
+    paths = [str(tmp_path / name) if absolute_paths else name for name in ("good.mjs", "broken.mjs")]
+    result = subprocess.run(["node", "--test", "--test-reporter=" + str(ROOT / "scripts/ci/node-reporter.mjs"),
+                             "--test-reporter-destination=" + str(output), *paths],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1 and SECRET not in output.read_text()
+    summary = summarize([json.loads(line) for line in output.read_text().splitlines()])
+    assert summary["collected"] == summary["attempts"] == (1 if broken_import else 2)
+    assert summary["attempt_outcomes"]["passed"] == 1
+    assert summary["attempt_outcomes"]["failed"] == int(not broken_import)
+    assert summary["outcome"] == ("error" if broken_import else "failed")
+    assert summary["complete"] is (not broken_import)
 
 
 def test_workflow_queue_setup_execution_missing_shards_and_secrets():
@@ -208,3 +285,28 @@ test.skip('skip {SECRET}', async () => {{}});
     assert summary["attempt_outcomes"]["failed"] == 3 and summary["attempt_outcomes"]["skipped"] == 1
     assert summary["phase_totals_ms"]["setup_ms"] >= 50
     assert summary["phase_totals_ms"]["teardown_ms"] >= 50
+
+
+def test_real_playwright_global_teardown_error_keeps_passing_receipt_but_is_incomplete(tmp_path):
+    if not (ROOT / "node_modules/@playwright/test/cli.js").exists():
+        pytest.skip("Playwright reporter verification needs npm ci; no application or browser is started")
+    teardown = tmp_path / "global-teardown.mjs"
+    teardown.write_text(f"export default async () => {{ throw new Error('{SECRET}'); }};\n")
+    config = tmp_path / "playwright.config.mjs"
+    config.write_text("export default " + json.dumps({
+        "testDir": str(tmp_path), "outputDir": str(tmp_path / "results"), "workers": 1,
+        "globalTeardown": str(teardown), "reporter": [[str(ROOT / "scripts/ci/playwright-reporter.mjs")]],
+        "projects": [{"name": "desktop-chromium"}], "shard": {"current": 1, "total": 1},
+    }) + ";")
+    (tmp_path / "synthetic.spec.mjs").write_text(f'''
+import {{ test, expect }} from '{ROOT}/node_modules/@playwright/test/index.mjs';
+test('valid', async () => {{ expect(1).toBe(1); }});
+''')
+    output = tmp_path / "browser.jsonl"
+    result = subprocess.run(["node", str(ROOT / "node_modules/@playwright/test/cli.js"), "test", "--config", str(config)],
+                            cwd=tmp_path, env={**os.environ, "CI_TELEMETRY_FILE": str(output)},
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 1 and SECRET not in output.read_text()
+    summary = summarize([json.loads(line) for line in output.read_text().splitlines()])
+    assert summary["attempts"] == summary["attempt_outcomes"]["passed"] == 1
+    assert summary["outcome"] == "error" and summary["complete"] is False

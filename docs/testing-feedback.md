@@ -85,6 +85,24 @@ distinct from an incomplete run. First-attempt rate excludes skips/cancelled/
 unstarted cases; retry recovery retains the original failed attempt in its
 denominator. Expected-failure tests retain their actual failed status.
 
+Terminal ownership is authoritative even after all test receipts passed. A lane
+is complete only with a nonempty discovered inventory, an ending `passed` or
+`failed` status, every planned case observed and no cancelled/unstarted cases.
+Terminal cancellation, timeout, `collection-error` and `error` remain incomplete;
+their observed passing attempts are retained without establishing acceptance.
+Pytest collection reports distinguish import/collection failures from human
+interruption because both otherwise use exit code 2. Collection failures remain
+`collection-error` when explicitly continuing to execute valid collected cases.
+Only fixed error categories are published; exception text and fixture values are
+excluded. Hash identities require JSON strings of the exact length and format,
+so integer lookalikes cannot pass artifact validation.
+Node failed file-bootstrap wrappers similarly set terminal `error` outside the
+individual test denominator; undiscovered cases in an unloadable file cannot be
+treated as complete even when another file's tests all pass. Ordinary observed
+assertion failures keep their failed-attempt records and terminal `failed` status.
+Playwright global setup/teardown or runner errors set terminal `error` through
+its lifecycle error hook, retaining passed attempts without claiming completion.
+
 Reliability sampling uses the next ten naturally occurring comparable source
 runs, including first-attempt failures. Record canceled/incomplete runs and
 changed test inventories as exclusions; successful complete-run duration is a

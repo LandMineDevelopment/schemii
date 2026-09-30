@@ -21,6 +21,8 @@ class Timing:
         self.items = {}
         self.phases = {}
         self.completed = set()
+        self.collection_failed = False
+        self.interrupted = False
         sha = os.environ.get("CI_TELEMETRY_SHA", "")
         lane = os.environ.get("CI_TELEMETRY_LANE", "python")
         if lane not in {"python", "postgres"}:
@@ -47,6 +49,16 @@ class Timing:
         self.write({"kind": "start", "planned": len(self.items)})
         for nodeid in self.items:
             self.write({"kind": "plan", "test_id": _hash(nodeid)})
+
+    def pytest_collectreport(self, report):
+        # Pytest uses exit status 2 for both collection errors and interruption.
+        # The collection lifecycle owns the distinction; never infer it from
+        # exception messages or publish the collection failure object.
+        if report.failed:
+            self.collection_failed = True
+
+    def pytest_keyboard_interrupt(self, excinfo):
+        self.interrupted = True
 
     def emit(self, nodeid, missing=None):
         reports = self.phases.get(nodeid, {})
@@ -79,11 +91,16 @@ class Timing:
             self.emit(report.nodeid)
 
     def pytest_sessionfinish(self, session, exitstatus):
-        cancelled = int(exitstatus) == 2
+        if self.collection_failed:
+            outcome = "collection-error"
+        elif self.interrupted:
+            outcome = "cancelled"
+        else:
+            outcome = {0: "passed", 1: "failed", 2: "cancelled"}.get(int(exitstatus), "error")
         for nodeid in self.items:
             if nodeid not in self.completed:
-                self.emit(nodeid, "cancelled" if cancelled else "not-run")
-        self.write({"kind": "end", "outcome": "cancelled" if cancelled else "passed" if int(exitstatus) == 0 else "failed",
+                self.emit(nodeid, "cancelled" if outcome == "cancelled" else "not-run")
+        self.write({"kind": "end", "outcome": outcome,
                     "wall_ms": round((time.perf_counter() - self.started) * 1000, 3)})
 
 
