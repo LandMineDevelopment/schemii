@@ -39,6 +39,27 @@ stale PID birth rejection and cleanup-pending ownership. Scratch directories are
 removed only after all fixture workers have been reaped; production reports and
 recorded account/resource data remain retained.
 
+An unsolicited leader exit follows the same ownership boundary. The controller
+receives its original exit code/reason immediately and fences the matching broker
+generation while the pool retains its handle. Birth-checked group observations
+while the leader is live record child ownership once per second. A previously
+recorded surviving child permits bounded group termination after leader death;
+the reaped leader and closed recording streams are required before releasing the
+slot. The final exit receipt retains the first failure and records cleanup
+separately, so a delayed cleanup receipt cannot pause a newly assigned generation.
+If a crash occurs before child ownership was observed, the orphan remains
+`cleanup-pending` and its reservation is retained for inspection. The pool never
+adopts an unknown group from a saved PGID. Recording failures also retain pending
+ownership rather than masquerading as complete closure.
+
+The crash regression uses a real leader exiting with code seven while its
+recorded child keeps inherited recording pipes open. It verifies prompt broker
+fencing, automatic child termination, stream closure and peer survival before
+handle release. Separate failure injections preserve unobserved-group and
+recording-error ownership; only after restoring separately verified fixture
+identities/real closure do those fixtures use the pool's automatic teardown. No
+manual process kill establishes the successful automatic-cleanup result.
+
 Native T3/Codex threads are controlled by the coordinator, not `CodexWorkers`.
 This interface exposes interruption but no native thread/session-close tool; an
 interrupted or completed turn can retain its MCP connection. Expiry fences the
