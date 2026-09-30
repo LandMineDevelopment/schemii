@@ -7,6 +7,15 @@ application or opt-in load/browser work. CI runs the Node checks before Python
 setup. Dispatch delay and setup time still contribute to hosted feedback; the
 30-second early-feedback target requires an ordinary hosted run, not a local claim.
 
+Local and CI Node execution share `npm test` and the single discovery runner
+`scripts/ci/node-tests.mjs`. It selects deterministic `.test.js`/`.test.mjs` files
+from frontend, harness, telemetry and the load-unit family when that family is
+present. Browser specs and executable load scenarios are excluded. Setting
+`CI_TELEMETRY_FILE` adds the approved reporters before the selected file arguments
+without changing discovery; there is no second CI test-glob list. The deployment
+contract check executes the actual CI command in a temporary four-family checkout
+and checks unique receipts, with planted opt-in files that fail if selected.
+
 ## Focused inventory
 
 Costs below are audit observations at the referenced baseline, not current

@@ -29,20 +29,30 @@ class Timing:
             raise ValueError("Invalid timing lane")
         self.meta = {
             "schema": 1,
-            "source_sha": sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else None,
+            "source_sha": sha
+            if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)
+            else None,
             "run_id": self.numeric("CI_TELEMETRY_RUN_ID"),
             "run_attempt": self.numeric("CI_TELEMETRY_RUN_ATTEMPT"),
-            "lane": lane, "project": "none", "shard": 0,
+            "lane": lane,
+            "project": "none",
+            "shard": 0,
         }
 
     @staticmethod
     def numeric(name):
         value = os.environ.get(name, "")
-        return int(value) if value.isascii() and value.isdigit() and len(value) <= 20 else 0
+        return (
+            int(value)
+            if value.isascii() and value.isdigit() and len(value) <= 20
+            else 0
+        )
 
     def write(self, record):
         with self.file.open("a") as stream:
-            stream.write(json.dumps({**self.meta, **record}, separators=(",", ":")) + "\n")
+            stream.write(
+                json.dumps({**self.meta, **record}, separators=(",", ":")) + "\n"
+            )
 
     def pytest_collection_finish(self, session):
         self.items = {item.nodeid: item for item in session.items}
@@ -73,14 +83,24 @@ class Timing:
         else:
             outcome = "not-run"
         item = self.items.get(nodeid)
-        source, line = (item.location[:2] if item is not None else ("unknown", 0))
-        self.write({
-            "kind": "attempt", "test_id": _hash(nodeid), "source_id": _hash(source),
-            "source_line": line + 1, "attempt": 0, "outcome": outcome,
-            "skip": "declared-or-runtime" if outcome == "skipped" else "none",
-            **{f"{phase}_ms": round(reports[phase].duration * 1000, 3) if phase in reports else 0
-               for phase in ("setup", "execution", "teardown")},
-        })
+        source, line = item.location[:2] if item is not None else ("unknown", 0)
+        self.write(
+            {
+                "kind": "attempt",
+                "test_id": _hash(nodeid),
+                "source_id": _hash(source),
+                "source_line": line + 1,
+                "attempt": 0,
+                "outcome": outcome,
+                "skip": "declared-or-runtime" if outcome == "skipped" else "none",
+                **{
+                    f"{phase}_ms": round(reports[phase].duration * 1000, 3)
+                    if phase in reports
+                    else 0
+                    for phase in ("setup", "execution", "teardown")
+                },
+            }
+        )
         # Pytest calls its test-body phase "call".
         self.completed.add(nodeid)
 
@@ -96,12 +116,19 @@ class Timing:
         elif self.interrupted:
             outcome = "cancelled"
         else:
-            outcome = {0: "passed", 1: "failed", 2: "cancelled"}.get(int(exitstatus), "error")
+            outcome = {0: "passed", 1: "failed", 2: "cancelled"}.get(
+                int(exitstatus), "error"
+            )
         for nodeid in self.items:
             if nodeid not in self.completed:
                 self.emit(nodeid, "cancelled" if outcome == "cancelled" else "not-run")
-        self.write({"kind": "end", "outcome": outcome,
-                    "wall_ms": round((time.perf_counter() - self.started) * 1000, 3)})
+        self.write(
+            {
+                "kind": "end",
+                "outcome": outcome,
+                "wall_ms": round((time.perf_counter() - self.started) * 1000, 3),
+            }
+        )
 
 
 def pytest_configure(config):

@@ -46,9 +46,9 @@ jobs:
         with:
           node-version: "22"
       - name: Fast frontend and harness feedback
-        run: |
-          mkdir -p artifacts/ci-timing
-          npm run test:ci
+        env:
+          CI_TELEMETRY_FILE: artifacts/ci-timing/node.jsonl
+        run: npm test
       - name: Validate public Node timing
         id: node-timing
         if: always()
