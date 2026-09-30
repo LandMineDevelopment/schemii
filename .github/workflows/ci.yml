@@ -4,12 +4,14 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
   CI_TELEMETRY_SHA: ${{ github.sha }}
+  CI_TELEMETRY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   CI_TELEMETRY_RUN_ID: ${{ github.run_id }}
   CI_TELEMETRY_RUN_ATTEMPT: ${{ github.run_attempt }}
 
@@ -18,8 +20,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  classify:
+    name: Classify complete change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      lane: ${{ steps.classify.outputs.lane }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Classify the complete base-to-head change
+        id: classify
+        run: python3 scripts/ci/classify_changes.py --output artifacts/ci-classification.json
+      - name: Retain classification, including invalid comparisons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts/ci-classification.json
+          if-no-files-found: error
+          retention-days: 7
+
+  report-validation:
+    name: Report Markdown and local links
+    if: always()
+    needs: classify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts
+      - name: Validate changed Markdown and local links
+        run: python3 scripts/ci/validate_reports.py --classification artifacts/ci-classification.json --output artifacts/report-validation.json
+      - name: Publish report validation timing and status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-validation-attempt-${{ github.run_attempt }}
+          path: artifacts/report-validation.json
+          if-no-files-found: error
+          retention-days: 7
+
   static-quality:
     name: Incremental Python static quality
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -33,11 +83,13 @@ jobs:
       - run: python -m pip install --constraint constraints.docker.txt --editable '.[quality]'
       - name: Check Python quality against the change base
         env:
-          QUALITY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          QUALITY_BASE: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
         run: python scripts/check_python_quality.py "$QUALITY_BASE"
 
   test:
     name: Node and deterministic Python behavior
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -89,6 +141,8 @@ jobs:
 
   postgres-integration:
     name: Real PostgreSQL metadata behavior
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -136,6 +190,8 @@ jobs:
 
   browser-smoke:
     name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/2)
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
@@ -182,7 +238,7 @@ jobs:
   timing-rollup:
     name: Public workflow timing
     if: always()
-    needs: [static-quality, test, postgres-integration, browser-smoke]
+    needs: [classify, report-validation, static-quality, test, postgres-integration, browser-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
@@ -190,8 +246,13 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
+      - name: Download classification
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts
       - name: Download only public timing evidence
-        if: always()
+        if: always() && needs.classify.outputs.lane != 'reports'
         uses: actions/download-artifact@v4
         with:
           pattern: '*-timing*-attempt-${{ github.run_attempt }}'
@@ -200,7 +261,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         if: always()
-        run: python3 scripts/ci/workflow_timing.py --inputs artifacts/ci-timing/lanes --output artifacts/ci-timing/workflow-summary.json
+        run: python3 scripts/ci/workflow_timing.py --classification artifacts/ci-classification.json --inputs artifacts/ci-timing/lanes --output artifacts/ci-timing/workflow-summary.json
       - name: Publish public workflow timing
         if: always()
         uses: actions/upload-artifact@v4
@@ -208,3 +269,29 @@ jobs:
           name: workflow-timing-attempt-${{ github.run_attempt }}
           path: artifacts/ci-timing/workflow-summary.json
           retention-days: 7
+
+  required-gate:
+    name: CI validation
+    if: always()
+    needs: [classify, report-validation, static-quality, test, postgres-integration, browser-smoke, timing-rollup]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts
+      - name: Download complete timing receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: workflow-timing-attempt-${{ github.run_attempt }}
+          path: artifacts/ci-timing
+      - name: Resolve report validation or every required source layer
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/required_gate.py --classification artifacts/ci-classification.json --timing artifacts/ci-timing/workflow-summary.json
