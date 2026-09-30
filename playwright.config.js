@@ -10,7 +10,7 @@ export default defineConfig({
   workers: 1,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI
-    ? [["line"], ["html", { outputFolder: "artifacts/playwright-report", open: "never" }]]
+    ? [["line"], ["./scripts/ci/playwright-reporter.mjs"]]
     : "line",
   timeout: 45_000,
   expect: { timeout: 7_500 },
