@@ -39,7 +39,7 @@ function fontFixture(t) {
 
 test('Ubuntu preparation is explicit CI only; the local Arch quick loop cannot invoke it', () => {
   assert.doesNotThrow(() => requireRunner(runner));
-  for (const override of [{ ci: undefined }, { platform: 'darwin' }, { arch: 'arm64' }, { release: 'ID=arch\nVERSION_ID=24.04\n' }, { release: 'ID=ubuntu\nVERSION_ID="22.04"\n' }]) {
+  for (const override of [{ ci: 'false' }, { ci: '' }, { platform: 'darwin' }, { arch: 'arm64' }, { release: 'ID=arch\nVERSION_ID=24.04\n' }, { release: 'ID=ubuntu\nVERSION_ID="22.04"\n' }]) {
     assert.throws(() => requireRunner({ ...runner, ...override }), /only for CI Ubuntu 24.04 x64/);
   }
   const result = spawnSync(process.execPath, ['scripts/ci/browser-dependencies.mjs', 'plan'], { cwd: root, env: { ...process.env, CI: 'false' }, encoding: 'utf8' });
