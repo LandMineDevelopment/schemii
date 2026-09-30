@@ -62,14 +62,16 @@ reviewed cases. The real database cases were not rerun for this composition-only
 change. Managed result memory and latency measurements belong to the separate
 #133 delivery.
 
-The subsequent PostgreSQL 17 CI run exposed a fixture ordering error after
+The subsequent PostgreSQL 17 CI run exposed a wrapper compatibility defect after
 metadata connection admission was merged: assigning `observer.autocommit = True`
 changed a wrapper attribute while the native connection stayed transactional.
 The observer's new table was therefore invisible to the raw connection. The same
-failure was reproduced on PostgreSQL 18.6 with the current admission wrapper;
-the earlier PostgreSQL 18 evidence preceded that wrapper. The lifecycle fixture
-now calls the forwarded `set_autocommit(True)` method and asserts native idle
-state after setup DDL. Raw initialization still sets its namespace search path
-and remains idle before the explicit transaction. The rollback, lock/backend
-release and retained-admission checks are unchanged, and fixture setup failures
-also close the owned raw session.
+failure was reproduced on PostgreSQL 18.6 with the defective admission wrapper;
+the earlier PostgreSQL 18 evidence preceded that wrapper. Metadata admission now
+forwards the native `autocommit` property getter and setter, including native
+transaction-state rejection, without releasing its permit early. The lifecycle
+fixture retains the standard property assignment and asserts native idle state
+after setup DDL. Raw initialization still sets its namespace search path and
+remains idle before the explicit transaction. The rollback, lock/backend release
+and retained-admission checks are unchanged, and expiry/dispatch fixture setup
+failures also close their owned raw sessions.
