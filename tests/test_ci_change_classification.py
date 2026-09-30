@@ -62,6 +62,116 @@ def repository(tmp_path):
     return tmp_path, commit(tmp_path)
 
 
+def report_workflow(root, event, base, head):
+    """Run the same dependency-free classifier and validator commands as CI."""
+    payload = (
+        {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
+        if event == "pull_request"
+        else {"before": base, "after": head}
+    )
+    event_path = root / "event.json"
+    event_path.write_text(json.dumps(payload))
+    classification = root / "classification.json"
+    env = {
+        **os.environ,
+        "GITHUB_EVENT_NAME": event,
+        "GITHUB_EVENT_PATH": str(event_path),
+        "GITHUB_OUTPUT": str(root / "github-output"),
+    }
+    classified = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "scripts/ci/classify_changes.py"),
+            "--output",
+            str(classification),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert classified.returncode == 0, classified.stdout + classified.stderr
+    output = root / "validation.json"
+    validated = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "scripts/ci/validate_reports.py"),
+            "--classification",
+            str(classification),
+            "--output",
+            str(output),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return (
+        json.loads(classification.read_text()),
+        validated.returncode,
+        json.loads(output.read_text()),
+    )
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request"])
+@pytest.mark.parametrize("change", ["modify", "rename", "delete"])
+def test_existing_front_matter_skill_uses_full_ci_without_report_title_policy(
+    repository, event, change
+):
+    root, _ = repository
+    skill = ".agents/skills/stock-t3-agents/SKILL.md"
+    original = (ROOT / skill).read_text()
+    assert original.startswith("---\n")
+    write(root, skill, original)
+    base = commit(root)
+    if change == "modify":
+        write(root, skill, original + "\nPreserve explicit task ownership.\n")
+    elif change == "rename":
+        command(root, "mv", skill, ".agents/skills/stock-t3-agents/RENAMED.md")
+    else:
+        (root / skill).unlink()
+    classified, status, receipt = report_workflow(root, event, base, commit(root))
+    assert classified["valid"] and classified["lane"] == "source"
+    assert classified["markdown"] == []
+    assert status == 0 and receipt["outcome"] == "success" and receipt["files"] == 0
+
+
+@pytest.mark.parametrize("change", ["rename", "delete"])
+def test_report_rename_or_deletion_retains_full_ci_without_reading_missing_paths(
+    repository, change
+):
+    root, base = repository
+    if change == "rename":
+        command(root, "mv", REPORT, "docs/audits/2026-09-30-renamed-report.md")
+    else:
+        (root / REPORT).unlink()
+    classified, status, receipt = report_workflow(root, "push", base, commit(root))
+    assert classified["valid"] and classified["lane"] == "source"
+    assert classified["markdown"] == []
+    assert status == 0 and receipt["outcome"] == "success" and receipt["files"] == 0
+
+
+@pytest.mark.parametrize("source_change", [False, True])
+@pytest.mark.parametrize(
+    "report", ["Untitled report\n", "# Report\n\n[Missing](missing.md)\n"]
+)
+def test_workflow_keeps_report_title_and_link_failures_in_report_and_source_lanes(
+    repository, source_change, report
+):
+    root, base = repository
+    write(root, REPORT, report)
+    if source_change:
+        write(root, "src/app.py", "# Changed source invariant\n")
+    classified, status, receipt = report_workflow(root, "push", base, commit(root))
+    assert classified["valid"]
+    assert classified["lane"] == ("source" if source_change else "reports")
+    assert classified["markdown"] == [REPORT]
+    assert status == 1 and receipt["outcome"] == "failure"
+
+
 @pytest.mark.parametrize("event", ["push", "pull_request"])
 @pytest.mark.parametrize(
     "path",
@@ -104,13 +214,15 @@ def test_unknown_source_contract_fixture_dependency_and_config_paths_select_full
     write(root, path, "# Changed contract or source\n")
     result = classify(root, "push", base, commit(root))
     assert result["valid"] and result["lane"] == "source"
+    assert result["markdown"] == []
 
 
 def test_report_and_source_in_same_change_select_full(repository):
     root, base = repository
     write(root, REPORT, "# New report\n")
     write(root, "src/app.py", "# broken invariant\n")
-    assert classify(root, "pull_request", base, commit(root))["lane"] == "source"
+    result = classify(root, "pull_request", base, commit(root))
+    assert result["lane"] == "source" and result["markdown"] == [REPORT]
 
 
 @pytest.mark.parametrize("old", ["src/app.py", REPORT])

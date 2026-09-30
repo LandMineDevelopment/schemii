@@ -128,9 +128,8 @@ def classify(root: Path, event: str, base: str, head: str) -> dict:
                         and len(old_tree) == 2
                         and old_tree[0].startswith(b"100644 blob ")
                     )
-                if regular and path.endswith(".md"):
-                    result["markdown"].append(path)
                 if regular and report_path(path):
+                    result["markdown"].append(path)
                     continue
                 if regular and status == "M" and path == "README.md":
                     before = git(root, "show", comparison_base + ":README.md").decode(
@@ -152,6 +151,7 @@ def classify(root: Path, event: str, base: str, head: str) -> dict:
                             for tree in target_trees
                         ):
                             # Validate index destinations as reports, not only their existence.
+                            result["markdown"].append(path)
                             result["markdown"].extend(targets)
                             continue
             # Includes both ends of renames, all deletions, mode changes and unknowns.

@@ -84,9 +84,25 @@ def markdown_links(text: str) -> tuple[list[str], set[str]]:
         references[label] = destination(match[2])
     content = re.sub(r"^ {0,3}\[[^]\n]+\]:.*$", "", content, flags=re.MULTILINE)
     links = list(references.values())
-    starts = list(re.finditer(r"(?<!\\)!?\[[^]\n]*\]\(", content))
-    for match in starts:
-        start = index = match.end()
+    # Balanced labels include linked images and escaped brackets. Scan inner
+    # images before their outer link so both destinations receive validation.
+    brackets = 0
+    index = 0
+    while index < len(content):
+        char = content[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            brackets += 1
+        if char != "]" or not brackets:
+            index += 1
+            continue
+        brackets -= 1
+        index += 1
+        if content[index : index + 1] != "(":
+            continue
+        start = index = index + 1
         depth = 1
         while index < len(content) and depth:
             if content[index] == "\\":

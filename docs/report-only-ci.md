@@ -22,6 +22,11 @@ links; a missing link target fails validation.
 
 Agent contracts, skills, testing/evidence policy, fixtures, source, migrations,
 dependencies, configuration, launchers and workflows retain full source CI.
+The report validator receives only selected reports and positively proved README
+index changes, including when they accompany source changes. Other Markdown
+contracts keep their own format requirements; a front-matter skill does not need
+a report title. Rename/deletion changes retain full CI without passing removed
+paths to the report validator.
 Adding another shortcut path requires changing the classifier in a full CI run.
 
 ## Complete comparisons
@@ -43,6 +48,8 @@ Markdown heading anchors and source line anchors. Code examples are not executed
 External links are checked for syntax, never fetched; their availability remains
 an editorial review responsibility. This validator supports ordinary inline,
 reference and HTML links, not every Markdown extension or rendered-layout rule.
+Inline linked images and labels with escaped brackets validate their outer link
+destinations as well as any image destination.
 
 ## Required status
 
@@ -98,9 +105,11 @@ Local cheap-check timings do not establish hosted runner savings or queue time.
 On this shared host, classifying the existing report-only commit `936d332` and
 validating its one file/six links with actual `python3 -S` commands took
 **101.455ms** combined: 51.391ms for classification and 50.064ms for the validator
-process, including 1.586ms of validation. The final 188 focused cases above passed
-in 10.08s on Python 3.14.7; no application or browser was started. These single
-local observations are not percentiles or hosted performance claims.
+process, including 1.586ms of validation. Before review corrections, the 188
+focused cases above passed in 10.08s on Python 3.14.7. The 131 classifier/validator
+cases, including real skill updates and nested/escaped link counterexamples,
+passed in 3.01s after those corrections; no application or browser was started.
+These single local observations are not percentiles or hosted performance claims.
 The workflow passed `actionlint` 1.7.12 (official release asset SHA-256 checked),
 plus a parsed graph check preserving the seven source names and matrix inventory.
 New Python files passed Ruff lint/format; modified timing code passed the legacy

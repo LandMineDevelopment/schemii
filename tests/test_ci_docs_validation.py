@@ -92,6 +92,26 @@ def test_angle_destination_supports_spaces_and_balanced_parentheses(reports):
     assert validate_file(root, "docs/report.md") == 2
 
 
+@pytest.mark.parametrize(
+    "link,expected",
+    [
+        ("[![Status](../present.svg)](missing.md)", ["../present.svg", "missing.md"]),
+        (r"[Array \[index\]](missing.md)", ["missing.md"]),
+    ],
+)
+def test_nested_images_and_escaped_label_brackets_check_outer_destination(
+    reports, link, expected
+):
+    root, report = reports
+    (root / "present.svg").write_text("<svg></svg>\n")
+    report.write_text("# Results\n\n" + link + "\n")
+    assert markdown_links(report.read_text())[0] == expected
+    with pytest.raises(ValueError, match="Broken local"):
+        validate_file(root, "docs/report.md")
+    report.write_text(report.read_text().replace("missing.md", "../README.md"))
+    assert validate_file(root, "docs/report.md") == len(expected)
+
+
 def test_empty_invalid_title_nul_and_symlink_reports_fail(reports):
     root, report = reports
     for text in ("", "Untitled prose\n", "# Results\0\n"):
