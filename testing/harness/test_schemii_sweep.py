@@ -69,7 +69,7 @@ class SchemiiSweepTest(unittest.TestCase):
         for username, lane in manifest["lanes"].items():
             ids.add(lane["resources"]["localWorkspaceId"])
             self.assertTrue(any(check.get("equals", {}).get("user.username") == username for check in lane["checks"]))
-            self.assertTrue(any(check.get("equals", {}).get("content.tables.length") == 0 for check in lane["checks"]))
+            self.assertTrue(any(check.get("equals", {}).get("content.tables.length") == 0 and check.get("phase") == "initial" for check in lane["checks"]))
             self.assertTrue(any(check.get("status") == 404 for check in lane["checks"]))
             self.assertTrue(any("upload" in operation for operation in lane["writeAuthorization"]["operations"]))
             for scenario in lane["scenarios"]:
