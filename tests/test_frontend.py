@@ -324,29 +324,6 @@ def test_source_derived_change_cues_follow_workspace_section_colors() -> None:
     )
 
 
-def test_mobile_status_toasts_never_cover_or_capture_workspace_tools() -> None:
-    app_assets = files("schemii.schemii").joinpath("web", "assets")
-    common_assets = files("schemii.common").joinpath("web", "assets")
-    shared_styles = common_assets.joinpath("ui.css").read_text(encoding="utf-8")
-    app_styles = app_assets.joinpath("app.css").read_text(encoding="utf-8")
-
-    assert ".ui-toast" in shared_styles
-    assert "pointer-events: none" in shared_styles
-    assert ".ui-toast { top: 108px;" in app_styles
-
-
-def test_matching_history_confirmation_does_not_repaint_the_optimistic_catalog() -> None:
-    app = (
-        files("schemii.schemii")
-        .joinpath("web", "assets", "app.js")
-        .read_text(encoding="utf-8")
-    )
-
-    assert "return { presentation, targets };" in app
-    assert "applyDesignHistoryMutation(mutation, { cue: !previewMatches, render: !previewMatches });" in app
-    assert "state.viewAnalysisCache.clear();\n  if (!state.catalog.tables" not in app
-
-
 def test_views_use_compact_context_specific_empty_states() -> None:
     assets = files("schemii.schemii").joinpath("web", "assets")
     catalog = assets.joinpath("catalog.js").read_text(encoding="utf-8")

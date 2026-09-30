@@ -52,6 +52,7 @@ import {
   replaceColumnDisplayOrder,
 } from "/assets/common/column-display-order.js";
 import { applyJsonDelta } from "/assets/common/json-delta.js";
+import { performDesignHistoryMove } from "./design-history.js";
 import {
   createChangeTransitionManager,
   elementFullyVisible,
@@ -3446,56 +3447,35 @@ async function executeDesignHistoryMove(direction) {
 async function executeDesignHistoryMoveConfirmed(direction) {
   if (!state.activeWorkspace || !state.design || state.historySubmitting) return;
   if (!await flushLayoutBeforeTransition()) return;
-  const workspaceId = state.activeWorkspace.id;
-  const expectedDesignRevision = state.design.revision;
-  const rollback = {
-    design: state.design,
-    layout: state.designLayout,
-    history: state.designHistory,
-    activeLayer: state.activeLayer,
-    selectedTableId: state.selectedTableId,
-    selectedViewId: state.selectedViewId,
-  };
-  const delta = state.designHistory?.[direction]?.delta || [];
-  const action = state.designHistory?.[direction] || null;
-  let previewApplied = false;
-  let presentation = null;
   let reloadAfterFailure = false;
   state.historySubmitting = true;
   updateDesignControls();
   const operation = beginWorkspaceMutation();
   try {
-    if (delta.length) {
-      const preview = await applyDesignHistoryPreview(delta);
-      presentation = preview.presentation;
-      previewApplied = true;
-    }
-    const mutation = await api[direction === "undo" ? "undoDesign" : "redoDesign"](
-      workspaceId,
-      { expectedDesignRevision },
-      { signal: operation.signal },
-    );
-    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
-    const previewMatches = previewApplied
-      && JSON.stringify(state.design.content) === JSON.stringify(mutation.design.content);
-    applyDesignHistoryMutation(mutation, { cue: !previewMatches, render: !previewMatches });
-    const result = presentation?.headline || action?.title || "Design changed";
-    const next = state.designHistory?.[direction]?.title;
-    showToast(`${result} · ${direction} complete.${next ? ` Next ${direction}: ${next}.` : ""}`);
-  } catch (error) {
-    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
-    if (previewApplied) {
-      changeCues.clear();
-      applyDesignHistoryMutation(rollback, { cue: false });
-      commitWorkspaceState({
-        selectedTableId: rollback.selectedTableId,
-        selectedViewId: rollback.selectedViewId,
-      });
-      setLayer(rollback.activeLayer, { historyMode: "replace" });
-    }
-    errorToast(error);
-    if (error instanceof ApiError && ["design_changed", "nothing_to_undo", "nothing_to_redo"].includes(error.code)) {
-      reloadAfterFailure = true;
+    const result = await performDesignHistoryMove({
+      state, direction, operation,
+      applyPreview: applyDesignHistoryPreview,
+      requestMove: (move, ...args) => api[move === "undo" ? "undoDesign" : "redoDesign"](...args),
+      applyMutation: applyDesignHistoryMutation,
+      restorePreview: rollback => {
+        changeCues.clear();
+        applyDesignHistoryMutation(rollback, { cue: false });
+        commitWorkspaceState({
+          selectedTableId: rollback.selectedTableId,
+          selectedViewId: rollback.selectedViewId,
+        });
+        setLayer(rollback.activeLayer, { historyMode: "replace" });
+      },
+    });
+    if (!result) return;
+    if (result.error) {
+      errorToast(result.error);
+      reloadAfterFailure = result.error instanceof ApiError
+        && ["design_changed", "nothing_to_undo", "nothing_to_redo"].includes(result.error.code);
+    } else {
+      const headline = result.presentation?.headline || result.action?.title || "Design changed";
+      const next = state.designHistory?.[direction]?.title;
+      showToast(`${headline} · ${direction} complete.${next ? ` Next ${direction}: ${next}.` : ""}`);
     }
   } finally {
     operation.finish();
