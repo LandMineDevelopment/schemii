@@ -103,20 +103,23 @@ def test_snapshot_documents_describe_the_same_registered_operations(
     assert planned_from_source == planned_from_openapi
 
 
-def test_canonical_snapshot_and_compatibility_routes_share_exact_documents() -> None:
-    api = TestClient(
-        create_app(developer_inspection=True),
-        base_url="http://localhost",
-    )
-
-    response = api.get("/_developer/inspection")
+def test_canonical_snapshot_and_compatibility_routes_share_exact_documents(
+    inspection_baseline,
+) -> None:
+    # These are real endpoint responses from a newly constructed installed app,
+    # not documents injected into another app or requests on a shared client.
+    responses = inspection_baseline.run.responses
+    response = responses["/_developer/inspection"][0]
 
     assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    snapshot = response.json()
+    assert response.cache_control == "no-store"
+    snapshot = response.payload
     for name in ("routes", "database", "system"):
-        assert api.get(f"/_developer/{name}").json() == snapshot["documents"][name]
-    assert api.get("/openapi.json").json() == snapshot["documents"]["openapi"]
+        compatibility = responses[f"/_developer/{name}"][0]
+        assert compatibility.status_code == 200
+        assert compatibility.cache_control == "no-store"
+        assert compatibility.payload == snapshot["documents"][name]
+    assert responses["/openapi.json"][0].payload == snapshot["documents"]["openapi"]
     assert not {
         "/_developer/inspection",
         "/_developer/routes",
@@ -165,6 +168,7 @@ def test_canonical_inspection_is_opt_in_and_hidden_from_its_openapi_snapshot(
     response = enabled.get("/_developer/inspection")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+    assert response.json() == inspection_http_documents
     assert (
         "/_developer/inspection"
         not in response.json()["documents"]["openapi"]["paths"]
@@ -243,3 +247,10 @@ def test_baseline_documents_are_deeply_immutable_and_copies_are_independent(
     copy["documents"]["routes"]["routes"][0]["id"] = "changed"
     assert routes[0]["id"] == original_id
     assert digest(snapshot["documentDigests"]) == snapshot["snapshotId"]
+
+    with pytest.raises(TypeError):
+        inspection_baseline.run.construction_derivations["routes"] = 999
+    with pytest.raises(TypeError):
+        inspection_baseline.run.responses["/_developer/routes"][0].payload[
+            "schemaVersion"
+        ] = 999
