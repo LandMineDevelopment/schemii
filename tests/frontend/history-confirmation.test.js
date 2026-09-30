@@ -114,15 +114,17 @@ test("history without a delta renders the confirmation once and does not invent 
   assert.deepEqual(failed.calls, ["request"]);
 });
 
+for (const ownerChange of ["operation", "workspace", "both"]) {
 for (const outcome of ["confirmation", "error"]) {
-  test(`superseded ${outcome} cannot commit or roll back another workspace`, async () => {
+  test(`${ownerChange} superseded ${outcome} cannot commit or roll back stale state`, async () => {
     const f = fixture(), pending = performDesignHistoryMove(f.args);
     await f.requested.promise;
-    f.supersede();
-    f.state.activeWorkspace = { id: "other_workspace" };
+    if (ownerChange !== "workspace") f.supersede();
+    if (ownerChange !== "operation") f.state.activeWorkspace = { id: "other_workspace" };
     if (outcome === "confirmation") f.response.resolve(f.mutation(f.before));
     else f.response.reject(new Error("Late response"));
     assert.equal(await pending, null);
     assert.deepEqual(f.calls, ["preview", "request"]);
   });
+}
 }
