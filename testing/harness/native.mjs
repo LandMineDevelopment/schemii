@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
@@ -7,6 +7,17 @@ import { open, readFile, readdir, lstat, realpath, mkdir, writeFile } from 'node
 import { join, resolve, relative, isAbsolute, dirname } from 'node:path';
 
 export const nativeMode = run => run.browser === 'native';
+export function nativeBrowserRoots(root) {
+  const list=execFileSync('git',['-C',root,'worktree','list','--porcelain','-z'],{encoding:'utf8'});
+  return list.split('\0').filter(field=>field.startsWith('worktree ')).map(field=>join(field.slice(9),'artifacts/native-browsers'));
+}
+async function selectBrowserRoot(directory,roots) {
+  const parent=dirname(resolve(directory));
+  for(const root of Array.isArray(roots)?roots:[roots]) {
+    if(parent===resolve(root))return root;
+  }
+  throw new Error('Native output must belong to an actual registered project checkout.');
+}
 const requiredText = (value, name, limit = 4000) => {
   if (typeof value !== 'string' || !value.trim() || value.length > limit) throw new Error(`${name} requires bounded nonblank text.`);
   return value.trim();
@@ -31,6 +42,7 @@ async function literalPath(path, base) {
   return target;
 }
 export async function readNativeSession(directory, browserRoot) {
+  browserRoot=await selectBrowserRoot(directory,browserRoot);
   const target = await literalPath(directory, browserRoot);
   if (dirname(target) !== await realpath(browserRoot) || !/^session-[a-f0-9]{32}$/.test(target.split('/').at(-1))) throw new Error('Bind the exact native connection directory from its own browser output.');
   const info = await lstat(target);
@@ -288,7 +300,10 @@ export function acceptance(run) {
     if (scenario.functional !== 'passed' || scenario.visual !== 'passed') reasons.push(`${lane.id}/${scenario.id}: execution gap`);
     if (!attempt?.id || !(run.reviews || []).some(review => review.targetLane === lane.id && review.scenario === scenario.id && review.attempt === attempt.id && review.source === run.deployment?.identity?.fingerprint && review.verdict === 'accepted' && review.agent !== lane.agent)) reasons.push(`${lane.id}/${scenario.id}: independent review pending`);
   }
-  for (const finding of run.findings || []) if (!finding.reviews?.length || finding.verificationStatus === 'unverified') reasons.push(`${finding.id}: finding adjudication pending`);
+  for (const finding of run.findings || []) {
+    if (!finding.reviews?.length || finding.verificationStatus === 'unverified') reasons.push(`${finding.id}: finding adjudication pending`);
+    if (finding.verificationStatus === 'confirmed-defect' || finding.reviews?.some(review=>review.verdict==='confirmed-defect')) reasons.push(`${finding.id}: confirmed defect remains unresolved; independent remediation verification required`);
+  }
   if (nativeMode(run)) for (const lane of testers) if(!lane.native?.authentication || lane.native.authentication.source !== run.deployment?.identity?.fingerprint)reasons.push(`${lane.id}: native authenticated UI observation pending`);
   if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed')) reasons.push(`${lane.id}: native transport cleanup pending`);
   return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0), completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0), reviewed: (run.reviews || []).filter(review => review.verdict === 'accepted').length };

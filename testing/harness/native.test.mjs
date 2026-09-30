@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, utimes, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, acceptance } from './native.mjs';
+import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -185,4 +185,23 @@ test('workspace selection requires exact declared or fresh owned creation receip
   assert.equal(beginScenario(f.run,f.lane,f.scenario.id,{url}).url,new URL(url,f.run.baseURL).href);
   await assert.rejects(recordNativeResource(f.run,f.lane,input,{runDir:join(fs.directory,'qa-test'),browserRoot:fs.browserRoot}),/already recorded/);
   assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,{url:'/?workspace=other'}),/explicitly assigned/);
+});
+
+
+test('confirmed defects cannot become accepted merely because adjudication exists',()=>{
+  const f=attemptedFixture();inspectionReceipt(f.capture,f.reviewer.agent,{tool:'view_image',invocation:'review image',note:'Expected canvas; actual canvas.'});
+  recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'accepted',note:'Independent expected/actual match.'});
+  f.run.findings=[{id:'finding-material',verificationStatus:'confirmed-defect',reviews:[{verdict:'confirmed-defect',agent:f.reviewer.agent}]}];
+  assert.equal(acceptance(f.run).status,'review-pending');assert.match(acceptance(f.run).reasons.join(),/confirmed defect remains unresolved/);
+  f.run.findings[0].verificationStatus='not-reproduced';
+  assert.match(acceptance(f.run).reasons.join(),/remediation verification/);
+});
+
+test('registered linked checkout output roots are accepted; arbitrary roots are rejected',async t=>{
+  const fs=await sessionFixture(t);
+  const connection=await readNativeSession(fs.session,[join(fs.directory,'unused-primary','artifacts/native-browsers'),fs.browserRoot]);
+  assert.equal(connection.directory,fs.session);
+  await assert.rejects(readNativeSession(fs.session,[join(fs.directory,'another-checkout','artifacts/native-browsers')]),/registered project checkout/);
+  const {root}=await import('./store.mjs');
+  assert.ok(nativeBrowserRoots(root).includes(join(root,'artifacts/native-browsers')));
 });

@@ -8,9 +8,7 @@ import { BrowserFleet } from './browser.mjs';
 import { assertScenarioPrerequisite } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
-import { nativeMode, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
-import { dirname } from 'node:path';
-import { deploymentLockPath } from './deployment.mjs';
+import { nativeMode, nativeBrowserRoots, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
 
 process.umask(0o077);
@@ -23,7 +21,7 @@ let saving = Promise.resolve(), transition = Promise.resolve(), stopping = false
 const operations = new Map();
 const tokens = new Map();
 const LEASE_MS = 10*60*1000;
-const browserRoot = resolve(dirname(deploymentLockPath(root)), '../artifacts/native-browsers');
+const browserRoot = nativeBrowserRoots(root);
 const equal = (a,b) => typeof a==='string' && typeof b==='string' && /^[a-f0-9]{64}$/.test(a) && /^[a-f0-9]{64}$/.test(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const terminalStatus = () => run.lanes.filter(x=>x.role!=='reviewer').every(x=>x.scenarios.every(s=>s.functional==='passed'&&s.visual==='passed'))?'execution-complete':'finished-with-gaps';
 const safeError = error => error?.name === 'TimeoutError' || /Call log:|locator\.|page\./.test(error?.message || '') ? 'Browser action failed or timed out. Inspect the current page before repeating a write.' : String(error?.message || 'Unknown error').split('\n')[0];

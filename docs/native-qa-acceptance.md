@@ -60,6 +60,7 @@ worker's session-file and brief paths:
    establish this path; omit its filename. Bind the parent session directory:
    `./test.sh native-bind --session-file SESSION --args-json '{"directory":"/actual/session-DIR"}'`.
    The adapter checks private metadata, PID birth identities and session inode,
+   checks the output root against actual registered Git checkouts/worktrees,
    and exclusively records a run/lane/agent binding. Other lanes/runs cannot reuse
    that connection. Metadata proves connection/process ownership; scheduler-to-
    connection binding still relies on the actual worker/coordinator observation.
@@ -140,7 +141,9 @@ scenario begin and fresh inspected evidence; never take over a tester's account.
 Use `--finding FINDING_ID` to adjudicate a material candidate with reviewer-owned
 reproduction evidence. Verdicts are `confirmed-defect`, `prerequisite-mistake`,
 `unsupported-action`, or `not-reproduced`; include provenance for external review.
-An unadjudicated finding remains pending. Historical evidence/findings are retained;
+An unadjudicated finding remains pending. A confirmed defect also remains
+pending after adjudication; a later not-reproduced note does not establish its
+remediation. This adapter does not yet provide a remediation-resolution command. Historical evidence/findings are retained;
 issue closure or a reviewer name typed by a tester does not rewrite their history.
 Every accepted attempt requires a distinct agent/account/lane/connection and a
 hash-bound review of the exact current-source attempt image. Findings are separate
