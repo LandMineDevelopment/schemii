@@ -40,6 +40,24 @@ export function missingFonts(result) {
   return packages.sort();
 }
 
+// apt-cache rebuilds its package view per invocation. Query the complete set
+// once, but require an unambiguous candidate owned by each requested name.
+export function policyCandidates(names, output) {
+  const required = new Set(names);
+  if (required.size !== names.length) throw new Error('Duplicate requested package policy.');
+  const candidates = new Map();
+  for (const block of output.trimEnd().split(/\n(?=\S)/).filter(Boolean)) {
+    const name = /^([a-z0-9][a-z0-9+.-]*):\n/.exec(block)?.[1];
+    const values = [...block.matchAll(/^\s+Candidate: ([\w.+:~\-]+)$/gm)];
+    if (!name || !required.has(name) || candidates.has(name) || values.length !== 1) {
+      throw new Error('Missing, duplicate or misattributed package candidate.');
+    }
+    candidates.set(name, values[0][1]);
+  }
+  if (candidates.size !== required.size) throw new Error('Incomplete package candidates.');
+  return candidates;
+}
+
 export function packageRecord(name, candidate, output) {
   if (!/^[a-z0-9][a-z0-9+.-]*$/.test(name) || !/^[\w.+:~\-]+$/.test(candidate)) throw new Error('Invalid package identity.');
   const records = output.trim().split(/\n\s*\n/).map(stanza => Object.fromEntries(
@@ -151,10 +169,10 @@ function plan() {
   let result;
   try { result = { status: 0, stdout: run(process.execPath, [cli, 'install-deps', '--dry-run', 'chromium'], { env }) }; }
   catch (error) { result = { status: error.status, stdout: error.stdout?.toString() || '', stderr: error.stderr?.toString() || '' }; }
-  const packages = missingFonts(result).map(name => {
-    const candidate = /^\s*Candidate:\s*(\S+)/m.exec(run('apt-cache', ['policy', name], { env }))?.[1];
-    return packageRecord(name, candidate || '', run('apt-cache', ['show', `${name}=${candidate}`], { env }));
-  });
+  const names = missingFonts(result);
+  const candidates = policyCandidates(names, names.length ? run('apt-cache', ['policy', ...names], { env }) : '');
+  const records = names.length ? run('apt-cache', ['show', ...names.map(name => `${name}=${candidates.get(name)}`)], { env }) : '';
+  const packages = names.map(name => packageRecord(name, candidates.get(name), records));
   const version = require('playwright/package.json').version;
   const key = cacheKey(version, packages);
   mkdirSync(cache, { recursive: true });

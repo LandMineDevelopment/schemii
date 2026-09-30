@@ -212,12 +212,20 @@ jobs:
         id: browser-dependencies
         run: node scripts/ci/browser-dependencies.mjs plan
       - name: Reuse authenticated immutable font archives
-        uses: actions/cache@v4
+        id: browser-font-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ steps.browser-dependencies.outputs.cache_dir }}
           key: ${{ steps.browser-dependencies.outputs.cache_key }}
       - name: Prepare complete fonts and validate Chromium runtime
+        id: browser-runtime
         run: node scripts/ci/browser-dependencies.mjs prepare
+      - name: Retain verified immutable font archives before application execution
+        if: success() && steps.browser-runtime.outcome == 'success' && steps.browser-font-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.browser-dependencies.outputs.cache_dir }}
+          key: ${{ steps.browser-font-cache.outputs.cache-primary-key }}
       - name: Start the canonical application stack
         run: ./start.sh
       - name: Exercise browser flows

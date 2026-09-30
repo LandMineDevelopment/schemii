@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   cacheKey, fontConfiguration, missingFonts, outlineFonts, packageRecord,
-  playwrightCLI, requireRunner, verifyArchive, verifyFaces,
+  playwrightCLI, policyCandidates, requireRunner, verifyArchive, verifyFaces,
 } from './browser-dependencies.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -66,6 +66,28 @@ test('a changed CLI format, failed APT simulation or truncated/duplicate plan ne
     missing(['fonts-unifont', 'fonts-unifont']),
     { status: 1, stdout: 'Missing system dependencies (1):\n  fonts-unifont\n  unexpected output\n' },
   ]) assert.throws(() => missingFonts(result), /dependency check failed|Incomplete/);
+});
+
+test('batched APT policies assign exactly one candidate to each requested package', () => {
+  const names = ['fonts-test', 'xfonts-utils'];
+  const policy = (name, version) => `${name}:\n  Installed: (none)\n  Candidate: ${version}\n  Version table:\n     ${version} 500\n        500 http://archive.ubuntu.com noble/universe amd64 Packages\n`;
+  const first = policy(names[0], '1:2.3-4');
+  const second = policy(names[1], '7.7+6build3');
+  const result = policyCandidates(names, second + first);
+  assert.deepEqual([...result].sort(), [[names[0], '1:2.3-4'], [names[1], '7.7+6build3']]);
+  assert.deepEqual([...policyCandidates([], '')], []);
+  for (const output of [first, first + first + second, first + policy('unrequested-fonts', '1.0'),
+    first + second.replace('Candidate: 7.7+6build3', 'Candidate: (none)'),
+    first + second.replace('  Candidate: 7.7+6build3', '  Candidate: 7.7+6build3\n  Candidate: 1.0')]) {
+    assert.throws(() => policyCandidates(names, output), /Incomplete|Missing, duplicate or misattributed/);
+  }
+  assert.throws(() => policyCandidates([names[0], names[0]], first), /Duplicate requested/);
+  // Batched show must still attribute the selected version/hash to that package,
+  // never borrow another package's metadata or swap policy candidates.
+  const bytes = Buffer.from('font');
+  const records = metadata(names[1], '7.7+6build3', bytes) + '\n' + metadata(names[0], '1:2.3-4', bytes);
+  for (const name of names) assert.equal(packageRecord(name, result.get(name), records).name, name);
+  assert.throws(() => packageRecord(names[0], result.get(names[1]), records), /Missing authenticated/);
 });
 
 test('package receipts require an exact authenticated candidate, architecture, size and SHA256', () => {
@@ -170,11 +192,19 @@ test('workflow preserves engine, device lanes, one-worker scheduling, launcher a
   assert.match(workflow, /project: \[desktop-chromium, android-chromium\]/);
   assert.match(workflow, /shard: \[1, 2\]/);
   assert.match(workflow, /run: node scripts\/ci\/browser-dependencies.mjs plan/);
-  assert.match(workflow, /uses: actions\/cache@v4/);
+  assert.match(workflow, /uses: actions\/cache\/restore@v4/);
+  assert.match(workflow, /uses: actions\/cache\/save@v4/);
   assert.match(workflow, /key: \$\{\{ steps.browser-dependencies.outputs.cache_key \}\}/);
   assert.doesNotMatch(workflow, /restore-keys:|playwright install --with-deps|SKIP_VALIDATE_HOST/);
   assert.ok(workflow.indexOf('browser-dependencies.mjs plan') < workflow.indexOf('browser-dependencies.mjs prepare'));
-  assert.ok(workflow.indexOf('browser-dependencies.mjs prepare') < workflow.indexOf('run: ./start.sh'));
+  const save = workflow.split('      - name: Retain verified immutable font archives before application execution')[1].split('      - name:')[0];
+  assert.match(save, /if: success\(\) && steps.browser-runtime.outcome == 'success' && steps.browser-font-cache.outputs.cache-hit != 'true'/);
+  assert.match(save, /path: \$\{\{ steps.browser-dependencies.outputs.cache_dir \}\}/);
+  assert.match(save, /key: \$\{\{ steps.browser-font-cache.outputs.cache-primary-key \}\}/);
+  assert.doesNotMatch(save, /always\(\)|continue-on-error/);
+  assert.ok(workflow.indexOf('actions/cache/restore@v4') < workflow.indexOf('browser-dependencies.mjs prepare'));
+  assert.ok(workflow.indexOf('browser-dependencies.mjs prepare') < workflow.indexOf('actions/cache/save@v4'));
+  assert.ok(workflow.indexOf('actions/cache/save@v4') < workflow.indexOf('run: ./start.sh'));
   assert.match(workflow, /run: node scripts\/ci\/run-browser-shard.mjs --project=\$\{\{ matrix.project \}\} --shard=\$\{\{ matrix.shard \}\}\/2/);
   assert.match(workflow, /run: node --test tests\/browser-infrastructure\/shards.test.mjs/);
 });
