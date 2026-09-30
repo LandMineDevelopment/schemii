@@ -318,7 +318,7 @@ async function execute(command,o) {
   }
   if(command==='cleanup-sweep') {
     if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||'')||!o['workspace-fixtures'])throw invalid('cleanup-sweep requires --run RUN and --workspace-fixtures MAP.');
-    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures'])]);return;
+    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures']),'--state-dir',stateDir]);return;
   }
   if(command==='cleanup-author-fixture') {
     if(!o.accounts)throw invalid('--accounts is required; name each retained report-author fixture to delete.');
