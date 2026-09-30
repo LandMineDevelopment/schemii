@@ -16,8 +16,12 @@ from schemii.common.api import inspection as route_inspection
 from schemii.common.api.inspection import build_developer_route_document
 from schemii.main import create_app
 
+pytest_plugins = ["inspection_fixtures"]
 
-def test_developer_route_inspection_is_opt_in_and_hidden_from_openapi() -> None:
+
+def test_developer_route_inspection_is_opt_in_and_hidden_from_openapi(
+    inspection_http_documents,
+) -> None:
     disabled = TestClient(create_app(), base_url="http://localhost")
     enabled = TestClient(
         create_app(developer_inspection=True),
@@ -31,15 +35,11 @@ def test_developer_route_inspection_is_opt_in_and_hidden_from_openapi() -> None:
     assert "/_developer/routes" not in enabled.get("/openapi.json").json()["paths"]
 
 
-def test_developer_route_inspection_derives_flow_objects_and_bounded_source() -> None:
-    application = create_app(developer_inspection=True)
-    api = TestClient(
-        application,
-        base_url="http://localhost",
-    )
-
-    document = api.get("/_developer/routes").json()
-    openapi = application.openapi()
+def test_developer_route_inspection_derives_flow_objects_and_bounded_source(
+    inspection_baseline,
+) -> None:
+    document = inspection_baseline.documents["routes"]
+    openapi = inspection_baseline.documents["openapi"]
     expected_route_ids = {
         f"{method}:{path}"
         for path, path_item in openapi["paths"].items()
@@ -112,7 +112,7 @@ def test_developer_route_inspection_derives_flow_objects_and_bounded_source() ->
         "WorkspaceImportSummary",
     }
 
-    serialized = json.dumps(document)
+    serialized = json.dumps(document, default=dict)
     assert '"/home/' not in serialized
     assert '"/opt/' not in serialized
     assert "schemii-local-test" not in serialized

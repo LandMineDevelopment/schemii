@@ -20,6 +20,8 @@ from schemii.main import ApplicationServices, create_app
 from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
+pytest_plugins = ["inspection_fixtures"]
+
 
 def test_runtime_binding_resolves_nested_installed_services_without_name_special_cases():
     from schemii.common.ai.credential_lifecycle import record_activity
@@ -258,7 +260,9 @@ def test_system_inspection_with_installed_pi_runtime_resolves_catalog_snapshot_w
     assert "runtime-only-pi-secret-9f70" not in json.dumps(document)
 
 
-def test_developer_system_inspection_is_opt_in_and_hidden_from_openapi() -> None:
+def test_developer_system_inspection_is_opt_in_and_hidden_from_openapi(
+    inspection_http_documents,
+) -> None:
     disabled = TestClient(create_app(), base_url="http://localhost")
     enabled = TestClient(
         create_app(developer_inspection=True),
@@ -297,27 +301,30 @@ def test_developer_documents_are_derived_once_for_each_application_run(
         assert first.get(path).status_code == 200
     assert counters == {"routes": 1, "database": 1, "system": 1}
 
-    create_app(developer_inspection=True)
+    second = TestClient(create_app(developer_inspection=True), base_url="http://localhost")
+    assert counters == {"routes": 2, "database": 2, "system": 2}
+    # Reuse these required fresh builds to retain installed-graph determinism,
+    # in addition to the small-graph rebuild check and frozen baseline digests.
+    assert first.get("/_developer/inspection").json() == (
+        second.get("/_developer/inspection").json()
+    )
     assert counters == {"routes": 2, "database": 2, "system": 2}
 
 
-def test_system_inspection_preserves_application_route_registration_order() -> None:
-    application = create_app()
-    document = build_developer_system_document(application)
-    expected_route_ids = [
-        f"{method.lower()}:{route.path}"
-        for route in system_inspection.public_route_contexts(application)
-        if system_inspection.is_first_party(route.endpoint)
-        for method in sorted(route.methods)
-    ]
-
-    assert [route["id"] for route in document["routes"]] == expected_route_ids
+def test_system_inspection_preserves_application_route_registration_order(
+    inspection_baseline,
+) -> None:
+    document = inspection_baseline.documents["system"]
+    assert tuple(route["id"] for route in document["routes"]) == (
+        inspection_baseline.route_order
+    )
 
 
-def test_system_inspection_joins_routes_services_repositories_and_gateway_calls() -> None:
-    application = create_app()
-    document = build_developer_system_document(application)
-    openapi = application.openapi()
+def test_system_inspection_joins_routes_services_repositories_and_gateway_calls(
+    inspection_baseline,
+) -> None:
+    document = inspection_baseline.documents["system"]
+    openapi = inspection_baseline.documents["openapi"]
     expected_route_ids = {
         f"{method}:{path}"
         for path, path_item in openapi["paths"].items()
@@ -453,8 +460,10 @@ def test_system_inspection_derives_runtime_protocol_bindings_without_values() ->
     assert '"/home/' not in serialized
 
 
-def test_every_route_journey_is_derived_from_live_source_relationships() -> None:
-    document = build_developer_system_document(create_app())
+def test_every_route_journey_is_derived_from_live_source_relationships(
+    inspection_baseline,
+) -> None:
+    document = inspection_baseline.documents["system"]
     objects = {item["id"]: item for item in document["objects"]}
 
     assert document["analysis"]["journeyClassification"] == (
@@ -466,7 +475,7 @@ def test_every_route_journey_is_derived_from_live_source_relationships() -> None
     }
     for route in document["routes"]:
         journey = route["journey"]
-        assert journey["issues"] == []
+        assert journey["issues"] == ()
         assert {node["key"] for node in journey["nodes"]}
         for node in journey["nodes"]:
             source_object = objects[node["objectId"]]
@@ -524,8 +533,10 @@ def test_every_route_journey_is_derived_from_live_source_relationships() -> None
     )
 
 
-def test_system_inspection_derives_data_shapes_and_call_argument_flow() -> None:
-    document = build_developer_system_document(create_app())
+def test_system_inspection_derives_data_shapes_and_call_argument_flow(
+    inspection_baseline,
+) -> None:
+    document = inspection_baseline.documents["system"]
     objects = {item["id"]: item for item in document["objects"]}
     callables = {item["objectId"]: item for item in document["callables"]}
     create = next(
@@ -590,7 +601,7 @@ def test_system_inspection_derives_data_shapes_and_call_argument_flow() -> None:
         field["name"] for field in shapes["PostgresConnectionProfile"]["fields"]
     } >= {"id", "revision", "credentialStored", "createdAt", "updatedAt"}
 
-    assert " at 0x" not in json.dumps(document)
+    assert " at 0x" not in json.dumps(document, default=dict)
 
 
 def test_runtime_return_contract_uses_exact_installed_repository_binding():
@@ -609,8 +620,7 @@ def test_runtime_return_contract_uses_exact_installed_repository_binding():
     assert resolved.resolution == "return-contract"
 
 
-def test_raw_console_api_map_exposes_routes_and_deferred_execution():
-    application = create_app()
+def test_raw_console_api_map_exposes_routes_and_deferred_execution(inspection_baseline):
     prefix = "/api/v1/schemii/workspaces/{workspace_id}/console/sessions"
     expected = {
         ("get", ""), ("post", ""),
@@ -626,14 +636,14 @@ def test_raw_console_api_map_exposes_routes_and_deferred_execution():
         ("get", "/{session_id}/copy/downloads/{ticket_id}"),
         ("get", "/{session_id}/copy/downloads/{ticket_id}/status"),
     }
-    schema = application.openapi()
-    routes = route_inspection.build_developer_route_document(application)
+    schema = inspection_baseline.documents["openapi"]
+    routes = inspection_baseline.documents["routes"]
     exposed = {(route["method"], route["path"]) for route in routes["routes"]}
     for method, suffix in expected:
         assert method in schema["paths"][prefix + suffix]
         assert (method, prefix + suffix) in exposed
 
-    document = build_developer_system_document(application)
+    document = inspection_baseline.documents["system"]
     execution = next(route for route in document["routes"]
                      if route["id"] == "post:" + prefix + "/{session_id}/executions")
     assert execution["journey"]["status"] == "complete"

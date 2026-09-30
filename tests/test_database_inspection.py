@@ -6,8 +6,12 @@ from fastapi.testclient import TestClient
 
 from schemii.main import create_app
 
+pytest_plugins = ["inspection_fixtures"]
 
-def test_developer_database_inspection_is_opt_in_and_hidden_from_openapi() -> None:
+
+def test_developer_database_inspection_is_opt_in_and_hidden_from_openapi(
+    inspection_http_documents,
+) -> None:
     disabled = TestClient(create_app(), base_url="http://localhost")
     enabled = TestClient(
         create_app(developer_inspection=True),
@@ -21,13 +25,10 @@ def test_developer_database_inspection_is_opt_in_and_hidden_from_openapi() -> No
     assert "/_developer/database" not in enabled.get("/openapi.json").json()["paths"]
 
 
-def test_database_inspection_derives_the_runtime_contract_calls_and_queries() -> None:
-    api = TestClient(
-        create_app(developer_inspection=True),
-        base_url="http://localhost",
-    )
-
-    document = api.get("/_developer/database").json()
+def test_database_inspection_derives_the_runtime_contract_calls_and_queries(
+    inspection_baseline,
+) -> None:
+    document = inspection_baseline.documents["database"]
 
     assert document["schemaVersion"] == 1
     assert document["analysis"]["kind"] == "bounded-python-source"
@@ -145,12 +146,12 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
         query
         for query in document["queries"]
         if query["name"] == "CONNECTION_TEST_QUERY"
-    )["resultColumns"] == ["database", "server_version"]
+    )["resultColumns"] == ("database", "server_version")
     assert next(
         query
         for query in document["queries"]
         if query["name"] == "NAMESPACE_EXISTS_QUERY"
-    )["resultColumns"] == ["namespace_exists"]
+    )["resultColumns"] == ("namespace_exists",)
     assert all(query["resultColumns"] for query in document["queries"])
     assert "pg_catalog.pg_namespace" in next(
         query
@@ -159,13 +160,12 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries() ->
     )["catalogObjects"]
 
 
-def test_database_inspection_is_static_bounded_and_contains_no_runtime_values() -> None:
-    document = TestClient(
-        create_app(developer_inspection=True),
-        base_url="http://localhost",
-    ).get("/_developer/database").json()
+def test_database_inspection_is_static_bounded_and_contains_no_runtime_values(
+    inspection_baseline,
+) -> None:
+    document = inspection_baseline.documents["database"]
 
-    serialized = json.dumps(document)
+    serialized = json.dumps(document, default=dict)
     assert '"/home/' not in serialized
     assert '"/opt/' not in serialized
     assert "postgres.internal" not in serialized
