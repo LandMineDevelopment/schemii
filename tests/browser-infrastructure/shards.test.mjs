@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { balanceFiles, OBSERVED_COSTS, PROJECTS } from '../../scripts/ci/browser-shards.mjs';
+import { balanceFiles, OBSERVATION, OBSERVED_COSTS, PROJECTS } from '../../scripts/ci/browser-shards.mjs';
 import { inventoryFiles, invocation } from '../../scripts/ci/run-browser-shard.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -45,6 +46,7 @@ function proveInventory(cwd, baseline) {
     const projectFiles = [...new Set(required.filter(item => item.project === project)
       .map(item => `tests/e2e/${item.file}`))].sort();
     const plan = balanceFiles(projectFiles, project);
+    assert.deepEqual(plan.unknownFiles, projectFiles.filter(file => OBSERVED_COSTS[file]?.[project] === undefined));
     assert.deepEqual(new Set(inventoryFiles(projectReport, cwd)), new Set(projectFiles));
     for (const [index, shard] of plan.shards.entries()) {
       const selected = discover(cwd, invocation(project, shard.files, index + 1, true));
@@ -72,7 +74,27 @@ test('real Playwright discovery proves exact project/test coverage and transport
   for (const path of ['raw-console.spec.js', 'schemoo-model-dependencies-live.spec.js', 'quick-start.spec.js']) {
     assert.ok(required.some(item => item.file === path && item.project === 'android-chromium'));
   }
-  assert.equal(Object.keys(OBSERVED_COSTS).length, 61);
+  assert.match(OBSERVATION.sourceSha, /^[a-f0-9]{40}$/);
+  assert.ok(Number.isInteger(OBSERVATION.runId) && OBSERVATION.runId > 0);
+  assert.equal(OBSERVATION.runAttempt, 1);
+  assert.equal(OBSERVATION.completeBrowserLanes, PROJECTS.length * 2);
+  assert.equal(OBSERVATION.wholeWorkflowOutcome, 'success');
+  assert.equal(OBSERVATION.costBasis, 'first-attempt-setup+execution+teardown-ms');
+  for (const project of PROJECTS) {
+    const measured = Object.entries(OBSERVED_COSTS).filter(([, costs]) => costs[project] !== undefined)
+      .map(([file, costs]) => [file, costs[project]]).sort(([left], [right]) => left.localeCompare(right));
+    const observed = OBSERVATION.profiles[project];
+    const discovered = new Set(required.filter(item => item.project === project)
+      .map(item => `tests/e2e/${item.file}`));
+    assert.equal(measured.length, observed.measuredFiles);
+    assert.equal(observed.collectedCases, observed.passed + observed.skipped);
+    assert.equal(measured.reduce((sum, [, cost]) => sum + cost, 0), observed.phaseTotalMs);
+    assert.equal(createHash('sha256').update(JSON.stringify(measured)).digest('hex'), observed.costsSha256);
+    for (const [file, cost] of measured) {
+      assert.ok(discovered.has(file), `measured file is outside ${project} discovery: ${file}`);
+      assert.ok(Number.isFinite(cost) && cost >= 0);
+    }
+  }
 });
 
 test('a freshly added nested spec is discovered and scheduled exactly once per intended profile', () => {
