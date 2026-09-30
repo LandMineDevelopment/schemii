@@ -42,43 +42,101 @@ test('empty or incomplete authorization does not enable writes', () => {
   }
 });
 
-async function probeWorkers(t, { ignoreTermination = false, crashable = false, onEvent = () => {}, onExit = () => {} } = {}) {
+async function probeWorkers(t, { ignoreTermination = false, crashable = false, holdChildReadiness = false, onEvent = () => {}, onExit = () => {} } = {}) {
   const { spawn } = await import('node:child_process');
-  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { mkdtemp, rm, readFile, access } = await import('node:fs/promises');
   const { join } = await import('node:path');
   const { tmpdir } = await import('node:os');
   const { CodexWorkers } = await import('./workers.mjs');
   const directory = await mkdtemp(join(tmpdir(),'schemii-owned-worker-'));
-  const script = crashable
-    ? `const fs=require('node:fs'),{spawn}=require('node:child_process');
-const child=spawn(process.execPath,['-e','process.on("SIGTERM",()=>process.exit(0));setInterval(()=>{},50)'],{stdio:['ignore','inherit','inherit']});
-let stopping=false;process.stdin.resume();
-process.on('SIGTERM',()=>{stopping=true;child.kill('SIGTERM');});
-child.once('exit',()=>{if(stopping)process.exit(0);});
-fs.writeFileSync('probe.json',JSON.stringify({pid:process.pid,child:child.pid}));
-setInterval(()=>{if(fs.existsSync('crash'))process.exit(7);},10);`
-    : ignoreTermination
+  // A spawned PID is not readiness: publish only after descendant handlers are
+  // installed. Keep initialization controllable without adding a timing sleep.
+  const descendant = `process.on('message',message=>{
+  if(message!=='initialize')return;
+  process.on('SIGTERM',()=>process.exit(0));process.send('ready');
+});process.send('starting');setInterval(()=>{},50);`;
+  const script = ignoreTermination
     ? `const fs=require('node:fs');process.stdin.resume();process.on('SIGTERM',()=>{});fs.writeFileSync('probe.json',JSON.stringify({pid:process.pid}));setInterval(()=>{},50);`
     : `const fs=require('node:fs'),{spawn}=require('node:child_process');
-const child=spawn(process.execPath,['-e','process.on("SIGTERM",()=>process.exit(0));setInterval(()=>{},50)'],{stdio:'ignore'});
-let stopping=false,ticks=0;process.stdin.resume();
-process.on('SIGTERM',()=>{stopping=true;child.kill('SIGTERM');});
-child.once('exit',()=>{if(stopping)process.exit(0);});
-fs.writeFileSync('probe.json',JSON.stringify({pid:process.pid,child:child.pid}));
-setInterval(()=>{fs.writeFileSync('pulse.json',JSON.stringify({ticks:++ticks}));process.stderr.write('noise\\n');},50);`;
+const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',${crashable ? "'inherit','inherit'" : "'ignore','ignore'"},'ipc']});
+const publish=(file,value)=>{fs.writeFileSync(file+'.tmp',JSON.stringify(value));fs.renameSync(file+'.tmp',file);};
+let stopping=false,childExited=false,childStarting=false,initialized=false,ticks=0;process.stdin.resume();
+// Group SIGTERM can deliver the child exit before the leader's signal callback.
+process.on('SIGTERM',()=>{stopping=true;if(childExited)process.exit(0);else child.kill('SIGTERM');});
+child.once('exit',()=>{childExited=true;publish('child-exited.json',{pid:child.pid});if(stopping)process.exit(0);});
+child.on('message',message=>{
+  if(message==='starting'){childStarting=true;publish('child-starting.json',{pid:child.pid});}
+  if(message==='ready')publish('probe.json',{pid:process.pid,child:child.pid});
+});
+setInterval(()=>{
+  if(childStarting&&!initialized&&(!${holdChildReadiness}||fs.existsSync('release-child'))){initialized=true;child.send('initialize');}
+  if(fs.existsSync('exit-child')&&!childExited)child.kill('SIGTERM');
+  if(${crashable}&&fs.existsSync('crash'))process.exit(7);
+},10);
+if(!${crashable})setInterval(()=>{publish('pulse.json',{ticks:++ticks});process.stderr.write('noise\\n');},50);`;
   const workers = new CodexWorkers({root:directory,runDir:directory,timeoutSeconds:60,onEvent,onExit,
     spawnProcess:(_command,_args,options)=>spawn(process.execPath,['-e',script],options)});
-  t.after(async()=>{await workers.close();await rm(directory,{recursive:true,force:true});});
+  t.after(async()=>{
+    const {processIdentity}=await import('./native.mjs');const owners=[];
+    for(const handle of workers.handles.values()){
+      const owner=await processIdentity(handle.pid);if(owner)owners.push(owner);
+      for(const file of ['probe.json','child-starting.json']){
+        try{
+          const probe=JSON.parse(await readFile(join(directory,handle.laneId,file),'utf8'));
+          const descendant=await processIdentity(probe.child||probe.pid);
+          if(descendant?.parent===handle.pid)owners.push(descendant);
+        }catch(error){if(error.code!=='ENOENT')throw error;}
+      }
+    }
+    await workers.close();assert.equal(workers.handles.size,0);
+    for(const owner of owners)assert.notEqual((await processIdentity(owner.pid))?.birthTick,owner.birthTick,'automatic pool closure must reap owned birth identities');
+    await rm(directory,{recursive:true,force:true});await assert.rejects(access(directory),{code:'ENOENT'});
+  });
   return {workers,directory};
 }
-async function readProbe(directory,lane) {
+async function readProbe(directory,lane,file='probe.json') {
   const {readFile}=await import('node:fs/promises');const {join}=await import('node:path');
   for(let i=0;i<100;i++) {
-    try{return JSON.parse(await readFile(join(directory,lane,'probe.json'),'utf8'));}catch{}
+    try{return JSON.parse(await readFile(join(directory,lane,file),'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
     await new Promise(resolve=>setTimeout(resolve,10));
   }
   throw new Error('Owned process probe never became ready.');
 }
+
+test('owned fixture readiness waits for descendant signal handlers rather than its PID',async t=>{
+  const {access,writeFile}=await import('node:fs/promises');const {join}=await import('node:path');
+  const {processIdentity}=await import('./native.mjs');
+  const {workers,directory}=await probeWorkers(t,{holdChildReadiness:true});
+  const lane={id:'lane-1',generation:1};const worker=await workers.start({lane,sessionFile:'/private/session',brief});
+  const descendant=await readProbe(directory,lane.id,'child-starting.json');
+  assert.equal((await processIdentity(worker.pid))?.birthTick,worker.birthTick);
+  assert.equal((await processIdentity(descendant.pid))?.parent,worker.pid);
+  await assert.rejects(access(join(directory,lane.id,'probe.json')),{code:'ENOENT'});
+  await writeFile(join(directory,lane.id,'release-child'),'initialize');
+  const owner=await readProbe(directory,lane.id);
+  assert.equal(owner.pid,worker.pid);assert.equal(owner.child,descendant.pid);
+  const started=Date.now();await workers.stop(lane.id,'fixture-ready-cleanup');
+  assert.ok(Date.now()-started<2000,'ready graceful fixture must not require escalation');
+  assert.equal(await processIdentity(owner.pid),null);assert.equal(await processIdentity(owner.child),null);
+  assert.equal(workers.handles.size,0);
+});
+
+test('owned fixture exits gracefully when descendant exit precedes leader termination',async t=>{
+  const {writeFile}=await import('node:fs/promises');const {join}=await import('node:path');
+  const {processIdentity}=await import('./native.mjs');const {workers,directory}=await probeWorkers(t);
+  const lane={id:'lane-1',generation:1},peer={id:'lane-2',generation:1};
+  await workers.start({lane,sessionFile:'/private/session',brief});await workers.start({lane:peer,sessionFile:'/private/peer',brief});
+  const owner=await readProbe(directory,lane.id),other=await readProbe(directory,peer.id);
+  const peerOwner=await processIdentity(other.pid);
+  await writeFile(join(directory,lane.id,'exit-child'),'terminate descendant first');
+  assert.deepEqual(await readProbe(directory,lane.id,'child-exited.json'),{pid:owner.child});
+  assert.equal(await processIdentity(owner.child),null);assert.ok(await processIdentity(owner.pid));
+  const started=Date.now(),result=await workers.stop(lane.id,'fixture-child-first-cleanup');
+  assert.equal(result.code,0);assert.equal(result.signal,null);
+  assert.ok(Date.now()-started<2000,'child-first graceful fixture must not require escalation');
+  assert.equal(await processIdentity(owner.pid),null);assert.equal(workers.handles.has(lane.id),false);
+  assert.equal((await processIdentity(other.pid))?.birthTick,peerOwner.birthTick);assert.equal(workers.handles.size,1);
+});
 
 // This is the original counterexample: a blocked lane operation must not defer
 // inference termination until the browser queue or the 60-second worker timeout.
