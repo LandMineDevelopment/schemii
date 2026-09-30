@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { releaseAccounts } from './leases.mjs';
+import { releaseAccounts, renewWorkerLease, expireWorkerLease } from './leases.mjs';
 import { chmod, readFile, writeFile, rm, stat, realpath } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
@@ -36,14 +36,15 @@ const fleet = new BrowserFleet({baseURL:run.baseURL,runDir:dir,headless:run.head
 const workers = new CodexWorkers({root,runDir:dir,model:run.agentModel,reasoning:run.agentReasoning,timeoutSeconds:run.agentTimeout || 600,
   onEvent: async data => {
     const l=lane(data.laneId);
-    if(l.status==='claimed')l.heartbeatAt=stamp();
+    renewWorkerLease(l,data);
+    if(data.kind==='worker-log-error'){l.workerRecording='unavailable';run.recordingStatus='unavailable';}
     run.workers={peakProcesses:workers.peakProcesses,peakTurns:workers.peakTurns,active:workers.handles.size};
     if(data.kind!=='worker-heartbeat'&&data.kind!=='worker-stderr')await event(dir,{...data,source:'codex'});
     await persist();
   },
   onExit: async result => {
     const l=lane(result.laneId);l.workerExit=result;
-    if(l.status==='claimed') {
+    if(l.status==='claimed'&&result.generation===l.generation) {
       l.status='paused';l.generation++;tokens.delete(l.id);
       l.error=`Agent exited (${result.reason}) before completing all assigned checkpoints.`;
       run.status='needs-attention';
@@ -214,7 +215,7 @@ async function workerRequest(req){
           const h=fleet.lanes.get(l.id),state=assertCaptureState(run,l,{viewport:h.page.viewportSize(),url:h.page.url()}),bytes=await readFile(result.download);
           l.captures ||= [];l.captures.push({...state,kind:'download',path:relative(dir,result.download),sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length});
         }
-        l.lastActionAt=stamp();await persist();return result;
+        l.actionCount=(l.actionCount||0)+1;l.lastActionAt=stamp();await persist();return result;
       }catch(error){
         await event(dir,{kind:'action-failed',lane:l.id,action:req.kind,error:safeError(error)});
         // An expired identity must never become another account's UI session.
@@ -382,8 +383,19 @@ try{
   await prepareWave();starting=false;
 }catch(e){starting=false;run.status='blocked';run.error=safeError(e);await persist();await workers.close();await fleet.close();await releaseAccounts({runId:id,accounts:run.lanes.map(l=>l.username)});server.close();await rm(control.socket,{force:true});process.exitCode=4;}
 if(run.status!=='blocked')setInterval(()=>{
-  for(const l of run.lanes)if(l.status==='claimed'&&Date.now()-Date.parse(l.heartbeatAt)>LEASE_MS){
-    l.status='paused';l.generation++;tokens.delete(l.id);
-    void queueLane(l.id,async()=>{await workers.stop(l.id);await fleet.closeLane(l.id);await event(dir,{kind:'lease-expired',lane:l.id});await persist();});
+  for(const l of run.lanes) {
+    void expireWorkerLease(l,{
+      leaseMs:LEASE_MS,managedProcess:run.controller==='codex',
+      invalidate:active=>tokens.delete(active.id),
+      // Termination is deliberately outside operations: a stalled UI action
+      // cannot postpone stopping an expired worker's inference process.
+      stopWorker:(laneId,reason)=>workers.stop(laneId,reason),
+      closeBrowser:laneId=>queueLane(laneId,async()=>{
+        if(nativeMode(run))await closeNativeReceipt(lane(laneId));
+        else await fleet.closeLane(laneId);
+      }),
+      persist,
+      onEvent:async data=>{run.status='needs-attention';run.summary='An execution lease expired; inspect retained results and reconcile uncertain writes before recovery.';await event(dir,data);},
+    }).catch(()=>{run.recordingStatus='unavailable';void persist().catch(()=>{});});
   }
 },30000).unref();

@@ -141,3 +141,55 @@ export function reserveAvailable(options) {
 export function releaseAccounts(options) {
   return withReservations(options.root || defaultRoot,()=>releaseAccountsUnlocked(options));
 }
+
+/** Only observable current-worker activity can renew an execution lease. */
+export function renewWorkerLease(lane, event, now = new Date().toISOString()) {
+  if (lane.status !== 'claimed' || event.generation !== lane.generation
+      || event.pid !== lane.worker?.pid || event.birthTick !== lane.worker?.birthTick
+      || !['worker-progress','worker-activity'].includes(event.kind)) return false;
+  lane.heartbeatAt = now;
+  lane.workerActivity ||= {providerEvents:0,toolEvents:0};
+  lane.workerActivity[event.kind === 'worker-progress' ? 'providerEvents' : 'toolEvents']++;
+  return true;
+}
+
+/**
+ * Fence synchronously, start inference termination immediately, and only then
+ * drain the browser's lane queue. Holding a UI queue must not keep an expired
+ * legacy worker alive. Reservations remain held for explicit recovery/cleanup.
+ */
+export async function expireWorkerLease(lane, {
+  now = Date.now(), leaseMs, managedProcess = true, invalidate,
+  stopWorker, closeBrowser, persist, onEvent = async () => {},
+}) {
+  if (lane.status !== 'claimed' || now - Date.parse(lane.heartbeatAt) <= leaseMs) return {expired:false};
+  const owned = {agent:lane.agent,generation:lane.generation,worker:lane.worker};
+  lane.status = 'paused';lane.generation++;
+  invalidate(lane);
+  lane.workerLifecycle = {status:'termination-requested',reason:'lease-expired',...owned,expiredAt:new Date(now).toISOString(),reservation:'retained-for-recovery'};
+  // Capture rejection immediately even if durable recording itself fails.
+  const termination = managedProcess
+    ? Promise.resolve().then(() => stopWorker(lane.id,'lease-expired')).then(result => ({ok:true,result}),error => ({ok:false,error}))
+    : Promise.resolve({ok:true,result:null});
+  let recordingError;
+  try { await persist(); } catch(error) { recordingError=error; }
+  const outcome = await termination;
+  if (!outcome.ok) {
+    lane.workerLifecycle.status='cleanup-pending';
+    lane.workerLifecycle.error='Owned worker termination failed; keep ownership for inspection and recovery.';
+  } else {
+    try {
+      await closeBrowser(lane.id);
+      lane.workerLifecycle.status=managedProcess?'stopped':'controller-intervention-required';
+      lane.workerLifecycle.stoppedAt=new Date().toISOString();
+      if(outcome.result)lane.workerLifecycle.exit=outcome.result;
+    } catch {
+      lane.workerLifecycle.status='cleanup-pending';
+      lane.workerLifecycle.error='Owned browser closure failed; keep ownership for inspection and recovery.';
+    }
+  }
+  if(recordingError)lane.workerLifecycle.recording='unavailable';
+  await onEvent({kind:'lease-expired',lane:lane.id,agent:owned.agent,generation:owned.generation,status:lane.workerLifecycle.status});
+  await persist();
+  return {expired:true,...lane.workerLifecycle};
+}
