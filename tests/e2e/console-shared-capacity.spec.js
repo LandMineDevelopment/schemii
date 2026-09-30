@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 const id = () => `con_${randomUUID().replaceAll('-', '')}`;
 
-test('retained reads and a raw transaction leave capacity for catalog access', async ({ request }) => {
+test('retained reads and a raw transaction leave capacity for catalog access', { tag: '@request-only' }, async ({ request }) => {
   const { workspaces } = await (await request.get('/api/v1/schemii/workspaces')).json();
   const workspace = workspaces.find(w => w.database === 'schemii_test' && w.namespace === 'bookstore');
   expect(workspace).toBeTruthy();

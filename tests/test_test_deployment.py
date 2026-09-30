@@ -757,7 +757,29 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
     assert shlex.split(
         _step_run(_named_step(browser, "Start the canonical application stack"))
     ) == ["./start.sh"]
-    assert shlex.split(_step_run(_named_step(browser, "Exercise browser flows")))[
-        :3
-    ] == ["npm", "run", "test:e2e"]
+    browser_command = _step_run(_named_step(browser, "Exercise browser flows"))
+    browser_command = browser_command.replace(
+        "${{ matrix.project }}", "desktop-chromium"
+    ).replace("${{ matrix.shard }}", "1")
+    assert shlex.split(browser_command) == [
+        "node",
+        "scripts/ci/run-browser-shard.mjs",
+        "--project=desktop-chromium",
+        "--shard=1/2",
+    ]
+    discovery = _named_step(browser, "Verify browser discovery and shard coverage")
+    assert shlex.split(_step_run(discovery)) == [
+        "node",
+        "--test",
+        "tests/browser-infrastructure/shards.test.mjs",
+    ]
+    assert "if: matrix.project == 'desktop-chromium' && matrix.shard == 1" in discovery
+    assert browser.count("tests/browser-infrastructure/shards.test.mjs") == 1
+    assert (
+        browser.index("run: npm ci")
+        < browser.index(discovery)
+        < browser.index("name: Start the canonical application stack")
+    )
+    assert "tests/browser-infrastructure" not in unit
+    assert "run: npm ci" not in unit
     assert shlex.split(package["scripts"]["test:e2e"]) == ["playwright", "test"]

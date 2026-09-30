@@ -138,22 +138,58 @@ test("Schemoo teaches the model starting object before preview outputs", async (
   await expect(dialog.locator(".quick-start-page:visible .smq-pane-preview")).not.toContainText("Start from");
 });
 
-test("guide cursor clears when the clicked control disappears", async ({ page }) => {
-  for (const product of ["Schemoo", "Schemer"]) {
-    await page.goto(product === "Schemoo" ? "/schemoo" : "/schemer");
-    if (product === "Schemoo") await page.getByRole("button", { name: "Close model library" }).click();
-    await page.locator("#quick-start-button").click();
-    const scene = page.getByRole("dialog", { name: `Welcome to ${product}` })
-      .locator(".quick-start-page:visible .quick-start-scene");
-    await expect(scene.locator(":scope > :first-child")).toHaveClass(/demo-(created|saved)/, { timeout: 20000 });
-    if (product === "Schemoo") {
-      const target = scene.locator(".smq-top-target");
-      expect(await target.evaluate(element => getComputedStyle(element, "::after").content))
-        .toContain("Bookstore DB · schemii_test.bookstore");
-    }
-    await expect(scene.locator(".quick-start-cursor")).not.toHaveClass(/visible/);
-  }
-});
+for (const product of [
+  { name: "Schemoo", slug: "schemoo", target: "create-model", state: "created" },
+  { name: "Schemer", slug: "schemer", target: "save-dashboard", state: "saved" },
+]) {
+  test.describe(`${product.name} disappearing guide target`, () => {
+    let actions;
+    test.beforeEach(async ({ page }) => {
+      // Installing before navigation avoids mixing native and fake timer handles.
+      // Navigation/fixture work is a Before Hook, separate from playback timing.
+      await page.clock.install();
+      await page.goto(`/${product.slug}`);
+      if (product.name === "Schemoo") await page.getByRole("button", { name: "Close model library" }).click();
+      actions = await page.evaluate(async slug => {
+        const { QUICK_STARTS } = await import("/assets/common/quick-start.js");
+        return QUICK_STARTS[slug].steps[0].actions.map(action => ({
+          target: action.target, delay: action.delay ?? 900,
+        }));
+      }, product.slug);
+      await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+      await page.locator("#quick-start-button").click();
+      await expect(page.getByRole("dialog", { name: `Welcome to ${product.name}` })).toBeVisible();
+    });
+
+    test("cursor clears immediately when the clicked control disappears", async ({ page }) => {
+      const scene = page.getByRole("dialog", { name: `Welcome to ${product.name}` })
+        .locator(".quick-start-page:visible .quick-start-scene");
+      await test.step("controlled playback and disappearing-target assertions", async () => {
+        await page.clock.runFor(500);
+        for (const [index, action] of actions.entries()) {
+          const target = scene.locator(`[data-quick-start-target="${action.target}"]`);
+          await expect(target).toBeVisible();
+          await expect(scene.locator(".quick-start-cursor")).toHaveClass(/visible/);
+          await page.clock.runFor(650);
+          await expect(scene.locator(".quick-start-cursor")).toHaveClass(/clicking/);
+          await page.clock.runFor(700);
+          if (index < actions.length - 1) await page.clock.runFor(action.delay);
+        }
+        expect(actions.at(-1).target).toBe(product.target);
+        await expect(scene.locator(":scope > :first-child")).toHaveClass(new RegExp(`demo-${product.state}`));
+        await expect(scene.locator(`[data-quick-start-target="${product.target}"]`)).toBeHidden();
+        // Do not advance the later completion timer: it also clears the cursor
+        // and could conceal broken disappearing-control handling.
+        await expect(scene.locator(".quick-start-cursor")).not.toHaveClass(/visible/);
+        if (product.name === "Schemoo") {
+          expect(await scene.locator(".smq-top-target")
+            .evaluate(element => getComputedStyle(element, "::after").content))
+            .toContain("Bookstore DB · schemii_test.bookstore");
+        }
+      }, { timeout: 3000 });
+    });
+  });
+}
 
 test("mobile and reduced-motion guides expose a readable action list", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

@@ -205,6 +205,9 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      - name: Verify browser discovery and shard coverage
+        if: matrix.project == 'desktop-chromium' && matrix.shard == 1
+        run: node --test tests/browser-infrastructure/shards.test.mjs
       - run: npx playwright install --with-deps chromium
       - name: Start the canonical application stack
         run: ./start.sh
@@ -214,7 +217,7 @@ jobs:
           SCHEMII_E2E_BOOTSTRAP: "1"
           CI_TELEMETRY_FILE: artifacts/ci-timing/browser.jsonl
           CI_TELEMETRY_PROJECT: ${{ matrix.project }}
-        run: npm run test:e2e -- --project=${{ matrix.project }} --shard=${{ matrix.shard }}/2
+        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/2
       - name: Verify metadata backup recovery in an isolated database
         if: matrix.project == 'desktop-chromium' && matrix.shard == 1
         run: |
