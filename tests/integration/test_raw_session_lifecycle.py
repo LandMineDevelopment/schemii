@@ -2,11 +2,12 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import threading
 import time
 
 import pytest
-from psycopg import sql
+from psycopg import pq, sql
 
 from schemii.common.postgres import PsycopgPostgresGateway
 from schemii.common.postgres.console.raw import RawSession
@@ -39,14 +40,19 @@ def test_lifespan_expiry_rolls_back_releases_lock_backend_and_admission(
     session.update(id="raw_abandoned", raw=raw, used=0)
     service.sessions[session["id"]] = session
     pid = raw.backend_pid
-    with postgres_metadata.connection_factory() as observer:
-        observer.autocommit = True
+    with closing(service), postgres_metadata.connection_factory() as observer:
+        assert raw.transaction_status == "idle"
+        # Metadata admission wraps the native connection. Use its forwarded
+        # method: assigning an attribute only changes the wrapper, leaving DDL
+        # uncommitted and invisible to the separately owned raw session.
+        observer.set_autocommit(True)
         with observer.cursor() as cursor:
             cursor.execute(
                 sql.SQL("CREATE TABLE {}.idle_marker (id integer)").format(
                     sql.Identifier(gateway_target.namespace)
                 )
             )
+        assert observer.info.transaction_status == pq.TransactionStatus.IDLE
         receipt = raw.execute(
             "BEGIN; INSERT INTO idle_marker VALUES (1); LOCK TABLE idle_marker IN ACCESS EXCLUSIVE MODE",
             lambda _: None,
@@ -101,10 +107,7 @@ def test_lifespan_expiry_rolls_back_releases_lock_backend_and_admission(
                 finally:
                     fresh.close()
 
-        try:
-            asyncio.run(check())
-        finally:
-            service.close()
+        asyncio.run(check())
     assert connection.closed
     assert gateway._connection_capacity._total == 0
 
@@ -126,7 +129,7 @@ def test_shutdown_cancel_before_wire_dispatch_never_starts_sql_or_copy(
     service.sessions[session["id"]] = session
     pid = raw.backend_pid
     with postgres_metadata.connection_factory() as observer:
-        observer.autocommit = True
+        observer.set_autocommit(True)
         with observer.cursor() as cursor:
             cursor.execute(
                 sql.SQL("CREATE TABLE {}.copy_marker (id integer)").format(
@@ -239,7 +242,7 @@ def test_raw_active_cancel_and_next_operation_recover_without_statement_timeout(
         with ThreadPoolExecutor(max_workers=1) as pool:
             operation = pool.submit(service.run, session, execution, body)
             with postgres_metadata.connection_factory() as observer:
-                observer.autocommit = True
+                observer.set_autocommit(True)
                 deadline = time.monotonic() + 2
                 while time.monotonic() < deadline:
                     with observer.cursor() as cursor:

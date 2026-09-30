@@ -61,3 +61,15 @@ shutdown composition; the raw-driver/session code is unchanged from those
 reviewed cases. The real database cases were not rerun for this composition-only
 change. Managed result memory and latency measurements belong to the separate
 #133 delivery.
+
+The subsequent PostgreSQL 17 CI run exposed a fixture ordering error after
+metadata connection admission was merged: assigning `observer.autocommit = True`
+changed a wrapper attribute while the native connection stayed transactional.
+The observer's new table was therefore invisible to the raw connection. The same
+failure was reproduced on PostgreSQL 18.6 with the current admission wrapper;
+the earlier PostgreSQL 18 evidence preceded that wrapper. The lifecycle fixture
+now calls the forwarded `set_autocommit(True)` method and asserts native idle
+state after setup DDL. Raw initialization still sets its namespace search path
+and remains idle before the explicit transaction. The rollback, lock/backend
+release and retained-admission checks are unchanged, and fixture setup failures
+also close the owned raw session.
