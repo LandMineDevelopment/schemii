@@ -1,8 +1,9 @@
 # Inspection test setup and evidence
 
 Work for [#126](https://github.com/LandMineDevelopment/schemii/issues/126),
-against baseline `77af33c`. Acceptance remains pending the full changed-order
-checks, independent review and three comparable after measurements.
+against baseline `77af33c`. Full normal and reversed runs pass on the final
+verification changes. Acceptance remains pending independent review, three
+comparable final-code after measurements and integrated whole-suite timing.
 
 ## Boundary and invariant inventory
 
@@ -26,7 +27,7 @@ single-file invocation without adding a global conftest dependency.
 | Database gateway contract, ordered operations/calls, query discovery/results/source bounds | Same complete installed database document; every query and source-bound assertion retained |
 | Four opt-in HTTP checks | Fresh applications and clients; only snapshot derivation is replaced by baseline documents. A private plain JSON copy is required by Pydantic's response serializer |
 | Canonical HTTP snapshot/compatibility documents/no-store/hidden OpenAPI | Unchanged fresh full application build and real endpoint responses |
-| Once-per-application derivation | Unchanged two fresh full application builds, strict counters for all three builders and repeated HTTP requests |
+| Once-per-application derivation and installed-graph determinism | Same two fresh full application builds, strict counters for all three builders and repeated HTTP requests; their complete canonical snapshots now compare equal without an additional build |
 | Authenticated durable configured graph and installed Pi graph | Unchanged fresh configured builds, completeness/bounds assertions, Pi/catalog no-I/O sentinels and secret exclusion |
 | Configured repositories with runtime-only credentials/values | Unchanged fresh service graph and installed routes; all runtime name/host/database/user/password exclusions retained |
 | Nested/exact/scoped/optional/unknown/ambiguous receivers, helper nonexecution, cursor discrimination and return contracts | Unchanged fresh installed services and focused AST expressions; these do not derive full snapshots |
@@ -82,9 +83,54 @@ files; its formatter passed for the new fixture module. Compilation and
 and `browser_close` confirmed no open tabs; this is not transport-cleanup or UI
 acceptance evidence.
 
-Further heavy testing was deferred when the coordinator reprioritized native UI
-acceptance. Pending: normal and reversed full four-module runs, three comparable
-after timing samples, an integrated whole-suite result, and independent review.
-No 50% saving or completed #126 acceptance is claimed yet. Baseline logs, exact
-collection inventories and timing JSON are retained privately at
+## Follow-up full verification
+
+The follow-up verifier ran only this four-module selection with the same warmed
+dependencies. An external observation plugin recorded each pytest setup, call
+and teardown phase and checked that the process's Schemii environment was restored
+after the full run. It does not change selection, assertions, skips or retries.
+`--durations=20` was retained. The normal command used the module order above;
+the reversed command passed all 39 collected node IDs in exactly reverse order,
+including reversed parameter cases within modules.
+
+Inspection of the changed assertions identified one missing explicit guarantee:
+the small-graph rebuild check did not itself prove installed-graph determinism.
+The once-per-app counter test already requires two fresh full builds. Comparing
+their complete canonical HTTP snapshots preserves that guarantee without another
+build; subsequent requests still leave all three derivation counters at exactly
+two. This assertion was added after the first follow-up run.
+
+| Follow-up attempt | Pytest elapsed | Process wall | Setup | Call | Teardown | Result | Start / exit one-minute load |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| Normal, before added equality assertion | 76.25s | 85.763s | 8.610s | 66.299s | 0.0045s | 39 passed, zero skips | 4.38 / 4.27 |
+| Reversed, final verification changes | 81.90s | 90.849s | 8.774s | 71.856s | 0.0042s | 39 passed, zero skips | 3.13 / 4.48 |
+| Normal, final verification changes | 75.91s | 85.155s | 9.173s | 65.503s | 0.0039s | 39 passed, zero skips | 4.36 / 4.54 |
+
+All three runs contain 39 unique passing call reports, successful setup/teardown
+reports and restored Schemii environment settings. No fixture defect or order
+dependency was observed. The installed baseline's first setup costs 6.67s,
+6.76s and 7.18s respectively. Call time includes the retained fresh application
+builds, configured graphs and subprocess checks; it is not pure assertion time.
+Pytest elapsed and process wall also include collection, startup and reporting,
+so the phase sums are not expected to equal either elapsed measurement.
+
+Unlike the quieter baseline window, the follow-up took place during native UI
+pilot work and parallel development/review. At the first follow-up dispatch,
+the native interface reported **10 running agents including the coordinator**,
+one pending initialization and two completed agents. Desktop/background work and
+browser processes also remained active. The same machine/runtime and dependency
+cache were used, but concurrency differs and was not controlled. These numbers
+show observed reduced cost; they do not establish the issue's controlled 50%
+criterion. The first follow-up also predates the added equality assertion and
+does not count as a third final-code sample.
+
+Collection comparison again confirmed all 36 original node IDs survive, with
+only the same three added counterexamples. Follow-up Ruff, fixture formatting,
+compilation and `git diff --check` passed. No full-suite timing sample, application
+deployment or UI acceptance was performed by this verifier.
+
+Pending: three comparable final-code after measurements, an integrated
+whole-suite result, and independent review. No completed #126 acceptance is
+claimed yet. Baseline and follow-up logs, exact collection inventories, per-case
+phase reports, commands and timing JSON are retained privately at
 `/tmp/schemii-audit-20260929/inspection/` for the coordinator to archive.

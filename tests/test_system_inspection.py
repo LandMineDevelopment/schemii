@@ -301,7 +301,13 @@ def test_developer_documents_are_derived_once_for_each_application_run(
         assert first.get(path).status_code == 200
     assert counters == {"routes": 1, "database": 1, "system": 1}
 
-    create_app(developer_inspection=True)
+    second = TestClient(create_app(developer_inspection=True), base_url="http://localhost")
+    assert counters == {"routes": 2, "database": 2, "system": 2}
+    # Reuse these required fresh builds to retain installed-graph determinism,
+    # in addition to the small-graph rebuild check and frozen baseline digests.
+    assert first.get("/_developer/inspection").json() == (
+        second.get("/_developer/inspection").json()
+    )
     assert counters == {"routes": 2, "database": 2, "system": 2}
 
 
