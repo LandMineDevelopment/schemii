@@ -31,3 +31,33 @@ schema, observes `pg_stat_activity`/`pg_locks` from another connection, checks
 rollback and reacquires retained capacity. It performs no raw request after
 abandonment. Integration checks require the repository's explicit private test
 PostgreSQL environment; a skipped integration test is not rollback evidence.
+
+
+Shutdown keeps metadata admission available until raw/chat maintenance, catalog
+and credential workers, bulk jobs, raw sessions, managed Console sessions and the
+migration worker have been joined or have reported their own stop failure.
+Metadata closes last. An individual stop failure still runs the remaining owned
+cleanup callbacks and then propagates. Raw and chat maintenance use cooperative
+stop signals: cancellation of the lifespan cannot abandon a running native
+thread. Repeated cancellation waits for owned shutdown to finish before the
+caller receives cancellation.
+
+The delivery regressions include an actual catalog-worker refresh failure that
+previously skipped raw-session and metadata closure, failed raw maintenance, and
+repeated shutdown cancellation while either raw or chat maintenance is blocked
+in a native thread. They assert raw/bulk closure and metadata ownership order,
+and check that the scheduled workers and shutdown task have ended.
+
+The retained #132 real-PostgreSQL evidence was measured at reviewed raw source
+`253feb9` on 2026-09-29 with PostgreSQL 18.6, Psycopg 3.3.4 and libpq 18.0. Six
+cases in `tests/integration/test_raw_session_lifecycle.py` passed: lifespan expiry
+rolled back an abandoned write and released its lock/backend/retained permit;
+pre-dispatch shutdown prevented SQL, COPY upload and COPY download from starting;
+and active cancellation recovered a fresh operation in both each-statement and
+whole-run modes with no raw statement timeout. The owned fixture stopped all
+nine recorded PostgreSQL process identities and automatically removed its
+private cluster/socket/password directory. This integration changes lifespan
+shutdown composition; the raw-driver/session code is unchanged from those
+reviewed cases. The real database cases were not rerun for this composition-only
+change. Managed result memory and latency measurements belong to the separate
+#133 delivery.
