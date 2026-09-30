@@ -1,7 +1,8 @@
 """Unmodified PostgreSQL protocol execution for owner-operated SQL sessions.
 
 Unlike managed AI execution, this boundary does not classify or rewrite SQL.
-libpq single-row mode bounds application memory even for arbitrary result sets.
+libpq single-row mode avoids buffering an entire result set. A native row or
+value can still exceed the application preview budget before rejection.
 """
 from __future__ import annotations
 
