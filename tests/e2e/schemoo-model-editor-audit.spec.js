@@ -114,8 +114,6 @@ async function assertKeyboardToggle(page, field, observations, label = keyboardF
   observations.beforeSpace = await keyboardSnapshot(page, label);
   await page.keyboard.press("Space");
   observations.afterSpace = await keyboardSnapshot(page, label);
-  await expect(field, "one keyboard Space toggle changes the intended exposure").not.toBeChecked();
-  await expect(field, "canvas redraw retains keyboard focus on the exposure").toBeFocused();
   const events = observations.afterSpace.events.filter(event => event.phase === "capture");
   for (const type of ["keydown", "keyup", "input", "change"]) {
     expect(events.filter(event => event.type === type), `one trusted ${type} event for the intended field`).toHaveLength(1);
@@ -125,10 +123,43 @@ async function assertKeyboardToggle(page, field, observations, label = keyboardF
   expect(events.find(event => event.type === "input").checked).toBe(false);
   expect(events.find(event => event.type === "change").checked).toBe(false);
   expect(events.findIndex(event => event.type === "input")).toBeLessThan(events.findIndex(event => event.type === "change"));
-  await expect(page.locator("#draft-status"), "change reaches the model dirty-state owner").toHaveText("Unsaved changes");
+  // The change handler updates dirty state synchronously. Check that receipt
+  // before a later validation redraw can restore an unchanged model's input.
+  expect(observations.afterSpace.draftStatus, "change reaches the model dirty-state owner").toBe("Unsaved changes");
+  await expect(field, "one keyboard Space toggle changes the intended exposure").not.toBeChecked();
+  await expect(field, "canvas redraw retains keyboard focus on the exposure").toBeFocused();
   await expect(page.locator("#save-model"), "the intended Save action remains visible").toBeVisible();
   if (saveReady) await expect(page.locator("#save-model"), "a dirty ready model enables Save").toBeEnabled();
   else await expect(page.locator("#save-model"), "a dirty model keeps Save disabled while preview loading blocks admission").toBeDisabled();
+}
+
+async function fieldScrollGeometry(page, { bottom = false } = {}) {
+  return page.evaluate(bottom => {
+    // Resolve, scroll and measure in one browser callback. A locator's resolved
+    // element can have been detached by the canvas validation redraw.
+    const list = document.querySelector('.sc-node[data-node-id="people"] .sc-node-fields');
+    const row = list?.querySelector('[data-column-name="field_20"]');
+    const anchor = document.querySelector('[data-edge-id="late_field"] circle');
+    if (!list || !row || !anchor) return null;
+    const beforeScroll = list.scrollTop;
+    if (bottom) list.scrollTop = list.scrollHeight;
+    const listBounds = list.getBoundingClientRect(), rowBounds = row.getBoundingClientRect();
+    const point = new DOMPoint(Number(anchor.getAttribute("cx")), Number(anchor.getAttribute("cy")))
+      .matrixTransform(anchor.getScreenCTM());
+    const rowCenter = rowBounds.top + rowBounds.height / 2;
+    // Hidden rows attach at the first/last visible row centre. Use actual DOM
+    // bounds rather than repeating the renderer's fixed row/port arithmetic.
+    const top = listBounds.top + rowBounds.height / 2;
+    const last = listBounds.bottom - rowBounds.height / 2;
+    const expectedY = Math.max(top, Math.min(last, rowCenter));
+    const tolerance = 3 * rowBounds.height / row.offsetHeight;
+    const maxScroll = list.scrollHeight - list.clientHeight;
+    return { connected: list.isConnected, beforeScroll, scrollTop: list.scrollTop, maxScroll,
+      atBottom: Math.abs(list.scrollTop - maxScroll) <= 1,
+      anchorY: point.y, expectedY, tolerance,
+      anchorAligned: Math.abs(point.y - expectedY) <= tolerance,
+      clamp: rowCenter < top ? "top" : rowCenter > last ? "bottom" : "row" };
+  }, bottom);
 }
 
 async function attachKeyboardDiagnostics(page, testInfo, observations, transport, label = keyboardFieldLabel) {
@@ -228,29 +259,64 @@ test("missing saved positions stay clean; tall fields scroll with visible relati
     await openFixture(page);
     await expect(page.locator("#save-model"), "the owned mocked model opens clean").toBeDisabled();
     await expect(page.locator("#draft-status")).toHaveText("Saved · revision 1 · read-only preview");
+    await expect(page.locator("#plan-status"), "initial validation settles before targeting a native scroll gesture")
+      .toHaveText("0 required connections · one row per person");
     observations.initial = await keyboardSnapshot(page);
     const card = page.locator('.sc-node[data-node-id="people"]');
     const list = card.locator(".sc-node-fields");
     expect(await card.evaluate(node => node.getBoundingClientRect().height)).toBeLessThan(370);
     expect(await list.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
-    const bounds = await list.boundingBox();
+    observations.gesture = await page.evaluate(() => {
+      const list = document.querySelector('.sc-node[data-node-id="people"] .sc-node-fields');
+      const bounds = list.getBoundingClientRect(), canvas = document.querySelector("#canvas-host").getBoundingClientRect();
+      // The mobile canvas can clip a tall list. A gesture on the full list's
+      // bounding box can land on the dock or background instead of its fields.
+      const left = Math.max(bounds.left, canvas.left, 0), right = Math.min(bounds.right, canvas.right, innerWidth);
+      const top = Math.max(bounds.top, canvas.top, 0), bottom = Math.min(bounds.bottom, canvas.bottom, innerHeight);
+      const x = left + (right - left) * .7;
+      const start = top + (bottom - top) * .8, end = top + (bottom - top) * .2, middle = (start + end) / 2;
+      const owned = y => document.elementFromPoint(x, y)?.closest(".sc-node-fields") === list;
+      return { x, start, end, middle, width: right - left, height: bottom - top,
+        listHeight: bounds.height, canvasHeight: canvas.height,
+        ownedStart: owned(start), ownedEnd: owned(end), ownedMiddle: owned(middle) };
+    });
+    const gesture = observations.gesture;
+    expect(gesture.width).toBeGreaterThan(0);
+    expect(gesture.height).toBeGreaterThan(0);
+    expect([gesture.ownedStart, gesture.ownedMiddle, gesture.ownedEnd], "the native gesture targets only visible owned fields")
+      .toEqual([true, true, true]);
     if (test.info().project.name === "android-chromium") {
       const session = await page.context().newCDPSession(page);
-      const x = bounds.x + bounds.width * .7, start = bounds.y + bounds.height * .8, end = bounds.y + bounds.height * .2;
-      await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: start }] });
-      for (let step = 1; step <= 8; step++) {
-        await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: start + (end - start) * step / 8 }] });
+      const { x, start, end } = gesture;
+      try {
+        await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: start }] });
+        for (let step = 1; step <= 8; step++) {
+          await session.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: start + (end - start) * step / 8 }] });
+        }
+        await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      } finally {
+        await session.detach();
       }
-      await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-      await session.detach();
     } else {
-      await page.mouse.move(bounds.x + bounds.width * .7, bounds.y + bounds.height * .5);
+      await page.mouse.move(gesture.x, gesture.middle);
       await page.mouse.wheel(0, 420);
     }
-    await expect.poll(() => list.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
-    const before = await page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy");
-    await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
-    await expect.poll(() => page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy")).not.toBe(before);
+    await expect.poll(async () => {
+      observations.userScroll = await fieldScrollGeometry(page);
+      return { scrolled: observations.userScroll?.scrollTop > 0, anchorAligned: observations.userScroll?.anchorAligned };
+    }, "ordinary field scrolling keeps the source anchor aligned").toEqual({ scrolled: true, anchorAligned: true });
+    observations.scrollAssignment = await fieldScrollGeometry(page, { bottom: true });
+    expect(observations.scrollAssignment.connected).toBe(true);
+    expect(observations.scrollAssignment.maxScroll).toBeGreaterThan(0);
+    await expect.poll(async () => {
+      observations.scrolledGeometry = await fieldScrollGeometry(page);
+      return { atBottom: observations.scrolledGeometry?.atBottom, anchorAligned: observations.scrolledGeometry?.anchorAligned };
+    }, "the scrolled source anchor follows its row or visible clipping boundary").toEqual({ atBottom: true, anchorAligned: true });
+    // Repeating an already-bottom scroll is valid even when the clipped anchor
+    // cannot move. Its position must still agree with the visible field list.
+    observations.alreadyBottom = await fieldScrollGeometry(page, { bottom: true });
+    expect(observations.alreadyBottom.atBottom).toBe(true);
+    expect(observations.alreadyBottom.anchorAligned).toBe(true);
     const field = list.getByRole("checkbox", { name: keyboardFieldLabel, exact: true });
     await assertKeyboardToggle(page, field, observations);
   } finally {
@@ -341,7 +407,13 @@ test("controlled missed change fails at model dirty state after a trusted keyboa
     let failure;
     try { await assertKeyboardToggle(page, field, observations); } catch (error) { failure = error; }
     expect(failure?.message, "the controlled defect must reach and fail the intermediate dirty-state assertion").toContain("change reaches the model dirty-state owner");
-    await expect(field).not.toBeChecked();
+    expect(observations.afterSpace.events.filter(event => event.type === "change" && event.phase === "bubble"),
+      "the controlled change was captured but never reached the model handler").toHaveLength(0);
+    await expect(page.locator("#draft-status")).toHaveText("Saved · revision 1 · read-only preview");
+    await expect(page.locator("#save-model")).toBeDisabled();
+    await page.locator("#reload-model").click();
+    await expect(page.locator("#workbench"), "reload completes before checking the unchanged exposure").toHaveJSProperty("inert", false);
+    await expect(field, "reload renders the unchanged saved model's exposure").toBeChecked();
     await expect(page.locator("#draft-status")).toHaveText("Saved · revision 1 · read-only preview");
     await expect(page.locator("#save-model")).toBeDisabled();
     observations.detectedStage = "model-dirty-state";
