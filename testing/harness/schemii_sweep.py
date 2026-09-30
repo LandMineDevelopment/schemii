@@ -60,7 +60,7 @@ def scenario_contract(scenario_id: str, title: str, instructions: str) -> dict:
 
 
 def empty_design_check(workspace_id: str) -> dict:
-    return {"path": f"/api/v1/schemii/workspaces/{workspace_id}/design", "status": 200,
+    return {"path": f"/api/v1/schemii/workspaces/{workspace_id}/design", "status": 200, "phase": "initial",
             "equals": {"content." + key + ".length": 0 for key in
                        ("tables", "relationships", "types", "functions", "views", "triggers")}}
 
