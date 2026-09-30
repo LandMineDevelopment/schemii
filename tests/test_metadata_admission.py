@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from schemii.common.auth.service import COOKIE
 from schemii.common.errors import MetadataCapacityError, MetadataStorageUnavailableError
 from schemii.common.metadata.config import MetadataConfig
 from schemii.common.metadata.database import MetadataConnectionFactory
+from schemii.schemii.ai.repository import PostgresAiRepository
+from schemii.schemii.bulk_jobs.repository import JobRepository
 
 
 class NativeConnection:
@@ -303,3 +306,83 @@ def test_auth_metadata_pressure_is_retryable_without_cookie_loss(
         assert client.delete("/api/v1/common/query-executions/owned").json() == {
             "canceled": True
         }
+
+
+@pytest.mark.parametrize("repository_type", ["bulk", "ai"])
+@pytest.mark.parametrize(
+    "failure_type",
+    [psycopg.errors.QueryCanceled, psycopg.errors.IdleInTransactionSessionTimeout],
+)
+def test_repository_transaction_deadline_uses_safe_error_owner(
+    config, repository_type, failure_type
+):
+    class BlockedCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def execute(self, *_):
+            raise failure_type("private SQL diagnostic")
+
+    class BlockedConnection(NativeConnection):
+        def cursor(self):
+            return BlockedCursor()
+
+        def transaction(self):
+            return nullcontext()
+
+    native = BlockedConnection()
+    factory = MetadataConnectionFactory(config, lambda *_a, **_kw: native)
+    repository = (
+        JobRepository(factory)
+        if repository_type == "bulk"
+        else PostgresAiRepository(factory)
+    )
+    app = FastAPI()
+    install_api_error_handlers(app)
+
+    @app.get("/owned")
+    def endpoint():
+        return (
+            repository.list("owner", "workspace")
+            if repository_type == "bulk"
+            else repository.list_chats("owner")
+        )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/owned")
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "metadata_storage_unavailable"
+    assert response.json()["error"]["retryable"] is True
+    assert "private" not in response.text
+    assert native.closed
+    assert factory.admission_snapshot().active == 0
+    factory.close()
+
+
+def test_application_lifespan_closes_metadata_after_migration_worker(monkeypatch):
+    from test_runtime_hardening import application_services
+    from schemii.common.connections.store import InMemoryConnectionRepository
+    from schemii.common.metadata.factory import MetadataRepositories
+    from schemii.main import MigrationExecutionWorker, create_app
+
+    order = []
+    original_stop = MigrationExecutionWorker.stop
+
+    async def stop_worker(worker):
+        await original_stop(worker)
+        order.append("migration-worker-stopped")
+
+    def close_metadata():
+        assert order == ["migration-worker-stopped"]
+        order.append("metadata-closed")
+
+    monkeypatch.setattr(MigrationExecutionWorker, "stop", stop_worker)
+    metadata = MetadataRepositories(
+        connections=InMemoryConnectionRepository(), close_runtime=close_metadata
+    )
+    with TestClient(create_app(application_services(metadata=metadata))):
+        assert order == []
+    assert order == ["migration-worker-stopped", "metadata-closed"]

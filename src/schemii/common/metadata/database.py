@@ -21,6 +21,12 @@ from .secrets import read_secret_file
 
 _MIGRATION_FILE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _MIGRATION_LOCK = 0x534348454D4949
+_CONNECTION_FAILURES = (
+    psycopg.OperationalError,
+    psycopg.InterfaceError,
+    # PostgreSQL classifies this enforced connection deadline as InternalError.
+    psycopg.errors.IdleInTransactionSessionTimeout,
+)
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,11 @@ class _AdmittedConnection:
     def __enter__(self) -> _AdmittedConnection:
         try:
             self._connection.__enter__()
+        except _CONNECTION_FAILURES as error:
+            self.close()
+            raise MetadataStorageUnavailableError(
+                "Durable metadata is temporarily unavailable"
+            ) from error
         except BaseException:
             self.close()
             raise
@@ -114,14 +125,14 @@ class _AdmittedConnection:
         try:
             try:
                 self._connection.__exit__(exc_type, exc_value, traceback)
-            except (psycopg.OperationalError, psycopg.InterfaceError) as error:
+            except _CONNECTION_FAILURES as error:
                 raise MetadataStorageUnavailableError(
                     "Durable metadata is temporarily unavailable"
                 ) from error
         finally:
             # A failed commit can leave psycopg's context manager without closing.
             self.close()
-        if isinstance(exc_value, (psycopg.OperationalError, psycopg.InterfaceError)):
+        if isinstance(exc_value, _CONNECTION_FAILURES):
             raise MetadataStorageUnavailableError(
                 "Durable metadata is temporarily unavailable"
             ) from exc_value
@@ -224,7 +235,7 @@ class MetadataConnectionFactory:
             with self._condition:
                 self._connection_failures += 1
             self._release()
-            if isinstance(error, (psycopg.OperationalError, psycopg.InterfaceError)):
+            if isinstance(error, _CONNECTION_FAILURES):
                 raise MetadataStorageUnavailableError(
                     "Durable metadata is temporarily unavailable"
                 ) from error
