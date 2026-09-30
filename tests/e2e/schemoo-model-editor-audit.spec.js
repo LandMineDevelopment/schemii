@@ -1,12 +1,13 @@
 import { expect, test } from "@playwright/test";
 import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
+import { createOrganizationModel } from "./helpers/schemoo-model.js";
 
 const modelId = "model_editor_audit_fixture";
 const keyboardFieldLabel = "Expose people.field_35";
 
-async function recordKeyboardEvents(page) {
-  await page.addInitScript(({ label }) => {
+async function recordKeyboardEvents(page, { label = keyboardFieldLabel, suppressChange = false } = {}) {
+  await page.addInitScript(({ label, suppressChange }) => {
     window.__schemooKeyboardAudit = { events: [] };
     for (const type of ["keydown", "keyup", "input", "change"]) {
       for (const capture of [true, false]) document.addEventListener(type, event => {
@@ -15,29 +16,67 @@ async function recordKeyboardEvents(page) {
           type, phase: capture ? "capture" : "bubble", key: event.key ?? null, trusted: event.isTrusted,
           checked: event.target.checked, connected: event.target.isConnected,
           focusedField: document.activeElement?.getAttribute("aria-label") === label,
+          workbenchInert: document.querySelector("#workbench")?.inert ?? null,
           draftStatus: document.querySelector("#draft-status")?.textContent ?? null,
           saveDisabled: document.querySelector("#save-model")?.disabled ?? null,
         });
       }, capture);
     }
-  }, { label: keyboardFieldLabel });
+    if (suppressChange) document.addEventListener("change", event => {
+      if (event.target?.getAttribute("aria-label") === label) event.stopImmediatePropagation();
+    }, true);
+  }, { label, suppressChange });
 }
 
-async function keyboardSnapshot(page) {
+async function keyboardSnapshot(page, label = keyboardFieldLabel) {
   return page.evaluate(label => {
     const field = document.querySelector(`input[aria-label="${label}"]`);
     return {
       field: field ? { checked: field.checked, connected: field.isConnected, disabled: field.disabled,
         focused: document.activeElement === field } : null,
       activeElement: { tag: document.activeElement?.tagName, id: document.activeElement?.id },
+      workbenchInert: document.querySelector("#workbench")?.inert ?? null,
       draftStatus: document.querySelector("#draft-status")?.textContent ?? null,
       saveDisabled: document.querySelector("#save-model")?.disabled ?? null,
       events: window.__schemooKeyboardAudit?.events ?? [],
     };
-  }, keyboardFieldLabel);
+  }, label);
 }
 
-async function openFixture(page, { wideSavedLayout = false, modelName = "Editor audit fixture" } = {}) {
+async function assertKeyboardToggle(page, field, observations, label = keyboardFieldLabel) {
+  await expect(field, "the intended exposure starts checked before Space").toBeChecked();
+  await field.focus();
+  await expect(field, "Space must reach the intended checkbox").toBeFocused();
+  observations.beforeSpace = await keyboardSnapshot(page, label);
+  await page.keyboard.press("Space");
+  observations.afterSpace = await keyboardSnapshot(page, label);
+  await expect(field, "one keyboard Space toggle changes the intended exposure").not.toBeChecked();
+  await expect(field, "canvas redraw retains keyboard focus on the exposure").toBeFocused();
+  const events = observations.afterSpace.events.filter(event => event.phase === "capture");
+  for (const type of ["keydown", "keyup", "input", "change"]) {
+    expect(events.filter(event => event.type === type), `one trusted ${type} event for the intended field`).toHaveLength(1);
+  }
+  expect(events.every(event => event.trusted)).toBe(true);
+  expect(events.find(event => event.type === "keydown").key).toBe(" ");
+  expect(events.find(event => event.type === "input").checked).toBe(false);
+  expect(events.find(event => event.type === "change").checked).toBe(false);
+  expect(events.findIndex(event => event.type === "input")).toBeLessThan(events.findIndex(event => event.type === "change"));
+  await expect(page.locator("#draft-status"), "change reaches the model dirty-state owner").toHaveText("Unsaved changes");
+  await expect(page.locator("#save-model"), "a dirty model enables Save").toBeEnabled();
+}
+
+async function attachKeyboardDiagnostics(page, testInfo, observations, transport, label = keyboardFieldLabel) {
+  observations.final = page.isClosed() ? { pageClosed: true }
+    : await keyboardSnapshot(page, label).catch(() => ({ snapshotUnavailable: true }));
+  // These attachments stay private. Public reports retain only reviewed outcome
+  // counts/stages; no cookies, headers, account fields, console or page dumps.
+  await testInfo.attach("keyboard-toggle-diagnostics", {
+    body: Buffer.from(JSON.stringify({ transport, ...observations }, null, 2)),
+    contentType: "application/json",
+  });
+}
+
+async function openFixture(page, { wideSavedLayout = false, modelName = "Editor audit fixture", beforeCatalog } = {}) {
   const fields = Array.from({ length: 36 }, (_, index) => ({ name: `field_${index}`, dataType: "integer", nullable: false }));
   const catalog = { database: "fixture", namespace: "public", fingerprint: "fixture-v1", notice: "Isolated editor fixture",
     tables: [{ name: "people", primaryKey: ["field_0"], columns: fields }, { name: "teams", primaryKey: ["id"], columns: [{ name: "id", dataType: "integer", nullable: false }] }],
@@ -52,7 +91,10 @@ async function openFixture(page, { wideSavedLayout = false, modelName = "Editor 
     layoutRevision: 1, exploreRevision: 1, catalogFingerprint: catalog.fingerprint, ...splitDraft(draft),
     ...(wideSavedLayout ? {} : { layout: { positions: [] } }) };
   await page.route(`**/api/v1/schemoo/models/${modelId}`, route => route.fulfill({ json: saved }));
-  await page.route("**/api/v1/schemoo/catalog?*", route => route.fulfill({ json: catalog }));
+  await page.route("**/api/v1/schemoo/catalog?*", async route => {
+    await beforeCatalog?.();
+    await route.fulfill({ json: catalog });
+  });
   await page.route(`**/api/v1/schemoo/models/${modelId}/validate`, route => route.fulfill({ json: {
     sql: "SELECT 1;", usedRelationships: [], grain: "one row per person", warnings: [], sourceIssues: [], activeScopes: [], cycleEdges: [],
   } }));
@@ -144,32 +186,110 @@ test("missing saved positions stay clean; tall fields scroll with visible relati
     await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
     await expect.poll(() => page.locator('[data-edge-id="late_field"] circle').first().getAttribute("cy")).not.toBe(before);
     const field = list.getByRole("checkbox", { name: keyboardFieldLabel, exact: true });
-    await expect(field, "the intended exposure starts checked before Space").toBeChecked();
-    await field.focus();
-    await expect(field, "Space must reach the intended checkbox").toBeFocused();
-    observations.beforeSpace = await keyboardSnapshot(page);
-    await page.keyboard.press("Space");
-    observations.afterSpace = await keyboardSnapshot(page);
-    await expect(field, "one keyboard Space toggle changes the intended exposure").not.toBeChecked();
-    await expect(field, "canvas redraw retains keyboard focus on the exposure").toBeFocused();
-    await expect(page.locator("#draft-status"), "change reaches the model dirty-state owner").toHaveText("Unsaved changes");
-    await expect(page.locator("#save-model"), "a dirty model enables Save").toBeEnabled();
-    const events = observations.afterSpace.events.filter(event => event.phase === "capture");
-    for (const type of ["keydown", "keyup", "input", "change"]) {
-      expect(events.filter(event => event.type === type), `one trusted ${type} event for the intended field`).toHaveLength(1);
-    }
-    expect(events.every(event => event.trusted)).toBe(true);
-    expect(events.find(event => event.type === "keydown").key).toBe(" ");
-    expect(events.findIndex(event => event.type === "input")).toBeLessThan(events.findIndex(event => event.type === "change"));
+    await assertKeyboardToggle(page, field, observations);
   } finally {
-    observations.final = page.isClosed() ? { pageClosed: true }
-      : await keyboardSnapshot(page).catch(() => ({ snapshotUnavailable: true }));
-    // Only owned fixture state and event metadata: no cookies, headers, account
-    // fields, arbitrary console text or page contents enter attempt evidence.
-    await testInfo.attach("keyboard-toggle-diagnostics", {
-      body: Buffer.from(JSON.stringify({ modelId, transport: "immutable mocked GET/PUT; keyboard and dirty-state evidence only", ...observations }, null, 2)),
-      contentType: "application/json",
-    });
+    await attachKeyboardDiagnostics(page, testInfo, observations, "immutable mocked GET/PUT; keyboard and dirty-state evidence only");
+  }
+});
+
+test("keyboard Space exposure saves through the owned API model and stays changed after reload", async ({ page, request }, testInfo) => {
+  const label = "Expose certification_dim.id";
+  const observations = {};
+  let ownedModelId;
+  await recordKeyboardEvents(page, { label });
+  const exposed = model => model.definition.exposedFields.some(field => field.table === "certification_dim" && field.column === "id");
+  try {
+    ownedModelId = await createOrganizationModel(request, "Keyboard save audit");
+    observations.fixture = { ownedModelId };
+    const initialResponse = await request.get(`/api/v1/schemoo/models/${ownedModelId}`);
+    expect(initialResponse.status(), "read only the newly created owned model").toBe(200);
+    const initialModel = await initialResponse.json();
+    expect(exposed(initialModel), "the owned server model initially exposes the field").toBe(true);
+    await page.goto(`/schemoo?model=${ownedModelId}`);
+    const field = page.getByRole("checkbox", { name: label, exact: true });
+    await expect(page.locator("#save-model"), "the real owned model opens clean").toBeDisabled();
+    await expect(page.locator("#draft-status")).toHaveText(`Saved · revision ${initialModel.revision} · read-only preview`);
+    observations.initial = await keyboardSnapshot(page, label);
+    await assertKeyboardToggle(page, field, observations, label);
+    const savedResponse = page.waitForResponse(response => response.request().method() === "PUT"
+      && new URL(response.url()).pathname === `/api/v1/schemoo/models/${ownedModelId}`);
+    await page.getByRole("button", { name: "Save model", exact: true }).click();
+    const response = await savedResponse;
+    expect(response.status(), "the single intended semantic save succeeds").toBe(200);
+    const savedModel = await response.json();
+    expect(savedModel.revision).toBe(initialModel.revision + 1);
+    expect(exposed(savedModel), "save response retains the keyboard exposure edit").toBe(false);
+    await expect(page.locator("#draft-status")).toHaveText(`Saved · revision ${savedModel.revision} · read-only preview`);
+    await expect(page.locator("#save-model")).toBeDisabled();
+    const persistedResponse = await request.get(`/api/v1/schemoo/models/${ownedModelId}`);
+    expect(persistedResponse.status()).toBe(200);
+    const persisted = await persistedResponse.json();
+    expect(persisted.revision).toBe(savedModel.revision);
+    expect(exposed(persisted), "a separate API GET observes the saved exposure").toBe(false);
+    observations.persisted = { revisionAdvancedOnce: true, exposed: exposed(persisted) };
+    await page.reload();
+    await expect(field, "reload reads the saved unchecked field").not.toBeChecked();
+    await expect(page.locator("#draft-status")).toHaveText(`Saved · revision ${persisted.revision} · read-only preview`);
+    await expect(page.locator("#save-model")).toBeDisabled();
+    observations.reloaded = await keyboardSnapshot(page, label);
+  } finally {
+    try {
+      if (ownedModelId) {
+        const currentResponse = await request.get(`/api/v1/schemoo/models/${ownedModelId}`);
+        expect(currentResponse.status(), "cleanup reads the exact owned model revision").toBe(200);
+        const current = await currentResponse.json();
+        const deleted = await request.delete(`/api/v1/schemoo/models/${ownedModelId}?expected_revision=${current.revision}`);
+        expect(deleted.ok(), "cleanup deletes only the exact model created by this attempt").toBe(true);
+        expect((await request.get(`/api/v1/schemoo/models/${ownedModelId}`)).status(), "owned model is absent after cleanup").toBe(404);
+        observations.cleanup = { ownedModelDeleted: true };
+      }
+    } finally {
+      await attachKeyboardDiagnostics(page, testInfo, observations, "owned real API model; Save, independent GET, reload and revision-checked delete", label);
+    }
+  }
+});
+
+test("controlled missed change fails at model dirty state after a trusted keyboard toggle", async ({ page }, testInfo) => {
+  const observations = { perturbation: "stop change before the checkbox model handler" };
+  await recordKeyboardEvents(page, { suppressChange: true });
+  try {
+    await openFixture(page);
+    await expect(page.locator("#save-model")).toBeDisabled();
+    const field = page.getByRole("checkbox", { name: keyboardFieldLabel, exact: true });
+    let failure;
+    try { await assertKeyboardToggle(page, field, observations); } catch (error) { failure = error; }
+    expect(failure?.message, "the controlled defect must reach and fail the intermediate dirty-state assertion").toContain("change reaches the model dirty-state owner");
+    await expect(field).not.toBeChecked();
+    await expect(page.locator("#draft-status")).toHaveText("Saved · revision 1 · read-only preview");
+    await expect(page.locator("#save-model")).toBeDisabled();
+    observations.detectedStage = "model-dirty-state";
+  } finally {
+    await attachKeyboardDiagnostics(page, testInfo, observations, "immutable mock with controlled missing change delivery; diagnostic control only");
+  }
+});
+
+test("controlled delayed catalog keeps the editor inert until keyboard editing is ready", async ({ page }, testInfo) => {
+  const observations = { perturbation: "hold initial catalog response behind an explicit gate" };
+  await recordKeyboardEvents(page);
+  let releaseCatalog, markRequested;
+  const catalogReady = new Promise(resolve => { releaseCatalog = resolve; });
+  const catalogRequested = new Promise(resolve => { markRequested = resolve; });
+  const opening = openFixture(page, { beforeCatalog: async () => { markRequested(); await catalogReady; } });
+  try {
+    await catalogRequested;
+    await expect(page.locator("#workbench"), "the editor is inert while its initial catalog is unresolved").toHaveJSProperty("inert", true);
+    await expect(page.getByRole("checkbox", { name: keyboardFieldLabel, exact: true })).toHaveCount(0);
+    await expect(page.locator("#save-model")).toBeDisabled();
+    observations.loading = await keyboardSnapshot(page);
+    releaseCatalog();
+    await opening;
+    await expect(page.locator("#workbench")).toHaveJSProperty("inert", false);
+    await expect(page.locator("#draft-status")).toHaveText("Saved · revision 1 · read-only preview");
+    await assertKeyboardToggle(page, page.getByRole("checkbox", { name: keyboardFieldLabel, exact: true }), observations);
+  } finally {
+    releaseCatalog();
+    await opening.catch(() => {});
+    await attachKeyboardDiagnostics(page, testInfo, observations, "immutable mock with explicitly delayed initial catalog; readiness control only");
   }
 });
 
