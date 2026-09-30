@@ -1,14 +1,29 @@
 import { randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { HTTPClient } from './http.mjs';
 import { oracleFor, ProtocolFailure } from './protocol.mjs';
-import { privateJSON, writeJSON } from '../harness/store.mjs';
+import { privateJSON, writeJSON, root } from '../harness/store.mjs';
 
 const bad = code => { throw new ProtocolFailure(code); };
 const fields = [{ table: 'orders', column: 'id' }];
 export const explore = { root: 'orders', fields, limit: 100, selections: {}, reportFilters: [] };
-export const orderOracle = oracleFor(['id'], Array.from({ length: 513 }, (_, i) => [i + 1]));
-export const csvOracle = oracleFor(['id'], Array.from({ length: 513 }, (_, i) => [String(i + 1)]));
+export function rowOracles(columns) {
+  return { rows: oracleFor(columns, Array.from({ length: 513 }, (_, i) => [i + 1])),
+    csv: oracleFor(columns, Array.from({ length: 513 }, (_, i) => [String(i + 1)])) };
+}
+export async function compiledColumns(sql) {
+  const python = existsSync(join(root, '.venv/bin/python')) ? join(root, '.venv/bin/python') : 'python';
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, [join(root, 'testing/load/compiled_columns.py')], { stdio: ['pipe', 'pipe', 'ignore'] });
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; if (output.length > 16384) child.kill('SIGTERM'); });
+    child.once('error', () => reject(new ProtocolFailure('compiled_plan_parser_unavailable')));
+    child.once('close', code => { try { if (code !== 0) bad('invalid_compiled_plan'); resolve(JSON.parse(output)); } catch (error) { reject(error); } });
+    child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify(sql));
+  });
+}
 
 export function ordinaryRequest(workload, account) {
   if (workload === 'cheap-read') return { method: 'GET', path: '/api/v1/auth/me', status: 200,
@@ -26,10 +41,10 @@ export function streamRequest(workload, account) {
     const count = Number(workload.slice(7)), dashboard = account.dashboards[count];
     return { method: 'POST', path: `/api/v1/schemer/dashboards/${dashboard.id}/executions/stream`,
       body: { expectedRevision: dashboard.revision },
-      tiles: Object.fromEntries(Array.from({ length: count }, (_, i) => [`tile-${i + 1}`, orderOracle])) };
+      tiles: Object.fromEntries(Array.from({ length: count }, (_, i) => [`tile-${i + 1}`, account.oracles.rows])) };
   }
   return { method: 'POST', path: `/api/v1/schemer/query/${workload === 'csv' ? 'export' : 'stream'}`, body,
-    tiles: { report: orderOracle } };
+    tiles: { report: account.oracles.rows } };
 }
 
 // Persist the creation intent before sending a write. On uncertain outcomes,
@@ -70,6 +85,13 @@ export async function prepareFixtures({ dir, accounts, credentialMap, stateDir, 
         if (model.ownerId !== account.userId || model.connectionId !== slot.connectionId || model.namespace !== slot.schema) bad('model_ownership_changed');
         account.model = { id: model.id, revision: model.revision, name: modelName };
         account.owned.push({ kind: 'model', ...account.model }); account.pending = null; await save();
+      }
+      if (!account.oracles) {
+        const compiled = await client.json('POST', `/api/v1/schemoo/models/${account.model.id}/plan`, {
+          expectedRevision: account.model.revision, explore });
+        const columns = await compiledColumns(compiled.sql);
+        if (columns.length !== fields.length) bad('compiled_column_count');
+        account.oracles = rowOracles(columns); await save();
       }
       account.dashboards ||= {};
       for (const count of [1, 5, 20]) {
@@ -113,14 +135,31 @@ export async function cleanupFixtures({ dir, credentialMap, origin, Client = HTT
   let deleted = 0;
   for (const account of receipt.accounts) {
     const client = new Client({ origin });
+    let cleanupAuthenticated = false;
     try {
+      if (account.cleanupCookie) {
+        const previous = new Client({ origin, cookie: account.cleanupCookie });
+        try { await previous.logout(); } finally { previous.close(); }
+        delete account.cleanupCookie; await save();
+      }
       await client.login(credentialMap.get(account.username), account.userId);
+      cleanupAuthenticated = true;
+      account.cleanupCookie = client.cookie; await save();
       for (const execution of receipt.executions || []) {
         if (execution.username !== account.username || execution.closed) continue;
         if (!/^cex_[a-f0-9]{32}$/.test(execution.id)) bad('invalid_owned_execution');
-        const current = await client.json('GET', `/api/v1/common/query-executions/${execution.id}`);
+        const current = await client.request({ path: `/api/v1/common/query-executions/${execution.id}` });
+        if (current.status === 404 && current.data?.error?.code === 'console_execution_not_found') {
+          // This exact receipt was captured in this owner's authenticated
+          // response. Recheck owner identity before accepting process-local
+          // receipt disappearance after a launcher rebuild.
+          const identity = await client.json('GET', '/api/v1/auth/me');
+          if (identity.user?.id !== account.userId || identity.user?.username !== account.username) bad('cleanup_identity_changed');
+          execution.closed = true; await save(); continue;
+        }
+        if (current.status !== 200 || current.data?.id !== execution.id || !Array.isArray(current.data.results)) bad('cleanup_execution_read_failed');
         await client.json('DELETE', `/api/v1/common/query-executions/${execution.id}`);
-        for (const result of current.results) await client.json('DELETE',
+        for (const result of current.data.results) await client.json('DELETE',
           `/api/v1/common/query-executions/${execution.id}/results/${result.id}`, undefined, 204);
         execution.closed = true; await save();
       }
@@ -154,8 +193,13 @@ export async function cleanupFixtures({ dir, credentialMap, origin, Client = HTT
       // Revoke the recorded load session as well as this cleanup login.
       const loadSession = new Client({ origin, cookie: account.cookie });
       try { await loadSession.logout(); } finally { loadSession.close(); }
-      delete account.cookie; await save(); await client.logout();
-    } finally { client.close(); }
+      delete account.cookie; await save();
+    } finally {
+      // Destroying an HTTP agent does not revoke authentication. Always
+      // attempt logout; a failed revocation remains a cleanup failure.
+      try { if (cleanupAuthenticated) { await client.logout(); delete account.cleanupCookie; await save(); } }
+      finally { client.close(); }
+    }
   }
   return { deleted, objectsRemaining: receipt.accounts.reduce((n, account) => n + account.owned.length + Number(!!account.pending), 0), sessionsRevoked: true };
 }

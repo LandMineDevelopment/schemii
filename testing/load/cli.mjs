@@ -11,6 +11,7 @@ import { reserveAccounts, releaseAccounts, withFileLock } from '../harness/lease
 import { cleanupFixtures } from './fixtures.mjs';
 import { plan, WORKLOADS, validatePlan } from './plan.mjs';
 import { birthTick, requireStopped } from './engine.mjs';
+import { observeChild, stopChild } from './children.mjs';
 import { LOCAL, PREVIEW } from './http.mjs';
 
 const COMMANDS = {
@@ -102,12 +103,18 @@ cleanup deletes only private receipt-owned report fixtures, revokes load session
     await reserveAccounts({ runId: id, runDir: dir, accounts, root });
     const lock = deploymentLockPath(root), gate = join(dirname(lock), 'qa-startup.lock');
     const log = await open(join(dir, 'controller-private.log'), 'a', 0o600);
-    let child;
+    let child, completion;
     try {
       child = spawn('bash', ['-c', 'exec 4> "$1"; flock --wait 180 4 || exit 4; exec 3> "$2"; if flock --nonblock 3; then export SCHEMII_QA_LEASE_MODE=exclusive; else flock --shared --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_MODE=shared; fi; export SCHEMII_QA_LEASE_FD=3 SCHEMII_QA_GATE_FD=4; exec node "$3" "$4"', 'load-controller', gate, lock,
         join(root, 'testing/load/controller.mjs'), id], { cwd: root, detached: true, stdio: ['ignore', log.fd, log.fd] });
+      completion = observeChild(child);
       child.unref(); await writeJSON(join(dir, 'controller-owner.json'), { pid: child.pid, birthTick: await birthTick(child.pid) });
-    } catch (error) { await releaseAccounts({ runId: id, root }); throw error; }
+    } catch (error) {
+      // A post-spawn journal failure must join the exact owned process group
+      // before releasing reservations. Failure to reap preserves reservations.
+      if (child) await stopChild(child, completion);
+      await releaseAccounts({ runId: id, root }); throw error;
+    }
     finally { await log.close(); }
     for (let i = 0; i < 360; i++) {
       const state = await privateJSON(join(dir, 'manifest-private.json'));

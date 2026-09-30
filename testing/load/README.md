@@ -16,6 +16,8 @@ tests or `load plan`. Do not edit source or rebuild while either harness owns a 
 ## Tools and recipes
 
 Node uses the existing host runtime; no npm or production dependency is added.
+Fixture preparation also uses the existing Python/sqlglot environment to read
+output labels from the application's compiled SQL plan without executing SQL.
 Ordinary exact-rate traffic uses host-side **k6 2.3.0**, pinned to upstream release
 checksums. The optional installer supports Linux amd64/arm64, never uses elevated
 privileges, and refuses to replace an existing destination:
@@ -55,7 +57,9 @@ run names. Source data remain read-only. NDJSON and CSV expect all 513 baseline
 order IDs, independent of row order, with no duplicates or extra/missing values.
 NDJSON must include every expected tile's completion plus the final `end` event;
 HTTP 200 with an error event fails. Disclosed preview caps require explicit matching
-oracle expectations. CSV is parsed incrementally, including split UTF-8, quoted
+oracle expectations. Exact columns are derived from the real saved-model plan
+(the default label is `Orders.id`), rather than assuming a raw table column name.
+CSV is parsed incrementally, including split UTF-8, quoted
 newlines, escaped quotes and a required final record terminator.
 
 Registered account count comes from the private fixture registry; active identities
@@ -86,6 +90,9 @@ reports `dropped_iterations`, actual `http_reqs` and custom per-outcome counts;
 accounting mismatch, drops, correctness failures and thresholds invalidate the
 stage. First-row and full-drain measurements come from parsing body chunks. A
 generator on the host competes with the stack; reports disclose that placement.
+Unexpected authentication/server/transport failures have aborting k6 thresholds;
+their failed/incomplete counts remain in the summary. Failed ownership writes join
+the exact spawned generator/controller process group before reservations release.
 
 Run recipes are explicit: `smoke` (6s), `ramp` (each of 100/300/600/1,000/3,000/6,000/
 12,000 calls/min, 2m warmup and 5m measured hold), `confirm` (three near-knee repeats),
@@ -125,7 +132,8 @@ Ten-second post-arrival drain must return all six resource gauges to their captu
 baseline. A completed stream or explicit close is not proof of source release.
 The observer implementation, real process count/effective budgets, control-plane
 recovery probe, cancellation deadlines and independently reviewed cleanup remain
-live acceptance requirements.
+live acceptance requirements. Reports always keep capacityEligible false in this
+foundation until those independent campaign gates are implemented and verified.
 
 Private state is under `artifacts/load/LOAD_ID`: controller handle/config, sessions,
 create intents and opaque object IDs. Share only the allowlisted `report.json` after

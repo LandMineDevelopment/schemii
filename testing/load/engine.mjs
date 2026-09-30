@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { Accounting, assertHealthy, verifyRecovery } from './accounting.mjs';
 import { HTTPClient } from './http.mjs';
 import { CSVOracle, NDJSONOracle, ProtocolFailure } from './protocol.mjs';
-import { ordinaryRequest, streamRequest, csvOracle } from './fixtures.mjs';
+import { ordinaryRequest, streamRequest } from './fixtures.mjs';
+import { observeChild, stopChild } from './children.mjs';
 import { publicObservation, K6_VERSION } from './plan.mjs';
 import { privateJSON, writeJSON } from '../harness/store.mjs';
 
@@ -61,7 +62,7 @@ export async function runStreams({ spec, stage, receipt, origin, signal, onExecu
         client.accounting = accounting;
         const request = streamRequest(spec.workload, account);
         const executions = []; let recording = Promise.resolve();
-        const oracle = spec.workload === 'csv' ? new CSVOracle(csvOracle, { maxBytes: spec.maxBodyBytes }) :
+        const oracle = spec.workload === 'csv' ? new CSVOracle(account.oracles.csv, { maxBytes: spec.maxBodyBytes }) :
           new NDJSONOracle(request.tiles, { maxBytes: spec.maxBodyBytes, onExecution: id => {
             executions.push(id); recording = recording.then(() => onExecution(account.username, id));
             // Observe a failed private ownership write immediately and stop
@@ -124,28 +125,32 @@ export function reconcileK6(raw, stage) {
 export async function runK6({ spec, stage, receipt, dir, origin, binary, signal, onGenerator }) {
   const input = join(dir, 'k6-input-private.json'), result = join(dir, 'k6-result.json');
   const log = await open(join(dir, 'k6-private.log'), 'a', 0o600);
-  await writeJSON(input, { workload: spec.workload, rate: stage.callsPerMinute, seconds: stage.seconds, vus: spec.maxConcurrent, origin,
-    accounts: receipt.accounts.slice(0, spec.activeIdentities).map(account => ({ cookie: account.cookie, request: ordinaryRequest(spec.workload, account) })) });
   const script = new URL('./exact-rate.k6.js', import.meta.url).pathname;
-  let child;
+  let child, done, abort;
   try {
+    await writeJSON(input, { workload: spec.workload, rate: stage.callsPerMinute, seconds: stage.seconds, vus: spec.maxConcurrent, origin,
+      accounts: receipt.accounts.slice(0, spec.activeIdentities).map(account => ({ cookie: account.cookie, request: ordinaryRequest(spec.workload, account) })) });
     await onGenerator({ pending: true });
     child = spawn(binary, ['run', '--quiet', '--summary-mode=full', script], {
-      env: { ...process.env, SCHEMII_LOAD_INPUT: input, SCHEMII_LOAD_RESULT: result }, stdio: ['ignore', log.fd, log.fd] });
-    const done = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(code)); });
-    await onGenerator({ pid: child.pid, birthTick: await birthTick(child.pid), pending: false });
-    let terminateTimer;
-    const abort = () => { child.kill('SIGTERM'); terminateTimer = setTimeout(() => child.kill('SIGKILL'), 5000); };
+      env: { ...process.env, SCHEMII_LOAD_INPUT: input, SCHEMII_LOAD_RESULT: result }, detached: true, stdio: ['ignore', log.fd, log.fd] });
+    done = observeChild(child);
+    let stopping;
+    abort = () => { stopping ||= stopChild(child, done); void stopping.catch(() => {}); };
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
-    let code;
-    try { code = await done; } finally { signal.removeEventListener('abort', abort); clearTimeout(terminateTimer); }
+    await onGenerator({ pid: child.pid, birthTick: await birthTick(child.pid), pending: false });
+    const { code, error } = await done;
+    if (error) throw new Error('k6_generator_unavailable');
     await onGenerator({ pending: false, exited: true });
     if (![0, 99].includes(code)) throw new Error('k6_generator_failed');
     const summary = reconcileK6(JSON.parse(await readFile(result, 'utf8')), stage);
     summary.thresholdsPassed = code === 0;
     return summary;
-  } finally { await log.close(); await unlink(input).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+  } finally {
+    if (abort) signal.removeEventListener('abort', abort);
+    try { if (child) await stopChild(child, done); }
+    finally { await log.close(); await unlink(input).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+  }
 }
 
 export async function verifyK6(binary) {
@@ -192,7 +197,9 @@ export async function executePlan({ spec, receipt, dir, origin, binary, observer
     if (signal.aborted) failures.push('run_stopped');
     if (!recovery.verified) failures.push(...recovery.failures);
     return { stages: results, observations: { before, after }, recovery, failures,
-      capacityEligible: spec.capacityEligible && !allowUnobserved && !failures.length && before?.apiProcesses === 1 && after?.apiProcesses === 1,
+      // The foundation has not proven topology/budgets, generator headroom,
+      // control recovery or independent campaign cleanup acceptance.
+      capacityEligible: false, capacityLimitations: ['independent_campaign_acceptance_pending'],
       conclusion: 'No active-user sizing is inferred from this harness report.' };
   } finally { clearInterval(timer); }
 }

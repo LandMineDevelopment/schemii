@@ -14,7 +14,8 @@ export const options = {
   discardResponseBodies: false, tags: { workload: spec.workload },
   systemTags: ['status', 'method', 'scenario', 'expected_response'],
   thresholds: { dropped_iterations: ['count==0'], schemii_incorrect: [{ threshold: 'count==0', abortOnFail: true }],
-    schemii_incomplete: ['count==0'], schemii_failed: ['count==0'], schemii_rejected: ['count==0'],
+    schemii_incomplete: [{ threshold: 'count==0', abortOnFail: true }],
+    schemii_failed: [{ threshold: 'count==0', abortOnFail: true }], schemii_rejected: ['count==0'],
     schemii_http_ms: ['p(95)<=300', 'p(99)<=1000'] },
 };
 

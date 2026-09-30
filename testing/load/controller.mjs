@@ -6,7 +6,7 @@ import { root, privateJSON, writeJSON, credentials } from '../harness/store.mjs'
 import { startDeployment, sourceIdentity } from '../harness/deployment.mjs';
 import { releaseAccounts } from '../harness/leases.mjs';
 import { prepareFixtures, cleanupFixtures } from './fixtures.mjs';
-import { executePlan, verifyK6, observation } from './engine.mjs';
+import { executePlan, verifyK6, observation, requireStopped } from './engine.mjs';
 import { loadPath } from './cli.mjs';
 
 process.umask(0o077);
@@ -22,6 +22,8 @@ const close = async () => { if (server) await new Promise(resolve => server.clos
 async function cleanup() {
   if (stopping) throw new Error('cleanup_already_running');
   stopping = true; aborter.abort(); if (task) await task;
+  if (run.generatorOwner?.pending) throw new Error('unresolved_generator_launch');
+  if (run.generatorOwner?.pid) await requireStopped(run.generatorOwner);
   const result = await cleanupFixtures({ dir, credentialMap, origin: config.origin });
   if (result.objectsRemaining) throw new Error('owned_objects_remaining');
   await releaseAccounts({ runId: run.id, root }); run.status = 'cleaned'; run.cleanup = result; await save();

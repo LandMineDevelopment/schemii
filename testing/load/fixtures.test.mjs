@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
-import { prepareFixtures, cleanupFixtures } from './fixtures.mjs';
-import { privateJSON, writeJSON } from '../harness/store.mjs';
+import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest } from './fixtures.mjs';
+import { NDJSONOracle, CSVOracle } from './protocol.mjs';
+import { privateJSON, writeJSON, root } from '../harness/store.mjs';
 import { ProtocolFailure } from './protocol.mjs';
 
 async function fixture(t) {
@@ -16,15 +19,21 @@ async function fixture(t) {
   await writeJSON(join(dir, 'registry.json'), { slots });
   const modelStore = new Map(names.map(name => [name, [{ id: `retained-${name}`, name: 'starter' }]]));
   const dashStore = new Map(names.map(name => [name, [{ id: `retained-${name}`, name: 'starter' }]]));
-  const state = { crossOwner: false, failAfterCreate: false, drift: false, logouts: 0, intents: 0, serial: 0 };
+  const compiled = realPlan();
+  const state = { crossOwner: false, failAfterCreate: false, drift: false, logouts: 0, logins: 0, intents: 0, serial: 0,
+    executionResponse: null, failLogout: false, executionDeletes: 0 };
   class FakeClient {
     constructor({ cookie } = {}) { this.cookie = cookie || ''; }
     async login(credential, expected) {
+      state.logins++;
       this.username = credential.username; this.userId = slots.find(slot => slot.username === this.username).accountId;
       assert.equal(this.userId, expected); this.cookie = `private=${this.username}`;
       return { capabilities: ['schemoo:access', 'schemer:access', 'schemer:author'] };
     }
     async json(method, path, body, expected = 200) {
+      if (path === '/api/v1/auth/me') return { user: { id: this.userId, username: this.username } };
+      if (path.endsWith('/plan') && method === 'POST') return compiled;
+      if (path.startsWith('/api/v1/common/query-executions/') && method === 'DELETE') { state.executionDeletes++; return {}; }
       const kind = path.includes('/models') ? 'model' : 'dashboard';
       const store = kind === 'model' ? modelStore : dashStore, entries = store.get(this.username);
       const base = kind === 'model' ? '/api/v1/schemoo/models' : '/api/v1/schemer/dashboards';
@@ -48,12 +57,13 @@ async function fixture(t) {
       throw new Error('Unexpected test API call');
     }
     async request({ path }) {
+      if (path.startsWith('/api/v1/common/query-executions/')) return state.executionResponse;
       const store = path.includes('/models') ? modelStore : dashStore;
       const id = path.split('/').at(-1), owned = store.get(this.username).find(value => value.id === id);
       if (!owned) return { status: state.crossOwner ? 200 : 404, data: {} };
       return { status: 200, data: state.drift ? { ...owned, ownerId: 'peer' } : owned };
     }
-    async logout() { state.logouts++; this.cookie = ''; }
+    async logout() { if (!this.cookie) return; state.logouts++; if (state.failLogout) throw new ProtocolFailure('logout_transport_failed'); this.cookie = ''; }
     close() {}
   }
   const credentialMap = new Map(names.map(username => [username, { username, password: 'private-secret' }]));
@@ -61,6 +71,39 @@ async function fixture(t) {
     credentialMap, stateDir: dir, kind: 'reports', Client: FakeClient, ...options }),
     cleanup: () => cleanupFixtures({ dir, credentialMap, Client: FakeClient }) };
 }
+function realPlan(label = 'Orders') {
+  const python = existsSync(join(root, '.venv/bin/python')) ? join(root, '.venv/bin/python') : 'python';
+  const result = spawnSync(python, ['-c', `
+import json,sys
+from schemii.schemoo.models import ModelDefinition,ExploreState
+from schemii.schemoo.service import plan_query
+catalog={'namespace':'fixture','fingerprint':'fixture','tables':[{'name':'orders','columns':[{'name':'id','dataType':'bigint'}]}],'relationships':[]}
+definition=ModelDefinition.model_validate({'root':'orders','nodes':[{'id':'orders','table':'orders','label':sys.argv[1]}],'edges':[],'scopes':[]})
+explore=ExploreState.model_validate({'root':'orders','fields':[{'table':'orders','column':'id'}],'limit':100,'selections':{},'reportFilters':[]})
+print(json.dumps(plan_query(catalog,definition,explore,_bounded=False)))
+`, label], { cwd: root, env: { ...process.env, PYTHONPATH: join(root, 'src') }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+test('default fixture oracles accept real compiled report and CSV headers without replacing exact header checks', async () => {
+  const compiled = realPlan(), columns = await compiledColumns(compiled.sql);
+  assert.deepEqual(columns, ['Orders.id']);
+  const oracles = rowOracles(columns), account = { model: { id: `model_${'a'.repeat(32)}`, revision: 1 }, oracles,
+    dashboards: { 1: { id: `dashboard_${'b'.repeat(32)}`, revision: 1 } } };
+  const parser = new NDJSONOracle(streamRequest('report-1', account).tiles);
+  const rows = Array.from({ length: 513 }, (_, i) => [i + 1]);
+  for (const event of [{ type: 'start', tiles: [{ tileId: 'tile-1' }] },
+    { type: 'execution', executionId: `cex_${'c'.repeat(32)}` },
+    { type: 'rows', tileId: 'tile-1', columns: columns.map(name => ({ name })), rows },
+    { type: 'complete', tileId: 'tile-1', rowCount: 513, limitReached: false, reason: null }, { type: 'end' }])
+    parser.push(Buffer.from(JSON.stringify(event) + '\n'));
+  assert.equal(parser.finish().rows, 513);
+  const csv = new CSVOracle(oracles.csv);
+  csv.push(Buffer.from(columns.join(',') + '\r\n' + rows.map(row => row.join(',') + '\r\n').join('')));
+  assert.equal(csv.finish().rows, 513);
+  const renamed = await compiledColumns(realPlan('Order details').sql);
+  assert.deepEqual(renamed, ['Order details.id']);
+});
 test('owned fixture lifecycle journals each write, checks cross-owner denial and preserves retained objects', async t => {
   const f = await fixture(t), receipt = await f.prepare();
   assert.equal(receipt.crossOwnerVerified, true);
@@ -88,6 +131,44 @@ test('cross-owner disclosure fails preparation and ownership drift blocks cleanu
   const f = await fixture(t); f.state.crossOwner = true;
   await assert.rejects(f.prepare(), { code: 'cross_owner_access' });
   f.state.crossOwner = false; f.state.drift = true;
+  const before = f.state.logouts;
   await assert.rejects(f.cleanup(), { code: 'cleanup_ownership_changed' });
+  assert.equal(f.state.logouts, before + 1);
+  assert.equal((await privateJSON(join(f.dir, 'fixtures-private.json'))).accounts[0].cleanupCookie, undefined);
   assert.equal(f.dashStore.get(f.names[0]).length, 4);
+});
+test('already-absent owned execution converges only for its exact code and verified authenticated owner', async t => {
+  const f = await fixture(t); await f.prepare();
+  const file = join(f.dir, 'fixtures-private.json'), receipt = await privateJSON(file);
+  receipt.executions = [{ username: f.names[0], id: `cex_${'d'.repeat(32)}` }]; await writeJSON(file, receipt);
+  f.state.executionResponse = { status: 404, data: { error: { code: 'console_execution_not_found' } } };
+  assert.equal((await f.cleanup()).objectsRemaining, 0);
+  assert.equal(f.state.executionDeletes, 0);
+  assert.equal((await privateJSON(file)).executions[0].closed, true);
+  assert.equal((await f.cleanup()).deleted, 0);
+});
+test('unknown execution404 and access failures retain ownership and revoke newly obtained cleanup authentication', async t => {
+  const f = await fixture(t); await f.prepare();
+  const file = join(f.dir, 'fixtures-private.json'), receipt = await privateJSON(file);
+  receipt.executions = [{ username: f.names[0], id: `cex_${'e'.repeat(32)}` }]; await writeJSON(file, receipt);
+  for (const response of [{ status: 404, data: { error: { code: 'unknown_resource' } } }, { status: 403, data: {} }]) {
+    f.state.executionResponse = response; const before = f.state.logouts;
+    await assert.rejects(f.cleanup(), { code: 'cleanup_execution_read_failed' });
+    assert.equal(f.state.logouts, before + 1);
+    const retained = await privateJSON(file);
+    assert.ok(!retained.executions[0].closed); assert.equal(retained.accounts[0].owned.length, 4);
+  }
+});
+test('failed cleanup revocation preserves its exact private cookie for recovery without silently creating another session', async t => {
+  const f = await fixture(t); await f.prepare();
+  f.state.drift = true; f.state.failLogout = true;
+  await assert.rejects(f.cleanup(), { code: 'logout_transport_failed' });
+  const receipt = await privateJSON(join(f.dir, 'fixtures-private.json'));
+  assert.ok(receipt.accounts[0].cleanupCookie);
+  const logins = f.state.logins;
+  await assert.rejects(f.cleanup(), { code: 'logout_transport_failed' });
+  assert.equal(f.state.logins, logins);
+  assert.ok((await privateJSON(join(f.dir, 'fixtures-private.json'))).accounts[0].cleanupCookie);
+  f.state.failLogout = false; f.state.drift = false;
+  assert.equal((await f.cleanup()).objectsRemaining, 0);
 });
