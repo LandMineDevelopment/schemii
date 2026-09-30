@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import ast
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,64 @@ from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
 pytest_plugins = ["inspection_fixtures"]
+
+
+class _IterationOwner:
+    def run(self):
+        for provider in self.providers:
+            provider.run()
+            provider.other()
+        provider.run()
+        return [provider.run() for provider in self.providers]
+
+
+class _FirstIterationProvider:
+    def run(self):
+        raise AssertionError("Source analysis must not execute a provider")
+
+    def other(self):
+        raise AssertionError("Source analysis must not execute a provider")
+
+
+class _SecondIterationProvider(_FirstIterationProvider):
+    def run(self):
+        raise AssertionError("Source analysis must not execute a provider")
+
+
+def test_runtime_iterations_are_derived_once_and_keep_exact_receiver_and_line_scope(monkeypatch):
+    from schemii.common.source_inspection import SourceRegistry
+
+    registry = SourceRegistry()
+    index = system_inspection.RuntimeBindingIndex(SimpleNamespace(), registry)
+    index.field_types[(_IterationOwner, "providers")] = (
+        _FirstIterationProvider, _SecondIterationProvider,
+    )
+    tree = registry.source_tree(_IterationOwner.run)
+    calls = sorted(
+        (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+        key=lambda node: node.lineno,
+    )
+    original_walk = ast.walk
+    traversals = []
+
+    def walk(subject_tree):
+        traversals.append(subject_tree)
+        return original_walk(subject_tree)
+
+    monkeypatch.setattr(ast, "walk", walk)
+    for call in (calls[0], calls[-1]):
+        resolved = index.resolve_all(call.func, callable_subject=_IterationOwner.run)
+        assert tuple(item.subject for item in resolved) == (
+            _FirstIterationProvider.run, _SecondIterationProvider.run,
+        )
+        assert all(item.resolution == "runtime-iteration" for item in resolved)
+    # Inherited methods stay deduplicated; the same variable outside its source
+    # loop does not acquire receiver evidence from a different line.
+    assert tuple(item.subject for item in index.resolve_all(
+        calls[1].func, callable_subject=_IterationOwner.run,
+    )) == (_FirstIterationProvider.other,)
+    assert index.resolve_all(calls[2].func, callable_subject=_IterationOwner.run)[0].subject is None
+    assert traversals == [tree]
 
 
 def test_runtime_binding_resolves_nested_installed_services_without_name_special_cases():

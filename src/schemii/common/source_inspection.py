@@ -64,6 +64,12 @@ def source_docstring(source: str | None, *, limit: int) -> tuple[str | None, boo
         tree = ast.parse(textwrap.dedent(source))
     except (IndentationError, SyntaxError):
         return None, False
+    return _tree_docstring(tree, limit=limit)
+
+
+def _tree_docstring(tree: ast.Module | None, *, limit: int) -> tuple[str | None, bool]:
+    if tree is None:
+        return None, False
     definition = next(
         (
             node
@@ -389,6 +395,36 @@ def pydantic_model_tree(
     return discovered, bool(queued)
 
 
+@dataclass(frozen=True)
+class _SourceDetails:
+    text: str | None
+    start_line: int | None
+    end_line: int | None
+    definition_line: int | None
+    tree: ast.Module | None
+
+
+def _read_source(subject: object) -> _SourceDetails:
+    try:
+        lines, start_line = inspect.getsourcelines(inspect.unwrap(subject))
+    except (OSError, TypeError):
+        return _SourceDetails(None, None, None, None, None)
+    text = "".join(lines)
+    definition_line = next(
+        (
+            start_line + offset
+            for offset, line in enumerate(lines)
+            if line.lstrip().startswith(("def ", "async def ", "class "))
+        ),
+        None,
+    )
+    try:
+        tree = ast.parse(textwrap.dedent(text))
+    except (IndentationError, SyntaxError):
+        tree = None
+    return _SourceDetails(text, start_line, start_line + len(lines) - 1, definition_line, tree)
+
+
 def source_metadata(
     subject: object,
     *,
@@ -396,35 +432,35 @@ def source_metadata(
     source_budget: int = DEFAULT_SOURCE_LIMIT,
     limits: SourceInspectionLimits | None = None,
 ) -> dict[str, Any]:
-    active_limits = limits or SourceInspectionLimits()
+    return _source_metadata(
+        subject, _read_source(subject), kind=kind, source_budget=source_budget,
+        limits=limits or SourceInspectionLimits(),
+    )
+
+
+def _source_metadata(
+    subject: object,
+    source: _SourceDetails,
+    *,
+    kind: str | None,
+    source_budget: int,
+    limits: SourceInspectionLimits,
+) -> dict[str, Any]:
     unwrapped = inspect.unwrap(subject)
-    full_source: str | None = None
+    full_source = source.text
     source_excerpt: str | None = None
-    start_line: int | None = None
-    end_line: int | None = None
-    definition_line: int | None = None
     truncated = False
-    try:
-        lines, start_line = inspect.getsourcelines(unwrapped)
-        full_source = "".join(lines)
-        end_line = start_line + len(lines) - 1
-        for offset, line in enumerate(lines):
-            stripped = line.lstrip()
-            if stripped.startswith(("def ", "async def ", "class ")):
-                definition_line = start_line + offset
-                break
-        excerpt_limit = min(active_limits.source_limit, max(0, source_budget))
+    if full_source is not None:
+        excerpt_limit = min(limits.source_limit, max(0, source_budget))
         source_excerpt = full_source[:excerpt_limit]
         if len(full_source) > excerpt_limit:
             newline = source_excerpt.rfind("\n")
             if newline >= 0:
                 source_excerpt = source_excerpt[: newline + 1]
             truncated = True
-    except (OSError, TypeError):
-        pass
-    docstring, docstring_truncated = source_docstring(
-        full_source,
-        limit=active_limits.docstring_limit,
+    docstring, docstring_truncated = _tree_docstring(
+        source.tree,
+        limit=limits.docstring_limit,
     )
     digest = hashlib.sha256((full_source or "").encode("utf-8")).hexdigest()
     return {
@@ -438,9 +474,9 @@ def source_metadata(
         "docstringTruncated": docstring_truncated,
         "location": {
             "path": source_path(unwrapped),
-            "sourceStartLine": start_line,
-            "definitionLine": definition_line,
-            "endLine": end_line,
+            "sourceStartLine": source.start_line,
+            "definitionLine": source.definition_line,
+            "endLine": source.end_line,
         },
         "source": {
             "available": full_source is not None,
@@ -448,7 +484,7 @@ def source_metadata(
             "text": source_excerpt,
             "tokens": python_source_segments(
                 source_excerpt,
-                limit=active_limits.highlight_segment_limit,
+                limit=limits.highlight_segment_limit,
             ),
             "truncated": truncated,
         },
@@ -461,6 +497,10 @@ class SourceRegistry:
     def __init__(self, limits: SourceInspectionLimits | None = None) -> None:
         self.limits = limits or SourceInspectionLimits()
         self._objects: dict[str, dict[str, Any]] = {}
+        # Retain only routines, whose syntax is reused for call analysis. Class
+        # trees can be large and are consumed once for metadata, then released.
+        # This cache ends with the document; metadata keeps its own budgets.
+        self._sources: dict[object, _SourceDetails] = {}
         self.source_characters = 0
         self.objects_truncated = False
 
@@ -471,6 +511,18 @@ class SourceRegistry:
     def get(self, object_id: str) -> dict[str, Any] | None:
         return self._objects.get(object_id)
 
+    def _source_details(self, subject: object) -> _SourceDetails:
+        subject = inspect.unwrap(subject)
+        if not inspect.isroutine(subject):
+            return _read_source(subject)
+        if subject not in self._sources:
+            self._sources[subject] = _read_source(subject)
+        return self._sources[subject]
+
+    def source_tree(self, subject: object) -> ast.Module | None:
+        """Return this build's syntax tree for read-only source analysis."""
+        return self._source_details(subject).tree
+
     def register(self, subject: object, *, kind: str | None = None) -> str | None:
         if not is_first_party(subject):
             return None
@@ -479,8 +531,9 @@ class SourceRegistry:
             if len(self._objects) >= self.limits.object_limit:
                 self.objects_truncated = True
                 return None
-            metadata = source_metadata(
+            metadata = _source_metadata(
                 subject,
+                self._source_details(subject),
                 kind=kind,
                 source_budget=self.limits.total_source_limit - self.source_characters,
                 limits=self.limits,
@@ -693,13 +746,13 @@ class SourceCallSiteCollector(DirectCallCollector):
             self._contexts.pop()
 
 
-def direct_call_sites(subject: object) -> list[SourceCallSite]:
+def direct_call_sites(
+    subject: object, *, registry: SourceRegistry | None = None,
+) -> list[SourceCallSite]:
     """Return direct call sites and bounded control labels for one callable."""
 
-    try:
-        source = inspect.getsource(inspect.unwrap(subject))
-        tree = ast.parse(textwrap.dedent(source))
-    except (IndentationError, OSError, SyntaxError, TypeError):
+    tree = registry.source_tree(subject) if registry is not None else _read_source(subject).tree
+    if tree is None:
         return []
     function = next(
         (
