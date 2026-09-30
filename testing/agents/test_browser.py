@@ -512,10 +512,16 @@ class GuardianProcessTests(ArtifactFixture):
             time.sleep(0.02)
         self.fail(message)
 
-    def launch_stub(self, guardian=True):
+    def launch_stub(self, guardian=True, ignore_shutdown=False):
         child = (
-            "from pathlib import Path; import sys; "
-            "(Path(sys.argv[1]) / 'temporary.dat').write_bytes(b'owned temporary output'); "
+            "from pathlib import Path; import sys, signal; "
+            + (
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "signal.signal(signal.SIGINT, signal.SIG_IGN); "
+                if ignore_shutdown
+                else ""
+            )
+            + "(Path(sys.argv[1]) / 'temporary.dat').write_bytes(b'owned temporary output'); "
             "sys.stdin.buffer.read()"
         )
         script = f"""
@@ -638,6 +644,22 @@ raise SystemExit(browser.main([]))
         self.assertEqual(process.stdout.read(), b"")
         self.assertEqual(process.stderr.read(), b"")
 
+    def test_termination_escalates_ignoring_child_and_automatically_cleans_output(self):
+        peer = browser.create_session(self.repository)
+        peer_output = peer.path / "output" / "peer.dat"
+        peer_output.write_bytes(b"live peer output")
+        process, path, metadata = self.launch_stub(ignore_shutdown=True)
+        started = time.monotonic()
+        process.terminate()
+        self.assertEqual(process.wait(timeout=7), 143)
+        self.assertLess(time.monotonic() - started, 7)
+        self.assertFalse(path.exists())
+        self.assertIsNone(browser.process_birth_tick(metadata["child_pid"]))
+        self.assertFalse(Path(f"/proc/{metadata['guardian_pid']}").exists())
+        self.assertEqual(peer_output.read_bytes(), b"live peer output")
+        self.assertEqual(process.stdout.read(), b"")
+        self.assertEqual(process.stderr.read(), b"")
+
     def test_guardian_startup_metadata_failure_reaps_its_fork_child(self):
         session = browser.create_session(self.repository)
         browser._record_child(session, os.getpid())
@@ -757,7 +779,7 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(self.output().parent.exists())
         self.assertEqual(self.stdout.getvalue(), "")
         self.assertEqual(self.stderr.getvalue(), "")
-        self.assertEqual(self.signals.call_count, 4)
+        self.assertEqual(self.signals.call_count, 6)
         self.guardian.assert_called_once()
         self.stop_guardian.assert_called_once_with(12346)
 
@@ -866,6 +888,15 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(expire.call_count, 1)
         self.assertEqual(expire.call_args.args[0].path / "output", self.output())
         self.assertFalse(self.output().parent.exists())
+
+    def test_shutdown_signal_enters_bounded_finalizer_with_preserved_exit_status(self):
+        for signum in (browser.signal.SIGINT, browser.signal.SIGTERM):
+            with self.subTest(signum=signum):
+                self.process.wait.side_effect = browser.ShutdownRequested(signum)
+                with mock.patch.object(browser, "_stop_child") as stop:
+                    self.assertEqual(self.launch(), 128 + signum)
+                stop.assert_called_once_with(self.process)
+                self.assertFalse(self.output().parent.exists())
 
     def test_agent_supplied_options_and_commands_are_rejected(self):
         for arguments in (

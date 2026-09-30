@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import struct
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -14,6 +15,74 @@ spec = importlib.util.spec_from_file_location(
 )
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+
+cleanup_spec = importlib.util.spec_from_file_location(
+    "browser_cleanup_probe", Path(__file__).with_name("verify_browser_cleanup.py")
+)
+cleanup_probe = importlib.util.module_from_spec(cleanup_spec)
+with patch.dict(sys.modules, {"verify_browser_isolation": probe}):
+    cleanup_spec.loader.exec_module(cleanup_probe)
+
+
+class CleanupSignalOwnershipTests(unittest.TestCase):
+    def record(self, pid=50, birth=100, state="S"):
+        return {"pid": pid, "birth_tick": birth, "state": state}
+
+    def test_reused_or_unknown_pid_never_receives_a_signal(self):
+        for records in ({}, {50: self.record(birth=101)}):
+            with (
+                patch.object(probe, "process_snapshot", return_value=records),
+                patch.object(cleanup_probe.os, "kill") as kill,
+                patch.object(cleanup_probe.os, "killpg") as killpg,
+            ):
+                with self.assertRaisesRegex(probe.ProbeError, "identity changed"):
+                    cleanup_probe.signal_owned(50, 100, 9)
+                kill.assert_not_called()
+                killpg.assert_not_called()
+
+    def test_group_signal_requires_the_captured_group_leader(self):
+        with (
+            patch.object(probe, "process_snapshot", return_value={50: self.record()}),
+            patch.object(cleanup_probe.os, "getpgid", return_value=49),
+            patch.object(cleanup_probe.os, "killpg") as killpg,
+        ):
+            with self.assertRaisesRegex(probe.ProbeError, "group is not owned"):
+                cleanup_probe.signal_owned(50, 100, 9, group=True)
+            killpg.assert_not_called()
+
+    def test_live_cleanup_count_ignores_exited_zombies_and_unowned_peers(self):
+        records = {
+            50: self.record(),
+            51: self.record(pid=51, state="Z"),
+            52: self.record(pid=52),
+        }
+        with patch.object(probe, "process_snapshot", return_value=records):
+            self.assertEqual(
+                cleanup_probe.live_identities({(50, 100), (51, 100)}), {(50, 100)}
+            )
+
+
+class CleanupInitializationTests(unittest.TestCase):
+    def test_failed_or_interrupted_initialization_closes_transport_before_reraising(
+        self,
+    ):
+        for error in (
+            probe.ProbeError("Synthetic initialize failure"),
+            KeyboardInterrupt(),
+        ):
+            server = Mock()
+            server.request.side_effect = error
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(probe, "AppServer", return_value=server),
+                patch.object(probe, "cleanup") as cleanup,
+            ):
+                root = Path(directory)
+                with self.assertRaises(type(error)):
+                    cleanup_probe.Connection(root, 1)
+                cleanup.assert_called_once_with(
+                    server, [], set(), root / "artifacts" / "native-browsers", set()
+                )
 
 
 class EphemeralConfigurationTests(unittest.TestCase):

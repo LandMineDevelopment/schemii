@@ -66,6 +66,9 @@ Warm the exact package once, then check the configuration:
 npx --yes --prefer-online @playwright/mcp@0.0.83 --version
 python3 testing/agents/doctor.py --runtime-slots 13 --require-native-browser-config
 python3 testing/agents/verify_browser_isolation.py --clients 12
+python3 testing/agents/verify_browser_cleanup.py
+# Deliberate lifecycle acceptance; takes ten real minutes, outside PR feedback.
+python3 testing/agents/verify_browser_cleanup.py --include-expiry
 ```
 
 The launcher requires `chromium` on PATH and starts the cached package offline.
@@ -107,9 +110,24 @@ finishes. A small connection-owned cleanup process survives that targeted shutdo
 closes all inherited transport descriptors, waits for its recorded supervisor and
 child identities to end, removes only its own output and exits. Normal disconnect
 also reaps that helper. The launcher forwards shutdown only to its own captured
-process group. On later startup it removes only validated orphan sessions whose
+process group and enters bounded cleanup immediately on SIGINT/SIGTERM, escalating
+an ignoring child to SIGKILL after five seconds. Signals cannot interrupt that
+finalizer. On later startup it removes only validated orphan sessions whose
 recorded owners have stopped; active, unknown, symlinked and user-owned directories
 remain untouched. No permanent cleanup service or browser/controller daemon is added.
+
+The cleanup verification uses disposable stock Codex app-servers and ephemeral
+threads, without AI turns, app writes or a replacement browser launcher. It
+exercises normal transport exit, browser-close retention, the 20 MiB soft budget
+including an oversized current image, supervisor and app-server SIGKILL, and
+recovery after the supervisor and guardian both die. A separate live peer stays
+usable throughout. It checks captured PID/start-tick identities, never process
+names, and never manually removes a disposable session directory. The optional
+expiry run waits for a fresh screenshot to age ten real minutes. Keep that long
+run and destructive disposable lifecycle checks outside ordinary CI. Native
+turn interruption still requires an actual coordinator interruption/follow-up;
+the current collaboration surface exposes no session-close control. Neither
+completion nor interruption implies MCP transport shutdown.
 
 With thirteen available slots, twelve children can each own a browser. For manual
 acceptance reserve one of those children for independent review: at most eleven
