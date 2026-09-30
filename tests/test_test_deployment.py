@@ -471,6 +471,7 @@ def test_ci_telemetry_preserves_requested_reporter_and_destination(
     [
         ["--schemii-planted-invalid-option"],
         ["--test-reporter=tap", "--test-reporter=dot"],
+        ["--test-name-pattern=selected", "--test-reporter-destination=destination.tap"],
     ],
 )
 def test_npm_test_preserves_native_invalid_option_errors_before_execution(

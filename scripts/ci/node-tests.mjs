@@ -34,7 +34,7 @@ if (output) {
   const count = option => requested.filter(arg => arg === option || arg.startsWith(`${option}=`)).length;
   const reporters = count('--test-reporter');
   const destinations = count('--test-reporter-destination');
-  if (!reporters) args.push('--test-reporter=spec');
+  if (!reporters && !destinations) args.push('--test-reporter=spec');
   // Node defaults a single human reporter to stdout. Make only that implicit
   // destination explicit when appending telemetry; preserve mismatched reporter
   // and destination counts so invalid requests still fail in the native runner.
