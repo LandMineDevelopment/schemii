@@ -5,7 +5,9 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import time
 
 import pytest
 
@@ -345,6 +347,270 @@ def _step_run(step: str) -> str:
             if line.startswith("          ")
         )
     return value[1]
+
+
+def _node_flag_checkout(tmp_path: Path) -> tuple[list[str], dict[str, str]]:
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    (tmp_path / "package.json").write_text(
+        json.dumps({"type": "module", "scripts": package["scripts"]})
+    )
+    files = []
+    for family in ("tests/frontend", "testing/harness", "scripts/ci", "testing/load"):
+        target = tmp_path / family
+        target.mkdir(parents=True)
+        filename = "flags.test.mjs"
+        files.append(f"{family}/{filename}")
+        (target / filename).write_text(
+            "import { test } from 'node:test';\n"
+            "test('selected', () => {});\n"
+            "test('excluded', () => { throw new Error('planted excluded failure'); });\n"
+        )
+    for filename in ("node-tests.mjs", "node-reporter.mjs", "timing.mjs"):
+        shutil.copyfile(
+            ROOT / "scripts/ci" / filename, tmp_path / "scripts/ci" / filename
+        )
+    env = {
+        key: value for key, value in os.environ.items() if key != "CI_TELEMETRY_FILE"
+    }
+    env.update(
+        CI_TELEMETRY_SHA="a" * 40,
+        CI_TELEMETRY_RUN_ID="1",
+        CI_TELEMETRY_RUN_ATTEMPT="1",
+    )
+    return files, env
+
+
+@pytest.mark.parametrize("instrumented", [False, True])
+def test_npm_test_preserves_requested_name_selection_and_unfiltered_failures(
+    tmp_path: Path, instrumented: bool
+) -> None:
+    files, env = _node_flag_checkout(tmp_path)
+    if instrumented:
+        env["CI_TELEMETRY_FILE"] = "artifacts/node.jsonl"
+    options = ["--test-name-pattern=selected", "--test-reporter=tap"]
+    native = subprocess.run(
+        ["node", "--test", *options, *files],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    selected = subprocess.run(
+        ["npm", "test", "--", *options],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert selected.returncode == native.returncode == 0
+    assert "TAP version 13" in selected.stdout
+    assert re.search(r"^# pass 4$", selected.stdout, re.MULTILINE)
+    assert re.search(r"^# fail 0$", selected.stdout, re.MULTILINE)
+    from scripts.ci.summary import load, summarize
+
+    if instrumented:
+        selected_summary = summarize(load(tmp_path / env["CI_TELEMETRY_FILE"]))
+        assert selected_summary["complete"] is True
+        assert selected_summary["attempt_outcomes"]["passed"] == 4
+        assert selected_summary["attempt_outcomes"]["failed"] == 0
+    unfiltered = subprocess.run(
+        ["npm", "test"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert unfiltered.returncode == 1
+    assert "planted excluded failure" in unfiltered.stdout
+    if instrumented:
+        unfiltered_summary = summarize(load(tmp_path / env["CI_TELEMETRY_FILE"]))
+        assert unfiltered_summary["complete"] is True
+        assert unfiltered_summary["outcome"] == "failed"
+        assert unfiltered_summary["attempt_outcomes"]["failed"] == 4
+
+
+def test_ci_telemetry_preserves_requested_reporter_and_destination(
+    tmp_path: Path,
+) -> None:
+    _, env = _node_flag_checkout(tmp_path)
+    env["CI_TELEMETRY_FILE"] = "artifacts/node.jsonl"
+    destination = tmp_path / "requested reporter.tap"
+    result = subprocess.run(
+        [
+            "npm",
+            "test",
+            "--",
+            "--test-name-pattern",
+            "selected",
+            "--test-reporter",
+            "tap",
+            "--test-reporter-destination",
+            str(destination),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0
+    assert destination.read_text().startswith("TAP version 13\n")
+    assert "TAP version 13" not in result.stdout
+    from scripts.ci.summary import load, summarize
+
+    summary = summarize(load(tmp_path / env["CI_TELEMETRY_FILE"]))
+    assert summary["complete"] is True and summary["attempt_outcomes"]["passed"] == 4
+
+
+@pytest.mark.parametrize("instrumented", [False, True])
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--schemii-planted-invalid-option"],
+        ["--test-reporter=tap", "--test-reporter=dot"],
+    ],
+)
+def test_npm_test_preserves_native_invalid_option_errors_before_execution(
+    tmp_path: Path, instrumented: bool, options: list[str]
+) -> None:
+    files, env = _node_flag_checkout(tmp_path)
+    if instrumented:
+        env["CI_TELEMETRY_FILE"] = "artifacts/node.jsonl"
+    for filename in files:
+        (tmp_path / filename).write_text(
+            "import { writeFileSync } from 'node:fs';\n"
+            "import { test } from 'node:test';\n"
+            "writeFileSync('executed', 'unexpected'); test('selected', () => {});\n"
+        )
+    native = subprocess.run(
+        ["node", "--test", *options, *files],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    canonical = subprocess.run(
+        ["npm", "test", "--", *options],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert canonical.returncode != 0 and native.returncode != 0
+    assert not (tmp_path / "executed").exists()
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        "tests/frontend",
+        "testing/harness",
+        "scripts/ci",
+        "testing/load",
+    ],
+)
+def test_node_discovery_rejects_present_empty_families(
+    tmp_path: Path, family: str
+) -> None:
+    files, env = _node_flag_checkout(tmp_path)
+    for filename in files:
+        path = tmp_path / filename
+        if path.parent == tmp_path / family:
+            path.unlink()
+        else:
+            path.write_text(
+                "throw new Error('Discovery must finish before execution');\n"
+            )
+    result = subprocess.run(
+        ["npm", "test"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode != 0
+    assert f"No deterministic Node tests discovered in {family}" in result.stderr
+    assert "Discovery must finish before execution" not in result.stdout + result.stderr
+
+
+def _process_active(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+@pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM])
+def test_node_runner_cancellation_stops_owned_child_and_keeps_incomplete_evidence(
+    tmp_path: Path, stop_signal: int
+) -> None:
+    files, env = _node_flag_checkout(tmp_path)
+    env["CI_TELEMETRY_FILE"] = "artifacts/node.jsonl"
+    for filename in files:
+        (tmp_path / filename).write_text(
+            "import { test } from 'node:test'; test('selected', () => {});\n"
+        )
+    (tmp_path / files[0]).write_text(
+        "import { test } from 'node:test'; import { writeFileSync } from 'node:fs';\n"
+        "test('selected', () => {});\n"
+        "test('waiting', async () => { writeFileSync('owned-child-pid', String(process.pid));"
+        "setInterval(() => {}, 1000); await new Promise(() => {}); });\n"
+    )
+    process = subprocess.Popen(
+        ["node", "scripts/ci/node-tests.mjs", "--test-reporter=tap"],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        marker = tmp_path / "owned-child-pid"
+        output = tmp_path / env["CI_TELEMETRY_FILE"]
+        while time.monotonic() < deadline:
+            if (
+                marker.exists()
+                and output.exists()
+                and '"kind":"attempt"' in output.read_text()
+            ):
+                child_pid = int(marker.read_text())
+                break
+            assert process.poll() is None, (
+                "Planted waiting test must reach cancellation"
+            )
+            time.sleep(0.02)
+        assert child_pid is not None
+        process.send_signal(stop_signal)
+        process.communicate(timeout=5)
+        assert process.returncode != 0
+        deadline = time.monotonic() + 2
+        while _process_active(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _process_active(child_pid), (
+            "Runner must stop its owned test child automatically"
+        )
+        from scripts.ci.summary import load, summarize
+
+        summary = summarize(load(output))
+        assert summary["complete"] is False
+        assert summary["attempt_outcomes"]["passed"] >= 1
+    finally:
+        # Bound an unsuccessful planted regression to its own process group;
+        # automatic cleanup assertions above run before this fallback.
+        if process.poll() is None or (
+            child_pid is not None and _process_active(child_pid)
+        ):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=5)
 
 
 @pytest.mark.parametrize("include_load", [False, True])

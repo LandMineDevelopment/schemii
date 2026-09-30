@@ -57,6 +57,21 @@ defect; distinguish source/package contracts from visible behavior guarantees.
 
 ## Public CI timing and evidence policy
 
+`npm test` uses one deterministic discovery path for frontend, harness, telemetry
+and available load-unit tests. Each required family, and any present optional
+load family, must contain tests; an absent load family remains supported while
+that work lands. Browser acceptance and stress execution files stay outside this
+command. `npm test -- <Node options>` forwards the original argument array before
+the discovered files, including name selection, reporters and destinations.
+Instrumentation adds its sanitized reporter alongside the requested reporter,
+preserving native unknown-option and reporter/destination mismatch errors.
+A focused name-filter receipt describes only that selected inventory; ordinary
+unfiltered CI remains the full deterministic lane. Controlled four-family checks
+prove excluded body failures are not executed with a matching name filter and
+still fail the unfiltered command, both with and without instrumentation.
+SIGINT/SIGTERM checks verify the runner stops its owned waiting test process and
+retains passing receipts as incomplete cancellation evidence.
+
 GitHub Actions artifacts for this public repository are public evidence. Each
 Node, Python, PostgreSQL and browser lane emits JSONL with a fixed schema: source
 SHA, numeric run/attempt, fixed lane/project/shard labels, hashed test and source
