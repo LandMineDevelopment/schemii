@@ -294,11 +294,14 @@ export function recordReview(run, reviewer, target, scenarioId, input) {
 export function acceptance(run) {
   const testers = run.lanes.filter(lane => lane.role !== 'reviewer');
   const reasons = [];
+  let reviewed = 0;
   if(run.recordingStatus === 'unavailable')reasons.push('evidence recording unavailable');
   for (const lane of testers) for (const scenario of lane.scenarios) {
     const attempt = scenario.attempts?.at(-1);
     if (scenario.functional !== 'passed' || scenario.visual !== 'passed') reasons.push(`${lane.id}/${scenario.id}: execution gap`);
-    if (!attempt?.id || !(run.reviews || []).some(review => review.targetLane === lane.id && review.scenario === scenario.id && review.attempt === attempt.id && review.source === run.deployment?.identity?.fingerprint && review.verdict === 'accepted' && review.agent !== lane.agent)) reasons.push(`${lane.id}/${scenario.id}: independent review pending`);
+    const review = attempt?.id ? (run.reviews || []).filter(review => review.targetLane === lane.id && review.scenario === scenario.id && review.attempt === attempt.id && review.source === run.deployment?.identity?.fingerprint && review.agent !== lane.agent).at(-1) : null;
+    if (review?.verdict === 'accepted') reviewed++;
+    else reasons.push(`${lane.id}/${scenario.id}: independent review pending${review ? ` (${review.verdict})` : ''}`);
   }
   for (const finding of run.findings || []) {
     if (!finding.reviews?.length || finding.verificationStatus === 'unverified') reasons.push(`${finding.id}: finding adjudication pending`);
@@ -306,5 +309,5 @@ export function acceptance(run) {
   }
   if (nativeMode(run)) for (const lane of testers) if(!lane.native?.authentication || lane.native.authentication.source !== run.deployment?.identity?.fingerprint)reasons.push(`${lane.id}: native authenticated UI observation pending`);
   if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed')) reasons.push(`${lane.id}: native transport cleanup pending`);
-  return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0), completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0), reviewed: (run.reviews || []).filter(review => review.verdict === 'accepted').length };
+  return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0), completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0), reviewed };
 }

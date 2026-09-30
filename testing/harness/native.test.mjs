@@ -205,3 +205,15 @@ test('registered linked checkout output roots are accepted; arbitrary roots are 
   const {root}=await import('./store.mjs');
   assert.ok(nativeBrowserRoots(root).includes(join(root,'artifacts/native-browsers')));
 });
+
+
+test('latest current-attempt review governs acceptance; duplicate receipts never inflate reviewed cases',()=>{
+  const f=attemptedFixture();inspectionReceipt(f.capture,f.reviewer.agent,{tool:'view_image',invocation:'review image',note:'Expected canvas; actual canvas.'});
+  const input={verdict:'accepted',note:'Independent expected/actual match.'};
+  recordReview(f.run,f.reviewer,f.lane,f.scenario.id,input);
+  recordReview(f.run,f.reviewer,f.lane,f.scenario.id,input);
+  assert.equal(acceptance(f.run).reviewed,1);assert.equal(acceptance(f.run).intended,1);
+  recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'confirmed-defect',note:'Later independent reproduction reveals a defect.'});
+  assert.equal(acceptance(f.run).status,'review-pending');assert.equal(acceptance(f.run).reviewed,0);
+  assert.match(acceptance(f.run).reasons.join(),/confirmed-defect/);
+});
