@@ -7,6 +7,15 @@ application or opt-in load/browser work. CI runs the Node checks before Python
 setup. Dispatch delay and setup time still contribute to hosted feedback; the
 30-second early-feedback target requires an ordinary hosted run, not a local claim.
 
+Local and CI Node execution share `npm test` and the single discovery runner
+`scripts/ci/node-tests.mjs`. It selects deterministic `.test.js`/`.test.mjs` files
+from frontend, harness, telemetry and the load-unit family when that family is
+present. Browser specs and executable load scenarios are excluded. Setting
+`CI_TELEMETRY_FILE` adds the approved reporters before the selected file arguments
+without changing discovery; there is no second CI test-glob list. The deployment
+contract check executes the actual CI command in a temporary four-family checkout
+and checks unique receipts, with planted opt-in files that fail if selected.
+
 ## Focused inventory
 
 Costs below are audit observations at the referenced baseline, not current
@@ -45,3 +54,92 @@ Full capacity ramps/soaks in #135/#136 stay outside the normal PR feedback path.
 Do not remove meaningful coverage, increase skips/timeouts or add retries to
 conceal failures. Prefer a cheaper oracle only when it detects the same plausible
 defect; distinguish source/package contracts from visible behavior guarantees.
+
+## Public CI timing and evidence policy
+
+`npm test` uses one deterministic discovery path for frontend, harness, telemetry
+and available load-unit tests. Each required family, and any present optional
+load family, must contain tests; an absent load family remains supported while
+that work lands. Browser acceptance and stress execution files stay outside this
+command. `npm test -- <Node options>` forwards the original argument array before
+the discovered files, including name selection, reporters and destinations.
+Instrumentation adds its sanitized reporter alongside the requested reporter,
+preserving native unknown-option and reporter/destination mismatch errors.
+A focused name-filter receipt describes only that selected inventory; ordinary
+unfiltered CI remains the full deterministic lane. Controlled four-family checks
+prove excluded body failures are not executed with a matching name filter and
+still fail the unfiltered command, both with and without instrumentation.
+SIGINT/SIGTERM checks verify the runner stops its owned waiting test process and
+retains passing receipts as incomplete cancellation evidence.
+
+GitHub Actions artifacts for this public repository are public evidence. Each
+Node, Python, PostgreSQL and browser lane emits JSONL with a fixed schema: source
+SHA, numeric run/attempt, fixed lane/project/shard labels, hashed test and source
+identities, source line, attempt, outcome and phase durations. Titles, parameter
+labels, arbitrary skip reasons, errors, stdout/stderr, request/response content,
+fixture objects and environment values are never serialized. Hash identities can
+be matched to the checked-out test inventory without publishing dynamic titles.
+Skip metadata says `declared-or-runtime`; prerequisites remain in the test source.
+
+Before upload, `scripts/ci/summary.py` validates every record's exact fields and
+types, duplicate/missing attempts and plan completeness. Upload steps point only
+at the validated JSONL and derived summary, with seven-day retention. A failed
+validation blocks that artifact. The previous whole Playwright-results/HTML
+upload is removed: traces, screenshots, raw logs, storage-state, cookies,
+Authorization headers, provider keys and fixture secrets are not approved public
+artifacts. Existing trace-disabled sensitive tests retain their policy. Sanitized
+failed-attempt receipts remain available when a retry makes the job green.
+
+Python reports setup, test-body and teardown durations independently. Playwright
+counts only top-level Before/After Hook steps; nested durations overlap and are
+not added twice. Node exposes test durations and whole-run elapsed time, without
+a distinct per-fixture setup API. Node tests execute concurrently, so summed test
+durations can exceed elapsed time; do not subtract their sum to infer overhead.
+The Actions rollup uses job/step timestamps for launcher startup, test steps and
+remaining setup/other time, workflow dispatch delay, start delay after workflow
+start, critical path and total job-minutes. GitHub timestamps do not isolate pure
+runner queue time from scheduling/dependencies; `after_workflow_start_ms` retains
+that limitation explicitly.
+
+The rollup validates downloaded timing records again and requires all seven
+test lanes, one source/run/attempt cohort, all expected jobs and complete test
+lifecycle records. Missing shards/footers, cancelled or unstarted cases and API
+collection failure mark it incomplete. A failed-but-fully-observed attempt remains
+distinct from an incomplete run. First-attempt rate excludes skips/cancelled/
+unstarted cases; retry recovery retains the original failed attempt in its
+denominator. Expected-failure tests retain their actual failed status.
+
+Terminal ownership is authoritative even after all test receipts passed. A lane
+is complete only with a nonempty discovered inventory, an ending `passed` or
+`failed` status, every planned case observed and no cancelled/unstarted cases.
+Terminal cancellation, timeout, `collection-error` and `error` remain incomplete;
+their observed passing attempts are retained without establishing acceptance.
+Pytest collection reports distinguish import/collection failures from human
+interruption because both otherwise use exit code 2. Collection failures remain
+`collection-error` when explicitly continuing to execute valid collected cases.
+Only fixed error categories are published; exception text and fixture values are
+excluded. Hash identities require JSON strings of the exact length and format,
+so integer lookalikes cannot pass artifact validation.
+Node failed file-bootstrap wrappers similarly set terminal `error` outside the
+individual test denominator; undiscovered cases in an unloadable file cannot be
+treated as complete even when another file's tests all pass. Ordinary observed
+assertion failures keep their failed-attempt records and terminal `failed` status.
+Playwright global setup/teardown or runner errors set terminal `error` through
+its lifecycle error hook, retaining passed attempts without claiming completion.
+
+Reliability sampling uses the next ten naturally occurring comparable source
+runs, including first-attempt failures. Record canceled/incomplete runs and
+changed test inventories as exclusions; successful complete-run duration is a
+separate cohort. No artificial reruns populate this sample. Any retry recovery
+is a triage signal with the test identity, first-attempt status and timing; keep
+the existing retry policy while identifying and fixing the actual cause.
+
+Local verification on Python 3.14.7 / Node 25.2.1 used secret sentinels in failure
+messages, titles, skip reasons, fixture values, attachments and API payloads.
+The real Playwright runner synthetic retry/pass/fail/skip test starts no browser
+or application; it is additionally runnable after `npm ci`. The reporter-free
+398-case Node run took 664.7ms; the instrumented run took 1,028.6ms and wrote
+228,822 bytes (~224 KiB). These single observations on a shared host suggest
+~364ms overhead, not a percentile or controlled benchmark. The 12-case fixture
+subset emitted 7,319 bytes and completed in 0.05s with Python timing enabled.
+Hosted Python 3.12 / Node 22 behavior and ordinary-run overhead remain CI checks.
