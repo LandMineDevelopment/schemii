@@ -3,6 +3,8 @@
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import sys
 
@@ -114,6 +116,92 @@ def report_workflow(root, event, base, head):
         validated.returncode,
         json.loads(output.read_text()),
     )
+
+
+@pytest.mark.parametrize("path,lane", [("src/app.py", "source"), (REPORT, "reports")])
+def test_workflow_checkout_runs_base_added_classifier_for_an_existing_pr(
+    repository, path, lane
+):
+    root, fork = repository
+    command(root, "checkout", "--quiet", "-b", "existing-pr")
+    write(root, path, "# Existing PR change\n")
+    head = commit(root)
+    assert not (root / "scripts/ci/classify_changes.py").exists()
+
+    command(root, "checkout", "--quiet", "main")
+    for file in ("scripts/ci/classify_changes.py", ".github/workflows/ci.yml"):
+        write(root, file, (ROOT / file).read_text())
+    write(root, "src/base-only.py", "# Unrelated base advance\n")
+    base = commit(root)
+    command(root, "merge", "--quiet", "--no-ff", head, "-m", "prospective PR merge")
+    merge = command(root, "rev-parse", "HEAD")
+    assert command(root, "rev-list", "--parents", "-n", "1", merge).split() == [
+        merge,
+        base,
+        head,
+    ]
+
+    # Read the actual merged workflow, not a duplicated checkout/command choice.
+    workflow = (root / ".github/workflows/ci.yml").read_text()
+    job = re.search(r"(?ms)^  classify:\n(.*?)(?=^  [\w-]+:|\Z)", workflow)[1]
+    checkout = re.search(
+        r"(?m)^      - uses: actions/checkout@v4\n((?:^        .*\n)*)", job
+    )[1]
+    options = dict(re.findall(r"(?m)^          ([\w-]+): (.+)$", checkout))
+    assert options["fetch-depth"] == "0"
+    revisions = {
+        "": merge,  # actions/checkout defaults to the triggering github.sha.
+        "${{ github.sha }}": merge,
+        "${{ github.event.pull_request.head.sha || github.sha }}": head,
+    }
+    assert options.get("ref", "") in revisions
+    revision = revisions[options.get("ref", "")]
+    args = shlex.split(re.search(r"(?m)^        run: (.+)$", job)[1])
+    assert args[:2] == ["python3", "scripts/ci/classify_changes.py"]
+    args[:1] = [sys.executable, "-S"]
+    output = root / args[args.index("--output") + 1]
+    event = root / "event.json"
+    event.write_text(
+        json.dumps({"pull_request": {"base": {"sha": base}, "head": {"sha": head}}})
+    )
+    env = {
+        **os.environ,
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_EVENT_PATH": str(event),
+        "GITHUB_SHA": merge,
+        "GITHUB_OUTPUT": str(root / "github-output"),
+    }
+
+    command(root, "checkout", "--quiet", "--detach", head)
+    broken = subprocess.run(
+        args, cwd=root, env=env, capture_output=True, text=True, timeout=10
+    )
+    assert broken.returncode == 2 and "No such file or directory" in broken.stderr
+    assert not output.exists()
+
+    command(root, "checkout", "--quiet", "--detach", revision)
+    corrected = subprocess.run(
+        args, cwd=root, env=env, capture_output=True, text=True, timeout=10
+    )
+    assert corrected.returncode == 0, corrected.stdout + corrected.stderr
+    result = load_classification(output)
+    assert command(root, "rev-parse", "HEAD") == merge
+    assert result["valid"] and result["lane"] == lane
+    assert result["base"] == base and result["head"] == head
+    assert result["comparison_base"] == fork
+    assert result["markdown"] == ([REPORT] if lane == "reports" else [])
+
+    # Having the control script at the merge cannot excuse a missing event ref.
+    for missing in ("base", "head"):
+        payload = {"base": {"sha": base}, "head": {"sha": head}}
+        payload[missing]["sha"] = "0" * 40
+        event.write_text(json.dumps({"pull_request": payload}))
+        rejected = subprocess.run(
+            args, cwd=root, env=env, capture_output=True, text=True, timeout=10
+        )
+        invalid = load_classification(output)
+        assert rejected.returncode == 1 and invalid["valid"] is False
+        assert invalid["lane"] == "source" and invalid["markdown"] == []
 
 
 @pytest.mark.parametrize("event", ["push", "pull_request"])
