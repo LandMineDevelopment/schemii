@@ -729,7 +729,14 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
 
     python_step = _named_step(unit, "Deterministic Python behavior")
     python_args = shlex.split(_step_run(python_step))
-    assert python_args[:3] == ["python", "-m", "pytest"]
+    assert python_args == [
+        "python",
+        "scripts/ci/python-tests.py",
+        "${{",
+        "needs.classify.outputs.python_paths",
+        "}}",
+    ]
+    # Empty paths mean complete discovery; fixed tooling arguments are selected by classifier.
     assert not any(
         argument.split("=", 1)[0]
         in {"-k", "-m", "--collect-only", "--ignore", "--deselect"}
@@ -765,7 +772,7 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
         "node",
         "scripts/ci/run-browser-shard.mjs",
         "--project=desktop-chromium",
-        "--shard=1/2",
+        "--shard=1/3",
     ]
     discovery = _named_step(browser, "Verify browser discovery and shard coverage")
     assert shlex.split(_step_run(discovery)) == [

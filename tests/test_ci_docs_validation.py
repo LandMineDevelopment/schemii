@@ -152,8 +152,9 @@ def test_standard_library_cli_records_failure_and_duration_without_application_d
     classification.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "lane": "source",
+                "profile": "full",
                 "valid": True,
                 "reason": "full-validation",
                 "base": "a" * 40,

@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { balanceFiles, OBSERVATION, PROJECTS, validateFile } from './browser-shards.mjs';
+import { balanceFiles, OBSERVATION, PROJECTS, validateFile, validateShardCount } from './browser-shards.mjs';
 
 const cli = resolve(fileURLToPath(new URL('../../node_modules/@playwright/test/cli.js', import.meta.url)));
 
@@ -19,9 +19,17 @@ export function inventoryFiles(report, cwd) {
   return [...files].sort();
 }
 
-export function invocation(project, files, shard, list, environment = process.env) {
-  if (!PROJECTS.includes(project) || ![1, 2].includes(shard) || !files.length) {
-    throw new Error('Invalid or empty browser shard');
+function validateShard(project, shard, shardCount) {
+  validateShardCount(shardCount);
+  if (!PROJECTS.includes(project) || !Number.isInteger(shard) || shard < 1 || shard > shardCount) {
+    throw new Error('Invalid browser project or shard index');
+  }
+}
+
+export function invocation(project, files, shard, list, environment = process.env, shardCount = 2) {
+  validateShard(project, shard, shardCount);
+  if (!Array.isArray(files) || !files.length || new Set(files).size !== files.length) {
+    throw new Error('Browser shard files must be nonempty and unique');
   }
   files.forEach(validateFile);
   return {
@@ -37,20 +45,22 @@ export function invocation(project, files, shard, list, environment = process.en
 }
 
 export function run(options, cwd = process.cwd()) {
+  const { shardCount = 2 } = options;
+  validateShard(options.project, options.shard, shardCount);
   const environment = { ...process.env };
   delete environment.SCHEMII_E2E_FILE_MANIFEST;
   const discovered = spawnSync(process.execPath,
     [cli, 'test', `--project=${options.project}`, '--list', '--reporter=json'],
     { cwd, env: environment, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   if (discovered.error || discovered.status !== 0) throw new Error('Playwright discovery failed');
-  const plan = balanceFiles(inventoryFiles(JSON.parse(discovered.stdout), cwd), options.project);
+  const plan = balanceFiles(inventoryFiles(JSON.parse(discovered.stdout), cwd), options.project, undefined, shardCount);
   const selected = plan.shards[options.shard - 1];
   if (options.plan) {
-    console.log(JSON.stringify({ project: options.project, shard: options.shard,
+    console.log(JSON.stringify({ project: options.project, shard: options.shard, shardCount,
       observation: OBSERVATION, ...selected, unknownFiles: plan.unknownFiles }));
     return 0;
   }
-  const command = invocation(options.project, selected.files, options.shard, options.list, environment);
+  const command = invocation(options.project, selected.files, options.shard, options.list, environment, shardCount);
   const result = spawnSync(command.command, command.args,
     { cwd, env: command.env, stdio: 'inherit' });
   if (result.error) throw new Error('Browser runner could not start');
@@ -63,12 +73,16 @@ export function parseOptions(args) {
     if (argument === '--list') options.list = true;
     else if (argument === '--plan') options.plan = true;
     else if (argument.startsWith('--project=') && !options.project) options.project = argument.slice(10);
-    else if (/^--shard=[12]\/2$/.test(argument) && !options.shard) options.shard = Number(argument[8]);
-    else throw new Error('Use --project=PROFILE --shard=1/2 or 2/2, optionally --plan or --list');
+    else if (/^--shard=[1-3]\/[23]$/.test(argument) && !options.shard) {
+      const [current, total] = argument.slice(8).split('/').map(Number);
+      options.shard = current;
+      // Keep the existing exported two-way options shape and default intact.
+      if (total !== 2) options.shardCount = total;
+    }
+    else throw new Error('Use --project=PROFILE --shard=CURRENT/2 or CURRENT/3, optionally --plan or --list');
   }
-  if (!PROJECTS.includes(options.project) || !options.shard || (options.plan && options.list)) {
-    throw new Error('A supported project and exactly one of the two shards are required');
-  }
+  validateShard(options.project, options.shard, options.shardCount ?? 2);
+  if (options.plan && options.list) throw new Error('Choose only one of --plan or --list');
   return options;
 }
 

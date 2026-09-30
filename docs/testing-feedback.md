@@ -38,8 +38,53 @@ substitute for a focused regression or a faithful controlled failure.
    Node/Python commands and the required source CI layers. A narrow selection
    is feedback during development, not permission to omit acceptance.
 
-No additional selector or dependency is needed: these are the existing supported
-commands, and the same Node runner owns local and hosted discovery.
+Use `python scripts/test-changes.py --base origin/main` to print the actual
+Git comparison, committed changed paths, staged/dirty/untracked status and all
+required commands. `--run` executes them and stops on the first failure. Dirty,
+staged or untracked work conservatively selects full checks; it never disappears
+from the plan. Full real-database checks require `SCHEMII_TEST_METADATA_DSN`.
+Browser checks require explicitly owned account credentials or bootstrap consent;
+missing prerequisites stop execution with the real layers still pending. The
+application command remains `./start.sh`; deployment leases still apply.
+
+## Affected PR acceptance
+
+A strict schema-2 descriptor selects one reviewed profile from the complete
+PR merge-base-to-head diff. Only modifications to frozen existing regular files
+with unchanged modes qualify; new siblings, shared helpers, mixed families,
+renames, deletions, symlinks, dependencies, startup, CI policy and every product
+source change select full acceptance. Source/test/tooling pushes to main and
+manual dispatch run full acceptance. The existing positively verified audit
+report shortcut remains available on both PRs and main.
+
+| PR profile | Required checks |
+| --- | --- |
+| native tooling | Node, static Python, all native Python controls |
+| harness or load tooling | Node, static Python, native + harness + load-planner Python closure |
+| existing backend test leaves | Node, static Python, complete deterministic Python |
+| existing frontend test leaves | complete Node |
+| existing E2E test leaves | Node and complete desktop + Android browser acceptance |
+| full | Node, static Python, complete Python, real PostgreSQL and all browser acceptance |
+
+The exact path lists and closures live in
+[scripts/ci/test_selection.py](../scripts/ci/test_selection.py). This first mapping
+accelerates tooling and test-only PRs; product changes retain full acceptance.
+Complete CI Python uses `python scripts/ci/python-tests.py`: two isolated processes
+keep the inspection fixture consumers together and all other discovery in the
+other process, merging one strict canonical receipt. Explicit tooling arguments
+use the same runner. Browser acceptance uses three isolated hosted application
+stacks per device, retaining serialized whole-file execution and every case.
+The gate derives exact expected jobs and receipt lanes from the profile, requires
+selected layers to succeed, and requires excluded workflow needs to be skipped.
+Missing/duplicate/stale/failed/recovered selected receipts cannot pass; full and
+browser profiles require all six browser legs. Unknown step time remains `null`.
+
+For scale only, natural main run 36763414216 attempt 1 took 474 seconds to its
+source critical path: unit wall 258 seconds and browser walls 354–457 seconds.
+Omitting its PostgreSQL and four browser jobs would remove 29.167 job-minutes;
+retaining its unchanged unit job would imply a 277-second source path. This is
+an estimate from old job boundaries, not measured selective-CI speed. Fresh
+ordinary full and selected PR runs must establish actual elapsed savings.
 
 ## Ordinary hosted cost reference
 
@@ -86,11 +131,23 @@ under `testing/`; the original omitted provisioning inventory is 30 of those.
 Counts grow as focused regressions land. Report collected, executed and skipped
 counts together; PostgreSQL skips do not prove database behavior.
 
-## Broad pre-merge acceptance
+## Pre-merge acceptance and reuse
 
-Run the full Node and default Python commands, incremental Python static quality
-against the intended change base, the explicitly configured real PostgreSQL
-integration job, and the assembled browser matrix. Browser CI uses the canonical
+Use the complete change plan and the current PR's selected profile. Inspect
+existing checks and their actual source-bound receipts before running acceptance;
+the coordinator schedules missing work once. A new agent, review, handoff, worktree
+or merge does not require another local full suite or a manually dispatched CI run.
+Independent review examines actual evidence and reproduces material findings or
+gaps with focused controls. Record commands, scope, tested source, outcomes and
+evidence locations; distinguish inspected evidence from checks you actually ran.
+Relevant source changes, failures and missing/stale evidence justify fresh checks.
+Passing required hosted checks must belong to the current PR head; preserve failed
+attempts and let GitHub schedule required PR/main acceptance automatically.
+
+For a full profile, acceptance comprises Node and complete Python, incremental
+Python quality against the intended base, explicitly configured real PostgreSQL
+and all six browser legs. A narrower reviewed profile omits only its documented
+unrelated layers. Browser CI uses the canonical
 HTTPS stack through `./start.sh`; it does not replace manual native-agent UI
 acceptance in #73/#137. Backup recovery remains an isolated-database check.
 Live provider/report specs require their own authenticated fixture prerequisites;
@@ -156,8 +213,8 @@ job wall, outcomes and independently measured phases remain available. Missing
 phase measurements do not replace the complete job/test outcome and identity
 requirements of the acceptance gate.
 
-The rollup validates downloaded timing records again and requires all seven
-test lanes, one source/run/attempt cohort, all expected jobs and complete test
+The rollup validates downloaded timing records again and requires the exact selected
+test lanes (nine for full acceptance), one source/run/attempt cohort, all expected jobs and complete test
 lifecycle records. Missing shards/footers, cancelled or unstarted cases and API
 collection failure mark it incomplete. A failed-but-fully-observed attempt remains
 distinct from an incomplete run. First-attempt rate excludes skips/cancelled/

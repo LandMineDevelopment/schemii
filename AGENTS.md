@@ -17,6 +17,30 @@ These requirements are mandatory for every agent and every session in this repos
 
 The launcher may use Docker on the host as an implementation detail. Application containers must never receive the Docker socket.
 
+## Testing and verification reuse
+
+Read [the testing feedback policy](docs/testing-feedback.md) before choosing checks.
+Inspect the current PR head, existing checks and retained evidence before running
+tests. Use `python scripts/test-changes.py --base origin/main` for the complete
+change plan; choose the cheapest faithful regression for the edit during development.
+The planner conservatively falls back to full acceptance for unknown or dirty work;
+that does not require repeating every acceptance layer after each edit.
+
+The coordinator owns acceptance scheduling. Assign developers focused checks and
+reviewers evidence inspection, with reproduction only for a material gap or finding.
+Record the command, scope, source, outcome and evidence location. Reuse successful
+checks whose tested source is still applicable; verify required hosted checks against
+the current PR head before merging. A new agent, handoff, review, worktree or merge
+is not a reason to repeat a local full suite or manually dispatch/rerun CI. Broaden
+or repeat checks only for relevant source changes, failures, missing evidence or an
+explicit acceptance requirement. Preserve failed attempts; do not retry them away.
+
+GitHub schedules required PR/main checks automatically. Respect its selected
+profile and strict gate; do not bypass them or launch duplicate runs for samples.
+Keep full stress campaigns and ten-minute browser cleanup probes outside ordinary
+feedback unless their ownership boundary changed or deliberate lifecycle acceptance
+is assigned. Test/CI/instruction-only changes do not require an application rebuild.
+
 ## Manual UI QA
 
 For coordinated or parallel UI testing, read `testing/README.md` and `testing/harness/README.md` and use `./test.sh`.
