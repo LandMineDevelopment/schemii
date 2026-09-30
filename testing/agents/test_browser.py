@@ -553,11 +553,19 @@ browser.subprocess.Popen.wait = observed_wait
 original_guard = browser._guard_session
 def observed_guard(session):
     original_sleep = browser.time.sleep
+    original_birth_tick = browser.process_birth_tick
+    observed_owners = {{}}
+    def observed_birth_tick(pid):
+        tick = original_birth_tick(pid)
+        if pid in (session.metadata['pid'], session.metadata['child_pid']):
+            observed_owners[pid] = tick
+        return tick
+    browser.process_birth_tick = observed_birth_tick
     def observed_poll(seconds):
         if seconds != 1:
             raise AssertionError('Production guardian polling policy changed')
-        if (browser.process_birth_tick(session.metadata['pid']) is None
-            and browser.process_birth_tick(session.metadata['child_pid'])
+        if (observed_owners.get(session.metadata['pid'], -1) is None
+            and observed_owners.get(session.metadata['child_pid'])
                 == session.metadata['child_birth_tick']):
             # This acknowledgment occurs after the actual guardian's ownership
             # decision, while the captured stdio child still holds its context.
@@ -569,6 +577,7 @@ def observed_guard(session):
                     'child_pid': session.metadata['child_pid'],
                     'child_birth_tick': session.metadata['child_birth_tick']}}))
                 temporary.replace(observed)
+        observed_owners.clear()
         original_sleep(0.02)
     browser.time.sleep = observed_poll
     original_guard(session)
