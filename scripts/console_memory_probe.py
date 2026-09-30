@@ -207,6 +207,7 @@ def named_latency(args: argparse.Namespace) -> None:
     import psycopg
     from psycopg import pq
     from schemii.common.postgres.console.gateway import PsycopgConsoleReadSession
+    from schemii.common.postgres.console.execution import json_console_value
 
     measurements = []
     modes = ("one-row-reference", "bounded-fixed", "old-batch-reference")
@@ -227,10 +228,6 @@ def named_latency(args: argparse.Namespace) -> None:
                 reader = session._readers[0]
                 if mode == "one-row-reference":
                     reader.fixed_row_memory_bytes = None
-                elif mode == "old-batch-reference":
-                    # All 1,000 integer rows fit; faithfully reproduce the old
-                    # row-count FETCH while retaining identical conversion.
-                    reader.fixed_row_memory_bytes = 1
                 fetch_sizes = []
 
                 class CountedCursor:
@@ -245,7 +242,28 @@ def named_latency(args: argparse.Namespace) -> None:
                 reader.cursor = CountedCursor()
                 try:
                     started = time.perf_counter()
-                    page = session.page(0, 0, 1000)
+                    if mode == "old-batch-reference":
+                        # Faithful 77af33c boundary: one FETCH then a straight
+                        # conversion/byte-check loop, without new carry costs.
+                        raw_rows = reader.cursor.fetchmany(1000)
+                        rows = []
+                        used_bytes = 0
+                        for raw_row in raw_rows:
+                            converted = tuple(
+                                json_console_value(value, maximum_bytes=args.cell_bytes)
+                                for value in raw_row
+                            )
+                            row_bytes = len(
+                                json.dumps(converted, ensure_ascii=False).encode(
+                                    "utf-8"
+                                )
+                            )
+                            assert used_bytes + row_bytes <= args.page_bytes
+                            rows.append(converted)
+                            used_bytes += row_bytes
+                        page = tuple(rows)
+                    else:
+                        page = session.page(0, 0, 1000)
                     elapsed = time.perf_counter() - started
                     assert len(page) == 1000 and sum(row[0] for row in page) == 500500
                     measurements.append(

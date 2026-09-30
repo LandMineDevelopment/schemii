@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
@@ -251,7 +252,7 @@ class PsycopgConsoleReadSession:
     ) -> tuple[tuple[Any, ...], ...]:
         cursor = reader.export_cursor if export else reader.cursor
         position = reader.export_position if export else reader.position
-        pending = reader.export_pending if export else reader.pending
+        pending = deque(reader.export_pending if export else reader.pending)
         if cursor is None:
             if not export or reader.statement is None:
                 return reader.rows[offset : offset + page_size]
@@ -265,10 +266,7 @@ class PsycopgConsoleReadSession:
         used_bytes = 0
         remaining: tuple[tuple[Any, ...], ...] = ()
         while len(rows) < page_size:
-            if pending:
-                raw_row, *tail = pending
-                pending = tuple(tail)
-            else:
+            if not pending:
                 # Unknown/variable-width rows may already exceed the byte cap
                 # before decoding, so receive only one. Trusted fixed scalars can
                 # batch from their conservative native/Python/JSON allowance.
@@ -279,15 +277,15 @@ class PsycopgConsoleReadSession:
                 batch = cursor.fetchmany(size)
                 if not batch:
                     break
-                raw_row, *tail = batch
-                pending = tuple(tail)
+                pending.extend(batch)
+            raw_row = pending.popleft()
             converted = tuple(
                 json_console_value(value, maximum_bytes=self._maximum_cell_bytes)
                 for value in raw_row
             )
             row_bytes = len(json.dumps(converted, ensure_ascii=False).encode("utf-8"))
             if rows and used_bytes + row_bytes > self._page_memory_bytes:
-                remaining = (tuple(raw_row),) + pending
+                remaining = (tuple(raw_row),) + tuple(pending)
                 break
             if row_bytes > self._page_memory_bytes:
                 raise PostgresConsoleLimitError(
@@ -301,7 +299,7 @@ class PsycopgConsoleReadSession:
             rows.append(converted)
             used_bytes += row_bytes
         if not remaining:
-            remaining = pending
+            remaining = tuple(pending)
         if export:
             reader.export_position += len(rows)
             reader.export_pending = remaining
