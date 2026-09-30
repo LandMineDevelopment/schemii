@@ -153,6 +153,66 @@ export function renewWorkerLease(lane, event, now = new Date().toISOString()) {
   return true;
 }
 
+const matchesWorker = (owner, receipt) => owner && owner.pid === receipt.pid && owner.birthTick === receipt.birthTick
+  && (owner.generation === undefined || owner.generation === receipt.generation);
+function lifecycleFor(lane, owner) {
+  const previous = lane.workerLifecycle;
+  if (previous?.generation === owner.generation && (!previous.worker || matchesWorker(previous.worker,owner))) return previous;
+  // A newer actor retains earlier obligations; acceptance checks that history.
+  if (previous) { lane.workerLifecycleHistory ||= [];lane.workerLifecycleHistory.push(previous); }
+  return lane.workerLifecycle = {status:'cleanup-pending',reason:'worker-exit',agent:lane.agent,generation:owner.generation,
+    worker:{pid:owner.pid,birthTick:owner.birthTick,generation:owner.generation},workerCleanup:'pending',browserCleanup:'pending',reservation:'retained-for-recovery'};
+}
+function completeWorkerCleanup(lane, lifecycle) {
+  if (lifecycle.workerCleanup === 'stopped' && lifecycle.browserCleanup === 'closed-observed'
+      && lifecycle.recording !== 'unavailable' && lane.workerRecording !== 'unavailable') {
+    lifecycle.status='stopped';lifecycle.stoppedAt=new Date().toISOString();
+  }
+}
+/** Apply only receipts from this recorded owner; retain delayed history. */
+export function recordWorkerExit(lane, result) {
+  const owner = lane.worker || lane.workerLifecycle?.worker;
+  const previous = lane.workerExit;
+  const launching=lane.workerLaunchPending && result.generation===lane.generation;
+  const applied = launching || (owner ? matchesWorker(owner,result) : result.generation === lane.generation
+    || (previous && previous.generation === result.generation && matchesWorker(previous,result)));
+  lane.workerExitHistory ||= [];lane.workerExitHistory.push({...result,applied:Boolean(applied)});
+  if (!applied) return false;
+  if(launching)lane.worker={pid:result.pid,birthTick:result.birthTick,generation:result.generation,startedAt:result.startedAt};
+  lane.workerExit={...result};
+  const lifecycle=lifecycleFor(lane,result);
+  if (lifecycle) {
+    lifecycle.workerCleanup=result.cleanup;lifecycle.exit={...result};
+    if (result.cleanup !== 'stopped') lifecycle.status='cleanup-pending';
+    completeWorkerCleanup(lane,lifecycle);
+  }
+  return true;
+}
+/** Closure of the matching owned browser is a separate observed stage. */
+export function recordWorkerBrowserClosure(lane, owner) {
+  if (lane.worker && !matchesWorker(lane.worker,owner)) return false;
+  const lifecycle=lifecycleFor(lane,owner);
+  if (!lifecycle) return false;
+  lifecycle.browserCleanup='closed-observed';completeWorkerCleanup(lane,lifecycle);return true;
+}
+export function workerCleanupReasons(lane) {
+  const reasons=[], lifecycle=lane.workerLifecycle, exit=lane.workerExit || lifecycle?.exit;
+  if (lane.workerLaunchPending) reasons.push('owned worker launch/cleanup pending');
+  if (lifecycle && lifecycle.status !== 'stopped') reasons.push(`owned worker cleanup pending (${lifecycle.status}${lifecycle.error ? `: ${lifecycle.error}` : ''})`);
+  if (lifecycle?.workerCleanup && lifecycle.workerCleanup !== 'stopped') reasons.push(`owned worker/recording stage pending (${lifecycle.workerCleanup})`);
+  if (lifecycle?.browserCleanup && lifecycle.browserCleanup !== 'closed-observed') reasons.push('owned browser closure pending');
+  for (const previous of lane.workerLifecycleHistory || []) {
+    if (previous.status !== 'stopped' || previous.recording === 'unavailable'
+        || (previous.workerCleanup && previous.workerCleanup !== 'stopped')
+        || (previous.browserCleanup && previous.browserCleanup !== 'closed-observed')) reasons.push(`earlier owned worker cleanup pending (generation ${previous.generation ?? 'unrecorded'}: ${previous.status})`);
+  }
+  if (exit?.cleanup && exit.cleanup !== 'stopped') reasons.push('owned worker/recording drain pending');
+  if (lane.worker && (!matchesWorker(lane.worker,exit || {}) || exit?.cleanup !== 'stopped')) reasons.push('recorded owned worker release unobserved');
+  if (lane.workerRecording === 'unavailable' || lifecycle?.recording === 'unavailable') reasons.push('owned worker evidence recording unavailable');
+  if (['agent-failed','startup-failed','spawn-failed','timeout'].includes(exit?.reason)) reasons.push(`worker execution failed (${exit.reason}; exit ${exit.code ?? exit.signal ?? 'unavailable'})`);
+  return reasons;
+}
+
 /**
  * Fence synchronously, start inference termination immediately, and only then
  * drain the browser's lane queue. Holding a UI queue must not keep an expired
@@ -166,7 +226,8 @@ export async function expireWorkerLease(lane, {
   const owned = {agent:lane.agent,generation:lane.generation,worker:lane.worker};
   lane.status = 'paused';lane.generation++;
   invalidate(lane);
-  lane.workerLifecycle = {status:'termination-requested',reason:'lease-expired',...owned,expiredAt:new Date(now).toISOString(),reservation:'retained-for-recovery'};
+  if(lane.workerLifecycle){lane.workerLifecycleHistory ||= [];lane.workerLifecycleHistory.push(lane.workerLifecycle);}
+  const lifecycle=lane.workerLifecycle = {status:'termination-requested',reason:'lease-expired',...owned,workerCleanup:'pending',browserCleanup:'pending',expiredAt:new Date(now).toISOString(),reservation:'retained-for-recovery'};
   // Capture rejection immediately even if durable recording itself fails.
   const termination = managedProcess
     ? Promise.resolve().then(() => stopWorker(lane.id,'lease-expired')).then(result => ({ok:true,result}),error => ({ok:false,error}))
@@ -175,21 +236,26 @@ export async function expireWorkerLease(lane, {
   try { await persist(); } catch(error) { recordingError=error; }
   const outcome = await termination;
   if (!outcome.ok) {
-    lane.workerLifecycle.status='cleanup-pending';
-    lane.workerLifecycle.error='Owned worker termination failed; keep ownership for inspection and recovery.';
+    lifecycle.status='cleanup-pending';
+    lifecycle.error='Owned worker termination failed; keep ownership for inspection and recovery.';
   } else {
     try {
       await closeBrowser(lane.id);
-      lane.workerLifecycle.status=managedProcess?'stopped':'controller-intervention-required';
-      lane.workerLifecycle.stoppedAt=new Date().toISOString();
-      if(outcome.result)lane.workerLifecycle.exit=outcome.result;
+      const releaseObserved=outcome.result?.cleanup==='stopped' && outcome.result.generation===owned.generation && (!owned.worker || matchesWorker({...owned.worker,generation:owned.generation},outcome.result));
+      lifecycle.browserCleanup='closed-observed';
+      lifecycle.workerCleanup=managedProcess ? releaseObserved ? 'stopped' : 'pending' : 'controller-intervention-required';
+      lifecycle.status=managedProcess && releaseObserved ? 'stopped' : managedProcess ? 'cleanup-pending' : 'controller-intervention-required';
+      if(managedProcess && lifecycle.status==='cleanup-pending')lifecycle.error='Owned worker release was not observed; retain ownership for inspection.';
+      if(lifecycle.status==='stopped')lifecycle.stoppedAt=new Date().toISOString();
+      else lifecycle.cleanupCheckedAt=new Date().toISOString();
+      if(outcome.result)lifecycle.exit=outcome.result;
     } catch {
-      lane.workerLifecycle.status='cleanup-pending';
-      lane.workerLifecycle.error='Owned browser closure failed; keep ownership for inspection and recovery.';
+      lifecycle.status='cleanup-pending';
+      lifecycle.error='Owned browser closure failed; keep ownership for inspection and recovery.';
     }
   }
-  if(recordingError)lane.workerLifecycle.recording='unavailable';
-  await onEvent({kind:'lease-expired',lane:lane.id,agent:owned.agent,generation:owned.generation,status:lane.workerLifecycle.status});
+  if(recordingError){lifecycle.recording='unavailable';lifecycle.status='cleanup-pending';lifecycle.error='Evidence recording failed; retain ownership for review.';}
+  await onEvent({kind:'lease-expired',lane:lane.id,agent:owned.agent,generation:owned.generation,status:lifecycle.status});
   await persist();
-  return {expired:true,...lane.workerLifecycle};
+  return {expired:true,...lifecycle};
 }

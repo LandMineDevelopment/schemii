@@ -6,6 +6,7 @@ import { constants } from 'node:fs';
 import { open, readFile, readdir, lstat, realpath, readlink, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
 import { readWorkspaceNavigation } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
+import { workerCleanupReasons } from './leases.mjs';
 
 export const nativeMode = run => run.browser === 'native';
 export function nativeBrowserRoots(root) {
@@ -319,6 +320,7 @@ export function acceptance(run) {
   const reasons = [];
   let reviewed = 0;
   if(run.recordingStatus === 'unavailable')reasons.push('evidence recording unavailable');
+  for (const lane of run.lanes) for (const reason of workerCleanupReasons(lane)) reasons.push(`${lane.id}: ${reason}`);
   for (const lane of testers) for (const scenario of lane.scenarios) {
     const attempt = scenario.attempts?.at(-1);
     if (scenario.functional !== 'passed' || scenario.visual !== 'passed') reasons.push(`${lane.id}/${scenario.id}: execution gap`);

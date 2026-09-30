@@ -195,7 +195,7 @@ export class CodexWorkers {
       this.#emit({ laneId, generation:handle.generation, pid:handle.pid, birthTick:handle.birthTick, kind: 'worker-started', pid: handle.pid, birthTick: handle.birthTick });
       handle.timer = setTimeout(() => { handle.reason = 'timeout'; void this.stop(laneId).catch(() => {}); }, this.timeoutSeconds * 1000);
       child.stdin.end(workerAssignment(this.root, sessionFile, brief));
-      return { pid: handle.pid, birthTick: handle.birthTick, startedAt: handle.startedAt };
+      return { pid: handle.pid, birthTick: handle.birthTick, generation:handle.generation, startedAt: handle.startedAt };
     } catch (error) {
       handle.reason ??= 'startup-failed';
       if (handle.child && !handle.finished) {

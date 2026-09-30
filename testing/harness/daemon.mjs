@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { releaseAccounts, renewWorkerLease, expireWorkerLease } from './leases.mjs';
+import { releaseAccounts, renewWorkerLease, expireWorkerLease, recordWorkerExit, recordWorkerBrowserClosure } from './leases.mjs';
 import { chmod, readFile, writeFile, rm, stat, realpath } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
@@ -43,12 +43,13 @@ const workers = new CodexWorkers({root,runDir:dir,model:run.agentModel,reasoning
     await persist();
   },
   onExit: async result => {
-    const l=lane(result.laneId);l.workerExit=result;
-    if(l.status==='claimed'&&result.generation===l.generation) {
+    const l=lane(result.laneId),applied=recordWorkerExit(l,result),cleanup=l.workerLifecycle;
+    if(applied&&l.status==='claimed'&&result.generation===l.generation) {
       l.status='paused';l.generation++;tokens.delete(l.id);
       l.error=`Agent exited (${result.reason}) before completing all assigned checkpoints.`;
       run.status='needs-attention';
-      await queueLane(l.id,()=>fleet.closeLane(l.id));
+      try {await queueLane(l.id,()=>fleet.closeLane(l.id));recordWorkerBrowserClosure(l,result);}
+      catch(error){if(cleanup?.generation===result.generation){cleanup.status='cleanup-pending';cleanup.error='Owned browser closure failed; cleanup remains pending.';}await persist();throw error;}
     }
     await persist();
   }
@@ -258,6 +259,7 @@ async function workerRequest(req){
       if(l.role!=='reviewer'&&l.scenarios.some(s=>s.functional==='not-run'||s.visual==='not-run'))throw new Error('Every scenario needs explicit results; use blocked for unavailable checks.');
       if(nativeMode(run))await closeNativeReceipt(l);
       else await fleet.closeLane(l.id);
+      if(l.worker)recordWorkerBrowserClosure(l,{...l.worker,generation:l.worker.generation??l.generation});
       l.status='complete';l.generation++;tokens.delete(l.id);
       if(l.credentialFile)await rm(l.credentialFile,{force:true});
       await releaseAccounts({runId:id,accounts:[l.username]});

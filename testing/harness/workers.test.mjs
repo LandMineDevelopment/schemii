@@ -129,15 +129,18 @@ test('stale process identity cannot kill a live worker or peer and retains clean
 
 test('unexpected leader exit fences promptly and drains recorded children/streams before releasing ownership',async t=>{
   const {writeFile}=await import('node:fs/promises');const {join}=await import('node:path');const {processIdentity}=await import('./native.mjs');
+  const {recordWorkerExit,workerCleanupReasons}=await import('./leases.mjs');
   const lane={id:'lane-1',status:'claimed',generation:1},peer={id:'lane-2',status:'claimed',generation:1};
   let token='old-owned-token',workers,firstExit;const exits=[];
   const pool=await probeWorkers(t,{crashable:true,onExit:result=>{
     exits.push(result);
+    if(result.laneId===lane.id)recordWorkerExit(lane,result);
     if(result.laneId===lane.id&&result.generation===lane.generation&&lane.status==='claimed') {
+      assert.match(workerCleanupReasons(lane).join(),/cleanup pending/);
       firstExit={retained:workers.handles.has(lane.id),cleanup:result.cleanup};lane.status='paused';lane.generation++;token=null;
     }
   }});workers=pool.workers;const {directory}=pool;
-  await workers.start({lane,sessionFile:'/private/session',brief});await workers.start({lane:peer,sessionFile:'/private/peer',brief});
+  lane.worker=await workers.start({lane,sessionFile:'/private/session',brief});peer.worker=await workers.start({lane:peer,sessionFile:'/private/peer',brief});
   const owner=await readProbe(directory,lane.id),other=await readProbe(directory,peer.id),handle=workers.handles.get(lane.id);
   const childOwner=await processIdentity(owner.child),peerOwner=await processIdentity(other.pid);
   for(let i=0;i<150&&!handle.ownedGroup?.some(item=>item.pid===childOwner.pid&&item.birthTick===childOwner.birthTick);i++)await new Promise(resolve=>setTimeout(resolve,20));
@@ -147,6 +150,8 @@ test('unexpected leader exit fences promptly and drains recorded children/stream
   const result=await handle.done;
   assert.deepEqual(firstExit,{retained:true,cleanup:'pending'});assert.equal(token,null);assert.equal(lane.generation,2);
   assert.equal(result.code,7);assert.equal(result.reason,'agent-failed');assert.equal(result.cleanup,'stopped');
+  assert.equal(lane.workerLifecycle.workerCleanup,'stopped');assert.equal(lane.workerLifecycle.browserCleanup,'pending');
+  assert.match(workerCleanupReasons(lane).join(),/cleanup pending/);assert.match(workerCleanupReasons(lane).join(),/worker execution failed.*exit 7/);
   assert.equal(recordingClosed,true);assert.equal(handle.child.exitCode,7);assert.equal(workers.handles.has(lane.id),false);
   assert.equal(await processIdentity(owner.pid),null);assert.equal(await processIdentity(childOwner.pid),null);
   assert.equal((await processIdentity(other.pid))?.birthTick,peerOwner.birthTick);assert.equal(peer.status,'claimed');assert.equal(peer.generation,1);
