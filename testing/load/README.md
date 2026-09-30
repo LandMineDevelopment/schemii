@@ -137,8 +137,10 @@ foundation until those independent campaign gates are implemented and verified.
 
 Private state is under `artifacts/load/LOAD_ID`: controller handle/config, sessions,
 create intents and opaque object IDs. Share only the allowlisted `report.json` after
-review, never the directory. HTTP mutations send the validated canonical or preview
-Origin required by the application authentication boundary; cookies stay private.
+review, never the directory. Both the incremental Node transport and actual k6
+generator send the validated canonical or preview Origin required by the application
+authentication boundary, including compile POSTs; cookies stay private. The k6
+generator rejects an unvalidated origin before offering work or disclosing a cookie.
 Preparation declares the observer file path but does not consume a pre-rebuild
 snapshot. Start the independent collector after the ready launcher runtime receipt
 exists; `run` requires a fresh valid observation below the memory stop threshold

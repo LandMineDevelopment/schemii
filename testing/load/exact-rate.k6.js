@@ -3,6 +3,7 @@ import exec from 'k6/execution';
 import { Counter, Trend } from 'k6/metrics';
 
 const spec = JSON.parse(open(__ENV.SCHEMII_LOAD_INPUT));
+if (!['https://localhost:8001', 'https://omarchy.taile4f57f.ts.net'].includes(spec.origin)) throw new Error('invalid_origin');
 const sent = new Counter('schemii_sent'), completed = new Counter('schemii_completed');
 const rejected = new Counter('schemii_rejected'), incomplete = new Counter('schemii_incomplete');
 const failed = new Counter('schemii_failed'), admitted = new Counter('schemii_admitted');
@@ -25,7 +26,7 @@ export default function () {
   const request = account.request;
   sent.add(1); incomplete.add(0); failed.add(0); rejected.add(0); completed.add(0); admitted.add(0); incorrect.add(0);
   const response = http.request(request.method, spec.origin + request.path, request.body ? JSON.stringify(request.body) : null,
-    { headers: { Cookie: account.cookie, 'Content-Type': 'application/json' }, timeout: '30s',
+    { headers: { Origin: spec.origin, Cookie: account.cookie, 'Content-Type': 'application/json' }, timeout: '30s',
       redirects: 0, responseType: 'text', tags: { name: spec.workload } });
   latency.add(response.timings.duration);
   if (!response.status || response.error_code) { incomplete.add(1); return; }
