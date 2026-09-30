@@ -30,6 +30,13 @@ class ArtifactError(RuntimeError):
     """The artifact path cannot safely hold this connection's output."""
 
 
+class ShutdownRequested(Exception):
+    """A transport signal must enter bounded cleanup even if its child ignores it."""
+
+    def __init__(self, signum: int):
+        self.signum = signum
+
+
 class Session(NamedTuple):
     path: Path
     inode: tuple[int, int]
@@ -510,10 +517,16 @@ def main(argv: list[str] | None = None) -> int:
             stderr=None,
             start_new_session=True,
         )
+
+        def shutdown(received, frame):
+            # Repeated cancellation must not interrupt the bounded finalizer.
+            for signum in handlers:
+                signal.signal(signum, signal.SIG_IGN)
+            _signal_child(process, received)
+            raise ShutdownRequested(received)
+
         for signum in (signal.SIGINT, signal.SIGTERM):
-            handlers[signum] = signal.signal(
-                signum, lambda received, frame: _signal_child(process, received)
-            )
+            handlers[signum] = signal.signal(signum, shutdown)
         _record_child(session, process.pid)
         guardian = _start_guardian(session)
         while True:
@@ -523,6 +536,8 @@ def main(argv: list[str] | None = None) -> int:
             except subprocess.TimeoutExpired:
                 expire_output(session, time.time())
         result = 128 - result if result < 0 else result
+    except ShutdownRequested as shutdown:
+        result = 128 + shutdown.signum
     except (ArtifactError, OSError, ValueError, IndexError):
         print(
             "Schemii browser MCP setup failed. Check tool installation, the warmed package cache, "
@@ -532,11 +547,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         result = 130
     finally:
+        for signum in handlers:
+            signal.signal(signum, signal.SIG_IGN)
         try:
             if process is not None:
                 _stop_child(process)
-            for signum, handler in handlers.items():
-                signal.signal(signum, handler)
             if session is not None:
                 try:
                     cleanup_session(session)
@@ -548,8 +563,12 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     result = 2
         finally:
-            if guardian is not None:
-                _stop_guardian(guardian)
+            try:
+                if guardian is not None:
+                    _stop_guardian(guardian)
+            finally:
+                for signum, handler in handlers.items():
+                    signal.signal(signum, handler)
     return result
 
 
