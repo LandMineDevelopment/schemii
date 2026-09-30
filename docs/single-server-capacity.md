@@ -133,3 +133,42 @@ active-workload findings separately. If hardware/topology, generator delivery,
 cleanup, larger source/catalog, external AI or distributed scaling were not tested,
 label them unmeasured. Prioritize the smallest confirmed bottleneck fix; do not
 publish a capacity estimate while a correctness/isolation/leak/OOM gate is unresolved.
+
+## Observer source map and current gaps
+
+Source inspection for this foundation used `49ed0a3`; the metadata admission
+snapshot was also inspected on `audit/metadata-bounds` at `13ec07c`. Those source
+checks did not collect runtime metrics. The current load adapter consumes a private
+observer file; it does not implement the observer or turn unavailable fields into
+zero. A refreshed timestamp must describe newly sampled values.
+
+| Observer field | Concrete read-only source | Ownership / remaining boundary |
+| --- | --- | --- |
+| appRssBytes | Host `/proc/PID/status` `VmRSS` for a verified API PID; cgroup v2 `memory.current` separately describes the whole app cgroup | Record PID birth identity and scope; process RSS and cgroup memory usage are distinct |
+| appMemoryLimitBytes | Resolve the verified API process's `/proc/PID/cgroup`, read that cgroup's `memory.max` and effective finite ancestors | `compose.test.yaml` is a default, not proof of a live limit; `max` must remain unmeasured |
+| appCpuPercent | Delta of verified cgroup v2 `cpu.stat` `usage_usec` over monotonic time; read `cpu.max` for effective quota | Specify whether percent is one-core or quota-normalized; do not mix denominators |
+| apiProcesses, threads, fds | Read-only host `/proc` process identities, `status` Threads and accessible `fd` entries, restricted to the verified app cgroup | A launcher-owned identity/export seam is still needed; names alone do not establish deployment ownership |
+| retainedSessions, openCursors | Live `ConsoleService` retained/read/transaction and driver cursor registries under their existing locks | No aggregate read-only API/export exists; PostgreSQL `pg_cursors` is session-local and cannot prove every app cursor closed |
+| ordinaryPermits, retainedPermits | Live gateway `_connection_capacity` acquire/release state; monitor/control have separate capacity objects | No public locked snapshot exists in the inspected gateway; DB connections are not equivalent to permits while connecting or closing |
+| ownedBackends | Dedicated read-only source observer querying `pg_stat_activity` with the fixture's database roles, app name, database and captured PID/backend-start identity | Account/role filtering alone is insufficient for a shared-profile run; source visibility and exact run identity must be proven |
+| activeJobs | GET `/api/v1/schemii/workspaces/{owned-workspace}/bulk-jobs` plus exact receipt-owned job IDs/status; Console execution GET/activity for exact execution IDs | This fixture adapter creates no bulk jobs. A workspace-wide total is not a run-owned count; internal active worker state is not fully exposed |
+| metadataActive, metadataRejected | `MetadataConnectionFactory.admission_snapshot()` fields active/rejected in the reviewed metadata-bounds implementation | Internal factory seam only, with no live process export; creating another factory produces unrelated counters |
+| sourceConnections / lock waits | The source observer's bounded aggregate `pg_stat_activity` / `pg_locks`; existing owned execution `/activity` exposes database/wait/blocker state | `/activity` sets monitoringAvailable false for ended **or** visibility-restricted sessions and is not a source-release proof |
+| ingressConnections | Verified ingress network namespace socket observation | `dev/ingress/nginx.conf` exposes timing logs, no connection-count or stub-status endpoint |
+| eventLoopLagMs / executor pressure | A bounded instrument in the running API event loop / executor | No runtime sampler/export exists in the inspected source |
+
+Existing request middleware emits safe route/status/handler timing, and ingress
+access logs include `request_time` and `upstream_time`. Read them only through the
+supported `./start.sh --logs schemii` / `./start.sh --logs ingress` controls. Their
+bounded 200-line output is useful diagnosis, not a complete high-rate sample, and
+handler timing is not a streaming body-drain measurement. Private `metadata.limit_events`
+can explain rejection/eviction classes to an authorized observer; it is neither a
+live permit gauge nor a product-readable metrics route.
+
+The smallest remaining observer work is a launcher-owned read-only deployment
+identity/cgroup exporter plus a live, locked, numeric-only application snapshot for
+retained/cursor/admission state and an explicit source observer. Preserve normal
+end-user grants, exclude SQL/row/credential/owner labels from public metrics, and
+keep observer connections in separately disclosed budgets. No Docker/socket access,
+additional server, inferred zero counters or missing-source fallback qualifies as
+capacity evidence.
