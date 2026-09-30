@@ -1,13 +1,33 @@
 import re
+from collections.abc import Iterator
 from importlib.resources import files
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 from schemii.main import create_app
 
 
-def test_frontend_is_served_with_browser_security_and_cache_headers() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+@pytest.fixture(scope="module")
+def frontend_application() -> FastAPI:
+    # Only read mounted documents/assets and the derived OpenAPI schema here.
+    # Stateful API, configuration and lifespan checks need their own fresh apps.
+    return create_app()
+
+
+@pytest.fixture
+def api(frontend_application: FastAPI) -> Iterator[TestClient]:
+    # Keep cookies and request/client state separate for every case. As before,
+    # these static contract checks do not enter the application's lifespan.
+    client = TestClient(frontend_application, base_url="http://localhost")
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+def test_frontend_is_served_with_browser_security_and_cache_headers(api: TestClient) -> None:
 
     response = api.get("/")
 
@@ -151,8 +171,7 @@ def test_designed_tables_are_edited_directly_in_the_table_inspector() -> None:
     assert ".inspector.is-editable" in styles
 
 
-def test_api_route_opens_the_unified_system_map_with_its_api_lens() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+def test_api_route_opens_the_unified_system_map_with_its_api_lens(api: TestClient) -> None:
 
     response = api.get("/api-map")
 
@@ -187,8 +206,7 @@ def test_api_route_opens_the_unified_system_map_with_its_api_lens() -> None:
     assert "/api-map" not in schema["paths"]
 
 
-def test_database_route_opens_the_same_unified_system_map() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+def test_database_route_opens_the_same_unified_system_map(api: TestClient) -> None:
 
     response = api.get("/db-map")
 
@@ -219,8 +237,7 @@ def test_database_route_opens_the_same_unified_system_map() -> None:
     assert "/db-map" not in schema["paths"]
 
 
-def test_canonical_system_map_is_served_and_hidden_from_openapi() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+def test_canonical_system_map_is_served_and_hidden_from_openapi(api: TestClient) -> None:
 
     response = api.get("/system-map")
 
@@ -235,8 +252,7 @@ def test_canonical_system_map_is_served_and_hidden_from_openapi() -> None:
     assert "/system-map" not in api.get("/openapi.json").json()["paths"]
 
 
-def test_local_prototype_rejects_untrusted_host_headers() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+def test_local_prototype_rejects_untrusted_host_headers(api: TestClient) -> None:
 
     response = api.get("/api/v1/session", headers={"Host": "rebound.attacker.example"})
 
@@ -247,8 +263,7 @@ def test_local_prototype_rejects_untrusted_host_headers() -> None:
     assert len(response.headers["x-request-id"]) == 32
 
 
-def test_api_documentation_receives_general_browser_safety_headers() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+def test_api_documentation_receives_general_browser_safety_headers(api: TestClient) -> None:
 
     response = api.get("/docs")
 
@@ -259,8 +274,7 @@ def test_api_documentation_receives_general_browser_safety_headers() -> None:
     assert "content-security-policy" not in response.headers
 
 
-def test_every_packaged_frontend_asset_is_available_and_revalidated() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+def test_every_packaged_frontend_asset_is_available_and_revalidated(api: TestClient) -> None:
     assets = files("schemii.schemii").joinpath("web", "assets")
     common_assets = files("schemii.common").joinpath("web", "assets")
 
@@ -363,8 +377,7 @@ def test_postgres_workspace_open_is_idempotent_and_source_derived() -> None:
     assert "design/imports" not in api
 
 
-def test_frontend_does_not_replace_unknown_routes_with_the_app_shell() -> None:
-    api = TestClient(create_app(), base_url="http://localhost")
+def test_frontend_does_not_replace_unknown_routes_with_the_app_shell(api: TestClient) -> None:
 
     response = api.get("/not-a-frontend-route")
 
@@ -409,7 +422,7 @@ def test_frontend_uses_only_the_active_same_origin_api_contract() -> None:
     assert "https://" not in api_source
 
 
-def test_shared_frontend_entrypoints_use_the_csp_authorized_import_map():
+def test_shared_frontend_entrypoints_use_the_csp_authorized_import_map(api: TestClient):
     from schemii.common.frontend import COMMON_IMPORT_MAP
     from schemii.common.api.middleware import IMPORT_MAP_DIGEST
 
@@ -425,7 +438,6 @@ def test_shared_frontend_entrypoints_use_the_csp_authorized_import_map():
         assert re.findall(r'<script type="importmap">(.*?)</script>', html) == [COMMON_IMPORT_MAP]
         assert html.index('type="importmap"') < html.index('type="module"')
 
-    api = TestClient(create_app(), base_url="http://localhost")
     for path in ("/", "/schemoo", "/system-map"):
         policy = api.get(path).headers["content-security-policy"]
         assert f"'sha256-{IMPORT_MAP_DIGEST}'" in policy
@@ -607,11 +619,10 @@ def test_frontends_use_explicit_shared_state_and_text_action_contracts() -> None
     assert index.count("ui-button compact") >= 20
 
 
-def test_schemer_frontend_serves_modules_with_authorized_import_map():
+def test_schemer_frontend_serves_modules_with_authorized_import_map(api: TestClient):
     from schemii.schemer.frontend import SCHEMER_IMPORT_MAP
     from schemii.common.api.middleware import SCHEMER_IMPORT_MAP_DIGEST
 
-    api = TestClient(create_app(), base_url="http://localhost")
     page = api.get("/schemer")
     assert page.status_code == 200
     assert re.findall(r'<script type="importmap">(.*?)</script>', page.text) == [SCHEMER_IMPORT_MAP]
