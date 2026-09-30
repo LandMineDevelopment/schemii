@@ -15,6 +15,12 @@ PERMISSIONS = sorted(set(TOOL_CAPABILITIES.values()))
 
 def repository_fixture(capability, enabled, *, revision=3):
     connection = MagicMock()
+    connection.__enter__.return_value = connection
+    def close_transaction(exc_type, _value, _traceback):
+        if exc_type is not None:
+            connection.rollback()
+        connection.close()
+    connection.__exit__.side_effect = close_transaction
     cursor = connection.cursor.return_value.__enter__.return_value
     factory = Mock(return_value=connection)
     repository = PostgresAiRepository(factory)

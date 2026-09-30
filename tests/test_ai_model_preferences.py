@@ -86,6 +86,12 @@ def test_postgres_switch_updates_existing_row_or_rejects_busy_before_writes(busy
         "default_model_id": "new", "capabilities": chat.capabilities.model_dump(),
     }]
     connection = MagicMock()
+    connection.__enter__.return_value = connection
+    def close_transaction(exc_type, _value, _traceback):
+        if exc_type is not None:
+            connection.rollback()
+        connection.close()
+    connection.__exit__.side_effect = close_transaction
     connection.cursor.return_value = cursor
     connection.transaction.return_value = nullcontext()
     repo = PostgresAiRepository(lambda: connection, AiPolicy(maximum_chats_per_workspace=1))

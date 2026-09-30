@@ -15,16 +15,9 @@ class JobRepository:
 
     @contextmanager
     def _cursor(self):
-        connection = self.factory()
-        try:
+        with self.factory() as connection:
             with connection.cursor() as cursor:
                 yield cursor
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     def list(self, owner, workspace):
         if self.factory:
