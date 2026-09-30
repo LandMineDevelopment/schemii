@@ -79,20 +79,29 @@ test("visible status toasts leave desktop and mobile tools clear and clickable",
   });
   await expect(toast).toBeVisible();
   await expect(toast).toHaveCSS("pointer-events", "none");
-  const geometry = await toast.evaluate(node => {
-    const bounds = node.getBoundingClientRect();
-    const overlap = other => {
-      const rect = other.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && bounds.left < rect.right && bounds.right > rect.left
-        && bounds.top < rect.bottom && bounds.bottom > rect.top;
-    };
+  // Closed <details> content can retain nonzero rectangles in Chromium. Use
+  // Playwright's visibility boundary before testing actual painted controls.
+  const visibleTools = page.locator('.topbar button, .topbar summary, .layer-switch button, #tool-rail button')
+    .filter({ visible: true });
+  const geometry = await visibleTools.evaluateAll(controls => {
+    const bounds = document.getElementById("toast").getBoundingClientRect();
+    const rectangle = rect => ({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+    const tools = controls.map(control => ({
+      name: control.id || control.getAttribute("aria-label") || control.textContent.trim(),
+      bounds: rectangle(control.getBoundingClientRect()),
+    }));
     return {
       withinViewport: bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight,
-      overlapsTools: [...document.querySelectorAll('.topbar button, .topbar summary, .layer-switch button, #tool-rail button:not([hidden])')]
-        .some(overlap),
+      toast: rectangle(bounds),
+      visibleTools: tools,
+      overlappingTools: tools.filter(({ bounds: rect }) => bounds.left < rect.right && bounds.right > rect.left
+        && bounds.top < rect.bottom && bounds.bottom > rect.top),
     };
   });
-  expect(geometry).toEqual({ withinViewport: true, overlapsTools: false });
+  const geometryEvidence = JSON.stringify(geometry, null, 2);
+  expect(geometry.visibleTools.map(({ name }) => name), geometryEvidence).toEqual(expect.arrayContaining(["Views", "Help"]));
+  expect(geometry.withinViewport, geometryEvidence).toBe(true);
+  expect(geometry.overlappingTools, geometryEvidence).toEqual([]);
   await page.getByRole("button", { name: "Views", exact: true }).click();
   await expect(page.getByRole("button", { name: "Views", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.locator('summary[aria-label="Help"]').click();

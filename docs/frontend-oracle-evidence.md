@@ -43,3 +43,17 @@ history source assertion follows the extracted owner but remains a weak check.
 These checks are automated
 frontend regression evidence, not manual UI acceptance for #73 or a native QA
 replacement proof.
+
+PR #154's first Android attempt failed the toast overlap assertion while its
+screenshot showed the toast below the visible layer switch and inside the
+412-by-839 CSS viewport. The trace records closed Download and Help menus. The
+original oracle counted every descendant button with a nonzero rectangle, which
+does not establish visibility for collapsed `details` content in Chromium.
+The corrected mounted check filters controls through Playwright's existing
+visibility boundary, then reports named visible controls and their bounds on
+failure. It retains the viewport, pointer behavior and actual Views/Help click
+checks. No application style change is justified by this evidence. The trace does
+not contain the per-control geometry result, so confirmation of the exact old
+overlap and the corrected desktop/mobile baseline and late CSS counterexample
+remain pending a leased deployment. Syntax validation and collection of all six
+mounted cases passed; collection is not an application acceptance run.
