@@ -494,6 +494,65 @@ def test_failed_cancelled_skipped_or_unfinished_source_matrix_leg_fails_gate(out
     assert not gate("source", observed=observed)
 
 
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "none",
+        "failed-job",
+        "cancelled-job",
+        "missing-job",
+        "stale-attempt",
+        "missing-test-evidence",
+    ],
+)
+def test_unknown_step_measurement_preserves_strict_source_acceptance(damage, tmp_path):
+    observed = jobs()
+    for job in observed:
+        job.update(
+            started_at="2026-09-30T00:00:03Z",
+            completed_at="2026-09-30T00:00:10Z",
+            steps=[
+                {
+                    "name": "Exercise browser flows",
+                    "started_at": "2026-09-30T00:00:04Z",
+                    "completed_at": None,
+                }
+            ],
+        )
+    if damage in {"failed-job", "cancelled-job"}:
+        observed[0]["conclusion"] = "failure" if damage == "failed-job" else "cancelled"
+    elif damage == "missing-job":
+        observed.pop()
+    timing = {
+        **summarize(
+            {
+                "created_at": "2026-09-30T00:00:00Z",
+                "run_started_at": "2026-09-30T00:00:02Z",
+            },
+            observed,
+        ),
+        **IDENTITY,
+    }
+    assert all(
+        job["test_steps_ms"] is None and job["setup_and_other_ms"] is None
+        for job in timing["jobs"]
+    )
+    if damage == "stale-attempt":
+        timing["run_attempt"] = 1
+    elif damage == "missing-test-evidence":
+        # The real collector still requires all seven sanitized test lanes.
+        timing["test_evidence"] = collect_evidence(tmp_path, identity=IDENTITY)
+        timing["complete"] = timing["complete"] and timing["test_evidence"]["complete"]
+    passed, _ = evaluate(
+        {"valid": True, "lane": "source", "head": IDENTITY["head_sha"]},
+        needs("source"),
+        observed,
+        timing,
+        IDENTITY,
+    )
+    assert passed is (damage == "none")
+
+
 @pytest.mark.parametrize("lane", ["source", "reports"])
 @pytest.mark.parametrize("job", sorted(CONTROL_NEEDS))
 def test_classifier_docs_or_timing_failure_always_fails_gate(lane, job):

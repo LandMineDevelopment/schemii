@@ -145,7 +145,16 @@ The Actions rollup uses job/step timestamps for launcher startup, test steps and
 remaining setup/other time, workflow dispatch delay, start delay after workflow
 start, critical path and total job-minutes. GitHub timestamps do not isolate pure
 runner queue time from scheduling/dependencies; `after_workflow_start_ms` retains
-that limitation explicitly.
+that limitation explicitly. Missing, malformed or reversed timestamps on a
+named test or launcher step produce `null` for that phase and its setup residual;
+partial phase totals must not appear as zero execution or extra setup. Genuine
+zero durations remain zero. Explicitly skipped conditional steps contribute
+zero even without timestamps; pending/in-progress steps remain unknown. Jobs
+without a named phase keep zero for that phase. Unknown job wall time makes total job-minutes unknown; inconsistent
+phase totals exceeding job wall also leave the setup residual unknown. Known
+job wall, outcomes and independently measured phases remain available. Missing
+phase measurements do not replace the complete job/test outcome and identity
+requirements of the acceptance gate.
 
 The rollup validates downloaded timing records again and requires all seven
 test lanes, one source/run/attempt cohort, all expected jobs and complete test

@@ -12,6 +12,8 @@ import pytest
 from scripts.ci.summary import summarize, valid
 from scripts.ci.workflow_timing import (
     JOB_NAMES,
+    duration,
+    timestamp,
     summarize as workflow_summary,
     test_evidence as collect_evidence,
 )
@@ -385,6 +387,249 @@ def test_workflow_queue_setup_execution_missing_shards_and_secrets():
     cancelled = copy.deepcopy(jobs)
     cancelled[0]["conclusion"] = "cancelled"
     assert workflow_summary(run, cancelled)["complete"] is False
+
+
+WORKFLOW_RUN = {
+    "created_at": "2026-09-30T14:05:53Z",
+    "run_started_at": "2026-09-30T14:05:53Z",
+}
+
+
+def successful_workflow_jobs(steps=()):
+    return [
+        {
+            "name": name,
+            "started_at": "2026-09-30T14:07:57Z",
+            "completed_at": "2026-09-30T14:18:05Z",
+            "status": "completed",
+            "conclusion": "success",
+            "steps": copy.deepcopy(list(steps)),
+        }
+        for name in JOB_NAMES
+    ]
+
+
+def test_completed_job_with_observed_missing_browser_step_ends_keeps_unknowns():
+    # Actual retained run36726522134 Android shard2: successful completed job,
+    # while Actions still supplied in_progress/pending test step metadata.
+    steps = [
+        {
+            "name": "Start the canonical application stack",
+            "started_at": "2026-09-30T14:11:01Z",
+            "completed_at": "2026-09-30T14:11:59Z",
+            "status": "completed",
+            "conclusion": "success",
+        },
+        {
+            "name": "Exercise browser flows",
+            "started_at": "2026-09-30T14:11:59Z",
+            "completed_at": None,
+            "status": "in_progress",
+            "conclusion": None,
+        },
+        {
+            "name": "Verify metadata backup recovery in an isolated database",
+            "started_at": None,
+            "completed_at": None,
+            "status": "pending",
+            "conclusion": None,
+        },
+    ]
+    jobs = successful_workflow_jobs()
+    next(job for job in jobs if job["name"].endswith("(android-chromium, shard 2/2)"))[
+        "steps"
+    ] = steps
+    summary = workflow_summary(WORKFLOW_RUN, jobs)
+    job = next(
+        item for item in summary["jobs"] if item["job"] == "browser-android-chromium-2"
+    )
+    assert job["wall_ms"] == 608000 and job["startup_ms"] == 58000
+    assert job["test_steps_ms"] is None and job["setup_and_other_ms"] is None
+    assert job["outcome"] == "success" and summary["complete"] is True
+    assert summary["critical_path_ms"] == 732000
+    assert summary["total_job_minutes"] == round(7 * 608000 / 60000, 3)
+
+
+@pytest.mark.parametrize("phase", ["test", "startup"])
+@pytest.mark.parametrize(
+    "start,end",
+    [
+        (None, "2026-09-30T14:12:00Z"),
+        ("2026-09-30T14:11:59Z", None),
+        (None, None),
+        ("invalid", "2026-09-30T14:12:00Z"),
+        ("2026-09-30T14:11:59Z", "invalid"),
+        ("2026-09-30T14:12:00Z", "2026-09-30T14:11:59Z"),
+        ("2026-09-30T14:11:59", "2026-09-30T14:12:00Z"),
+    ],
+)
+def test_unknown_named_step_propagates_through_partial_phase_and_residual(
+    phase, start, end
+):
+    steps = [
+        {
+            "name": "Exercise browser flows",
+            "started_at": "2026-09-30T14:11:59Z",
+            "completed_at": "2026-09-30T14:12:00Z",
+        },
+        {
+            "name": "Start the canonical application stack",
+            "started_at": "2026-09-30T14:11:01Z",
+            "completed_at": "2026-09-30T14:11:59Z",
+        },
+        {
+            "name": "Verify metadata backup recovery in an isolated database"
+            if phase == "test"
+            else "Start the canonical application stack",
+            "started_at": start,
+            "completed_at": end,
+        },
+    ]
+    summary = workflow_summary(WORKFLOW_RUN, successful_workflow_jobs(steps))
+    for job in summary["jobs"]:
+        assert job["test_steps_ms"] == (None if phase == "test" else 1000)
+        assert job["startup_ms"] == (None if phase == "startup" else 58000)
+        assert job["setup_and_other_ms"] is None
+        assert job["wall_ms"] == 608000 and job["outcome"] == "success"
+    assert summary["complete"] is True
+
+
+@pytest.mark.parametrize("phase", ["test", "startup"])
+def test_genuine_zero_named_step_duration_remains_zero(phase):
+    steps = [
+        {
+            "name": "Exercise browser flows"
+            if phase == "test"
+            else "Start the canonical application stack",
+            "started_at": "2026-09-30T14:11:59Z",
+            "completed_at": "2026-09-30T14:11:59Z",
+        }
+    ]
+    summary = workflow_summary(WORKFLOW_RUN, successful_workflow_jobs(steps))
+    assert summary["complete"] is True
+    for job in summary["jobs"]:
+        assert job["test_steps_ms"] == job["startup_ms"] == 0
+        assert job["setup_and_other_ms"] == job["wall_ms"] == 608000
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Verify metadata backup recovery in an isolated database",
+        "Start the canonical application stack",
+        "Fast frontend and harness feedback",
+    ],
+)
+def test_explicitly_skipped_conditional_steps_have_zero_cost_without_timestamps(name):
+    steps = [
+        {
+            "name": "Exercise browser flows",
+            "started_at": "2026-09-30T14:11:59Z",
+            "completed_at": "2026-09-30T14:12:00Z",
+        },
+        {
+            "name": name,
+            "status": "completed",
+            "conclusion": "skipped",
+            "started_at": None,
+            "completed_at": None,
+        },
+    ]
+    summary = workflow_summary(WORKFLOW_RUN, successful_workflow_jobs(steps))
+    assert summary["complete"] is True
+    for job in summary["jobs"]:
+        assert job["test_steps_ms"] == 1000 and job["startup_ms"] == 0
+        assert job["setup_and_other_ms"] == 607000
+        assert job["first_node_feedback_ms"] is None
+
+
+def test_skipped_node_step_does_not_claim_feedback_even_with_known_end():
+    steps = [
+        {
+            "name": "Fast frontend and harness feedback",
+            "status": "completed",
+            "conclusion": "skipped",
+            "started_at": "2026-09-30T14:08:08Z",
+            "completed_at": "2026-09-30T14:08:09Z",
+        }
+    ]
+    for job in workflow_summary(WORKFLOW_RUN, successful_workflow_jobs(steps))["jobs"]:
+        assert job["test_steps_ms"] == 0 and job["setup_and_other_ms"] == 608000
+        assert job["first_node_feedback_ms"] is None
+
+
+def test_uninstrumented_jobs_ignore_unknown_unrelated_steps():
+    summary = workflow_summary(
+        WORKFLOW_RUN,
+        successful_workflow_jobs(
+            [
+                {"name": "Set up job", "started_at": None, "completed_at": None},
+            ]
+        ),
+    )
+    assert summary["complete"] is True
+    for job in summary["jobs"]:
+        assert job["test_steps_ms"] == job["startup_ms"] == 0
+        assert job["setup_and_other_ms"] == 608000
+
+
+def test_known_independent_feedback_and_phase_durations_survive_missing_start():
+    steps = [
+        {
+            "name": "Fast frontend and harness feedback",
+            "started_at": None,
+            "completed_at": "2026-09-30T14:08:09Z",
+        },
+        {
+            "name": "Start the canonical application stack",
+            "started_at": "2026-09-30T14:11:01Z",
+            "completed_at": "2026-09-30T14:11:59Z",
+        },
+    ]
+    summary = workflow_summary(WORKFLOW_RUN, successful_workflow_jobs(steps))
+    assert summary["complete"] is True
+    for job in summary["jobs"]:
+        assert job["first_node_feedback_ms"] == 12000 and job["startup_ms"] == 58000
+        assert job["test_steps_ms"] is None and job["setup_and_other_ms"] is None
+
+
+def test_known_phases_exceeding_job_wall_leave_setup_residual_unknown():
+    steps = [
+        {
+            "name": "Exercise browser flows",
+            "started_at": "2026-09-30T14:07:57Z",
+            "completed_at": "2026-09-30T14:18:06Z",
+        }
+    ]
+    summary = workflow_summary(WORKFLOW_RUN, successful_workflow_jobs(steps))
+    for job in summary["jobs"]:
+        assert job["test_steps_ms"] == 609000 and job["wall_ms"] == 608000
+        assert job["setup_and_other_ms"] is None
+
+
+def test_reversed_job_interval_is_unknown_and_cannot_establish_completeness():
+    jobs = successful_workflow_jobs()
+    jobs[0]["completed_at"] = "2026-09-30T14:07:56Z"
+    summary = workflow_summary(WORKFLOW_RUN, jobs)
+    job = next(
+        item for item in summary["jobs"] if item["job"] == JOB_NAMES[jobs[0]["name"]]
+    )
+    assert job["wall_ms"] is None and job["setup_and_other_ms"] is None
+    assert summary["total_job_minutes"] is None and summary["complete"] is False
+    assert summary["critical_path_ms"] == 732000
+
+
+@pytest.mark.parametrize(
+    "start,end", [(None, 1), (1, None), (2, 1), (float("nan"), 1), (1, float("inf"))]
+)
+def test_invalid_intervals_are_unknown_instead_of_clamped_to_zero(start, end):
+    assert duration(start, end) is None
+
+
+def test_timestamp_requires_timezone_and_preserves_equivalent_offsets():
+    assert timestamp("2026-09-30T14:11:59") is None
+    assert timestamp("2026-09-30T14:11:59Z") == timestamp("2026-09-30T15:11:59+01:00")
+    assert duration(1, 1) == 0
 
 
 def test_missing_or_mixed_source_evidence_cannot_establish_complete_run(tmp_path):
