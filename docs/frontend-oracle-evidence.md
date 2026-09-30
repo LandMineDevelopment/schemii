@@ -45,7 +45,11 @@ mounted field/focus/selection through real deferred undo/redo responses, and
 verify one authoritative conflict reload. The served history owner byte-matched
 reviewed source `f49f5332`.
 
-Both late CSS controls failed the intended overlap assertion in **4.102s**.
+The exact original later override, `.ui-toast { pointer-events: auto!important; top: 0!important; }`,
+failed the computed pointer assertion on both profiles in **17.871s**, with zero
+retries or skips. It created no API fixtures.
+
+Both separate geometry-only controls failed the intended overlap assertion in **4.102s**.
 Independent review inspected their actual images and geometry receipts: the toast
 covered visible tools while viewport containment and pointer-events checks still
 passed. Hidden controls inside closed details no longer create false overlaps.
