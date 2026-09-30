@@ -61,3 +61,54 @@ shutdown composition; the raw-driver/session code is unchanged from those
 reviewed cases. The real database cases were not rerun for this composition-only
 change. Managed result memory and latency measurements belong to the separate
 #133 delivery.
+
+## Managed result execution
+
+Managed SELECT, command-only statements and DML RETURNING use libpq single-row
+delivery before conversion and preview byte checks. Each validated statement is
+sent once using extended query protocol. PostgreSQL's terminal result supplies
+column metadata even for zero rows, and the completed command receipt. Psycopg
+loaders retain typed values and existing JSON conversion rules. A byte/cell cap
+raises the existing explicit limit error; it never returns incomplete rows as a
+complete result or replays a write. Interrupted delivery is cancelled/drained
+before reuse. Broken cleanup closes the owned connection and releases admission.
+The existing transaction owner still governs commit/rollback after an error.
+
+Retained named reads fetch one row at a time. Their page keeps accepted rows and
+at most one carry row for the next page, so fetching a large row-count batch does
+not allocate hundreds of wide rows before the byte boundary. Forward ordering,
+snapshot ownership, separate export cursors and owner-scoped cancellation remain
+the same. This increases FETCH round trips for narrow-row pages; real latency
+and capacity measurement are required before drawing throughput conclusions.
+
+The configured JSON byte caps are not a whole-process RSS limit. Python object
+overhead, serialization copies and native input/result buffers add memory. A
+single PostgreSQL row/value must be received before conversion: an oversized
+cell can allocate substantially more than the 256 KiB serialized cell limit.
+For fixed row/column width, expected retained memory stops growing with source
+row count once the preview is rejected. RSS plateau/tolerance and the native
+buffer allowance require isolated real-driver measurement. No measured plateau
+is claimed by unit tests or the implementation alone.
+
+`scripts/console_memory_probe.py` compares a buffered reference of the old
+execute-before-limit boundary with current incremental delivery. Each sample
+runs in a fresh child process, records `/proc` RSS, `ru_maxrss`, phase timing,
+fixture cell size and driver/server versions, then verifies rollback and a fresh
+read. RETURNING owns a connection-local temporary table; it vanishes on exit.
+The probe terminates its owned child on timeout/interruption. Credentials stay
+in the explicit private integration environment. Run only in a scheduled real
+PostgreSQL window, for example:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/console_memory_probe.py \
+  --rows 1000 10000 100000 --width 8192 --path select
+PYTHONPATH=src .venv/bin/python scripts/console_memory_probe.py \
+  --rows 1000 10000 100000 --width 8192 --path returning
+PYTHONPATH=src .venv/bin/python scripts/console_memory_probe.py \
+  --rows 1000 10000 100000 --width 8192 --mode named
+```
+
+Large buffered references intentionally expose the former native memory cost;
+choose staged counts that fit the host. The probe is opt-in and ordinary PR
+feedback never launches it. Real result/RETURNING/cell-limit and source-state
+regressions are in `tests/integration/test_postgres_gateway_execution.py`.

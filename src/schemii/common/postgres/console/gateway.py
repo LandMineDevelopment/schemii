@@ -32,6 +32,7 @@ from .execution import (
     json_console_value,
 )
 from .models import ConsoleResultColumn
+from .incremental import execute_incremental
 
 
 @runtime_checkable
@@ -242,21 +243,27 @@ class PsycopgConsoleReadSession:
             raise PostgresQueryError(
                 "Result pages must be read in sequence; rerun the query to restart this result"
             )
-        raw_rows = list(pending)
-        if len(raw_rows) < page_size:
-            raw_rows.extend(cursor.fetchmany(page_size - len(raw_rows)))
-
         rows: list[tuple[Any, ...]] = []
         used_bytes = 0
         remaining: tuple[tuple[Any, ...], ...] = ()
-        for row_index, raw_row in enumerate(raw_rows):
+        while len(rows) < page_size:
+            if pending:
+                raw_row, *tail = pending
+                pending = tuple(tail)
+            else:
+                # A row-count batch can materialize hundreds of wide rows before
+                # the byte boundary. Fetch one row and retain at most one carry.
+                batch = cursor.fetchmany(1)
+                if not batch:
+                    break
+                raw_row = batch[0]
             converted = tuple(
                 json_console_value(value, maximum_bytes=self._maximum_cell_bytes)
                 for value in raw_row
             )
             row_bytes = len(json.dumps(converted, ensure_ascii=False).encode("utf-8"))
             if rows and used_bytes + row_bytes > self._page_memory_bytes:
-                remaining = tuple(raw_rows[row_index:])
+                remaining = (tuple(raw_row),) + pending
                 break
             if row_bytes > self._page_memory_bytes:
                 raise PostgresConsoleLimitError(
@@ -269,6 +276,8 @@ class PsycopgConsoleReadSession:
                 )
             rows.append(converted)
             used_bytes += row_bytes
+        if not remaining:
+            remaining = pending
         if export:
             reader.export_position += len(rows)
             reader.export_pending = remaining
@@ -478,69 +487,44 @@ def _execute_console_statements(
         for statement_index, statement in enumerate(statements):
             check_query_authority()
             statement_progress(statement_index)
-            cursor: Any | None = None
-            try:
-                cursor = database_connection.cursor(
-                    row_factory=lambda _cursor: lambda values: tuple(values)
+            rows: list[tuple[Any, ...]] = []
+            result_bytes = 0
+
+            def consume(raw_row):
+                nonlocal result_bytes
+                converted = tuple(
+                    json_console_value(value, maximum_bytes=maximum_cell_bytes)
+                    for value in raw_row
                 )
-                cursor.execute(statement)
-                description = tuple(cursor.description or ())
-                rows: list[tuple[Any, ...]] = []
-                result_bytes = 0
-                truncated = False
-                while description:
-                    check_query_authority()
-                    raw_rows = cursor.fetchmany(100)
-                    if not raw_rows:
-                        break
-                    for raw_row in raw_rows:
-                        converted = tuple(
-                            json_console_value(
-                                value, maximum_bytes=maximum_cell_bytes
-                            )
-                            for value in raw_row
-                        )
-                        row_bytes = len(
-                            json.dumps(converted, ensure_ascii=False).encode("utf-8")
-                        )
-                        if result_bytes + row_bytes > maximum_result_bytes:
-                            raise PostgresConsoleLimitError(
-                                f"This statement needs more than the configured {maximum_result_bytes}-byte Console memory page. Narrow the selected columns or use managed read and its streaming download.",
-                                statement_index=statement_index,
-                                resource="console_result_memory",
-                                limit_name="console.results.page_memory_bytes",
-                                limit=maximum_result_bytes,
-                                observed=result_bytes + row_bytes,
-                            )
-                        rows.append(converted)
-                        result_bytes += row_bytes
-                type_names = _console_type_names(
-                    database_connection,
-                    tuple(column.type_code for column in description),
-                )
-                columns = tuple(
-                    ConsoleResultColumn(
-                        name=column.name,
-                        data_type=type_names.get(
-                            column.type_code,
-                            f"oid:{column.type_code}",
-                        ),
-                    )
-                    for column in description
-                )
-                status_message = str(cursor.statusmessage or "OK")
-                results.append(
-                    ConsoleQueryResult(
+                row_bytes = len(json.dumps(converted, ensure_ascii=False).encode("utf-8"))
+                if result_bytes + row_bytes > maximum_result_bytes:
+                    raise PostgresConsoleLimitError(
+                        f"This statement needs more than the configured {maximum_result_bytes}-byte Console memory page. Narrow the selected columns or use managed read and its streaming download.",
                         statement_index=statement_index,
-                        command=status_message.split(" ", 1)[0],
-                        columns=columns,
-                        rows=tuple(rows),
-                        truncated=truncated,
+                        resource="console_result_memory",
+                        limit_name="console.results.page_memory_bytes",
+                        limit=maximum_result_bytes,
+                        observed=result_bytes + row_bytes,
                     )
-                )
-                statement_progress(statement_index, True)
-            finally:
-                _safe_close(cursor)
+                rows.append(converted)
+                result_bytes += row_bytes
+
+            description, status_message = execute_incremental(
+                database_connection, statement, consume,
+            )
+            type_names = _console_type_names(
+                database_connection, tuple(oid for _, oid in description),
+            )
+            columns = tuple(
+                ConsoleResultColumn(name=name, data_type=type_names.get(oid, f"oid:{oid}"))
+                for name, oid in description
+            )
+            results.append(ConsoleQueryResult(
+                statement_index=statement_index,
+                command=status_message.split(" ", 1)[0],
+                columns=columns, rows=tuple(rows), truncated=False,
+            ))
+            statement_progress(statement_index, True)
         return tuple(results)
     except PostgresGatewayError:
         raise

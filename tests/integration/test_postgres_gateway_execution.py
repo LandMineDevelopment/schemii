@@ -240,3 +240,125 @@ def test_required_column_empty_table_precondition_is_rechecked_under_lock(
     table = _table(visible, "guarded_events")
     assert table is not None
     assert [column.name for column in table.columns] == ["id"]
+
+
+def test_incremental_console_preserves_empty_metadata_commands_and_exact_once_dml(
+    gateway_target: GatewayTarget, postgres_metadata: PostgresMetadataHarness,
+) -> None:
+    from schemii.common.postgres.console.gateway import execute_console_statements
+
+    gateway = PsycopgPostgresGateway()
+    connection = gateway._connect(gateway_target.connection)
+    namespace = gateway_target.namespace
+    try:
+        results = execute_console_statements(connection, [
+            f"CREATE TABLE {namespace}.incremental_marker (id integer PRIMARY KEY, visits integer)",
+            f"INSERT INTO {namespace}.incremental_marker VALUES (1, 0) RETURNING id",
+            f"UPDATE {namespace}.incremental_marker SET visits = visits + 1 RETURNING visits",
+            "SELECT 1::integer AS value WHERE false",
+            "SHOW statement_timeout",
+            "SELECT 1.25::numeric, DATE '2026-09-29', decode('abcd', 'hex'), '{\"x\":1}'::jsonb",
+        ])
+        assert [result.command for result in results] == ["CREATE", "INSERT", "UPDATE", "SELECT", "SHOW", "SELECT"]
+        assert results[1].rows == ((1,),)
+        assert results[2].rows == ((1,),)
+        assert results[3].rows == ()
+        assert [(column.name, column.data_type) for column in results[3].columns] == [("value", "integer")]
+        assert results[5].rows == (("1.25", "2026-09-29", "\\xabcd", {"x": 1}),)
+        connection.commit()
+        with postgres_metadata.connection_factory() as observer:
+            with observer.cursor() as cursor:
+                cursor.execute(sql.SQL("SELECT visits FROM {}.incremental_marker WHERE id = 1").format(sql.Identifier(namespace)))
+                assert cursor.fetchone()["visits"] == 1
+    finally:
+        connection.close()
+    assert gateway._connection_capacity._total == 0
+
+
+@pytest.mark.parametrize(("rows", "width", "cell_limit", "limit_name"), [
+    (100_000, 8, 256 * 1024, "console.results.page_memory_bytes"),
+    (100_000, 8192, 256 * 1024, "console.results.page_memory_bytes"),
+    (2, 512 * 1024, 256 * 1024, "console.results.maximum_cell_bytes"),
+])
+def test_incremental_console_caps_real_results_and_restores_protocol(
+    gateway_target: GatewayTarget, rows, width, cell_limit, limit_name,
+) -> None:
+    from schemii.common.postgres.console.gateway import execute_console_statements
+    from schemii.common.postgres.errors import PostgresConsoleLimitError
+
+    gateway = PsycopgPostgresGateway()
+    connection = gateway._connect(gateway_target.connection)
+    try:
+        with pytest.raises(PostgresConsoleLimitError) as caught:
+            execute_console_statements(connection, [
+                f"SELECT repeat('x', {width}) FROM generate_series(1, {rows})",
+            ], maximum_result_bytes=16384, maximum_cell_bytes=cell_limit)
+        assert caught.value.limit_name == limit_name
+        assert caught.value.observed > caught.value.limit
+        connection.rollback()
+        assert execute_console_statements(connection, ["SELECT 1 AS healthy"])[0].rows == ((1,),)
+    finally:
+        connection.close()
+    assert gateway._connection_capacity._total == 0
+
+
+def test_incremental_returning_limit_rolls_back_whole_script_without_replay(
+    gateway_target: GatewayTarget, postgres_metadata: PostgresMetadataHarness,
+) -> None:
+    from schemii.common.postgres.console.gateway import execute_console_statements
+    from schemii.common.postgres.errors import PostgresConsoleLimitError
+
+    namespace = gateway_target.namespace
+    with postgres_metadata.connection_factory() as setup:
+        with setup.cursor() as cursor:
+            cursor.execute(sql.SQL("CREATE TABLE {}.returning_marker (id integer PRIMARY KEY, visits integer); CREATE SEQUENCE {}.dispatch_marker").format(
+                sql.Identifier(namespace), sql.Identifier(namespace)))
+            cursor.execute(sql.SQL("INSERT INTO {}.returning_marker SELECT n, 0 FROM generate_series(1, 1000) AS n").format(sql.Identifier(namespace)))
+        setup.commit()
+    gateway = PsycopgPostgresGateway()
+    connection = gateway._connect(gateway_target.connection)
+    try:
+        with pytest.raises(PostgresConsoleLimitError) as caught:
+            execute_console_statements(connection, [
+                f"UPDATE {namespace}.returning_marker SET visits = visits + 1 WHERE id = 1",
+                f"UPDATE {namespace}.returning_marker SET visits = visits + 1 RETURNING nextval('{namespace}.dispatch_marker'), repeat('x', 1024)",
+                f"UPDATE {namespace}.returning_marker SET visits = 100",
+            ], maximum_result_bytes=4096)
+        assert caught.value.statement_index == 1
+        connection.rollback()
+        with postgres_metadata.connection_factory() as observer:
+            with observer.cursor() as cursor:
+                cursor.execute(sql.SQL("SELECT sum(visits) AS visits FROM {}.returning_marker").format(sql.Identifier(namespace)))
+                assert cursor.fetchone()["visits"] == 0
+                # Sequence calls survive rollback. The write ran at most once;
+                # cancellation may stop it before all source rows were visited.
+                cursor.execute(sql.SQL("SELECT last_value FROM {}.dispatch_marker").format(sql.Identifier(namespace)))
+                assert 1 <= cursor.fetchone()["last_value"] <= 1000
+        assert execute_console_statements(connection, ["SELECT 1"])[0].rows == ((1,),)
+    finally:
+        connection.close()
+    assert gateway._connection_capacity._total == 0
+
+
+def test_named_read_wide_page_carries_one_row_without_skipping(
+    gateway_target: GatewayTarget,
+) -> None:
+    gateway = PsycopgPostgresGateway()
+    session = gateway.open_console_read_session(
+        gateway_target.connection, gateway_target.namespace,
+        ["SELECT n, repeat('x', 8192) FROM generate_series(1, 6) AS n ORDER BY n"],
+        on_started=lambda pid: True, page_memory_bytes=16384,
+    )
+    try:
+        received = []
+        for offset in range(6):
+            page = session.page(0, offset, 1000)
+            assert len(page) == 1
+            assert page[0][1] == "x" * 8192
+            assert len(session._readers[0].pending) <= 1
+            received.append(page[0][0])
+        assert received == [1, 2, 3, 4, 5, 6]
+        assert session.page(0, 6, 1000) == ()
+    finally:
+        session.close()
+    assert gateway._connection_capacity._total == 0

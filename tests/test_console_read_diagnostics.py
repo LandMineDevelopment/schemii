@@ -41,7 +41,7 @@ def test_unbounded_read_uses_one_forward_cursor_without_counting_or_offsets():
     assert session.results[0].row_count is None
     assert session.page(0, 0, 3) == ((0,), (1,), (2,))
     assert session.page(0, 3, 2) == ((3,), (4,))
-    assert cursor.fetch_sizes == [3, 2]
+    assert cursor.fetch_sizes == [1, 1, 1, 1, 1]
     assert len(cursors) == 1
     session.close()
 
@@ -122,8 +122,11 @@ def test_read_preparation_preserves_postgres_diagnostic_and_closes_connection():
     assert closed == [True]
 
 
-def test_mixed_read_progress_retains_outer_statement_index():
+def test_mixed_read_progress_retains_outer_statement_index(monkeypatch):
     from schemii.common.query_executions.activity import report_progress
+    from schemii.common.postgres.console import gateway
+    monkeypatch.setattr(gateway, "execute_incremental",
+                        lambda connection, statement, consume: ((), "SHOW"))
 
     class Cursor:
         description = ()
