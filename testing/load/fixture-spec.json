@@ -1,0 +1,15 @@
+{
+  "definition": {
+    "root": "orders",
+    "nodes": [{ "id": "orders", "table": "orders", "label": "Orders" }],
+    "edges": [],
+    "scopes": []
+  },
+  "explore": {
+    "root": "orders",
+    "fields": [{ "table": "orders", "column": "id" }],
+    "limit": 100,
+    "selections": {},
+    "reportFilters": []
+  }
+}

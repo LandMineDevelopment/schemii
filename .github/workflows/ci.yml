@@ -4,17 +4,71 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  CI_TELEMETRY_SHA: ${{ github.sha }}
+  CI_TELEMETRY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  CI_TELEMETRY_RUN_ID: ${{ github.run_id }}
+  CI_TELEMETRY_RUN_ATTEMPT: ${{ github.run_attempt }}
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  classify:
+    name: Classify complete change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      lane: ${{ steps.classify.outputs.lane }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify the complete base-to-head change
+        id: classify
+        run: python3 scripts/ci/classify_changes.py --output artifacts/ci-classification.json
+      - name: Retain classification, including invalid comparisons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts/ci-classification.json
+          if-no-files-found: error
+          retention-days: 7
+
+  report-validation:
+    name: Report Markdown and local links
+    if: always()
+    needs: classify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts
+      - name: Validate changed Markdown and local links
+        run: python3 scripts/ci/validate_reports.py --classification artifacts/ci-classification.json --output artifacts/report-validation.json
+      - name: Publish report validation timing and status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-validation-attempt-${{ github.run_attempt }}
+          path: artifacts/report-validation.json
+          if-no-files-found: error
+          retention-days: 7
+
   static-quality:
     name: Incremental Python static quality
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -28,11 +82,13 @@ jobs:
       - run: python -m pip install --constraint constraints.docker.txt --editable '.[quality]'
       - name: Check Python quality against the change base
         env:
-          QUALITY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          QUALITY_BASE: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
         run: python scripts/check_python_quality.py "$QUALITY_BASE"
 
   test:
     name: Node and deterministic Python behavior
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -41,18 +97,51 @@ jobs:
         with:
           node-version: "22"
       - name: Fast frontend and harness feedback
+        env:
+          CI_TELEMETRY_FILE: artifacts/ci-timing/node.jsonl
         run: npm test
+      - name: Validate public Node timing
+        id: node-timing
+        if: always()
+        run: python3 scripts/ci/summary.py artifacts/ci-timing/node.jsonl artifacts/ci-timing/node-summary.json
+      - name: Publish public Node timing
+        if: always() && steps.node-timing.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-timing-attempt-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-timing/node.jsonl
+            artifacts/ci-timing/node-summary.json
+          retention-days: 7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
-      - run: python -m pytest -q
+      - name: Deterministic Python behavior
+        env:
+          CI_TELEMETRY_FILE: artifacts/ci-timing/python.jsonl
+        run: python -m pytest -q -p scripts.ci.pytest_timing
       - run: python -m compileall -q src tests testing
+      - name: Validate public Python timing
+        id: python-timing
+        if: always()
+        run: python3 scripts/ci/summary.py artifacts/ci-timing/python.jsonl artifacts/ci-timing/python-summary.json
+      - name: Publish public Python timing
+        if: always() && steps.python-timing.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-timing-attempt-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-timing/python.jsonl
+            artifacts/ci-timing/python-summary.json
+          retention-days: 7
 
   postgres-integration:
     name: Real PostgreSQL metadata behavior
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -81,10 +170,27 @@ jobs:
         env:
           SCHEMII_TEST_METADATA_DSN: host=127.0.0.1 port=5432 dbname=schemii_ci user=postgres
           SCHEMII_TEST_METADATA_PASSWORD: postgres-ci-password
-        run: python -m pytest -q tests/integration
+          CI_TELEMETRY_FILE: artifacts/ci-timing/postgres.jsonl
+          CI_TELEMETRY_LANE: postgres
+        run: python -m pytest -q -p scripts.ci.pytest_timing tests/integration
+      - name: Validate public PostgreSQL timing
+        id: postgres-timing
+        if: always()
+        run: python3 scripts/ci/summary.py artifacts/ci-timing/postgres.jsonl artifacts/ci-timing/postgres-summary.json
+      - name: Publish public PostgreSQL timing
+        if: always() && steps.postgres-timing.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-timing-attempt-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-timing/postgres.jsonl
+            artifacts/ci-timing/postgres-summary.json
+          retention-days: 7
 
   browser-smoke:
     name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/2)
+    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
@@ -106,18 +212,85 @@ jobs:
         timeout-minutes: 28
         env:
           SCHEMII_E2E_BOOTSTRAP: "1"
+          CI_TELEMETRY_FILE: artifacts/ci-timing/browser.jsonl
+          CI_TELEMETRY_PROJECT: ${{ matrix.project }}
         run: npm run test:e2e -- --project=${{ matrix.project }} --shard=${{ matrix.shard }}/2
       - name: Verify metadata backup recovery in an isolated database
         if: matrix.project == 'desktop-chromium' && matrix.shard == 1
         run: |
           ./start.sh --backup artifacts/recovery-smoke
           ./start.sh --verify-backup artifacts/recovery-smoke
-      - name: Upload browser failure evidence
-        if: failure()
+      - name: Validate public browser timing
+        id: browser-timing
+        if: always()
+        run: python3 scripts/ci/summary.py artifacts/ci-timing/browser.jsonl artifacts/ci-timing/browser-summary.json
+      - name: Publish public browser timing, including failed first attempts
+        if: always() && steps.browser-timing.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: browser-failure-evidence-${{ matrix.project }}-shard-${{ matrix.shard }}
+          name: browser-timing-${{ matrix.project }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: |
-            artifacts/playwright-results
-            artifacts/playwright-report
+            artifacts/ci-timing/browser.jsonl
+            artifacts/ci-timing/browser-summary.json
           retention-days: 7
+
+  timing-rollup:
+    name: Public workflow timing
+    if: always()
+    needs: [classify, report-validation, static-quality, test, postgres-integration, browser-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download classification
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts
+      - name: Download only public timing evidence
+        if: always() && needs.classify.outputs.lane != 'reports'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-timing*-attempt-${{ github.run_attempt }}'
+          path: artifacts/ci-timing/lanes
+      - name: Collect workflow dispatch, queue, setup and execution timings
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        if: always()
+        run: python3 scripts/ci/workflow_timing.py --classification artifacts/ci-classification.json --inputs artifacts/ci-timing/lanes --output artifacts/ci-timing/workflow-summary.json
+      - name: Publish public workflow timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-timing-attempt-${{ github.run_attempt }}
+          path: artifacts/ci-timing/workflow-summary.json
+          retention-days: 7
+
+  required-gate:
+    name: CI validation
+    if: always()
+    needs: [classify, report-validation, static-quality, test, postgres-integration, browser-smoke, timing-rollup]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-classification-attempt-${{ github.run_attempt }}
+          path: artifacts
+      - name: Download complete timing receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: workflow-timing-attempt-${{ github.run_attempt }}
+          path: artifacts/ci-timing
+      - name: Resolve report validation or every required source layer
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/required_gate.py --classification artifacts/ci-classification.json --timing artifacts/ci-timing/workflow-summary.json

@@ -6,7 +6,8 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
 async function birthTick(pid) {
   const text = await readFile(`/proc/${pid}/stat`, 'utf8');
-  return text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+  const fields=text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/);
+  return fields[0] === 'Z' ? null : fields[19];
 }
 
 export function workerAssignment(root, sessionFile, brief) {
@@ -60,13 +61,14 @@ ${JSON.stringify(brief, null, 2)}
 
 /** One installed Codex process per lane; no dependency on T3 subagent capacity. */
 export class CodexWorkers {
-  constructor({ root, runDir, model, reasoning, timeoutSeconds = 600, onEvent = () => {}, onExit = () => {} }) {
+  constructor({ root, runDir, model, reasoning, timeoutSeconds = 600, spawnProcess = spawn, onEvent = () => {}, onExit = () => {} }) {
     if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new Error('Agent timeout must be positive');
     this.root = resolve(root);
     this.runDir = resolve(runDir);
     this.model = model;
     this.reasoning = reasoning;
     this.timeoutSeconds = timeoutSeconds;
+    this.spawnProcess = spawnProcess;
     this.onEvent = onEvent;
     this.onExit = onExit;
     this.handles = new Map();
@@ -87,22 +89,44 @@ export class CodexWorkers {
     if (this.handles.size >= 10) throw new Error('At most ten Codex workers may run concurrently');
     const directory = join(this.runDir, laneId);
     // Reserve synchronously so concurrent starts cannot launch two owners.
-    const handle = { laneId, startedAt: new Date().toISOString(), finished: false, reason: null, turnStarted: false };
+    const handle = { laneId, startedAt: new Date().toISOString(), finished: false, reason: null, turnStarted: false, generation:lane.generation };
     this.handles.set(laneId, handle);
     let resolveDone;
     handle.done = new Promise(resolve => { resolveDone = resolve; });
-    const finish = (code, signal, error = false) => {
-      if (handle.finished) return;
-      if (handle.draining) { handle.leaderExit = { code, signal, error }; return; }
-      handle.finished = true;
-      clearTimeout(handle.timer);
-      const result = { laneId, pid: handle.pid ?? null, birthTick: handle.birthTick ?? null, code, signal, reason: handle.reason ?? (error ? 'spawn-failed' : code === 0 ? 'completed' : 'agent-failed'), turnStarted: handle.turnStarted, startedAt: handle.startedAt, endedAt: new Date().toISOString() };
-      this.handles.delete(laneId);
-      resolveDone(result);
-      this.#emit({ laneId, kind: 'worker-exited', reason: result.reason, code, signal });
+    const exitResult = cleanup => {
+      const { code, signal, error } = handle.leaderExit;
+      return { laneId, generation:handle.generation, pid: handle.pid ?? null, birthTick: handle.birthTick ?? null, code, signal, reason: handle.reason ?? (error ? 'spawn-failed' : code === 0 ? 'completed' : 'agent-failed'), cleanup, turnStarted: handle.turnStarted, startedAt: handle.startedAt, endedAt: new Date().toISOString() };
+    };
+    const notifyExit = result => {
       try { Promise.resolve(this.onExit(result)).catch(() => {}); } catch {}
     };
+    const release = () => {
+      if (handle.finished) return;
+      handle.finished = true;
+      clearTimeout(handle.timer);
+      clearInterval(handle.groupTimer);
+      const result = exitResult('stopped');
+      if (this.handles.get(laneId) === handle) this.handles.delete(laneId);
+      resolveDone(result);
+      this.#emit({ laneId, generation:handle.generation, pid:handle.pid, birthTick:handle.birthTick, kind: 'worker-exited', reason: result.reason, code:result.code, signal:result.signal, cleanup:result.cleanup });
+      notifyExit(result);
+    };
+    const finish = (code, signal, error = false) => {
+      if (handle.finished || handle.leaderExit) return;
+      handle.leaderExit = { code, signal, error };
+      handle.reason ??= error ? 'spawn-failed' : code === 0 ? 'completed' : 'agent-failed';
+      handle.turnActive = false;
+      clearTimeout(handle.timer);clearInterval(handle.groupTimer);
+      // Fence through the generation-aware controller now, while cleanup still
+      // owns the execution slot, recording streams and any surviving children.
+      const result = exitResult('pending');
+      this.#emit({laneId,generation:handle.generation,pid:handle.pid,birthTick:handle.birthTick,kind:'worker-leader-exited',code,signal,reason:result.reason,cleanup:result.cleanup});
+      notifyExit(result);
+      if (!handle.child) { release();return; }
+      if (!handle.draining && !handle.cleanupPending) void this.stop(laneId,handle.reason).catch(() => {});
+    };
     handle.finish = finish;
+    handle.release = release;
     let output;
     try {
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -112,14 +136,18 @@ export class CodexWorkers {
       if (this.model) args.push('-m', this.model);
       if (this.reasoning) args.push('-c', `model_reasoning_effort=${JSON.stringify(this.reasoning)}`);
       args.push('-');
-      const child = spawn('codex', args, { cwd: directory, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = this.spawnProcess('codex', args, { cwd: directory, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
       handle.child = child;
+      handle.closed = new Promise((resolve,reject) => { handle.resolveClosed = resolve;handle.rejectClosed = reject; });
+      // Exit/startup cleanup awaits this promise; attach an observer immediately
+      // so an early stream failure is not an unhandled rejection.
+      void handle.closed.catch(() => {});
       handle.pid = child.pid;
       this.peakProcesses = Math.max(this.peakProcesses, [...this.handles.values()].filter(item => item.pid && !item.finished).length);
       let pending = '';
       let writing = Promise.resolve();
       child.stdout.on('data', chunk => {
-        writing = writing.then(() => output.write(chunk)).catch(() => { this.#emit({ laneId, kind: 'worker-log-error' }); });
+        writing = writing.then(() => output.write(chunk)).catch(error => { handle.recordingError ??= error.message;this.#emit({ laneId, generation:handle.generation, pid:handle.pid, birthTick:handle.birthTick, kind: 'worker-log-error' }); });
         pending += chunk.toString('utf8');
         const lines = pending.split('\n');
         pending = lines.pop();
@@ -135,24 +163,39 @@ export class CodexWorkers {
           }
           if (['turn.completed', 'turn.failed', 'error'].includes(data.type)) handle.turnActive = false;
           if (['thread.started', 'turn.started', 'turn.completed', 'turn.failed', 'error'].includes(data.type)) {
-            this.#emit({ laneId, kind: 'worker-progress', event: data.type });
-          } else this.#emit({ laneId, kind: 'worker-heartbeat' });
+            this.#emit({ laneId, generation:handle.generation, pid:handle.pid, birthTick:handle.birthTick, kind: 'worker-progress', event: data.type });
+          } else if (['item.started','item.updated','item.completed'].includes(data.type) && data.item && typeof data.item === 'object') {
+            this.#emit({laneId,generation:handle.generation,pid:handle.pid,birthTick:handle.birthTick,kind:'worker-activity',event:data.type});
+          } else this.#emit({ laneId, generation:handle.generation, pid:handle.pid, birthTick:handle.birthTick, kind: 'worker-heartbeat' });
         }
       });
       // Avoid persisting unstructured stderr, which may contain local credentials.
-      child.stderr.on('data', () => this.#emit({ laneId, kind: 'worker-stderr' }));
+      child.stderr.on('data', () => this.#emit({ laneId, generation:handle.generation, pid:handle.pid, birthTick:handle.birthTick, kind: 'worker-stderr' }));
       child.stdin.on('error', () => {});
       child.once('error', () => finish(null, null, true));
       child.once('exit', (code, signal) => finish(code, signal));
-      child.once('close', () => { void writing.finally(() => output.close()).catch(() => {}); });
+      child.once('close', () => { void writing.finally(() => output.close()).then(() => {
+        if (handle.recordingError) handle.rejectClosed(new Error('Worker recording is unavailable; preserve its ownership for review.'));
+        else handle.resolveClosed();
+      }, error => { this.#emit({laneId,generation:handle.generation,pid:handle.pid,birthTick:handle.birthTick,kind:'worker-log-error'});handle.rejectClosed(error); }); });
       if (!handle.pid) throw new Error('Cannot launch installed Codex executable');
       handle.birthTick = await birthTick(handle.pid);
       if (!handle.birthTick || handle.finished) throw new Error('Codex agent exited before process ownership was recorded');
       if (handle.reason || this.closing) throw new Error('Worker stopped during process startup');
-      this.#emit({ laneId, kind: 'worker-started', pid: handle.pid, birthTick: handle.birthTick });
-      handle.timer = setTimeout(() => { handle.reason = 'timeout'; void this.stop(laneId); }, this.timeoutSeconds * 1000);
+      await this.#ownedGroup(handle);
+      if (handle.leaderExit || handle.reason || this.closing) throw new Error('Worker exited during process ownership recording');
+      // Observe child birth identities while the leader can still prove this
+      // detached group. An unknown group after a crash is never adopted blindly.
+      handle.groupTimer = setInterval(() => {
+        if (handle.groupScan || handle.draining || handle.cleanupPending || handle.leaderExit) return;
+        handle.groupScan = this.#ownedGroup(handle).catch(error => {
+          handle.groupObservationError = error.message;
+        }).finally(() => { handle.groupScan = null; });
+      },1000).unref();
+      this.#emit({ laneId, generation:handle.generation, pid:handle.pid, birthTick:handle.birthTick, kind: 'worker-started', pid: handle.pid, birthTick: handle.birthTick });
+      handle.timer = setTimeout(() => { handle.reason = 'timeout'; void this.stop(laneId).catch(() => {}); }, this.timeoutSeconds * 1000);
       child.stdin.end(workerAssignment(this.root, sessionFile, brief));
-      return { pid: handle.pid, birthTick: handle.birthTick, startedAt: handle.startedAt };
+      return { pid: handle.pid, birthTick: handle.birthTick, generation:handle.generation, startedAt: handle.startedAt };
     } catch (error) {
       handle.reason ??= 'startup-failed';
       if (handle.child && !handle.finished) {
@@ -164,15 +207,6 @@ export class CodexWorkers {
     }
   }
 
-  async #signal(handle, signal) {
-    if (handle.finished || !handle.pid || !handle.birthTick) return;
-    let current;
-    try { current = await birthTick(handle.pid); } catch { return; }
-    if (current !== handle.birthTick || handle.finished) return;
-    try { process.kill(-handle.pid, signal); }
-    catch (error) { if (error.code !== 'ESRCH') throw error; }
-  }
-
   async #groupMembers(handle) {
     const names = await readdir('/proc');
     const members = await Promise.all(names.filter(name => /^\d+$/.test(name)).map(async name => {
@@ -181,63 +215,88 @@ export class CodexWorkers {
         const fields = text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/);
         if (fields[0] === 'Z' || Number(fields[2]) !== handle.pid || Number(fields[3]) !== handle.pid) return null;
         return { pid: Number(name), birthTick: fields[19] };
-      } catch { return null; }
+      } catch (error) { if (['ENOENT','ESRCH'].includes(error.code)) return null;throw error; }
     }));
     return members.filter(Boolean);
   }
 
+  async #ownedGroup(handle) {
+    const current = await this.#groupMembers(handle);
+    const leaderMatches = current.some(owner => owner.pid === handle.pid && owner.birthTick === handle.birthTick);
+    if (current.some(owner => owner.pid === handle.pid) && !leaderMatches) throw new Error('Worker process group ownership changed; preserve its reservation for inspection.');
+    const memberMatches = current.some(owner => owner.pid !== handle.pid && (handle.ownedGroup || []).some(known => known.pid === owner.pid && known.birthTick === owner.birthTick));
+    if (current.length && !leaderMatches && !memberMatches) throw new Error('Worker process group ownership changed; preserve its reservation for inspection.');
+    handle.ownedGroup = current;
+    return current;
+  }
+
+  async #signal(handle, signal) {
+    const members = await this.#ownedGroup(handle);
+    if (!members.length) return;
+    // A birth-matched live leader or previously captured group member proves
+    // ownership. Never signal a group from a lane label or a bare saved PGID.
+    try { process.kill(-handle.pid, signal); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+  }
+
   async #drain(handle) {
+    const startupDeadline = Date.now() + 1000;
     while (!handle.birthTick && !handle.leaderExit && !handle.finished) {
+      if (Date.now() >= startupDeadline) throw new Error('Worker process ownership is unresolved; cleanup remains pending.');
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    if (!handle.birthTick || handle.finished) return;
-    // Stop the owned group before taking the membership snapshot so descendants
-    // cannot fork between enumeration and the initial termination signal.
-    if (await birthTick(handle.pid).catch(() => null) !== handle.birthTick) return;
+    if (!handle.birthTick) {
+      if (handle.leaderExit && (!handle.pid || !(await this.#groupMembers(handle)).length)) return;
+      throw new Error('Worker process ownership is missing; cleanup remains pending.');
+    }
+    // Stop the owned group before inspecting it so children cannot fork between
+    // ownership capture and termination. Continue it so SIGTERM can be handled.
     await this.#signal(handle, 'SIGSTOP');
-    let members;
-    try {
-      members = await this.#groupMembers(handle);
-      await this.#signal(handle, 'SIGTERM');
-    } finally { await this.#signal(handle, 'SIGCONT'); }
-    const deadline = Date.now() + 5000;
-    while (members.length) {
-      const alive = (await Promise.all(members.map(async member =>
-        await birthTick(member.pid).catch(() => null) === member.birthTick ? member : null))).filter(Boolean);
-      if (!alive.length) return;
-      // A surviving birth-matched member proves the detached group still belongs
-      // to this launch, even after its leader has exited. Never use just a PGID.
-      const current = await this.#groupMembers(handle);
-      if (!current.some(member => alive.some(known => known.pid === member.pid && known.birthTick === member.birthTick))) return;
-      members = current;
-      if (Date.now() >= deadline) {
-        try { process.kill(-handle.pid, 'SIGKILL'); }
-        catch (error) { if (error.code !== 'ESRCH') throw error; }
-        return;
+    try { await this.#signal(handle, 'SIGTERM'); }
+    finally { await this.#signal(handle, 'SIGCONT'); }
+    const gracefulDeadline = Date.now() + 5000, finalDeadline = gracefulDeadline + 1000;
+    let escalated = false;
+    while ((await this.#ownedGroup(handle)).length) {
+      if (!escalated && Date.now() >= gracefulDeadline) {
+        await this.#signal(handle, 'SIGKILL');escalated = true;
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      if (Date.now() >= finalDeadline) throw new Error('Owned worker processes remain live after termination; cleanup remains pending.');
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
   }
 
-  async stop(laneId) {
+  async stop(laneId, reason = 'stopped') {
     const handle = this.handles.get(laneId);
     if (!handle) return;
-    handle.reason ??= 'stopped';
+    handle.reason ??= reason;
+    clearTimeout(handle.timer);
+    clearInterval(handle.groupTimer);
     if (!handle.child) return handle.done;
     if (!handle.stopTask) {
-      handle.draining = true;
-      handle.stopTask = this.#drain(handle).catch(() => {
-        this.#emit({ laneId, kind: 'worker-stop-error' });
-      }).finally(() => {
-        handle.draining = false;
-        if (handle.leaderExit) {
-          const { code, signal, error } = handle.leaderExit;
-          handle.finish(code, signal, error);
+      handle.draining = true;handle.cleanupPending = false;
+      handle.stopTask = (async () => {
+        try {
+          await handle.groupScan;
+          await this.#drain(handle);
+          // ChildProcess exit reaps the leader; close confirms inherited stdout
+          // descriptors and the private recording have drained before release.
+          let timer;
+          try { await Promise.race([handle.closed, new Promise((_,reject) => {timer=setTimeout(() => reject(new Error('Worker recording closure is pending.')),1000);})]); }
+          finally { clearTimeout(timer); }
+          if (!handle.leaderExit) throw new Error('Worker exit has not been reaped; cleanup remains pending.');
+          handle.draining = false;
+          handle.release();
+          return handle.done;
+        } catch (error) {
+          handle.draining = false;handle.cleanupPending = true;
+          handle.cleanupError = error.message;
+          this.#emit({laneId,generation:handle.generation,pid:handle.pid,birthTick:handle.birthTick,kind:'worker-stop-error',cleanup:'pending',reason:handle.reason,error:handle.cleanupError});
+          throw error;
         }
-      });
+      })();
     }
-    await handle.stopTask;
-    return handle.done;
+    try { return await handle.stopTask; }
+    catch(error) { handle.stopTask=null;throw error; }
   }
 
   async close() {
