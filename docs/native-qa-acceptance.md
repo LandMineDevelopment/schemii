@@ -69,7 +69,18 @@ worker's session-file and brief paths:
    account, and take an unnamed PNG at CSS scale with `fullPage:false`. Record:
    `./test.sh native-auth --session-file SESSION --args-json '{"username":"ASSIGNED_ACCOUNT","url":"https://localhost:8001/account","file":"/own/output/page.png","viewport":{"width":1280,"height":800},"invocation":"actual account snapshot tool reference","note":"Expected assigned identity; actual visible signed-in identity"}'`.
    Authentication evidence is not product-scenario pass evidence.
-3. Begin the exact scenario before captures:
+3. For a newly UI-created prefixed workspace, immediately record `resource-receipt`
+   with `kind`, exact `id`, `name`, `createdAt`, current `url`, fresh native PNG
+   `file`/`viewport`, actual creation snapshot `invocation` and expected/actual
+   `note` in `--args-json`. This persists an exact lane cleanup receipt. The name
+   must use this fixture's prefix and creation must occur during this run; another
+   lane's resource cannot be adopted. No raw app API call substitutes for creation.
+   For evidence in this new workspace, `begin` additionally accepts
+   `--args-json '{"url":"/?workspace=EXACT_RECEIPTED_ID"}'`. Only declared static
+   fixture IDs or exact creation-receipted IDs are selectable; arbitrary routes
+   remain rejected.
+
+   Begin the exact scenario before captures:
    `./test.sh begin --session-file SESSION --scenario EXACT_ID`.
    An expected-denial case additionally supplies
    `--args-json '{"expectedState":"denied"}'`; the lane must explicitly declare

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, utimes, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
+import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -167,4 +167,22 @@ while True: time.sleep(1)
   assert.equal(result.transport,'stopped');assert.equal(result.temporaryOutput,'removed-observed');
   assert.equal(f.lane.native.termination.mode,'harness-owned-extension-SIGTERM');
   assert.ok(await processIdentity(peer.child.pid));assert.ok(await readFile(join(peer.session,'session.json')));
+});
+
+
+test('workspace selection requires exact declared or fresh owned creation receipt',async t=>{
+  const f=fixture(), fs=await sessionFixture(t);f.run.createdAt=new Date(Date.now()-2000).toISOString();
+  f.lane.resources={localWorkspaceId:'owned-5',scratchPrefix:'qa_owned_005_'};
+  f.lane.writeAuthorization={enabled:true,operations:['create/edit/save own local design']};
+  await bindNative(f.run,f.lane,fs.session,fs.browserRoot);
+  beginScenario(f.run,f.lane,f.scenario.id,{url:'/?workspace=owned-5'});
+  const id=`ws_${'1'.repeat(32)}`,url=`/?workspace=${id}`,file=join(fs.session,'output','created.png');
+  await writeFile(file,png());
+  const input={kind:'workspace',id,name:'qa_owned_005_import',createdAt:new Date(Date.now()-1000).toISOString(),url,file,viewport:f.scenario.viewport,invocation:'actual creation snapshot',note:'Expected own import workspace; actual own named workspace.'};
+  assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,{url}),/creation-receipted/);
+  const receipt=await recordNativeResource(f.run,f.lane,input,{runDir:join(fs.directory,'qa-test'),browserRoot:fs.browserRoot});
+  assert.equal(receipt.id,id);assert.equal(f.lane.resources.cleanupReceipts[0].createdAt,input.createdAt);
+  assert.equal(beginScenario(f.run,f.lane,f.scenario.id,{url}).url,new URL(url,f.run.baseURL).href);
+  await assert.rejects(recordNativeResource(f.run,f.lane,input,{runDir:join(fs.directory,'qa-test'),browserRoot:fs.browserRoot}),/already recorded/);
+  assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,{url:'/?workspace=other'}),/explicitly assigned/);
 });

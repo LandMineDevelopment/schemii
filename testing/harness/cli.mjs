@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
 import { deploymentLockPath } from './deployment.mjs';
 import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock, withAvailableAccounts } from './leases.mjs';
+import { expandFixtureScenario } from './prerequisites.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
 const catalog=()=>readJSON(join(root,'testing/personas.json'));
 const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spawn(file,args,{cwd:root,stdio:'inherit',...options});child.once('error',rej);child.once('close',code=>code===0?res():rej(blocked(`${file} exited ${code}; inspect the exact diagnostic above.`)));});
@@ -14,6 +15,7 @@ const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spa
 const help = `Usage: ./test.sh COMMAND [options]
 
   setup      Create/extend stable persona credentials, prepare QA DB, provision accounts
+  cleanup-sweep Delete only exact-prefix objects from a stopped owned sweep
   cleanup-author-fixture Delete selected report-author starter dashboards and models
   provision-chat Grant one retained designer access to the tested shared AI model
   provision-writer Prepare and attach one isolated writable Schemii QA target
@@ -34,6 +36,7 @@ const help = `Usage: ./test.sh COMMAND [options]
   native-release Stop only a finished/paused lane's owned extension transport
   native-auth Record visibly authenticated account identity and fresh image
   native-bind Bind claimed native lane to its live thread connection before login
+  resource-receipt Record exact owned UI creation ID/name/time and fresh image
   begin      Begin an assigned scenario before fresh captures (--scenario ID)
   capture    Export a selected native screenshot/download (--args-json)
   inspect    Record hash-bound image viewing and expected/actual observations
@@ -76,7 +79,7 @@ Finding:   --session-file FILE --scenario ID --title TEXT
            --severity low|medium|high|critical --steps TEXT
            --expected TEXT --actual TEXT --evidence FILE1,FILE2
 
-All actions emit JSON. Browser backend: isolated (one Chromium process per lane).
+All actions emit JSON. Browser backend: isolated or explicit native thread connection.
 T3 dispatch is an explicit handoff; Codex dispatch launches independent CLI workers.
 Worker model and reasoning follow the installed Codex configuration unless selected.
 Reasoning: none|minimal|low|medium|high|xhigh|max|ultra; model support varies.
@@ -90,6 +93,7 @@ const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
   'cleanup-author-fixture': ['accounts'],
+  'cleanup-sweep': ['run','workspace-fixtures'],
   'provision-writer': ['account','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
@@ -100,6 +104,7 @@ const commandOptions = {
   action: ['session-file','kind','args-json'],
   'native-bind': ['session-file','args-json'],
   'native-auth': ['session-file','args-json'],
+  'resource-receipt': ['session-file','args-json'],
   begin: ['session-file','scenario','args-json'],
   capture: ['session-file','args-json'],
   inspect: ['session-file','evidence','note','args-json','target-lane'],
@@ -212,13 +217,7 @@ async function selection(o, reservedAccounts) {
     if (!Array.isArray(baseScenarios) || !baseScenarios.length || baseScenarios.some(s => !s || !/^[a-z0-9-]+$/.test(s.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
     const scenarios = baseScenarios.flatMap(s => {
       if (Object.hasOwn(s, 'product') && !products.includes(s.product)) throw new Error(`Scenario ${s.id} product must be one of the selected products.`);
-      return (s.product ? [s.product] : products).flatMap(product => viewports.map(viewportName => ({
-        ...s, id: `${s.id}-${product}-${viewportName}`,
-        title: `${s.title || s.id} · ${product} · ${viewportName}`,
-        product, viewportName,
-        viewport: viewportName === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
-        functional:'not-run', visual:'not-run', evidence:[],
-      })));
+      return (s.product ? [s.product] : products).flatMap(product => viewports.map(viewportName => expandFixtureScenario(s,product,viewportName)));
     });
     return { id: `lane-${i+1}`, username, products, track, role: username === reviewerAccount ? 'reviewer' : 'tester', status: 'queued', generation: 0,
       viewport: viewports[0] === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
@@ -317,6 +316,10 @@ async function execute(command,o) {
     await runCommand('./testing/setup.sh',[copies,resolve(o['admin-credentials']),stateDir]);
     return;
   }
+  if(command==='cleanup-sweep') {
+    if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||'')||!o['workspace-fixtures'])throw invalid('cleanup-sweep requires --run RUN and --workspace-fixtures MAP.');
+    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures'])]);return;
+  }
   if(command==='cleanup-author-fixture') {
     if(!o.accounts)throw invalid('--accounts is required; name each retained report-author fixture to delete.');
     const accounts=list(o.accounts,'');
@@ -412,7 +415,7 @@ async function execute(command,o) {
     });
     console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
-  if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','begin','capture','inspect','inspect-download','review'].includes(command)) {
+  if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','capture','inspect','inspect-download','review'].includes(command)) {
     if(!o['session-file'])throw invalid('--session-file is required.');
     if(command==='action'&&!o.kind)throw invalid('--kind is required.');
     if(command==='checkpoint'&&(!o.scenario||!['passed','failed','blocked'].includes(o.functional)||!['passed','failed','blocked'].includes(o.visual)))throw invalid('Checkpoint requires --scenario and passed|failed|blocked values for --functional and --visual.');

@@ -122,12 +122,18 @@ finally: os.close(fd)
   } while (Date.now() < deadline);
   throw new Error('Native transport cleanup is pending after owned SIGTERM; preserve its ledger and deployment lease. No files were manually deleted.');
 }
-function scenarioURL(run, lane, scenario, expectedState) {
+function scenarioURL(run, lane, scenario, expectedState, requestedURL) {
   if (expectedState === 'denied') {
     if (!(lane.deniedProducts || []).includes(scenario.product)) throw new Error('Access denial must be explicitly expected by this lane.');
     return new URL('/account', run.baseURL).href;
   }
   if (expectedState !== 'product') throw new Error('Scenario state must be product or explicitly expected denied.');
+  if (requestedURL) {
+    const requested = new URL(requestedURL,run.baseURL), workspace = requested.searchParams.get('workspace');
+    const allowed = new Set([...Object.entries(lane.resources || {}).filter(([key,value]) => key.endsWith('WorkspaceId') && typeof value === 'string').map(([,value]) => value), ...(lane.resources?.cleanupReceipts || []).filter(receipt => receipt.kind === 'workspace').map(receipt => receipt.id)]);
+    if (scenario.product !== 'schemii' || requested.origin !== new URL(run.baseURL).origin || requested.pathname !== '/' || [...requested.searchParams.keys()].length !== 1 || !allowed.has(workspace) || requested.username || requested.password) throw new Error('Scenario URL can select only an explicitly assigned or creation-receipted owned workspace.');
+    return requested.href;
+  }
   const target = scenario.url || lane.url || (scenario.product === 'schemii' ? '/' : `/${scenario.product}`);
   const url = new URL(target, run.baseURL);
   if (url.origin !== new URL(run.baseURL).origin || url.username || url.password) throw new Error('Scenario route must stay on its assigned application origin.');
@@ -137,7 +143,7 @@ export function beginScenario(run, lane, scenarioId, request = {}, now = new Dat
   const scenario = lane.scenarios.find(item => item.id === scenarioId);
   if (!scenario) throw new Error('Begin requires an assigned scenario.');
   if (!run.deployment?.identity?.fingerprint) throw new Error('Scenario requires a verified source identity.');
-  const url = scenarioURL(run, lane, scenario, request.expectedState || 'product');
+  const url = scenarioURL(run, lane, scenario, request.expectedState || 'product', request.url);
   const session = { id: randomUUID(), scenario: scenario.id, generation: lane.generation, agent: lane.agent, startedAt: now,
     expectedState: request.expectedState || 'product', url, viewport: scenario.viewport, source: run.deployment.identity.fingerprint,
     resources: scenario.resources || lane.resources, phase: 'scenario' };
@@ -194,6 +200,25 @@ export async function recordNativeAuthentication(run, lane, input, options) {
     lane.native.authentication = { username:lane.username,generation:lane.generation,source:run.deployment.identity.fingerprint,evidence:capture.path,invocation:requiredText(input.invocation,'Visible account snapshot invocation',1000),note:requiredText(input.note,'Visible authentication observation'),at:new Date().toISOString(),assurance:'visible-UI-worker-attestation-requires-independent-review' };
     return lane.native.authentication;
   } finally { lane.currentScenario = prior; }
+}
+export async function recordNativeResource(run,lane,input,options) {
+  await assertNativeConnection(lane,options.browserRoot);
+  const prefix = lane.resources?.scratchPrefix;
+  if (input.kind !== 'workspace' || !/^ws_[0-9a-f]{32}$/.test(input.id || '') || !prefix || typeof input.name !== 'string' || !input.name.startsWith(prefix) || !lane.writeAuthorization?.enabled || !lane.writeAuthorization.operations?.some(operation => /create/i.test(operation))) throw new Error('Resource receipt requires an explicitly authorized new prefixed owned workspace.');
+  const created = Date.parse(input.createdAt), started = Date.parse(run.createdAt);
+  if (!Number.isFinite(created) || !Number.isFinite(started) || created < started || created > Date.now()+5000) throw new Error('Resource creation timestamp must belong to this run.');
+  const url = new URL(input.url,run.baseURL);
+  if (url.origin !== new URL(run.baseURL).origin || url.pathname !== '/' || [...url.searchParams.keys()].length !== 1 || url.searchParams.get('workspace') !== input.id || url.username || url.password) throw new Error('Resource route must identify the exact newly created workspace.');
+  if ((lane.resources.cleanupReceipts || []).some(receipt => receipt.id === input.id)) throw new Error('Resource creation was already recorded; inspect saved state instead of replaying it.');
+  if (run.lanes.some(peer => peer !== lane && (Object.values(peer.resources || {}).includes(input.id) || peer.resources?.cleanupReceipts?.some(receipt => receipt.id === input.id)))) throw new Error('Resource belongs to another lane.');
+  const prior = lane.currentScenario;
+  lane.currentScenario = { id:randomUUID(),scenario:'resource-creation',phase:'scenario',generation:lane.generation,agent:lane.agent,startedAt:input.createdAt,url:url.href,viewport:input.viewport,source:run.deployment.identity.fingerprint,resources:{workspace:input.id} };
+  try {
+    const capture = await importNativeFile(run,lane,input.file,{...options,url:url.href,viewport:input.viewport});capture.phase='resource-receipt';
+    const receipt = {kind:'workspace',id:input.id,name:requiredText(input.name,'Resource name',200),createdAt:input.createdAt,agent:lane.agent,generation:lane.generation,source:run.deployment.identity.fingerprint,evidence:capture.path,
+      invocation:requiredText(input.invocation,'Creation UI observation invocation',1000),note:requiredText(input.note,'Creation expected/actual observation'),assurance:'worker-observation-rechecked-by-scoped-cleanup',at:new Date().toISOString()};
+    lane.resources.cleanupReceipts ||= [];lane.resources.cleanupReceipts.push(receipt);return receipt;
+  } finally { lane.currentScenario=prior; }
 }
 export function currentCapture(run, lane, path, { inspection = false } = {}) {
   const active = lane.currentScenario;

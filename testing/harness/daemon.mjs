@@ -5,9 +5,10 @@ import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { CodexWorkers } from './workers.mjs';
 import { BrowserFleet } from './browser.mjs';
+import { assertScenarioPrerequisite } from './prerequisites.mjs';
 import { assertLaneReadyToClaim, openProductsAfterIsolation, recoverFleetFailClosed } from './readiness.mjs';
 import { startDeployment, sourceIdentity } from './deployment.mjs';
-import { nativeMode, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
+import { nativeMode, recordNativeResource, recordNativeAuthentication, releaseNativeTransport, bindNative, assertNativeConnection, closeNativeReceipt, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, acceptance } from './native.mjs';
 import { dirname } from 'node:path';
 import { deploymentLockPath } from './deployment.mjs';
 import { root, runPath, readJSON, privateJSON, writeJSON, credentials, reportHTML, event, stamp, findingInput } from './store.mjs';
@@ -153,11 +154,17 @@ async function workerRequest(req){
     if(req.command==='native-auth') {
       const receipt=await recordNativeAuthentication(run,l,req.args,{runDir:dir,browserRoot});await persist();return receipt;
     }
+    if(req.command==='resource-receipt') {
+      const receipt=await recordNativeResource(run,l,req.args,{runDir:dir,browserRoot});await persist();return receipt;
+    }
     if(req.command==='begin') {
       if(nativeMode(run)) {
         await assertNativeConnection(l,browserRoot);
         if(l.native.authentication?.generation!==l.generation)throw new Error('Record the visible authenticated account observation before scenarios.');
       }
+      const scenario=l.scenarios.find(s=>s.id===req.scenario);
+      if(!scenario)throw new Error('Unknown scenario.');
+      assertScenarioPrerequisite(l,scenario);
       const state=beginScenario(run,l,req.scenario,req.args);await persist();return state;
     }
     if(req.command==='capture') {
@@ -348,7 +355,7 @@ async function shutdown(reason){
       if((l.native.cleanup.transport!=='stopped'||l.native.cleanup.guardian!=='stopped'||l.native.cleanup.temporaryOutput!=='removed-observed')) { run.status='cleanup-pending';stopping=false;await persist();throw new Error('Native transport cleanup remains pending. Use supported native session closure; keep the deployment lease until owned transports exit.'); }
     }
   }
-  await workers.close();await fleet.close();await releaseAccounts({runId:id,accounts:run.lanes.map(l=>l.username)});run.status=['passed','execution-complete','finished-with-gaps'].includes(run.status)?run.status:'stopped';run.summary=`Browser controller stopped (${reason}); retained accounts and resources preserved.`;
+  await workers.close();await fleet.close();await releaseAccounts({runId:id,accounts:run.lanes.map(l=>l.username)});if(nativeMode(run)) {run.executionStatus=run.status;run.status='stopped';}else run.status=['passed','execution-complete','finished-with-gaps'].includes(run.status)?run.status:'stopped';run.summary=`Browser controller stopped (${reason}); retained accounts and resources preserved.`;
   await event(dir,{kind:'stopped',reason});await persist();
   setTimeout(()=>{server.close();void rm(control.socket,{force:true}).finally(()=>process.exit(0));},200).unref();
 }
@@ -360,7 +367,7 @@ const server=net.createServer(socket=>{
   socket.on('data',chunk=>{
     if(handled)return;input+=chunk;if(input.length>65536){socket.destroy();return;}
     if(!input.includes('\n'))return;handled=true;
-    (async()=>{try{const req=JSON.parse(input.split('\n')[0]);const result=['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','begin','capture','inspect','inspect-download','review'].includes(req.command)?await workerRequest(req):await controllerRequest(req);socket.end(JSON.stringify({ok:true,result})+'\n');}catch(e){socket.end(JSON.stringify({ok:false,error:safeError(e)})+'\n');}})();
+    (async()=>{try{const req=JSON.parse(input.split('\n')[0]);const result=['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','capture','inspect','inspect-download','review'].includes(req.command)?await workerRequest(req):await controllerRequest(req);socket.end(JSON.stringify({ok:true,result})+'\n');}catch(e){socket.end(JSON.stringify({ok:false,error:safeError(e)})+'\n');}})();
   });
 });
 await new Promise((res,rej)=>{server.once('error',rej);server.listen(control.socket,res);});await chmod(control.socket,0o600);
