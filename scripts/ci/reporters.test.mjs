@@ -85,6 +85,8 @@ test('Playwright custom file shards retain lane identities without native shardi
       parent: { project: () => ({ name: 'android-chromium' }) } };
     for (const [config, value, expected] of [
       [{ shard: null }, '2', 2],
+      [{ shard: null }, '3', 3],
+      [{ shard: { current: 3 } }, '2', 3],
       [{ shard: { current: 1 } }, '2', 1],
       [{ shard: null }, '', 0],
     ]) {
@@ -98,7 +100,7 @@ test('Playwright custom file shards retain lane identities without native shardi
       assert.equal(records.find(record => record.kind === 'attempt').outcome, 'failed');
       assert.equal(records.at(-1).outcome, 'failed');
     }
-    for (const invalid of ['3', '2/2', 'NaN']) {
+    for (const invalid of ['4', '2/2', 'NaN']) {
       process.env.CI_TELEMETRY_SHARD = invalid;
       assert.throws(() => new PlaywrightReporter().onBegin({ shard: null }, { allTests: () => [item] }),
         /Invalid timing lane/);
