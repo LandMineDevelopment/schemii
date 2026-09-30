@@ -8,8 +8,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 import time
+import threading
 
-from psycopg import generators, pq, sql
+from psycopg import Cursor, generators, pq, sql
+from psycopg.errors import QueryCanceled
 from pglast import parse_sql
 
 
@@ -19,6 +21,8 @@ class RawSession:
         self.connection = connection
         self.row_limit = row_limit
         self.byte_limit = byte_limit
+        self._dispatch_lock = threading.RLock()
+        self._cancelled = threading.Event()
         connection.set_autocommit(True)
         with connection.cursor() as cursor:
             cursor.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(namespace)))
@@ -35,10 +39,32 @@ class RawSession:
         return self.connection.info.transaction_status.name.lower()
 
     def cancel(self) -> None:
-        self.connection.cancel_safe(timeout=2)
+        with self._dispatch_lock:
+            # A signal before SQL/COPY dispatch remains effective until the
+            # next operation explicitly arms this idle session.
+            self._cancelled.set()
+            self.connection.cancel_safe(timeout=2)
+
+    def begin_operation(self) -> None:
+        with self._dispatch_lock:
+            self._cancelled.clear()
+
+    def _check_dispatch(self) -> None:
+        if self._cancelled.is_set():
+            raise QueryCanceled("Database operation cancelled before execution")
+
+    def cursor(self):
+        return _RawDispatchCursor(self)
+
+    def rollback(self):
+        """Owned cleanup remains allowed after operation cancellation."""
+        with self._dispatch_lock:
+            self.connection.rollback()
 
     def close(self) -> None:
-        self.connection.close()  # PostgreSQL rolls back any uncommitted transaction.
+        with self._dispatch_lock:
+            self._cancelled.set()
+            self.connection.close()  # PostgreSQL rolls back uncommitted work.
 
     def execute(self, statement: str, publish: Callable[[dict], None]) -> dict:
         """Send one untouched script; PostgreSQL owns its transaction semantics."""
@@ -55,9 +81,13 @@ class RawSession:
         current: dict | None = None
         used = 0
         started = time.monotonic()
-        pg.send_query(statement.encode(encoding))
-        pg.set_single_row_mode()
-        self.connection.wait(generators.send(pg))
+        with self._dispatch_lock:
+            if self._cancelled.is_set():
+                return {"results": [], "errorMessage": "Database operation cancelled before execution",
+                        "sqlstate": "57014", "transactionStatus": self.transaction_status, "elapsedMs": 0}
+            pg.send_query(statement.encode(encoding))
+            pg.set_single_row_mode()
+            self.connection.wait(generators.send(pg))
         while (response := self.connection.wait(generators.fetch(pg))) is not None:
             status = response.status
             if status in (pq.ExecStatus.SINGLE_TUPLE, pq.ExecStatus.TUPLES_OK, pq.ExecStatus.COMMAND_OK):
@@ -103,14 +133,31 @@ class RawSession:
         return result
 
     def copy_upload(self, statement: str, chunks: Iterable[bytes]) -> dict:
-        with self.connection.cursor() as cursor:
+        with self.cursor() as cursor:
             with cursor.copy(statement) as copy:
                 for chunk in chunks:
                     copy.write(chunk)
             return {"command": cursor.statusmessage, "transactionStatus": self.transaction_status}
 
     def copy_download(self, statement: str) -> Iterator[bytes]:
-        with self.connection.cursor() as cursor:
+        with self.cursor() as cursor:
             with cursor.copy(statement) as copy:
                 for chunk in copy:
                     yield bytes(chunk)
+
+
+class _RawDispatchCursor(Cursor):
+    """Keep Psycopg COPY adaptation while fencing its actual wire dispatch."""
+
+    def __init__(self, raw):
+        self._raw = raw
+        super().__init__(raw.connection)
+
+    def _execute_send(self, query, *, force_extended=False, binary=None):
+        # Cursor.copy enters through this non-blocking Psycopg 3.x boundary.
+        # Hold the same gate as cancel until the queued command is flushed,
+        # then release it before waiting for PostgreSQL's COPY response.
+        with self._raw._dispatch_lock:
+            self._raw._check_dispatch()
+            super()._execute_send(query, force_extended=force_extended, binary=binary)
+            self.connection.wait(generators.send(self.connection.pgconn))

@@ -12,6 +12,15 @@ releasing locks, the backend and its retained admission permit. A previously
 obtained session object cannot start new work after closure. Shutdown stops and
 joins maintenance before cancelling active operations and waiting for their
 leases, then closes the registry once. Repeated shutdown/close calls are harmless.
+SQL and COPY cancellation share the actual wire-dispatch gate. A stop before
+dispatch remains sticky until an explicitly claimed fresh operation; shutdown
+cannot lose a signal while policy setup or COPY adaptation is pending. The
+gate is released before waiting for results, so an executing statement remains
+cancellable. Whole-run rollback cleanup is allowed after cancellation without
+rearming arbitrary SQL. Transport failures with an unknown persisted outcome
+remain uncertain even if Stop raced with them. Views recheck closure under the
+same signal lock before reading native connection metadata.
+
 The 30-second interval bounds scheduling delay during a healthy event loop;
 operating-system or database failure can delay native connection cleanup.
 

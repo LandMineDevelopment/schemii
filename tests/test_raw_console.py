@@ -39,6 +39,8 @@ def wire_session(monkeypatch, responses, row_limit=2, byte_limit=256):
     )
     session = RawSession.__new__(RawSession)
     session.connection, session.row_limit, session.byte_limit = connection, row_limit, byte_limit
+    session._dispatch_lock = threading.RLock()
+    session._cancelled = threading.Event()
     return session, sent
 
 
@@ -77,6 +79,10 @@ class PolicyRaw:
         self.sent = []
         self.byte_limit = 4096
         self.connection = SimpleNamespace(add_notice_handler=lambda fn: None, remove_notice_handler=lambda fn: None)
+    def begin_operation(self):
+        pass
+    def rollback(self):
+        self.execute("ROLLBACK", lambda _: None)
     def execute(self, sql, publish):
         self.sent.append(sql)
         command = sql.split()[0].upper()
@@ -307,6 +313,32 @@ def test_cancelled_unstarted_copy_releases_lease_once_without_dispatch():
     assert ticket["status"] == "failed"
 
 
+@pytest.mark.parametrize("mode", ["whole_run", "each_statement"])
+def test_transport_loss_after_dispatch_stays_uncertain_during_stop(mode):
+    from psycopg import OperationalError
+    service, session = policy_fixture()
+    raw = session["raw"]
+    raw.cancel = lambda: None
+    execute = raw.execute
+    def lose_ack(statement, publish):
+        result = execute(statement, publish)
+        if (mode == "whole_run" and statement == "COMMIT") or (mode == "each_statement" and statement.startswith("UPDATE")):
+            service.cancel(session)
+            raw.transaction_status = "unknown"
+            raise OperationalError("Connection lost after dispatch")
+        return result
+    raw.execute = lose_ack
+    body = SqlCreate(sql="UPDATE marker SET visits = visits + 1", commit_mode=mode)
+    execution = service.reserve(session, body)
+    service.run(session, execution, body)
+    assert execution["status"] == "uncertain"
+    assert execution["sqlstate"] is None
+    assert raw.sent.count(body.sql) == 1
+    assert raw.sent.count("COMMIT") == (1 if mode == "whole_run" else 0)
+    assert "ROLLBACK" not in raw.sent
+    assert not session["operation"].locked()
+
+
 def test_shutdown_waits_for_opening_and_late_connection_is_closed(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import nullcontext
@@ -356,4 +388,41 @@ def test_shutdown_waits_for_opening_and_late_connection_is_closed(monkeypatch):
         shutdown.result(timeout=1)
     assert closed == [True]
     assert service.opening == set()
+    assert service.sessions == {}
+
+
+@pytest.mark.parametrize("listing", [False, True])
+def test_view_fences_a_session_selected_before_expiry(monkeypatch, listing):
+    from datetime import datetime, timezone
+    from psycopg import pq
+    service, session = policy_fixture()
+    class NativeInfo:
+        def __init__(self):
+            self.pg = pq.PGconn.connect_start(b"host=/nonexistent/schemii-test dbname=unused connect_timeout=1")
+        @property
+        def backend_pid(self): return self.pg.backend_pid
+        @property
+        def transaction_status(self): return self.pg.transaction_status.name.lower()
+        def close(self): self.pg.finish()
+    session.update(raw=NativeInfo(), used=0, consoleId="con_test",
+                   createdAt=datetime.now(timezone.utc).isoformat(),
+                   lastUsedAt=datetime.now(timezone.utc).isoformat())
+    service.sessions[session["id"]] = session
+    service.console._require_workspace = lambda *args: None
+    service._clock = lambda: 1
+    obtained = service.get("me", "ws_test", "raw_test", validate_target=False)
+    view = service.view
+    def expire_then_view(selected):
+        assert not service.lock._is_owned(), "registry lock must be released before signal lock"
+        service._clock = lambda: 1800
+        service.reap()
+        return view(selected)
+    monkeypatch.setattr(service, "view", expire_then_view)
+    if listing:
+        assert service.list_sessions("me", "ws_test") == {"sessions": []}
+    else:
+        with pytest.raises(ApiProblem) as caught:
+            service.view(obtained)
+        assert caught.value.status_code == 404
+    assert obtained["status"] == "closed"
     assert service.sessions == {}

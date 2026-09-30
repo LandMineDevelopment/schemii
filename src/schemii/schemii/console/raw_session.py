@@ -214,13 +214,16 @@ class RawSessionService:
 
     @staticmethod
     def view(session):
-        return {key: session[key] for key in ("id", "consoleId", "workspaceId", "status", "createdAt", "lastUsedAt", "currentExecutionId", "revision")} | {
-            "backendPid": session["raw"].backend_pid, "transactionStatus": session["raw"].transaction_status,
-            "pendingStatements": list(session["pendingStatements"]),
-            "pendingStatementsTruncated": session["pendingStatementsTruncated"],
-            "transactionStartedAt": session["transactionStartedAt"],
-            "idleTimeoutSeconds": RAW_SESSION_IDLE_SECONDS,
-            "expiresAt": (datetime.fromisoformat(session["lastUsedAt"]) + timedelta(seconds=RAW_SESSION_IDLE_SECONDS)).isoformat() if session["status"] == "open" else None}
+        with session["signalLock"]:
+            if session["status"] == "closed":
+                raise ApiProblem(404, "console_session_not_found", "Database session closed or expired; uncommitted work was rolled back. Open a new session.")
+            return {key: session[key] for key in ("id", "consoleId", "workspaceId", "status", "createdAt", "lastUsedAt", "currentExecutionId", "revision")} | {
+                "backendPid": session["raw"].backend_pid, "transactionStatus": session["raw"].transaction_status,
+                "pendingStatements": list(session["pendingStatements"]),
+                "pendingStatementsTruncated": session["pendingStatementsTruncated"],
+                "transactionStartedAt": session["transactionStartedAt"],
+                "idleTimeoutSeconds": RAW_SESSION_IDLE_SECONDS,
+                "expiresAt": (datetime.fromisoformat(session["lastUsedAt"]) + timedelta(seconds=RAW_SESSION_IDLE_SECONDS)).isoformat() if session["status"] == "open" else None}
 
     def claim(self, session, expected_revision=None, *, reserved=False):
         with session["signalLock"]:
@@ -233,6 +236,11 @@ class RawSessionService:
                 raise ApiProblem(409, "console_session_changed", "Transaction changed after review. Refresh and review its pending SQL before committing or rolling back.")
             if not session["operation"].acquire(blocking=False):
                 raise ApiProblem(409, "console_session_busy", "This session is running a command. Stop it or wait before running another.")
+            try:
+                session["raw"].begin_operation()
+            except BaseException:
+                session["operation"].release()
+                raise
             session.setdefault("cancelled", threading.Event()).clear()
             session["operationStarted"] = not reserved
             session.update(status="running", used=self._clock(), lastUsedAt=now(), revision=session["revision"] + 1)
@@ -351,18 +359,25 @@ class RawSessionService:
             if (session["cancelled"].is_set() or (is_authorized and not is_authorized())) and not execution["errorMessage"]:
                 execution.update(errorMessage="Query cancelled", sqlstate="57014")
             if body.commit_mode == "whole_run":
-                boundary = raw.execute("ROLLBACK" if execution["errorMessage"] else "COMMIT", lambda _: None)
-                if boundary["errorMessage"]:
-                    execution.update(errorMessage=boundary["errorMessage"], sqlstate=boundary["sqlstate"])
+                if execution["errorMessage"]:
+                    raw.rollback()
+                else:
+                    boundary = raw.execute("COMMIT", lambda _: None)
+                    if boundary["errorMessage"]:
+                        execution.update(errorMessage=boundary["errorMessage"], sqlstate=boundary["sqlstate"])
+                        if raw.transaction_status in {"intrans", "inerror"}:
+                            raw.rollback()
             for index, result in enumerate(execution["results"]):
                 result["statementIndex"] = index
             execution["completedStatements"] = len(execution["results"])
             execution["status"] = "cancelled" if execution["sqlstate"] == "57014" else "failed" if execution["errorMessage"] else "succeeded"
         except Exception as error:
-            execution.update(status="uncertain" if isinstance(error, (OperationalError, InterfaceError)) and not getattr(error, "sqlstate", None) else "failed", errorMessage=str(error)[:2048], sqlstate=getattr(error, "sqlstate", None))
+            uncertain = isinstance(error, (OperationalError, InterfaceError)) and not getattr(error, "sqlstate", None)
+            cancelled = session["cancelled"].is_set() and not uncertain
+            execution.update(status="uncertain" if uncertain else "cancelled" if cancelled else "failed", errorMessage=str(error)[:2048], sqlstate="57014" if cancelled else getattr(error, "sqlstate", None))
             if body.commit_mode == "whole_run" and raw.transaction_status in {"intrans", "inerror"}:
                 try:
-                    raw.execute("ROLLBACK", lambda _: None)
+                    raw.rollback()
                 except Exception:
                     raw.close()
         finally:
@@ -409,8 +424,16 @@ class RawSessionService:
         self.console._require_workspace(owner, workspace)
         self.reap()
         with self.lock:
-            return {"sessions": [self.view(s) for s in self.sessions.values()
-                                 if s["owner"] == owner and s["workspaceId"] == workspace]}
+            selected = tuple(s for s in self.sessions.values()
+                             if s["owner"] == owner and s["workspaceId"] == workspace)
+        sessions = []
+        for session in selected:
+            try:
+                sessions.append(self.view(session))
+            except ApiProblem as error:
+                if error.code != "console_session_not_found":
+                    raise
+        return {"sessions": sessions}
 
     def activity(self, session):
         data = self.view(session)
@@ -418,7 +441,7 @@ class RawSessionService:
             with self.connections.use(session["owner"], session["target"].connection_id) as resolved:
                 if (getattr(resolved, "owner_id", None) or session["owner"]) != (session["target"].connection_owner_id or session["owner"]):
                     raise ApiProblem(409, "console_target_changed", "The PostgreSQL connection changed")
-                data.update(self.postgres.console_activity(resolved, session["raw"].backend_pid,
+                data.update(self.postgres.console_activity(resolved, data["backendPid"],
                                                           started_before=datetime.fromisoformat(session["createdAt"])))
         except ConnectionNotFoundError as error:
             raise ApiProblem(403, "console_connection_revoked", "Access to the PostgreSQL connection was revoked") from error
@@ -653,7 +676,7 @@ async def upload_copy(workspace_id: str, session_id: str, ticket_id: str, reques
         policy = SqlCreate(sql=ticket["sql"], commit_mode=(
             "each_statement" if ticket["commitMode"] == "whole_run" else ticket["commitMode"]))
         await anyio.to_thread.run_sync(manager.prepare_policy, session, policy)
-        cursor = session["raw"].connection.cursor()
+        cursor = session["raw"].cursor()
         context = cursor.copy(ticket["sql"])
         copy = await anyio.to_thread.run_sync(context.__enter__)
         entered = True
