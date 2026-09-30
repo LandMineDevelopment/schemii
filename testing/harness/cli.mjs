@@ -27,6 +27,7 @@ const help = `Usage: ./test.sh COMMAND [options]
   reset      Restore registered QA data spaces; preserve credentials and app accounts
   check-reset Exercise and restore one registered fixture space
   verify-data Verify the stable baseline and PostgreSQL isolation
+  load       Opt-in HTTP/stream load plan, prepare, run, report and owned cleanup
   plan       Show account/track assignments without mutations
   doctor     Check installed browser, credentials and display prerequisites
   prepare    Start canonical app once, open isolated browsers, prove readiness
@@ -291,6 +292,10 @@ async function requireStoppedOwner(dir) {
   }
 }
 async function main() {
+  if (process.argv[2] === 'load') {
+    const { loadMain } = await import('../load/cli.mjs');
+    return loadMain(process.argv.slice(3));
+  }
   const {command,options:o}=parse(process.argv.slice(2));
   if(!o.help&&['resume','stop','cleanup'].includes(command)) {
     if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||''))throw invalid('--run must identify a valid QA run.');
