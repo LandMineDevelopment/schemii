@@ -205,14 +205,19 @@ def prepare(workspace_map: Path, output: Path, state: Path) -> dict:
             existing = next((chat for chat in client.call("GET", "/api/v1/schemii/ai/chats?workspaceId=" + workspace_id)["chats"]
                              if chat["title"] == expected_title and chat["status"] != "deleted"), None)
             if existing is None:
+                chats.setdefault("pending", {})[purpose] = {"workspaceId": workspace_id, "title": expected_title}
+                write_private(output, result)
                 existing = client.call("POST", f"/api/v1/schemii/workspaces/{workspace_id}/ai/chats",
                                        {"title": expected_title, "providerId": provider,
                                         "modelId": model, "reasoningEffort": "default",
                                         "capabilities": capabilities}, expected=201)
+            else:
+                raise ValueError("Unledgered chat name collision; reconcile without adopting another creation")
             if existing["capabilities"]["actionModes"] != {
                 **existing["capabilities"]["actionModes"], **capabilities["actionModes"]}:
                 raise ValueError("Existing chat has different required permissions")
             chats["chats"][purpose] = {"id": existing["id"], "workspaceId": workspace_id}
+            chats["pending"].pop(purpose, None)
             write_private(output, result)
     finally:
         client.logout()

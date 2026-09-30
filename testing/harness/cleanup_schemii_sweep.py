@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from testing.harness.schemii_sweep import ACCOUNTS, ROOT, WRITERS
+from testing.harness.schemii_sweep import ROOT, WRITERS
 from testing.provision import Client, registry_load, write_private
 
 
@@ -99,9 +99,12 @@ def owned_workspaces(workspaces: dict, run: dict, run_file: Path) -> dict[str, s
         raise ValueError("Run is not a Schemii sweep with declared fixtures")
     accounts = run.get("accounts", [])
     if (not isinstance(accounts, list) or not accounts or len(accounts) != len(set(accounts))
-            or not set(accounts).issubset(ACCOUNTS) or not isinstance(run.get("lanes"), list)):
+            or any(not isinstance(account, str) or not re.fullmatch(r"qa_designer_[0-9]{3}", account) for account in accounts)
+            or not isinstance(run.get("lanes"), list)):
         raise ValueError("Run does not contain a valid subset of designer accounts")
-    if set(workspaces.get("lanes", {})) != set(ACCOUNTS) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", workspaces.get("tag", "")):
+    if (not isinstance(workspaces.get("lanes"), dict) or not set(accounts).issubset(workspaces["lanes"])
+            or any(not re.fullmatch(r"qa_designer_[0-9]{3}", account) for account in workspaces["lanes"])
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", workspaces.get("tag", ""))):
         raise ValueError("Workspace fixture accounts or tag are invalid")
     lanes = run["lanes"]
     if len(lanes) != len(accounts) or [lane.get("username") for lane in lanes] != accounts:
@@ -155,6 +158,8 @@ def _cleanup(state: Path, workspace_file: Path, run_file: Path, run: dict) -> di
     owned_by_account = owned_workspaces(workspaces, run, run_file)
     started = timestamp(run["createdAt"])
     slots = {slot["username"]: slot for slot in registry_load(state)["slots"]}
+    if not set(owned_by_account).issubset(slots) or any(not slots[username].get("provisioned") for username in owned_by_account):
+        raise ValueError("Cleanup accounts must be provisioned in the retained registry")
     receipts_by_account = {}
     for lane in run["lanes"]:
         username = lane["username"]

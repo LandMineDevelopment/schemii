@@ -137,7 +137,7 @@ class SchemiiOwnershipTest(unittest.TestCase):
         self.assertFalse(journal_path(output).exists())
         self.assertEqual(output.stat().st_mode & 0o777, 0o600)
 
-    def test_retry_recovers_create_that_succeeded_before_response(self):
+    def test_retry_preserves_ambiguous_create_that_succeeded_before_response(self):
         output = self.root / "workspaces.json"
         FakeClient.fail_after_create = 1
         with self.assertRaisesRegex(RuntimeError, "interrupted after create"):
@@ -145,10 +145,42 @@ class SchemiiOwnershipTest(unittest.TestCase):
         first = ACCOUNTS[0]
         self.assertTrue(json.loads(journal_path(output).read_text())["lanes"][first]["localPending"])
         FakeClient.fail_after_create = None
-        result = seed(self.root, "test1", output)
-        self.assertEqual(result["lanes"][first]["localWorkspaceId"], wid(1))
-        self.assertTrue(result["lanes"][first]["localCreated"])
+        with self.assertRaisesRegex(ValueError, "Ambiguous unreceipted"):
+            seed(self.root, "test1", output)
+        self.assertFalse(output.exists())
+        self.assertTrue(json.loads(journal_path(output).read_text())["lanes"][first]["localPending"])
         self.assertEqual(sum(item["id"] == wid(1) for item in FakeClient.workspaces[first]), 1)
+
+    def test_seed_never_adopts_a_merely_name_matching_local_workspace(self):
+        first = ACCOUNTS[0]
+        FakeClient.workspaces[first] = [{"id": wid(999), "name": "qa_test1_004_seed", "connectionId": None}]
+        with self.assertRaisesRegex(ValueError, "Unowned local workspace name collision"):
+            seed(self.root, "test1", self.root / "workspaces.json")
+        self.assertEqual(FakeClient.posts, 0)
+
+    def test_seed_and_cleanup_support_an_exact_fresh_retained_designer_subset(self):
+        selected = ("qa_designer_012", "qa_designer_013", "qa_designer_014")
+        self.slots.extend({"username": username, "provisioned": True, "connectionId": "pg_" + "1" * 32}
+                          for username in selected)
+        output = self.root / "workspaces.json"
+        fixture = seed(self.root, "test1", output, selected)
+        self.assertEqual(set(fixture["lanes"]), set(selected))
+        run_file = self.root / "qa-test-run" / "manifest.json"
+        run_file.parent.mkdir()
+        run_file.with_name("controller-owner.json").write_text(json.dumps({"pid": 2147483647, "birthTick": "1"}))
+        run = {"id": "qa-test-run", "status": "stopped", "createdAt": "2026-09-26T12:00:00Z",
+               "fixtureMode": "declared-retained-resources", "fixtureVersion": "schemii-full-qa-v1",
+               "accounts": list(selected), "lanes": [
+                   {"username": username, "resources": {"scratchPrefix": fixture["lanes"][username]["prefix"],
+                    "localWorkspaceId": fixture["lanes"][username]["localWorkspaceId"],
+                    "readerWorkspaceId": fixture["lanes"][username]["readerWorkspaceId"]}}
+                   for username in selected]}
+        run_file.write_text(json.dumps(run))
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
+                            registry_load=lambda state: {"slots": self.slots}):
+            result = cleanup(self.root, output, run_file)
+        self.assertEqual(result["workspaces"], 6)
+        self.assertEqual({username for username, _ in FakeClient.deletes}, set(selected))
 
     def test_followup_manifest_uses_exact_workspace_tag(self):
         fixture = seed(self.root, "test1", self.root / "workspaces.json")

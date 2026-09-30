@@ -1,9 +1,12 @@
 import hashlib
 import json
 import re
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from testing.harness.schemii_preseed import canonical, design_content
+from testing.harness.schemii_preseed import canonical, design_content, prepare
 
 
 class SchemiiPreseedTests(unittest.TestCase):
@@ -47,6 +50,48 @@ class SchemiiPreseedTests(unittest.TestCase):
         self.assertNotEqual(first, design_content("sep26e"))
         self.assertEqual(hashlib.sha256(canonical(first)).hexdigest(),
                          hashlib.sha256(json.dumps(first, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+
+    def test_unledgered_chat_collision_is_not_adopted_or_replayed(self):
+        class ChatClient:
+            chats = []
+            posts = 0
+
+            def login(self, slot):
+                pass
+
+            def logout(self):
+                pass
+
+            def call(self, method, path, payload=None, expected=200):
+                if method == "GET" and path.endswith("/ai/settings"):
+                    return {"enabled": True, "defaultProviderId": "instance-codex", "defaultModelId": "gpt-6-luna"}
+                if method == "GET" and "/ai/chats?" in path:
+                    return {"chats": self.chats}
+                if method == "POST":
+                    self.__class__.posts += 1
+                    self.chats.append({"id": "chat_" + "a" * 32, "title": payload["title"], "status": "active"})
+                    raise RuntimeError("created before response interrupted")
+                raise AssertionError((method, path))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = {"tag": "owned", "lanes": {"qa_designer_001": {
+                "prefix": "qa_owned_001_", "localWorkspaceId": "ws_" + "1" * 32,
+                "readerWorkspaceId": "ws_" + "2" * 32}}}
+            workspace_map, output = root / "workspaces.json", root / "ready.json"
+            workspace_map.write_text(json.dumps(source))
+            with patch.multiple("testing.harness.schemii_preseed", Client=ChatClient, DESIGN_ACCOUNTS=(),
+                                registry_load=lambda state: {"slots": [{"username": "qa_designer_001", "connectionId": "pg_" + "1" * 32}]}), \
+                    patch("testing.harness.schemii_preseed._assert_workspace"):
+                with self.assertRaisesRegex(RuntimeError, "response interrupted"):
+                    prepare(workspace_map, output, root)
+                pending = json.loads(output.read_text())["chat"]["qa_designer_001"]["pending"]["reader"]
+                self.assertEqual(pending["workspaceId"], source["lanes"]["qa_designer_001"]["readerWorkspaceId"])
+                with self.assertRaisesRegex(ValueError, "Unledgered chat name collision"):
+                    prepare(workspace_map, output, root)
+                self.assertEqual(ChatClient.posts, 1)
+                self.assertEqual(len(ChatClient.chats), 1)
+                self.assertEqual(json.loads(output.read_text())["chat"]["qa_designer_001"]["chats"], {})
 
 
 if __name__ == "__main__":

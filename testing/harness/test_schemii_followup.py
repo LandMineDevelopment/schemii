@@ -47,6 +47,7 @@ class SchemiiFollowupTest(unittest.TestCase):
         preseed = {
             account: {"workspaceId": lanes[account]["writerWorkspaceId" if account == "qa_designer_011" else "localWorkspaceId"],
                       "marker": lanes[account]["prefix"], "designHash": "a" * 64,
+                      "fingerprint": "b" * 64,
                       "tables": ["qa_projects", "qa_tasks"]}
             for account in PRESEEDED
         }
@@ -90,8 +91,21 @@ class SchemiiFollowupTest(unittest.TestCase):
             self.assertEqual(lane["resources"]["seedOwnership"]["writerCreated"], account in WRITERS)
             self.assertTrue(lane["url"].startswith("/?workspace=ws_"))
             self.assertEqual(len({s["id"] for s in lane["scenarios"]}), 5)
-            self.assertTrue(all("390x844" in s["instructions"] for s in lane["scenarios"]))
+            self.assertTrue(all("390x844" in s["viewportContracts"]["mobile"]["instructions"] for s in lane["scenarios"]))
             self.assertEqual(lane["writeAuthorization"]["enabled"], True)
+
+    def test_dispatch_checks_exact_design_start_state_and_reader_approval(self):
+        manifest = build(self.source(), self.tag, self.workspaces())
+        creator = manifest["lanes"]["qa_designer_006"]
+        self.assertTrue(any(check.get("equals", {}).get("content.tables.length") == 0 for check in creator["checks"]))
+        seeded = manifest["lanes"]["qa_designer_007"]
+        self.assertTrue(any(check.get("equals", {}).get("fingerprint") == "b" * 64 for check in seeded["checks"]))
+        writer = manifest["lanes"]["qa_designer_011"]
+        self.assertTrue(any(check.get("equals", {}).get("catalog.tables.length") == 0 for check in writer["checks"]))
+        chat = manifest["lanes"]["qa_designer_001"]
+        self.assertTrue(any("approve read-only SELECT" in operation for operation in chat["writeAuthorization"]["operations"]))
+        self.assertTrue(any(check.get("equals", {}).get("capabilities.sqlWriteExecute") is False for check in chat["checks"]))
+        self.assertIn("page starts 1,101,201,301,401,501", creator["resources"]["oracle"])
 
     def test_preseed_workspace_hash_and_table_contract(self):
         ws = self.workspaces()

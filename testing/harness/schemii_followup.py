@@ -12,7 +12,7 @@ import os
 import re
 from pathlib import Path
 
-from testing.harness.schemii_sweep import ACCOUNTS, ORACLE, ROOT, WRITERS
+from testing.harness.schemii_sweep import ACCOUNTS, ORACLE, PAGING_ORACLE, ROOT, WRITERS, empty_design_check, scenario_contract
 
 
 ID = re.compile(r"^(?:ws|pg|chat)_[0-9a-f]{32}$")
@@ -170,7 +170,8 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
             expected_workspace = writer if username == "qa_designer_011" else local
             if (not isinstance(seed, dict) or seed.get("workspaceId") != expected_workspace
                 or seed.get("marker") != prefix or seed.get("tables") != PRESEED_TABLES
-                or not isinstance(seed.get("designHash"), str) or not HASH.fullmatch(seed["designHash"])):
+                or not isinstance(seed.get("designHash"), str) or not HASH.fullmatch(seed["designHash"])
+                or not isinstance(seed.get("fingerprint"), str) or not HASH.fullmatch(seed["fingerprint"])):
                 raise ValueError(f"Invalid preseed design metadata for {username}")
         chat = chat_map.get(username)
         if chat:
@@ -191,13 +192,13 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
                      "seedOwnership": {key: mapped[key] for key in
                                        ("localCreated", "readerCreated", "writerCreated")},
                      "localWorkspaceId": local,
-                     "readerWorkspaceId": reader, "oracle": ORACLE,
+                     "readerWorkspaceId": reader, "oracle": ORACLE + "\n" + PAGING_ORACLE,
                      "rowSpecificColumnNameSelector": ROW_SELECTOR}
         if writer:
             resources.update(writableConnectionId=src["writableConnectionId"],
                              writableSchema=src["writableSchema"], writerWorkspaceId=writer)
         if seed:
-            resources["preseed"] = {key: seed[key] for key in ("workspaceId", "marker", "designHash", "tables")}
+            resources["preseed"] = {key: seed[key] for key in ("workspaceId", "marker", "designHash", "fingerprint", "tables")}
         if chat:
             resources["chat"] = {"readerWorkspaceId": reader, "localWorkspaceId": local,
                                  "chats": {key: {"id": chat["chats"][key]["id"],
@@ -210,6 +211,12 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
             {"path": f"/api/v1/schemii/workspaces/{reader}", "status": 200,
              "equals": {"connectionId": src["connectionId"], "namespace": username}},
         ]
+        if seed:
+            checks.append({"path": f"/api/v1/schemii/workspaces/{seed['workspaceId']}/design", "status": 200,
+                           "equals": {"fingerprint": seed["fingerprint"], "content.tables.length": 2,
+                                      "content.tables.0.name": "qa_projects", "content.tables.1.name": "qa_tasks"}})
+        if not seed or seed["workspaceId"] != local:
+            checks.append(empty_design_check(local))
         if writer:
             checks += [
                 {"path": f"/api/v1/connections/{src['writableConnectionId']}", "status": 200,
@@ -217,11 +224,19 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
                 {"path": f"/api/v1/schemii/workspaces/{writer}", "status": 200,
                  "equals": {"connectionId": src["writableConnectionId"], "namespace": src["writableSchema"]}},
             ]
+            checks.append({"path": f"/api/v1/schemii/workspaces/{writer}/catalog", "status": 200,
+                           "equals": {"catalog.namespace": src["writableSchema"],
+                                      "catalog.tables.length": 0, "catalog.views.length": 0}})
         if chat:
             checks += [{"path": f"/api/v1/schemii/ai/chats/{item['id']}", "status": 200,
                         "equals": {"workspaceId": item["workspaceId"], "providerId": "instance-codex",
                                    "modelId": "gpt-6-luna", "reasoningEffort": "default"}}
                        for item in chat["chats"].values()]
+            reader_check = next(check for check in checks if check["path"].endswith(chat["chats"]["reader"]["id"]))
+            reader_check["equals"].update({"capabilities.liveCatalog": True, "capabilities.structuredDataRead": True,
+                                          "capabilities.rawSqlRead": True, "capabilities.readApprovalRequired": True,
+                                          "capabilities.structuredQuery": True, "capabilities.structuredQueryApprovalRequired": True,
+                                          "capabilities.sqlWriteExecute": False})
 
         default = writer if username in {"qa_designer_004", "qa_designer_010", "qa_designer_011"} else (
             local if username in {"qa_designer_006", "qa_designer_007", "qa_designer_008"} else reader)
@@ -233,7 +248,8 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
             actions.append("upload <=1 MiB design JSON into a new owned local workspace")
         if username == "qa_designer_001":
             actions += ["send one AI prompt at a time in precreated reader/design chats",
-                        "approve only exact proposals on owned local design"]
+                        "approve only exact proposals on owned local design",
+                        f"approve read-only SELECT proposals only in assigned reader schema {username}; never approve reader writes"]
         if username == "qa_designer_002":
             actions.append("change and restore own AI preferences without model inference")
         if writer:
@@ -249,7 +265,7 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
                      f"only inside the owned workspace; prefix all additional object names with {prefix}. "
                    f"Column names repeat: snapshot first, then replace N in {ROW_SELECTOR} with actual one-based row. "
                    "Toolbar opener #create-table-button; dialog submit #save-design-table-button. "
-                   "Run each scenario independently at 1280x800 desktop and 390x844 mobile. "
+                   "Perform stateful workflows at 1280x800 desktop; mobile contracts are saved-state readback only. "
                    "Use harness actions only, screenshot actual state, verify persisted/reloaded result, "
                    "checkpoint functional and visual separately, and file a structured finding for reproducible defects. "
                    "Mark unsupported UI behavior blocked with evidence. ")
@@ -269,8 +285,7 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
                              "reasoningEffort": "default"} if username in {"qa_designer_001", "qa_designer_002"} else None,
             "resources": resources,
             "writeAuthorization": {"enabled": True, "resources": owned, "operations": actions},
-            "scenarios": [{"id": scenario_id, "title": title, "product": "schemii",
-                           "instructions": context + steps}
+            "scenarios": [scenario_contract(scenario_id, title, context + steps)
                           for scenario_id, title, steps in scenarios],
         }
     return output
