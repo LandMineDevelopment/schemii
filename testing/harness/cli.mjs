@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
 import { deploymentLockPath } from './deployment.mjs';
 import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock, withAvailableAccounts } from './leases.mjs';
+import { expandFixtureScenario } from './prerequisites.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
 const catalog=()=>readJSON(join(root,'testing/personas.json'));
 const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spawn(file,args,{cwd:root,stdio:'inherit',...options});child.once('error',rej);child.once('close',code=>code===0?res():rej(blocked(`${file} exited ${code}; inspect the exact diagnostic above.`)));});
@@ -14,6 +15,7 @@ const runCommand=(file,args,options={})=>new Promise((res,rej)=>{const child=spa
 const help = `Usage: ./test.sh COMMAND [options]
 
   setup      Create/extend stable persona credentials, prepare QA DB, provision accounts
+  cleanup-sweep Delete only exact-prefix objects from a stopped owned sweep
   cleanup-author-fixture Delete selected report-author starter dashboards and models
   provision-chat Grant one retained designer access to the tested shared AI model
   provision-writer Prepare and attach one isolated writable Schemii QA target
@@ -31,6 +33,15 @@ const help = `Usage: ./test.sh COMMAND [options]
   run        Dispatch ready lanes through T3 or start isolated Codex workers
   claim      Bind a lane to an agent; returns private session-file path
   action     Drive only that agent's browser through its session file
+  native-release Stop only a finished/paused lane's owned extension transport
+  native-auth Record visibly authenticated account identity and fresh image
+  native-bind Bind claimed native lane to its live thread connection before login
+  resource-receipt Record exact owned UI creation ID/name/time and fresh image
+  begin      Begin an assigned scenario before fresh captures (--scenario ID)
+  capture    Export a selected native screenshot/download (--args-json)
+  inspect    Record hash-bound image viewing and expected/actual observations
+  inspect-download Verify actual downloaded bytes against an expected oracle
+  review     Independently adjudicate a target scenario/finding from reviewer lane
   checkpoint Record a scenario's function/style results and evidence
   finding    Record a documented issue candidate with lane-owned evidence
   heartbeat  Renew an agent’s ownership lease using its session file
@@ -54,6 +65,8 @@ Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
            --tracks lifecycle,canvas,rules,query,chat --parallel 1..10
            --viewports desktop,mobile --fixtures /path/manifest.json
            --credentials-file /private/accounts.json --headless
+Native:    --browser native --controller t3 --reviewer-account USER --runtime-slots N
+           Native UI tools act directly; session CLI records ownership/evidence only.
 Workers:   --controller t3|codex --agent-model MODEL --agent-reasoning EFFORT
            --agent-timeout SECONDS
            Default controller: t3. Default timeout: 600 (range 30..3600).
@@ -66,7 +79,7 @@ Finding:   --session-file FILE --scenario ID --title TEXT
            --severity low|medium|high|critical --steps TEXT
            --expected TEXT --actual TEXT --evidence FILE1,FILE2
 
-All actions emit JSON. Browser backend: isolated (one Chromium process per lane).
+All actions emit JSON. Browser backend: isolated or explicit native thread connection.
 T3 dispatch is an explicit handoff; Codex dispatch launches independent CLI workers.
 Worker model and reasoning follow the installed Codex configuration unless selected.
 Reasoning: none|minimal|low|medium|high|xhigh|max|ultra; model support varies.
@@ -75,19 +88,28 @@ Exit codes: 0 success, 1 failure, 2 invalid args, 3 awaiting agent dispatch,
 `;
 function invalid(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
 function blocked(message) { return Object.assign(new Error(message), { exitCode: 4 }); }
-const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona'];
+const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona','reviewer-account','runtime-slots'];
 const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
   'cleanup-author-fixture': ['accounts'],
+  'cleanup-sweep': ['run','workspace-fixtures'],
   'provision-writer': ['account','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
   plan: [...selectionOptions,'headless'],
   doctor: [...selectionOptions,'credentials-file','headless'],
   prepare: [...selectionOptions,'credentials-file','headless'],
-  run: ['run'], claim: ['run','lane','agent'],
+  run: ['run'], 'native-release': ['run','lane'], claim: ['run','lane','agent'],
   action: ['session-file','kind','args-json'],
+  'native-bind': ['session-file','args-json'],
+  'native-auth': ['session-file','args-json'],
+  'resource-receipt': ['session-file','args-json'],
+  begin: ['session-file','scenario','args-json'],
+  capture: ['session-file','args-json'],
+  inspect: ['session-file','evidence','note','args-json','target-lane'],
+  'inspect-download': ['session-file','evidence','args-json'],
+  review: ['session-file','target-lane','scenario','verdict','note','evidence','finding','args-json'],
   checkpoint: ['session-file','scenario','functional','visual','note','evidence'],
   finding: ['session-file','scenario','title','severity','steps','expected','actual','evidence'],
   finish: ['session-file'], heartbeat: ['session-file'],
@@ -116,10 +138,12 @@ const trackSteps = {
   harness: 'Inspect the assigned app in your own browser, capture desktop and mobile evidence, and verify ordinary controls. This is a harness walkthrough, not full app acceptance.',
 };
 async function selection(o, reservedAccounts) {
-  if (o.browser && o.browser !== 'isolated') throw new Error('Only --browser isolated can guarantee independent sessions. Native T3 context control is unavailable.');
+  const browser = o.browser || 'isolated';
+  if (!['isolated','native'].includes(browser)) throw new Error('--browser must be isolated or native.');
   const controller = o.controller || 't3';
   if (!['t3','codex'].includes(controller)) throw new Error('--controller must be t3 or codex.');
-  if (o.agents !== undefined && !/^(?:[1-9]|10)$/.test(o.agents)) throw new Error('--agents must be an integer from 1 through 10.');
+  if (browser === 'native' && controller !== 't3') throw new Error('--browser native requires --controller t3 and thread-owned schemii_browser tools.');
+  if (o.agents !== undefined && !(browser === 'native' ? /^(?:[1-9]|10|11)$/ : /^(?:[1-9]|10)$/).test(o.agents)) throw new Error('--agents must be 1 through 10 (11 including reserved reviewer for native).');
   const defaultAccounts = Array.from({length: Number(o.agents || 2)}, (_,i)=>`qa_subagent_${String(i+1).padStart(2,'0')}`).join(',');
   let persona=null,poolCandidates=[];
   if(o.persona) {
@@ -149,6 +173,13 @@ async function selection(o, reservedAccounts) {
   if (o.parallel !== undefined && !/^(?:[1-9]|10)$/.test(o.parallel)) throw new Error('--parallel must be an integer from 1 through 10.');
   const parallel = Number(o.parallel || Math.min(2, accounts.length));
   if (!Number.isInteger(parallel) || parallel < 1 || parallel > 10 || parallel > accounts.length) throw new Error('Parallelism must be 1–10 and no greater than the selected accounts.');
+  const reviewerAccount = o['reviewer-account'] || null;
+  const runtimeSlots = o['runtime-slots'] === undefined ? null : Number(o['runtime-slots']);
+  if (browser === 'native') {
+    if (!reviewerAccount || !accounts.includes(reviewerAccount) || accounts.length < 2) throw new Error('Native QA requires --reviewer-account naming a separately selected account.');
+    if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + 2) throw new Error('Native QA requires observed --runtime-slots for active testers plus coordinator and independent reviewer.');
+    if (parallel > accounts.length - 1) throw new Error('Native --parallel counts testers; reserve one selected reviewer account separately.');
+  } else if (reviewerAccount || runtimeSlots !== null) throw new Error('--reviewer-account and --runtime-slots currently require --browser native.');
   const products = list(o.products, 'schemoo');
   if (products.some(x => !['schemii','schemoo','schemer'].includes(x))) throw new Error('Unknown product.');
   const tracks = list(o.tracks, 'harness');
@@ -186,15 +217,9 @@ async function selection(o, reservedAccounts) {
     if (!Array.isArray(baseScenarios) || !baseScenarios.length || baseScenarios.some(s => !s || !/^[a-z0-9-]+$/.test(s.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
     const scenarios = baseScenarios.flatMap(s => {
       if (Object.hasOwn(s, 'product') && !products.includes(s.product)) throw new Error(`Scenario ${s.id} product must be one of the selected products.`);
-      return (s.product ? [s.product] : products).flatMap(product => viewports.map(viewportName => ({
-        ...s, id: `${s.id}-${product}-${viewportName}`,
-        title: `${s.title || s.id} · ${product} · ${viewportName}`,
-        product, viewportName,
-        viewport: viewportName === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
-        functional:'not-run', visual:'not-run', evidence:[],
-      })));
+      return (s.product ? [s.product] : products).flatMap(product => viewports.map(viewportName => expandFixtureScenario(s,product,viewportName)));
     });
-    return { id: `lane-${i+1}`, username, products, track, status: 'queued', generation: 0,
+    return { id: `lane-${i+1}`, username, products, track, role: username === reviewerAccount ? 'reviewer' : 'tester', status: 'queued', generation: 0,
       viewport: viewports[0] === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
       viewports, resources: spec.resources || {}, checks, url: spec.url,
       persona:persona?.id || spec.persona || null, expectedCapabilities:spec.expectedCapabilities, deniedProducts:spec.deniedProducts || [], writeAuthorization,
@@ -203,7 +228,7 @@ async function selection(o, reservedAccounts) {
   for (const l of lanes) {
     if (!l.scenarios.length || new Set(l.scenarios.map(x=>x.id)).size !== l.scenarios.length || l.scenarios.some(x=>!/^[a-z0-9-]+$/.test(x.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
   }
-  return { accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
+  return { browser, reviewerAccount, runtimeSlots, accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
     baseURL:'https://localhost:8001',previewURL:'https://omarchy.taile4f57f.ts.net',
     fixtureMode:o.fixtures ? 'declared-retained-resources' : 'harness-only-no-app-data-writes',
     fixtureVersion:fixture.version || fixture.fixtureVersion || null,
@@ -230,7 +255,7 @@ async function startBroker(run, dir, resume=false) {
   for(let i=0;i<360;i++) {
     await new Promise(r=>setTimeout(r,1000));
     const state=await readJSON(join(dir,'manifest.json'));
-    if(['ready','blocked','complete','passed','finished-with-gaps'].includes(state.status)) return state;
+    if(['ready','blocked','complete','passed','execution-complete','finished-with-gaps'].includes(state.status)) return state;
     try{process.kill(child.pid,0);}catch{ throw blocked('Controller stopped before readiness. Inspect controller.log; another run may hold the deployment lease.'); }
   }
   throw blocked('Preparation is still running. Use status; do not start another run.');
@@ -250,6 +275,11 @@ async function requireStoppedOwner(dir) {
   if(actual&&actual===owner.birthTick)throw blocked('Controller process is still running but unavailable; wait for it to stop before recovery or cleanup.');
   const savedRun=await readJSON(join(dir,'manifest.json'));
   for(const lane of savedRun.lanes||[]) {
+    if (lane.native) {
+      const { closeNativeReceipt } = await import('./native.mjs');
+      await closeNativeReceipt(lane);
+      if (lane.native.cleanup.transport !== 'stopped' || lane.native.cleanup.guardian !== 'stopped' || lane.native.cleanup.temporaryOutput !== 'removed-observed') throw blocked(`Native transport for ${lane.id} remains live; close its supported native session before resume/cleanup.`);
+    }
     for(const kind of ['browser','worker']) {
       if(lane[`${kind}LaunchPending`])throw blocked(`${kind} launch ownership for ${lane.id} is unresolved; inspect that owned ${kind} and confirm it stopped before recovery or cleanup.`);
       const owned=lane[kind];
@@ -285,6 +315,10 @@ async function execute(command,o) {
     await privateJSON(resolve(o['admin-credentials']));
     await runCommand('./testing/setup.sh',[copies,resolve(o['admin-credentials']),stateDir]);
     return;
+  }
+  if(command==='cleanup-sweep') {
+    if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||'')||!o['workspace-fixtures'])throw invalid('cleanup-sweep requires --run RUN and --workspace-fixtures MAP.');
+    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures']),'--state-dir',stateDir]);return;
   }
   if(command==='cleanup-author-fixture') {
     if(!o.accounts)throw invalid('--accounts is required; name each retained report-author fixture to delete.');
@@ -346,7 +380,7 @@ async function execute(command,o) {
       await access(chromium.executablePath());
       if(!config.headless&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new Error('No display available. Use explicit --headless for functional-only browser operation.');
     } catch(error) { throw blocked(`Prerequisite check failed: ${error instanceof SyntaxError ? 'Malformed private credential JSON.' : error.message}`); }
-    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
+    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:config.browser === 'native' ? 'thread-owned-native-after-claim' : 'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
     const id=`qa-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,dir=runPath(id);
     await privateDir(dir);
     const runtime=join('/tmp',`schemii-qa-${process.getuid()}`,id);
@@ -381,7 +415,7 @@ async function execute(command,o) {
     });
     console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
-  if(['action','checkpoint','finding','finish','heartbeat'].includes(command)) {
+  if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','capture','inspect','inspect-download','review'].includes(command)) {
     if(!o['session-file'])throw invalid('--session-file is required.');
     if(command==='action'&&!o.kind)throw invalid('--kind is required.');
     if(command==='checkpoint'&&(!o.scenario||!['passed','failed','blocked'].includes(o.functional)||!['passed','failed','blocked'].includes(o.visual)))throw invalid('Checkpoint requires --scenario and passed|failed|blocked values for --functional and --visual.');
@@ -390,17 +424,17 @@ async function execute(command,o) {
     let args={};
     try { args=o['args-json']?JSON.parse(o['args-json']):{}; } catch { throw invalid('--args-json must contain valid JSON.'); }
     if(!args||typeof args!=='object'||Array.isArray(args))throw invalid('--args-json must be an object.');
-    const result=await rpc(session,{command,kind:o.kind,args,scenario:o.scenario,functional:o.functional,visual:o.visual,note:o.note,evidence:list(o.evidence,''),title:o.title,severity:o.severity,steps:o.steps,expected:o.expected,actual:o.actual});
+    const result=await rpc(session,{command,kind:o.kind,args,scenario:o.scenario,functional:o.functional,visual:o.visual,note:o.note,evidence:list(o.evidence,''),title:o.title,severity:o.severity,steps:o.steps,expected:o.expected,actual:o.actual,targetLane:o['target-lane'],verdict:o.verdict,finding:o.finding});
     console.log(JSON.stringify(result,null,2));return;
   }
   if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||''))throw invalid('--run must identify a valid QA run.');
-  if(['claim','recover'].includes(command)&&!o.lane)throw invalid('--lane is required.');
+  if(['claim','recover','native-release'].includes(command)&&!o.lane)throw invalid('--lane is required.');
   if(command==='claim'&&!o.agent)throw invalid('--agent is required.');
   const dir=runPath(o.run),run=await readJSON(join(dir,'manifest.json'));
   if(command==='status'){console.log(JSON.stringify(run,null,2));return;}
   if(command==='report') {const path=join(dir,'report.html');await writeFile(path,reportHTML(run),{mode:0o600});console.log(JSON.stringify({report:path,status:run.status}));return;}
   if(command==='resume') {
-    if(['complete','passed','finished-with-gaps'].includes(run.status)) {
+    if(['complete','passed','execution-complete','finished-with-gaps'].includes(run.status)) {
       const report=join(dir,'report.html');
       await writeFile(report,reportHTML(run),{mode:0o600});
       console.log(JSON.stringify({status:run.status,report,message:'Completed run preserved; use prepare for a new run.'}));
@@ -415,7 +449,7 @@ async function execute(command,o) {
     const resumed=await startBroker(run,dir,true);
     console.log(JSON.stringify(resumed,null,2));if(resumed.status==='blocked')process.exitCode=4;return;
   }
-  if(!['run','claim','advance','recover','stop','cleanup'].includes(command))throw new Error(`Unknown command: ${command}`);
+  if(!['run','claim','advance','recover','stop','cleanup','native-release'].includes(command))throw new Error(`Unknown command: ${command}`);
   const control=await privateJSON(join(dir,'control.json'));
   let result;
   try { result=await rpc(control,{command:command==='run'&&run.controller==='codex'?'launch-codex':command,laneId:o.lane,agent:o.agent}); }

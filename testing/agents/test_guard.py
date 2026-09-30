@@ -323,6 +323,36 @@ class AssignmentGuardTests(unittest.TestCase):
         assignment["kind"] = "review"
         self.assertEqual(self.result(assignment), {})
 
+    def native_qa(self):
+        assignment = self.ready_qa()
+        assignment["qa"]["browser"] = "native"
+        self.manifest.update(browser="native", runtimeSlots=13, parallel=2, reviewerAccount="qa_designer_014")
+        self.manifest["lanes"][0].update(role="tester", username="qa_designer_012")
+        self.manifest["lanes"].append({"id":"lane-2", "role":"reviewer", "username":"qa_designer_014", "status":"ready", "agent":None})
+        self.write_manifest()
+        return assignment
+
+    def test_prepared_native_lane_requires_matching_backend_capacity_and_reviewer(self):
+        assignment = self.native_qa()
+        self.assertEqual(self.result(assignment), {})
+        for change in ({"browser":"isolated"}, {"runtimeSlots":3}, {"reviewerAccount":"someone_else"}):
+            with self.subTest(change=change):
+                assignment = self.native_qa()
+                self.manifest.update(change)
+                self.write_manifest()
+                self.assertDenied(self.result(assignment), "prepared native backend")
+
+    def test_native_reserved_reviewer_requires_independent_review_role(self):
+        assignment = self.native_qa()
+        assignment["qa"]["lane"] = "lane-2"
+        assignment["owned_resources"] = ["qa:qa-guard-test:lane-2"]
+        assignment["owned_paths"] = ["artifacts/qa/qa-guard-test/lane-2"]
+        self.assertDenied(self.result(assignment), "independent review role")
+        assignment["kind"] = "review"
+        self.assertEqual(self.result(assignment), {})
+        assignment["qa"]["browser"] = "isolated"
+        self.assertDenied(self.result(assignment), "match its prepared lane")
+
     def test_qa_cannot_use_asserted_readiness_or_another_claim(self):
         assignment = self.ready_qa()
         del assignment["qa"]

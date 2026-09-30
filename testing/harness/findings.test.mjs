@@ -31,3 +31,10 @@ test('report renders scenario-linked findings while escaping agent text', () => 
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.doesNotMatch(html, /<script>/);
 });
+
+
+test('historical execution and unadjudicated findings render review pending', () => {
+  const html=reportHTML({id:'qa-historical',status:'passed',lanes:[],parallel:1,acceptance:{status:'review-pending',reasons:['finding-one: finding adjudication pending'],intended:2,completed:2,reviewed:0}});
+  assert.match(html,/Independent acceptance: <strong>review-pending<\/strong>/);
+  assert.match(html,/finding-one: finding adjudication pending/);
+});

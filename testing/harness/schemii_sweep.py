@@ -33,6 +33,37 @@ The page has two controls named 'Create table': use selector #create-table-butto
 The create-table editor repeats the accessible label 'Column name' for every row. Target row N (1-based) with selector #design-columns > .design-column-row:nth-child(N) [data-design-column-name] after confirming the row order in a fresh snapshot; the harness does not support a label index. For exports use the header Download menu and the harness download action, then inspect the returned private file. Scroll a 100-row preview or a horizontally overflowing result grid before calling later rows or columns unavailable.
 For every scenario, assess functionality and visual behavior separately at the assigned desktop or 390x844 mobile viewport. Capture actual result and persisted/reloaded state, not just a click. File a structured finding for a reproducible defect with exact input, expected/actual outcome and screenshot. An unsupported or API-only capability is blocked, never passed by assumption."""
 
+PAGING_ORACLE = """Use SELECT id,customer_id,ordered_on,status,amount,notes FROM orders ORDER BY id.
+Set Console Rows per page to 100 through its settings UI (restore the prior preference afterward).
+513 rows exceed five complete pages: page starts 1,101,201,301,401,501; ends 100,200,300,400,500,513.
+Require the full ordered id sequence 1..513 exactly once in the full exported file, not a displayed-page count.
+For id n: customer_id=(n%32)+1; date=2025-01-01+(n%90) days; status cycles paid,cancelled,pending;
+amount=((n*137)%100000)/100; notes is NULL for multiples of 7, otherwise 'Fixture order n'.
+If catalog row preview does not guarantee order, use the explicit ordered Console query for this oracle;
+report preview ordering separately rather than assuming its first row is id 1."""
+
+
+def scenario_contract(scenario_id: str, title: str, instructions: str) -> dict:
+    """Preserve meaningful mobile coverage without replaying stateful creation."""
+    mobile = (f"Saved-state readback of desktop scenario {scenario_id} at 390x844 mobile. "
+              "The matching desktop functional result must pass first; otherwise mark blocked prerequisite. "
+              "Inspect its exact assigned resources and recorded final state through visible UI; reopen/reload "
+              "and verify saved values, target identity, navigation, focus, scrolling and visible feedback. "
+              "Do not create/edit/delete/import, execute SQL writes, approve actions or send another AI turn. "
+              "Record expected versus actual and fresh screenshots. This result covers mobile readback, "
+              "not independent mobile creation, upload or mutation. "
+              f"Desktop workflow for expected results: {instructions}")
+    return {"id": scenario_id, "title": title, "product": "schemii", "instructions": instructions,
+            "viewportContracts": {
+                "desktop": {"mode": "write", "instructions": instructions},
+                "mobile": {"mode": "readback", "dependsOnDesktop": True, "instructions": mobile}}}
+
+
+def empty_design_check(workspace_id: str) -> dict:
+    return {"path": f"/api/v1/schemii/workspaces/{workspace_id}/design", "status": 200,
+            "equals": {"content." + key + ".length": 0 for key in
+                       ("tables", "relationships", "types", "functions", "views", "triggers")}}
+
 # Each mission is deliberately broader than a single component. A scenario is a
 # multistep acceptance contract, expanded by the harness into desktop and mobile.
 MISSIONS = (
@@ -131,7 +162,9 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
             raise ValueError(f"Missing exact designer fixture for {username}")
         if username in CHAT and not fixture.get("chatProvider"):
             raise ValueError(f"Missing active chat policy for {username}; run ./test.sh provision-chat")
-        resources = dict(fixture["resources"])
+        resources = {key: fixture["resources"][key] for key in (
+            "schema", "connectionId", "connectionOwnerId", "database", "host", "fixtureVersion",
+            "writableConnectionId", "writableSchema") if key in fixture["resources"]}
         checks = list(fixture["checks"])
         prefix = f"qa_{tag}_{username[-3:]}_"
         seeded = workspaces.get("lanes", {}).get(username)
@@ -145,16 +178,18 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
         ownership = {key: seeded.get(key) for key in ("localCreated", "readerCreated", "writerCreated")}
         if any(not isinstance(value, bool) for value in ownership.values()):
             raise ValueError(f"Missing workspace ownership flags for {username}")
-        resources.update({"scratchPrefix": prefix, "mission": mission, "oracle": ORACLE,
+        resources.update({"scratchPrefix": prefix, "mission": mission, "oracle": ORACLE + "\n" + PAGING_ORACLE,
                           "workspaceTag": tag, "seedOwnership": ownership,
                           "localWorkspaceId": seeded["localWorkspaceId"],
                           "readerWorkspaceId": seeded["readerWorkspaceId"]})
         checks += [
+            {"path": "/api/v1/auth/me", "status": 200, "equals": {"user.username": username}},
             {"path": "/api/v1/schemii/workspaces/" + seeded["localWorkspaceId"],
              "status": 200, "equals": {"name": prefix + "seed", "connectionId": None}},
             {"path": "/api/v1/schemii/workspaces/" + seeded["readerWorkspaceId"],
              "status": 200, "equals": {"connectionId": resources["connectionId"], "namespace": username}},
         ]
+        checks.append(empty_design_check(seeded["localWorkspaceId"]))
         if username in WRITERS and not resources.get("writableConnectionId"):
             raise ValueError(f"Missing exact writable profile for {username}; provision writer target first")
         if username in WRITERS:
@@ -165,6 +200,9 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
             checks.append({"path": "/api/v1/schemii/workspaces/" + seeded["writerWorkspaceId"],
                            "status": 200, "equals": {"connectionId": resources["writableConnectionId"],
                                                       "namespace": resources["writableSchema"]}})
+            checks.append({"path": f"/api/v1/schemii/workspaces/{seeded['writerWorkspaceId']}/catalog",
+                           "status": 200, "equals": {"catalog.namespace": resources["writableSchema"],
+                                                      "catalog.tables.length": 0, "catalog.views.length": 0}})
         operations = ["create/edit/delete own prefixed app workspaces/designs/queries/chats", "download own exports"]
         if username == "qa_designer_005":
             operations.append("upload test-owned design JSON into own scratch workspace")
@@ -183,11 +221,76 @@ def build(source: dict, tag: str, workspaces: dict) -> dict:
             "deniedProducts": fixture["deniedProducts"], "checks": checks,
             "chatProvider": fixture.get("chatProvider"), "resources": resources,
             "writeAuthorization": {"enabled": True, "resources": resources_owned, "operations": operations},
-            "scenarios": [{"id": scenario_id, "title": title, "product": "schemii",
-                           "instructions": f"Mission: {mission}. {steps} Default workspace is {default_workspace}; local workspace {seeded['localWorkspaceId']}; reader workspace {seeded['readerWorkspaceId']}; writer workspace {seeded.get('writerWorkspaceId')}. Navigate to /?workspace=WORKSPACE_ID when switching targets and confirm identity before writes. Use test-owned prefix {prefix}. Apply the exact oracle in resources, record expected versus actual and verify persistence. File documented findings immediately."}
+            "scenarios": [scenario_contract(scenario_id, title,
+                           f"Mission: {mission}. {steps} Default workspace is {default_workspace}; local workspace {seeded['localWorkspaceId']}; reader workspace {seeded['readerWorkspaceId']}; writer workspace {seeded.get('writerWorkspaceId')}. Navigate to /?workspace=WORKSPACE_ID when switching targets and confirm identity before writes. Use test-owned prefix {prefix}. Apply the exact oracle in resources, record expected versus actual and verify persistence. File documented findings immediately.")
                           for scenario_id, title, steps in scenarios],
         }
     return output
+
+
+def build_pilot(source: dict, tag: str, workspaces: dict,
+                accounts=("qa_designer_005", "qa_designer_006"), reviewer=None) -> dict:
+    """A bounded two-account native adoption fixture, using existing seed receipts."""
+    if (len(accounts) != 2 or len(set(accounts)) != 2
+            or any(not re.fullmatch(r"qa_designer_[0-9]{3}", account) for account in accounts)
+            or reviewer is not None and (reviewer in accounts or not re.fullmatch(r"qa_designer_[0-9]{3}", reviewer))):
+        raise ValueError("Pilot needs two distinct retained designers and an optional separate reviewer")
+    testers = tuple(accounts)
+    accounts = testers + ((reviewer,) if reviewer else ())
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", tag) or workspaces.get("tag") != tag:
+        raise ValueError("Pilot needs an exact matching workspace tag")
+    result = {"version": "schemii-full-qa-v1", "tag": tag, "lanes": {}}
+    ids = []
+    for username in accounts:
+        seeded = workspaces.get("lanes", {}).get(username, {})
+        local = seeded.get("localWorkspaceId")
+        if not isinstance(local, str) or not re.fullmatch(r"ws_[0-9a-f]{32}", local) or seeded.get("localCreated") is not True:
+            raise ValueError(f"Pilot requires a fresh owned local workspace for {username}")
+        ids.append(local)
+    if len(set(ids)) != len(ids):
+        raise ValueError("Pilot workspaces collide")
+    for index, (username, local) in enumerate(zip(accounts, ids, strict=True)):
+        peer = ids[1] if index == 0 else ids[0]
+        fixture = source.get("lanes", {}).get(username, {})
+        if (fixture.get("persona") != "designer" or fixture.get("expectedCapabilities") != ["schemii:access"]
+                or fixture.get("resources", {}).get("schema") != username):
+            raise ValueError(f"Pilot needs exact effective designer grants for {username}")
+        mapped = workspaces["lanes"][username]
+        prefix = f"qa_{tag}_{username[-3:]}_"
+        if mapped.get("prefix") != prefix:
+            raise ValueError("Pilot workspace marker differs")
+        resources = {key: fixture["resources"][key] for key in ("schema", "connectionId")}
+        resources.update(workspaceTag=tag, scratchPrefix=prefix, localWorkspaceId=local,
+                         readerWorkspaceId=mapped["readerWorkspaceId"],
+                         seedOwnership={key: mapped[key] for key in ("localCreated", "readerCreated", "writerCreated")},
+                         cleanupOwner="coordinator: exact seed receipts; extra app objects require cleanupReceipts")
+        context = (f"Use only owned local workspace {local} at /?workspace={local}; prefix {prefix}. "
+                   "Your peer owns a different workspace: never enter or mutate it. Initial design is empty. "
+                   "The saved table oracle is qa_pilot_items with id integer NOT NULL primary key, label text NOT NULL, "
+                   "qty integer NULL. Use #create-table-button then #save-design-table-button once; "
+                   "column names repeat, so use row selectors from a fresh snapshot. "
+                   "Preserve each first attempt outcome. Inspect saved state before repeating an uncertain write. ")
+        cases = [
+            ("pilot-create", "Create, save and reopen", "Create the exact table, save once, switch away/back and reload. Verify all three exact names/types/nullability and PK in inspector and exported desired SQL. Leave table for subsequent cases."),
+            ("pilot-files", "Real JSON/SQL download and owned upload", "Requires the saved pilot-create table; block prerequisite if creation failed. Open summary[aria-label=\"Download\"] before #download-catalog-button or #export-design-sql-button. Download JSON and SQL, inspect actual private bytes and exact three columns/PK. Create a new prefixed import workspace through UI; record exact creation ID/time receipt before further work. Upload the downloaded <=1 MiB JSON through its file input. Save/reload and compare content; original remains unchanged. Inspect downloads; an unsupported picker is blocked browser capability, not a pass."),
+            ("pilot-recovery", "Validation, keyboard save and recovery", "Requires the saved pilot-create table; block prerequisite if creation failed. On owned table attempt a blank or duplicate column name and verify clear validation with no partial saved change. Restore valid input, make label->description, Tab to the visible Save control and activate it with Enter once, switch away/back and reload. Verify the renamed column persists once, peers remain separate and the browser session can recover after reload. Leave exact final state and receipts for coordinator cleanup."),
+        ]
+        checks = list(fixture.get("checks", [])) + [
+            {"path": "/api/v1/auth/me", "status": 200, "equals": {"user.username": username}},
+            {"path": f"/api/v1/schemii/workspaces/{local}", "status": 200,
+             "equals": {"id": local, "name": prefix + "seed", "connectionId": None}},
+            {"path": f"/api/v1/schemii/workspaces/{peer}", "status": 404},
+            empty_design_check(local),
+        ]
+        result["lanes"][username] = {
+            "url": f"/?workspace={local}", "persona": "designer", "expectedCapabilities": ["schemii:access"],
+            "independentReviewer": username == reviewer,
+            "deniedProducts": list(fixture.get("deniedProducts", [])), "checks": checks, "resources": resources,
+            "writeAuthorization": {"enabled": True, "resources": [f"owned seed workspace {local}", f"own prefixed import workspace {prefix}import"],
+                                   "operations": ["create/edit/save own local design", "download own design JSON and SQL", "upload <=1 MiB own JSON into own prefixed workspace"]},
+            "scenarios": [scenario_contract(sid, title, context + steps) for sid, title, steps in cases],
+        }
+    return result
 
 
 def main() -> None:
@@ -196,9 +299,14 @@ def main() -> None:
     parser.add_argument("--workspace-fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--tag", required=True, help="Unique short label for test-owned app object names")
+    parser.add_argument("--pilot", action="store_true", help="Only two owned designer adoption lanes; no provider inference")
+    parser.add_argument("--pilot-accounts", default="qa_designer_005,qa_designer_006")
+    parser.add_argument("--pilot-reviewer", help="A separate retained designer with its own fresh review workspace")
     args = parser.parse_args()
     source = json.loads(args.fixtures.read_text())
-    manifest = build(source, args.tag, json.loads(args.workspace_fixtures.read_text()))
+    workspace_map = json.loads(args.workspace_fixtures.read_text())
+    manifest = (build_pilot(source, args.tag, workspace_map, tuple(args.pilot_accounts.split(",")), args.pilot_reviewer)
+                if args.pilot else build(source, args.tag, workspace_map))
     args.output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as stream:

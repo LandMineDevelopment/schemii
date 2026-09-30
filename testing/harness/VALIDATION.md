@@ -148,3 +148,21 @@ Final live checks passed: all four independent drift cases were detected, the
 normal reset restored checksum `f7a9a1e37ea763d729b1e17ae5090bfd`, and all
 120 spaces passed the strengthened verifier. Credential hashes were unchanged
 and no account reservations remained. No application suite was run.
+
+## Native adapter code-level checkpoint
+
+The opt-in native adapter adds fast no-browser regressions for stale generation,
+wrong scenario/resource/route/viewport/source, expected-denial fencing, private
+live connection binding, screenshot hash/inspection, exact download contents,
+tester self-review, distinct reviewer receipt and pending-only recovery briefs.
+A disposable Python supervisor test verifies owned pidfd SIGTERM, automatic owned
+directory removal and live-peer preservation. It is an adapter ownership test,
+not production browser or Schemii application acceptance. Actual native extension
+tools were exposed and `browser_close` succeeded during development; no application
+launcher, live authenticated case or application acceptance ran in that checkout.
+
+The independent reviewer must verify the adapter and extension teardown before
+coordinator integration. Live acceptance follows
+[the native runbook](../../docs/native-qa-acceptance.md): two authenticated testers
+plus a reserved reviewer first, then concurrent real workflows. Keep legacy saved
+runs and execution until those case/evidence/recovery/cleanup gates pass.

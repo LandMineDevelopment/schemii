@@ -362,3 +362,24 @@ visible in screenshots may itself be private. All run directories/files are priv
 No app test suites run as part of this harness. Native T3 context support,
 automatic disposable DB provisioning, multi-instance deployment, recording, and
 suite orchestration remain separate extensions; unsupported flags fail explicitly.
+
+## Opt-in native thread browser adapter
+
+Use `--browser native --controller t3 --reviewer-account ACCOUNT --runtime-slots N`
+for the stock native `schemii_browser` adapter. Read the complete
+[native acceptance contract](../../docs/native-qa-acceptance.md) before dispatch.
+Preparation retains existing account, fixture, capability and deployment checks,
+then closes its transient readiness browsers. Claimed native workers visibly log
+in through their own thread tools; `test.sh action` is rejected for those lanes.
+The CLI records native binding/authentication, scenario-begin, selected captures,
+image/download inspection and distinct reviewer adjudication. It never mixes a
+legacy session handle with an unrelated native browser.
+
+`--parallel` counts native testers and reserves a separate selected reviewer
+account/lane. The guard checks the matching prepared backend and reported capacity.
+Normal browser close leaves the transport live. After actual `browser_close` and
+finish, `native-release --run RUN --lane LANE` terminates only the recorded owned
+extension supervisor and verifies automatic guardian/output cleanup; it does not
+claim to close a native agent/thread. Execution-complete and review-pending are
+separate states. Existing isolated runs/evidence stay available until live native
+application acceptance and cleanup parity are demonstrated.

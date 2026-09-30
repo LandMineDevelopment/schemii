@@ -189,8 +189,8 @@ def validate_qa(qa: object, assignment: dict, workspace: Path) -> None:
         "Coordinator must claim the actual spawned worker ID before browser actions.",
     )
     require(
-        qa["browser"] == "isolated",
-        "Manual account QA requires an isolated ./test.sh lane; native-cooperative tabs do not prove cookie isolation.",
+        qa["browser"] in {"isolated", "native"},
+        "Manual account QA requires an isolated or thread-owned native ./test.sh lane; shared preview tabs do not prove cookie isolation.",
     )
     require(
         assignment["owned_resources"] == [f"qa:{run}:{lane_id}"],
@@ -235,6 +235,24 @@ def validate_qa(qa: object, assignment: dict, workspace: Path) -> None:
         and bool(deployment.get("verifiedAt")),
         "QA run needs its verified deployment from ./test.sh prepare.",
     )
+    if qa["browser"] == "native":
+        require(
+            manifest.get("browser") == "native"
+            and isinstance(manifest.get("runtimeSlots"), int)
+            and manifest["runtimeSlots"] >= manifest.get("parallel", 0) + 2
+            and any(
+                isinstance(lane, dict)
+                and lane.get("role") == "reviewer"
+                and lane.get("username") == manifest.get("reviewerAccount")
+                for lane in manifest.get("lanes", [])
+            ),
+            "Native QA needs its prepared native backend, observed capacity and reserved reviewer account.",
+        )
+    else:
+        require(
+            manifest.get("browser", "isolated") == "isolated",
+            "Assignment browser must match its prepared lane; do not mix legacy handles with native browsers.",
+        )
     owner_path = qa_artifact_path(
         f"artifacts/qa/{run}/controller-owner.json", workspace
     )
@@ -266,6 +284,11 @@ def validate_qa(qa: object, assignment: dict, workspace: Path) -> None:
         and not matching[0].get("agent"),
         "Only a ready unclaimed lane may be assigned; do not adopt another worker's claim.",
     )
+    if qa["browser"] == "native":
+        require(
+            (matching[0].get("role") == "reviewer") == (assignment["kind"] == "review"),
+            "The reserved reviewer lane must be assigned to an independent review role.",
+        )
     require(
         any(
             "./test.sh" in step and "checkpoint" in step

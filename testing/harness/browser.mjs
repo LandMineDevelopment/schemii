@@ -7,6 +7,7 @@ import { assertProductNavigationAllowed } from './readiness.mjs';
 
 const COOKIE = 'schemii_session';
 const STORAGE_KEY = '__schemii_qa_isolation__';
+export const dialogDetails = dialog => ({ type:dialog.type(), message:dialog.message(), defaultValue:dialog.defaultValue() });
 const safeId = value => /^[a-zA-Z0-9_-]+$/.test(value);
 
 // Self-contained so Playwright can run this same inspection in either a
@@ -128,7 +129,7 @@ export class BrowserFleet {
       handle.page.on('dialog', dialog => {
         handle.pendingDialog = dialog;
         this.#event(handle, 'dialog', { type: dialog.type() });
-        handle.dialogSignal?.({ dialog: { type: dialog.type() } });
+        handle.dialogSignal?.({ dialog: dialogDetails(dialog), requires:'explicit dialog accept or dismiss' });
       });
       // Error text can include credentials or query data; only persist the category.
       handle.page.on('pageerror', () => this.#event(handle, 'page-error'));
@@ -260,7 +261,7 @@ export class BrowserFleet {
       await this.#identity(handle);
       const page = handle.page;
       if (new URL(page.url()).origin !== this.baseURL) throw new Error('Browser left the application origin; recover the lane before continuing');
-      if (handle.pendingDialog && action !== 'dialog' && action !== 'identity') return { dialog: { type: handle.pendingDialog.type() }, requires: 'dialog accept or dismiss' };
+      if (handle.pendingDialog && action !== 'dialog' && action !== 'identity') return { dialog: dialogDetails(handle.pendingDialog), requires: 'dialog accept or dismiss' };
       switch (action) {
         case 'identity': return this.#identity(handle);
         case 'navigate': return await this.#withDialog(handle, async () => {
@@ -296,8 +297,9 @@ export class BrowserFleet {
           const dialog = handle.pendingDialog;
           if (!dialog) throw new Error('No pending dialog');
           if (!['accept', 'dismiss'].includes(args.action)) throw new Error('Dialog action must be accept or dismiss');
-          await dialog[args.action](); handle.pendingDialog = null;
-          return { handled: args.action };
+          const details = dialogDetails(dialog);
+          await dialog[args.action](args.action === 'accept' ? args.promptText : undefined); handle.pendingDialog = null;
+          return { handled: args.action, dialog:details };
         }
         case 'drag': {
           await page.mouse.move(Number(args.from.x), Number(args.from.y)); await page.mouse.down();
