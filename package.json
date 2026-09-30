@@ -7,7 +7,7 @@
     "#common/*": "./src/schemii/common/web/assets/*"
   },
   "scripts": {
-    "test": "node --test tests/frontend/*.test.js testing/harness/*.test.mjs",
+    "test": "node scripts/ci/node-tests.mjs",
     "test:e2e": "playwright test"
   },
   "engines": {
