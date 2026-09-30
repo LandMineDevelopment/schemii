@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { workspaceNavigationHref } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
-import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, acceptance } from './native.mjs';
+import { recordWorkerExit, recordWorkerBrowserClosure } from './leases.mjs';
+import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -188,6 +189,60 @@ test('distinct hash-bound reviewer persists acceptance, findings and transport c
   assert.match(acceptance(f.run).reasons.join(),/cleanup pending/);
 });
 
+function reviewedLegacyFixture() {
+  const f=attemptedFixture();f.run.browser='isolated';f.run.controller='codex';
+  inspectionReceipt(f.capture,f.reviewer.agent,{tool:'view_image',invocation:'independent recorded image view',note:'Expected owned saved table; actual owned saved table.'});
+  recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'accepted',note:'Independent owned persistence and visual state match.'});
+  return f;
+}
+test('reviewed legacy and native cases stay pending for owned lifecycle, crash and recording cleanup',()=>{
+  const f=reviewedLegacyFixture();f.lane.status='paused';
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  for(const status of ['termination-requested','cleanup-pending','controller-intervention-required']) {
+    f.lane.workerLifecycle={status,generation:1,reason:'lease-expired',error:'Controlled unresolved closure'};
+    assert.equal(acceptance(f.run).status,'review-pending');assert.match(acceptance(f.run).reasons.join(),/owned worker cleanup pending/);
+  }
+  delete f.lane.workerLifecycle;f.lane.workerExit={cleanup:'pending'};
+  assert.match(acceptance(f.run).reasons.join(),/worker\/recording drain pending/);
+  f.run.browser='native';assert.equal(acceptance(f.run).status,'review-pending');
+  delete f.lane.workerExit;f.lane.workerLifecycle={status:'stopped',recording:'unavailable'};
+  assert.match(acceptance(f.run).reasons.join(),/recording unavailable/);
+  f.lane.workerLifecycle={status:'stopped',workerCleanup:'pending',browserCleanup:'pending'};
+  assert.match(acceptance(f.run).reasons.join(),/worker\/recording stage pending/);assert.match(acceptance(f.run).reasons.join(),/browser closure pending/);
+  delete f.lane.workerLifecycle;f.reviewer.workerLifecycle={status:'cleanup-pending'};
+  assert.match(acceptance(f.run).reasons.join(),/lane-2: owned worker cleanup pending/);
+});
+test('acceptance waits for matching worker and browser drain; old generation cannot clear a fresh owner',()=>{
+  const f=reviewedLegacyFixture(), owner={pid:123,birthTick:'456',generation:2};f.lane.worker=owner;
+  const exit={...owner,laneId:f.lane.id,code:0,reason:'completed',cleanup:'pending'};
+  assert.match(acceptance(f.run).reasons.join(),/release unobserved/);
+  recordWorkerExit(f.lane,exit);assert.equal(acceptance(f.run).status,'review-pending');
+  recordWorkerExit(f.lane,{...exit,cleanup:'stopped'});
+  assert.equal(f.lane.workerLifecycle.status,'cleanup-pending');assert.equal(acceptance(f.run).status,'review-pending');
+  recordWorkerBrowserClosure(f.lane,owner);assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  f.lane.worker={...owner,generation:3};f.lane.generation=3;
+  const fresh={...exit,generation:3,cleanup:'pending'};recordWorkerExit(f.lane,fresh);
+  assert.equal(recordWorkerExit(f.lane,{...exit,cleanup:'stopped'}),false);
+  assert.equal(recordWorkerBrowserClosure(f.lane,owner),false);
+  assert.equal(f.lane.workerExit.generation,3);assert.equal(f.lane.workerExit.cleanup,'pending');assert.equal(acceptance(f.run).status,'review-pending');
+  assert.equal(f.lane.workerExitHistory.at(-1).applied,false);
+  recordWorkerExit(f.lane,{...fresh,cleanup:'stopped'});recordWorkerBrowserClosure(f.lane,f.lane.worker);
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  recordWorkerExit(f.lane,{...fresh,code:7,reason:'agent-failed',cleanup:'stopped'});
+  assert.equal(acceptance(f.run).status,'review-pending');assert.match(acceptance(f.run).reasons.join(),/worker execution failed.*exit 7/);
+  assert.equal(f.lane.workerExit.code,7);assert.equal(f.scenario.functional,'passed');
+  // A new recorded pool owner can crash before start() publishes its return.
+  f.lane.generation=4;f.lane.workerLaunchPending=true;
+  const startup={...fresh,pid:999,birthTick:'888',generation:4,code:7,reason:'agent-failed',cleanup:'pending'};
+  assert.equal(recordWorkerExit(f.lane,startup),true);assert.equal(f.lane.worker.pid,999);assert.equal(f.lane.workerExit.generation,4);
+  assert.equal(recordWorkerExit(f.lane,{...fresh,cleanup:'stopped'}),false);assert.equal(f.lane.workerExit.cleanup,'pending');
+  const outstanding=f.lane.workerLifecycle;f.lane.worker={...f.lane.worker,generation:5};f.lane.generation=5;
+  const replacement={...startup,generation:5,code:0,reason:'completed',cleanup:'stopped'};
+  recordWorkerExit(f.lane,replacement);recordWorkerBrowserClosure(f.lane,f.lane.worker);
+  assert.ok(f.lane.workerLifecycleHistory.includes(outstanding));assert.equal(outstanding.status,'cleanup-pending');
+  assert.match(acceptance(f.run).reasons.join(),/earlier owned worker cleanup pending/);
+});
+
 test('recovery briefs include pending scenarios only and preserve failed/completed history',()=>{
   const f=fixture();f.lane.scenarios.push({...f.scenario,id:'completed',functional:'failed',visual:'passed',note:'Initial failure preserved.'});
   assert.deepEqual(pendingScenarios(f.lane).map(s=>s.id),[f.scenario.id]);
@@ -273,4 +328,27 @@ test('latest current-attempt review governs acceptance; duplicate receipts never
   recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'confirmed-defect',note:'Later independent reproduction reveals a defect.'});
   assert.equal(acceptance(f.run).status,'review-pending');assert.equal(acceptance(f.run).reviewed,0);
   assert.match(acceptance(f.run).reasons.join(),/confirmed-defect/);
+});
+
+
+test('native recovery fences interrupted owner before browser-close prerequisite and preserves peers',async()=>{
+  const f=fixture();f.lane.native={sessionId:'owned-connection'};let token='old',persisted=0;
+  await assert.rejects(recoverNativeLane(f.run,f.lane,{
+    invalidate:()=>{token=null;},persist:async()=>{persisted++;},drain:async()=>{},
+    closeOldTransport:async lane=>{assert.equal(lane.status,'paused');assert.equal(lane.generation,3);assert.equal(token,null);throw new Error('browser_close observation required');},
+    prepare:async()=>{throw new Error('must not prepare a live context');},
+  }),/browser_close/);
+  assert.equal(f.lane.status,'paused');assert.equal(f.lane.recovery.status,'blocked');assert.equal(persisted,2);
+  assert.equal(f.reviewer.status,'claimed');assert.equal(f.reviewer.generation,2);assert.equal(f.lane.native.sessionId,'owned-connection');
+});
+
+test('closed native recovery prepares pending-only reconciliation while retaining completed results',async()=>{
+  const f=fixture();f.lane.native={sessionId:'owned-connection'};f.lane.dispatchedAt='previous-owned-claim';
+  f.lane.scenarios.push({...f.scenario,id:'completed-case',functional:'passed',visual:'passed',note:'Saved initial evidence remains retained.'});
+  let closed=false,prepared=false;
+  const result=await recoverNativeLane(f.run,f.lane,{invalidate:()=>{},persist:async()=>{},drain:async()=>{},
+    closeOldTransport:async()=>{closed=true;},prepare:async lane=>{assert.equal(closed,true);prepared=true;lane.status='ready';lane.agent=null;},
+  });
+  assert.equal(prepared,true);assert.deepEqual(result.pending,[f.scenario.id]);assert.equal(result.status,'ready');
+  assert.equal(f.lane.scenarios[1].functional,'passed');assert.equal(f.lane.recovery.reconciliationRequired,true);
 });

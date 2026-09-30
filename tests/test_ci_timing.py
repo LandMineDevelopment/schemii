@@ -417,6 +417,39 @@ def test_missing_or_mixed_source_evidence_cannot_establish_complete_run(tmp_path
     assert collect_evidence(tmp_path)["complete"] is False
 
 
+@pytest.mark.parametrize(
+    "field,current", [("source_sha", "b" * 40), ("run_id", 2), ("run_attempt", 2)]
+)
+def test_one_complete_but_stale_cohort_cannot_supply_current_attempt_evidence(
+    tmp_path, field, current
+):
+    expected = [
+        ("node", "none", 0),
+        ("python", "none", 0),
+        ("postgres", "none", 0),
+        *(
+            ("browser", project, shard)
+            for project in ("desktop-chromium", "android-chromium")
+            for shard in (1, 2)
+        ),
+    ]
+    for index, (lane, project, shard) in enumerate(expected):
+        values = records(attempt(0, "passed"))
+        for value in values:
+            value.update(lane=lane, project=project, shard=shard)
+        (tmp_path / f"lane-{index}.jsonl").write_text(
+            "\n".join(json.dumps(value) for value in values)
+        )
+    identity = {key: META[key] for key in ("source_sha", "run_id", "run_attempt")}
+    assert collect_evidence(tmp_path, identity=identity)["complete"] is True
+    assert collect_evidence(tmp_path)["complete"] is True
+    stale = collect_evidence(tmp_path, identity={**identity, field: current})
+    assert stale["complete"] is False
+    assert (
+        stale["first_attempt_passes"] == 7
+    )  # Retain observations without calling them current acceptance.
+
+
 def test_real_playwright_runner_retry_pass_failure_skip_and_safe_public_output(
     tmp_path,
 ):
