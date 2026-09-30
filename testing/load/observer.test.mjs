@@ -33,7 +33,7 @@ test('cgroup snapshot measures actual budgets/counters and aggregates RSS', asyn
   assert.equal(sample.status, 'available'); assert.equal(sample.rssBytes, 81920);
   assert.equal(sample.memoryCurrentBytes, 100000); assert.equal(sample.memoryLimitBytes, 1000000);
   assert.equal(sample.cpuUsageUsec, 100000); assert.equal(sample.quotaCpus, 2);
-  assert.deepEqual(sample.processes, [{ pid: 100, birthTick: '999', rssBytes: 81920, namespacePid: 1 }]);
+  assert.deepEqual(sample.processes, [{ pid: 100, birthTick: '999', rssBytes: 81920, namespacePid: 1, threadStatus: 'not_available', fdStatus: 'not_available' }]);
 });
 test('stale PID, replaced cgroup and missing counters fail unavailable without zeros', async t => {
   const f = await fixture(t);
@@ -64,11 +64,12 @@ test('busy cursor, wrong endpoint and stale internal observations never manufact
 });
 test('CPU percent uses cumulative usec across sample time; first/reset samples stay unknown', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now();
-  const first = combineObservation(receipt, { schemii: app }, null, { now });
+  app.cpuObservedMonotonicMs = 0;
+  const first = combineObservation(receipt, { schemii: app }, null, { now, monotonicMs: 0 });
   assert(!('appCpuPercent' in first));
-  const next = combineObservation(receipt, { schemii: { ...app, cpuUsageUsec: 2600000 } }, null, { now: now + 5000, previous: first });
+  const next = combineObservation(receipt, { schemii: { ...app, cpuUsageUsec: 2600000, cpuObservedMonotonicMs: 5000 } }, null, { now: now - 60000, monotonicMs: 8000, previous: first });
   assert.equal(next.appCpuPercent, 50);
-  assert(!('appCpuPercent' in combineObservation(receipt, { schemii: { ...app, cpuUsageUsec: 0 } }, null, { now: now + 5000, previous: first })));
+  assert(!('appCpuPercent' in combineObservation(receipt, { schemii: { ...app, cpuUsageUsec: 0, cpuObservedMonotonicMs: 5000 } }, null, { now: now + 5000, monotonicMs: 8000, previous: first })));
 });
 test('memory guard uses cgroup charge even when RSS is below the limit', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now();
@@ -93,6 +94,17 @@ test('exited members are disclosed without attributing a replacement process', a
   await writeFile(join(f.cgroupRoot, 'owned.scope/cgroup.procs'), '100\n101\n');
   const sample = await sampleContainer(f.container, f);
   assert.deepEqual(sample.exitedDuringSample, [101]); assert.equal(sample.processes.length, 1);
+});
+test('threads and FDs are counted only from readable owned process entries', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.procRoot, '100/status'), 'VmRSS:\t80 kB\nNSpid:\t100\t1\nThreads:\t7\n');
+  await mkdir(join(f.procRoot, '100/fd'));
+  await writeFile(join(f.procRoot, '100/fd/0'), ''); await writeFile(join(f.procRoot, '100/fd/3'), '');
+  const app = await sampleContainer(f.container, f), output = combineObservation(receipt, { schemii: app }, null);
+  assert.equal(output.threads, 7); assert.equal(output.fds, 2);
+  await rm(join(f.procRoot, '100/fd'), { recursive: true });
+  const unreadable = combineObservation(receipt, { schemii: await sampleContainer(f.container, f) }, null);
+  assert.equal(unreadable.threads, 7); assert(!('fds' in unreadable));
 });
 test('boot ownership and options are bounded before observing any process', async t => {
   const f = await fixture(t);

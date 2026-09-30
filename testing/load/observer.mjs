@@ -1,5 +1,5 @@
 // Read-only host observer. Container control stays in ./start.sh.
-import { readFile, appendFile, stat, lstat, unlink } from 'node:fs/promises';
+import { readFile, appendFile, stat, lstat, unlink, readdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -40,10 +40,10 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
     if (JSON.stringify(cgroup) !== JSON.stringify(container.cgroup)) throw new Error('cgroup_replaced');
     const path = resolve(cgroupRoot, `.${cgroup.path}`);
     const [memory, cpu, members, budgets] = await Promise.all([
-      readFile(`${path}/memory.current`, 'utf8'), readFile(`${path}/cpu.stat`, 'utf8'),
+      readFile(`${path}/memory.current`, 'utf8'), readFile(`${path}/cpu.stat`, 'utf8').then(text => ({ text, observedMonotonicMs: performance.now() })),
       readFile(`${path}/cgroup.procs`, 'utf8'), effectiveBudgets(path, cgroupRoot),
     ]);
-    const cpuValues = Object.fromEntries(cpu.trim().split('\n').map(line => line.trim().split(/\s+/)));
+    const cpuValues = Object.fromEntries(cpu.text.trim().split('\n').map(line => line.trim().split(/\s+/)));
     const processes = [], exited = [];
     const pids = members.trim() ? members.trim().split(/\s+/).map(counter) : [];
     if (pids.length > 2048 || !pids.includes(identity.pid)) throw new Error('invalid_cgroup_members');
@@ -55,8 +55,17 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
         const rss = status.match(/^VmRSS:\s+(\d+)\s+kB$/m);
         if (!rss) throw new Error('rss_unavailable');
         const nsPid = status.match(/^NSpid:\s+([\d\s]+)$/m)?.[1].trim().split(/\s+/).map(Number).at(-1);
+        const process = { ...owner, rssBytes: counter(rss[1]) * 1024, namespacePid: nsPid ?? null };
+        const threads = status.match(/^Threads:\s+(\d+)$/m);
+        if (threads) process.threads = counter(threads[1]);
+        else process.threadStatus = 'not_available';
+        try {
+          const files = await readdir(`${procRoot}/${pid}/fd`);
+          if (files.some(file => !/^\d+$/.test(file))) throw new Error('invalid_fd_counter');
+          process.fds = files.length;
+        } catch (error) { process.fdStatus = failure(error) === 'permission_denied' ? 'permission_denied' : 'not_available'; }
         if ((await processIdentity(pid, procRoot)).birthTick !== owner.birthTick) throw new Error('process_replaced');
-        processes.push({ ...owner, rssBytes: counter(rss[1]) * 1024, namespacePid: nsPid ?? null });
+        processes.push(process);
       } catch (error) {
         if (failure(error) !== 'process_exited') throw error;
         exited.push(pid);
@@ -64,7 +73,8 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
     }
     if ((await processIdentity(identity.pid, procRoot)).birthTick !== identity.birthTick) throw new Error('process_replaced');
     return { status: 'available', memoryCurrentBytes: counter(memory), ...budgets,
-      cpuUsageUsec: counter(cpuValues.usage_usec || ''), throttledUsec: counter(cpuValues.throttled_usec || ''),
+      cpuUsageUsec: counter(cpuValues.usage_usec || ''), cpuObservedMonotonicMs: cpu.observedMonotonicMs,
+      throttledUsec: counter(cpuValues.throttled_usec || ''),
       rssBytes: processes.reduce((total, process) => total + process.rssBytes, 0), processes, exitedDuringSample: exited };
   } catch (error) {
     let reason = failure(error);
@@ -77,9 +87,9 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
     return { status: 'unavailable', reason };
   }
 }
-export function combineObservation(receipt, containers, internal, { previous = null, now = Date.now() } = {}) {
+export function combineObservation(receipt, containers, internal, { previous = null, now = Date.now(), monotonicMs = performance.now() } = {}) {
   const app = containers.schemii;
-  const output = { at: new Date(now).toISOString(), version: 1, status: app?.status === 'available' ? 'available' : 'unavailable',
+  const output = { at: new Date(now).toISOString(), monotonicMs, version: 1, status: app?.status === 'available' ? 'available' : 'unavailable',
     qualification: { scope: 'deployment_aggregate', method: 'launcher_PID_birth_cgroup_inode_and_authenticated_admin_snapshot',
       generatorPlacement: receipt.topology.generatorPlacement, generatorHeadroomVerified: false,
       capacityEligible: false, runOwnedBackends: 'unavailable', activeJobs: 'unavailable',
@@ -91,11 +101,14 @@ export function combineObservation(receipt, containers, internal, { previous = n
     return output; // Existing publicObservation rejects this sample and stops arrivals.
   }
   output.appRssBytes = app.rssBytes;
+  for (const metric of ['threads', 'fds'])
+    if (app.processes.every(process => finite(process[metric]))) output[metric] = app.processes.reduce((total, process) => total + process[metric], 0);
   if (finite(app.memoryLimitBytes) && app.memoryLimitBytes > 0) output.appMemoryLimitBytes = app.memoryLimitBytes;
   const before = previous?.containers?.schemii;
-  const elapsed = now - Date.parse(previous?.at);
+  const elapsed = app.cpuObservedMonotonicMs - before?.cpuObservedMonotonicMs;
   if (before?.status === 'available' && elapsed > 0 && app.cpuUsageUsec >= before.cpuUsageUsec)
     output.appCpuPercent = (app.cpuUsageUsec - before.cpuUsageUsec) / (elapsed * 1000) * 100;
+  output.qualification.cpuPercentBasis = 'one_core_100_percent_monotonic_elapsed';
   if (!internal || internal.version !== 1 || internal.scope !== 'process_aggregate' ||
       !Number.isFinite(Date.parse(internal.at)) || Math.abs(now - Date.parse(internal.at)) > 15000 ||
       !app.processes.some(process => process.namespacePid === internal.processPid)) {
@@ -163,7 +176,7 @@ export async function observe(options, { signal, clientFactory = args => new HTT
   await writePrivateJSON(options.output, { at: new Date().toISOString(), status: 'initializing' }, { exclusive: true });
   const client = options.credentialPath ? clientFactory({ origin: receipt.origin, timeoutMs: 4000, maxBytes: 65536 }) : null;
   let previous = null, sampleNumber = 0;
-  const started = Date.now(), log = `${options.output}.jsonl`;
+  const started = performance.now(), log = `${options.output}.jsonl`;
   try {
     if (client) {
       const account = (await credentials(options.credentialPath)).get(options.account);
@@ -172,7 +185,7 @@ export async function observe(options, { signal, clientFactory = args => new HTT
       await writePrivateJSON(`${options.output}.session-private.json`, { version: 1, owner,
         origin: receipt.origin, username: account.username, userId: identity.user.id, cookie: client.cookie }, { exclusive: true });
     }
-    while (!signal?.aborted && Date.now() - started < options.seconds * 1000) {
+    while (!signal?.aborted && performance.now() - started < options.seconds * 1000) {
       let internal;
       if (client) {
         try { internal = await client.json('GET', '/api/v1/admin/runtime-observation'); }
@@ -187,7 +200,7 @@ export async function observe(options, { signal, clientFactory = args => new HTT
       previous = current;
       if (current.status !== 'available') throw new Error('observed_app_exited_or_unavailable');
       const nextSample = started + (++sampleNumber * 5000);
-      await delay(Math.max(1, Math.min(nextSample - Date.now(), options.seconds * 1000 - (Date.now() - started))), undefined, { signal });
+      await delay(Math.max(1, Math.min(nextSample - performance.now(), options.seconds * 1000 - (performance.now() - started))), undefined, { signal });
     }
   } catch (error) {
     if (error.name !== 'AbortError') {

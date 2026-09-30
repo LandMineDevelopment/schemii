@@ -145,8 +145,12 @@ outside the measured arrival totals and add disclosed background traffic.
 The collector checks boot identity, root PID/birth, cgroup device/inode and live
 process membership on each sample. It records every configured stack service's
 cgroup memory charge, the strictest ancestor memory/CPU quota, cumulative CPU and
-throttling usec, process identities and RSS; vanished members are disclosed. RSS
-is the sum of process RSS and can count shared pages more than once. The existing
+throttling usec, process identities/RSS/threads and readable FD counts; vanished
+members and unavailable FD readings are disclosed. RSS
+is the sum of process RSS and can count shared pages more than once.
+CPU percentage uses monotonic elapsed time with 100% representing one CPU core;
+it is not normalized to the container's quota. Sampling duration also uses the
+monotonic clock. The existing
 RSS guard is supplemented by a conservative 85% cgroup-charge guard; a rejected
 sample stops arrivals through the existing observer-unavailable gate. Shared
 ancestor budgets compete with peer cgroups and are not dedicated capacity.
