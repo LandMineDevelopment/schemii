@@ -1,184 +1,95 @@
 # Keyboard exposure and Save diagnostics
 
-This is the source review and focused acceptance plan for
-[#131](https://github.com/LandMineDevelopment/schemii/issues/131), part of
-[#123](https://github.com/LandMineDevelopment/schemii/issues/123). The historical
-desktop first attempt toggled `Expose people.field_35` with Space but left Save
-disabled; its retry passed. The cause remains unresolved. Passing source checks,
-or a future passing repetition, do not establish the historical cause.
+Work for [#131](https://github.com/LandMineDevelopment/schemii/issues/131), part
+of [#123](https://github.com/LandMineDevelopment/schemii/issues/123). The historical
+retry-dependent Save-disabled cause remains unproven. The changes fix a confirmed
+Save admission mismatch and strengthen diagnostics without claiming that cause.
 
-The incoming diagnostic head was `2295344` on main `402ef8f`. This phase used the
-linked `audit/keyboard-save` worktree. The diagnostic work was followed by an
-explicitly assigned minimal Save-readiness fix in `prototype.js`, with main
-`aacfdfc` merged to inherit PR #148's artifact policy. This phase did not start
-the application, use browser tools to visit it,
-authenticate, create a fixture or execute browser tests.
+## Product boundary
 
-## Source findings and diagnostic boundaries
+The exposure checkbox emits a trusted change event to `setFieldExposure`; the
+canvas redraw restores focus, and `changedParts` determines dirty state. Tests
+retain the real Space press and verify focus, checked state, trusted keyboard/
+input/change delivery and synchronous model dirty state before Save readiness.
 
-The checkbox's `change` listener in
-[canvas.js](../src/schemii/schemoo/web/canvas.js) calls `setFieldExposure`, then
-the `changed` callback. [model-state.js](../src/schemii/schemoo/web/model-state.js)
-mutates the exposure allowlist and separates definition, layout and Explore
-changes. [prototype.js](../src/schemii/schemoo/web/prototype.js) redraws the canvas,
-then computes dirty state with `changedParts` and updates Save. Canvas redraw
-captures the focused node/column before replacing cards and restores focus to
-the replacement input. Model loading records generated layout as its clean
-baseline. No defect in this path has yet been reproduced.
+Previously Save could appear enabled while the preview library was pending,
+although its handler rejected the action. `prototype.js` now computes button
+readiness from the same saving/busy/conflicted/preview-pending condition and
+refreshes it on pending/busy transitions. A held real preview response verifies
+that admission remains disabled until readiness, followed by one actual save.
+Clean-on-open behavior and the existing draft policy remain covered.
 
-The spec keeps the original tall-field, scroll and relationship-anchor case and
-its real Space press. Intermediate checks distinguish these stages:
+## Faithful test oracles
 
-| Stage | Faithful observation |
-| --- | --- |
-| Clean opening | Save disabled and exact saved revision status; exposure initially checked. |
-| Keyboard delivery | Actual checkbox focus before Space; one trusted keydown, keyup, input and change; Space key and unchecked input/change values. |
-| Redraw | The intended field remains unchecked and focused; event receipts record target connection, active field and workbench inert state. |
-| Model mutation | `Unsaved changes` appears before checking that Save becomes enabled. |
-| Real save | One UI click produces a successful semantic PUT and advances its revision exactly once. |
-| Persistence | A separate real API GET observes the absent exposure; page reload reads an unchecked field and a clean saved state. |
-| Ownership cleanup | Delete only this attempt's new model with its current expected revision; a subsequent GET must return 404. |
+The tall-field case reads the current connected list, row and relationship
+anchor together. It compares the anchor to its row or visible clipping boundary;
+an already-bottom scroll need not change its position. Before a native mobile
+gesture, the test checks the visible list/canvas/viewport intersection and actual
+hit ownership. Desktop wheel and Android CDP touch remain real input. Persistent
+missing-anchor controls exercise the same eventual alignment assertion through
+its existing timeout. No retries, sleeps or longer timeouts hide failures.
 
-The original fixture still mocks immutable model GET/PUT, catalog, validation and
-preview-list responses. It proves keyboard, geometry and dirty-state behavior;
-it does not prove persistence. A separate case creates an owned real model using
-the existing Organization browser fixture, edits `certification_dim.id`, saves,
-reads the API, reloads and deletes that exact model. It does not mutate the
-source database, retained connection, account or starter models. Creation and
-cleanup are pending runtime verification.
+The controlled missed-change case captures the trusted unchecked event and fails
+specifically at the dirty-state owner. A later healthy redraw may re-check the
+unchanged model's field; that readback cannot invalidate the captured event.
+Controlled clipping, redraw and missing-input cases preserve distinct failures.
 
-Three controlled cases reuse the same keyboard assertion. Suppressing delivery
-of the trusted change event to the model handler must fail specifically at the
-dirty-state assertion, while the DOM checkbox is unchecked and Save remains
-disabled. A held initial catalog response uses an explicit promise gate, not a
-sleep; the editor must remain inert until the gate releases, then accept the
-trusted toggle. A held real preview-list response must keep the dirty model's
-Save button disabled, then release it and permit one real save, independent API
-read, reload and owned-model cleanup. These controls are test perturbations, not claimed production
-causes. They have been discovered but not executed.
+The mocked tall-field case proves event/geometry/dirty-state behavior. A separate
+owned real API model proves one semantic PUT, revision advancement, independent
+GET, reload persistence and clean saved state. No retained model, source database,
+account, connection or grant is modified. An exact-ID ledger in `afterEach`
+uses a fresh authenticated request context even after a body timeout, reads the
+current revision, requires DELETE 204 and GET 404, and disposes that context.
+The timeout-hook controls retain their primary failures and unsafe identities
+never reach deletion.
 
-An adjacent source mismatch was fixed at the Save owner: previously `save()` did
-not disable Save while the preview library was pending, although `saveModel()`
-returned without a write in that state. Model load starts that preview-list
-request after making the workbench interactive; its pending callback refreshed
-model-library actions rather than Save state. The button and handler now share
-the saving/busy/conflicted/preview-pending condition. Preview pending changes and
-query busy transitions refresh Save, preserving the existing dirty-state display
-and clean-model behavior. Initialization is safe because preview-library creation
-does not invoke its pending callback; rendering does not change pending state,
-so refreshing Save from that callback introduces no render recursion. The new
-controlled delayed-preview case detects the original enabled-but-rejected action
-and requires recovery after readiness, but remains unrun. This fixes the
-source-confirmed readiness inconsistency; it does not establish the historical
-disabled-Save cause.
+## Observed verification
 
-## Checks actually run
+The frozen assembled source was `6a7600a596d07c3a0cefd232e22a0d8eb6edc8ed`;
+served `canvas.js` and `prototype.js` byte-matched that source. This is automated
+browser regression evidence, not manual/native application acceptance.
 
-On Node 25.2.1, `node --check` passed for both edited JavaScript files. Exact Playwright list
-discovery found five selected cases on each of `desktop-chromium` and
-`android-chromium`, ten cases total. The repetition command's list-only mode
-found exactly 80 cases: twenty original-fixture and twenty real-persistence
-attempts per profile. List mode did not run global setup or launch a browser.
-The existing focused `schemoo-model-state.test.js` passed all eleven cases in
-56.6 ms in the final focused run, covering exposure mutation, definition/layout separation and clean
-generated layout. These checks do not prove trusted browser event dispatch,
-actual UI readiness, model persistence or automatic runtime cleanup.
+| Verification | Result | Boundary |
+| --- | --- | --- |
+| Original 20 mocked + 20 real repetitions per profile | Desktop 38/40 in 88.729s; Android 40/40 | Both desktop failures occurred at the old anchor-position assertion before keyboard input; original first attempts remain preserved |
+| Original delayed/missed-change controls | 4/6 passed; 2 missed-change readback failures | Failures and images retained; neither was the historical disabled-Save failure |
+| Earlier affected cases and real-persistence selection | 10/10 passed in 13.422s | Includes real Save/API/reload and delayed-preview readiness; four additional owned models |
+| Final desktop/Android geometry selection | 2/2 passed in 3.506s | Current connected geometry and visible native gesture ownership |
+| Final affected cases plus faithful controls | 12/12 passed in 26.911s | Includes persistent missing-anchor rejection, clipping, redraw and missing-input detection |
+| Final missed-change reload-readiness selection | 2/2 passed in 2.313s | Captured missing model change and unchanged checked, clean state after reload |
 
-Independent review reproduced a separate cleanup defect at `ef4ef75` using the
-actual Playwright 1.62.1 timeout lifecycle. When the expected preview request
-never arrived, the helper remained inside an unresolved custom promise: its
-body-local `finally` did not run, leaving the created synthetic model undeleted
-and diagnostics unattached. Cleanup and owned-attempt diagnostics now run in
-`afterEach`, with an exact returned-ID ledger and a fresh request context using
-the project's private authenticated storage state and origin. The hook reads and
-validates the current identity/revision, requires DELETE 204 and a subsequent
-GET 404, then disposes its request context. Each cleanup request is bounded to
-five seconds; test timeouts and retries are unchanged. Failed IDs and cleanup
-errors remain in the private receipt. Hook failures supplement the primary test
-failure rather than replacing it. Both preview gates release at teardown, and a
-resumed custom wait stops before further UI actions. Timeout diagnostics use the
-already collected observations without waiting on the page again.
+All final focused attempts used one worker, zero retries and zero skips. Seven
+fresh selected images were inspected independently. The additional Android
+scrollTop-zero failure encountered while strengthening the guard remains in its
+original receipt and trace; clipping/gesture readiness was then fixed at the test
+boundary. Initial immediate missing-anchor observations were insufficient;
+final controls prove persistent rejection with the actual polling oracle.
 
-The focused lifecycle reproduction copied the exact final hook, owned-save
-helper and attachment function into a private standalone spec and used synthetic
-HTTP/page boundaries, without application, browser or network actions. All seven
-cases intentionally retained their real 200 ms Playwright timeout. The successful
-cleanup case observed exact-ID GET, DELETE with the current revision 7 (rather
-than the opening revision 1), GET 404, context disposal and an attached receipt.
-Six controls detected rejected deletion, failed absence verification, mismatched
-identity, invalid revision, disposal failure and context-creation failure. Every
-control retained the primary timeout, attached diagnostics and separately
-reported the cleanup error; unsafe identities/revisions never reached deletion.
-The receipt verifier passed all seven cases; the runner correctly exited 1 in
-3.69 seconds because all seven bodies timed out. This establishes the timeout
-hook boundary, not live authenticated API cleanup or application acceptance.
-The original independent counterexample remains unchanged. Selected private
-evidence is retained under
-`/tmp/schemii-audit-20260929/keyboard-timeout-cleanup`; independent rerun is pending.
+All 42 original owned models and four additional models were deleted using their
+current revisions and independently verified absent; request contexts were
+disposed. Seven synthetic body-timeout controls separately proved exact-ID cleanup
+and rejection/disposal error reporting while retaining intentional body failures.
+Focused source/state, syntax and diff checks passed. Independent review approved
+final spec `29b841364ed7ecc9ffa751286174180c03f94c31` and inspected results,
+images, diagnostics and cleanup receipts.
 
-## Pending acceptance and evidence
+## Remaining limits and reproduction
 
-| Profile | Original keyboard case | Real API persistence | Missed-change control | Delayed-catalog control | Delayed-preview control |
-| --- | --- | --- | --- | --- | --- |
-| desktop-chromium | 0 of 20 run | 0 of 20 run | Not run | Not run | Not run |
-| android-chromium | 0 of 20 run | 0 of 20 run | Not run | Not run | Not run |
+The final oracle changes have focused verification, not a new 20-repetition
+cohort. The original 80 attempts and six controls are preserved rather than
+rewritten as final-code success. Ordinary required CI still supplies integrated
+acceptance. Historical Save-disabled causation and long-run reliability remain
+open; no full-suite speed improvement follows from these observations.
 
-The coordinator first assigns the deployment window, private evidence directory
-and authenticated fixture ownership. Respect all active `./test.sh` leases. The
-application is built/refreshed only by `./start.sh`; verify both
-`https://localhost:8001` and `https://omarchy.taile4f57f.ts.net` before recording
-that the source is deployed. Use an existing explicitly supplied mode-0600
-administrator test credential file and verify the required Organization fixture
-and grants. Do not bootstrap, reset data, create accounts or copy credentials
-merely to make these commands work.
+For a future bounded repetition, select the two original/real-save case names in
+`tests/e2e/schemoo-model-editor-audit.spec.js` with `--repeat-each=20`, one profile
+at a time, `--workers=1 --retries=0`. Use only an assigned deployed source and
+private authenticated fixture state, respect deployment leases, and start only
+through `./start.sh`. Default bootstrap is not authorization to replace a retained
+account or grants. Preserve every first attempt, inspect uncertain persisted state
+before replaying writes, and verify exact fixture cleanup.
 
-After that preparation, execute the following focused commands. Set
-`SCHEMII_KEYBOARD_EVIDENCE` to the task-owned private evidence directory and
-`SCHEMII_E2E_CREDENTIALS_FILE` to the assigned private credential file without
-printing its contents. Create evidence files with `umask 077`. Run profiles
-sequentially with one worker; the CLI retry override applies even under CI.
-
-```bash
-PLAYWRIGHT_JSON_OUTPUT_NAME="$SCHEMII_KEYBOARD_EVIDENCE/desktop-results.json" \
-  npm run test:e2e -- tests/e2e/schemoo-model-editor-audit.spec.js \
-  --project=desktop-chromium --workers=1 --retries=0 --repeat-each=20 \
-  --grep '(missing saved positions stay clean; tall fields scroll with visible relationship anchors|keyboard Space exposure saves through the owned API model and stays changed after reload)$' \
-  --reporter=line,json --output="$SCHEMII_KEYBOARD_EVIDENCE/desktop" \
-  >"$SCHEMII_KEYBOARD_EVIDENCE/desktop.log" 2>&1
-
-PLAYWRIGHT_JSON_OUTPUT_NAME="$SCHEMII_KEYBOARD_EVIDENCE/android-results.json" \
-  npm run test:e2e -- tests/e2e/schemoo-model-editor-audit.spec.js \
-  --project=android-chromium --workers=1 --retries=0 --repeat-each=20 \
-  --grep '(missing saved positions stay clean; tall fields scroll with visible relationship anchors|keyboard Space exposure saves through the owned API model and stays changed after reload)$' \
-  --reporter=line,json --output="$SCHEMII_KEYBOARD_EVIDENCE/android" \
-  >"$SCHEMII_KEYBOARD_EVIDENCE/android.log" 2>&1
-
-PLAYWRIGHT_JSON_OUTPUT_NAME="$SCHEMII_KEYBOARD_EVIDENCE/control-results.json" \
-  npm run test:e2e -- tests/e2e/schemoo-model-editor-audit.spec.js \
-  --workers=1 --retries=0 \
-  --grep 'controlled (missed change|delayed catalog|delayed previews)' \
-  --reporter=line,json --output="$SCHEMII_KEYBOARD_EVIDENCE/controls" \
-  >"$SCHEMII_KEYBOARD_EVIDENCE/controls.log" 2>&1
-```
-
-Record the source and deployed source SHA, profile, repeat index, retry index
-(always zero), first-attempt outcome and failing intermediate stage for every
-case. Verify expected counts rather than treating a process exit as acceptance.
-Keep all failures and interruptions; inspect persisted state before replaying an
-uncertain write. Do not use `check()`, synthetic success events, sleeps, increased
-timeouts, retries or extra full-suite samples to get green results. The forty
-first-attempt repetitions per profile above cover two distinct cases; they are
-focused reliability acceptance, not the ordinary-CI sample collection in #125.
-
-Diagnostics attach only task-owned fixture identity, event metadata and bounded
-UI state. Attachments, traces, screenshots, authenticated storage state and raw
-logs remain private. Public issue/PR reports receive reviewed counts, stage
-categories, cleanup outcomes and selected credential-safe evidence only, following
-[#125](https://github.com/LandMineDevelopment/schemii/issues/125). Main `aacfdfc`
-has been merged; its workflow uploads only validated timing JSONL and summaries,
-with no whole Playwright result/report upload. That inherited policy is unchanged.
-The private local recipe above does not authorize raw uploads. Confirm deletion
-receipts for every created model; preserve the exact private fixture ID when
-cleanup fails so the coordinator can recover only owned resources. Independent
-review must distinguish these browser results from native manual UI acceptance
-and verify the diagnostics catch the planted failure before #131 is closed.
+Raw traces, screenshots, diagnostics and storage state stay private. Public
+reports use reviewed counts, stage categories and cleanup outcomes; existing CI
+uploads only validated timing JSONL/summaries. A native `browser_close` closes the
+context; worker completion does not establish MCP transport shutdown.
