@@ -1,10 +1,74 @@
-import { expect, test } from "@playwright/test";
+import { expect, request as requestFactory, test } from "@playwright/test";
 import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 import { createOrganizationModel } from "./helpers/schemoo-model.js";
 
 const modelId = "model_editor_audit_fixture";
 const keyboardFieldLabel = "Expose people.field_35";
+const cleanupIds = new Set();
+let ownedKeyboardAttempt;
+
+test.afterEach(async ({}, testInfo) => {
+  const attempt = ownedKeyboardAttempt;
+  ownedKeyboardAttempt = undefined;
+  if (!attempt) return;
+  attempt.finished = true;
+  attempt.releasePreviews();
+  const errors = [];
+  let cleanup;
+  attempt.observations.cleanup = { ownedModelDeleted: false, requestContextDisposed: false };
+  try {
+    if (cleanupIds.size) {
+      // The body's request fixture may already be disposed after a timeout.
+      // Keep the same private authentication in an independently owned context.
+      const baseURL = testInfo.project.use.baseURL;
+      cleanup = await requestFactory.newContext({
+        baseURL, ignoreHTTPSErrors: true, storageState: testInfo.project.use.storageState,
+        extraHTTPHeaders: { Origin: new URL(baseURL).origin }, timeout: 5_000,
+      });
+      for (const ownedModelId of cleanupIds) {
+        try {
+          const path = `/api/v1/schemoo/models/${ownedModelId}`;
+          const response = await cleanup.get(path);
+          expect(response.status(), "cleanup reads the exact owned model revision").toBe(200);
+          const current = await response.json();
+          expect(current.id, "cleanup never adopts another model identity").toBe(ownedModelId);
+          expect(Number.isSafeInteger(current.revision) && current.revision >= 1, "cleanup requires a valid current revision").toBe(true);
+          const deleted = await cleanup.delete(`${path}?expected_revision=${current.revision}`);
+          expect(deleted.status(), "cleanup deletes only the exact model created by this attempt").toBe(204);
+          expect((await cleanup.get(path)).status(), "owned model is absent after cleanup").toBe(404);
+          cleanupIds.delete(ownedModelId);
+          attempt.observations.cleanup.ownedModelDeleted = true;
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+    }
+  } catch (error) {
+    errors.push(error);
+  } finally {
+    if (cleanup) {
+      try {
+        await cleanup.dispose();
+        attempt.observations.cleanup.requestContextDisposed = true;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    attempt.observations.cleanup.pendingOwnedModelIds = [...cleanupIds];
+    attempt.observations.cleanup.errors = errors.map(error => ({ name: error.name, message: error.message }));
+    attempt.observations.outcome = { status: testInfo.status, primaryErrors: testInfo.errors.map(error => error.message) };
+    try {
+      await attachKeyboardDiagnostics(attempt.page, testInfo, attempt.observations,
+        "owned real API model; Save, independent GET, reload and revision-checked delete", attempt.label);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  // Playwright retains the body's primary failure alongside this hook failure.
+  if (errors.length) throw new AggregateError(errors,
+    `Owned keyboard model cleanup or diagnostics failed: ${errors.map(error => error.message).join("; ")}`);
+});
 
 async function recordKeyboardEvents(page, { label = keyboardFieldLabel, suppressChange = false } = {}) {
   await page.addInitScript(({ label, suppressChange }) => {
@@ -68,7 +132,7 @@ async function assertKeyboardToggle(page, field, observations, label = keyboardF
 }
 
 async function attachKeyboardDiagnostics(page, testInfo, observations, transport, label = keyboardFieldLabel) {
-  observations.final = page.isClosed() ? { pageClosed: true }
+  observations.final = testInfo.status === "timedOut" ? { testTimedOut: true } : page.isClosed() ? { pageClosed: true }
     : await keyboardSnapshot(page, label).catch(() => ({ snapshotUnavailable: true }));
   // These attachments stay private. Public reports retain only reviewed outcome
   // counts/stages; no cookies, headers, account fields, console or page dumps.
@@ -201,10 +265,15 @@ async function verifyOwnedKeyboardSave(page, request, testInfo, { delayPreviews 
   let releasePreviews = () => {}, markRequested;
   const previewReady = delayPreviews ? new Promise(resolve => { releasePreviews = resolve; }) : Promise.resolve();
   const previewRequested = delayPreviews ? new Promise(resolve => { markRequested = resolve; }) : Promise.resolve();
+  const attempt = { page, observations, label, finished: false,
+    releasePreviews: () => { releasePreviews(); markRequested?.(); } };
+  ownedKeyboardAttempt = attempt;
   await recordKeyboardEvents(page, { label });
   const exposed = model => model.definition.exposedFields.some(field => field.table === "certification_dim" && field.column === "id");
   try {
     ownedModelId = await createOrganizationModel(request, "Keyboard save audit");
+    expect(typeof ownedModelId === "string" && ownedModelId.length > 0, "fixture creation returns an exact owned model ID").toBe(true);
+    cleanupIds.add(ownedModelId);
     observations.fixture = { ownedModelId };
     const initialResponse = await request.get(`/api/v1/schemoo/models/${ownedModelId}`);
     expect(initialResponse.status(), "read only the newly created owned model").toBe(200);
@@ -215,6 +284,7 @@ async function verifyOwnedKeyboardSave(page, request, testInfo, { delayPreviews 
     });
     await page.goto(`/schemoo?model=${ownedModelId}`);
     await previewRequested;
+    if (attempt.finished) return; // A timeout hook released the custom promise.
     const field = page.getByRole("checkbox", { name: label, exact: true });
     await expect(page.locator("#save-model"), "the real owned model opens clean").toBeDisabled();
     await expect(page.locator("#draft-status")).toHaveText(`Saved · revision ${initialModel.revision} · read-only preview`);
@@ -250,19 +320,6 @@ async function verifyOwnedKeyboardSave(page, request, testInfo, { delayPreviews 
     observations.reloaded = await keyboardSnapshot(page, label);
   } finally {
     releasePreviews();
-    try {
-      if (ownedModelId) {
-        const currentResponse = await request.get(`/api/v1/schemoo/models/${ownedModelId}`);
-        expect(currentResponse.status(), "cleanup reads the exact owned model revision").toBe(200);
-        const current = await currentResponse.json();
-        const deleted = await request.delete(`/api/v1/schemoo/models/${ownedModelId}?expected_revision=${current.revision}`);
-        expect(deleted.ok(), "cleanup deletes only the exact model created by this attempt").toBe(true);
-        expect((await request.get(`/api/v1/schemoo/models/${ownedModelId}`)).status(), "owned model is absent after cleanup").toBe(404);
-        observations.cleanup = { ownedModelDeleted: true };
-      }
-    } finally {
-      await attachKeyboardDiagnostics(page, testInfo, observations, "owned real API model; Save, independent GET, reload and revision-checked delete", label);
-    }
   }
 }
 

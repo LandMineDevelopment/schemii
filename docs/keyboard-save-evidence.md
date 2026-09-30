@@ -80,9 +80,41 @@ discovery found five selected cases on each of `desktop-chromium` and
 found exactly 80 cases: twenty original-fixture and twenty real-persistence
 attempts per profile. List mode did not run global setup or launch a browser.
 The existing focused `schemoo-model-state.test.js` passed all eleven cases in
-72.5 ms in the final focused run, covering exposure mutation, definition/layout separation and clean
+56.6 ms in the final focused run, covering exposure mutation, definition/layout separation and clean
 generated layout. These checks do not prove trusted browser event dispatch,
 actual UI readiness, model persistence or automatic runtime cleanup.
+
+Independent review reproduced a separate cleanup defect at `ef4ef75` using the
+actual Playwright 1.62.1 timeout lifecycle. When the expected preview request
+never arrived, the helper remained inside an unresolved custom promise: its
+body-local `finally` did not run, leaving the created synthetic model undeleted
+and diagnostics unattached. Cleanup and owned-attempt diagnostics now run in
+`afterEach`, with an exact returned-ID ledger and a fresh request context using
+the project's private authenticated storage state and origin. The hook reads and
+validates the current identity/revision, requires DELETE 204 and a subsequent
+GET 404, then disposes its request context. Each cleanup request is bounded to
+five seconds; test timeouts and retries are unchanged. Failed IDs and cleanup
+errors remain in the private receipt. Hook failures supplement the primary test
+failure rather than replacing it. Both preview gates release at teardown, and a
+resumed custom wait stops before further UI actions. Timeout diagnostics use the
+already collected observations without waiting on the page again.
+
+The focused lifecycle reproduction copied the exact final hook, owned-save
+helper and attachment function into a private standalone spec and used synthetic
+HTTP/page boundaries, without application, browser or network actions. All seven
+cases intentionally retained their real 200 ms Playwright timeout. The successful
+cleanup case observed exact-ID GET, DELETE with the current revision 7 (rather
+than the opening revision 1), GET 404, context disposal and an attached receipt.
+Six controls detected rejected deletion, failed absence verification, mismatched
+identity, invalid revision, disposal failure and context-creation failure. Every
+control retained the primary timeout, attached diagnostics and separately
+reported the cleanup error; unsafe identities/revisions never reached deletion.
+The receipt verifier passed all seven cases; the runner correctly exited 1 in
+3.69 seconds because all seven bodies timed out. This establishes the timeout
+hook boundary, not live authenticated API cleanup or application acceptance.
+The original independent counterexample remains unchanged. Selected private
+evidence is retained under
+`/tmp/schemii-audit-20260929/keyboard-timeout-cleanup`; independent rerun is pending.
 
 ## Pending acceptance and evidence
 
