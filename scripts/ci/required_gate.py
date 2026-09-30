@@ -9,10 +9,22 @@ from pathlib import Path
 
 if __package__:
     from .classify_changes import load_classification
-    from .workflow_timing import JOB_NAMES, api
+    from .workflow_timing import (
+        JOB_NAMES,
+        api,
+        current_identity,
+        current_jobs,
+        matches_identity,
+    )
 else:
     from classify_changes import load_classification
-    from workflow_timing import JOB_NAMES, api
+    from workflow_timing import (
+        JOB_NAMES,
+        api,
+        current_identity,
+        current_jobs,
+        matches_identity,
+    )
 
 
 SOURCE_NEEDS = {"static-quality", "test", "postgres-integration", "browser-smoke"}
@@ -20,7 +32,7 @@ CONTROL_NEEDS = {"classify", "report-validation", "timing-rollup"}
 
 
 def evaluate(
-    classification: dict, needs: dict, jobs: list[dict], timing: dict
+    classification: dict, needs: dict, jobs: list[dict], timing: dict, identity: dict
 ) -> tuple[bool, str]:
     if not classification.get("valid") or classification.get("lane") not in {
         "source",
@@ -31,6 +43,11 @@ def evaluate(
         return False, "missing-required-job"
     if any(needs[name].get("result") != "success" for name in CONTROL_NEEDS):
         return False, "classification-docs-or-timing-failed"
+    if (
+        not matches_identity(timing, identity)
+        or classification.get("head") != identity["head_sha"]
+    ):
+        return False, "stale-or-mismatched-workflow-evidence"
     if (
         timing.get("complete") is not True
         or timing.get("lane") != classification["lane"]
@@ -54,6 +71,8 @@ def evaluate(
         for job in observed
     ):
         return False, "source-matrix-leg-not-successful"
+    if not current_jobs(observed, identity):
+        return False, "stale-or-mismatched-source-matrix-leg"
     return True, "all-source-layers-passed"
 
 
@@ -63,6 +82,7 @@ def main() -> int:
     parser.add_argument("--timing", type=Path, required=True)
     args = parser.parse_args()
     try:
+        identity = current_identity(os.environ)
         classification = load_classification(args.classification)
         timing = json.loads(args.timing.read_text())
         needs = json.loads(os.environ["CI_NEEDS"])
@@ -86,7 +106,7 @@ def main() -> int:
             if response.get("total_count", 101) > 100:
                 raise ValueError("Truncated job evidence")
             jobs = response["jobs"]
-        passed, reason = evaluate(classification, needs, jobs, timing)
+        passed, reason = evaluate(classification, needs, jobs, timing, identity)
     except Exception:
         # Do not print API exception bodies, request headers or provider content.
         passed, reason = False, "required-evidence-unavailable"

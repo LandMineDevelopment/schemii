@@ -10,7 +10,7 @@ when every changed file meets the policy below; unknowns use full source checks.
 The allowlist is date-named Markdown directly inside `docs/audits/`, with the form
 `YYYY-MM-DD-lowercase-report-name.md`, plus `docs/browser-shard-balance.md`.
 Files must be ordinary, nonexecutable Git blobs. New reports and modifications
-qualify. Renames, copies, deletions, symlinks and executable-mode changes always
+qualify. Renames, deletions, symlinks and executable-mode changes always
 select source validation, including a source-to-report rename.
 
 A modified root `README.md` qualifies only when its final `## Reports` section
@@ -56,6 +56,14 @@ duplicate legs, failure, cancellation, timeout, skip or unfinished status. It
 also requires the timing job and a complete timing receipt. No top-level path
 filter or secret-enabled `pull_request_target` is used.
 
+The receipt binds the current source SHA, PR head SHA, run ID and attempt.
+Source jobs and every test lane must belong to that same current attempt;
+even a complete passing cohort from an earlier attempt is rejected. A PR's
+head SHA is distinct from its checked-out prospective merge SHA. Both identities
+are retained, so that distinction cannot either reject a valid PR or accept a
+different head. Re-run all jobs to obtain a new complete attempt; partial reruns
+cannot borrow previous-attempt receipts.
+
 Workflow timing labels source jobs/tests explicitly inapplicable on report runs;
 their passing-test denominator is zero, not a fabricated pass rate. Report
 validation publishes its own execution milliseconds/status. Missing/cancelled
@@ -80,7 +88,7 @@ incomplete timing. Production classifier/validator commands are also executed
 with Python's `-S` option to demonstrate that application packages are unnecessary:
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_ci_change_classification.py tests/test_ci_docs_validation.py tests/test_ci_timing.py
+.venv/bin/python -m pytest -q tests/test_ci_change_classification.py tests/test_ci_docs_validation.py tests/test_ci_timing.py tests/test_test_deployment.py
 ```
 
 The cited pre-change report run took **10m47s** overall and **37m57s** summed job
@@ -90,13 +98,18 @@ Local cheap-check timings do not establish hosted runner savings or queue time.
 On this shared host, classifying the existing report-only commit `936d332` and
 validating its one file/six links with actual `python3 -S` commands took
 **101.455ms** combined: 51.391ms for classification and 50.064ms for the validator
-process, including 1.586ms of validation. The 139 focused cases above passed in
-6.97s on Python 3.14.7; no application/browser suite was started. These single
+process, including 1.586ms of validation. The final 188 focused cases above passed
+in 10.08s on Python 3.14.7; no application or browser was started. These single
 local observations are not percentiles or hosted performance claims.
 The workflow passed `actionlint` 1.7.12 (official release asset SHA-256 checked),
 plus a parsed graph check preserving the seven source names and matrix inventory.
 New Python files passed Ruff lint/format; modified timing code passed the legacy
-undefined-name boundary. Hosted checks and independent review are still required.
+undefined-name boundary. After integrating the canonical Node runner and argument
+repairs, the full pinned local quality script passed Ruff and then failed
+Mypy 2.3.1 on Python 3.14.7 with 19
+transitive errors in seven application files unchanged from timing delivery
+`5cbeaea`. Those unrelated files were preserved. Hosted Python 3.12 static
+quality and independent review remain required; this local failure is retained.
 Record the first ordinary report-only run after delivery: report feedback from
 job start (target under one minute), dispatch delay, whole workflow wall time
 and summed all-job minutes including rollup/gate. Compare the measured total

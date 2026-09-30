@@ -20,6 +20,17 @@ from scripts.ci.workflow_timing import (
 
 REPORT = "docs/audits/2026-09-30-feedback-results.md"
 ROOT = Path(__file__).resolve().parents[1]
+IDENTITY = {"source_sha": "a" * 40, "head_sha": "b" * 40, "run_id": 1, "run_attempt": 2}
+
+
+def identity_environment():
+    return {
+        "GITHUB_SHA": IDENTITY["source_sha"],
+        "CI_TELEMETRY_SHA": IDENTITY["source_sha"],
+        "CI_TELEMETRY_HEAD_SHA": IDENTITY["head_sha"],
+        "GITHUB_RUN_ID": str(IDENTITY["run_id"]),
+        "GITHUB_RUN_ATTEMPT": str(IDENTITY["run_attempt"]),
+    }
 
 
 def command(root, *args):
@@ -242,7 +253,12 @@ def needs(lane):
 
 def jobs():
     return [
-        {"name": name, "status": "completed", "conclusion": "success"}
+        {
+            "name": name,
+            "status": "completed",
+            "conclusion": "success",
+            **{key: IDENTITY[key] for key in ("run_id", "run_attempt", "head_sha")},
+        }
         for name in JOB_NAMES
     ]
 
@@ -253,11 +269,13 @@ def gate(lane, required=None, observed=None, **classification):
             "valid": True,
             "lane": lane,
             "reason": "verified-report-only",
+            "head": IDENTITY["head_sha"],
             **classification,
         },
         needs(lane) if required is None else required,
         jobs() if observed is None else observed,
-        {"complete": True, "lane": lane},
+        {"complete": True, "lane": lane, **IDENTITY},
+        IDENTITY,
     )[0]
 
 
@@ -296,13 +314,168 @@ def test_report_source_skips_need_positive_classification_and_complete_control_j
 
 @pytest.mark.parametrize("lane", ["source", "reports"])
 def test_incomplete_or_mismatched_timing_is_not_acceptance(lane):
-    classification = {"valid": True, "lane": lane, "reason": "verified-report-only"}
+    classification = {
+        "valid": True,
+        "lane": lane,
+        "reason": "verified-report-only",
+        "head": IDENTITY["head_sha"],
+    }
     assert not evaluate(
-        classification, needs(lane), jobs(), {"complete": False, "lane": lane}
+        classification,
+        needs(lane),
+        jobs(),
+        {"complete": False, "lane": lane, **IDENTITY},
+        IDENTITY,
     )[0]
     assert not evaluate(
-        classification, needs(lane), jobs(), {"complete": True, "lane": "unknown"}
+        classification,
+        needs(lane),
+        jobs(),
+        {"complete": True, "lane": "unknown", **IDENTITY},
+        IDENTITY,
     )[0]
+
+
+@pytest.mark.parametrize("lane", ["source", "reports"])
+@pytest.mark.parametrize(
+    "field,stale",
+    [
+        ("source_sha", "c" * 40),
+        ("head_sha", "c" * 40),
+        ("run_id", 99),
+        ("run_attempt", 1),
+        ("run_attempt", True),
+    ],
+)
+def test_stale_or_earlier_attempt_timing_cannot_establish_acceptance(
+    lane, field, stale
+):
+    classification = {
+        "valid": True,
+        "lane": lane,
+        "reason": "verified-report-only",
+        "head": IDENTITY["head_sha"],
+    }
+    passed, reason = evaluate(
+        classification,
+        needs(lane),
+        jobs(),
+        {"complete": True, "lane": lane, **IDENTITY, field: stale},
+        IDENTITY,
+    )
+    assert not passed and reason == "stale-or-mismatched-workflow-evidence"
+
+
+@pytest.mark.parametrize(
+    "field,stale",
+    [("head_sha", "c" * 40), ("run_id", 99), ("run_attempt", 1), ("run_attempt", True)],
+)
+def test_stale_earlier_attempt_or_other_head_api_jobs_fail_source_gate(field, stale):
+    observed = jobs()
+    observed[-1][field] = stale
+    assert not gate("source", observed=observed)
+
+
+def test_stale_classification_head_is_not_a_report_shortcut():
+    assert not gate("reports", head="c" * 40)
+
+
+@pytest.mark.parametrize(
+    "stale,complete",
+    [
+        ("none", True),
+        ("run", False),
+        ("job", False),
+        ("head", False),
+        ("classification", False),
+    ],
+)
+def test_actual_rollup_preserves_observations_but_rejects_stale_actions_responses(
+    tmp_path, monkeypatch, stale, complete
+):
+    from scripts.ci import workflow_timing
+
+    classification = tmp_path / "classification.json"
+    classification.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "lane": "reports",
+                "valid": True,
+                "reason": "verified-report-only",
+                "base": "a" * 40,
+                "head": IDENTITY["head_sha"],
+                "comparison_base": "a" * 40,
+                "markdown": [REPORT],
+            }
+        )
+    )
+    if stale == "classification":
+        value = json.loads(classification.read_text())
+        value.update(valid=False, lane="source", reason="invalid-comparison")
+        classification.write_text(json.dumps(value))
+    run = {
+        "id": 1,
+        "run_attempt": 2,
+        "created_at": "2026-09-30T00:00:00Z",
+        "run_started_at": "2026-09-30T00:00:02Z",
+        "debug": "PRIVATE_SENTINEL",
+    }
+    observed = [
+        {
+            "name": name,
+            "run_id": 1,
+            "run_attempt": 2,
+            "head_sha": IDENTITY["head_sha"],
+            "started_at": "2026-09-30T00:00:03Z",
+            "completed_at": "2026-09-30T00:00:10Z",
+            "conclusion": "success",
+            "steps": [],
+            "debug": "PRIVATE_SENTINEL",
+        }
+        for name in REPORT_JOB_NAMES
+    ]
+    if stale == "run":
+        run["run_attempt"] = 1
+    elif stale == "job":
+        observed[-1]["run_attempt"] = 1
+    elif stale == "head":
+        observed[-1]["head_sha"] = "c" * 40
+    monkeypatch.setattr(
+        workflow_timing,
+        "api",
+        lambda path: (
+            {"total_count": len(observed), "jobs": observed}
+            if "/jobs?" in path
+            else run
+        ),
+    )
+    for key, value in {
+        **identity_environment(),
+        "GITHUB_REPOSITORY": "example/project",
+    }.items():
+        monkeypatch.setenv(key, value)
+    output = tmp_path / "workflow.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "workflow_timing.py",
+            "--classification",
+            str(classification),
+            "--inputs",
+            str(tmp_path / "lanes"),
+            "--output",
+            str(output),
+        ],
+    )
+    workflow_timing.main()
+    result = json.loads(output.read_text())
+    assert result["complete"] is complete and len(result["jobs"]) == 2
+    assert all(result[key] == value for key, value in IDENTITY.items())
+    assert "PRIVATE_SENTINEL" not in output.read_text()
+    if stale == "classification":
+        assert result["collection_error"] == "invalid-classification"
 
 
 def test_report_timing_marks_source_tests_inapplicable_without_a_pass_denominator(
@@ -399,7 +572,7 @@ def test_actual_stdlib_report_gate_resolves_success_and_docs_failures(
         )
     )
     timing = tmp_path / "timing.json"
-    timing.write_text(json.dumps({"lane": "reports", "complete": True}))
+    timing.write_text(json.dumps({"lane": "reports", "complete": True, **IDENTITY}))
     required = needs("reports")
     required["report-validation"]["result"] = outcome
     # Arbitrary provider/debug content must not escape through gate diagnostics.
@@ -414,7 +587,7 @@ def test_actual_stdlib_report_gate_resolves_success_and_docs_failures(
             "--timing",
             str(timing),
         ],
-        env={**os.environ, "CI_NEEDS": json.dumps(required)},
+        env={**os.environ, **identity_environment(), "CI_NEEDS": json.dumps(required)},
         capture_output=True,
         text=True,
         timeout=10,
@@ -440,13 +613,12 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
         )
     )
     timing = tmp_path / "timing.json"
-    timing.write_text(json.dumps({"lane": "source", "complete": True}))
+    timing.write_text(json.dumps({"lane": "source", "complete": True, **IDENTITY}))
     env = {
         **os.environ,
+        **identity_environment(),
         "CI_NEEDS": json.dumps(needs("source")),
         "GITHUB_REPOSITORY": "example/project",
-        "GITHUB_RUN_ID": "1",
-        "GITHUB_RUN_ATTEMPT": "1",
     }
     env.pop("GITHUB_TOKEN", None)
     result = subprocess.run(
