@@ -43,7 +43,7 @@ async function keyboardSnapshot(page, label = keyboardFieldLabel) {
   }, label);
 }
 
-async function assertKeyboardToggle(page, field, observations, label = keyboardFieldLabel) {
+async function assertKeyboardToggle(page, field, observations, label = keyboardFieldLabel, saveReady = true) {
   await expect(field, "the intended exposure starts checked before Space").toBeChecked();
   await field.focus();
   await expect(field, "Space must reach the intended checkbox").toBeFocused();
@@ -62,7 +62,9 @@ async function assertKeyboardToggle(page, field, observations, label = keyboardF
   expect(events.find(event => event.type === "change").checked).toBe(false);
   expect(events.findIndex(event => event.type === "input")).toBeLessThan(events.findIndex(event => event.type === "change"));
   await expect(page.locator("#draft-status"), "change reaches the model dirty-state owner").toHaveText("Unsaved changes");
-  await expect(page.locator("#save-model"), "a dirty model enables Save").toBeEnabled();
+  await expect(page.locator("#save-model"), "the intended Save action remains visible").toBeVisible();
+  if (saveReady) await expect(page.locator("#save-model"), "a dirty ready model enables Save").toBeEnabled();
+  else await expect(page.locator("#save-model"), "a dirty model keeps Save disabled while preview loading blocks admission").toBeDisabled();
 }
 
 async function attachKeyboardDiagnostics(page, testInfo, observations, transport, label = keyboardFieldLabel) {
@@ -192,10 +194,13 @@ test("missing saved positions stay clean; tall fields scroll with visible relati
   }
 });
 
-test("keyboard Space exposure saves through the owned API model and stays changed after reload", async ({ page, request }, testInfo) => {
+async function verifyOwnedKeyboardSave(page, request, testInfo, { delayPreviews = false } = {}) {
   const label = "Expose certification_dim.id";
   const observations = {};
   let ownedModelId;
+  let releasePreviews = () => {}, markRequested;
+  const previewReady = delayPreviews ? new Promise(resolve => { releasePreviews = resolve; }) : Promise.resolve();
+  const previewRequested = delayPreviews ? new Promise(resolve => { markRequested = resolve; }) : Promise.resolve();
   await recordKeyboardEvents(page, { label });
   const exposed = model => model.definition.exposedFields.some(field => field.table === "certification_dim" && field.column === "id");
   try {
@@ -205,12 +210,23 @@ test("keyboard Space exposure saves through the owned API model and stays change
     expect(initialResponse.status(), "read only the newly created owned model").toBe(200);
     const initialModel = await initialResponse.json();
     expect(exposed(initialModel), "the owned server model initially exposes the field").toBe(true);
+    if (delayPreviews) await page.route(`**/api/v1/schemoo/models/${ownedModelId}/previews`, async route => {
+      markRequested(); await previewReady; await route.continue();
+    });
     await page.goto(`/schemoo?model=${ownedModelId}`);
+    await previewRequested;
     const field = page.getByRole("checkbox", { name: label, exact: true });
     await expect(page.locator("#save-model"), "the real owned model opens clean").toBeDisabled();
     await expect(page.locator("#draft-status")).toHaveText(`Saved · revision ${initialModel.revision} · read-only preview`);
     observations.initial = await keyboardSnapshot(page, label);
-    await assertKeyboardToggle(page, field, observations, label);
+    await assertKeyboardToggle(page, field, observations, label, !delayPreviews);
+    if (delayPreviews) {
+      await expect(page.locator('.saved-previews [role="status"]')).toHaveText("Loading or saving previews…");
+      observations.previewPending = await keyboardSnapshot(page, label);
+      releasePreviews();
+      await expect(page.locator("#save-model"), "preview readiness restores the dirty model's Save action").toBeEnabled();
+      observations.previewReady = await keyboardSnapshot(page, label);
+    }
     const savedResponse = page.waitForResponse(response => response.request().method() === "PUT"
       && new URL(response.url()).pathname === `/api/v1/schemoo/models/${ownedModelId}`);
     await page.getByRole("button", { name: "Save model", exact: true }).click();
@@ -233,6 +249,7 @@ test("keyboard Space exposure saves through the owned API model and stays change
     await expect(page.locator("#save-model")).toBeDisabled();
     observations.reloaded = await keyboardSnapshot(page, label);
   } finally {
+    releasePreviews();
     try {
       if (ownedModelId) {
         const currentResponse = await request.get(`/api/v1/schemoo/models/${ownedModelId}`);
@@ -247,6 +264,14 @@ test("keyboard Space exposure saves through the owned API model and stays change
       await attachKeyboardDiagnostics(page, testInfo, observations, "owned real API model; Save, independent GET, reload and revision-checked delete", label);
     }
   }
+}
+
+test("keyboard Space exposure saves through the owned API model and stays changed after reload", async ({ page, request }, testInfo) => {
+  await verifyOwnedKeyboardSave(page, request, testInfo);
+});
+
+test("controlled delayed previews keep Save disabled until ready and then persist one keyboard edit", async ({ page, request }, testInfo) => {
+  await verifyOwnedKeyboardSave(page, request, testInfo, { delayPreviews: true });
 });
 
 test("controlled missed change fails at model dirty state after a trusted keyboard toggle", async ({ page }, testInfo) => {
