@@ -16,6 +16,52 @@ without changing discovery; there is no second CI test-glob list. The deployment
 contract check executes the actual CI command in a temporary four-family checkout
 and checks unique receipts, with planted opt-in files that fail if selected.
 
+## During development
+
+Use the inventory below to choose the smallest check that exercises the changed
+invariant. Run it after each meaningful edit, then let the ordinary PR acceptance
+path cover the complete source change. Repeated full browser matrices are not a
+substitute for a focused regression or a faithful controlled failure.
+
+1. For frontend state, start with the relevant `node --test` files, or use
+   `npm test -- --test-name-pattern='<known invariant>'` for a known named check.
+   Confirm the intended cases actually execute; a filter matching no tests
+   supplies no behavioral evidence.
+2. For Python ownership or API behavior, pass the relevant test modules to
+   `python -m pytest -q`. Keep installed-graph, real-database or mounted checks
+   whenever the invariant depends on those boundaries.
+3. Run incremental Python quality against the intended branch base with
+   `python scripts/check_python_quality.py BASE`, using the constrained quality
+   environment. An unavailable comparison stops the check; resolve the intended
+   base before continuing rather than treating an empty selection as validation.
+4. When ownership is unknown or a change crosses boundaries, use the broader
+   Node/Python commands and the required source CI layers. A narrow selection
+   is feedback during development, not permission to omit acceptance.
+
+No additional selector or dependency is needed: these are the existing supported
+commands, and the same Node runner owns local and hosted discovery.
+
+## Ordinary hosted cost reference
+
+The successful [PR #167 run, attempt 1](https://github.com/LandMineDevelopment/schemii/actions/runs/36666053425)
+checked out source `86edfe85bbe99cf984a9976e931243e33d3ad7fe`. This is one
+ordinary Ubuntu/Python 3.12/Node 22 observation, not a percentile or a controlled
+before/after benchmark.
+
+| Layer | Observed inventory and time | Interpretation |
+| --- | --- | --- |
+| Node | 478 passed; 9.577s reporter wall | First Node feedback arrived 14s after its job started, about 26s after workflow creation |
+| Default Python | 2,031 collected; 1,945 passed, 86 skipped; 264.705s reporter wall | Setup 52.740s, execution 203.789s, teardown 0.347s; skips retain their prerequisite limits |
+| Inspection subset | All 39 passed; 129.994s of disjoint setup/execution/teardown | Total phases are 49.1% of Python wall; its 114.399s execution is 56.1% of Python execution; shared setup is charged to its initializing case |
+| Slowest browser shard | Android shard 2: 550s job wall | Launcher startup 61s, test step 438s, setup/other 51s |
+| Complete workflow | 582s from workflow creation to final job completion; 562s acceptance critical path; 37.367 total job-minutes | Concurrent job costs must not be added to estimate developer wait |
+
+Reporter wall, job wall and workflow elapsed describe different boundaries.
+Phase sums exclude collection, startup and reporting. Dispatch/start delays
+include scheduling and dependencies; the available timestamps do not isolate
+pure runner queue time. Compare future ordinary runs at their recorded source
+and inventory, retaining failed attempts rather than selecting only green ones.
+
 ## Focused inventory
 
 Costs below are audit observations at the referenced baseline, not current
