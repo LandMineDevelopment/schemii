@@ -26,6 +26,13 @@ jobs:
     timeout-minutes: 2
     outputs:
       lane: ${{ steps.classify.outputs.lane }}
+      profile: ${{ steps.classify.outputs.profile }}
+      static: ${{ steps.classify.outputs.static }}
+      node: ${{ steps.classify.outputs.node }}
+      python: ${{ steps.classify.outputs.python }}
+      postgres: ${{ steps.classify.outputs.postgres }}
+      browser: ${{ steps.classify.outputs.browser }}
+      python_paths: ${{ steps.classify.outputs.python_paths }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,7 +74,7 @@ jobs:
 
   static-quality:
     name: Incremental Python static quality
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.static == 'true'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -87,7 +94,7 @@ jobs:
 
   test:
     name: Node and deterministic Python behavior
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.node == 'true'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -114,22 +121,27 @@ jobs:
             artifacts/ci-timing/node-summary.json
           retention-days: 7
       - uses: actions/setup-python@v5
+        if: needs.classify.outputs.python == 'true'
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
+      - if: needs.classify.outputs.python == 'true'
+        run: python -m pip install --upgrade pip
+      - if: needs.classify.outputs.python == 'true'
+        run: python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
       - name: Deterministic Python behavior
+        if: needs.classify.outputs.python == 'true'
         env:
           CI_TELEMETRY_FILE: artifacts/ci-timing/python.jsonl
-        run: python -m pytest -q -p scripts.ci.pytest_timing
-      - run: python -m compileall -q src tests testing
+        run: python scripts/ci/python-tests.py ${{ needs.classify.outputs.python_paths }}
+      - if: needs.classify.outputs.python == 'true'
+        run: python -m compileall -q src tests testing
       - name: Validate public Python timing
         id: python-timing
-        if: always()
+        if: always() && needs.classify.outputs.python == 'true'
         run: python3 scripts/ci/summary.py artifacts/ci-timing/python.jsonl artifacts/ci-timing/python-summary.json
       - name: Publish public Python timing
-        if: always() && steps.python-timing.outcome == 'success'
+        if: always() && needs.classify.outputs.python == 'true' && steps.python-timing.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: python-timing-attempt-${{ github.run_attempt }}
@@ -140,7 +152,7 @@ jobs:
 
   postgres-integration:
     name: Real PostgreSQL metadata behavior
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.postgres == 'true'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -188,8 +200,8 @@ jobs:
           retention-days: 7
 
   browser-smoke:
-    name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/2)
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/3)
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.browser == 'true'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -197,7 +209,7 @@ jobs:
       fail-fast: false
       matrix:
         project: [desktop-chromium, android-chromium]
-        shard: [1, 2]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -234,7 +246,7 @@ jobs:
           SCHEMII_E2E_BOOTSTRAP: "1"
           CI_TELEMETRY_FILE: artifacts/ci-timing/browser.jsonl
           CI_TELEMETRY_PROJECT: ${{ matrix.project }}
-        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/2
+        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/3
       - name: Verify metadata backup recovery in an isolated database
         if: matrix.project == 'desktop-chromium' && matrix.shard == 1
         run: |

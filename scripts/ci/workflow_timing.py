@@ -12,21 +12,13 @@ from urllib.request import Request, urlopen
 if __package__:
     from .classify_changes import load_classification
     from .summary import load, summarize as lane_summary
+    from .test_selection import JOB_NAMES, expected_jobs, expected_lanes
 else:
     from classify_changes import load_classification
     from summary import load, summarize as lane_summary
+    from test_selection import JOB_NAMES, expected_jobs, expected_lanes
 
 
-JOB_NAMES = {
-    "Incremental Python static quality": "static",
-    "Node and deterministic Python behavior": "unit",
-    "Real PostgreSQL metadata behavior": "postgres",
-    **{
-        f"Assembled browser smoke ({project}, shard {shard}/2)": f"browser-{project}-{shard}"
-        for project in ("desktop-chromium", "android-chromium")
-        for shard in (1, 2)
-    },
-}
 REPORT_JOB_NAMES = {
     "Classify complete change": "classification",
     "Report Markdown and local links": "reports",
@@ -101,20 +93,29 @@ def sum_durations(values):
     return None if any(value is None for value in values) else sum(values)
 
 
-def summarize(run, jobs, *, lane="source", report_validation=False):
+def summarize(run, jobs, *, lane="source", profile=None, report_validation=False):
+    profile = profile or ("reports" if lane == "reports" else "full")
+    if (lane == "reports") != (profile == "reports"):
+        raise ValueError("Mismatched profile")
     created = timestamp(run.get("created_at"))
     dispatched = timestamp(run.get("run_started_at"))
     records = []
     labels = {**JOB_NAMES, **REPORT_JOB_NAMES}
-    expected = set(JOB_NAMES.values()) if lane == "source" else set()
+    expected = set(expected_jobs(profile).values())
     if report_validation or lane == "reports":
         expected.update(REPORT_JOB_NAMES.values())
     not_applicable = []
+    unexpected_source_jobs = sum(
+        isinstance(job.get("name"), str)
+        and job["name"].startswith("Assembled browser smoke (")
+        and job["name"] not in JOB_NAMES
+        for job in jobs
+    )
     for job in jobs:
         label = labels.get(job.get("name"))
         if label is None:
             continue
-        if lane == "reports" and label in JOB_NAMES.values():
+        if label in JOB_NAMES.values() and label not in expected:
             not_applicable.append({"job": label, "outcome": job.get("conclusion")})
             continue
         start = timestamp(job.get("started_at"))
@@ -183,8 +184,12 @@ def summarize(run, jobs, *, lane="source", report_validation=False):
     return {
         "schema": 1,
         "lane": lane,
+        "profile": profile,
         "workflow_dispatch_delay_ms": duration(created, dispatched),
-        "complete": len(records) == len(expected)
+        "unexpected_source_jobs": unexpected_source_jobs,
+        "complete": not unexpected_source_jobs
+        and len({record["job"] for record in not_applicable}) == len(not_applicable)
+        and len(records) == len(expected)
         and observed == expected
         and all(
             record["wall_ms"] is not None
@@ -194,7 +199,9 @@ def summarize(run, jobs, *, lane="source", report_validation=False):
         and all(record["outcome"] == "skipped" for record in not_applicable),
         "missing_jobs": sorted(expected - observed),
         "jobs": sorted(records, key=lambda record: record["job"]),
-        "not_applicable_jobs": sorted(JOB_NAMES.values()) if lane == "reports" else [],
+        "not_applicable_jobs": sorted(
+            set(JOB_NAMES.values()) - set(expected_jobs(profile).values())
+        ),
         "critical_path_ms": duration(created, max(end_times)) if end_times else None,
         "total_job_minutes": round(total_job_ms / 60000, 3)
         if total_job_ms is not None
@@ -215,19 +222,11 @@ def api(path):
         return json.load(response)
 
 
-def test_evidence(directory, *, lane="source", identity=None):
-    expected = {
-        ("node", "none", 0),
-        ("python", "none", 0),
-        ("postgres", "none", 0),
-        *(
-            ("browser", project, shard)
-            for project in ("desktop-chromium", "android-chromium")
-            for shard in (1, 2)
-        ),
-    }
-    if lane == "reports":
-        expected = set()
+def test_evidence(directory, *, lane="source", profile=None, identity=None):
+    profile = profile or ("reports" if lane == "reports" else "full")
+    if (lane == "reports") != (profile == "reports"):
+        raise ValueError("Mismatched profile")
+    expected = expected_lanes(profile)
     observed = {}
     invalid = 0
     for path in directory.rglob("*.jsonl"):
@@ -246,7 +245,8 @@ def test_evidence(directory, *, lane="source", identity=None):
     eligible = sum(value["first_attempt_eligible"] for value in values)
     passes = sum(value["first_attempt_passes"] for value in values)
     return {
-        "applicable": lane == "source",
+        "applicable": bool(expected),
+        "profile": profile,
         "complete": set(observed) == expected
         and not invalid
         and (len(cohorts) == 1 if lane == "source" else not cohorts)
@@ -256,7 +256,13 @@ def test_evidence(directory, *, lane="source", identity=None):
             or cohorts
             == {(identity["source_sha"], identity["run_id"], identity["run_attempt"])}
         )
-        and all(value["complete"] for value in values),
+        and all(
+            value["complete"]
+            and value["outcome"] == "passed"
+            and value["first_attempt_failures"] == 0
+            and value["retry_recovered"] == 0
+            for value in values
+        ),
         "missing_lanes": [
             f"{lane}-{project}-{shard}"
             for lane, project, shard in sorted(expected - set(observed))
@@ -289,18 +295,18 @@ def main():
         or not attempt.isdigit()
     ):
         raise ValueError("Invalid workflow identity")
-    classification = {"lane": "source", "valid": False}
+    classification = {"lane": "source", "profile": "full", "valid": False}
     try:
         classification = (
             load_classification(args.classification)
             if args.classification
-            else {"lane": "source", "valid": True}
+            else {"lane": "source", "profile": "full", "valid": True}
         )
     except (OSError, ValueError, TypeError):
         pass  # Still collect source observations; never turn an unknown into reports.
     classification_valid = classification["valid"]
     if not classification_valid:
-        classification = {"lane": "source", "valid": False}
+        classification = {"lane": "source", "profile": "full", "valid": False}
     try:
         run = api(f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}")
         jobs = api(
@@ -310,6 +316,7 @@ def main():
             run,
             jobs["jobs"],
             lane=classification["lane"],
+            profile=classification["profile"],
             report_validation=bool(args.classification),
         )
         # Pagination cannot be mistaken for a complete measured workflow.
@@ -340,11 +347,16 @@ def main():
             "collection_error": "actions-api-unavailable",
         }
     result.update(identity)
+    result["lane"] = classification["lane"]
+    result["profile"] = classification["profile"]
     result["classification_valid"] = classification_valid
     if not classification_valid:
         result["collection_error"] = "invalid-classification"
     evidence = test_evidence(
-        args.inputs, lane=result.get("lane", "source"), identity=identity
+        args.inputs,
+        lane=classification["lane"],
+        profile=classification["profile"],
+        identity=identity,
     )
     result["test_evidence"] = evidence
     result["complete"] = result["complete"] and evidence["complete"]

@@ -9,6 +9,13 @@ from pathlib import Path
 
 if __package__:
     from .classify_changes import load_classification
+    from .test_selection import (
+        SOURCE_NEEDS,
+        PROFILES,
+        expected_jobs,
+        expected_lanes,
+        required_needs,
+    )
     from .workflow_timing import (
         JOB_NAMES,
         api,
@@ -18,6 +25,13 @@ if __package__:
     )
 else:
     from classify_changes import load_classification
+    from test_selection import (
+        SOURCE_NEEDS,
+        PROFILES,
+        expected_jobs,
+        expected_lanes,
+        required_needs,
+    )
     from workflow_timing import (
         JOB_NAMES,
         api,
@@ -27,19 +41,41 @@ else:
     )
 
 
-SOURCE_NEEDS = {"static-quality", "test", "postgres-integration", "browser-smoke"}
 CONTROL_NEEDS = {"classify", "report-validation", "timing-rollup"}
 
 
 def evaluate(
     classification: dict, needs: dict, jobs: list[dict], timing: dict, identity: dict
 ) -> tuple[bool, str]:
+    if (
+        not all(
+            isinstance(value, dict)
+            for value in (classification, needs, timing, identity)
+        )
+        or not isinstance(jobs, list)
+        or any(not isinstance(job, dict) for job in jobs)
+    ):
+        return False, "invalid-required-evidence"
+    profile = classification.get("profile")
+    if (
+        not isinstance(profile, str)
+        or profile not in PROFILES
+        or (classification.get("lane") == "reports") != (profile == "reports")
+    ):
+        return False, "invalid-classification"
+    if (
+        profile not in {"full", "reports"}
+        and classification.get("reason") != "verified-owned-pr-change"
+    ):
+        return False, "invalid-classification"
     if not classification.get("valid") or classification.get("lane") not in {
         "source",
         "reports",
     }:
         return False, "invalid-classification"
-    if set(needs) != SOURCE_NEEDS | CONTROL_NEEDS:
+    if set(needs) != SOURCE_NEEDS | CONTROL_NEEDS or any(
+        not isinstance(value, dict) for value in needs.values()
+    ):
         return False, "missing-required-job"
     if any(needs[name].get("result") != "success" for name in CONTROL_NEEDS):
         return False, "classification-docs-or-timing-failed"
@@ -51,29 +87,86 @@ def evaluate(
     if (
         timing.get("complete") is not True
         or timing.get("lane") != classification["lane"]
+        or timing.get("profile") != profile
     ):
         return False, "incomplete-or-mismatched-timing"
-    if classification["lane"] == "reports":
-        if classification.get("reason") != "verified-report-only":
-            return False, "report-classification-not-positive"
-        if any(needs[name].get("result") != "skipped" for name in SOURCE_NEEDS):
-            return False, "unexpected-source-outcome"
-        return True, "verified-report-validation"
-    if any(needs[name].get("result") != "success" for name in SOURCE_NEEDS):
+    evidence = timing.get("test_evidence", {})
+    if not isinstance(evidence, dict):
+        return False, "incomplete-or-failed-selected-test-evidence"
+    receipts = evidence.get("lanes", [])
+    if not isinstance(receipts, list) or any(
+        not isinstance(value, dict)
+        or not isinstance(value.get("lane"), str)
+        or not isinstance(value.get("project"), str)
+        or type(value.get("shard")) is not int
+        for value in receipts
+    ):
+        return False, "incomplete-or-failed-selected-test-evidence"
+    expected_receipts = expected_lanes(profile)
+    keys = [
+        (value.get("lane"), value.get("project"), value.get("shard"))
+        for value in receipts
+    ]
+    if (
+        evidence.get("complete") is not True
+        or evidence.get("profile") != profile
+        or len(keys) != len(expected_receipts)
+        or set(keys) != expected_receipts
+        or any(
+            value.get("complete") is not True
+            or value.get("outcome") != "passed"
+            or type(value.get("first_attempt_failures")) is not int
+            or value["first_attempt_failures"] != 0
+            or type(value.get("retry_recovered")) is not int
+            or value["retry_recovered"] != 0
+            or not matches_identity(
+                value,
+                {key: identity[key] for key in ("source_sha", "run_id", "run_attempt")},
+            )
+            for value in receipts
+        )
+    ):
+        return False, "incomplete-or-failed-selected-test-evidence"
+    selected_needs = required_needs(profile)
+    if any(needs[name].get("result") != "success" for name in selected_needs):
         return False, "source-job-failed-cancelled-or-skipped"
+    if any(
+        needs[name].get("result") != "skipped" for name in SOURCE_NEEDS - selected_needs
+    ):
+        return False, "unexpected-source-outcome"
+    selected_jobs = expected_jobs(profile)
     observed = [job for job in jobs if job.get("name") in JOB_NAMES]
-    if len(observed) != len(JOB_NAMES) or {job["name"] for job in observed} != set(
-        JOB_NAMES
+    executed = [job for job in observed if job["name"] in selected_jobs]
+    if len(executed) != len(selected_jobs) or {job["name"] for job in executed} != set(
+        selected_jobs
     ):
         return False, "missing-or-duplicate-source-matrix-leg"
     if any(
         job.get("status") != "completed" or job.get("conclusion") != "success"
-        for job in observed
+        for job in executed
     ):
         return False, "source-matrix-leg-not-successful"
+    excluded = [job for job in observed if job["name"] not in selected_jobs]
+    if (
+        len({job["name"] for job in excluded}) != len(excluded)
+        or any(
+            job.get("conclusion") != "skipped" or job.get("status") != "completed"
+            for job in excluded
+        )
+        or any(
+            job.get("name", "").startswith("Assembled browser smoke (")
+            and job["name"] not in JOB_NAMES
+            for job in jobs
+        )
+    ):
+        return False, "unexpected-source-matrix-leg"
     if not current_jobs(observed, identity):
         return False, "stale-or-mismatched-source-matrix-leg"
-    return True, "all-source-layers-passed"
+    if profile == "reports":
+        if classification.get("reason") != "verified-report-only":
+            return False, "report-classification-not-positive"
+        return True, "verified-report-validation"
+    return True, "all-selected-source-layers-passed"
 
 
 def main() -> int:

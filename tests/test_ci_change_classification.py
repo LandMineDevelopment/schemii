@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from scripts.ci.classify_changes import classify, load_classification, readme_index_only
+from scripts.ci.test_selection import expected_lanes
 from scripts.ci.required_gate import CONTROL_NEEDS, SOURCE_NEEDS, evaluate
 from scripts.ci.workflow_timing import (
     JOB_NAMES,
@@ -129,7 +130,11 @@ def test_workflow_checkout_runs_base_added_classifier_for_an_existing_pr(
     assert not (root / "scripts/ci/classify_changes.py").exists()
 
     command(root, "checkout", "--quiet", "main")
-    for file in ("scripts/ci/classify_changes.py", ".github/workflows/ci.yml"):
+    for file in (
+        "scripts/ci/classify_changes.py",
+        "scripts/ci/test_selection.py",
+        ".github/workflows/ci.yml",
+    ):
         write(root, file, (ROOT / file).read_text())
     write(root, "src/base-only.py", "# Unrelated base advance\n")
     base = commit(root)
@@ -463,18 +468,48 @@ def jobs():
     ]
 
 
+def evidence(profile):
+    return {
+        "complete": True,
+        "profile": profile,
+        "lanes": [
+            {
+                "lane": lane,
+                "project": project,
+                "shard": shard,
+                "complete": True,
+                "outcome": "passed",
+                "first_attempt_failures": 0,
+                "retry_recovered": 0,
+                **{
+                    key: IDENTITY[key]
+                    for key in ("source_sha", "run_id", "run_attempt")
+                },
+            }
+            for lane, project, shard in sorted(expected_lanes(profile))
+        ],
+    }
+
+
 def gate(lane, required=None, observed=None, **classification):
     return evaluate(
         {
             "valid": True,
             "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
             "reason": "verified-report-only",
             "head": IDENTITY["head_sha"],
             **classification,
         },
         needs(lane) if required is None else required,
         jobs() if observed is None else observed,
-        {"complete": True, "lane": lane, **IDENTITY},
+        {
+            "complete": True,
+            "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
+            "test_evidence": evidence("reports" if lane == "reports" else "full"),
+            **IDENTITY,
+        },
         IDENTITY,
     )[0]
 
@@ -537,6 +572,7 @@ def test_unknown_step_measurement_preserves_strict_source_acceptance(damage, tmp
         job["test_steps_ms"] is None and job["setup_and_other_ms"] is None
         for job in timing["jobs"]
     )
+    timing["test_evidence"] = evidence("full")
     if damage == "stale-attempt":
         timing["run_attempt"] = 1
     elif damage == "missing-test-evidence":
@@ -544,7 +580,12 @@ def test_unknown_step_measurement_preserves_strict_source_acceptance(damage, tmp
         timing["test_evidence"] = collect_evidence(tmp_path, identity=IDENTITY)
         timing["complete"] = timing["complete"] and timing["test_evidence"]["complete"]
     passed, _ = evaluate(
-        {"valid": True, "lane": "source", "head": IDENTITY["head_sha"]},
+        {
+            "valid": True,
+            "lane": "source",
+            "profile": "full",
+            "head": IDENTITY["head_sha"],
+        },
         needs("source"),
         observed,
         timing,
@@ -576,6 +617,7 @@ def test_incomplete_or_mismatched_timing_is_not_acceptance(lane):
     classification = {
         "valid": True,
         "lane": lane,
+        "profile": "reports" if lane == "reports" else "full",
         "reason": "verified-report-only",
         "head": IDENTITY["head_sha"],
     }
@@ -583,7 +625,12 @@ def test_incomplete_or_mismatched_timing_is_not_acceptance(lane):
         classification,
         needs(lane),
         jobs(),
-        {"complete": False, "lane": lane, **IDENTITY},
+        {
+            "complete": False,
+            "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
+            **IDENTITY,
+        },
         IDENTITY,
     )[0]
     assert not evaluate(
@@ -612,6 +659,7 @@ def test_stale_or_earlier_attempt_timing_cannot_establish_acceptance(
     classification = {
         "valid": True,
         "lane": lane,
+        "profile": "reports" if lane == "reports" else "full",
         "reason": "verified-report-only",
         "head": IDENTITY["head_sha"],
     }
@@ -619,7 +667,13 @@ def test_stale_or_earlier_attempt_timing_cannot_establish_acceptance(
         classification,
         needs(lane),
         jobs(),
-        {"complete": True, "lane": lane, **IDENTITY, field: stale},
+        {
+            "complete": True,
+            "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
+            **IDENTITY,
+            field: stale,
+        },
         IDENTITY,
     )
     assert not passed and reason == "stale-or-mismatched-workflow-evidence"
@@ -658,8 +712,9 @@ def test_actual_rollup_preserves_observations_but_rejects_stale_actions_response
     classification.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "lane": "reports",
+                "profile": "reports",
                 "valid": True,
                 "reason": "verified-report-only",
                 "base": "a" * 40,
@@ -819,8 +874,9 @@ def test_actual_stdlib_report_gate_resolves_success_and_docs_failures(
     classification.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "lane": "reports",
+                "profile": "reports",
                 "valid": True,
                 "reason": "verified-report-only",
                 "base": "a" * 40,
@@ -831,7 +887,17 @@ def test_actual_stdlib_report_gate_resolves_success_and_docs_failures(
         )
     )
     timing = tmp_path / "timing.json"
-    timing.write_text(json.dumps({"lane": "reports", "complete": True, **IDENTITY}))
+    timing.write_text(
+        json.dumps(
+            {
+                "lane": "reports",
+                "profile": "reports",
+                "complete": True,
+                "test_evidence": evidence("reports"),
+                **IDENTITY,
+            }
+        )
+    )
     required = needs("reports")
     required["report-validation"]["result"] = outcome
     # Arbitrary provider/debug content must not escape through gate diagnostics.
@@ -860,8 +926,9 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
     classification.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "lane": "source",
+                "profile": "full",
                 "valid": True,
                 "reason": "full-validation",
                 "base": "a" * 40,
@@ -872,7 +939,9 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
         )
     )
     timing = tmp_path / "timing.json"
-    timing.write_text(json.dumps({"lane": "source", "complete": True, **IDENTITY}))
+    timing.write_text(
+        json.dumps({"lane": "source", "profile": "full", "complete": True, **IDENTITY})
+    )
     env = {
         **os.environ,
         **identity_environment(),
@@ -901,10 +970,10 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
 @pytest.mark.parametrize(
     "mutation",
     [
-        {"lane": "reports", "valid": False},
-        {"lane": "reports", "reason": "unknown"},
-        {"lane": "reports", "markdown": []},
-        {"lane": "reports", "markdown": ["AGENTS.md"]},
+        {"lane": "reports", "profile": "reports", "valid": False},
+        {"lane": "reports", "profile": "reports", "reason": "unknown"},
+        {"lane": "reports", "profile": "reports", "markdown": []},
+        {"lane": "reports", "profile": "reports", "markdown": ["AGENTS.md"]},
         {"markdown": ["../outside.md"]},
         {"markdown": ["report.md\nsecret.md"]},
         {"schema": True},
@@ -913,8 +982,9 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
 def test_malformed_or_unproven_classification_receipt_is_rejected(tmp_path, mutation):
     path = tmp_path / "classification.json"
     value = {
-        "schema": 1,
+        "schema": 2,
         "lane": "reports",
+        "profile": "reports",
         "valid": True,
         "reason": "verified-report-only",
         "base": "a" * 40,

@@ -1,4 +1,4 @@
-"""Positively identify report-only Git changes; everything else uses source CI."""
+"""Positively identify independent PR owners; unknown changes use full source CI."""
 
 from __future__ import annotations
 
@@ -8,6 +8,12 @@ import os
 from pathlib import Path
 import re
 import subprocess
+
+
+if __package__:
+    from .test_selection import PROFILES, layers, select_paths, PYTHON_PATHS
+else:
+    from test_selection import PROFILES, layers, select_paths, PYTHON_PATHS
 
 
 REPORTS = {"docs/browser-shard-balance.md"}
@@ -77,8 +83,9 @@ def changes(root: Path, base: str, head: str) -> list[tuple[str, list[str]]]:
 
 def classify(root: Path, event: str, base: str, head: str) -> dict:
     result = {
-        "schema": 1,
+        "schema": 2,
         "lane": "source",
+        "profile": "full",
         "valid": True,
         "reason": "full-validation",
         "base": base,
@@ -114,8 +121,23 @@ def classify(root: Path, event: str, base: str, head: str) -> dict:
             result["reason"] = "empty-comparison"
             return result
         eligible = True
+        safe_modes = True
         for status, paths in diff:
             path = paths[-1]
+            # A profile never authorizes renamed/deleted/symlink or changed executable inputs.
+            if status == "M":
+                old_entry = git(
+                    root, "ls-tree", "-z", comparison_base, "--", path
+                ).split(b"\0")
+                new_entry = git(root, "ls-tree", "-z", head, "--", path).split(b"\0")
+                safe_modes = (
+                    safe_modes
+                    and len(old_entry) == len(new_entry) == 2
+                    and old_entry[0][:6] == new_entry[0][:6]
+                    and new_entry[0][:6] in {b"100644", b"100755"}
+                )
+            else:
+                safe_modes = False
             if status in {"A", "M"}:
                 tree = git(root, "ls-tree", "-z", head, "--", path).split(b"\0")
                 regular = len(tree) == 2 and tree[0].startswith(b"100644 blob ")
@@ -160,10 +182,19 @@ def classify(root: Path, event: str, base: str, head: str) -> dict:
         result.update(
             lane="reports" if eligible else "source",
             reason="verified-report-only" if eligible else "source-or-unknown-change",
+            profile="reports" if eligible else "full",
         )
+        if not eligible and event == "pull_request" and safe_modes:
+            profile = select_paths(diff)
+            if profile != "full":
+                result.update(profile=profile, reason="verified-owned-pr-change")
     except (ValueError, TypeError, UnicodeError, subprocess.SubprocessError, OSError):
         result.update(
-            valid=False, lane="source", reason="invalid-comparison", markdown=[]
+            valid=False,
+            lane="source",
+            profile="full",
+            reason="invalid-comparison",
+            markdown=[],
         )
     return result
 
@@ -173,6 +204,7 @@ def load_classification(path: Path) -> dict:
     fields = {
         "schema",
         "lane",
+        "profile",
         "valid",
         "reason",
         "base",
@@ -184,13 +216,27 @@ def load_classification(path: Path) -> dict:
         not isinstance(value, dict)
         or set(value) != fields
         or type(value["schema"]) is not int
-        or value["schema"] != 1
+        or value["schema"] != 2
         or type(value["valid"]) is not bool
         or value["lane"] not in ("reports", "source")
+        or not isinstance(value["profile"], str)
+        or value["profile"] not in PROFILES
+        or (value["lane"] == "reports") != (value["profile"] == "reports")
         or any(
             not isinstance(value[field], str)
             for field in ("reason", "base", "head", "comparison_base")
         )
+        or value["profile"] not in {"full", "reports"}
+        and (
+            not value["valid"]
+            or value["reason"] != "verified-owned-pr-change"
+            or not all(
+                SHA.fullmatch(value[field])
+                for field in ("base", "head", "comparison_base")
+            )
+        )
+        or not value["valid"]
+        and value["profile"] != "full"
         or not isinstance(value["markdown"], list)
         or any(
             not isinstance(item, str)
@@ -244,6 +290,16 @@ def main() -> int:
     if os.environ.get("GITHUB_OUTPUT"):
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             output.write("lane=" + result["lane"] + "\n")
+            output.write("profile=" + result["profile"] + "\n")
+            for layer in ("static", "node", "python", "postgres", "browser"):
+                output.write(
+                    layer + "=" + str(layer in layers(result["profile"])).lower() + "\n"
+                )
+            output.write(
+                "python_paths="
+                + " ".join(PYTHON_PATHS.get(result["profile"], ()))
+                + "\n"
+            )
     print("CI lane=" + result["lane"] + "; reason=" + result["reason"])
     return 0 if result["valid"] else 1
 
