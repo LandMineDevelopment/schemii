@@ -72,7 +72,7 @@ and **2.615s** (dependency race). Whole request-only files disappear from Androi
 discovery. This preserves transport assertions and cleanup while removing their
 second device execution. It does not turn failures into skips.
 
-The actual discovery after these changes has **239 desktop cases across 61 files**
+Before integrating PR #153, discovery after these changes had **239 desktop cases across 61 files**
 and **231 Android cases across 58 files**. Splitting the old two-product cursor
 test into two independent cases adds one case per profile. The transport scope
 removes seven Android cases and its preexisting skipped large-COPY duplicate.
@@ -80,6 +80,11 @@ The four custom shard assignments are disjoint and their union equals all **470
 intended project/case identities**. A fresh temporary checkout containing a new
 nested spec also proves exact inclusion on both profiles. Fixtures are removed
 after these offline checks; no browser/application/session is started.
+
+After integration with main `093062f`, real discovery contains **240 desktop and
+232 Android cases**. The new semantic API file receives the profile median
+estimate and remains scheduled. All six scheduling/discovery checks passed;
+the assignments still run every one of the **472** intended cases exactly once.
 
 | Profile | Projected first-attempt file cost, shard 1 / 2 | Projected slow/fast ratio |
 | --- | ---: | ---: |
@@ -111,10 +116,20 @@ Schemoo bookstore target label assertion remains. A broken disappearance handler
 must fail here rather than pass because completion later hides the cursor.
 
 The controlled assertion step has a **3,000ms wall timeout**; before-hook loading
-is outside that bound. This is an implemented acceptance bound, **not a measured
-pass**: assembled execution and a mutation/reproduction showing failure when
-disappearance handling is broken remain required in the coordinator's deployment
-window. Real-time and reduced-motion cases still use real timers. Clock behavior
+is outside that bound. Focused assembled verification on September 30 passed
+all six desktop/Android
+controlled and mobile/reduced-motion cases with retries disabled. The four
+controlled playback steps took **1.19–1.45s**, within the unchanged bound. All four
+client-only mutants that removed hide-on-disappearance failed the final cursor
+assertion while the completion timer remained frozen. Independent review checked
+the raw step timings and actual baseline, passing and mutant images. The tested
+renderer was the frozen `6a7600a` deployment; test source was `ad9fa82`.
+
+The fake clock advances JavaScript timers while CSS transitions use browser time.
+The test waits for the mock's finite animations between intermediate actions,
+then advances the next action timer. It never waits after the disappearing final
+action or advances the completion timer to conceal a broken handler. Real-time
+and reduced-motion cases still use real timers. Clock behavior
 follows the [official guide](https://playwright.dev/docs/clock) and
 [Clock API](https://playwright.dev/docs/api/class-clock).
 
@@ -196,7 +211,8 @@ duplicated request-only device execution and the old workflow browser command.
 Ruff lint/format, all changed JavaScript syntax, SHA-verified actionlint 1.7.12
 and diff checks passed. The owned archive and its installed dependencies were
 removed automatically when its verification context exited; selected receipts
-remain. This does not satisfy the separate assembled guide/disappearance mutant.
+remain. The focused assembled guide/disappearance verification described above
+subsequently satisfied that separate boundary.
 
 ## Remaining acceptance and natural monitoring
 
