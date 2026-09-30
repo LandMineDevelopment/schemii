@@ -137,7 +137,7 @@ test('recovery briefs include pending scenarios only and preserve failed/complet
   assert.equal(f.lane.scenarios[1].functional,'failed');
 });
 
-test('owned extension release waits for automatic output cleanup and preserves a live peer',async t=>{
+test('owned extension release ignores MCP browser flags, waits for automatic cleanup and preserves a live peer',async t=>{
   const {spawn}=await import('node:child_process');
   const {releaseNativeTransport}=await import('./native.mjs');
   const directory=await mkdtemp(join(tmpdir(),'schemii-native-release-'));t.after(()=>rm(directory,{recursive:true,force:true}));
@@ -157,7 +157,7 @@ signal.signal(signal.SIGTERM,stop)
 print('ready',flush=True)
 while True: time.sleep(1)
 `;
-    const child=spawn('python3',['-c',script,session],{stdio:['ignore','pipe','pipe']});
+    const child=spawn('python3',['-c',script,session,'--browser','chromium'],{stdio:['ignore','pipe','pipe']});
     await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);child.once('exit',()=>reject(new Error('Owned fixture exited before ready')));});
     t.after(()=>{try{child.kill('SIGTERM');}catch{}});return {session,child};
   };

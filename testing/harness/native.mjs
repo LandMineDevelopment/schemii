@@ -3,8 +3,8 @@ import { promisify } from 'node:util';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, readFile, readdir, lstat, realpath, mkdir, writeFile } from 'node:fs/promises';
-import { join, resolve, relative, isAbsolute, dirname } from 'node:path';
+import { open, readFile, readdir, lstat, realpath, readlink, mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
 
 export const nativeMode = run => run.browser === 'native';
 export function nativeBrowserRoots(root) {
@@ -89,8 +89,10 @@ export async function nativeBrowserProcesses(binding) {
   }
   const browsers = [];
   for (const row of rows) if (descendants.has(row.pid)) {
-    const command = await readFile(`/proc/${row.pid}/cmdline`, 'utf8').catch(() => '');
-    if (/(?:^|\0|\/)chrom(?:e|ium)(?:\0|\s|$|\/)/.test(command)) browsers.push(row);
+    const executable = basename(await readlink(`/proc/${row.pid}/exe`).catch(() => ''));
+    // MCP's own argv includes --browser chromium; arguments do not identify
+    // Chromium processes. Inspect the executable, not an arbitrary argv token.
+    if (['chrome','chromium','chrome-headless-shell','chrome_crashpad_handler'].includes(executable)) browsers.push(row);
   }
   return browsers;
 }
