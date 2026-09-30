@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, utimes, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { workspaceNavigationHref } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
 import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
@@ -53,6 +54,62 @@ test('wrong resource/route, viewport, unexpected denial and source drift reject 
   assert.throws(()=>beginScenario(run,lane,scenario.id,{expectedState:'denied'}),/explicitly expected/);
   run.deployment.identity.fingerprint='d'.repeat(64);
   assert.throws(()=>assertCaptureState(run,lane,{url:lane.url,viewport:scenario.viewport}),/generation\/source/);
+});
+
+test('real UI table selection imports an owned inspector PNG and retains its actual URL',async t=>{
+  const f=fixture(), fs=await sessionFixture(t), workspace=`ws_${'6'.repeat(32)}`, tableId=`table_${'9'.repeat(32)}`;
+  f.lane.url=`/?workspace=${workspace}`;f.lane.resources={localWorkspaceId:workspace};
+  await bindNative(f.run,f.lane,fs.session,fs.browserRoot);
+  beginScenario(f.run,f.lane,f.scenario.id,{},new Date(Date.now()-1000).toISOString());
+  const url=workspaceNavigationHref(new URL(f.lane.url,f.run.baseURL),{workspaceId:workspace,layer:'tables',tableId,table:'qa_pilot_items'});
+  assert.equal(url,`/?workspace=${workspace}&tableId=${tableId}&table=qa_pilot_items`);
+  const file=join(fs.session,'output','inspector.png');await writeFile(file,png());
+  const capture=await importNativeFile(f.run,f.lane,file,{runDir:join(fs.directory,'qa-test'),browserRoot:fs.browserRoot,url,viewport:f.scenario.viewport});
+  assert.equal(capture.url,new URL(url,f.run.baseURL).href);
+  assert.equal(f.lane.currentScenario.url,new URL(f.lane.url,f.run.baseURL).href);
+  assert.equal(capture.scenarioAttempt,f.lane.currentScenario.id);
+});
+
+test('workspace selection parameters stay bounded to the exact assigned product/resource/state',()=>{
+  const f=fixture(), workspace=`ws_${'6'.repeat(32)}`, other=`ws_${'7'.repeat(32)}`;
+  f.lane.url=`/?workspace=${workspace}`;f.lane.resources={localWorkspaceId:workspace};beginScenario(f.run,f.lane,f.scenario.id);
+  const capture=url=>assertCaptureState(f.run,f.lane,{url,viewport:f.scenario.viewport});
+  for(const suffix of ['&table=order+items','&layer=tables&tableId=table-1','&layer=views&viewId=view-1&view=monthly_sales&viewKind=materialized_view','&layer=sql']) {
+    assert.equal(capture(f.lane.url+suffix).url,new URL(f.lane.url+suffix,f.run.baseURL).href);
+  }
+  for(const url of [
+    `/?workspace=${other}&table=qa_pilot_items`,
+    `/schemoo?workspace=${workspace}&table=qa_pilot_items`,
+    `/account?workspace=${workspace}&table=qa_pilot_items`,
+    `https://example.test/?workspace=${workspace}&table=qa_pilot_items`,
+    `https://someone@localhost:8001/?workspace=${workspace}&table=qa_pilot_items`,
+    f.lane.url+'&workspace='+other,
+    f.lane.url+'&table=a&table=b',
+    f.lane.url+'&table=',f.lane.url+'&table='+('x'.repeat(257)),
+    f.lane.url+'&layer=unknown',f.lane.url+'&layer=sql&table=qa_pilot_items',
+    f.lane.url+'&view=qa_pilot_items',f.lane.url+'&layer=views&viewKind=unknown',
+    f.lane.url+'&table=qa_pilot_items&redirect=other',f.lane.url+'#sql=SELECT+1',
+  ]) assert.throws(()=>capture(url),/route\/resource/,url);
+  assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,{url:`/?workspace=${other}`}),/explicitly assigned/);
+  const valid=f.lane.url+'&table=qa_pilot_items';
+  assert.throws(()=>assertCaptureState(f.run,f.lane,{url:valid,viewport:{width:390,height:844}}),/viewport/);
+  f.lane.generation++;assert.throws(()=>capture(valid),/generation\/source/);f.lane.generation--;
+  f.run.deployment.identity.fingerprint='b'.repeat(64);assert.throws(()=>capture(valid),/generation\/source/);f.run.deployment.identity.fingerprint=fingerprint;
+  f.scenario.product='schemoo';assert.throws(()=>capture(valid),/route\/resource/);f.scenario.product='schemii';
+  f.lane.deniedProducts=['schemii'];beginScenario(f.run,f.lane,f.scenario.id,{expectedState:'denied'});
+  assert.equal(capture('/account').url,new URL('/account',f.run.baseURL).href);
+  assert.throws(()=>capture('/account?table=qa_pilot_items'),/route\/resource/);
+  assert.throws(()=>capture(valid),/route\/resource/);
+});
+
+test('explicit scenario selection and fixed query values cannot drift during workspace captures',()=>{
+  const f=fixture(), workspace=`ws_${'6'.repeat(32)}`;
+  f.lane.url=`/?workspace=${workspace}&campaign=preview&tableId=table-1`;beginScenario(f.run,f.lane,f.scenario.id);
+  const capture=url=>assertCaptureState(f.run,f.lane,{url,viewport:f.scenario.viewport});
+  assert.ok(capture(f.lane.url+'&table=qa_pilot_items'));
+  assert.throws(()=>capture(f.lane.url.replace('table-1','table-2')+'&table=qa_pilot_items'),/route\/resource/);
+  assert.throws(()=>capture(f.lane.url.replace('preview','other')+'&table=qa_pilot_items'),/route\/resource/);
+  assert.throws(()=>capture(f.lane.url.replace('&tableId=table-1','')+'&table=qa_pilot_items'),/route\/resource/);
 });
 
 test('explicit expected denied state is current scenario evidence, never a blanket account-page pass',()=>{
