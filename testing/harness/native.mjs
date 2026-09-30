@@ -5,6 +5,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, readFile, readdir, lstat, realpath, readlink, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
+import { readWorkspaceNavigation } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
+import { workerCleanupReasons } from './leases.mjs';
 
 export const nativeMode = run => run.browser === 'native';
 export function nativeBrowserRoots(root) {
@@ -164,11 +166,31 @@ export function beginScenario(run, lane, scenarioId, request = {}, now = new Dat
   lane.currentScenario = session;
   return session;
 }
+const selectionParameters = new Set(['layer', 'tableId', 'table', 'viewId', 'view', 'viewKind']);
+function captureRouteMatches(lane, active, actual, expected) {
+  if (actual.origin !== expected.origin || actual.pathname !== expected.pathname || actual.hash !== expected.hash || actual.username || actual.password) return false;
+  const actualEntries = [...actual.searchParams];
+  if (new Set(actualEntries.map(([name]) => name)).size !== actualEntries.length) return false;
+  if (actual.search === expected.search) return true;
+  const scenario = lane.scenarios.find(item => item.id === active.scenario);
+  if (active.expectedState !== 'product' || scenario?.product !== 'schemii' || expected.pathname !== '/') return false;
+  const assigned = readWorkspaceNavigation(expected), selected = readWorkspaceNavigation(actual);
+  if (!assigned.workspaceId || selected.workspaceId !== assigned.workspaceId) return false;
+  for (const [name, value] of actualEntries) {
+    if (selectionParameters.has(name) && selected[name] !== value) return false;
+  }
+  // An explicitly assigned selection remains part of its scenario's expected state.
+  for (const name of selectionParameters) {
+    if (expected.searchParams.has(name) && actual.searchParams.get(name) !== expected.searchParams.get(name)) return false;
+  }
+  const fixedQuery = url => [...url.searchParams].filter(([name]) => !selectionParameters.has(name)).sort(([a], [b]) => a.localeCompare(b));
+  return isDeepStrictEqual(fixedQuery(actual), fixedQuery(expected));
+}
 export function assertCaptureState(run, lane, input, now = new Date().toISOString()) {
   const active = lane.currentScenario;
   if (!active || active.phase !== 'scenario' || active.generation !== lane.generation || active.agent !== lane.agent || active.source !== run.deployment?.identity?.fingerprint) throw new Error('Evidence requires a current scenario-begin in this claimed generation/source.');
   const actual = new URL(input.url, run.baseURL), expected = new URL(active.url);
-  if (actual.origin !== expected.origin || actual.pathname !== expected.pathname || actual.search !== expected.search || actual.username || actual.password) throw new Error('Capture route/resource does not match the current assigned scenario.');
+  if (!captureRouteMatches(lane, active, actual, expected)) throw new Error('Capture route/resource does not match the current assigned scenario.');
   if (input.viewport?.width !== active.viewport.width || input.viewport?.height !== active.viewport.height) throw new Error('Capture viewport does not match the current assigned scenario.');
   return { scenario: active.scenario, scenarioAttempt: active.id, generation: active.generation, agent: lane.agent, source: active.source,
     resources: active.resources, phase: 'scenario', url: actual.href, viewport: { ...active.viewport }, at: now };
@@ -298,6 +320,7 @@ export function acceptance(run) {
   const reasons = [];
   let reviewed = 0;
   if(run.recordingStatus === 'unavailable')reasons.push('evidence recording unavailable');
+  for (const lane of run.lanes) for (const reason of workerCleanupReasons(lane)) reasons.push(`${lane.id}: ${reason}`);
   for (const lane of testers) for (const scenario of lane.scenarios) {
     const attempt = scenario.attempts?.at(-1);
     if (scenario.functional !== 'passed' || scenario.visual !== 'passed') reasons.push(`${lane.id}/${scenario.id}: execution gap`);
@@ -312,4 +335,25 @@ export function acceptance(run) {
   if (nativeMode(run)) for (const lane of testers) if(!lane.native?.authentication || lane.native.authentication.source !== run.deployment?.identity?.fingerprint)reasons.push(`${lane.id}: native authenticated UI observation pending`);
   if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed')) reasons.push(`${lane.id}: native transport cleanup pending`);
   return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0), completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0), reviewed };
+}
+
+/** Fence before any closure prerequisite, so interrupted owners can be released. */
+export async function recoverNativeLane(run,lane,{invalidate,persist,drain,closeOldTransport,prepare}) {
+  if(!nativeMode(run)||run.controller!=='t3'||['complete','queued'].includes(lane.status))throw new Error('Native recovery requires an active, paused or blocked native lane.');
+  const owner={agent:lane.agent,generation:lane.generation};
+  lane.status='paused';lane.generation++;invalidate(lane);
+  lane.recovery={status:'fenced',...owner,pending:pendingScenarios(lane).map(scenario=>scenario.id),reconciliationRequired:true,at:new Date().toISOString()};
+  await persist();
+  try {
+    await drain();
+    if(lane.native)await closeOldTransport(lane);
+    await prepare(lane);
+    lane.recovery.status='ready-for-owned-state-reconciliation';
+    await persist();
+    return {lane:lane.id,status:lane.status,generation:lane.generation,pending:lane.recovery.pending,reconcile:'Inspect saved state before repeating an uncertain write.'};
+  } catch(error) {
+    lane.status='paused';lane.recovery.status='blocked';
+    lane.recovery.reason='Old native context/transport or stable readiness is unresolved; preserve ownership and reconcile before reassignment.';
+    await persist();throw error;
+  }
 }

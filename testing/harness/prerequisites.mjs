@@ -38,3 +38,13 @@ export function assertScenarioPrerequisite(lane, scenario) {
     throw new Error(`Prerequisite ${scenario.dependsOn} must pass before saved-state readback; this is not independent creation coverage.`);
   }
 }
+
+/** Initial fixtures are asserted until first dispatch, not after an owned write. */
+export function readinessChecks(lane) {
+  const priorClaim=lane.dispatchedAt || (typeof lane.agent==='string'&&lane.agent.trim()) || lane.scenarios?.some(scenario=>scenario.attempts?.length);
+  const phase=priorClaim?'recovery':'initial';
+  const checks=lane.checks || [];
+  for(const check of checks)if(check.phase!==undefined&&!['initial','stable'].includes(check.phase))throw new Error('Fixture check phase must be initial or stable.');
+  const selected=checks.filter(check=>phase==='initial'||check.phase!=='initial');
+  return {phase,checks:selected,initialStateChecks:checks.filter(check=>check.phase==='initial').map(check=>check.path),reconciliationRequired:phase==='recovery'};
+}

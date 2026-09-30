@@ -16,7 +16,7 @@ from schemii.common.connections.store import (
     ConnectionCredentialUnreadableError,
     ConnectionStorageUnavailableError,
 )
-from schemii.common.errors import MetadataStorageUnavailableError
+from schemii.common.errors import MetadataCapacityError, MetadataStorageUnavailableError
 from schemii.common.metadata.limit_events import (
     LimitEventNotice,
     new_limit_event,
@@ -75,6 +75,26 @@ def _response(
                 "details": problem.details,
             }
         },
+    )
+
+
+def metadata_storage_error_response(
+    request: Request, error: MetadataStorageUnavailableError
+) -> JSONResponse:
+    """Use the same safe retryable failure inside and outside route middleware."""
+    capacity = isinstance(error, MetadataCapacityError)
+    code = "metadata_capacity_exceeded" if capacity else "metadata_storage_unavailable"
+    log_safe_exception(LOGGER, request, error, status_code=503, error_code=code)
+    return _response(
+        request,
+        ApiProblem(
+            503,
+            code,
+            "Metadata is busy. Try again shortly."
+            if capacity else "Durable metadata is temporarily unavailable",
+            retryable=True,
+        ),
+        headers={"Retry-After": "1"},
     )
 
 
@@ -200,22 +220,7 @@ def install_api_error_handlers(application: FastAPI) -> None:
         request: Request,
         error: MetadataStorageUnavailableError,
     ) -> JSONResponse:
-        log_safe_exception(
-            LOGGER,
-            request,
-            error,
-            status_code=503,
-            error_code="metadata_storage_unavailable",
-        )
-        return _response(
-            request,
-            ApiProblem(
-                503,
-                "metadata_storage_unavailable",
-                str(error),
-                retryable=True,
-            ),
-        )
+        return metadata_storage_error_response(request, error)
 
     @application.exception_handler(ConnectionCredentialUnreadableError)
     async def handle_connection_credential_error(

@@ -437,6 +437,7 @@ def create_app(
             active_services.console.close()
             active_services.migrations.set_execution_waker(None)
             await migration_worker.stop()
+            await asyncio.to_thread(active_services.metadata.close)
 
     application = FastAPI(
         title="Schemii",

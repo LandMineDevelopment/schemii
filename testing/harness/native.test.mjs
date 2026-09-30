@@ -4,7 +4,9 @@ import { mkdtemp, mkdir, writeFile, readFile, utimes, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, acceptance } from './native.mjs';
+import { workspaceNavigationHref } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
+import { recordWorkerExit, recordWorkerBrowserClosure } from './leases.mjs';
+import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -53,6 +55,62 @@ test('wrong resource/route, viewport, unexpected denial and source drift reject 
   assert.throws(()=>beginScenario(run,lane,scenario.id,{expectedState:'denied'}),/explicitly expected/);
   run.deployment.identity.fingerprint='d'.repeat(64);
   assert.throws(()=>assertCaptureState(run,lane,{url:lane.url,viewport:scenario.viewport}),/generation\/source/);
+});
+
+test('real UI table selection imports an owned inspector PNG and retains its actual URL',async t=>{
+  const f=fixture(), fs=await sessionFixture(t), workspace=`ws_${'6'.repeat(32)}`, tableId=`table_${'9'.repeat(32)}`;
+  f.lane.url=`/?workspace=${workspace}`;f.lane.resources={localWorkspaceId:workspace};
+  await bindNative(f.run,f.lane,fs.session,fs.browserRoot);
+  beginScenario(f.run,f.lane,f.scenario.id,{},new Date(Date.now()-1000).toISOString());
+  const url=workspaceNavigationHref(new URL(f.lane.url,f.run.baseURL),{workspaceId:workspace,layer:'tables',tableId,table:'qa_pilot_items'});
+  assert.equal(url,`/?workspace=${workspace}&tableId=${tableId}&table=qa_pilot_items`);
+  const file=join(fs.session,'output','inspector.png');await writeFile(file,png());
+  const capture=await importNativeFile(f.run,f.lane,file,{runDir:join(fs.directory,'qa-test'),browserRoot:fs.browserRoot,url,viewport:f.scenario.viewport});
+  assert.equal(capture.url,new URL(url,f.run.baseURL).href);
+  assert.equal(f.lane.currentScenario.url,new URL(f.lane.url,f.run.baseURL).href);
+  assert.equal(capture.scenarioAttempt,f.lane.currentScenario.id);
+});
+
+test('workspace selection parameters stay bounded to the exact assigned product/resource/state',()=>{
+  const f=fixture(), workspace=`ws_${'6'.repeat(32)}`, other=`ws_${'7'.repeat(32)}`;
+  f.lane.url=`/?workspace=${workspace}`;f.lane.resources={localWorkspaceId:workspace};beginScenario(f.run,f.lane,f.scenario.id);
+  const capture=url=>assertCaptureState(f.run,f.lane,{url,viewport:f.scenario.viewport});
+  for(const suffix of ['&table=order+items','&layer=tables&tableId=table-1','&layer=views&viewId=view-1&view=monthly_sales&viewKind=materialized_view','&layer=sql']) {
+    assert.equal(capture(f.lane.url+suffix).url,new URL(f.lane.url+suffix,f.run.baseURL).href);
+  }
+  for(const url of [
+    `/?workspace=${other}&table=qa_pilot_items`,
+    `/schemoo?workspace=${workspace}&table=qa_pilot_items`,
+    `/account?workspace=${workspace}&table=qa_pilot_items`,
+    `https://example.test/?workspace=${workspace}&table=qa_pilot_items`,
+    `https://someone@localhost:8001/?workspace=${workspace}&table=qa_pilot_items`,
+    f.lane.url+'&workspace='+other,
+    f.lane.url+'&table=a&table=b',
+    f.lane.url+'&table=',f.lane.url+'&table='+('x'.repeat(257)),
+    f.lane.url+'&layer=unknown',f.lane.url+'&layer=sql&table=qa_pilot_items',
+    f.lane.url+'&view=qa_pilot_items',f.lane.url+'&layer=views&viewKind=unknown',
+    f.lane.url+'&table=qa_pilot_items&redirect=other',f.lane.url+'#sql=SELECT+1',
+  ]) assert.throws(()=>capture(url),/route\/resource/,url);
+  assert.throws(()=>beginScenario(f.run,f.lane,f.scenario.id,{url:`/?workspace=${other}`}),/explicitly assigned/);
+  const valid=f.lane.url+'&table=qa_pilot_items';
+  assert.throws(()=>assertCaptureState(f.run,f.lane,{url:valid,viewport:{width:390,height:844}}),/viewport/);
+  f.lane.generation++;assert.throws(()=>capture(valid),/generation\/source/);f.lane.generation--;
+  f.run.deployment.identity.fingerprint='b'.repeat(64);assert.throws(()=>capture(valid),/generation\/source/);f.run.deployment.identity.fingerprint=fingerprint;
+  f.scenario.product='schemoo';assert.throws(()=>capture(valid),/route\/resource/);f.scenario.product='schemii';
+  f.lane.deniedProducts=['schemii'];beginScenario(f.run,f.lane,f.scenario.id,{expectedState:'denied'});
+  assert.equal(capture('/account').url,new URL('/account',f.run.baseURL).href);
+  assert.throws(()=>capture('/account?table=qa_pilot_items'),/route\/resource/);
+  assert.throws(()=>capture(valid),/route\/resource/);
+});
+
+test('explicit scenario selection and fixed query values cannot drift during workspace captures',()=>{
+  const f=fixture(), workspace=`ws_${'6'.repeat(32)}`;
+  f.lane.url=`/?workspace=${workspace}&campaign=preview&tableId=table-1`;beginScenario(f.run,f.lane,f.scenario.id);
+  const capture=url=>assertCaptureState(f.run,f.lane,{url,viewport:f.scenario.viewport});
+  assert.ok(capture(f.lane.url+'&table=qa_pilot_items'));
+  assert.throws(()=>capture(f.lane.url.replace('table-1','table-2')+'&table=qa_pilot_items'),/route\/resource/);
+  assert.throws(()=>capture(f.lane.url.replace('preview','other')+'&table=qa_pilot_items'),/route\/resource/);
+  assert.throws(()=>capture(f.lane.url.replace('&tableId=table-1','')+'&table=qa_pilot_items'),/route\/resource/);
 });
 
 test('explicit expected denied state is current scenario evidence, never a blanket account-page pass',()=>{
@@ -129,6 +187,60 @@ test('distinct hash-bound reviewer persists acceptance, findings and transport c
   assert.match(acceptance(f.run).reasons.join(),/adjudication/);
   f.run.findings=[];f.lane.native.cleanup.transport='live';
   assert.match(acceptance(f.run).reasons.join(),/cleanup pending/);
+});
+
+function reviewedLegacyFixture() {
+  const f=attemptedFixture();f.run.browser='isolated';f.run.controller='codex';
+  inspectionReceipt(f.capture,f.reviewer.agent,{tool:'view_image',invocation:'independent recorded image view',note:'Expected owned saved table; actual owned saved table.'});
+  recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'accepted',note:'Independent owned persistence and visual state match.'});
+  return f;
+}
+test('reviewed legacy and native cases stay pending for owned lifecycle, crash and recording cleanup',()=>{
+  const f=reviewedLegacyFixture();f.lane.status='paused';
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  for(const status of ['termination-requested','cleanup-pending','controller-intervention-required']) {
+    f.lane.workerLifecycle={status,generation:1,reason:'lease-expired',error:'Controlled unresolved closure'};
+    assert.equal(acceptance(f.run).status,'review-pending');assert.match(acceptance(f.run).reasons.join(),/owned worker cleanup pending/);
+  }
+  delete f.lane.workerLifecycle;f.lane.workerExit={cleanup:'pending'};
+  assert.match(acceptance(f.run).reasons.join(),/worker\/recording drain pending/);
+  f.run.browser='native';assert.equal(acceptance(f.run).status,'review-pending');
+  delete f.lane.workerExit;f.lane.workerLifecycle={status:'stopped',recording:'unavailable'};
+  assert.match(acceptance(f.run).reasons.join(),/recording unavailable/);
+  f.lane.workerLifecycle={status:'stopped',workerCleanup:'pending',browserCleanup:'pending'};
+  assert.match(acceptance(f.run).reasons.join(),/worker\/recording stage pending/);assert.match(acceptance(f.run).reasons.join(),/browser closure pending/);
+  delete f.lane.workerLifecycle;f.reviewer.workerLifecycle={status:'cleanup-pending'};
+  assert.match(acceptance(f.run).reasons.join(),/lane-2: owned worker cleanup pending/);
+});
+test('acceptance waits for matching worker and browser drain; old generation cannot clear a fresh owner',()=>{
+  const f=reviewedLegacyFixture(), owner={pid:123,birthTick:'456',generation:2};f.lane.worker=owner;
+  const exit={...owner,laneId:f.lane.id,code:0,reason:'completed',cleanup:'pending'};
+  assert.match(acceptance(f.run).reasons.join(),/release unobserved/);
+  recordWorkerExit(f.lane,exit);assert.equal(acceptance(f.run).status,'review-pending');
+  recordWorkerExit(f.lane,{...exit,cleanup:'stopped'});
+  assert.equal(f.lane.workerLifecycle.status,'cleanup-pending');assert.equal(acceptance(f.run).status,'review-pending');
+  recordWorkerBrowserClosure(f.lane,owner);assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  f.lane.worker={...owner,generation:3};f.lane.generation=3;
+  const fresh={...exit,generation:3,cleanup:'pending'};recordWorkerExit(f.lane,fresh);
+  assert.equal(recordWorkerExit(f.lane,{...exit,cleanup:'stopped'}),false);
+  assert.equal(recordWorkerBrowserClosure(f.lane,owner),false);
+  assert.equal(f.lane.workerExit.generation,3);assert.equal(f.lane.workerExit.cleanup,'pending');assert.equal(acceptance(f.run).status,'review-pending');
+  assert.equal(f.lane.workerExitHistory.at(-1).applied,false);
+  recordWorkerExit(f.lane,{...fresh,cleanup:'stopped'});recordWorkerBrowserClosure(f.lane,f.lane.worker);
+  assert.equal(acceptance(f.run).status,'reviewed-acceptance');
+  recordWorkerExit(f.lane,{...fresh,code:7,reason:'agent-failed',cleanup:'stopped'});
+  assert.equal(acceptance(f.run).status,'review-pending');assert.match(acceptance(f.run).reasons.join(),/worker execution failed.*exit 7/);
+  assert.equal(f.lane.workerExit.code,7);assert.equal(f.scenario.functional,'passed');
+  // A new recorded pool owner can crash before start() publishes its return.
+  f.lane.generation=4;f.lane.workerLaunchPending=true;
+  const startup={...fresh,pid:999,birthTick:'888',generation:4,code:7,reason:'agent-failed',cleanup:'pending'};
+  assert.equal(recordWorkerExit(f.lane,startup),true);assert.equal(f.lane.worker.pid,999);assert.equal(f.lane.workerExit.generation,4);
+  assert.equal(recordWorkerExit(f.lane,{...fresh,cleanup:'stopped'}),false);assert.equal(f.lane.workerExit.cleanup,'pending');
+  const outstanding=f.lane.workerLifecycle;f.lane.worker={...f.lane.worker,generation:5};f.lane.generation=5;
+  const replacement={...startup,generation:5,code:0,reason:'completed',cleanup:'stopped'};
+  recordWorkerExit(f.lane,replacement);recordWorkerBrowserClosure(f.lane,f.lane.worker);
+  assert.ok(f.lane.workerLifecycleHistory.includes(outstanding));assert.equal(outstanding.status,'cleanup-pending');
+  assert.match(acceptance(f.run).reasons.join(),/earlier owned worker cleanup pending/);
 });
 
 test('recovery briefs include pending scenarios only and preserve failed/completed history',()=>{
@@ -216,4 +328,27 @@ test('latest current-attempt review governs acceptance; duplicate receipts never
   recordReview(f.run,f.reviewer,f.lane,f.scenario.id,{verdict:'confirmed-defect',note:'Later independent reproduction reveals a defect.'});
   assert.equal(acceptance(f.run).status,'review-pending');assert.equal(acceptance(f.run).reviewed,0);
   assert.match(acceptance(f.run).reasons.join(),/confirmed-defect/);
+});
+
+
+test('native recovery fences interrupted owner before browser-close prerequisite and preserves peers',async()=>{
+  const f=fixture();f.lane.native={sessionId:'owned-connection'};let token='old',persisted=0;
+  await assert.rejects(recoverNativeLane(f.run,f.lane,{
+    invalidate:()=>{token=null;},persist:async()=>{persisted++;},drain:async()=>{},
+    closeOldTransport:async lane=>{assert.equal(lane.status,'paused');assert.equal(lane.generation,3);assert.equal(token,null);throw new Error('browser_close observation required');},
+    prepare:async()=>{throw new Error('must not prepare a live context');},
+  }),/browser_close/);
+  assert.equal(f.lane.status,'paused');assert.equal(f.lane.recovery.status,'blocked');assert.equal(persisted,2);
+  assert.equal(f.reviewer.status,'claimed');assert.equal(f.reviewer.generation,2);assert.equal(f.lane.native.sessionId,'owned-connection');
+});
+
+test('closed native recovery prepares pending-only reconciliation while retaining completed results',async()=>{
+  const f=fixture();f.lane.native={sessionId:'owned-connection'};f.lane.dispatchedAt='previous-owned-claim';
+  f.lane.scenarios.push({...f.scenario,id:'completed-case',functional:'passed',visual:'passed',note:'Saved initial evidence remains retained.'});
+  let closed=false,prepared=false;
+  const result=await recoverNativeLane(f.run,f.lane,{invalidate:()=>{},persist:async()=>{},drain:async()=>{},
+    closeOldTransport:async()=>{closed=true;},prepare:async lane=>{assert.equal(closed,true);prepared=true;lane.status='ready';lane.agent=null;},
+  });
+  assert.equal(prepared,true);assert.deepEqual(result.pending,[f.scenario.id]);assert.equal(result.status,'ready');
+  assert.equal(f.lane.scenarios[1].functional,'passed');assert.equal(f.lane.recovery.reconciliationRequired,true);
 });

@@ -606,11 +606,8 @@ class PostgresAiRepository:
 
     @contextmanager
     def _transaction(self) -> Iterator[Any]:
-        connection = self._connection_factory()
-        try:
+        with self._connection_factory() as connection:
             with connection.transaction(): yield connection
-        except Exception: connection.rollback(); raise
-        finally: connection.close()
 
     @staticmethod
     def _chat(row) -> SchemiiChat:

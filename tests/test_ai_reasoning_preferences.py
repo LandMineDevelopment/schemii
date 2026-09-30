@@ -86,6 +86,12 @@ def test_postgres_reasoning_column_roundtrip_and_old_row_default():
         'default_provider_id':chat.provider_id,'default_model_id':chat.model_id,
         'default_reasoning_effort':'max','capabilities':chat.capabilities.model_dump()}]
     connection = MagicMock()
+    connection.__enter__.return_value = connection
+    def close_transaction(exc_type, _value, _traceback):
+        if exc_type is not None:
+            connection.rollback()
+        connection.close()
+    connection.__exit__.side_effect = close_transaction
     connection.cursor.return_value = cursor
     connection.transaction.return_value = nullcontext()
     postgres = PostgresAiRepository(lambda:connection)

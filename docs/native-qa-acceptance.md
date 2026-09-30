@@ -101,6 +101,13 @@ worker's session-file and brief paths:
    come from the bound live connection's output, postdate begin, and have exact
    viewport PNG dimensions. Preserve previous evidence for reports; it cannot
    satisfy a new scenario/generation.
+   Record the actual browser URL, including visible selection parameters. For
+   Schemii's unchanged owned workspace route, the application's bounded
+   `tableId`/`table`, `layer` and `viewId`/`view`/`viewKind` navigation can accompany
+   a capture. Explicitly assigned selections remain required. Added unknown or
+   duplicate query keys, changed fixed query values, fragments, workspaces,
+   products and account/denial routes remain rejected; do not strip the URL or
+   substitute the expected route to make a screenshot pass.
 6. Actually inspect the fresh image inline or through `view_image`, then record
    `./test.sh inspect --session-file SESSION --evidence lane-1/image-ID.png --note 'Concrete expected and actual visible geometry/readability' --args-json '{"tool":"native-inline-image","invocation":"actual screenshot/image delivery reference"}'`.
    `view_image` is the other supported tool label. The receipt records the image
