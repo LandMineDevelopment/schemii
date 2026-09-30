@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, cp, readFile, writeFile, access, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -181,7 +182,12 @@ test('actual controller prepares before observation exists and admits no arrival
   const marker = '  const results = [], before = await observation(observerFile);';
   assert.ok(source.includes(marker));
   await writeFile(engine, "import {appendFile as fixtureAppendFile} from 'node:fs/promises';\n" +
-    source.replace(marker, `  await fixtureAppendFile(${JSON.stringify(arrivalFile)}, 'started\\n'); return {failures:[]};\n${marker}`));
+    source.replace(marker, `  process.send('fixture-engine-started');
+  await new Promise(resolve=>process.once('message',message=>{
+    if(message!=='release-fixture-arrival')throw new Error('unexpected_fixture_message');resolve();
+  }));
+  await fixtureAppendFile(${JSON.stringify(arrivalFile)}, 'started\\n');
+  process.send('fixture-arrival-written');return {failures:[]};\n${marker}`));
   const spec = plan({ active: 1, workload: 'report-1' });
   await writeJSON(join(dir, 'manifest-private.json'), { version: 1, id, status: 'preparing', accounts: [],
     plan: spec, source: sourceIdentity(checkout) });
@@ -190,7 +196,7 @@ test('actual controller prepares before observation exists and admits no arrival
   await writeJSON(join(dir, 'control-private.json'), control);
   await writeJSON(join(dir, 'controller-launch.json'), { version: 1, runId: id, status: 'pending', runtime });
   const child = spawn(process.execPath, ['testing/load/controller.mjs', id], { cwd: checkout, detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'] });
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   const done = observeChild(child); processes.push([child, done]);
   let stderr = ''; child.stdout.resume(); child.stderr.on('data', chunk => { stderr += chunk; });
   const owner = { pid: child.pid, birthTick: await birthTick(child.pid) };
@@ -216,11 +222,21 @@ test('actual controller prepares before observation exists and admits no arrival
     await assert.rejects(access(arrivalFile), { code: 'ENOENT' });
   }
   await writeJSON(observerFile, { at: new Date().toISOString(), appRssBytes: 1, appMemoryLimitBytes: 100 });
+  const engineStarted = once(child, 'message');
   const starts = await Promise.allSettled([rpc(control, 'run'), rpc(control, 'run')]);
   assert.equal(starts.filter(result => result.status === 'fulfilled').length, 1);
   assert.match(starts.find(result => result.status === 'rejected').reason.message, /run_not_ready/);
+  // RPC acceptance schedules the engine. Hold its write until acceptance to
+  // prove admission and observable arrival completion are separate events.
+  assert.equal((await engineStarted)[0], 'fixture-engine-started');
+  assert.equal((await privateJSON(join(dir, 'manifest-private.json'))).status, 'running');
+  await assert.rejects(access(arrivalFile), { code: 'ENOENT' });
+  const arrivalWritten = once(child, 'message');
+  child.send('release-fixture-arrival');
+  assert.equal((await arrivalWritten)[0], 'fixture-arrival-written');
   assert.equal(await readFile(arrivalFile, 'utf8'), 'started\n');
   const result = await rpc(control, 'cleanup'); assert.equal(result.status, 'cleaned');
   assert.equal((await done).code, 0, stderr);
+  assert.equal(await birthTick(owner.pid), null);
   await assert.rejects(access(runtime.path), { code: 'ENOENT' });
 });
