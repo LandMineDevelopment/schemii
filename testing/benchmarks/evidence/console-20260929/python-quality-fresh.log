@@ -1,0 +1,32 @@
++ /tmp/schema_foundry_issue90_venv/bin/python --version
+Python 3.14.7
+exit_code=0
++ /tmp/schema_foundry_issue90_venv/bin/python -m mypy --version
+mypy 2.3.1 (compiled: yes)
+exit_code=0
++ /tmp/schema_foundry_issue90_venv/bin/python -m ruff --version
+ruff 0.16.9
+exit_code=0
++ /tmp/schema_foundry_issue90_venv/bin/python -m mypy --no-incremental src/schemii/schemoo/join_types.py src/schemii/schemer/time_analysis.py
+src/schemii/common/metadata/secrets.py:29: error: Module has no attribute "binascii"  [attr-defined]
+src/schemii/common/connections/store.py:220: error: Argument 5 to "ResolvedPostgresConnection" has incompatible type "**dict[str, object]"; expected "str"  [arg-type]
+src/schemii/common/connections/store.py:220: error: Argument 5 to "ResolvedPostgresConnection" has incompatible type "**dict[str, object]"; expected "int"  [arg-type]
+src/schemii/common/connections/store.py:220: error: Argument 5 to "ResolvedPostgresConnection" has incompatible type "**dict[str, object]"; expected "PostgresSslMode"  [arg-type]
+src/schemii/common/ai/instance_provider_store.py:119: error: "_Encryption" has no attribute "_cipher"  [attr-defined]
+src/schemii/common/ai/instance_provider_store.py:122: error: "_Encryption" has no attribute "_cipher"  [attr-defined]
+src/schemii/common/ai/instance_provider_store.py:248: error: Incompatible types in assignment (expression has type "str | None", variable has type "str")  [assignment]
+src/schemii/common/ai/instance_provider_store.py:474: error: Incompatible types in assignment (expression has type "str | None", variable has type "str")  [assignment]
+src/schemii/common/ai/credential_store.py:39: error: "_Encryption" has no attribute "_cipher"  [attr-defined]
+src/schemii/common/ai/credential_store.py:42: error: "_Encryption" has no attribute "_cipher"  [attr-defined]
+src/schemii/common/connections/policy.py:123: error: Item "int" of "str | int | None" has no attribute "split"  [union-attr]
+src/schemii/common/connections/policy.py:123: error: Item "None" of "str | int | None" has no attribute "split"  [union-attr]
+src/schemii/common/connections/policy.py:124: error: Item "int" of "str | int | None" has no attribute "split"  [union-attr]
+src/schemii/common/connections/policy.py:124: error: Item "None" of "str | int | None" has no attribute "split"  [union-attr]
+src/schemii/common/connections/policy.py:135: error: Item "int" of "str | int | None" has no attribute "split"  [union-attr]
+src/schemii/common/connections/policy.py:135: error: Item "None" of "str | int | None" has no attribute "split"  [union-attr]
+src/schemii/common/connections/policy.py:142: error: Argument "database" to "MetadataControlPlaneTargetPolicy" has incompatible type "str | int"; expected "str"  [arg-type]
+src/schemii/common/connections/service.py:122: error: Function "schemii.common.connections.service.ConnectionService.list" is not valid as a type  [valid-type]
+src/schemii/common/connections/service.py:122: note: Perhaps you need "Callable[...]" or a callback protocol?
+src/schemii/schemer/frontend.py:15: error: Argument "methods" to "api_route" of "FastAPI" has incompatible type "tuple[str, str]"; expected "list[str] | None"  [arg-type]
+Found 19 errors in 7 files (checked 2 source files)
+exit_code=1

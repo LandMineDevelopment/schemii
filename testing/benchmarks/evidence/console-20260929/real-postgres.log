@@ -1,0 +1,34 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-8.4.2, pluggy-1.6.0 -- /home/kasey/projects/schema_foundry-worktrees/audit-console-bounds/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/kasey/projects/schema_foundry-worktrees/audit-console-bounds
+configfile: pyproject.toml
+plugins: anyio-4.14.2
+collecting ... collected 24 items
+
+tests/integration/test_raw_session_lifecycle.py::test_lifespan_expiry_rolls_back_releases_lock_backend_and_admission PASSED [  4%]
+tests/integration/test_raw_session_lifecycle.py::test_shutdown_cancel_before_wire_dispatch_never_starts_sql_or_copy[sql] PASSED [  8%]
+tests/integration/test_raw_session_lifecycle.py::test_shutdown_cancel_before_wire_dispatch_never_starts_sql_or_copy[copy_upload] PASSED [ 12%]
+tests/integration/test_raw_session_lifecycle.py::test_shutdown_cancel_before_wire_dispatch_never_starts_sql_or_copy[copy_download] PASSED [ 16%]
+tests/integration/test_raw_session_lifecycle.py::test_raw_active_cancel_and_next_operation_recover_without_statement_timeout[each_statement] PASSED [ 20%]
+tests/integration/test_raw_session_lifecycle.py::test_raw_active_cancel_and_next_operation_recover_without_statement_timeout[whole_run] PASSED [ 25%]
+tests/integration/test_postgres_gateway_execution.py::test_execute_migration_requires_reviewed_fingerprint_and_returns_commit_evidence PASSED [ 29%]
+tests/integration/test_postgres_gateway_execution.py::test_failed_multi_step_migration_rolls_back_every_target_statement PASSED [ 33%]
+tests/integration/test_postgres_gateway_execution.py::test_required_column_empty_table_precondition_is_rechecked_under_lock PASSED [ 37%]
+tests/integration/test_postgres_gateway_execution.py::test_incremental_console_preserves_empty_metadata_commands_and_exact_once_dml PASSED [ 41%]
+tests/integration/test_postgres_gateway_execution.py::test_incremental_console_caps_real_results_and_restores_protocol[100000-8-262144-console.results.page_memory_bytes] PASSED [ 45%]
+tests/integration/test_postgres_gateway_execution.py::test_incremental_console_caps_real_results_and_restores_protocol[100000-8192-262144-console.results.page_memory_bytes] PASSED [ 50%]
+tests/integration/test_postgres_gateway_execution.py::test_incremental_console_caps_real_results_and_restores_protocol[2-524288-262144-console.results.maximum_cell_bytes] PASSED [ 54%]
+tests/integration/test_postgres_gateway_execution.py::test_incremental_returning_limit_rolls_back_whole_script_without_replay PASSED [ 58%]
+tests/integration/test_postgres_gateway_execution.py::test_named_read_wide_page_carries_one_row_without_skipping PASSED [ 62%]
+tests/integration/test_postgres_gateway_execution.py::test_named_cell_limit_reports_boundary_and_releases_snapshot_admission[False] PASSED [ 66%]
+tests/integration/test_postgres_gateway_execution.py::test_named_cell_limit_reports_boundary_and_releases_snapshot_admission[True] PASSED [ 70%]
+tests/integration/test_postgres_gateway_execution.py::test_incremental_cancel_rolls_back_and_restores_owned_admission PASSED [ 75%]
+tests/integration/test_postgres_gateway_execution.py::test_fixed_scalar_named_batch_remains_cancellable_and_releases_admission[False] PASSED [ 79%]
+tests/integration/test_postgres_gateway_execution.py::test_fixed_scalar_named_batch_remains_cancellable_and_releases_admission[True] PASSED [ 83%]
+tests/integration/test_postgres_gateway_execution.py::test_named_fixed_scalar_extremes_preserve_every_row_and_export_snapshot PASSED [ 87%]
+tests/integration/test_query_cancellation_postgres.py::test_stop_interrupts_real_pg_sleep[False] PASSED [ 91%]
+tests/integration/test_query_cancellation_postgres.py::test_stop_interrupts_real_pg_sleep[True] PASSED [ 95%]
+tests/integration/test_query_cancellation_postgres.py::test_console_cancel_interrupts_retained_fetch_without_chat_scope PASSED [100%]
+
+============================== 24 passed in 2.21s ==============================

@@ -1,0 +1,35 @@
+Measured Console resource evidence for [#132](https://github.com/LandMineDevelopment/schemii/issues/132) and [#133](https://github.com/LandMineDevelopment/schemii/issues/133), 2026-09-29.
+
+The recorded source was `253feb9f9cd259da7519d4e7b5d7c73bc268f2df`, with no tracked source changes. The later evidence commit only retains this report and adds an explicit default-equivalent cell-limit argument to the latency probe. Application driver/lifecycle code is identical to the measured source. The focused commits are `4245175` and `d26bf23` for #132, and `85caac4`, `1ca2bda` and `253feb9` for #133.
+
+The shared host has an Intel i7-11800H, 16 logical CPUs and 31.12 GiB RAM. A private disposable PostgreSQL 18.6 cluster used loopback TCP and an owned Unix socket, independent of the application. Psycopg was 3.3.4; libpq was 18.0. This is a driver/lifecycle measurement, not application UI acceptance or production server capacity. No application deployment or Docker command ran.
+
+`real-postgres.log` retains all 24 real PostgreSQL case IDs: they passed on the first committed-source attempt in 2.21 seconds (3.124 seconds including Python/test setup). The cases independently observe abandoned transaction rollback, lock/backend removal and retained permit reconciliation without a subsequent raw API request; pre-dispatch SQL/COPY shutdown; running raw cancellation and whole-run rollback; exact-once DML; preview caps and protocol drain; named page/export caps; fixed-scalar extremes; managed owner-scoped cancellation; and fresh-read/admission recovery. Deterministic Console/read/cancellation/lifespan checks passed 123 tests in 6.27 seconds. Changed-file lint and formatting passed, including all seven new Python files and the legacy F821/F823 boundary. The cached Python gate initially returned success; a fresh selected-module typing check reports 19 diagnostics in seven untouched modules. Independent review reproduced identical diagnostics from clean baseline `77af33c`. Fresh typing is a known baseline failure, not a passed check; the exact command, tool versions and diagnostics are retained in `python-quality-fresh.log`. Quality/test commands used Python 3.14.7; pinned CI uses Python 3.12 and remains required.
+
+Every RSS attempt used a fresh child process. Page JSON budget was 65,536 bytes, cell JSON budget 262,144 bytes and source column count one. Reported peaks take the maximum of `ru_maxrss`, phase VmRSS and parent `/proc` samples. These methods and sampling granularity differ; values are observations, not sub-MiB physical bounds. The former client-side execute-before-cap path is a faithful buffered reference. Increasing source counts keep current peak RSS within a declared 4 MiB comparison tolerance of the first same-width sample; the observed current ranges are much narrower. This tolerance is for these workloads on this host.
+
+| Workload | Source rows | Largest source cell/row payload | Buffered-reference peak MiB | Current peak MiB |
+| --- | --- | --- | --- | --- |
+| SELECT text | 10,000 / 50,000 / 100,000 | 128 bytes | 87.34 / 93.74 / 101.70 | 85.76 / 85.79 / 85.79 |
+| SELECT text | 1,000 / 10,000 / 30,000 | 8,192 bytes | 94.45 / 165.26 / 322.52 | 85.84 / 85.86 / 85.81 |
+| UPDATE RETURNING text | 1,000 / 10,000 / 30,000 | 8,192 bytes | 94.45 / 165.25 / 322.56 | 85.87 / 85.91 / 85.83 |
+| Named text page | 1,000 / 10,000 / 30,000 | 8,192 bytes | — | 87.30 / 87.31 / 87.33 |
+| Named bigint page | 1,000 / 10,000 / 100,000 | 4 / 5 / 6 bytes in source | — | 87.36 / 87.42 / 87.37 |
+
+Native/object/serialization allowance remains above JSON budget. Relative to each process's before-query RSS, observed increases were at most 0.35 MiB for incremental fixed-width text SELECT, 0.12 MiB for RETURNING, 1.83 MiB for named text and 1.93 MiB for named bigint. These are measured overhead allowances, not hard allocator limits. Each named bigint page received 1,000 rows (largest received cell four bytes); each wide named page received seven rows and retained at most one carry row. Every sample closed its connection and passed a fresh read. RETURNING samples independently checked zero visible visits after rollback.
+
+The bounded pathological case deliberately received one 2,097,152-byte cell before its 256 KiB serialized limit rejected it (`observed=2,097,154`). Peak RSS was 95.38 MiB, 9.84 MiB above its before-query baseline. A single native/predecode value remains capable of allocations beyond the cell cap. No whole-process memory bound is claimed; arbitrarily large single values and many columns remain visible limitations.
+
+The narrow-page benchmark alternated seven fresh snapshots of 1,000 bigint rows, identical JSON conversion and byte checks. The old reference directly reproduces the baseline's one FETCH and straight batch loop. Current fixed-scalar batching made five FETCHes of at most 256 rows. Medians were 4.565 ms current, 4.251 ms old batch and 40.374 ms one-row reference. Current range was 4.424–4.883 ms; old range 4.050–6.085 ms; one-row range 38.125–50.343 ms. The initial 13.4-fold regression from one-row narrow paging is addressed; current median was 7.4% above the old loopback reference. Extra network round trips remain relevant on remote databases. Shared-host timings establish neither production throughput nor headroom.
+
+`report.json` records attempt timings, hardware, source SHA, private fixture ownership and automatic cleanup. `fixture-runner.py` reproduces the owned cluster/check/probe workflow and retains reports in this directory; it requires host `initdb`/`pg_ctl`. Passwords exist only in the temporary mode-0600 password file and child environments. Normal `finally` cleanup called `pg_ctl -m fast -w stop` successfully, all nine recorded PID/start identities disappeared, and `TemporaryDirectory` removed the private cluster/socket/password directory. No manual deletion established resource cleanup. No application/browser transport lifecycle claim is made by this fixture test. The runner has failure/interruption cleanup guards; the recorded run exercised normal completion.
+
+During regression authoring, one expected error-code assertion and three leased-connection context-manager assumptions were corrected to the established API and explicit owner closure. The final committed-source run passed once; tests gained no retries or skips. A timing reference that accidentally reused new pending-tuple copying was discarded before delivery; only the faithful final reference is retained.
+
+Reproduce an explicitly owned host fixture with:
+
+```bash
+PYTHONPATH=src .venv/bin/python testing/benchmarks/evidence/console-20260929/fixture-runner.py
+```
+
+The standalone probe can instead use the documented private `SCHEMII_TEST_METADATA_DSN`/`SCHEMII_TEST_METADATA_PASSWORD` environment. These opt-in real-driver comparisons are outside the default PR feedback path. Database fixture processes and scratch files are disposable; this selected report, raw JSON, verbose test log, server log and runner are retained intentionally.
