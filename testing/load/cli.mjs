@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import net from 'node:net';
-import { open, rm } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
@@ -11,7 +11,7 @@ import { reserveAccounts, releaseAccounts, withFileLock } from '../harness/lease
 import { cleanupFixtures } from './fixtures.mjs';
 import { plan, WORKLOADS, validatePlan } from './plan.mjs';
 import { birthTick, requireStopped } from './engine.mjs';
-import { observeChild, stopChild } from './children.mjs';
+import { observeChild, stopChild, createRuntime, disposeRuntime, runtimeSocket } from './children.mjs';
 import { LOCAL, PREVIEW } from './http.mjs';
 
 const COMMANDS = {
@@ -53,7 +53,6 @@ export async function rpc(control, command) {
     socket.once('end', () => { if (!text.includes('\n')) reject(new Error('controller_disconnected')); });
   });
 }
-function ownedSocket(runId) { return join('/tmp', `schemii-load-${process.getuid()}`, runId, 'controller.sock'); }
 function summary(run) { return { run: run.id, status: run.status, accounts: run.accounts.length,
   workload: run.plan.workload, recipe: run.plan.recipe, report: join(loadPath(run.id), 'report.json'),
   failures: run.result?.failures || [], capacityEligible: run.result?.capacityEligible || false }; }
@@ -95,27 +94,45 @@ cleanup deletes only private receipt-owned report fixtures, revokes load session
         registeredAccounts: (await privateJSON(join(resolve(o['state-dir'] || join(root, '.schemii/testing')), 'registry.json'))).slots.length,
         activeIdentities: accounts.length, profileSharing: 'distinct managed profiles' } };
     await writeJSON(join(dir, 'manifest-private.json'), run);
-    const runtime = join('/tmp', `schemii-load-${process.getuid()}`, id); await privateDir(runtime);
-    await writeJSON(join(dir, 'control-private.json'), { socket: join(runtime, 'controller.sock'), token: randomBytes(32).toString('hex') });
-    await writeJSON(join(dir, 'config-private.json'), { credentialPath, stateDir: resolve(o['state-dir'] || join(root, '.schemii/testing')),
-      observerFile: o['observer-file'] ? resolve(o['observer-file']) : null, allowUnobserved: !!o['allow-unobserved'],
-      binary: o['k6-bin'] ? resolve(o['k6-bin']) : 'k6', origin });
-    await reserveAccounts({ runId: id, runDir: dir, accounts, root });
-    const lock = deploymentLockPath(root), gate = join(dirname(lock), 'qa-startup.lock');
-    const log = await open(join(dir, 'controller-private.log'), 'a', 0o600);
-    let child, completion;
+    let runtime, launch, child, completion, owner, log;
     try {
+      runtime = await createRuntime(id);
+      launch = { version: 1, runId: id, status: 'pending', runtime };
+      // A durable intent exists before a child can be launched. Only a joined
+      // launch can transition it to stopped and permit owner-file recovery.
+      await writeJSON(join(dir, 'controller-launch.json'), launch);
+      await writeJSON(join(dir, 'control-private.json'), { socket: runtimeSocket(id), token: randomBytes(32).toString('hex') });
+      await writeJSON(join(dir, 'config-private.json'), { credentialPath, stateDir: resolve(o['state-dir'] || join(root, '.schemii/testing')),
+        observerFile: o['observer-file'] ? resolve(o['observer-file']) : null, allowUnobserved: !!o['allow-unobserved'],
+        binary: o['k6-bin'] ? resolve(o['k6-bin']) : 'k6', origin });
+      await reserveAccounts({ runId: id, runDir: dir, accounts, root });
+      const lock = deploymentLockPath(root), gate = join(dirname(lock), 'qa-startup.lock');
+      log = await open(join(dir, 'controller-private.log'), 'a', 0o600);
       child = spawn('bash', ['-c', 'exec 4> "$1"; flock --wait 180 4 || exit 4; exec 3> "$2"; if flock --nonblock 3; then export SCHEMII_QA_LEASE_MODE=exclusive; else flock --shared --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_MODE=shared; fi; export SCHEMII_QA_LEASE_FD=3 SCHEMII_QA_GATE_FD=4; exec node "$3" "$4"', 'load-controller', gate, lock,
         join(root, 'testing/load/controller.mjs'), id], { cwd: root, detached: true, stdio: ['ignore', log.fd, log.fd] });
       completion = observeChild(child);
-      child.unref(); await writeJSON(join(dir, 'controller-owner.json'), { pid: child.pid, birthTick: await birthTick(child.pid) });
+      child.unref();
+      const birth = child.pid && await birthTick(child.pid);
+      if (!birth) throw new Error('controller_spawn_failed');
+      owner = { pid: child.pid, birthTick: birth };
+      await writeJSON(join(dir, 'controller-owner.json'), owner);
+      launch.status = 'started'; launch.owner = owner;
+      await writeJSON(join(dir, 'controller-launch.json'), launch);
     } catch (error) {
       // A post-spawn journal failure must join the exact owned process group
-      // before releasing reservations. Failure to reap preserves reservations.
+      // before disposing its runtime or releasing reservations. Unknown
+      // process/directory ownership fails closed and retains the accounts.
       if (child) await stopChild(child, completion);
+      if (runtime) {
+        await disposeRuntime(id, runtime);
+        await writeJSON(join(dir, 'controller-launch.json'), { ...launch, version: 1, runId: id,
+          status: 'stopped', runtime, owner: owner || null });
+      }
+      run.status = 'launch-failed'; run.result = { failures: ['controller_launch_failed'] };
+      await writeJSON(join(dir, 'manifest-private.json'), run);
       await releaseAccounts({ runId: id, root }); throw error;
     }
-    finally { await log.close(); }
+    finally { if (log) await log.close(); }
     for (let i = 0; i < 360; i++) {
       const state = await privateJSON(join(dir, 'manifest-private.json'));
       if (state.status !== 'preparing') { console.log(JSON.stringify(summary(state))); return summary(state); }
@@ -128,11 +145,22 @@ cleanup deletes only private receipt-owned report fixtures, revokes load session
   const control = await privateJSON(join(dir, 'control-private.json'));
   if (command === 'cleanup') {
     return withFileLock(join(dir, 'lifecycle.lock'), async () => {
-      if (control.socket !== ownedSocket(o.run)) throw new Error('controller_socket_ownership_changed');
+      if (control.socket !== runtimeSocket(o.run)) throw new Error('controller_socket_ownership_changed');
       try { const result = await rpc(control, 'cleanup'); console.log(JSON.stringify(result)); return result; }
       catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error; }
       const run = await privateJSON(join(dir, 'manifest-private.json'));
-      await requireStopped(await privateJSON(join(dir, 'controller-owner.json')));
+      const launch = await privateJSON(join(dir, 'controller-launch.json'));
+      if (launch.version !== 1 || launch.runId !== o.run || !['pending', 'started', 'stopped'].includes(launch.status)) throw new Error('unknown_controller_launch');
+      let controllerOwner, joinedLaunch = false;
+      try { controllerOwner = await privateJSON(join(dir, 'controller-owner.json')); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        // Missing owner alone establishes nothing. A stopped receipt is written
+        // only after the launcher's actual ChildProcess/group has been joined.
+        if (launch.status !== 'stopped' || !Object.hasOwn(launch, 'owner')) throw new Error('unknown_controller_owner');
+        controllerOwner = launch.owner; joinedLaunch = true;
+      }
+      if (controllerOwner || !joinedLaunch) await requireStopped(controllerOwner);
       if (run.generatorOwner?.pending) throw new Error('unresolved_generator_launch');
       if (run.generatorOwner?.pid) await requireStopped(run.generatorOwner);
       const config = await privateJSON(join(dir, 'config-private.json'));
@@ -142,9 +170,9 @@ cleanup deletes only private receipt-owned report fixtures, revokes load session
       try {
         await new Promise((resolve, reject) => { const lock = spawn('flock', ['--shared', '3'], { stdio: ['ignore', 'ignore', 'ignore', lease.fd] }); lock.once('error', reject); lock.once('close', code => code === 0 ? resolve() : reject(new Error('cleanup_lease_failed'))); });
         const result = await cleanupFixtures({ dir, credentialMap: await credentials(config.credentialPath), origin: config.origin });
+        await disposeRuntime(o.run, launch.runtime);
         await releaseAccounts({ runId: o.run, root }); run.status = 'cleaned'; run.cleanup = result;
         await writeJSON(join(dir, 'manifest-private.json'), run);
-        await rm(control.socket, { force: true }); await rm(dirname(control.socket), { recursive: true, force: true });
         console.log(JSON.stringify(result)); return result;
       } finally { await lease.close(); }
     });

@@ -4,7 +4,9 @@ import { mkdtemp, rm, writeFile, access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import os from 'node:os';
-import { observeChild, stopChild } from './children.mjs';
+import { randomBytes } from 'node:crypto';
+import { observeChild, stopChild, createRuntime, disposeRuntime, runtimeSocket, awaitControllerHandoff } from './children.mjs';
+import { writeJSON } from '../harness/store.mjs';
 import { runK6, birthTick } from './engine.mjs';
 import { plan } from './plan.mjs';
 
@@ -50,4 +52,38 @@ test('stopping an owned controller-style process group joins descendants and pre
   await stopChild(child, completion, { graceMs: 50 });
   assert.equal(await birthTick(child.pid), null);
   assert.equal(await birthTick(peer.pid), peerBirth);
+});
+test('runtime disposal requires the exact created directory and preserves peers and unknown contents', async t => {
+  const id = `load-runtime-${randomBytes(6).toString('hex')}`, peerId = `${id}-peer`;
+  const owned = await createRuntime(id), peer = await createRuntime(peerId);
+  t.after(async () => { await disposeRuntime(id, owned); await disposeRuntime(peerId, peer); });
+  await assert.rejects(createRuntime(id), { code: 'EEXIST' });
+  await assert.rejects(disposeRuntime(id, { ...owned, inode: owned.inode + 1 }), /runtime_ownership_changed/);
+  await assert.rejects(disposeRuntime(id, null), /unknown_runtime_owner/);
+  const unknown = join(owned.path, 'unknown.txt');
+  await writeFile(unknown, 'fixture-owned unknown content');
+  await assert.rejects(disposeRuntime(id, owned), /unknown_runtime_contents/);
+  await access(unknown); await access(peer.path);
+  // Dispose this planted fixture only after proving it was preserved.
+  await rm(unknown);
+  await writeFile(runtimeSocket(id), 'not a socket');
+  await assert.rejects(disposeRuntime(id, owned), /unknown_runtime_contents/);
+  await access(runtimeSocket(id));
+  await rm(runtimeSocket(id));
+  await disposeRuntime(id, owned);
+  await assert.rejects(access(owned.path), { code: 'ENOENT' });
+  await access(peer.path);
+  await disposeRuntime(id, owned); // stopped cleanup is idempotent
+});
+test('controller handoff blocks application work until its exact process identity is durably recorded', async t => {
+  const dir = await temporary(t), runId = 'load-handoff-fixture';
+  const file = join(dir, 'controller-launch.json'), launch = { version: 1, runId, status: 'pending' };
+  await writeJSON(file, launch);
+  await assert.rejects(awaitControllerHandoff(dir, runId, { timeoutMs: 20 }), /controller_handoff_timeout/);
+  launch.status = 'started'; launch.owner = { pid: process.pid, birthTick: await birthTick(process.pid) };
+  await writeJSON(file, launch); await awaitControllerHandoff(dir, runId);
+  launch.owner.birthTick = 'unowned-birth'; await writeJSON(file, launch);
+  await assert.rejects(awaitControllerHandoff(dir, runId), /controller_handoff_owner_mismatch/);
+  launch.status = 'stopped'; await writeJSON(file, launch);
+  await assert.rejects(awaitControllerHandoff(dir, runId), /controller_launch_stopped/);
 });

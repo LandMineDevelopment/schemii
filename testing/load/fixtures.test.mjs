@@ -4,10 +4,13 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import os from 'node:os';
+import https from 'node:https';
+import tls from 'node:tls';
 import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest } from './fixtures.mjs';
 import { NDJSONOracle, CSVOracle } from './protocol.mjs';
 import { privateJSON, writeJSON } from '../harness/store.mjs';
 import { ProtocolFailure } from './protocol.mjs';
+import { HTTPClient, LOCAL, PREVIEW } from './http.mjs';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(os.tmpdir(), 'schemii-load-fixture-test-'));
@@ -177,4 +180,80 @@ test('failed cleanup revocation preserves its exact private cookie for recovery 
   assert.ok((await privateJSON(join(f.dir, 'fixtures-private.json'))).accounts[0].cleanupCookie);
   f.state.failLogout = false; f.state.drift = false;
   assert.equal((await f.cleanup()).objectsRemaining, 0);
+});
+
+// Publicly embedded, self-signed fixture material; never used by the application.
+const fixtureKey = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgQGNzhCo56l+imQYj
+pbnaw8H59xr2TrYjjwfjDC4kv0KhRANCAAQMVFBMgXx7O+zwGtbgn8TEb8FliFkL
+1Ss/wqjzJ69nH5HCrmId37bQEozYAjR0DHJaJnXcgLIEGaePelXy8/jc
+-----END PRIVATE KEY-----`;
+const fixtureCert = `-----BEGIN CERTIFICATE-----
+MIIBfTCCASOgAwIBAgIUEP3pQB0lN4rzPppRCfpPRbOvlRUwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDkzMDAxNDczM1oXDTQ2MDkyNTAx
+NDczM1owFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAEDFRQTIF8ezvs8BrW4J/ExG/BZYhZC9UrP8Ko8yevZx+Rwq5iHd+20BKM
+2AI0dAxyWiZ13ICyBBmnj3pV8vP43KNTMFEwHQYDVR0OBBYEFLOl0lpKyKg82pPv
+a+0MWlxwBlXZMB8GA1UdIwQYMBaAFLOl0lpKyKg82pPva+0MWlxwBlXZMA8GA1Ud
+EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIhAOAexcfnig9YkS2RBvtlOWUz
+ezmij/dW4Dlz7CxbKpEDAiBVvcLI6MRgWAzHyspoL7Ea4tOMMholFsgtlS/QPsgI
+QA==
+-----END CERTIFICATE-----`;
+test('real HTTPS mutations carry the validated local or preview Origin and owner cookie', async t => {
+  const received = [];
+  const server = https.createServer({ key: fixtureKey, cert: fixtureCert }, async (request, response) => {
+    let body = ''; for await (const chunk of request) body += chunk;
+    received.push({ method: request.method, path: request.url, origin: request.headers.origin, cookie: request.headers.cookie });
+    // This is a bounded transport fixture mirroring AuthenticationMiddleware's
+    // origin boundary, not an application server or application acceptance.
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && request.headers.origin !== `https://${request.headers.host}`) {
+      response.writeHead(403, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ detail: 'Same-origin request required' })); return;
+    }
+    const input = body ? JSON.parse(body) : null;
+    if (request.url === '/api/v1/auth/login') {
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': `fixture=${input.username}; Secure; HttpOnly` });
+      response.end(JSON.stringify({ user: { id: input.username, username: input.username } })); return;
+    }
+    response.writeHead(request.method === 'DELETE' ? 204 : 200, { 'Content-Type': 'application/json' });
+    response.end(request.method === 'DELETE' ? undefined : '{}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port, clients = [];
+  t.after(async () => { for (const client of clients) client.close(); await new Promise(resolve => server.close(resolve)); });
+  for (const [index, origin] of [LOCAL, PREVIEW].entries()) {
+    const client = new HTTPClient({ origin }); clients.push(client);
+    assert.equal(client.agent.options.rejectUnauthorized, origin !== LOCAL);
+    // Redirect only this owned test agent's socket, retaining the real request
+    // target/Host/headers. Production connection and TLS settings stay intact.
+    client.agent.createConnection = options => tls.connect({ ...options, host: '127.0.0.1', port,
+      servername: 'localhost', rejectUnauthorized: false });
+    const username = `owner-${index}`;
+    await client.login({ username, password: 'fixture-only' }, username);
+    await client.json('POST', '/api/v1/schemoo/models', { name: 'fixture-only' });
+    await client.json('PUT', '/api/v1/schemer/dashboards/fixture', { revision: 1 });
+    await client.json('DELETE', '/api/v1/schemoo/models/fixture', undefined, 204);
+    await client.logout();
+    const calls = received.slice(index * 5, index * 5 + 5);
+    assert.equal(calls.length, 5);
+    assert.ok(calls.every(call => call.origin === origin));
+    assert.equal(calls[0].cookie, undefined);
+    assert.ok(calls.slice(1).every(call => call.cookie === `fixture=${username}`));
+    assert.equal(client.cookie, '');
+  }
+  const before = received.length;
+  assert.throws(() => new HTTPClient({ origin: 'https://foreign.invalid' }), { code: 'invalid_origin' });
+  await assert.rejects(clients[0].json('POST', '//foreign.invalid/api/v1/auth/login', {}), { code: 'invalid_api_path' });
+  assert.equal(received.length, before);
+  // Prove the fixture itself rejects absent and foreign Origin. Removing the
+  // client's production header makes the positive authenticated workflow fail.
+  for (const origin of [undefined, 'https://foreign.invalid']) {
+    const status = await new Promise((resolve, reject) => {
+      const request = https.request({ hostname: '127.0.0.1', port, path: '/api/v1/auth/login', method: 'POST',
+        rejectUnauthorized: false, headers: { Host: new URL(LOCAL).host, ...(origin ? { Origin: origin } : {}) } },
+      response => { response.resume(); response.once('end', () => resolve(response.statusCode)); });
+      request.once('error', reject); request.end('{}');
+    });
+    assert.equal(status, 403);
+  }
 });

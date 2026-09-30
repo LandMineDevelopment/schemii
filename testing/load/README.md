@@ -137,8 +137,26 @@ foundation until those independent campaign gates are implemented and verified.
 
 Private state is under `artifacts/load/LOAD_ID`: controller handle/config, sessions,
 create intents and opaque object IDs. Share only the allowlisted `report.json` after
-review, never the directory. The controller removes its exact private Unix socket
-directory on normal cleanup/SIGINT/SIGTERM. After forced controller termination,
+review, never the directory. HTTP mutations send the validated canonical or preview
+Origin required by the application authentication boundary; cookies stay private.
+Preparation declares the observer file path but does not consume a pre-rebuild
+snapshot. Start the independent collector after the ready launcher runtime receipt
+exists; `run` requires a fresh valid observation below the memory stop threshold
+before changing state or offering any work. Missing, stale or placeholder evidence
+leaves the run ready with no arrivals.
+
+The controller removes its exact private Unix socket directory on normal
+cleanup/SIGINT/SIGTERM. A durable launch receipt records the newly created runtime
+directory's device/inode before spawn, and the controller waits for its exact
+PID/birth identity handoff before deployment or fixture writes. If an ownership
+write fails after spawn, the launcher joins its owned child/group, disposes that
+exact directory, records stopped recovery, then releases its reservations.
+`cleanup` can recover this verified stopped launch without `controller-owner.json`;
+a missing owner on a pending or unknown launch cannot authorize signaling,
+directory deletion or account release. Existing paths are never adopted and
+unexpected runtime files or replacement directories are preserved.
+
+After forced controller termination,
 `cleanup` verifies recorded controller/generator PID and birth identity have exited
 before reacquiring a shared deployment lease and reconciling fixtures. It refuses
 a live or unresolved generator; it never kills a peer process or steals accounts.

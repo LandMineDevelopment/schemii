@@ -26,7 +26,9 @@ export class HTTPClient {
     try {
       const response = await new Promise((resolve, reject) => {
         const req = https.request(new URL(path, this.origin), { method, agent: this.agent,
-          headers: { ...(this.cookie ? { Cookie: this.cookie } : {}),
+          // AuthenticationMiddleware requires same-origin mutations even for
+          // login. Use the validated destination, including the preview host.
+          headers: { Origin: this.origin, ...(this.cookie ? { Cookie: this.cookie } : {}),
             ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}) } }, resolve);
         this.pending.add(req); req.once('close', () => this.pending.delete(req));
         req.on('error', reject);

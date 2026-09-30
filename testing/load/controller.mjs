@@ -1,6 +1,6 @@
 import net from 'node:net';
-import { rm, chmod } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { chmod } from 'node:fs/promises';
+import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { root, privateJSON, writeJSON, credentials } from '../harness/store.mjs';
 import { startDeployment, sourceIdentity } from '../harness/deployment.mjs';
@@ -8,17 +8,22 @@ import { releaseAccounts } from '../harness/leases.mjs';
 import { prepareFixtures, cleanupFixtures } from './fixtures.mjs';
 import { executePlan, verifyK6, observation, requireStopped } from './engine.mjs';
 import { loadPath } from './cli.mjs';
+import { disposeRuntime, runtimeSocket, awaitControllerHandoff } from './children.mjs';
 
 process.umask(0o077);
 const dir = loadPath(process.argv[2]), run = await privateJSON(join(dir, 'manifest-private.json'));
 const config = await privateJSON(join(dir, 'config-private.json'));
 const control = await privateJSON(join(dir, 'control-private.json'));
+const launch = await privateJSON(join(dir, 'controller-launch.json'));
+if (launch.version !== 1 || launch.runId !== run.id || control.socket !== runtimeSocket(run.id)) throw new Error('unknown_controller_launch');
+// No deployment or fixture write may escape an unrecorded controller launch.
+await awaitControllerHandoff(dir, run.id);
 const credentialMap = await credentials(config.credentialPath);
 let receipt, task, stopping = false, server;
 const aborter = new AbortController();
 const save = () => writeJSON(join(dir, 'manifest-private.json'), run);
 const safe = error => /^[a-z0-9_-]{1,100}$/.test(error.message) ? error.message : 'load_operation_failed';
-const close = async () => { if (server) await new Promise(resolve => server.close(resolve)); await rm(control.socket, { force: true }); await rm(dirname(control.socket), { recursive: true, force: true }); };
+const close = async () => { if (server) await new Promise(resolve => server.close(resolve)); await disposeRuntime(run.id, launch.runtime); };
 async function cleanup() {
   if (stopping) throw new Error('cleanup_already_running');
   stopping = true; aborter.abort(); if (task) await task;
@@ -37,6 +42,17 @@ async function dispatch(command) {
   if (command !== 'run') throw new Error('invalid_controller_command');
   if (run.status !== 'ready' || task) throw new Error('run_not_ready');
   if (sourceIdentity(root).fingerprint !== run.source.fingerprint) throw new Error('source_changed_prepare_new_run');
+  // The collector starts after startDeployment publishes the ready runtime.
+  // Qualify that fresh observation before changing state or offering work.
+  if (config.observerFile) {
+    try {
+      const observed = await observation(config.observerFile);
+      if (observed.appRssBytes / observed.appMemoryLimitBytes >= run.plan.stopRssRatio) throw new Error('memory_stop_threshold');
+    }
+    catch (error) { if (error.code === 'ENOENT') throw new Error('observer_unavailable'); throw error; }
+  } else if (!config.allowUnobserved) throw new Error('observer_required');
+  // Another dispatch may have qualified while the observer file was read.
+  if (run.status !== 'ready' || task) throw new Error('run_not_ready');
   run.status = 'running'; await save();
   task = executePlan({ spec: run.plan, receipt, dir, origin: config.origin, binary: config.binary,
     observerFile: config.observerFile, allowUnobserved: config.allowUnobserved, signal: aborter.signal, abort: () => aborter.abort(),
@@ -51,7 +67,6 @@ async function dispatch(command) {
 }
 try {
   if (run.plan.engine === 'k6') await verifyK6(config.binary);
-  if (config.observerFile) await observation(config.observerFile);
   run.deployment = await startDeployment({ root, runDir: dir });
   receipt = await prepareFixtures({ dir, accounts: run.accounts, credentialMap, stateDir: config.stateDir,
     kind: run.plan.workload === 'cheap-read' ? 'cheap' : 'reports', origin: config.origin });
