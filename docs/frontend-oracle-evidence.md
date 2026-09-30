@@ -7,7 +7,7 @@ contracts retain their existing tests.
 | Invariant | Cheapest faithful check | Distinct mounted coverage | Controlled defect |
 | --- | --- | --- | --- |
 | A visible status toast stays inside the viewport, leaves workspace tools unobscured and lets pointer actions reach them | Mounted desktop/mobile geometry, computed pointer behavior and actual Views/Help clicks in `toast-history-behavior.spec.js` | Real application styles and controls; hidden DOM text cannot pass | Append the audit's later `.ui-toast { pointer-events: auto!important; top: 0!important; }` rule |
-| Matching history confirmation updates revision/layout/history once without repainting the optimistic surface | Seven deferred-response state-owner tests in `history-confirmation.test.js` | Hold real undo/redo responses; retain the mounted column field, value, focus, selection and existing table-editor draft behavior | Change only the confirmation's `render: !previewMatches` option to `render: true` |
+| Matching history confirmation updates revision/layout/history once without repainting the optimistic surface | Eleven deferred-response state-owner tests in `history-confirmation.test.js` | Hold real undo/redo responses; retain the mounted column field, value, focus, selection and existing table-editor draft behavior | Change only the confirmation's `render: !previewMatches` option to `render: true` |
 | An authoritative mismatch applies once; an error rolls back once; stale responses cannot mutate a different workspace | Fast state-owner response-order tests | A controlled `design_changed` response rolls back and reloads one authoritative snapshot | Matching-render mutation fails both undo and redo assertions while the five other owner cases still pass |
 
 The history owner is extracted from `app.js` into `design-history.js` without
@@ -24,6 +24,12 @@ cases passed in 73 ms. The full Node frontend/harness suite passed **402/402** i
 matching-confirmation cases and passed the other five in 97 ms. Python's temporary
 directory owner removed those counterexample files automatically. No mutation
 framework or dependency was added.
+
+Independent follow-up review isolated operation-generation and workspace identity
+changes into separate success/error cases. The final eleven owner tests retain
+the original combined-owner cases. Removing either ownership guard now fails its
+two targeted cases; forcing a matching repaint still fails undo and redo. The
+nineteen focused owner/delta/workspace checks passed in 64.54 ms.
 
 The Python frontend suite passed 30 cases in 11.58 seconds while the history
 source guard was temporarily removed. That guard was then restored at its new
