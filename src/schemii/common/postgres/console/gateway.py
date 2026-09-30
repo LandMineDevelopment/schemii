@@ -84,6 +84,23 @@ class _ReadCursor:
     export_cursor: Any | None = None
     export_position: int = 0
     export_pending: tuple[tuple[Any, ...], ...] = ()
+    fixed_row_memory_bytes: int | None = None
+
+
+# Only these built-in scalar types have bounded wire output and ordinary Python
+# loaders. Numeric, text, arrays, domains and unrecognized types stay one-row.
+_FIXED_SCALAR_OIDS = frozenset((16, 20, 21, 23, 700, 701))
+
+
+def _fixed_row_memory_bytes(description: Sequence[Any]) -> int | None:
+    if not description or any(column.type_code not in _FIXED_SCALAR_OIDS for column in description):
+        return None
+    # Bool/int64/float64 JSON/text fits 32 bytes per value (including extreme
+    # exponents and non-finite floats). Reserve 128 bytes per cell for native
+    # field metadata, decoded objects, tuple pointers and conversion copies,
+    # plus 128 bytes per row for headers/containers. This is a batching allowance,
+    # not a whole-process/native allocator RSS bound.
+    return 128 + 128 * len(description)
 
 
 class PsycopgConsoleReadSession:
@@ -172,7 +189,8 @@ class PsycopgConsoleReadSession:
                     for column in description
                 )
                 self._readers[statement_index] = _ReadCursor(
-                    cursor=cursor, rows=(), statement=query
+                    cursor=cursor, rows=(), statement=query,
+                    fixed_row_memory_bytes=_fixed_row_memory_bytes(description),
                 )
                 results.append(
                     ConsoleQueryResult(
@@ -251,12 +269,18 @@ class PsycopgConsoleReadSession:
                 raw_row, *tail = pending
                 pending = tuple(tail)
             else:
-                # A row-count batch can materialize hundreds of wide rows before
-                # the byte boundary. Fetch one row and retain at most one carry.
-                batch = cursor.fetchmany(1)
+                # Unknown/variable-width rows may already exceed the byte cap
+                # before decoding, so receive only one. Trusted fixed scalars can
+                # batch from their conservative native/Python/JSON allowance.
+                size = 1
+                if reader.fixed_row_memory_bytes is not None:
+                    size = max(1, min(page_size - len(rows),
+                        (self._page_memory_bytes - used_bytes) // reader.fixed_row_memory_bytes))
+                batch = cursor.fetchmany(size)
                 if not batch:
                     break
-                raw_row = batch[0]
+                raw_row, *tail = batch
+                pending = tuple(tail)
             converted = tuple(
                 json_console_value(value, maximum_bytes=self._maximum_cell_bytes)
                 for value in raw_row
@@ -307,8 +331,19 @@ class PsycopgConsoleReadSession:
                     offset=offset,
                     page_size=page_size,
                 )
+            except PostgresConsoleLimitError:
+                self.close()
+                raise
             except PostgresGatewayError:
                 raise
+            except ConsoleValueLimitError as error:
+                self.close()
+                raise PostgresConsoleLimitError(
+                    str(error), statement_index=statement_index,
+                    resource="console_result_cell",
+                    limit_name="console.results.maximum_cell_bytes",
+                    limit=error.limit, observed=error.observed,
+                ) from error
             except Exception as error:
                 if self._cancelled.is_set():
                     raise PostgresConsoleCancelledError() from None
@@ -347,8 +382,19 @@ class PsycopgConsoleReadSession:
                     page_size=page_size,
                     export=True,
                 )
+            except PostgresConsoleLimitError:
+                self.close()
+                raise
             except PostgresGatewayError:
                 raise
+            except ConsoleValueLimitError as error:
+                self.close()
+                raise PostgresConsoleLimitError(
+                    str(error), statement_index=statement_index,
+                    resource="console_result_cell",
+                    limit_name="console.results.maximum_cell_bytes",
+                    limit=error.limit, observed=error.observed,
+                ) from error
             except Exception as error:
                 if self._cancelled.is_set():
                     raise PostgresConsoleCancelledError() from None

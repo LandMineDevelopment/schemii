@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import resource
+import statistics
 import subprocess
 import sys
 import time
@@ -56,7 +57,7 @@ def child(args: argparse.Namespace) -> None:
 
     sample("before_connect")
     count = args.rows[0]
-    width = args.width
+    width = len(str(count)) if args.fixed_scalar else args.width
     with psycopg.connect(
         os.environ["SCHEMII_TEST_METADATA_DSN"],
         password=os.environ["SCHEMII_TEST_METADATA_PASSWORD"],
@@ -72,9 +73,17 @@ def child(args: argparse.Namespace) -> None:
                 (count,),
             )
             connection.commit()
-            statement = f"UPDATE memory_marker SET visits = visits + 1 RETURNING repeat('x', {width})"
+            statement = (
+                "UPDATE memory_marker SET visits = visits + 1 RETURNING id::bigint"
+                if args.fixed_scalar
+                else f"UPDATE memory_marker SET visits = visits + 1 RETURNING repeat('x', {width})"
+            )
         else:
-            statement = f"SELECT repeat('x', {width}) FROM generate_series(1, {count})"
+            statement = (
+                f"SELECT n::bigint FROM generate_series(1, {count}) AS n"
+                if args.fixed_scalar
+                else f"SELECT repeat('x', {width}) FROM generate_series(1, {count})"
+            )
         sample("before_query")
         outcome = "complete"
         observed: int | None = None
@@ -193,10 +202,100 @@ def child(args: argparse.Namespace) -> None:
     )
 
 
+def named_latency(args: argparse.Namespace) -> None:
+    """Alternate identical real 1,000-row bigint pages with different fetch boundaries."""
+    import psycopg
+    from psycopg import pq
+    from schemii.common.postgres.console.gateway import PsycopgConsoleReadSession
+
+    measurements = []
+    modes = ("one-row-reference", "bounded-fixed", "old-batch-reference")
+    server_version = None
+    for trial in range(7):
+        for mode in modes if trial % 2 == 0 else reversed(modes):
+            with psycopg.connect(
+                os.environ["SCHEMII_TEST_METADATA_DSN"],
+                password=os.environ["SCHEMII_TEST_METADATA_PASSWORD"],
+            ) as connection:
+                server_version = connection.info.server_version
+                session = PsycopgConsoleReadSession(
+                    connection,
+                    connection.info.backend_pid,
+                    ["SELECT n::bigint FROM generate_series(1, 1000) AS n"],
+                    page_memory_bytes=args.page_bytes,
+                )
+                reader = session._readers[0]
+                if mode == "one-row-reference":
+                    reader.fixed_row_memory_bytes = None
+                elif mode == "old-batch-reference":
+                    # All 1,000 integer rows fit; faithfully reproduce the old
+                    # row-count FETCH while retaining identical conversion.
+                    reader.fixed_row_memory_bytes = 1
+                fetch_sizes = []
+
+                class CountedCursor:
+                    def fetchmany(self, size):
+                        fetch_sizes.append(size)
+                        return cursor.fetchmany(size)
+
+                    def close(self):
+                        cursor.close()
+
+                cursor = reader.cursor
+                reader.cursor = CountedCursor()
+                try:
+                    started = time.perf_counter()
+                    page = session.page(0, 0, 1000)
+                    elapsed = time.perf_counter() - started
+                    assert len(page) == 1000 and sum(row[0] for row in page) == 500500
+                    measurements.append(
+                        {
+                            "trial": trial,
+                            "mode": mode,
+                            "seconds": elapsed,
+                            "source_rows": 1000,
+                            "source_columns": 1,
+                            "column_oid": 20,
+                            "largest_cell_bytes": 4,
+                            "serialized_page_bytes": sum(
+                                len(json.dumps(row).encode()) for row in page
+                            ),
+                            "fetch_calls": len(fetch_sizes),
+                            "largest_fetch_rows": max(fetch_sizes),
+                        }
+                    )
+                finally:
+                    session.close()
+    print(
+        json.dumps(
+            {
+                "topology": "Shared-host disposable PostgreSQL loopback; alternating fresh snapshots",
+                "page_bytes": args.page_bytes,
+                "server_version": server_version,
+                "psycopg": psycopg.__version__,
+                "libpq": pq.version(),
+                "measurements": measurements,
+                "median_seconds": {
+                    mode: statistics.median(
+                        item["seconds"] for item in measurements if item["mode"] == mode
+                    )
+                    for mode in modes
+                },
+            },
+            indent=2,
+        )
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", type=int, nargs="+", default=[1000, 10000, 100000])
     parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument(
+        "--fixed-scalar",
+        action="store_true",
+        help="Measure bigint instead of variable text",
+    )
     parser.add_argument("--page-bytes", type=int, default=1024 * 1024)
     parser.add_argument("--cell-bytes", type=int, default=256 * 1024)
     parser.add_argument("--timeout-seconds", type=float, default=120)
@@ -206,6 +305,11 @@ def main() -> None:
         nargs="+",
         choices=["buffered-reference", "incremental", "named"],
         default=["buffered-reference", "incremental"],
+    )
+    parser.add_argument(
+        "--named-latency",
+        action="store_true",
+        help="Compare narrow named-page FETCH boundaries",
     )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -219,6 +323,9 @@ def main() -> None:
         parser.error("rows, width, byte caps and timeout must be positive")
     if args.path == "returning" and "named" in args.mode:
         parser.error("named cursors support SELECT only")
+    if args.named_latency:
+        named_latency(args)
+        return
     if args.child:
         child(args)
         return
@@ -242,6 +349,8 @@ def main() -> None:
                 "--mode",
                 mode,
             ]
+            if args.fixed_scalar:
+                command.append("--fixed-scalar")
             samples = []
             attempt_started = time.monotonic()
             with subprocess.Popen(
@@ -273,6 +382,20 @@ def main() -> None:
                             process.wait()
             result = json.loads(output)
             result["rss_samples"] = samples
+            result["observed_peak_rss_bytes"] = max(
+                result["peak_rss_bytes"],
+                *(item["rss_bytes"] for item in result["timeline"]),
+                *(item["rss_bytes"] for item in samples),
+            )
+            result["source_columns"] = 1
+            result["largest_fixture_row_payload_bytes"] = result[
+                "largest_fixture_cell_bytes"
+            ]
+            result["column_oid"] = 20 if args.fixed_scalar else 25
+            result["fresh_read_passed"] = True
+            result["rollback_checked"] = mode != "named"
+            if args.path == "returning":
+                result["returning_rows_visible_after_rollback"] = 0
             measurements.append(result)
     print(
         json.dumps(

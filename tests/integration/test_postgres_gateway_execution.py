@@ -1,5 +1,6 @@
 """Transactional migration behavior against a real disposable PostgreSQL target."""
 
+from contextlib import closing
 from dataclasses import dataclass
 import os
 from typing import Iterator
@@ -359,6 +360,149 @@ def test_named_read_wide_page_carries_one_row_without_skipping(
             received.append(page[0][0])
         assert received == [1, 2, 3, 4, 5, 6]
         assert session.page(0, 6, 1000) == ()
+    finally:
+        session.close()
+    assert gateway._connection_capacity._total == 0
+
+
+@pytest.mark.parametrize("export", [False, True])
+def test_named_cell_limit_reports_boundary_and_releases_snapshot_admission(
+    gateway_target: GatewayTarget, export,
+) -> None:
+    from schemii.common.postgres.errors import PostgresConsoleLimitError, PostgresQueryError
+    gateway = PsycopgPostgresGateway(console_maximum_cell_bytes=4)
+    session = gateway.open_console_read_session(
+        gateway_target.connection, gateway_target.namespace,
+        ["SELECT repeat('x', 10)"], on_started=lambda pid: True,
+        page_memory_bytes=4096,
+    )
+    try:
+        fetch = session.export_page if export else session.page
+        with pytest.raises(PostgresConsoleLimitError) as caught:
+            fetch(0, 0, 1000)
+        assert caught.value.limit_name == "console.results.maximum_cell_bytes"
+        assert caught.value.limit == 4
+        assert caught.value.observed == 12
+        assert session._closed
+        assert gateway._connection_capacity._total == 0
+        with pytest.raises(PostgresQueryError):
+            fetch(0, 0, 1000)
+        with closing(gateway._connect(gateway_target.connection, retained=True)) as fresh:
+            assert fresh.execute("SELECT 1 AS healthy").fetchone()["healthy"] == 1
+    finally:
+        session.close()
+    assert gateway._connection_capacity._total == 0
+
+
+def test_incremental_cancel_rolls_back_and_restores_owned_admission(
+    gateway_target: GatewayTarget, postgres_metadata: PostgresMetadataHarness,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from schemii.common.postgres.console.gateway import execute_console_statements
+    from schemii.common.postgres.errors import PostgresConsoleCancelledError
+    from schemii.common.query_executions.cancellation import QueryCancellationRegistry
+    namespace = gateway_target.namespace
+    with postgres_metadata.connection_factory() as setup:
+        setup.execute(sql.SQL("CREATE TABLE {}.managed_cancel_marker (id integer)").format(sql.Identifier(namespace)))
+        setup.commit()
+    gateway = PsycopgPostgresGateway()
+    connection = gateway._connect(gateway_target.connection, retained=True)
+    registry = QueryCancellationRegistry()
+    def run():
+        with registry.scope("owner", "chat", "turn"):
+            return execute_console_statements(connection, [
+                f"INSERT INTO {namespace}.managed_cancel_marker VALUES (1)",
+                "SELECT pg_sleep(30)",
+            ])
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run)
+            with postgres_metadata.connection_factory() as observer:
+                observer.autocommit = True
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    row = observer.execute("SELECT wait_event FROM pg_stat_activity WHERE pid = %s", (connection.info.backend_pid,)).fetchone()
+                    if row and row["wait_event"] == "PgSleep":
+                        break
+                    time.sleep(.01)
+                else:
+                    pytest.fail("managed statement never entered pg_sleep")
+                registry.cancel("unrelated-owner", "chat", "turn")
+                assert not future.done()
+                registry.cancel("owner", "chat", "turn")
+                with pytest.raises(PostgresConsoleCancelledError):
+                    future.result(timeout=2)
+                connection.rollback()
+                assert observer.execute(sql.SQL("SELECT count(*) AS count FROM {}.managed_cancel_marker").format(sql.Identifier(namespace))).fetchone()["count"] == 0
+            registry.cancel("owner", "chat", "turn")
+            assert execute_console_statements(connection, ["SELECT 1"])[0].rows == ((1,),)
+    finally:
+        connection.close()
+    assert gateway._connection_capacity._total == 0
+    with closing(gateway._connect(gateway_target.connection, retained=True)) as fresh:
+        assert fresh.execute("SELECT 1 AS healthy").fetchone()["healthy"] == 1
+    assert gateway._connection_capacity._total == 0
+
+
+@pytest.mark.parametrize("export", [False, True])
+def test_fixed_scalar_named_batch_remains_cancellable_and_releases_admission(
+    gateway_target: GatewayTarget, postgres_metadata: PostgresMetadataHarness, export,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from schemii.common.postgres.errors import PostgresConsoleCancelledError
+    gateway = PsycopgPostgresGateway()
+    session = gateway.open_console_read_session(
+        gateway_target.connection, gateway_target.namespace,
+        ["SELECT 1::bigint FROM pg_sleep(30)"], on_started=lambda pid: True,
+        page_memory_bytes=65536,
+    )
+    assert session._readers[0].fixed_row_memory_bytes == 256
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(session.export_page if export else session.page, 0, 0, 1000)
+            with postgres_metadata.connection_factory() as observer:
+                observer.autocommit = True
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    row = observer.execute("SELECT wait_event FROM pg_stat_activity WHERE pid = %s", (session.backend_pid,)).fetchone()
+                    if row and row["wait_event"] == "PgSleep":
+                        break
+                    time.sleep(.01)
+                else:
+                    pytest.fail("fixed-width fetch never entered pg_sleep")
+            session.cancel()
+            with pytest.raises(PostgresConsoleCancelledError):
+                future.result(timeout=2)
+    finally:
+        session.close()
+    assert gateway._connection_capacity._total == 0
+    with closing(gateway._connect(gateway_target.connection, retained=True)) as fresh:
+        assert fresh.execute("SELECT 1 AS healthy").fetchone()["healthy"] == 1
+    assert gateway._connection_capacity._total == 0
+
+
+
+def test_named_fixed_scalar_extremes_preserve_every_row_and_export_snapshot(gateway_target: GatewayTarget) -> None:
+    import json
+    gateway = PsycopgPostgresGateway()
+    session = gateway.open_console_read_session(
+        gateway_target.connection, gateway_target.namespace,
+        ["SELECT n::bigint, '-9223372036854775808'::bigint, '-1.7976931348623157e308'::float8, 'Infinity'::float4, CASE WHEN n % 2 = 0 THEN NULL::boolean ELSE true END FROM generate_series(1, 100) AS n"],
+        on_started=lambda pid: True, page_memory_bytes=4096,
+    )
+    try:
+        for fetch in (session.page, session.export_page):
+            received = []
+            while len(received) < 100:
+                page = fetch(0, len(received), 30)
+                assert page
+                assert sum(len(json.dumps(row).encode()) for row in page) <= 4096
+                assert all(row[1] == -9223372036854775808 and row[2] == -1.7976931348623157e308 for row in page)
+                received.extend(row[0] for row in page)
+            assert received == list(range(1, 101))
+            assert fetch(0, 100, 30) == ()
     finally:
         session.close()
     assert gateway._connection_capacity._total == 0

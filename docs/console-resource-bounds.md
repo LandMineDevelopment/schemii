@@ -74,12 +74,25 @@ complete result or replays a write. Interrupted delivery is cancelled/drained
 before reuse. Broken cleanup closes the owned connection and releases admission.
 The existing transaction owner still governs commit/rollback after an error.
 
-Retained named reads fetch one row at a time. Their page keeps accepted rows and
-at most one carry row for the next page, so fetching a large row-count batch does
-not allocate hundreds of wide rows before the byte boundary. Forward ordering,
+Retained named reads fetch variable-width or unrecognized types one row at a
+time, retaining accepted rows and at most one carry row. Built-in boolean, int2,
+int4, int8, float4 and float8 columns may batch using an allowance of 128 bytes
+per row plus 128 bytes per cell, limited by remaining page bytes and requested
+rows. Their scalar JSON/wire output fits 32 bytes per value, including int64
+extremes and floating-point exponents; the allowance also reserves native
+metadata, Python objects, pointers, containers and conversion copies. Numeric,
+text, arrays, domains and unknown types never use a sampled width estimate.
+Many-column rows reduce the batch down to one. This is a conservative batching
+allowance, not an allocator or whole-process RSS guarantee. Forward ordering,
 snapshot ownership, separate export cursors and owner-scoped cancellation remain
-the same. This increases FETCH round trips for narrow-row pages; real latency
-and capacity measurement are required before drawing throughput conclusions.
+the same. A cell/page limit closes the consumed forward snapshot, releases its
+native admission and invalidates the service's cursors; retry requires rerun
+rather than silently skipping the rejected row.
+
+The opt-in probe's `--named-latency` comparison alternates seven fresh bigint
+page snapshots between the old 1,000-row batch reference, a one-row reference
+and current budget-derived fixed-scalar batching, with identical conversion and
+byte checks. `--fixed-scalar --mode named` measures the corresponding RSS path.
 
 The configured JSON byte caps are not a whole-process RSS limit. Python object
 overhead, serialization copies and native input/result buffers add memory. A
