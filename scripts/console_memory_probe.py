@@ -224,6 +224,7 @@ def named_latency(args: argparse.Namespace) -> None:
                     connection.info.backend_pid,
                     ["SELECT n::bigint FROM generate_series(1, 1000) AS n"],
                     page_memory_bytes=args.page_bytes,
+                    maximum_cell_bytes=args.cell_bytes,
                 )
                 reader = session._readers[0]
                 if mode == "one-row-reference":

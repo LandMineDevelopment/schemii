@@ -1,0 +1,114 @@
+{
+  "source_sha": "253feb9f9cd259da7519d4e7b5d7c73bc268f2df",
+  "tracked_source_dirty": false,
+  "topology": "Shared host; private disposable PostgreSQL18 loopback TCP/socket; no application deployment",
+  "hardware": {
+    "cpu": "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz",
+    "logical_cpus": 16,
+    "ram_kib": 32628356
+  },
+  "attempts": [
+    {
+      "name": "real-postgres",
+      "seconds": 3.12368399114348,
+      "returncode": 0
+    },
+    {
+      "name": "named-narrow-latency",
+      "seconds": 1.021619733888656,
+      "returncode": 0
+    },
+    {
+      "name": "rss-narrow-select",
+      "seconds": 3.1021717221010476,
+      "returncode": 0
+    },
+    {
+      "name": "rss-wide-select",
+      "seconds": 3.424977919086814,
+      "returncode": 0
+    },
+    {
+      "name": "rss-wide-returning",
+      "seconds": 3.9930986929684877,
+      "returncode": 0
+    },
+    {
+      "name": "rss-fixed-named",
+      "seconds": 1.6660643189679831,
+      "returncode": 0
+    },
+    {
+      "name": "rss-wide-named",
+      "seconds": 1.6682265331037343,
+      "returncode": 0
+    },
+    {
+      "name": "rss-single-cell",
+      "seconds": 0.6223344141617417,
+      "returncode": 0
+    }
+  ],
+  "initdb_seconds": 0.32005052897147834,
+  "fixture": {
+    "postmaster_pid": 1976338,
+    "port": 52121,
+    "owned_directory": "/tmp/schemii-console-pg-2f6jmcmd"
+  },
+  "cleanup": {
+    "pg_ctl_returncode": 0,
+    "owned_process_identities": [
+      {
+        "pid": 1976338,
+        "ppid": 1259,
+        "start_ticks": 121140111
+      },
+      {
+        "pid": 1976339,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      },
+      {
+        "pid": 1976340,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      },
+      {
+        "pid": 1976341,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      },
+      {
+        "pid": 1976342,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      },
+      {
+        "pid": 1976343,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      },
+      {
+        "pid": 1976345,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      },
+      {
+        "pid": 1976346,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      },
+      {
+        "pid": 1976347,
+        "ppid": 1976338,
+        "start_ticks": 121140112
+      }
+    ],
+    "owned_processes_remaining": [],
+    "postmaster_alive": false,
+    "stop_stdout": "waiting for server to shut down.... done\nserver stopped\n",
+    "owned_directory_exists_after_context_exit": false,
+    "postcheck_owned_processes_remaining": [],
+    "postcheck_owned_directory_exists": false
+  }
+}

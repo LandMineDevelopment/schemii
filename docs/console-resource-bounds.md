@@ -125,3 +125,11 @@ Large buffered references intentionally expose the former native memory cost;
 choose staged counts that fit the host. The probe is opt-in and ordinary PR
 feedback never launches it. Real result/RETURNING/cell-limit and source-state
 regressions are in `tests/integration/test_postgres_gateway_execution.py`.
+
+
+Measured PostgreSQL 18.6/Psycopg 3.3.4 acceptance for source `253feb9` is retained in
+[the Console resource evidence report](../testing/benchmarks/evidence/console-20260929/README.md).
+It includes 24 real-driver cases, row-count RSS comparisons, scalar-page latency,
+pathological single-cell allocation and automatic owned-fixture cleanup. Those
+shared-host results establish the tested driver/lifecycle behavior; they do not
+establish UI acceptance or production server capacity.
