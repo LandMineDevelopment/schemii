@@ -30,7 +30,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Classify the complete base-to-head change
         id: classify
         run: python3 scripts/ci/classify_changes.py --output artifacts/ci-classification.json
