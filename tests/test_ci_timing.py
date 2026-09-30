@@ -175,6 +175,9 @@ def run_pytest(tmp_path, source, extra_files=None, options=()):
     env = {
         **os.environ,
         "PYTHONPATH": f"{ROOT / 'src'}:{ROOT}",
+        # These synthetic cases exercise this explicit plugin and pytest's own
+        # lifecycle, independently of unrelated installed developer plugins.
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         "CI_TELEMETRY_FILE": str(timing_file),
         "CI_TELEMETRY_LANE": "python",
         "CI_TELEMETRY_SHA": "a" * 40,

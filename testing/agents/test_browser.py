@@ -527,13 +527,52 @@ class GuardianProcessTests(ArtifactFixture):
         script = f"""
 import importlib.util
 from pathlib import Path
-import sys
+import json, os, sys
 spec = importlib.util.spec_from_file_location('stub_browser', {str(Path(browser.__file__))!r})
 browser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser)
 browser.REPOSITORY_ROOT = Path(sys.argv[1])
 browser.shutil.which = lambda name: sys.executable
 browser.command = lambda npx, chromium, output: [sys.executable, '-c', {child!r}, str(output)]
+# Exercise real process ownership and escalation without spending the production
+# grace period in every default test run. The requested grace is still asserted.
+original_wait = browser.subprocess.Popen.wait
+def observed_wait(process, timeout=None):
+    if timeout != 5:
+        return original_wait(process, timeout=timeout)
+    evidence = {{'pid': process.pid, 'requested_timeout': timeout, 'timed_out': False}}
+    try:
+        return original_wait(process, timeout=0.05)
+    except browser.subprocess.TimeoutExpired:
+        evidence['timed_out'] = True
+        raise
+    finally:
+        (browser.REPOSITORY_ROOT / 'shutdown-grace.json').write_text(json.dumps(evidence))
+browser.subprocess.Popen.wait = observed_wait
+
+original_guard = browser._guard_session
+def observed_guard(session):
+    original_sleep = browser.time.sleep
+    def observed_poll(seconds):
+        if seconds != 1:
+            raise AssertionError('Production guardian polling policy changed')
+        if (browser.process_birth_tick(session.metadata['pid']) is None
+            and browser.process_birth_tick(session.metadata['child_pid'])
+                == session.metadata['child_birth_tick']):
+            # This acknowledgment occurs after the actual guardian's ownership
+            # decision, while the captured stdio child still holds its context.
+            observed = browser.REPOSITORY_ROOT / 'guardian-owner-observed.json'
+            if not observed.exists():
+                temporary = observed.with_suffix('.tmp')
+                temporary.write_text(json.dumps({{
+                    'guardian_pid': os.getpid(),
+                    'child_pid': session.metadata['child_pid'],
+                    'child_birth_tick': session.metadata['child_birth_tick']}}))
+                temporary.replace(observed)
+        original_sleep(0.02)
+    browser.time.sleep = observed_poll
+    original_guard(session)
+browser._guard_session = observed_guard
 if not {guardian!r}:
     browser._start_guardian = lambda session: None
 raise SystemExit(browser.main([]))
@@ -617,7 +656,16 @@ raise SystemExit(browser.main([]))
         os.killpg(process.pid, browser.signal.SIGKILL)
         process.wait(timeout=5)
         # The captured child still owns the connection until its inherited stdin closes.
-        time.sleep(1.1)
+        observed = self.repository / "guardian-owner-observed.json"
+        self.wait_for(observed.exists, "Guardian did not observe its live stdio owner")
+        self.assertEqual(
+            json.loads(observed.read_text()),
+            {
+                "guardian_pid": guardian,
+                "child_pid": metadata["child_pid"],
+                "child_birth_tick": metadata["child_birth_tick"],
+            },
+        )
         self.assertTrue((path / "output" / "temporary.dat").exists())
         self.assertEqual(
             browser.process_birth_tick(guardian), metadata["guardian_birth_tick"]
@@ -653,6 +701,14 @@ raise SystemExit(browser.main([]))
         process.terminate()
         self.assertEqual(process.wait(timeout=7), 143)
         self.assertLess(time.monotonic() - started, 7)
+        self.assertEqual(
+            json.loads((self.repository / "shutdown-grace.json").read_text()),
+            {
+                "pid": metadata["child_pid"],
+                "requested_timeout": 5,
+                "timed_out": True,
+            },
+        )
         self.assertFalse(path.exists())
         self.assertIsNone(browser.process_birth_tick(metadata["child_pid"]))
         self.assertFalse(Path(f"/proc/{metadata['guardian_pid']}").exists())
