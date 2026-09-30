@@ -3,6 +3,7 @@
 import argparse
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -78,17 +79,26 @@ def timestamp(value):
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.timestamp() if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError, OSError):
         return None
 
 
 def duration(start, end):
-    return (
-        round(max(0, end - start) * 1000, 3)
-        if start is not None and end is not None
-        else None
-    )
+    if (
+        start is None
+        or end is None
+        or not math.isfinite(start)
+        or not math.isfinite(end)
+        or end < start
+    ):
+        return None
+    return round((end - start) * 1000, 3)
+
+
+def sum_durations(values):
+    return None if any(value is None for value in values) else sum(values)
 
 
 def summarize(run, jobs, *, lane="source", report_validation=False):
@@ -110,22 +120,33 @@ def summarize(run, jobs, *, lane="source", report_validation=False):
         start = timestamp(job.get("started_at"))
         end = timestamp(job.get("completed_at"))
         wall = duration(start, end)
-        execution = startup = 0
+        execution_steps = []
+        startup_steps = []
         early = None
         for step in job.get("steps", []):
             step_ms = (
-                duration(
+                0
+                if step.get("conclusion") == "skipped"
+                else duration(
                     timestamp(step.get("started_at")),
                     timestamp(step.get("completed_at")),
                 )
-                or 0
             )
             if step.get("name") in TEST_STEPS:
-                execution += step_ms
+                execution_steps.append(step_ms)
             elif step.get("name") == "Start the canonical application stack":
-                startup += step_ms
-            if step.get("name") == "Fast frontend and harness feedback":
+                startup_steps.append(step_ms)
+            if (
+                step.get("name") == "Fast frontend and harness feedback"
+                and step.get("conclusion") != "skipped"
+            ):
                 early = duration(start, timestamp(step.get("completed_at")))
+        execution = sum_durations(execution_steps)
+        startup = sum_durations(startup_steps)
+        setup = None
+        if wall is not None and execution is not None and startup is not None:
+            residual = wall - execution - startup
+            setup = residual if residual >= 0 else None
         conclusion = job.get("conclusion")
         records.append(
             {
@@ -147,9 +168,7 @@ def summarize(run, jobs, *, lane="source", report_validation=False):
                 "wall_ms": wall,
                 "startup_ms": startup,
                 "test_steps_ms": execution,
-                "setup_and_other_ms": max(0, wall - execution - startup)
-                if wall is not None
-                else None,
+                "setup_and_other_ms": setup,
                 "first_node_feedback_ms": early,
             }
         )
@@ -160,6 +179,7 @@ def summarize(run, jobs, *, lane="source", report_validation=False):
         if labels.get(job.get("name")) in expected
     ]
     end_times = [value for value in end_times if value is not None]
+    total_job_ms = sum_durations([record["wall_ms"] for record in records])
     return {
         "schema": 1,
         "lane": lane,
@@ -176,9 +196,9 @@ def summarize(run, jobs, *, lane="source", report_validation=False):
         "jobs": sorted(records, key=lambda record: record["job"]),
         "not_applicable_jobs": sorted(JOB_NAMES.values()) if lane == "reports" else [],
         "critical_path_ms": duration(created, max(end_times)) if end_times else None,
-        "total_job_minutes": round(
-            sum(record["wall_ms"] or 0 for record in records) / 60000, 3
-        ),
+        "total_job_minutes": round(total_job_ms / 60000, 3)
+        if total_job_ms is not None
+        else None,
     }
 
 
