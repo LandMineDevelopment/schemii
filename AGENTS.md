@@ -23,7 +23,10 @@ Read [the testing feedback policy](docs/testing-feedback.md) before choosing che
 Inspect the current PR head, existing checks and retained evidence before running
 tests. Use `python scripts/test-changes.py --base origin/main` for the complete
 change plan; choose the cheapest faithful regression for the edit during development.
-The planner conservatively falls back to full acceptance for unknown or dirty work;
+The planner includes committed, staged and unstaged changes. Proven modifications
+to existing owned leaves retain their profile before commit; unknown, untracked,
+mixed or unsafe changes conservatively select full acceptance. Use `--feedback`
+for deterministic feedback with real database/browser acceptance explicitly pending;
 that does not require repeating every acceptance layer after each edit.
 
 The coordinator owns acceptance scheduling. Assign developers focused checks and
