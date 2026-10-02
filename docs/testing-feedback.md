@@ -47,6 +47,8 @@ Unknown, untracked, new, renamed, deleted, conflicted, symlinked, mode-changing 
 mixed-owner work selects full checks.
 Index flags that can conceal tracked edits also prevent narrow selection; the
 plan lists those paths as unverified rather than claiming they are unchanged.
+Git configurations that disable executable-mode or symlink discovery also force
+full checks, since they can conceal changes outside the visible diff.
 
 Use `--feedback` to execute the selected deterministic checks during development.
 The plan explicitly lists any required PostgreSQL/browser layers as pending;
