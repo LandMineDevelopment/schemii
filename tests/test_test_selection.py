@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -124,7 +125,7 @@ def test_unsafe_status_or_mixed_owners_uses_full(repository, change):
 
 
 @pytest.mark.parametrize("status", ["dirty", "staged", "untracked"])
-def test_local_plan_includes_actual_uncommitted_state_and_falls_back_full(
+def test_local_plan_includes_actual_uncommitted_state_and_unknown_work_uses_full(
     repository, status
 ):
     root, base = repository
@@ -141,8 +142,294 @@ def test_local_plan_includes_actual_uncommitted_state_and_falls_back_full(
     if status == "staged":
         git(root, "add", str(path))
     selected = local_selection.plan(root, base)
-    assert selected["classification"]["profile"] == "full"
+    assert selected["classification"]["profile"] == (
+        "full" if status == "untracked" else "frontend-tests"
+    )
+    assert str(path.relative_to(root)) in selected["changed_paths"]
     assert selected["local_status"] and path.name in " ".join(selected["local_status"])
+
+
+@pytest.mark.parametrize("profile", sorted(PATHS))
+@pytest.mark.parametrize("status", ["unstaged", "staged", "both"])
+def test_local_owned_modifications_retain_complete_closure(repository, profile, status):
+    root, base = repository
+    path = sorted(PATHS[profile])[0]
+    (root / path).write_text("staged content\n")
+    if status != "unstaged":
+        git(root, "add", path)
+    if status == "both":
+        (root / path).write_text("unstaged content\n")
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["valid"]
+    assert selected["classification"]["profile"] == profile
+    assert selected["classification"]["scope"] == "local-worktree"
+    assert selected["changed_paths"] == [path]
+    assert selected["commands"] == commands(profile, base)
+    assert selected["feedback"]["acceptance"] is False
+    assert selected["feedback"]["pending_layers"] == sorted(
+        layers(profile) & {"postgres", "browser"}
+    )
+    manifest = root / "local-classification.json"
+    manifest.write_text(json.dumps(selected["classification"]))
+    with pytest.raises(ValueError, match="classification"):
+        load_classification(manifest)
+
+
+def test_local_staged_reversal_retains_complete_ownership_union(repository):
+    root, base = repository
+    frontend = sorted(PATHS["frontend-tests"])[0]
+    native = sorted(PATHS["native"])[0]
+    (root / frontend).write_text("committed frontend\n")
+    commit(root)
+    (root / native).write_text("staged native\n")
+    git(root, "add", native)
+    (root / native).write_text("original\n")
+    # The net base-to-worktree diff hides native; the index remains part of the plan.
+    assert git(root, "diff", "--name-only", base) == frontend
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["profile"] == "full"
+    assert selected["changed_paths"] == sorted([frontend, native])
+
+
+def test_local_same_owner_staged_reversal_remains_owned(repository):
+    root, base = repository
+    path = sorted(PATHS["frontend-tests"])[0]
+    (root / path).write_text("changed\n")
+    git(root, "add", path)
+    (root / path).write_text("original\n")
+    assert not git(root, "diff", "--name-only", base)
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["profile"] == "frontend-tests"
+    assert selected["changed_paths"] == [path]
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_local_hidden_shared_index_edits_cannot_select_narrow_feedback(
+    repository, flag
+):
+    root, _ = repository
+    shared = "tests/conftest.py"
+    (root / shared).write_text("original shared\n")
+    base = commit(root)
+    git(root, "update-index", flag, shared)
+    (root / shared).write_text("hidden shared modification\n")
+    name = sorted(PATHS["frontend-tests"])[0]
+    (root / name).write_text("frontend modification\n")
+    assert git(root, "diff", "--name-only", base) == name
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["profile"] == "full"
+    assert selected["classification"]["reason"] == "unsupported-local-index"
+    assert selected["changed_paths"] == [name]
+    assert selected["unverified_paths"] == [shared]
+
+
+@pytest.mark.parametrize("work", ["dirty", "committed", "reports"])
+def test_local_hidden_shared_executable_mode_uses_full(repository, work):
+    root, _ = repository
+    launcher = root / "start.sh"
+    launcher.write_text("owned launcher fixture\n")
+    launcher.chmod(0o755)
+    base = commit(root)
+    name = (
+        "docs/audits/2026-10-02-owned-report.md"
+        if work == "reports"
+        else sorted(PATHS["frontend-tests"])[0]
+    )
+    (root / name).parent.mkdir(parents=True, exist_ok=True)
+    (root / name).write_text("# Changed owned fixture\n")
+    if work != "dirty":
+        commit(root)
+    git(root, "config", "core.fileMode", "false")
+    launcher.chmod(0o644)
+    assert git(root, "diff", "--name-only", base) == name
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["valid"]
+    assert selected["classification"]["profile"] == "full"
+    assert selected["classification"]["reason"] == "unreliable-local-file-discovery"
+    assert selected["changed_paths"] == [name]
+
+
+def test_local_hidden_shared_symlink_type_uses_full(repository):
+    root, _ = repository
+    shared = root / "shared-link"
+    shared.symlink_to("unowned-target")
+    base = commit(root)
+    git(root, "config", "core.symlinks", "false")
+    shared.unlink()
+    shared.write_text("unowned-target")
+    name = sorted(PATHS["frontend-tests"])[0]
+    (root / name).write_text("frontend modification\n")
+    # Git can treat a regular file as the unchanged symlink's checkout representation.
+    assert git(root, "diff", "--name-only", base) == name
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["valid"]
+    assert selected["classification"]["profile"] == "full"
+    assert selected["classification"]["reason"] == "unreliable-local-file-discovery"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "new",
+        "delete",
+        "rename",
+        "mode",
+        "staged-mode-reversal",
+        "ignored-mode",
+        "symlink",
+        "staged-symlink-reversal",
+        "mixed",
+        "shared",
+        "conflict",
+    ],
+)
+def test_local_unsafe_git_states_use_full_and_preserve_names(repository, change):
+    root, base = repository
+    name = sorted(PATHS["native"])[0]
+    path = root / name
+    expected = {name}
+    if change == "new":
+        path = root / sorted(PATHS["native"])[1]
+        expected = {path.relative_to(root).as_posix()}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("new frozen sibling\n")
+        git(root, "add", str(path))
+    elif change == "delete":
+        path.unlink()
+    elif change == "rename":
+        target = path.with_name("renamed-owner")
+        git(root, "mv", str(path), str(target))
+        expected.add(target.relative_to(root).as_posix())
+    elif change in {"mode", "staged-mode-reversal", "ignored-mode"}:
+        if change == "ignored-mode":
+            git(root, "config", "core.fileMode", "false")
+            path.write_text("content ensures the physical mode is checked\n")
+        path.chmod(0o755)
+        if change == "staged-mode-reversal":
+            git(root, "add", name)
+            path.chmod(0o644)
+    elif change in {"symlink", "staged-symlink-reversal"}:
+        path.unlink()
+        path.symlink_to("unowned-target")
+        if change == "staged-symlink-reversal":
+            git(root, "add", name)
+            path.unlink()
+            path.write_text("original\n")
+    elif change in {"mixed", "shared"}:
+        other = (
+            sorted(PATHS["frontend-tests"])[0]
+            if change == "mixed"
+            else "tests/conftest.py"
+        )
+        if change == "shared":
+            (root / other).write_text("original shared\n")
+            base = commit(root)
+        path.write_text("native modification\n")
+        (root / other).write_text("other owner\n")
+        expected.add(other)
+    else:
+        blob = git(root, "rev-parse", f"HEAD:{name}")
+        subprocess.run(
+            ["git", "update-index", "--index-info"],
+            cwd=root,
+            check=True,
+            text=True,
+            input=f"0 {'0' * 40}\t{name}\n"
+            + "".join(f"100644 {blob} {stage}\t{name}\n" for stage in (1, 2, 3)),
+        )
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["valid"]
+    assert selected["classification"]["profile"] == "full"
+    assert set(selected["changed_paths"]) == expected
+
+
+def test_local_existing_executable_with_stable_mode_remains_owned(repository):
+    root, base = repository
+    name = sorted(PATHS["harness"])[0]
+    path = root / name
+    path.chmod(0o755)
+    base = commit(root)
+    path.write_text("modified executable\n")
+    assert local_selection.plan(root, base)["classification"]["profile"] == "harness"
+
+
+def test_local_bad_comparison_cannot_run_feedback(repository):
+    root, _ = repository
+    selected = local_selection.plan(root, "nonexistent-base")
+    assert not selected["classification"]["valid"]
+    assert selected["classification"]["profile"] == "full"
+    assert local_selection.execute(root, selected, feedback=True) == 2
+
+
+def test_local_feedback_cli_runs_owned_node_and_keeps_browser_pending(repository):
+    root, base = repository
+    name = sorted(PATHS["e2e-tests"])[0]
+    (root / name).write_text("changed browser check\n")
+    # An actual executable proves the CLI runs npm test and never reaches npm ci.
+    bin_directory = root.with_name(root.name + "-bin")
+    bin_directory.mkdir()
+    npm = bin_directory / "npm"
+    npm.write_text(
+        f"#!{sys.executable}\nimport json,pathlib,sys\n"
+        "assert sys.argv[1:] == ['test']\n"
+        "pathlib.Path('executed.json').write_text(json.dumps(sys.argv[1:]))\n"
+    )
+    npm.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": str(bin_directory) + os.pathsep + os.environ["PATH"],
+    }
+    for key in (
+        "SCHEMII_E2E_BOOTSTRAP",
+        "SCHEMII_E2E_CREDENTIALS_FILE",
+        "SCHEMII_E2E_USERNAME",
+        "SCHEMII_E2E_PASSWORD",
+    ):
+        environment.pop(key, None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/test-changes.py"),
+            "--base",
+            base,
+            "--feedback",
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads((root / "executed.json").read_text()) == ["test"]
+    assert "full acceptance is not established" in result.stdout
+    assert "Required pending acceptance layers: browser" in result.stdout
+
+
+def test_local_clean_report_execution_retains_hosted_report_proof(repository):
+    root, base = repository
+    report = root / "docs/audits/2026-10-02-owned-report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("# Owned report\n")
+    commit(root)
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["profile"] == "reports"
+    selected["commands"] = [
+        [
+            sys.executable,
+            "-c",
+            "import json,pathlib; assert json.loads(pathlib.Path('.schemii/test-selection/classification.json').read_text())['schema'] == 2",
+        ]
+    ]
+    assert local_selection.execute(root, selected) == 0
+    assert (
+        load_classification(root / ".schemii/test-selection/classification.json")[
+            "profile"
+        ]
+        == "reports"
+    )
+    report.write_text("# Dirty report\n")
+    assert local_selection.plan(root, base)["classification"]["profile"] == "full"
 
 
 @pytest.mark.parametrize(
@@ -419,8 +706,8 @@ def test_boolean_shard_or_failure_count_is_not_integer_evidence(tmp_path):
 
 
 @pytest.mark.parametrize("profile", ["full", "e2e-tests"])
-def test_real_layer_prerequisites_block_execution_instead_of_claiming_acceptance(
-    tmp_path, monkeypatch, profile
+def test_real_layer_prerequisites_allow_earlier_feedback_but_block_acceptance(
+    tmp_path, monkeypatch, capsys, profile
 ):
     for name in (
         "SCHEMII_TEST_METADATA_DSN",
@@ -430,9 +717,95 @@ def test_real_layer_prerequisites_block_execution_instead_of_claiming_acceptance
         "SCHEMII_E2E_PASSWORD",
     ):
         monkeypatch.delenv(name, raising=False)
+    sentinel = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; Path('cheap-check').write_text('passed')",
+    ]
+    real = (
+        [
+            local_selection.POSTGRES_COMMAND,
+            local_selection.BROWSER_BOUNDARY,
+            ["./start.sh"],
+        ]
+        if profile == "full"
+        else [local_selection.BROWSER_BOUNDARY, ["./start.sh"]]
+    )
     selected = {
         "classification": {"valid": True, "profile": profile},
         "layers": sorted(layers(profile)),
-        "commands": [["must-not-execute"]],
+        "commands": [sentinel, *real],
     }
     assert local_selection.execute(tmp_path, selected) == 2
+    assert (tmp_path / "cheap-check").read_text() == "passed"
+    assert "acceptance pending" in capsys.readouterr().err
+    assert local_selection.execute(tmp_path, selected, feedback=True) == 0
+    output = capsys.readouterr().out
+    assert "full acceptance is not established" in output
+    assert "browser" in output
+    assert ("postgres" in output) == (profile == "full")
+
+
+def test_local_failed_cheap_check_stops_before_real_prerequisites(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("SCHEMII_TEST_METADATA_DSN", raising=False)
+    selected = {
+        "classification": {"valid": True, "profile": "full"},
+        "layers": sorted(layers("full")),
+        "commands": [
+            [sys.executable, "-c", "raise SystemExit(7)"],
+            local_selection.POSTGRES_COMMAND,
+        ],
+    }
+    assert local_selection.execute(tmp_path, selected) == 7
+    assert local_selection.execute(tmp_path, selected, feedback=True) == 7
+
+
+def test_local_configured_pg_runs_before_missing_browser_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("SCHEMII_TEST_METADATA_DSN", "owned-test-dsn")
+    for name in (
+        "SCHEMII_E2E_BOOTSTRAP",
+        "SCHEMII_E2E_CREDENTIALS_FILE",
+        "SCHEMII_E2E_USERNAME",
+        "SCHEMII_E2E_PASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    observed = []
+
+    def run(argv, **kwargs):
+        observed.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(local_selection.subprocess, "run", run)
+    selected = {
+        "classification": {"valid": True, "profile": "full"},
+        "layers": sorted(layers("full")),
+        "commands": [
+            ["npm", "test"],
+            local_selection.POSTGRES_COMMAND,
+            local_selection.BROWSER_BOUNDARY,
+            ["./start.sh"],
+        ],
+    }
+    assert local_selection.execute(tmp_path, selected) == 2
+    assert observed == [["npm", "test"], local_selection.POSTGRES_COMMAND]
+    assert "Browser acceptance pending" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("profile", sorted(PROFILES - {"reports"}))
+def test_local_feedback_retains_every_selected_deterministic_command(profile):
+    selected = commands(profile, "origin/main")
+    feedback = local_selection.feedback_commands(selected)
+    assert ["npm", "test"] in feedback
+    if "python" in layers(profile):
+        assert [
+            "python",
+            "scripts/ci/python-tests.py",
+            *PYTHON_PATHS.get(profile, ()),
+        ] in feedback
+    assert all(argv not in feedback for argv in selected if argv[0] == "./start.sh")
+    assert local_selection.POSTGRES_COMMAND not in feedback
+    assert local_selection.BROWSER_BOUNDARY not in feedback

@@ -39,13 +39,25 @@ substitute for a focused regression or a faithful controlled failure.
    is feedback during development, not permission to omit acceptance.
 
 Use `python scripts/test-changes.py --base origin/main` to print the actual
-Git comparison, committed changed paths, staged/dirty/untracked status and all
-required commands. `--run` executes them and stops on the first failure. Dirty,
-staged or untracked work conservatively selects full checks; it never disappears
-from the plan. Full real-database checks require `SCHEMII_TEST_METADATA_DSN`.
-Browser checks require explicitly owned account credentials or bootstrap consent;
-missing prerequisites stop execution with the real layers still pending. The
-application command remains `./start.sh`; deployment leases still apply.
+Git comparison, committed/staged/unstaged changed paths, untracked status and all
+required commands. Existing owned regular-file modifications with stable Git and
+working-tree modes retain their profile before commit. The union of each diff
+boundary matters: an unstaged reversal cannot hide a staged shared change.
+Unknown, untracked, new, renamed, deleted, conflicted, symlinked, mode-changing or
+mixed-owner work selects full checks.
+Index flags that can conceal tracked edits also prevent narrow selection; the
+plan lists those paths as unverified rather than claiming they are unchanged.
+Git configurations that disable executable-mode or symlink discovery also force
+full checks, since they can conceal changes outside the visible diff.
+
+Use `--feedback` to execute the selected deterministic checks during development.
+The plan explicitly lists any required PostgreSQL/browser layers as pending;
+successful feedback is not full acceptance. `--run` executes the complete plan
+and stops on the first failed check or missing prerequisite at that layer's
+boundary, so missing live credentials do not block earlier cheap checks.
+Real-database checks require `SCHEMII_TEST_METADATA_DSN`. Browser checks require
+explicitly owned account credentials or bootstrap consent. The application
+command remains `./start.sh`; deployment leases still apply.
 
 ## Affected PR acceptance
 
