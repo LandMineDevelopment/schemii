@@ -249,6 +249,9 @@ def execute(root: Path, selected: dict, *, feedback: bool = False) -> int:
                 file=sys.stderr,
             )
             return 2
+        # Keep the planner environment even when invoked without activating PATH.
+        if argv[0] in {"python", "python3"}:
+            argv = [sys.executable, *argv[1:]]
         print("+ " + shlex.join(argv), flush=True)
         result = subprocess.run(argv, cwd=root, check=False)
         if result.returncode:

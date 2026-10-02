@@ -21,7 +21,7 @@ The launcher may use Docker on the host as an implementation detail. Application
 
 Read [the testing feedback policy](docs/testing-feedback.md) before choosing checks.
 Inspect the current PR head, existing checks and retained evidence before running
-tests. Use `python scripts/test-changes.py --base origin/main` for the complete
+tests. Use `.venv/bin/python scripts/test-changes.py --base origin/main` for the complete
 change plan; choose the cheapest faithful regression for the edit during development.
 The planner includes committed, staged and unstaged changes. Proven modifications
 to existing owned leaves retain their profile before commit; unknown, untracked,
@@ -41,8 +41,11 @@ explicit acceptance requirement. Preserve failed attempts; do not retry them awa
 GitHub schedules required PR/main checks automatically. Respect its selected
 profile and strict gate; do not bypass them or launch duplicate runs for samples.
 An identical-tree main merge can reuse a recent full PR's validated original
-receipts through the CI admission and independent gate recheck. Inspect that
-automatic verdict; a merge is not a reason to rerun accepted work manually.
+receipts through CI admission and the independent gate recheck. The exact reviewed
+cache profile also supports reuse when both checks independently prove the entire
+push has the same owner, base, policy and original scoped inventory. Main otherwise
+retains full acceptance. Inspect that automatic verdict; a merge is not a reason
+to rerun accepted work manually.
 Keep full stress campaigns and ten-minute browser cleanup probes outside ordinary
 feedback unless their ownership boundary changed or deliberate lifecycle acceptance
 is assigned. Test/CI/instruction-only changes do not require an application rebuild.

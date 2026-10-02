@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+import re
+
+CACHE_PROFILE = "schemer-result-cache"
+CACHE_SOURCE = "src/schemii/schemer/web/result-cache.js"
+CACHE_TEST = "tests/frontend/schemer-result-cache.test.js"
+
 PROFILES = frozenset(
     {
         "full",
@@ -12,6 +21,7 @@ PROFILES = frozenset(
         "backend-tests",
         "frontend-tests",
         "e2e-tests",
+        CACHE_PROFILE,
     }
 )
 LAYERS = {
@@ -23,9 +33,11 @@ LAYERS = {
     "backend-tests": frozenset({"static", "node", "python"}),
     "frontend-tests": frozenset({"node"}),
     "e2e-tests": frozenset({"node", "browser"}),
+    CACHE_PROFILE: frozenset({"node", "python", "browser"}),
 }
 # Tooling closes over harness/load consumers without involving installed application owners.
 PYTHON_PATHS = {
+    CACHE_PROFILE: ("tests/test_frontend.py",),
     "native": ("testing/agents",),
     "harness": ("testing/agents", "testing/harness", "tests/test_load_planner.py"),
     "load": ("testing/agents", "testing/harness", "tests/test_load_planner.py"),
@@ -90,8 +102,10 @@ def expected_lanes(profile: str) -> set[tuple[str, str, int]]:
 
 
 # Frozen existing leaves, independently traced to consumers at main3e67404.
-# Shared helpers/configuration, new files, documentation and every product path fall back full.
+# Shared helpers/configuration, new files and documentation fall back full.
+# The only product owner is the independently reviewed result-cache singleton/pair.
 PATHS = {
+    CACHE_PROFILE: frozenset({CACHE_SOURCE}),
     "native": frozenset(
         """
 .codex/agents/developer.toml
@@ -423,6 +437,13 @@ tests/e2e/workspace-rename.spec.js
 
 def select_paths(changes: list[tuple[str, list[str]]]) -> str:
     """Select only modifications wholly within one independently owned family."""
+    # The direct test keeps its existing family unless its source is also present.
+    if any(CACHE_SOURCE in paths for _, paths in changes):
+        safe = all(status == "M" and len(paths) == 1 for status, paths in changes)
+        changed = {path for _, paths in changes for path in paths}
+        return (
+            CACHE_PROFILE if safe and changed <= {CACHE_SOURCE, CACHE_TEST} else "full"
+        )
     selected = set()
     for status, paths in changes:
         if status != "M" or len(paths) != 1:
@@ -484,6 +505,7 @@ def commands(profile: str, base: str) -> list[list[str]]:
                 "scripts/ci/run-browser-shard.mjs",
                 f"--project={project}",
                 f"--shard={shard}/3",
+                *([f"--profile={profile}"] if profile == CACHE_PROFILE else []),
             ]
             for project in BROWSER_PROJECTS
             for shard in BROWSER_SHARDS
@@ -500,3 +522,143 @@ def commands(profile: str, base: str) -> list[list[str]]:
                 ]
             )
     return result
+
+
+def coverage_policy() -> dict:
+    """Reviewed frozen discovery, independent of supplied classification/receipts."""
+    policy = json.loads(Path(__file__).with_name("coverage-profiles.json").read_text())
+    if (
+        set(policy) != {"schema", "profile", "files", "python", "browser"}
+        or type(policy["schema"]) is not int
+        or policy["schema"] != 1
+        or policy["profile"] != CACHE_PROFILE
+    ):
+        raise ValueError("Invalid coverage policy")
+    files = policy["files"]
+    if (
+        not isinstance(files, list)
+        or len(files) != 8
+        or len(set(files)) != 8
+        or any(
+            not isinstance(file, str)
+            or not re.fullmatch(r"tests/e2e/[a-z-]+\.spec\.js", file)
+            for file in files
+        )
+    ):
+        raise ValueError("Invalid browser coverage files")
+    if set(policy["browser"]) != set(BROWSER_PROJECTS):
+        raise ValueError("Invalid coverage projects")
+    for project, inventory in [
+        ("python", policy["python"]),
+        *policy["browser"].items(),
+    ]:
+        fields = {"files", "allowed_skips"} | (
+            {"shards"} if project != "python" else set()
+        )
+        if (
+            not isinstance(inventory, dict)
+            or set(inventory) != fields
+            or set(inventory["files"])
+            != ({"tests/test_frontend.py"} if project == "python" else set(files))
+        ):
+            raise ValueError("Invalid coverage inventory")
+        ids = []
+        for tests in inventory["files"].values():
+            if (
+                not isinstance(tests, list)
+                or not tests
+                or any(
+                    not isinstance(test, str) or not re.fullmatch(r"[0-9a-f]{64}", test)
+                    for test in tests
+                )
+            ):
+                raise ValueError("Invalid coverage cases")
+            ids.extend(tests)
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate coverage case")
+        skips = inventory["allowed_skips"]
+        if project == "python":
+            if skips != []:
+                raise ValueError("Unexpected Python skip")
+        else:
+            if (
+                skips != inventory["files"]["tests/e2e/schemer-ai-live.spec.js"]
+                or len(skips) != 1
+            ):
+                raise ValueError("Unexpected browser skip")
+            shards = inventory["shards"]
+            if (
+                not isinstance(shards, list)
+                or len(shards) != 3
+                or any(not isinstance(shard, list) or not shard for shard in shards)
+            ):
+                raise ValueError("Invalid coverage shards")
+            assigned = [file for shard in shards for file in shard]
+            if len(assigned) != len(files) or set(assigned) != set(files):
+                raise ValueError("Missing or duplicate coverage file")
+    return policy
+
+
+def expected_scope(profile, key):
+    """Return independently required cases for scoped Python/browser lanes only."""
+    if profile != CACHE_PROFILE or key[0] not in {"python", "browser"}:
+        return None
+    policy = coverage_policy()
+    lane, project, shard = key
+    if lane == "python" and (project, shard) == ("none", 0):
+        inventory = policy["python"]
+        files = list(inventory["files"])
+    elif lane == "browser" and project in BROWSER_PROJECTS and shard in BROWSER_SHARDS:
+        inventory = policy["browser"][project]
+        files = inventory["shards"][shard - 1]
+    else:
+        raise ValueError("Invalid scoped lane")
+    return {
+        test: {
+            "source_id": hashlib.sha256(file.encode()).hexdigest(),
+            "allow_skip": test in inventory["allowed_skips"],
+        }
+        for file in files
+        for test in inventory["files"][file]
+    }
+
+
+def valid_scope(profile, key, scope):
+    expected = expected_scope(profile, key)
+    if expected is None:
+        return True
+    if (
+        not isinstance(scope, dict)
+        or set(scope) != {"profile", "planned", "observed"}
+        or scope["profile"] != profile
+        or scope["planned"] != sorted(expected)
+    ):
+        return False
+    observed = scope["observed"]
+    if not isinstance(observed, list) or len(observed) != len(expected):
+        return False
+    seen = set()
+    for value in observed:
+        if not isinstance(value, dict) or set(value) != {
+            "test_id",
+            "source_id",
+            "outcome",
+            "attempt",
+        }:
+            return False
+        test = value["test_id"]
+        if (
+            not isinstance(test, str)
+            or test not in expected
+            or test in seen
+            or type(value["attempt"]) is not int
+            or value["attempt"] != 0
+        ):
+            return False
+        seen.add(test)
+        owner = expected[test]
+        if value["source_id"] != owner["source_id"] or value["outcome"] not in (
+            {"passed", "skipped"} if owner["allow_skip"] else {"passed"}
+        ):
+            return False
+    return seen == set(expected)

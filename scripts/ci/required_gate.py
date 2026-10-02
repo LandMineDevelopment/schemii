@@ -15,6 +15,7 @@ if __package__:
         expected_jobs,
         expected_lanes,
         required_needs,
+        valid_scope,
     )
     from .workflow_timing import (
         JOB_NAMES,
@@ -32,6 +33,7 @@ else:
         expected_jobs,
         expected_lanes,
         required_needs,
+        valid_scope,
     )
     from workflow_timing import (
         JOB_NAMES,
@@ -100,7 +102,7 @@ def evaluate(
         return False, "incomplete-or-mismatched-timing"
     if reuse is not None:
         return evaluate_reused(classification, needs, jobs, timing, identity, reuse)
-    if timing.get("acceptance_mode") == "reused-full-pr" or "reuse" in timing:
+    if "acceptance_mode" in timing or "reuse" in timing:
         return False, "unverified-reuse-proof"
     evidence = timing.get("test_evidence", {})
     if not isinstance(evidence, dict):
@@ -139,6 +141,14 @@ def evaluate(
         )
     ):
         return False, "incomplete-or-failed-selected-test-evidence"
+    try:
+        if any(
+            not valid_scope(profile, key, value.get("scope"))
+            for key, value in zip(keys, receipts, strict=True)
+        ):
+            return False, "incomplete-selected-coverage"
+    except (ValueError, TypeError, KeyError, OSError):
+        return False, "invalid-selected-coverage-policy"
     selected_needs = required_needs(profile)
     if any(needs[name].get("result") != "success" for name in selected_needs):
         return False, "source-job-failed-cancelled-or-skipped"
@@ -193,19 +203,29 @@ def evaluate(
 
 def evaluate_reused(classification, needs, jobs, timing, identity, reuse):
     if __package__:
-        from .reuse_acceptance import MODE, EXPENSIVE_NEEDS, current_reuse_jobs
+        from .reuse_acceptance import (
+            CACHE_MODE,
+            EXPENSIVE_NEEDS,
+            current_reuse_jobs,
+            valid_receipt_mode,
+        )
     else:
-        from reuse_acceptance import MODE, EXPENSIVE_NEEDS, current_reuse_jobs
+        from reuse_acceptance import (
+            CACHE_MODE,
+            EXPENSIVE_NEEDS,
+            current_reuse_jobs,
+            valid_receipt_mode,
+        )
     if (
         classification.get("profile") != "full"
         or classification.get("lane") != "source"
-        or timing.get("acceptance_mode") != MODE
+        or not isinstance(reuse, dict)
+        or not valid_receipt_mode(reuse)
+        or timing.get("acceptance_mode") != reuse.get("mode")
         or timing.get("reuse") != reuse
         or "test_evidence" in timing
-        or not isinstance(reuse, dict)
-        or reuse.get("mode") != MODE
         or not matches_identity(reuse.get("target", {}), identity)
-        or needs["classify"].get("outputs", {}).get("acceptance") != MODE
+        or needs["classify"].get("outputs", {}).get("acceptance") != reuse.get("mode")
     ):
         return False, "invalid-reuse-proof"
     if (
@@ -214,7 +234,11 @@ def evaluate_reused(classification, needs, jobs, timing, identity, reuse):
         or not current_reuse_jobs(jobs, identity)
     ):
         return False, "unexpected-reused-source-outcome"
-    return True, "verified-identical-tree-full-pr-acceptance"
+    return True, (
+        "verified-identical-tree-schemer-result-cache-pr-acceptance"
+        if reuse["mode"] == CACHE_MODE
+        else "verified-identical-tree-full-pr-acceptance"
+    )
 
 
 def main() -> int:
