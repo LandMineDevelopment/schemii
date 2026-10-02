@@ -223,6 +223,50 @@ def test_local_hidden_shared_index_edits_cannot_select_narrow_feedback(
     assert selected["unverified_paths"] == [shared]
 
 
+@pytest.mark.parametrize("work", ["dirty", "committed", "reports"])
+def test_local_hidden_shared_executable_mode_uses_full(repository, work):
+    root, _ = repository
+    launcher = root / "start.sh"
+    launcher.write_text("owned launcher fixture\n")
+    launcher.chmod(0o755)
+    base = commit(root)
+    name = (
+        "docs/audits/2026-10-02-owned-report.md"
+        if work == "reports"
+        else sorted(PATHS["frontend-tests"])[0]
+    )
+    (root / name).parent.mkdir(parents=True, exist_ok=True)
+    (root / name).write_text("# Changed owned fixture\n")
+    if work != "dirty":
+        commit(root)
+    git(root, "config", "core.fileMode", "false")
+    launcher.chmod(0o644)
+    assert git(root, "diff", "--name-only", base) == name
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["valid"]
+    assert selected["classification"]["profile"] == "full"
+    assert selected["classification"]["reason"] == "unreliable-local-file-discovery"
+    assert selected["changed_paths"] == [name]
+
+
+def test_local_hidden_shared_symlink_type_uses_full(repository):
+    root, _ = repository
+    shared = root / "shared-link"
+    shared.symlink_to("unowned-target")
+    base = commit(root)
+    git(root, "config", "core.symlinks", "false")
+    shared.unlink()
+    shared.write_text("unowned-target")
+    name = sorted(PATHS["frontend-tests"])[0]
+    (root / name).write_text("frontend modification\n")
+    # Git can treat a regular file as the unchanged symlink's checkout representation.
+    assert git(root, "diff", "--name-only", base) == name
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["valid"]
+    assert selected["classification"]["profile"] == "full"
+    assert selected["classification"]["reason"] == "unreliable-local-file-discovery"
+
+
 @pytest.mark.parametrize(
     "change",
     [

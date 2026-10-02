@@ -132,12 +132,23 @@ def plan(root: Path, base: str) -> dict:
         unverified = sorted(
             {os.fsdecode(item[2:]) for item in index_flags if item[:2] != b"H "}
         )
+        # These settings can hide mode/type changes on shared paths absent from diff.
+        reliable_discovery = all(
+            git(root, "config", "--bool", "--get", "--default", "true", option).strip()
+            == b"true"
+            for option in ("core.fileMode", "core.symlinks")
+        )
         dirty = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
         changed = committed + staged + unstaged + [("?", [path]) for path in untracked]
         paths = sorted({path for _, names in changed for path in names})
         profile = select_paths(changed)
         safe = False
-        if classification["valid"] and profile != "full" and not unverified:
+        if (
+            classification["valid"]
+            and profile != "full"
+            and not unverified
+            and reliable_discovery
+        ):
             safe = (
                 committed_safe
                 and staged_safe
@@ -150,6 +161,7 @@ def plan(root: Path, base: str) -> dict:
         if (
             dirty
             or unverified
+            or not reliable_discovery
             or (classification["profile"] not in {"full", "reports"} and not safe)
         ):
             classification.update(
@@ -158,7 +170,9 @@ def plan(root: Path, base: str) -> dict:
                 scope="local-worktree",
                 lane="source",
                 profile=profile if safe and classification["valid"] else "full",
-                reason="unsupported-local-index"
+                reason="unreliable-local-file-discovery"
+                if not reliable_discovery
+                else "unsupported-local-index"
                 if unverified
                 else "verified-owned-local-change"
                 if safe
