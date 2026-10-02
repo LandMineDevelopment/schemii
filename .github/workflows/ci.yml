@@ -24,6 +24,10 @@ jobs:
     name: Classify complete change
     runs-on: ubuntu-24.04
     timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       lane: ${{ steps.classify.outputs.lane }}
       profile: ${{ steps.classify.outputs.profile }}
@@ -33,6 +37,7 @@ jobs:
       postgres: ${{ steps.classify.outputs.postgres }}
       browser: ${{ steps.classify.outputs.browser }}
       python_paths: ${{ steps.classify.outputs.python_paths }}
+      acceptance: ${{ steps.reuse.outputs.acceptance }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +51,19 @@ jobs:
         with:
           name: ci-classification-attempt-${{ github.run_attempt }}
           path: artifacts/ci-classification.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Admit recent identical-tree full PR acceptance
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/reuse_acceptance.py --classification artifacts/ci-classification.json --output artifacts/acceptance-reuse/reuse.json
+      - name: Retain verified donor evidence with its original identities
+        if: steps.reuse.outputs.acceptance == 'reused-full-pr'
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-reuse-attempt-${{ github.run_attempt }}
+          path: artifacts/acceptance-reuse
           if-no-files-found: error
           retention-days: 7
 
@@ -94,7 +112,7 @@ jobs:
 
   test:
     name: Node and deterministic Python behavior
-    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.node == 'true'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.node == 'true' && needs.classify.outputs.acceptance != 'reused-full-pr'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -152,7 +170,7 @@ jobs:
 
   postgres-integration:
     name: Real PostgreSQL metadata behavior
-    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.postgres == 'true'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.postgres == 'true' && needs.classify.outputs.acceptance != 'reused-full-pr'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -201,7 +219,7 @@ jobs:
 
   browser-smoke:
     name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/3)
-    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.browser == 'true'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.browser == 'true' && needs.classify.outputs.acceptance != 'reused-full-pr'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -284,16 +302,27 @@ jobs:
           name: ci-classification-attempt-${{ github.run_attempt }}
           path: artifacts
       - name: Download only public timing evidence
-        if: always() && needs.classify.outputs.lane != 'reports'
+        if: always() && needs.classify.outputs.lane != 'reports' && needs.classify.outputs.acceptance != 'reused-full-pr'
         uses: actions/download-artifact@v4
         with:
           pattern: '*-timing*-attempt-${{ github.run_attempt }}'
           path: artifacts/ci-timing/lanes
+      - name: Download original donor acceptance evidence
+        if: needs.classify.outputs.acceptance == 'reused-full-pr'
+        uses: actions/download-artifact@v4
+        with:
+          name: acceptance-reuse-attempt-${{ github.run_attempt }}
+          path: artifacts/acceptance-reuse
       - name: Collect workflow dispatch, queue, setup and execution timings
         env:
           GITHUB_TOKEN: ${{ github.token }}
         if: always()
-        run: python3 scripts/ci/workflow_timing.py --classification artifacts/ci-classification.json --inputs artifacts/ci-timing/lanes --output artifacts/ci-timing/workflow-summary.json
+        run: |
+          reuse_args=()
+          if [[ "${{ needs.classify.outputs.acceptance }}" == 'reused-full-pr' ]]; then
+            reuse_args=(--reuse artifacts/acceptance-reuse/reuse.json)
+          fi
+          python3 scripts/ci/workflow_timing.py --classification artifacts/ci-classification.json --inputs artifacts/ci-timing/lanes --output artifacts/ci-timing/workflow-summary.json "${reuse_args[@]}"
       - name: Publish public workflow timing
         if: always()
         uses: actions/upload-artifact@v4
@@ -311,6 +340,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -322,8 +352,19 @@ jobs:
         with:
           name: workflow-timing-attempt-${{ github.run_attempt }}
           path: artifacts/ci-timing
+      - name: Download donor proof for independent provider revalidation
+        if: needs.classify.outputs.acceptance == 'reused-full-pr'
+        uses: actions/download-artifact@v4
+        with:
+          name: acceptance-reuse-attempt-${{ github.run_attempt }}
+          path: artifacts/acceptance-reuse
       - name: Resolve report validation or every required source layer
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci/required_gate.py --classification artifacts/ci-classification.json --timing artifacts/ci-timing/workflow-summary.json
+        run: |
+          reuse_args=()
+          if [[ "${{ needs.classify.outputs.acceptance }}" == 'reused-full-pr' ]]; then
+            reuse_args=(--reuse artifacts/acceptance-reuse/reuse.json)
+          fi
+          python3 scripts/ci/required_gate.py --classification artifacts/ci-classification.json --timing artifacts/ci-timing/workflow-summary.json "${reuse_args[@]}"

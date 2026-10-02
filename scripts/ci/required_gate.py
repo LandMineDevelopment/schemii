@@ -18,6 +18,7 @@ if __package__:
     )
     from .workflow_timing import (
         JOB_NAMES,
+        SKIPPED_BROWSER,
         api,
         current_identity,
         current_jobs,
@@ -34,6 +35,7 @@ else:
     )
     from workflow_timing import (
         JOB_NAMES,
+        SKIPPED_BROWSER,
         api,
         current_identity,
         current_jobs,
@@ -45,7 +47,13 @@ CONTROL_NEEDS = {"classify", "report-validation", "timing-rollup"}
 
 
 def evaluate(
-    classification: dict, needs: dict, jobs: list[dict], timing: dict, identity: dict
+    classification: dict,
+    needs: dict,
+    jobs: list[dict],
+    timing: dict,
+    identity: dict,
+    *,
+    reuse=None,
 ) -> tuple[bool, str]:
     if (
         not all(
@@ -90,6 +98,10 @@ def evaluate(
         or timing.get("profile") != profile
     ):
         return False, "incomplete-or-mismatched-timing"
+    if reuse is not None:
+        return evaluate_reused(classification, needs, jobs, timing, identity, reuse)
+    if timing.get("acceptance_mode") == "reused-full-pr" or "reuse" in timing:
+        return False, "unverified-reuse-proof"
     evidence = timing.get("test_evidence", {})
     if not isinstance(evidence, dict):
         return False, "incomplete-or-failed-selected-test-evidence"
@@ -135,7 +147,16 @@ def evaluate(
     ):
         return False, "unexpected-source-outcome"
     selected_jobs = expected_jobs(profile)
-    observed = [job for job in jobs if job.get("name") in JOB_NAMES]
+    browser_excluded = not any(
+        value.startswith("browser-") for value in selected_jobs.values()
+    )
+    observed = [
+        job
+        for job in jobs
+        if job.get("name") in JOB_NAMES
+        or browser_excluded
+        and job.get("name") == SKIPPED_BROWSER
+    ]
     executed = [job for job in observed if job["name"] in selected_jobs]
     if len(executed) != len(selected_jobs) or {job["name"] for job in executed} != set(
         selected_jobs
@@ -156,6 +177,7 @@ def evaluate(
         or any(
             job.get("name", "").startswith("Assembled browser smoke (")
             and job["name"] not in JOB_NAMES
+            and not (browser_excluded and job["name"] == SKIPPED_BROWSER)
             for job in jobs
         )
     ):
@@ -169,10 +191,37 @@ def evaluate(
     return True, "all-selected-source-layers-passed"
 
 
+def evaluate_reused(classification, needs, jobs, timing, identity, reuse):
+    if __package__:
+        from .reuse_acceptance import MODE, EXPENSIVE_NEEDS, current_reuse_jobs
+    else:
+        from reuse_acceptance import MODE, EXPENSIVE_NEEDS, current_reuse_jobs
+    if (
+        classification.get("profile") != "full"
+        or classification.get("lane") != "source"
+        or timing.get("acceptance_mode") != MODE
+        or timing.get("reuse") != reuse
+        or "test_evidence" in timing
+        or not isinstance(reuse, dict)
+        or reuse.get("mode") != MODE
+        or not matches_identity(reuse.get("target", {}), identity)
+        or needs["classify"].get("outputs", {}).get("acceptance") != MODE
+    ):
+        return False, "invalid-reuse-proof"
+    if (
+        needs["static-quality"].get("result") != "success"
+        or any(needs[name].get("result") != "skipped" for name in EXPENSIVE_NEEDS)
+        or not current_reuse_jobs(jobs, identity)
+    ):
+        return False, "unexpected-reused-source-outcome"
+    return True, "verified-identical-tree-full-pr-acceptance"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--classification", type=Path, required=True)
     parser.add_argument("--timing", type=Path, required=True)
+    parser.add_argument("--reuse", type=Path)
     args = parser.parse_args()
     try:
         identity = current_identity(os.environ)
@@ -199,7 +248,22 @@ def main() -> int:
             if response.get("total_count", 101) > 100:
                 raise ValueError("Truncated job evidence")
             jobs = response["jobs"]
-        passed, reason = evaluate(classification, needs, jobs, timing, identity)
+        reuse = None
+        if args.reuse:
+            if __package__:
+                from .reuse_acceptance import GitHub, context, recheck
+            else:
+                from reuse_acceptance import GitHub, context, recheck
+            event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+            target = context(os.environ, event, classification, Path.cwd())
+            reuse = recheck(
+                json.loads(args.reuse.read_text()),
+                GitHub(target["repository"], os.environ["GITHUB_TOKEN"]),
+                target,
+            )
+        passed, reason = evaluate(
+            classification, needs, jobs, timing, identity, reuse=reuse
+        )
     except Exception:
         # Do not print API exception bodies, request headers or provider content.
         passed, reason = False, "required-evidence-unavailable"
