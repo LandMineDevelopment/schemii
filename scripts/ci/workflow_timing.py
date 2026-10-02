@@ -23,6 +23,11 @@ REPORT_JOB_NAMES = {
     "Classify complete change": "classification",
     "Report Markdown and local links": "reports",
 }
+# GitHub retains the literal matrix expression when job-level selection skips
+# expansion. Only this exact current placeholder may represent an excluded lane.
+SKIPPED_BROWSER = (
+    "Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/3)"
+)
 TEST_STEPS = {
     "Fast frontend and harness feedback",
     "Deterministic Python behavior",
@@ -93,7 +98,9 @@ def sum_durations(values):
     return None if any(value is None for value in values) else sum(values)
 
 
-def summarize(run, jobs, *, lane="source", profile=None, report_validation=False):
+def summarize(
+    run, jobs, *, lane="source", profile=None, report_validation=False, reused=False
+):
     profile = profile or ("reports" if lane == "reports" else "full")
     if (lane == "reports") != (profile == "reports"):
         raise ValueError("Mismatched profile")
@@ -101,7 +108,12 @@ def summarize(run, jobs, *, lane="source", profile=None, report_validation=False
     dispatched = timestamp(run.get("run_started_at"))
     records = []
     labels = {**JOB_NAMES, **REPORT_JOB_NAMES}
-    expected = set(expected_jobs(profile).values())
+    expected = {"static"} if reused else set(expected_jobs(profile).values())
+    browser_excluded = reused or not any(
+        value.startswith("browser-") for value in expected
+    )
+    if browser_excluded:
+        labels[SKIPPED_BROWSER] = "browser-not-selected"
     if report_validation or lane == "reports":
         expected.update(REPORT_JOB_NAMES.values())
     not_applicable = []
@@ -109,13 +121,16 @@ def summarize(run, jobs, *, lane="source", profile=None, report_validation=False
         isinstance(job.get("name"), str)
         and job["name"].startswith("Assembled browser smoke (")
         and job["name"] not in JOB_NAMES
+        and not (browser_excluded and job["name"] == SKIPPED_BROWSER)
         for job in jobs
     )
     for job in jobs:
         label = labels.get(job.get("name"))
         if label is None:
             continue
-        if label in JOB_NAMES.values() and label not in expected:
+        if (
+            label in JOB_NAMES.values() or label == "browser-not-selected"
+        ) and label not in expected:
             not_applicable.append({"job": label, "outcome": job.get("conclusion")})
             continue
         start = timestamp(job.get("started_at"))
@@ -199,9 +214,7 @@ def summarize(run, jobs, *, lane="source", profile=None, report_validation=False
         and all(record["outcome"] == "skipped" for record in not_applicable),
         "missing_jobs": sorted(expected - observed),
         "jobs": sorted(records, key=lambda record: record["job"]),
-        "not_applicable_jobs": sorted(
-            set(JOB_NAMES.values()) - set(expected_jobs(profile).values())
-        ),
+        "not_applicable_jobs": sorted(set(JOB_NAMES.values()) - expected),
         "critical_path_ms": duration(created, max(end_times)) if end_times else None,
         "total_job_minutes": round(total_job_ms / 60000, 3)
         if total_job_ms is not None
@@ -284,6 +297,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--classification", type=Path)
+    parser.add_argument("--reuse", type=Path)
     args = parser.parse_args()
     identity = current_identity(os.environ)
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -307,6 +321,17 @@ def main():
     classification_valid = classification["valid"]
     if not classification_valid:
         classification = {"lane": "source", "profile": "full", "valid": False}
+    reuse = None
+    if args.reuse:
+        reuse = json.loads(args.reuse.read_text())
+        if __package__:
+            from .reuse_acceptance import MODE, current_reuse_jobs
+        else:
+            from reuse_acceptance import MODE, current_reuse_jobs
+        if reuse.get("mode") != MODE or any(
+            reuse.get("target", {}).get(key) != value for key, value in identity.items()
+        ):
+            raise ValueError("Invalid reuse identity")
     try:
         run = api(f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}")
         jobs = api(
@@ -318,6 +343,7 @@ def main():
             lane=classification["lane"],
             profile=classification["profile"],
             report_validation=bool(args.classification),
+            reused=bool(reuse),
         )
         # Pagination cannot be mistaken for a complete measured workflow.
         if (
@@ -334,6 +360,8 @@ def main():
                 identity,
             )
             or not classification_valid
+            or reuse
+            and not current_reuse_jobs(jobs["jobs"], identity)
             or args.classification
             and classification_valid
             and classification["head"] != identity["head_sha"]
@@ -352,14 +380,20 @@ def main():
     result["classification_valid"] = classification_valid
     if not classification_valid:
         result["collection_error"] = "invalid-classification"
-    evidence = test_evidence(
-        args.inputs,
-        lane=classification["lane"],
-        profile=classification["profile"],
-        identity=identity,
-    )
-    result["test_evidence"] = evidence
-    result["complete"] = result["complete"] and evidence["complete"]
+    if reuse:
+        # Donor tests/cost retain their original cohort; current execution totals
+        # include only the fresh classification, reports and static controls.
+        result["acceptance_mode"] = MODE
+        result["reuse"] = reuse
+    else:
+        evidence = test_evidence(
+            args.inputs,
+            lane=classification["lane"],
+            profile=classification["profile"],
+            identity=identity,
+        )
+        result["test_evidence"] = evidence
+        result["complete"] = result["complete"] and evidence["complete"]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print("Workflow timing complete=" + str(result["complete"]))

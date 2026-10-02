@@ -65,8 +65,9 @@ A strict schema-2 descriptor selects one reviewed profile from the complete
 PR merge-base-to-head diff. Only modifications to frozen existing regular files
 with unchanged modes qualify; new siblings, shared helpers, mixed families,
 renames, deletions, symlinks, dependencies, startup, CI policy and every product
-source change select full acceptance. Source/test/tooling pushes to main and
-manual dispatch run full acceptance. The existing positively verified audit
+source change select full acceptance. Source/test/tooling pushes to main run full
+acceptance unless the exact-tree post-merge proof below succeeds. Manual dispatch
+always runs full acceptance. The existing positively verified audit
 report shortcut remains available on both PRs and main.
 
 | PR profile | Required checks |
@@ -165,6 +166,40 @@ acceptance in #73/#137. Backup recovery remains an isolated-database check.
 Live provider/report specs require their own authenticated fixture prerequisites;
 track their skips and ownership rather than treating a green default run as proof.
 Full capacity ramps/soaks in #135/#136 stay outside the normal PR feedback path.
+
+### Identical-tree post-merge acceptance
+
+For an ordinary push to main, CI can reuse a same-repository merged PR's full
+acceptance from the preceding 24 hours. The tested prospective merge tree must
+equal the current checked-out main tree, including workflow, policy, tests and
+dependencies. The donor must be the actual CI workflow's unique successful
+attempt-one PR run for that final head, with all 13 jobs passed and all nine raw
+test lanes complete with zero first-attempt failures or retry recoveries.
+
+Admission downloads bounded, digest-checked original artifacts and validates
+their schemas, identities and completeness. The gate independently repeats
+provider and original-receipt verification. Current classification, report and
+static checks still run; only duplicate Node/Python, PostgreSQL and browser
+execution is skipped. Skipped matrix placeholders are accepted only with the
+exact known provider name, intentional exclusion and current-cohort skipped
+status. They cannot stand in for selected browser acceptance.
+
+Direct pushes, forks, changed trees/bases, ambiguous or rerun donors, stale or
+missing evidence and admission API failures select normal full acceptance.
+A corrupt or no-longer-verifiable proof at the gate fails closed. A reused main
+run cannot become a donor. Donor SHA/run/test timings remain separate from
+current main execution; no old case is relabeled as a new pass. Useful selected
+evidence is retained, and disposable validation directories clean up at their
+own context boundary.
+
+The implementation is [reuse_acceptance.py](../scripts/ci/reuse_acceptance.py).
+Natural main run 36775876339 repeated a tree already accepted by its final PR:
+402 seconds to final completion and 37.517 input-job minutes. Its duplicated
+unit, PostgreSQL and six browser jobs account for 36.917 runner-minutes. These
+are the work available to avoid; the next ordinary eligible merge establishes
+actual optimized elapsed time. Environment-dependent external services and
+hosted runner images are not made immutable by tree equality; the bounded age
+and unchanged same-repository execution contract are the reuse policy.
 
 Do not remove meaningful coverage, increase skips/timeouts or add retries to
 conceal failures. Prefer a cheaper oracle only when it detects the same plausible

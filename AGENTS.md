@@ -40,6 +40,9 @@ explicit acceptance requirement. Preserve failed attempts; do not retry them awa
 
 GitHub schedules required PR/main checks automatically. Respect its selected
 profile and strict gate; do not bypass them or launch duplicate runs for samples.
+An identical-tree main merge can reuse a recent full PR's validated original
+receipts through the CI admission and independent gate recheck. Inspect that
+automatic verdict; a merge is not a reason to rerun accepted work manually.
 Keep full stress campaigns and ten-minute browser cleanup probes outside ordinary
 feedback unless their ownership boundary changed or deliberate lifecycle acceptance
 is assigned. Test/CI/instruction-only changes do not require an application rebuild.
