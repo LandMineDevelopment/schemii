@@ -12,6 +12,7 @@ import subprocess
 
 if __package__:
     from .test_selection import (
+        NATIVE_MARKDOWN,
         PROFILES,
         layers,
         select_paths,
@@ -20,6 +21,7 @@ if __package__:
     )
 else:
     from test_selection import (
+        NATIVE_MARKDOWN,
         PROFILES,
         layers,
         select_paths,
@@ -142,12 +144,16 @@ def classify(root: Path, event: str, base: str, head: str) -> dict:
                     root, "ls-tree", "-z", comparison_base, "--", path
                 ).split(b"\0")
                 new_entry = git(root, "ls-tree", "-z", head, "--", path).split(b"\0")
-                safe_modes = (
-                    safe_modes
-                    and len(old_entry) == len(new_entry) == 2
+                regular_mode = (
+                    len(old_entry) == len(new_entry) == 2
                     and old_entry[0][:6] == new_entry[0][:6]
                     and new_entry[0][:6] in {b"100644", b"100755"}
                 )
+                safe_modes = safe_modes and regular_mode
+                if regular_mode and path in NATIVE_MARKDOWN:
+                    # Source ownership does not exempt its documentation from
+                    # the existing mandatory Markdown/link validation job.
+                    result["markdown"].append(path)
             else:
                 safe_modes = False
             if status in {"A", "M"}:

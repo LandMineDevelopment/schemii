@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 import re
 
+NATIVE_SKILL = ".agents/skills/stock-t3-agents/SKILL.md"
+NATIVE_MARKDOWN = frozenset({NATIVE_SKILL, "testing/agents/README.md"})
+
 CACHE_PROFILE = "schemer-result-cache"
 CACHE_SOURCE = "src/schemii/schemer/web/result-cache.js"
 CACHE_TEST = "tests/frontend/schemer-result-cache.test.js"
@@ -158,12 +161,13 @@ def expected_lanes(profile: str) -> set[tuple[str, str, int]]:
 
 
 # Frozen existing leaves, independently traced to consumers at main3e67404.
-# Shared helpers/configuration, new files and documentation fall back full.
+# Shared helpers/configuration, new files and unreviewed documentation fall back full.
 # Product selection is closed to the reviewed cache and inspection source owners.
 PATHS = {
     CACHE_PROFILE: frozenset({CACHE_SOURCE}),
     INSPECTION_PROFILE: INSPECTION_SOURCES,
-    "native": frozenset(
+    "native": NATIVE_MARKDOWN
+    | frozenset(
         """
 .codex/agents/developer.toml
 .codex/agents/qa_reviewer.toml

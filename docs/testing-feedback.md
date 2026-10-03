@@ -74,7 +74,7 @@ report shortcut remains available on both PRs and main.
 
 | PR profile | Required checks |
 | --- | --- |
-| native tooling | Node, static Python, all native Python controls |
+| native tooling and its two existing documentation companions | Node, static Python, all native Python controls and changed companion Markdown/link validation |
 | harness or load tooling | Node, static Python, native + harness + load-planner Python closure |
 | existing backend test leaves | Node, static Python, complete deterministic Python |
 | existing frontend test leaves | complete Node |
@@ -86,6 +86,25 @@ report shortcut remains available on both PRs and main.
 The exact path lists and closures live in
 [scripts/ci/test_selection.py](../scripts/ci/test_selection.py). This first mapping
 accelerates tooling/test-only PRs and two independently reviewed product owners.
+Native ownership additionally includes exactly the existing
+[stock T3 skill](../.agents/skills/stock-t3-agents/SKILL.md) and
+[native agent runbook](../testing/agents/README.md), alone or together with owned
+native code/configuration. These instructions govern the same connection,
+assignment and cleanup behavior covered by all of `testing/agents`; complete Node
+feedback and static Python checks remain required. The strict report-validation
+job checks every changed companion's code fences and local links. Only this exact
+skill may use its closed, bounded `stock-t3-agents` name/description metadata as its
+document title; unrelated Markdown keeps the normal title requirement.
+Local `--feedback` and `--run` put the same companion content validator before
+Node/static/native execution, including proven dirty edits and full plans with a
+changed companion. Its local input accepts only these two paths; local worktree
+descriptors remain ineligible for hosted acceptance.
+Unknown siblings, other documentation, policy files, mixed owners and unsafe Git
+states retain full acceptance. Manual dispatch and main retain their existing full
+or positively verified reuse rules. This avoids unrelated installed-application,
+PostgreSQL and browser work for native instructions; actual selected-CI elapsed
+savings require a naturally occurring eligible change.
+
 The exact product owner is `src/schemii/schemer/web/result-cache.js`, alone or with
 an existing modification to `tests/frontend/schemer-result-cache.test.js`. The
 source must be present; direct-test-only changes keep their ordinary frontend

@@ -15,6 +15,8 @@ import pytest
 from scripts.ci.classify_changes import classify, load_classification
 from scripts.ci.required_gate import CONTROL_NEEDS, evaluate
 from scripts.ci.test_selection import (
+    NATIVE_MARKDOWN,
+    NATIVE_SKILL,
     CACHE_PROFILE,
     CACHE_SOURCE,
     CACHE_TEST,
@@ -179,7 +181,20 @@ def test_local_owned_modifications_retain_complete_closure(repository, profile, 
     assert selected["classification"]["profile"] == profile
     assert selected["classification"]["scope"] == "local-worktree"
     assert selected["changed_paths"] == [path]
-    assert selected["commands"] == commands(profile, base)
+    expected = commands(profile, base)
+    if path in NATIVE_MARKDOWN:
+        expected.insert(
+            0,
+            [
+                "python3",
+                "scripts/ci/validate_reports.py",
+                "--native-documents",
+                path,
+                "--output",
+                ".schemii/test-selection/native-documents.json",
+            ],
+        )
+    assert selected["commands"] == expected
     assert selected["feedback"]["acceptance"] is False
     assert selected["feedback"]["pending_layers"] == sorted(
         layers(profile) & {"postgres", "browser"}
@@ -1736,3 +1751,290 @@ def test_inspection_frozen_policy_corruption_is_rejected(monkeypatch, damage):
     monkeypatch.setattr("scripts.ci.test_selection.json.loads", lambda _: policy)
     with pytest.raises(ValueError):
         coverage_policy(INSPECTION_PROFILE)
+
+
+@pytest.fixture
+def native_document_repository(tmp_path):
+    root = tmp_path / "repository"
+    root.mkdir()
+    git(root, "init", "--quiet", "--initial-branch=main")
+    git(root, "config", "user.name", "Native documentation fixture")
+    git(root, "config", "user.email", "native-docs@example.invalid")
+    files = {
+        NATIVE_SKILL: "---\nname: stock-t3-agents\ndescription: Native workflow instructions.\n---\n\nRead [the runbook](../../../testing/agents/README.md).\n",
+        "testing/agents/README.md": "# Native agents\n\nRead [the skill](../../.agents/skills/stock-t3-agents/SKILL.md).\n",
+        "testing/agents/browser.py": "# Native source fixture\n",
+        ".codex/config.toml": "# Native configuration fixture\n",
+        "testing/agents/notes.md": "# Unknown sibling\n",
+        ".agents/skills/stock-t3-agents/NOTES.md": "# Unknown skill sibling\n",
+        "docs/testing-feedback.md": "# Other documentation\n",
+        "scripts/ci/test_selection.py": "# Shared policy fixture\n",
+        "testing/harness/browser.mjs": "// Other owner fixture\n",
+    }
+    for relative, text in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return root, commit(root)
+
+
+@pytest.mark.parametrize(
+    "documents",
+    [(NATIVE_SKILL,), ("testing/agents/README.md",), tuple(sorted(NATIVE_MARKDOWN))],
+)
+@pytest.mark.parametrize("with_native", [False, True])
+def test_exact_native_document_companions_keep_pr_closure_and_markdown_descriptor(
+    native_document_repository, documents, with_native
+):
+    root, base = native_document_repository
+    assert NATIVE_MARKDOWN == {NATIVE_SKILL, "testing/agents/README.md"}
+    for path in documents:
+        (root / path).write_text(
+            (root / path).read_text() + "\nReviewed instructions.\n"
+        )
+    if with_native:
+        (root / "testing/agents/browser.py").write_text("# Updated native fixture\n")
+        (root / ".codex/config.toml").write_text("# Updated native configuration\n")
+    head = commit(root)
+    manifest = classify(root, "pull_request", base, head)
+    assert manifest["profile"] == "native" and manifest["lane"] == "source"
+    assert manifest["markdown"] == sorted(documents)
+    descriptor = root.parent / "classification.json"
+    descriptor.write_text(json.dumps(manifest))
+    assert load_classification(descriptor) == manifest
+    selected = local_selection.plan(root, base)
+    assert selected["commands"][1:] == commands("native", base)
+    assert selected["commands"][0][2:-2] == ["--native-documents", *sorted(documents)]
+    assert layers("native") == {"node", "static", "python"}
+    assert PYTHON_PATHS["native"] == ("testing/agents",)
+    assert expected_lanes("native") == {("node", "none", 0), ("python", "none", 0)}
+    assert classify(root, "push", base, head)["profile"] == "full"
+    assert classify(root, "push", base, head)["markdown"] == sorted(documents)
+    assert classify(root, "workflow_dispatch", base, head)["profile"] == "full"
+
+
+@pytest.mark.parametrize("document", sorted(NATIVE_MARKDOWN))
+@pytest.mark.parametrize("state", ["unstaged", "staged", "both"])
+def test_proven_dirty_native_document_keeps_full_native_feedback_closure(
+    native_document_repository, document, state
+):
+    root, base = native_document_repository
+    path = root / document
+    path.write_text(path.read_text() + "\nStaged instruction.\n")
+    if state != "unstaged":
+        git(root, "add", document)
+    if state == "both":
+        path.write_text(path.read_text() + "\nUnstaged instruction.\n")
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["profile"] == "native"
+    assert selected["classification"]["scope"] == "local-worktree"
+    assert selected["changed_paths"] == [document]
+    assert selected["classification"]["markdown"] == [document]
+    assert selected["commands"][1:] == commands("native", base)
+    assert selected["commands"][0][2:-2] == ["--native-documents", document]
+    assert selected["feedback"]["commands"] == selected["commands"]
+    descriptor = root.parent / "dirty-classification.json"
+    descriptor.write_text(json.dumps(selected["classification"]))
+    with pytest.raises(ValueError):
+        load_classification(descriptor)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "testing/agents/notes.md",
+        ".agents/skills/stock-t3-agents/NOTES.md",
+        "docs/testing-feedback.md",
+        "scripts/ci/test_selection.py",
+        "testing/harness/browser.mjs",
+    ],
+)
+def test_unknown_mixed_or_policy_document_companions_use_full(
+    native_document_repository, other
+):
+    root, base = native_document_repository
+    (root / NATIVE_SKILL).write_text(
+        (root / NATIVE_SKILL).read_text() + "\nNative edit.\n"
+    )
+    (root / other).write_text((root / other).read_text() + "\nOther edit.\n")
+    assert local_selection.plan(root, base)["classification"]["profile"] == "full"
+    head = commit(root)
+    manifest = classify(root, "pull_request", base, head)
+    assert manifest["profile"] == "full" and manifest["lane"] == "source"
+    assert manifest["markdown"] == [NATIVE_SKILL]
+
+
+@pytest.mark.parametrize("document", sorted(NATIVE_MARKDOWN))
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "new",
+        "deleted",
+        "renamed",
+        "mode",
+        "symlink",
+        "untracked",
+        "skip-worktree",
+        "assume-unchanged",
+        "file-mode-discovery",
+        "symlink-discovery",
+    ],
+)
+def test_unsafe_native_document_or_unproven_local_state_uses_full(
+    native_document_repository, document, damage
+):
+    root, base = native_document_repository
+    path = root / document
+    text = path.read_text()
+    if damage == "new":
+        path.unlink()
+        base = commit(root)
+        path.write_text(text + "\nNew input.\n")
+    elif damage == "deleted":
+        path.unlink()
+    elif damage == "renamed":
+        path.rename(path.with_name("renamed.md"))
+    elif damage == "mode":
+        path.chmod(0o755)
+    elif damage == "symlink":
+        path.unlink()
+        path.symlink_to("unowned-target.md")
+    else:
+        if damage in {"skip-worktree", "assume-unchanged"}:
+            git(root, "update-index", "--" + damage, document)
+        elif damage.endswith("discovery"):
+            git(
+                root,
+                "config",
+                "core.fileMode" if damage.startswith("file-mode") else "core.symlinks",
+                "false",
+            )
+        path.write_text(text + "\nChanged instruction.\n")
+        if damage == "untracked":
+            (path.parent / "new-sibling.md").write_text("# Unknown input\n")
+    assert local_selection.plan(root, base)["classification"]["profile"] == "full"
+    if damage in {"new", "deleted", "renamed", "mode", "symlink"}:
+        assert classify(root, "pull_request", base, commit(root))["profile"] == "full"
+
+
+@pytest.mark.parametrize("document", sorted(NATIVE_MARKDOWN))
+@pytest.mark.parametrize("damage", ["valid", "link", "fence"])
+def test_native_document_validation_is_mandatory_at_the_strict_gate(
+    native_document_repository, document, damage
+):
+    root, base = native_document_repository
+    body = (
+        "\nReviewed instruction.\n"
+        if damage == "valid"
+        else "\n[Broken](absent.md)\n"
+        if damage == "link"
+        else "\n```python\nunclosed()\n"
+    )
+    (root / document).write_text((root / document).read_text() + body)
+    head = commit(root)
+    manifest = classify(root, "pull_request", base, head)
+    assert manifest["profile"] == "native" and manifest["markdown"] == [document]
+    descriptor = root.parent / "classification.json"
+    descriptor.write_text(json.dumps(manifest))
+    output = root.parent / "report-validation.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "scripts/ci/validate_reports.py"),
+            "--classification",
+            str(descriptor),
+            "--output",
+            str(output),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    receipt = json.loads(output.read_text())
+    assert result.returncode == (0 if damage == "valid" else 1)
+    assert receipt["outcome"] == ("success" if damage == "valid" else "failure")
+    _, needs, jobs, timing, identity = selected_gate(root.parent / "gate", "native")
+    identity = {**identity, "head_sha": head}
+    timing["head_sha"] = head
+    for job in jobs:
+        job["head_sha"] = head
+    needs["report-validation"]["result"] = receipt["outcome"]
+    assert evaluate(manifest, needs, jobs, timing, identity)[0] == (damage == "valid")
+    needs["report-validation"]["result"] = "skipped"
+    assert not evaluate(manifest, needs, jobs, timing, identity)[0]
+
+
+@pytest.mark.parametrize("document", sorted(NATIVE_MARKDOWN))
+@pytest.mark.parametrize("invocation", ["--feedback", "--run"])
+@pytest.mark.parametrize("state", ["valid-native", "broken-native", "broken-full"])
+def test_local_cli_executes_native_document_validation_first_and_stops_on_failure(
+    native_document_repository, monkeypatch, document, invocation, state
+):
+    root, base = native_document_repository
+    path = root / document
+    path.write_text(
+        path.read_text()
+        + (
+            "\nReviewed instruction.\n"
+            if state == "valid-native"
+            else "\n[Broken](absent.md)\n"
+        )
+    )
+    if state == "broken-full":
+        (root / "testing/harness/browser.mjs").write_text("// Mixed owner edit\n")
+    selected = local_selection.plan(root, base)
+    assert selected["classification"]["profile"] == (
+        "full" if state == "broken-full" else "native"
+    )
+    assert selected["classification"]["schema"] == 1
+    original_run = subprocess.run
+    executed = []
+
+    def run(argv, *, cwd, check):
+        executed.append(argv)
+        if len(executed) == 1:
+            assert argv[0] == sys.executable
+            assert argv[1:4] == [
+                "scripts/ci/validate_reports.py",
+                "--native-documents",
+                document,
+            ]
+            # Execute the real cheap validator; spy on subsequent expensive layers.
+            return original_run(
+                [argv[0], "-S", str(ROOT / argv[1]), *argv[2:]],
+                cwd=cwd,
+                check=check,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(local_selection.subprocess, "run", run)
+    monkeypatch.setattr(local_selection, "git", lambda *_: str(root).encode())
+    monkeypatch.setattr(
+        local_selection,
+        "plan",
+        lambda actual_root, actual_base: (
+            selected
+            if actual_root == root and actual_base == base
+            else pytest.fail("Unexpected local plan")
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", ["test-changes.py", "--base", base, invocation])
+    assert local_selection.main() == (0 if state == "valid-native" else 1)
+    receipt = json.loads(
+        (root / ".schemii/test-selection/native-documents.json").read_text()
+    )
+    assert receipt["outcome"] == ("success" if state == "valid-native" else "failure")
+    assert not (root / ".schemii/test-selection/classification.json").exists()
+    if state == "valid-native":
+        assert len(executed) == len(selected["commands"])
+        assert executed[1:] == [
+            [sys.executable, *argv[1:]] if argv[0] in {"python", "python3"} else argv
+            for argv in commands("native", base)
+        ]
+    else:
+        assert len(executed) == 1
