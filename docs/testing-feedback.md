@@ -303,6 +303,10 @@ existing work rather than reordering or deleting it. This workflow requires the
 canonical launcher and deployment lease and does not replace native manual QA.
 Developers continue using focused checks; a new agent or merge does not authorize
 another full acceptance run.
+For changes to CI dispatch or shared runners, run complete cheap Node feedback
+once before pushing: its workflow contracts cover adjacent paths that a narrow
+name filter can miss. Reuse that pass until relevant source changes; it does not
+authorize repeating Python, database or browser acceptance locally.
 
 ### Identical-tree post-merge acceptance
 
