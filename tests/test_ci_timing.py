@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.ci.summary import summarize, valid
+from scripts.ci.required_gate import CONTROL_NEEDS, evaluate
 from scripts.ci.workflow_timing import (
     duration,
     timestamp,
@@ -22,11 +23,16 @@ from scripts.ci.workflow_timing import (
 
 
 from scripts.ci.test_selection import (
+    CACHE_PROFILE,
+    SOURCE_NEEDS,
     source_job_names,
     INSPECTION_PROFILE,
     INSPECTION_PYTHON,
     INSPECTION_TEST,
     expected_scope,
+    expected_jobs,
+    expected_lanes,
+    required_needs,
 )
 
 
@@ -711,6 +717,205 @@ def test_one_complete_but_stale_cohort_cannot_supply_current_attempt_evidence(
     assert (
         stale["first_attempt_passes"] == 15
     )  # Retain observations without calling them current acceptance.
+
+
+def scoped_workflow_records(profile, key):
+    inventory = expected_scope(profile, key)
+    template = records(attempt(0, "passed"))
+    for value in template:
+        value.update(lane=key[0], project=key[1], shard=key[2])
+    if inventory is None:
+        return template
+    meta = {field: template[0][field] for field in META}
+    return [
+        {**meta, "kind": "start", "planned": len(inventory)},
+        *({**meta, "kind": "plan", "test_id": test} for test in inventory),
+        *(
+            {
+                **template[2],
+                "test_id": test,
+                "source_id": owner["source_id"],
+                "outcome": "skipped" if owner["allow_skip"] else "passed",
+                "skip": "declared-or-runtime" if owner["allow_skip"] else "none",
+            }
+            for test, owner in inventory.items()
+        ),
+        template[-1],
+    ]
+
+
+def write_scoped_workflow_evidence(root, profile):
+    for key in expected_lanes(profile):
+        (root / f"{key[0]}-{key[1]}-{key[2]}.jsonl").write_text(
+            "\n".join(
+                json.dumps(value) for value in scoped_workflow_records(profile, key)
+            )
+        )
+
+
+def scoped_workflow_gate(profile, evidence):
+    identity = {
+        **{field: META[field] for field in ("source_sha", "run_id", "run_attempt")},
+        "head_sha": "b" * 40,
+    }
+    classification = {
+        "valid": True,
+        "lane": "source",
+        "profile": profile,
+        "reason": "verified-owned-pr-change",
+        "head": identity["head_sha"],
+    }
+    needs = {
+        **{name: {"result": "success"} for name in CONTROL_NEEDS},
+        **{
+            name: {
+                "result": "success" if name in required_needs(profile) else "skipped"
+            }
+            for name in SOURCE_NEEDS
+        },
+    }
+    jobs = [
+        {
+            "name": name,
+            "status": "completed",
+            "conclusion": "success" if name in expected_jobs(profile) else "skipped",
+            "started_at": "2026-09-30T00:00:02Z",
+            "completed_at": "2026-09-30T00:00:10Z",
+            **{
+                field: identity[field]
+                for field in ("head_sha", "run_id", "run_attempt")
+            },
+        }
+        for name in source_job_names(profile)
+    ]
+    timing = {
+        **workflow_summary(
+            {"created_at": "2026-09-30T00:00:00Z"}, jobs, profile=profile
+        ),
+        **identity,
+        "test_evidence": evidence,
+    }
+    return evaluate(classification, needs, jobs, timing, identity)
+
+
+@pytest.mark.parametrize("profile", [INSPECTION_PROFILE, CACHE_PROFILE])
+@pytest.mark.parametrize("outcome", ["failed", "recovered", "skipped"])
+def test_rejected_scoped_lane_retains_original_reliability_and_gate_rejection(
+    tmp_path, profile, outcome
+):
+    write_scoped_workflow_evidence(tmp_path, profile)
+    identity = {field: META[field] for field in ("source_sha", "run_id", "run_attempt")}
+    baseline = collect_evidence(tmp_path, profile=profile, identity=identity)
+    assert baseline["complete"] and scoped_workflow_gate(profile, baseline)[0]
+    path = tmp_path / "browser-android-chromium-1.jsonl"
+    original = [json.loads(line) for line in path.read_text().splitlines()]
+    first = next(
+        value
+        for value in original
+        if value["kind"] == "attempt" and value["outcome"] == "passed"
+    )
+    first["outcome"] = "skipped" if outcome == "skipped" else "failed"
+    if outcome == "skipped":
+        first["skip"] = "declared-or-runtime"
+    elif outcome == "recovered":
+        original.insert(-1, {**first, "attempt": 1, "outcome": "passed"})
+    else:
+        original[-1]["outcome"] = "failed"
+    path.write_text("\n".join(json.dumps(value) for value in original))
+
+    evidence = collect_evidence(tmp_path, profile=profile, identity=identity)
+    assert evidence["complete"] is False and evidence["invalid_lanes"] == 1
+    assert evidence["missing_lanes"] == []
+    retained = next(
+        value
+        for value in evidence["lanes"]
+        if (value["lane"], value["project"], value["shard"])
+        == ("browser", "android-chromium", 1)
+    )
+    expected = summarize(original)
+    fields = (
+        "first_attempt_eligible",
+        "first_attempt_passes",
+        "first_attempt_failures",
+        "retry_recovered",
+    )
+    assert {field: retained[field] for field in fields} == {
+        field: expected[field] for field in fields
+    }
+    assert retained["scope"]["observed"] == [
+        {
+            field: value[field]
+            for field in ("test_id", "source_id", "outcome", "attempt")
+        }
+        for value in original
+        if value["kind"] == "attempt"
+    ]
+    raw_totals = {
+        field: sum(
+            summarize([json.loads(line) for line in receipt.read_text().splitlines()])[
+                field
+            ]
+            for receipt in tmp_path.glob("*.jsonl")
+        )
+        for field in fields
+    }
+    assert {field: evidence[field] for field in fields} == raw_totals
+    assert evidence["first_attempt_pass_rate"] == (
+        raw_totals["first_attempt_passes"] / raw_totals["first_attempt_eligible"]
+    )
+    assert not scoped_workflow_gate(profile, evidence)[0]
+    forged = copy.deepcopy(evidence)
+    forged["complete"] = True
+    for value in forged["lanes"]:
+        value.update(outcome="passed", first_attempt_failures=0, retry_recovered=0)
+    assert not scoped_workflow_gate(profile, forged)[0]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "invalid-schema",
+        "mixed-record-identity",
+        "stale-cohort",
+        "duplicate",
+        "unsupported",
+        "missing-end",
+    ],
+)
+def test_scope_reliability_retention_keeps_invalid_evidence_rejection(tmp_path, damage):
+    profile = CACHE_PROFILE
+    write_scoped_workflow_evidence(tmp_path, profile)
+    identity = {field: META[field] for field in ("source_sha", "run_id", "run_attempt")}
+    baseline = collect_evidence(tmp_path, profile=profile, identity=identity)
+    path = tmp_path / "browser-android-chromium-1.jsonl"
+    original = [json.loads(line) for line in path.read_text().splitlines()]
+    if damage == "invalid-schema":
+        original[0]["secret"] = SECRET
+    elif damage == "mixed-record-identity":
+        original[1]["source_sha"] = "c" * 40
+    elif damage == "stale-cohort":
+        for value in original:
+            value["source_sha"] = "c" * 40
+    elif damage == "unsupported":
+        for value in original:
+            value["shard"] = 0
+    elif damage == "duplicate":
+        (tmp_path / "duplicate.jsonl").write_text(path.read_text())
+    else:
+        original.pop()
+    path.write_text("\n".join(json.dumps(value) for value in original))
+    evidence = collect_evidence(tmp_path, profile=profile, identity=identity)
+    assert evidence["complete"] is False
+    assert not scoped_workflow_gate(profile, evidence)[0]
+    if damage in {"invalid-schema", "mixed-record-identity", "unsupported"}:
+        assert evidence["invalid_lanes"] == 1
+        assert "browser-android-chromium-1" in evidence["missing_lanes"]
+    elif damage == "duplicate":
+        assert evidence["invalid_lanes"] == 1
+        assert evidence["first_attempt_eligible"] == baseline["first_attempt_eligible"]
+    else:
+        assert evidence["invalid_lanes"] == 0
+        assert evidence["missing_lanes"] == []
 
 
 def test_real_playwright_runner_retry_pass_failure_skip_and_safe_public_output(

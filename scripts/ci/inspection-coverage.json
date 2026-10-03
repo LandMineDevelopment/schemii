@@ -168,7 +168,7 @@
     "tests/test_application_structure.py": "46aeb00238b49d89918fe750dc86befc35020bdb902e5006040861eb78085085",
     "tests/test_frontend.py": "a90fef6420a059549659a09ceaa22349b15d4cef512aa5c7a92332fee7c9b916",
     "tests/test_runtime_hardening.py": "1b80a308b34d902a0e21812c1eedc8c108fbcb805c2fbb0d04f3c6811023e6ca",
-    "tests/e2e/shared-ui-audit.spec.js": "725cd984667e9475e5a08068d8448c58fed1c37f14a3e3bc55e1e29cab8e7310",
+    "tests/e2e/shared-ui-audit.spec.js": "841b09b6e38d7fe8acf1a7d82d8cafceb41ad7e56a86694ef27a3184750456f0",
     "tests/e2e/ai-diagnostic-permissions.spec.js": "196b0bd870b76b70111b5a808fae71e369ac9b1b45efad2392d8ea25f467420a"
   }
 }
