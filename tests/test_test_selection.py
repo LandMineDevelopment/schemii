@@ -1146,42 +1146,250 @@ def test_gate_never_accepts_unverified_acceptance_mode(tmp_path, mode):
     assert evaluate(*args) == (False, "unverified-reuse-proof")
 
 
-def test_workflow_suppresses_duplicate_layers_only_for_the_closed_verified_modes():
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-    parts = re.split(r"^  ([a-z-]+):\n", workflow, flags=re.MULTILINE)
-    sections = dict(zip(parts[1::2], parts[2::2], strict=True))
-    modes = {
+VERIFIED_REUSE_MODES = frozenset(
+    {
         "reused-full-pr",
         "reused-schemer-result-cache-pr",
         "reused-developer-inspection-pr",
+        "reused-native-pr",
     }
-    for job in ("test", "postgres-integration", "browser-smoke"):
-        condition = next(
-            line.strip()[4:]
-            for line in sections[job].splitlines()
-            if line.strip().startswith("if: ")
+)
+
+
+def workflow_sections(workflow):
+    parts = re.split(
+        r"^  ([a-z-]+):\n", workflow.split("jobs:\n", 1)[1], flags=re.MULTILINE
+    )
+    return dict(zip(parts[1::2], parts[2::2], strict=True))
+
+
+def assert_closed_reuse_guard(expression, variable, *, positive):
+    # Parse only literal comparisons joined by the required Boolean operator.
+    # No eval, partial matches, arbitrary GitHub expressions or order assumption.
+    terms = re.split(r"\s*(&&|\|\|)\s*", expression.strip())
+    assert len(terms) == 2 * len(VERIFIED_REUSE_MODES) - 1
+    assert set(terms[1::2]) == ({"||"} if positive else {"&&"})
+    comparisons = [
+        re.fullmatch(re.escape(variable) + r"\s*(==|!=)\s*'([^']+)'", term)
+        for term in terms[::2]
+    ]
+    assert all(comparisons)
+    assert {match[1] for match in comparisons} == ({"=="} if positive else {"!="})
+    literals = [match[2] for match in comparisons]
+    assert len(literals) == len(set(literals)) and set(literals) == VERIFIED_REUSE_MODES
+    for value in [
+        *VERIFIED_REUSE_MODES,
+        "fresh",
+        "source",
+        "invented",
+        "",
+        "reused-harness-pr",
+        "reused-load-pr",
+        "reused-backend-tests-pr",
+        "reused-frontend-tests-pr",
+        "reused-e2e-tests-pr",
+        "reused-native-pr ",
+    ]:
+        observed = (
+            any(value == mode for mode in literals)
+            if positive
+            else all(value != mode for mode in literals)
         )
-        guard = condition[condition.index("needs.classify.outputs.acceptance") :]
-        for mode in [*modes, "source", "invented", "", "reused-frontend-tests-pr"]:
-            expression = re.sub(
-                r"needs\.classify\.outputs\.acceptance != '([^']+)'",
-                lambda match: str(mode != match[1]),
-                guard,
-            )
-            assert re.fullmatch(r"[TrueFals &|()]+", expression)
-            assert eval(
-                expression.replace("&&", "and").replace("||", "or"),
-                {"__builtins__": {}},
-            ) == (mode not in modes)
+        assert observed == (
+            value in VERIFIED_REUSE_MODES
+            if positive
+            else value not in VERIFIED_REUSE_MODES
+        )
+
+
+def assert_workflow_reuse_contract(workflow):
+    sections = workflow_sections(workflow)
+    checked_conditions = []
+    variable = "needs.classify.outputs.acceptance"
+    for job in ("test", "postgres-integration", "browser-smoke"):
+        conditions = re.findall(r"^    if: (.+)$", sections[job], re.MULTILINE)
+        assert len(conditions) == 1
+        condition = conditions[0]
+        layer = {
+            "test": "node",
+            "postgres-integration": "postgres",
+            "browser-smoke": "browser",
+        }[job]
+        prefix = f"always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.{layer} == 'true' && "
+        assert condition.startswith(prefix)
+        assert_closed_reuse_guard(condition[len(prefix) :], variable, positive=False)
+        checked_conditions.append(condition)
     assert "outputs.acceptance" not in next(
         line
         for line in sections["static-quality"].splitlines()
         if line.strip().startswith("if: ")
     )
-    # Proof transport accepts only those explicit modes, including both shell branches.
-    positive = "outputs.acceptance == 'reused-full-pr' ||"
-    assert workflow.count(positive) == 3
-    assert workflow.count("== 'reused-developer-inspection-pr' ]]; then") == 2
+    # Inspect the actual named proof steps, not a count of a preferred first/last mode.
+    transports = [
+        (
+            "classify",
+            "Retain verified donor evidence with its original identities",
+            "steps.reuse.outputs.acceptance",
+        ),
+        ("timing-rollup", "Download original donor acceptance evidence", variable),
+        (
+            "required-gate",
+            "Download donor proof for independent provider revalidation",
+            variable,
+        ),
+    ]
+    for job, step, output in transports:
+        matches = re.findall(
+            r"^      - name: " + re.escape(step) + r"\n(.*?)(?=^      - |\Z)",
+            sections[job],
+            re.MULTILINE | re.DOTALL,
+        )
+        assert len(matches) == 1
+        conditions = re.findall(r"^        if: (.+)$", matches[0], re.MULTILINE)
+        assert len(conditions) == 1
+        assert_closed_reuse_guard(conditions[0], output, positive=True)
+        checked_conditions.extend(conditions)
+    ordinary = re.findall(
+        r"^        if: (.+outputs\.acceptance != .+)$",
+        sections["timing-rollup"],
+        re.MULTILINE,
+    )
+    assert len(ordinary) == 1
+    prefix = "always() && needs.classify.outputs.lane != 'reports' && "
+    assert ordinary[0].startswith(prefix)
+    assert_closed_reuse_guard(ordinary[0][len(prefix) :], variable, positive=False)
+    checked_conditions.extend(ordinary)
+    actual_conditions = re.findall(
+        r"^\s+if: (.+outputs\.acceptance.+)$", workflow, re.MULTILINE
+    )
+    assert sorted(actual_conditions) == sorted(checked_conditions)
+    shell_guards = []
+    for job in ("timing-rollup", "required-gate"):
+        branches = re.findall(
+            r"^          if \[\[ (.+) \]\]; then\n(.*?)^          fi$",
+            sections[job],
+            re.MULTILINE | re.DOTALL,
+        )
+        assert len(branches) == 1
+        guard, body = branches[0]
+        assert_closed_reuse_guard(
+            guard, '"${{ needs.classify.outputs.acceptance }}"', positive=True
+        )
+        assignment = "reuse_args=(--reuse artifacts/acceptance-reuse/reuse.json)"
+        assert body == f"            {assignment}\n"
+        assert sections[job].count(assignment) == 1
+        shell_guards.append(guard)
+    assert (
+        re.findall(
+            r"^\s+if \[\[ (.+outputs\.acceptance.+) \]\]; then$", workflow, re.MULTILINE
+        )
+        == shell_guards
+    )
+
+
+def test_workflow_suppresses_duplicate_layers_only_for_the_closed_verified_modes():
+    assert_workflow_reuse_contract((ROOT / ".github/workflows/ci.yml").read_text())
+
+
+REUSE_GUARD_TARGETS = [
+    ("test", "negative"),
+    ("postgres-integration", "negative"),
+    ("browser-smoke", "negative"),
+    ("classify", "positive"),
+    ("timing-rollup", "positive"),
+    ("required-gate", "positive"),
+    ("timing-rollup", "negative"),
+    ("timing-rollup", "shell"),
+    ("required-gate", "shell"),
+]
+
+
+@pytest.mark.parametrize("target", REUSE_GUARD_TARGETS)
+@pytest.mark.parametrize(
+    "damage", ["missing-native", "unsupported", "junction", "comparison"]
+)
+def test_workflow_reuse_guard_mutations_are_rejected(target, damage):
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    job, kind = target
+    section = workflow_sections(workflow)[job]
+    positive = kind != "negative"
+    variable = (
+        '"${{ needs.classify.outputs.acceptance }}"'
+        if kind == "shell"
+        else "steps.reuse.outputs.acceptance"
+        if job == "classify"
+        else "needs.classify.outputs.acceptance"
+    )
+    comparison, junction = ("==", "||") if positive else ("!=", "&&")
+    needle = f"{variable} {comparison} 'reused-native-pr'"
+    assert section.count(needle) == 1
+    if damage == "missing-native":
+        changed = (
+            section.replace(f" {junction} {needle}", "", 1)
+            if f" {junction} {needle}" in section
+            else section.replace(f"{needle} {junction} ", "", 1)
+        )
+    elif damage == "unsupported":
+        changed = section.replace(
+            needle,
+            needle
+            + f" {junction} "
+            + needle.replace("reused-native-pr", "reused-harness-pr"),
+            1,
+        )
+    elif damage == "junction":
+        changed = (
+            section.replace(
+                f" {junction} {needle}", f" {'&&' if positive else '||'} {needle}", 1
+            )
+            if f" {junction} {needle}" in section
+            else section.replace(
+                f"{needle} {junction} ", f"{needle} {'&&' if positive else '||'} ", 1
+            )
+        )
+    else:
+        changed = section.replace(
+            needle, needle.replace(comparison, "!=" if positive else "=="), 1
+        )
+    assert changed != section
+    with pytest.raises(AssertionError):
+        assert_workflow_reuse_contract(workflow.replace(section, changed, 1))
+
+
+def test_workflow_reuse_guard_accepts_reordered_literal_modes():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    for variable in (
+        "steps.reuse.outputs.acceptance",
+        "needs.classify.outputs.acceptance",
+        '"${{ needs.classify.outputs.acceptance }}"',
+    ):
+        for comparison, junction in (("==", "||"), ("!=", "&&")):
+            guard = f" {junction} ".join(
+                f"{variable} {comparison} '{mode}'"
+                for mode in (
+                    "reused-full-pr",
+                    "reused-schemer-result-cache-pr",
+                    "reused-developer-inspection-pr",
+                    "reused-native-pr",
+                )
+            )
+            workflow = workflow.replace(
+                guard, f" {junction} ".join(reversed(guard.split(f" {junction} ")))
+            )
+    assert_workflow_reuse_contract(workflow)
+
+
+@pytest.mark.parametrize("job", ["timing-rollup", "required-gate"])
+def test_workflow_reuse_guard_rejects_unconditionally_forwarded_proof(job):
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = workflow_sections(workflow)[job]
+    assignment = "reuse_args=(--reuse artifacts/acceptance-reuse/reuse.json)"
+    changed = section.replace(f"            {assignment}\n", "", 1).replace(
+        "          fi\n", f"          fi\n          {assignment}\n", 1
+    )
+    assert changed != section
+    with pytest.raises(AssertionError):
+        assert_workflow_reuse_contract(workflow.replace(section, changed, 1))
 
 
 @pytest.mark.parametrize("command", ["python", "python3"])
