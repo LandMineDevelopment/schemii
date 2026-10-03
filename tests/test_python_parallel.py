@@ -35,7 +35,8 @@ META = {
 
 
 @pytest.fixture
-def tiny(tmp_path):
+def tiny(tmp_path, monkeypatch):
+    monkeypatch.setattr(RUNNER.os, "sched_getaffinity", lambda _pid: {0, 1})
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / "tests").mkdir()
@@ -68,8 +69,27 @@ def tiny(tmp_path):
     return repository, environment, temporary
 
 
-def test_real_default_union_matches_original_discovery_with_isolated_resources(tiny):
+@pytest.fixture
+def three_group_tiny(tiny, monkeypatch):
     root, environment, temporary = tiny
+    # Use tiny whole-file subjects at the real ownership paths. In particular,
+    # the runner control leaf must not import itself and recurse into acceptance.
+    for file in RUNNER.CONTROLS:
+        path = root / file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_independent_control():\n    assert True\n")
+    monkeypatch.setattr(RUNNER.os, "sched_getaffinity", lambda _pid: set(range(4)))
+    return root, environment, temporary
+
+
+@pytest.mark.parametrize("capacity", [2, 4])
+def test_real_default_union_matches_original_discovery_with_isolated_resources(
+    three_group_tiny, monkeypatch, capacity
+):
+    root, environment, temporary = three_group_tiny
+    monkeypatch.setattr(
+        RUNNER.os, "sched_getaffinity", lambda _pid: set(range(capacity))
+    )
     (root / "conftest.py").write_text(
         "import json, os\n"
         "def pytest_sessionfinish(session):\n"
@@ -103,16 +123,17 @@ def test_real_default_union_matches_original_discovery_with_isolated_resources(t
     records = load(Path(environment["CI_TELEMETRY_FILE"]))
     actual = summarize(records)
     expected = summarize(load(serial))
-    assert actual["complete"] and actual["collected"] == expected["collected"] == 6
-    assert actual["attempts"] == 6
+    assert actual["complete"] and actual["collected"] == expected["collected"] == 13
+    assert actual["attempts"] == 13
     assert {item["test_id"] for item in records if item["kind"] == "plan"} == {
         item["test_id"] for item in load(serial) if item["kind"] == "plan"
     }
     resources = [
         json.loads(line) for line in (root / "roots.jsonl").read_text().splitlines()
     ]
-    assert len(resources) == 2
-    assert resources[0][0] != resources[1][0] and resources[0][1] != resources[1][1]
+    assert len(resources) == (3 if capacity == 4 else 2)
+    assert len({resource[0] for resource in resources}) == len(resources)
+    assert len({resource[1] for resource in resources}) == len(resources)
     assert all(
         not Path(item).exists() for resource in resources for item in resource[:2]
     )
@@ -152,6 +173,122 @@ def test_actual_partitions_execute_concurrently_without_duplicate_fixture_setup(
     assert len((root / "inspection-builds").read_text().splitlines()) == 1
     assert len(list(root.glob("barrier-*"))) == 2
     assert summarize(load(Path(environment["CI_TELEMETRY_FILE"])))["collected"] == 6
+
+
+def test_three_groups_overlap_without_rebuilding_installed_fixture(three_group_tiny):
+    root, environment, temporary = three_group_tiny
+    (root / "conftest.py").write_text(
+        "import os, pytest\n"
+        "@pytest.fixture(scope='session')\n"
+        "def inspection_baseline():\n"
+        "    with open('inspection-builds', 'a') as stream: stream.write(str(os.getpid()) + '\\n')\n"
+        "    return True\n"
+    )
+    for file in RUNNER.INSPECTION:
+        (root / file).write_text(
+            "def test_owned_inspection(inspection_baseline):\n    assert inspection_baseline\n"
+        )
+    barrier = (
+        "import os, pathlib, time\n"
+        "def test_concurrent{fixture}:\n"
+        "    pathlib.Path('barrier-' + str(os.getpid())).touch()\n"
+        "    deadline = time.monotonic() + 5\n"
+        "    while len(list(pathlib.Path('.').glob('barrier-*'))) < 3:\n"
+        "        assert time.monotonic() < deadline, 'three groups did not overlap'\n"
+        "        time.sleep(0.01)\n"
+    )
+    (root / RUNNER.INSPECTION[0]).write_text(
+        barrier.format(fixture="(inspection_baseline)")
+    )
+    for file in (RUNNER.CONTROLS[0], "tests/test_other.py"):
+        (root / file).write_text(barrier.format(fixture="()"))
+    assert RUNNER.run(root=root, environment=environment, temporary_parent=temporary) == 0
+    assert len((root / "inspection-builds").read_text().splitlines()) == 1
+    assert len(list(root.glob("barrier-*"))) == 3
+    result = summarize(load(Path(environment["CI_TELEMETRY_FILE"])))
+    assert result["complete"] and result["collected"] == result["attempts"] == 13
+    assert not list(temporary.iterdir())
+
+
+@pytest.mark.parametrize("capacity", [0, 1, 2, 3, 4, 8])
+def test_default_control_group_requires_four_observed_affinity_cpus(
+    three_group_tiny, monkeypatch, capacity
+):
+    root, _, _ = three_group_tiny
+    monkeypatch.setattr(
+        RUNNER.os, "sched_getaffinity", lambda _pid: set(range(capacity))
+    )
+    groups = RUNNER.partitions(root, [])
+    assert groups[0] == list(RUNNER.INSPECTION)
+    if capacity >= 4:
+        assert groups[1] == list(RUNNER.CONTROLS)
+        assert groups[2] == [
+            f"--ignore={path}" for path in (*RUNNER.INSPECTION, *RUNNER.CONTROLS)
+        ]
+    else:
+        assert groups == [
+            list(RUNNER.INSPECTION),
+            [f"--ignore={path}" for path in RUNNER.INSPECTION],
+        ]
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "error"])
+def test_unknown_affinity_preserves_two_group_fallback(
+    three_group_tiny, monkeypatch, unavailable
+):
+    root, _, _ = three_group_tiny
+    if unavailable == "missing":
+        monkeypatch.delattr(RUNNER.os, "sched_getaffinity")
+    else:
+        def failed(_pid):
+            raise OSError("affinity is unavailable")
+
+        monkeypatch.setattr(RUNNER.os, "sched_getaffinity", failed)
+    assert len(RUNNER.partitions(root, [])) == 2
+
+
+def test_four_cpu_focused_selection_keeps_existing_groups(three_group_tiny):
+    root, _, _ = three_group_tiny
+    ignored = [f"--ignore={path}" for path in RUNNER.INSPECTION]
+    assert RUNNER.partitions(root, [RUNNER.CONTROLS[0]]) == [
+        [RUNNER.CONTROLS[0], *ignored]
+    ]
+    assert RUNNER.partitions(root, ["tests"]) == [
+        list(RUNNER.INSPECTION), ["tests", *ignored]
+    ]
+    assert RUNNER.partitions(root, [RUNNER.INSPECTION[0], RUNNER.CONTROLS[0]]) == [
+        [RUNNER.INSPECTION[0]], [RUNNER.CONTROLS[0], *ignored]
+    ]
+
+
+def test_third_group_failure_keeps_all_original_peer_attempts(three_group_tiny):
+    root, environment, temporary = three_group_tiny
+    (root / RUNNER.CONTROLS[0]).write_text(
+        "def test_original_control_failure():\n    assert False\n"
+    )
+    assert RUNNER.run(root=root, environment=environment, temporary_parent=temporary) == 1
+    result = summarize(load(Path(environment["CI_TELEMETRY_FILE"])))
+    assert result["complete"] and result["outcome"] == "failed"
+    assert result["collected"] == result["attempts"] == 13
+    assert result["first_attempt_failures"] == 1
+    assert result["first_attempt_passes"] == 12 and result["retry_recovered"] == 0
+    assert not list(temporary.iterdir())
+
+
+@pytest.mark.parametrize("defect", ["missing-file", "collection-error"])
+def test_invalid_third_group_cannot_admit_complete_peers(three_group_tiny, defect):
+    root, environment, temporary = three_group_tiny
+    path = root / RUNNER.CONTROLS[0]
+    if defect == "missing-file":
+        path.unlink()
+    else:
+        path.write_text("raise ValueError('original control collection error')\n")
+    assert RUNNER.run(root=root, environment=environment, temporary_parent=temporary) == (
+        4 if defect == "missing-file" else 2
+    )
+    output = Path(environment["CI_TELEMETRY_FILE"])
+    assert not output.exists() or not summarize(load(output))["complete"]
+    assert not list(temporary.iterdir())
 
 
 def test_real_partition_failure_stays_visible_while_peer_completes(tiny):
@@ -300,8 +437,11 @@ def alive_identity(pid, birth):
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
-def test_signal_automatically_reaps_owned_descendants_and_temporary_roots(tiny, signum):
-    root, environment, temporary = tiny
+@pytest.mark.parametrize("capacity", [2, 4])
+def test_signal_automatically_reaps_owned_descendants_and_temporary_roots(
+    three_group_tiny, signum, capacity
+):
+    root, environment, temporary = three_group_tiny
     source = (
         "import os, pathlib, subprocess, sys, time\n"
         "def test_owned_block():\n"
@@ -311,10 +451,13 @@ def test_signal_automatically_reaps_owned_descendants_and_temporary_roots(tiny, 
     )
     (root / RUNNER.INSPECTION[0]).write_text(source)
     (root / "tests/test_other.py").write_text(source)
+    if capacity == 4:
+        (root / RUNNER.CONTROLS[0]).write_text(source)
     controller = (
         "import importlib.util, pathlib, sys; "
         "spec=importlib.util.spec_from_file_location('runner', sys.argv[1]); "
         "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+        "module.os.sched_getaffinity=lambda pid: set(range(int(sys.argv[4]))); "
         "raise SystemExit(module.run(root=pathlib.Path(sys.argv[2]), temporary_parent=sys.argv[3]))"
     )
     peer = subprocess.Popen(
@@ -328,16 +471,19 @@ def test_signal_automatically_reaps_owned_descendants_and_temporary_roots(tiny, 
             str(REPOSITORY / "scripts/ci/python-tests.py"),
             str(root),
             str(temporary),
+            str(capacity),
         ],
         env=environment,
         start_new_session=True,
     )
     identities = []
     try:
-        wait_for(lambda: len(list(root.glob("ready-*"))) == 2)
+        groups = 3 if capacity == 4 else 2
+        wait_for(lambda: len(list(root.glob("ready-*"))) == groups)
         for ready in root.glob("ready-*"):
             for pid in (int(ready.name.removeprefix("ready-")), int(ready.read_text())):
                 identities.append((pid, RUNNER.birth_tick(pid)))
+        assert len(identities) == groups * 2
         assert len(list(temporary.iterdir())) == 1
         process.send_signal(signum)
         assert process.wait(timeout=10) == 128 + signum

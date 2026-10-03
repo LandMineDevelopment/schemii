@@ -29,7 +29,25 @@ INSPECTION = (
     "tests/test_route_inspection.py",
     "tests/test_system_inspection.py",
 )
+CONTROLS = (
+    "tests/test_ci_reuse.py",
+    "tests/test_test_selection.py",
+    "tests/test_ci_change_classification.py",
+    "tests/test_test_deployment.py",
+    "tests/test_ci_timing.py",
+    "tests/test_python_parallel.py",
+    "testing/agents/test_browser.py",
+)
 SHUTDOWN_GRACE = 5
+
+
+def control_capacity():
+    # The controls include miniature two-process runner regressions. Leave a
+    # fourth CPU for that existing nested work; unknown capacity keeps two groups.
+    try:
+        return len(os.sched_getaffinity(0)) >= 4
+    except (AttributeError, OSError):
+        return False
 
 
 def partitions(root, selectors):
@@ -55,6 +73,12 @@ def partitions(root, selectors):
                         if "inspection_fixtures" in ast.unparse(node.value):
                             if path.relative_to(root).as_posix() not in INSPECTION:
                                 raise ValueError("Inspection fixture ownership changed")
+        if control_capacity():
+            return [
+                list(INSPECTION),
+                list(CONTROLS),
+                ignored + [f"--ignore={path}" for path in CONTROLS],
+            ]
         return [list(INSPECTION), ignored]
 
     normalized: list[tuple[Path, str]] = []
