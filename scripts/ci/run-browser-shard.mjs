@@ -252,6 +252,7 @@ async function runParallel(options, cwd, environment, report, files, started) {
       const directory = executionDirectory(slot.root, sourceRoot, group.phase);
       group.receipt = resolve(directory, 'browser.jsonl');
       const childEnvironment = { ...environment, SCHEMII_E2E_SOURCE_ROOT: sourceRoot,
+        SCHEMII_SECRET_DIRECTORY: resolve(sourceRoot, environment.SCHEMII_SECRET_DIRECTORY || '.schemii/secrets'),
         SCHEMII_E2E_PROCESS_INDEX: String(group.index), SCHEMII_E2E_BOOTSTRAP: '0', CI_TELEMETRY_FILE: group.receipt };
       for (const key of ['SCHEMII_E2E_USERNAME', 'SCHEMII_E2E_PASSWORD', 'SCHEMII_E2E_CREDENTIALS_FILE', 'SCHEMII_E2E_SETUP_TOKEN']) delete childEnvironment[key];
       group.command = { ...invocation(options.project, group.files, options.shard, false, childEnvironment, options.shardCount ?? 2), cwd: directory };

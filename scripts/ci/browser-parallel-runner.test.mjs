@@ -111,9 +111,16 @@ function fixture(directory) {
       const phase=process.cwd().endsWith('/serial')?'serial':'parallel';
       const index=process.env.SCHEMII_E2E_PROCESS_INDEX;
       const event=value=>appendFileSync(resolve(root,'events.jsonl'),JSON.stringify({phase,index,...value})+'\\n');
+      let secretRead;
+      if(process.env.FIXTURE_READ_SECRET === '1') {
+        const secretDirectory=process.env.SCHEMII_SECRET_DIRECTORY || resolve('.schemii/secrets');
+        const password=readFileSync(resolve(secretDirectory,'demo_target_password'),'utf8').split('\\n',1)[0];
+        if(password!==process.env.FIXTURE_EXPECTED_SECRET) throw new Error('Wrong fixture secret source');
+        secretRead=true;
+      }
       event({kind:'start',time:Date.now(),files:selected,cwd:process.cwd(),auth:resolve(process.cwd(),'../auth.json'),
         sourceRoot:process.env.SCHEMII_E2E_SOURCE_ROOT,bootstrap:process.env.SCHEMII_E2E_BOOTSTRAP,
-        telemetry:process.env.CI_TELEMETRY_FILE,args:process.argv.slice(2)});
+        telemetry:process.env.CI_TELEMETRY_FILE,args:process.argv.slice(2),secretRead});
       if(process.env.FIXTURE_HANG === '1' && phase === 'parallel') await new Promise(()=>setInterval(()=>{},1000));
       await delay(80);
       if(process.env.FIXTURE_MISSING && process.env.FIXTURE_MISSING === index && phase === 'parallel') process.exit(1);
@@ -128,6 +135,45 @@ function fixture(directory) {
     }
   `);
   return {manifest,files};
+}
+
+for (const selector of ['default', 'empty', 'relative explicit', 'absolute explicit']) {
+  test(`parallel child launcher-secret inputs preserve ${selector} source directory`, () => {
+    const owned = mkdtempSync(join(tmpdir(), 'schemii-child-secret-source-'));
+    const directory = join(owned, 'source');
+    mkdirSync(directory, {mode:0o700});
+    try {
+      const {manifest} = fixture(directory);
+      const output = join(directory, 'joined.jsonl');
+      const supplied = selector === 'relative explicit' ? 'private-secrets'
+        : selector === 'absolute explicit' ? join(owned, 'external-private-secrets') : '';
+      const secretDirectory = resolve(directory, supplied || '.schemii/secrets');
+      const secret = 'PLANTED_PRIVATE_TARGET_PASSWORD_DO_NOT_PUBLISH';
+      const secretFile = join(secretDirectory, 'demo_target_password');
+      put(secretFile, `${secret}\n`);
+      const env = {...process.env, SCHEMII_E2E_PARALLEL_ACCOUNTS_FILE:manifest,
+        CI_TELEMETRY_FILE:output, FIXTURE_READ_SECRET:'1', FIXTURE_EXPECTED_SECRET:secret};
+      if (selector === 'default') delete env.SCHEMII_SECRET_DIRECTORY;
+      else env.SCHEMII_SECRET_DIRECTORY = supplied;
+      const result = spawnSync(process.execPath, [join(directory, 'scripts/ci/run-browser-shard.mjs'),
+        '--project=desktop-chromium', '--shard=1/6', '--profile=full', '--parallel=2'],
+      {cwd:directory, env, encoding:'utf8'});
+      assert.equal(result.status, 0, result.stderr);
+      const starts = readFileSync(join(directory, 'events.jsonl'), 'utf8').trim().split('\n')
+        .map(JSON.parse).filter(event => event.kind === 'start');
+      assert.equal(starts.length, 3);
+      assert.ok(starts.every(event => event.cwd !== directory && event.secretRead === true));
+      for (const event of starts) {
+        assert.equal(existsSync(join(event.cwd, '.schemii')), false);
+        assert.equal(existsSync(join(dirname(event.cwd), '.schemii')), false);
+        const receipt = readFileSync(event.telemetry, 'utf8');
+        assert.ok(!receipt.includes(secret) && !receipt.includes(secretDirectory));
+      }
+      assert.ok(!readFileSync(output, 'utf8').includes(secret));
+      assert.equal(readFileSync(secretFile, 'utf8'), `${secret}\n`);
+    } finally { rmSync(owned, {recursive:true, force:true}); }
+    assert.equal(existsSync(owned), false);
+  });
 }
 
 test('actual CLI isolates serial/pair paths, overlaps two workers and joins source-bound failed/missing controls', () => {
