@@ -85,6 +85,322 @@ class CleanupInitializationTests(unittest.TestCase):
                 )
 
 
+class GenerationOwnershipTests(unittest.TestCase):
+    def record(self, pid, parent, *, birth=None, state="S", rss=1048576):
+        return {
+            "pid": pid,
+            "ppid": parent,
+            "birth_tick": birth or pid * 10,
+            "state": state,
+            "rss": rss,
+        }
+
+    def client(self, path):
+        return {
+            "thread": "same-thread",
+            "session": path,
+            "metadata": {
+                "pid": 10,
+                "birth_tick": 100,
+                "child_pid": 20,
+                "child_birth_tick": 200,
+                "guardian_pid": 30,
+                "guardian_birth_tick": 300,
+            },
+        }
+
+    def records(self):
+        return {
+            10: self.record(10, 1),
+            20: self.record(20, 10),
+            21: self.record(21, 20),
+            30: self.record(30, 10),
+            40: self.record(40, 1),  # A live peer must not enter this generation.
+        }
+
+    def generation(self, path):
+        return {
+            "endpoint": (10, 100),
+            "released": {(20, 200), (21, 210), (30, 300)},
+            "leaders": {(20, 200), (30, 300)},
+            "session": path,
+            "roles": {"backend_processes": 2, "backend_rss_bytes": 2097152},
+        }
+
+    def test_generation_roles_capture_backend_and_guardian_without_endpoint_or_peer(
+        self,
+    ):
+        server = Mock()
+        server.capture_owned.return_value = self.records()
+        with patch.object(probe.os, "getpgid", return_value=20):
+            result = probe.generation_snapshot(server, self.client(Path("/unused")))
+        self.assertEqual(result["released"], {(20, 200), (21, 210), (30, 300)})
+        self.assertEqual(result["roles"]["backend_rss_bytes"], 2097152)
+        self.assertEqual(result["roles"]["guardian_processes"], 1)
+        self.assertEqual(result["roles"]["endpoint_processes"], 1)
+
+    def test_missing_reused_exited_or_unowned_generation_process_fails_closed(self):
+        for pid, replacement in (
+            (20, None),
+            (30, None),
+            (20, self.record(20, 10, birth=201)),
+            (30, self.record(30, 40)),
+            (20, self.record(20, 10, state="Z")),
+        ):
+            records = self.records()
+            if replacement is None:
+                records.pop(pid)
+            else:
+                records[pid] = replacement
+            server = Mock()
+            server.capture_owned.return_value = records
+            with (
+                self.subTest(pid=pid, replacement=replacement),
+                self.assertRaises(probe.ProbeError),
+            ):
+                probe.generation_snapshot(server, self.client(Path("/unused")))
+
+    def test_backend_group_must_be_its_captured_leader(self):
+        server = Mock()
+        server.capture_owned.return_value = self.records()
+        with patch.object(probe.os, "getpgid", return_value=19):
+            with self.assertRaisesRegex(probe.ProbeError, "group is not owned"):
+                probe.generation_snapshot(server, self.client(Path("/unused")))
+
+    def test_release_requires_absent_generation_and_retains_only_same_endpoint(self):
+        server = Mock(timeout=1)
+        records = {10: self.record(10, 1), 40: self.record(40, 1)}
+        server.capture_owned.return_value = records
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(probe, "process_snapshot", return_value=records),
+        ):
+            result = probe.assert_generation_released(
+                server, self.generation(Path(directory) / "already-released")
+            )
+        self.assertTrue(result["session_and_output_removed"])
+        self.assertEqual(result["remaining_generation_process_entries"], 0)
+        self.assertEqual(result["after"]["backend_rss_bytes"], 0)
+        self.assertEqual(result["after"]["endpoint_rss_bytes"], 1048576)
+        self.assertFalse(result["native_transport_shutdown"])
+
+    def test_live_or_zombie_generation_entries_cannot_count_as_released(self):
+        for state in ("S", "Z"):
+            server = Mock(timeout=1)
+            server.capture_owned.return_value = {10: self.record(10, 1)}
+            with (
+                self.subTest(state=state),
+                patch.object(
+                    probe,
+                    "process_snapshot",
+                    return_value={20: self.record(20, 1, state=state)},
+                ),
+                patch.object(probe.time, "monotonic", side_effect=[0, 2]),
+            ):
+                with self.assertRaisesRegex(probe.ProbeError, "retained generation"):
+                    probe.assert_generation_released(
+                        server, self.generation(Path("/unused"))
+                    )
+
+    def test_missing_or_reused_endpoint_cannot_count_as_close_release(self):
+        for records in ({}, {10: self.record(10, 1, birth=101)}):
+            server = Mock(timeout=1)
+            server.capture_owned.return_value = records
+            with self.assertRaisesRegex(probe.ProbeError, "ended or replaced"):
+                probe.assert_generation_released(
+                    server, self.generation(Path("/unused"))
+                )
+
+    def test_retained_session_or_dangling_symlink_cannot_count_as_released(self):
+        server = Mock(timeout=1)
+        records = {10: self.record(10, 1)}
+        server.capture_owned.return_value = records
+        with tempfile.TemporaryDirectory() as directory:
+            for symlink in (False, True):
+                path = Path(directory) / str(symlink)
+                if symlink:
+                    path.symlink_to(Path(directory) / "missing")
+                else:
+                    path.mkdir()
+                with (
+                    self.subTest(symlink=symlink),
+                    patch.object(probe, "process_snapshot", return_value=records),
+                    patch.object(probe.time, "monotonic", side_effect=[0, 2]),
+                ):
+                    with self.assertRaisesRegex(
+                        probe.ProbeError, "retained generation"
+                    ):
+                        probe.assert_generation_released(server, self.generation(path))
+
+    def test_unexpected_new_backend_under_dormant_endpoint_is_rejected(self):
+        server = Mock(timeout=1)
+        records = {10: self.record(10, 1), 22: self.record(22, 10)}
+        server.capture_owned.return_value = records
+        with patch.object(probe, "process_snapshot", return_value=records):
+            with self.assertRaisesRegex(probe.ProbeError, "recreated backend"):
+                probe.assert_generation_released(
+                    server, self.generation(Path("/unused"))
+                )
+
+    def test_reopen_tracks_new_session_and_retains_all_generation_paths(self):
+        client = self.client(Path("/unused-old-generation"))
+        metadata = {**client["metadata"], "child_pid": 22, "guardian_pid": 32}
+        sessions = {client["session"]}
+        with patch.object(
+            probe,
+            "wait_session",
+            return_value=(Path("/unused-new-generation"), metadata),
+        ):
+            probe.track_generation(Mock(), client, Path("/root"), set(), sessions)
+        self.assertEqual(client["thread"], "same-thread")
+        self.assertEqual(client["session"], Path("/unused-new-generation"))
+        self.assertEqual(
+            sessions, {Path("/unused-old-generation"), Path("/unused-new-generation")}
+        )
+
+    def test_reopen_rejects_endpoint_or_generation_identity_reuse(self):
+        for change in ({"birth_tick": 101}, {"child_pid": 20}, {"guardian_pid": 30}):
+            client = self.client(Path("/unused-old-generation"))
+            metadata = {
+                **client["metadata"],
+                "child_pid": 22,
+                "guardian_pid": 32,
+                **change,
+            }
+            with (
+                self.subTest(change=change),
+                patch.object(
+                    probe,
+                    "wait_session",
+                    return_value=(Path("/unused-new-generation"), metadata),
+                ),
+            ):
+                with self.assertRaises(probe.ProbeError):
+                    probe.track_generation(Mock(), client, Path("/root"), set(), set())
+
+    def test_reopen_rejects_a_retained_previous_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.client(Path(directory))
+            metadata = {**client["metadata"], "child_pid": 22, "guardian_pid": 32}
+            with patch.object(
+                probe, "wait_session", return_value=(Path(directory) / "new", metadata)
+            ):
+                with self.assertRaisesRegex(
+                    probe.ProbeError, "previous generation directory"
+                ):
+                    probe.track_generation(
+                        Mock(), client, Path(directory), set(), set()
+                    )
+
+    def test_final_cleanup_does_not_hide_owned_zombie_entries(self):
+        server = Mock(timeout=1, known_processes={(20, 200)})
+        server.process.poll.return_value = 0
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(probe, "owned_sessions", return_value={}),
+            patch.object(
+                probe,
+                "process_snapshot",
+                return_value={20: self.record(20, 1, state="Z")},
+            ),
+            patch.object(probe.time, "monotonic", side_effect=[0, 16]),
+        ):
+            result = probe.cleanup(server, [], set(), Path(directory), set())
+        self.assertEqual(result["live_owned_processes"], 0)
+        self.assertEqual(result["remaining_owned_process_entries"], 1)
+
+
+class CloseFollowupControls(unittest.TestCase):
+    def state(self, **changes):
+        return {
+            "cookies": 0,
+            "marker": None,
+            "pages": 1,
+            "title": "Native cleanup probe",
+            **changes,
+        }
+
+    def response(self, state):
+        return {"content": [{"type": "text", "text": json.dumps(state)}]}
+
+    def test_used_and_never_used_close_reopen_track_generation_after_navigation(self):
+        for used in (False, True):
+            connection = Mock()
+            connection.call.return_value = self.response(self.state())
+            client = {"thread": "same-thread"}
+            events = []
+            connection.call.side_effect = lambda _client, tool, *args: (
+                events.append(tool) or self.response(self.state())
+            )
+            connection.track.side_effect = lambda _client: events.append("track")
+            with (
+                self.subTest(used=used),
+                patch.object(probe, "generation_snapshot", return_value={"roles": {}}),
+                patch.object(
+                    probe, "assert_generation_released", return_value={}
+                ) as release,
+                patch.object(probe, "inventory"),
+            ):
+                result = cleanup_probe.check_close_reopen(connection, client, used=used)
+            self.assertEqual(release.call_count, 2)
+            self.assertEqual(events.count("browser_close"), 2)
+            self.assertLess(events.index("browser_navigate"), events.index("track"))
+            self.assertTrue(result["fresh_context"])
+            self.assertFalse(result["native_transport_shutdown"])
+
+    def test_reopened_context_cookie_dom_or_tab_leaks_fail(self):
+        for changes in (
+            {"cookies": 1},
+            {"marker": "owned"},
+            {"pages": 2},
+            {"title": "foreign"},
+        ):
+            connection = Mock()
+            connection.call.return_value = self.response(self.state(**changes))
+            with (
+                self.subTest(changes=changes),
+                patch.object(probe, "generation_snapshot", return_value={"roles": {}}),
+                patch.object(probe, "assert_generation_released", return_value={}),
+                patch.object(probe, "inventory"),
+            ):
+                with self.assertRaisesRegex(probe.ProbeError, "prior context state"):
+                    cleanup_probe.check_close_reopen(
+                        connection, {"thread": "same-thread"}, used=False
+                    )
+
+    def test_failed_call_is_sent_once_and_active_generation_is_retained(self):
+        generation = {"endpoint": (1, 2), "leaders": {(3, 4)}, "session": Mock()}
+        generation["session"].exists.return_value = True
+        connection = Mock()
+        connection.call.side_effect = probe.ProbeError(
+            "Browser primitive failed: browser_evaluate"
+        )
+        with patch.object(probe, "generation_snapshot", return_value=generation):
+            result = cleanup_probe.check_failed_call(connection, {})
+        self.assertTrue(result["explicit_failure_preserved"])
+        connection.call.assert_called_once()
+
+    def test_failed_call_cannot_be_swallowed_or_replace_generation(self):
+        generation = {"endpoint": (1, 2), "leaders": {(3, 4)}, "session": Mock()}
+        for succeeds in (False, True):
+            connection = Mock()
+            if not succeeds:
+                connection.call.side_effect = probe.ProbeError(
+                    "Browser primitive failed: browser_evaluate"
+                )
+            with (
+                self.subTest(succeeds=succeeds),
+                patch.object(
+                    probe,
+                    "generation_snapshot",
+                    side_effect=[generation, {**generation, "leaders": {(3, 5)}}],
+                ),
+            ):
+                with self.assertRaises(probe.ProbeError):
+                    cleanup_probe.check_failed_call(connection, {})
+            connection.call.assert_called_once()
+
+
 class EphemeralConfigurationTests(unittest.TestCase):
     def configuration(self):
         return {

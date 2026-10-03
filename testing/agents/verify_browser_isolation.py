@@ -374,6 +374,17 @@ def wait_session(
                 "One thread created an unexpected number of browser transports",
             )
             path, metadata = next(iter(fresh.items()))
+            if not all(
+                type(metadata.get(field)) is int and metadata[field] > 0
+                for field in (
+                    "child_pid",
+                    "child_birth_tick",
+                    "guardian_pid",
+                    "guardian_birth_tick",
+                )
+            ):
+                time.sleep(0.05)
+                continue  # The running child can precede the guardian's ready metadata.
             require(
                 metadata.get("session_id") == path.name
                 and metadata.get("package") == PACKAGE,
@@ -395,6 +406,121 @@ def wait_session(
             return path, metadata
         time.sleep(0.05)
     raise ProbeError("Thread-owned browser metadata did not become ready")
+
+
+def track_generation(
+    server: AppServer,
+    client: dict,
+    root: Path,
+    baseline: set[str],
+    sessions: set[Path],
+) -> None:
+    """Bind a fresh backend session to the same captured native endpoint."""
+    path, metadata = wait_session(root, baseline, sessions, server)
+    previous = client.get("metadata")
+    if previous is not None:
+        require(
+            (metadata["pid"], metadata["birth_tick"])
+            == (previous["pid"], previous["birth_tick"]),
+            "Browser follow-up replaced the native endpoint",
+        )
+        require(
+            not client["session"].exists() and not client["session"].is_symlink(),
+            "Browser follow-up retained the previous generation directory",
+        )
+        for prefix in ("child", "guardian"):
+            require(
+                (metadata[f"{prefix}_pid"], metadata[f"{prefix}_birth_tick"])
+                != (previous[f"{prefix}_pid"], previous[f"{prefix}_birth_tick"]),
+                "Browser follow-up reused a released generation identity",
+            )
+    sessions.add(path)
+    client.update(session=path, metadata=metadata)
+
+
+def generation_snapshot(server: AppServer, client: dict) -> dict:
+    """Capture process roles by ancestry and birth identity, never process names."""
+    records = server.capture_owned()
+    metadata = client["metadata"]
+    endpoint = (metadata["pid"], metadata["birth_tick"])
+    child = (metadata["child_pid"], metadata["child_birth_tick"])
+    guardian = (metadata["guardian_pid"], metadata["guardian_birth_tick"])
+    transport = descendants(records, endpoint)
+    backend = descendants(transport, child)
+    require(
+        backend
+        and guardian[0] in transport
+        and identity(transport[guardian[0]]) == guardian
+        and all(
+            transport[pid]["state"] not in {"Z", "X", "x"}
+            for pid in (endpoint[0], child[0], guardian[0])
+        )
+        and set(transport) == set(backend) | {endpoint[0], guardian[0]},
+        "Browser generation process ownership is incomplete",
+    )
+    require(os.getpgid(child[0]) == child[0], "Backend process group is not owned")
+    released = {identity(record) for record in backend.values()} | {guardian}
+    require(endpoint not in released, "Browser endpoint overlaps its generation")
+    return {
+        "endpoint": endpoint,
+        "released": released,
+        "leaders": {child, guardian},
+        "session": client["session"],
+        "roles": {
+            "backend_processes": len(backend),
+            "backend_rss_bytes": sum(record["rss"] for record in backend.values()),
+            "guardian_processes": 1,
+            "guardian_rss_bytes": transport[guardian[0]]["rss"],
+            "endpoint_processes": 1,
+            "endpoint_rss_bytes": transport[endpoint[0]]["rss"],
+        },
+    }
+
+
+def assert_generation_released(server: AppServer, generation: dict) -> dict:
+    """A successful close releases the generation while retaining its endpoint."""
+    start = time.monotonic()
+    deadline = start + min(server.timeout, 15)
+    while True:
+        records = server.capture_owned()
+        endpoint = records.get(generation["endpoint"][0])
+        require(
+            endpoint is not None
+            and identity(endpoint) == generation["endpoint"]
+            and endpoint["state"] not in {"Z", "X", "x"},
+            "browser_close ended or replaced the native endpoint",
+        )
+        remaining = {
+            identity(record)
+            for record in process_snapshot().values()
+            if identity(record) in generation["released"]
+        }
+        path = generation["session"]
+        if not remaining and not path.exists() and not path.is_symlink():
+            require(
+                set(descendants(records, generation["endpoint"])) == {endpoint["pid"]},
+                "Closed native endpoint retained or recreated backend processes",
+            )
+            return {
+                "release_seconds": round(time.monotonic() - start, 3),
+                "released_processes": len(generation["released"]),
+                "remaining_generation_process_entries": 0,
+                "session_and_output_removed": True,
+                "before": generation["roles"],
+                "after": {
+                    "backend_processes": 0,
+                    "backend_rss_bytes": 0,
+                    "guardian_processes": 0,
+                    "guardian_rss_bytes": 0,
+                    "endpoint_processes": 1,
+                    "endpoint_rss_bytes": endpoint["rss"],
+                },
+                "native_transport_shutdown": False,
+            }
+        require(
+            time.monotonic() < deadline, "browser_close retained generation resources"
+        )
+        time.sleep(0.05)
 
 
 def inventory(server: AppServer, thread: str) -> None:
@@ -630,6 +756,7 @@ def cleanup(
         "app_server_stopped": False,
         "session_directories_removed": False,
         "live_owned_processes": 0,
+        "remaining_owned_process_entries": 0,
     }
     try:
         sessions.update(owned_sessions(root, baseline, server))
@@ -666,14 +793,17 @@ def cleanup(
     deadline = time.monotonic() + 15
     while True:
         records = process_snapshot()
-        live = [
+        entries = [
             record
             for record in records.values()
-            if identity(record) in server.known_processes and record["state"] != "Z"
+            if identity(record) in server.known_processes
         ]
-        remaining = [path for path in sessions if path.exists()]
-        if not live and not remaining or time.monotonic() >= deadline:
-            report["live_owned_processes"] = len(live)
+        remaining = [path for path in sessions if path.exists() or path.is_symlink()]
+        if not entries and not remaining or time.monotonic() >= deadline:
+            report["live_owned_processes"] = sum(
+                record["state"] not in {"Z", "X", "x"} for record in entries
+            )
+            report["remaining_owned_process_entries"] = len(entries)
             report["session_directories_removed"] = not remaining
             return report
         time.sleep(0.1)
@@ -731,9 +861,7 @@ def verify(cwd: Path, count: int, timeout: float) -> dict:
                 "Codex created a persistent probe thread",
             )
             inventory(server, client["thread"])
-            session, metadata = wait_session(root, baseline, sessions, server)
-            sessions.add(session)
-            client.update(session=session, metadata=metadata)
+            track_generation(server, client, root, baseline, sessions)
             call(server, client["thread"], "browser_navigate", {"url": URL})
             call(
                 server,
@@ -845,8 +973,21 @@ def verify(cwd: Path, count: int, timeout: float) -> dict:
             "Same-filename downloads overwrote another thread's artifact",
         )
         summary["artifact_isolation"] = True
+        generation = generation_snapshot(server, first)
+        started = time.monotonic()
         call(server, first["thread"], "browser_close")
+        summary["close_response_seconds"] = round(time.monotonic() - started, 3)
+        summary["close_release"] = assert_generation_released(server, generation)
+        call(server, first["thread"], "browser_close")
+        summary["repeated_close_release"] = assert_generation_released(
+            server, generation
+        )
+        started = time.monotonic()
         call(server, first["thread"], "browser_navigate", {"url": URL})
+        track_generation(server, first, root, baseline, sessions)
+        summary["reopened_processes"] = generation_snapshot(server, first)["roles"]
+        inventory(server, first["thread"])
+        summary["reopen_seconds"] = round(time.monotonic() - started, 3)
         reset = read_state(server, first, key)
         require(
             reset.get("cookie") is None
@@ -882,6 +1023,7 @@ def verify(cwd: Path, count: int, timeout: float) -> dict:
             released["app_server_stopped"]
             and released["session_directories_removed"]
             and released["live_owned_processes"] == 0
+            and released["remaining_owned_process_entries"] == 0
         ):
             summary["result"] = "failed"
             summary.setdefault(

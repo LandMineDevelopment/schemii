@@ -169,6 +169,10 @@ class NativeBrowserPolicyTests(unittest.TestCase):
         result = doctor.browser_policy(self.config)
         self.assertTrue(result["isolated_stdio_policy_valid"])
         self.assertEqual(result["runtime_browser_isolation"], "unverified")
+        self.assertEqual(
+            result["artifact_cleanup"],
+            "successful_browser_close; owned_connection_exit; orphan_sweep_on_start",
+        )
 
     def test_missing_and_remote_shared_servers_do_not_claim_isolation(self):
         self.assertFalse(doctor.browser_policy({})["isolated_stdio_policy_valid"])
