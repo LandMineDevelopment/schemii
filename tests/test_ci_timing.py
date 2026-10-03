@@ -15,7 +15,9 @@ import pytest
 from scripts.ci.summary import summarize, valid
 from scripts.ci.required_gate import CONTROL_NEEDS, evaluate
 from scripts.ci.workflow_timing import (
+    STARTUP_FIELDS,
     duration,
+    startup_jobs,
     timestamp,
     summarize as workflow_summary,
     test_evidence as collect_evidence,
@@ -38,6 +40,52 @@ from scripts.ci.test_selection import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SECRET = "PLANTED_PASSWORD_TOKEN_AUTHORIZATION_cookie_7ce19"
+
+
+def test_startup_collection_keeps_exact_browser_artifact_and_selected_topology():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    startup = workflow.split(
+        "      - name: Start the canonical application stack\n", 1
+    )[1].split("      - name:", 1)[0]
+    assert (
+        "SCHEMII_START_TIMING_FILE: ${{ github.workspace }}/artifacts/ci-timing/startup.jsonl"
+        in startup
+    )
+    assert workflow.index("run: mkdir -p artifacts/ci-timing") < workflow.index(
+        "run: ./start.sh"
+    )
+    assert "CI_TELEMETRY_PROJECT: ${{ matrix.project }}" in startup
+    assert "CI_TELEMETRY_SHARD: ${{ matrix.shard }}" in startup
+    assert "run: ./start.sh" in startup
+    assert "matrix: ${{ fromJSON(needs.classify.outputs.browser_matrix) }}" in workflow
+    assert "fail-fast: false" in workflow
+    validation = workflow.split("      - name: Validate public browser timing\n", 1)[
+        1
+    ].split("      - name:", 1)[0]
+    assert (
+        '--startup "${{ github.workspace }}/artifacts/ci-timing/startup.jsonl"'
+        in validation
+    )
+    publication = workflow.split(
+        "      - name: Publish public browser timing, including failed first attempts\n",
+        1,
+    )[1].split("      - name:", 1)[0]
+    assert "steps.browser-timing.outcome == 'success'" in publication
+    assert "startup.json" not in publication
+    assert "artifacts/ci-timing/browser.jsonl" in publication
+    assert "artifacts/ci-timing/browser-summary.json" in publication
+    assert "artifacts/ci-timing/browser-dependencies.json" in publication
+    assert "retention-days: 7" in publication
+    diagnostic = workflow.split(
+        "      - name: Publish validated failed startup diagnostic\n", 1
+    )[1].split("  timing-rollup:", 1)[0]
+    assert "steps.canonical-startup.outcome == 'failure'" in diagnostic
+    assert "steps.startup-diagnostic.outcome == 'success'" in diagnostic
+    assert "name: startup-diagnostic-" in diagnostic
+    assert "name: browser-timing-" not in diagnostic
+    assert "path: artifacts/ci-timing/startup-diagnostic.json" in diagnostic
+
+
 META = {
     "schema": 1,
     "source_sha": "a" * 40,
@@ -75,6 +123,224 @@ def records(*attempts):
         *attempts,
         record("end", outcome="passed", wall_ms=7),
     ]
+
+
+def launcher_records():
+    meta = {
+        key: META[key]
+        for key in ("schema", "source_sha", "run_id", "run_attempt", "project", "shard")
+    }
+    meta.update(source_kind="hosted", launcher_id="c" * 64)
+    return [
+        {**meta, "kind": "launcher-start"},
+        *[
+            {
+                **meta,
+                "kind": "launcher-phase",
+                "phase": name,
+                "outcome": "passed",
+                "duration_ms": milliseconds,
+            }
+            for name, milliseconds in zip(
+                ("preparation", "build", "replacement", "readiness", "post-start"),
+                (2, 11, 0, 17, 3),
+                strict=True,
+            )
+        ],
+        {**meta, "kind": "launcher-end", "outcome": "passed", "wall_ms": 33},
+    ]
+
+
+def startup_cli(tmp_path, receipt, *, failed=False):
+    path = tmp_path / "startup.jsonl"
+    path.write_text("".join(json.dumps(value) + "\n" for value in receipt))
+    public = tmp_path / "public"
+    public.mkdir()
+    raw_path = public / "browser.jsonl"
+    raw_path.write_text(
+        "".join(json.dumps(value) + "\n" for value in records(attempt(0, "passed")))
+    )
+    output = public / "browser-summary.json"
+    output.write_text(SECRET)
+    argv = [
+        sys.executable,
+        str(ROOT / "scripts/ci/workflow_timing.py"),
+        "--startup",
+        str(path),
+        "--output",
+        str(output),
+    ]
+    argv.extend(["--failed-startup"] if failed else ["--inputs", str(raw_path)])
+    result = subprocess.run(
+        argv,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "CI_TELEMETRY_SHA": META["source_sha"],
+            "GITHUB_SHA": META["source_sha"],
+            "CI_TELEMETRY_HEAD_SHA": META["source_sha"],
+            "GITHUB_RUN_ID": "1",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "CI_TELEMETRY_PROJECT": META["project"],
+            "CI_TELEMETRY_SHARD": "1",
+            "PLANTED_SECRET": SECRET,
+        },
+    )
+    assert SECRET not in result.stdout + result.stderr
+    return result, output
+
+
+def test_startup_cli_derives_bound_public_browser_summary_and_exact_zero(tmp_path):
+    result, output = startup_cli(tmp_path, launcher_records())
+    assert result.returncode == 0, result.stderr
+    published = json.loads(output.read_text())
+    assert SECRET not in output.read_text()
+    assert set(published) == set(summarize(records(attempt(0, "passed")))) | {"startup"}
+    assert published["startup"]["preflight"] == "unmeasured"
+    assert published["startup"]["phases"][2]["duration_ms"] == 0
+    assert published["startup"]["wall_ms"] == 33
+    assert published["startup"]["source_sha"] == META["source_sha"]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "source",
+        "run",
+        "attempt",
+        "project",
+        "shard",
+        "local",
+        "extra",
+        "failed",
+        "partial",
+    ],
+)
+def test_startup_cli_rejects_stale_private_or_incomplete_browser_measurements(
+    tmp_path, damage
+):
+    receipt = launcher_records()
+    replacement = {
+        "source": ("source_sha", "b" * 40),
+        "run": ("run_id", 2),
+        "attempt": ("run_attempt", 2),
+        "project": ("project", "android-chromium"),
+        "shard": ("shard", 2),
+    }
+    if damage in replacement:
+        key, value = replacement[damage]
+        for record in receipt:
+            record[key] = value
+    elif damage == "local":
+        for record in receipt:
+            record.update(source_kind="local", source_sha=None, run_id=0, run_attempt=0)
+    elif damage == "extra":
+        receipt[2]["stderr"] = SECRET
+    elif damage == "failed":
+        receipt[5]["outcome"] = receipt[6]["outcome"] = "failed"
+    else:
+        receipt = receipt[:3]
+    result, output = startup_cli(tmp_path, receipt)
+    assert result.returncode != 0 and not output.exists()
+    assert result.stderr.strip() == "Startup timing validation failed"
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_startup_failure_diagnostic_retains_failed_build_and_unknown_later_phases(
+    tmp_path, terminal
+):
+    receipt = launcher_records()[:3]
+    receipt[-1]["outcome"] = "failed"
+    if terminal:
+        receipt.append(
+            {**receipt[0], "kind": "launcher-end", "outcome": "failed", "wall_ms": 13}
+        )
+    result, output = startup_cli(tmp_path, receipt, failed=True)
+    assert result.returncode == 0, result.stderr
+    diagnostic = json.loads(output.read_text())
+    assert diagnostic["outcome"] == ("failed" if terminal else None)
+    assert diagnostic["wall_ms"] == (13 if terminal else None)
+    assert diagnostic["phases"][1] == {
+        "phase": "build",
+        "outcome": "failed",
+        "duration_ms": 11,
+    }
+    assert all(
+        phase["outcome"] is phase["duration_ms"] is None
+        for phase in diagnostic["phases"][2:]
+    )
+    assert SECRET not in output.read_text()
+
+
+def test_startup_failure_diagnostic_cannot_publish_a_successful_start(tmp_path):
+    result, output = startup_cli(tmp_path, launcher_records(), failed=True)
+    assert result.returncode != 0 and not output.exists()
+
+
+@pytest.mark.parametrize("profile", ["full", CACHE_PROFILE, INSPECTION_PROFILE])
+def test_startup_rollup_binds_selected_topology_and_preserves_absent_measurements(
+    tmp_path, profile
+):
+    result, output = startup_cli(tmp_path, launcher_records())
+    assert result.returncode == 0
+    lane = json.loads(output.read_text())
+    phases = startup_jobs({"lanes": [lane]}, profile)
+    template = successful_workflow_jobs()[0]
+    summary = workflow_summary(
+        WORKFLOW_RUN,
+        [
+            {
+                **template,
+                "name": name,
+                "conclusion": "success"
+                if name in expected_jobs(profile)
+                else "skipped",
+            }
+            for name in source_job_names(profile)
+        ],
+        profile=profile,
+        startup=phases,
+    )
+    assert summary["complete"]
+    observed = next(job for job in summary["jobs"] if job["job"] in phases)
+    assert observed["startup_build_ms"] == 11
+    assert observed["startup_replacement_ms"] == 0
+    assert observed["startup_up_readiness_ms"] == 17
+    assert observed["job"].endswith(
+        "1-of-6"
+        if profile == "full"
+        else "1-of-3"
+        if profile == CACHE_PROFILE
+        else "1-of-1"
+    )
+    assert all(
+        job[field] is None
+        for job in summary["jobs"]
+        if job["job"].startswith("browser-") and job["job"] not in phases
+        for field in STARTUP_FIELDS
+    )
+
+
+@pytest.mark.parametrize("damage", ["private", "identity", "extra-summary"])
+def test_downloaded_startup_summary_is_revalidated_before_workflow_publication(
+    tmp_path, damage
+):
+    result, output = startup_cli(tmp_path, launcher_records())
+    assert result.returncode == 0
+    summary = json.loads(output.read_text())
+    if damage == "private":
+        summary["startup"]["phases"][1]["stdout"] = SECRET
+    elif damage == "identity":
+        summary["startup"]["shard"] = 2
+    else:
+        summary["unapproved"] = SECRET
+    output.write_text(json.dumps(summary))
+    evidence = collect_evidence(output.parent)
+    assert evidence["invalid_lanes"] == 1 and evidence["complete"] is False
+    assert SECRET not in json.dumps(evidence)
 
 
 def test_retry_recovery_retains_failed_attempt_and_first_attempt_denominator():

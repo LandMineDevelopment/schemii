@@ -39,10 +39,13 @@ if __package__:
     from .workflow_timing import (
         REPORT_JOB_NAMES,
         SKIPPED_BROWSER,
+        STARTUP_FIELDS,
+        browser_summary,
         current_identity,
         current_jobs,
         matches_identity,
         summarize,
+        startup_jobs,
         test_evidence,
         timestamp,
     )
@@ -62,10 +65,13 @@ else:
     from workflow_timing import (
         REPORT_JOB_NAMES,
         SKIPPED_BROWSER,
+        STARTUP_FIELDS,
+        browser_summary,
         current_identity,
         current_jobs,
         matches_identity,
         summarize,
+        startup_jobs,
         test_evidence,
         timestamp,
     )
@@ -86,6 +92,7 @@ POLICY_FILES = frozenset(
         "scripts/ci/required_gate.py",
         "scripts/ci/reuse_acceptance.py",
         "scripts/ci/workflow_timing.py",
+        "scripts/ci/startup_timing.py",
         "scripts/ci/summary.py",
         "scripts/ci/node-tests.mjs",
         "scripts/ci/node-reporter.mjs",
@@ -806,15 +813,27 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
             == target["tree"],
             "different-tested-tree",
         )
+        saved = json_value(
+            (root / "workflow-timing-attempt-1/workflow-summary.json").read_bytes()
+        )
+        startup = startup_jobs(evidence, profile)
+        # Older original receipts have no startup extension or phase fields. They
+        # remain their original format; missing measurements are never fabricated.
+        startup_format = bool(startup) or any(
+            field in job for job in saved["jobs"] for field in STARTUP_FIELDS
+        )
         measured = {
-            **summarize(run, jobs, profile=profile, report_validation=True),
+            **summarize(
+                run,
+                jobs,
+                profile=profile,
+                report_validation=True,
+                startup=startup if startup_format else None,
+            ),
             **donor_identity,
             "classification_valid": True,
             "test_evidence": evidence,
         }
-        saved = json_value(
-            (root / "workflow-timing-attempt-1/workflow-summary.json").read_bytes()
-        )
         saved["test_evidence"]["lanes"].sort(
             key=lambda value: (value["lane"], value["project"], value["shard"])
         )
@@ -833,6 +852,8 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
             saved_lane = json_value(
                 path.with_name(path.stem + "-summary.json").read_bytes()
             )
+            if "startup" in saved_lane:
+                summary = browser_summary(records, saved_lane["startup"])
             require(equal_json(saved_lane, summary), "donor-lane-summary")
             lane, project, shard = summary["lane"], summary["project"], summary["shard"]
             key = lane, project, shard

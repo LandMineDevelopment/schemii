@@ -356,6 +356,30 @@ job wall, outcomes and independently measured phases remain available. Missing
 phase measurements do not replace the complete job/test outcome and identity
 requirements of the acceptance gate.
 
+Canonical browser startup additionally opts into the launcher's bounded receipt
+with `SCHEMII_START_TIMING_FILE`. The fixed source/run/attempt/project/shard
+identity must match the browser lane and current hosted checkout before upload.
+`workflow_timing.py --startup` validates the receipt and attaches its closed
+consolidated `startup` field to the existing `browser-summary.json`; the browser
+artifact keeps exactly its existing three members. No raw launcher output,
+commands, logs, paths or environment values are public timing inputs. Measurement
+starts after runtime access and possible stale-group recovery; `preflight` remains
+`unmeasured`. Preparation, build, replacement, up/readiness and post-start retain
+their separate observations. Workflow jobs expose `startup_build_ms`,
+`startup_replacement_ms` and `startup_up_readiness_ms` alongside the broader
+Actions `startup_ms`; these clocks need not agree and are not added twice.
+Missing measurements remain `null`, while observed zero durations stay zero.
+
+The rollup and both reuse checks independently revalidate the exact optional
+summary extension and its original identities. Historical applicable receipts
+without it keep their original format; no measurements are invented or relabeled.
+Selected reuse also proves the imported startup validator's policy bytes.
+A canonical launch failure may publish only the separately validated fixed
+`startup-diagnostic` artifact. Its partial phases and terminal remain unknown
+when unobserved. That artifact is excluded from the ordinary timing download and
+cannot enter the exact successful-donor artifact set. Browser failures and retry
+recoveries retain the existing strict acceptance and publication rules.
+
 The rollup validates downloaded timing records again and requires the exact selected
 test lanes (fifteen for full acceptance), one source/run/attempt cohort, all expected jobs and complete test
 lifecycle records. Missing shards/footers, cancelled or unstarted cases and API

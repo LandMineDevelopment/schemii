@@ -33,7 +33,12 @@ from scripts.ci.test_selection import (
     source_job_names,
     expected_scope,
 )
-from scripts.ci.workflow_timing import summarize, test_evidence as collect_evidence
+from scripts.ci.workflow_timing import (
+    STARTUP_FIELDS,
+    startup_jobs,
+    summarize,
+    test_evidence as collect_evidence,
+)
 
 
 NOW = datetime(2026, 10, 2, 12, tzinfo=timezone.utc).timestamp()
@@ -258,6 +263,213 @@ class Provider:
 @pytest.fixture
 def provider(tmp_path):
     return Provider(tmp_path)
+
+
+def startup_archives(provider, root, profile="full"):
+    """Real current archive members, complete inventories and original donor cohort."""
+    directory = root / "original-artifacts"
+    directory.mkdir()
+    for name, members in provider.files.items():
+        if name.startswith("browser-timing-"):
+            summary = json.loads(members["browser-summary.json"])
+            summary["startup"] = {
+                "schema": 1,
+                "source_kind": "hosted",
+                "source_sha": summary["source_sha"],
+                "launcher_id": "c" * 64,
+                "run_id": summary["run_id"],
+                "run_attempt": summary["run_attempt"],
+                "project": summary["project"],
+                "shard": summary["shard"],
+                "preflight": "unmeasured",
+                "phases": [
+                    {"phase": phase, "outcome": "passed", "duration_ms": milliseconds}
+                    for phase, milliseconds in zip(
+                        (
+                            "preparation",
+                            "build",
+                            "replacement",
+                            "readiness",
+                            "post-start",
+                        ),
+                        (2, 11, 0, 17, 3),
+                        strict=True,
+                    )
+                ],
+                "outcome": "passed",
+                "wall_ms": 33,
+            }
+            members["browser-summary.json"] = encoded(summary)
+        artifact = directory / name
+        artifact.mkdir()
+        for member, data in members.items():
+            (artifact / member).write_bytes(data)
+    evidence = collect_evidence(directory, profile=profile)
+    assert evidence["complete"]
+    measured = {
+        **summarize(
+            provider.run,
+            provider.jobs,
+            profile=profile,
+            report_validation=True,
+            startup=startup_jobs(evidence, profile),
+        ),
+        **{**DONOR, "head_sha": provider.run["head_sha"]},
+        "classification_valid": True,
+        "test_evidence": evidence,
+    }
+    provider.files["workflow-timing-attempt-1"]["workflow-summary.json"] = encoded(
+        measured
+    )
+    for artifact in list(provider.artifacts):
+        provider.set_archive(artifact["id"], artifact["name"])
+    return measured
+
+
+@pytest.mark.parametrize("profile", ["full", CACHE_PROFILE, INSPECTION_PROFILE])
+def test_current_startup_receipts_reuse_original_exact_archives_and_cohort(
+    tmp_path, profile
+):
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    if profile == "full":
+        provider, target, checkout = Provider(raw_root), TARGET, None
+    else:
+        checkout = tmp_path / "checkout"
+        target = cache_repository(checkout, profile=profile)
+        provider = cache_provider(raw_root, checkout, target, profile=profile)
+    original = {
+        name: members["browser.jsonl"]
+        for name, members in provider.files.items()
+        if name.startswith("browser-timing-")
+    }
+    startup_archives(provider, tmp_path, profile)
+    retained = {}
+    receipt = reuse.verify(provider, target, root=checkout, now=NOW, retained=retained)
+    assert reuse.recheck(receipt, provider, target, root=checkout, now=NOW) == receipt
+    assert set(provider.files) == set(reuse.artifact_files(profile))
+    assert all(
+        set(members) == reuse.artifact_files(profile)[name]
+        for name, members in provider.files.items()
+    )
+    for lane in receipt["test_evidence"]["lanes"]:
+        if lane["lane"] != "browser":
+            continue
+        assert (
+            lane["startup"]["source_sha"] == lane["source_sha"] == DONOR["source_sha"]
+        )
+        assert lane["startup"]["run_id"] == lane["run_id"] == DONOR["run_id"]
+        assert lane["startup"]["run_attempt"] == lane["run_attempt"] == 1
+        name = f"browser-timing-{lane['project']}-shard-{lane['shard']}-attempt-1"
+        assert [
+            json.loads(line) for line in retained[name + "/browser.jsonl"].splitlines()
+        ] == [json.loads(line) for line in original[name].splitlines()]
+        kept = json.loads(retained[name + "/browser-summary.json"])
+        assert kept["startup"] == lane["startup"]
+    browser_cost = [
+        job
+        for job in receipt["donor_cost"]["jobs"]
+        if job["job"].startswith("browser-")
+    ]
+    assert browser_cost and all(
+        job["startup_replacement_ms"] == 0 for job in browser_cost
+    )
+    assert all(
+        job["startup_build_ms"] == 11 and job["startup_up_readiness_ms"] == 17
+        for job in browser_cost
+    )
+
+
+def test_older_applicable_startup_absence_keeps_original_receipts(provider):
+    retained = {}
+    receipt = reuse.verify(provider, TARGET, now=NOW, retained=retained)
+    assert all("startup" not in lane for lane in receipt["test_evidence"]["lanes"])
+    assert all(
+        not set(STARTUP_FIELDS).intersection(job)
+        for job in receipt["donor_cost"]["jobs"]
+    )
+    assert all(
+        "startup" not in json.loads(value)
+        for name, value in retained.items()
+        if name.endswith("-summary.json")
+    )
+
+
+def test_current_workflow_keeps_missing_startup_unknown_during_reuse(provider):
+    name = "workflow-timing-attempt-1"
+    summary = json.loads(provider.files[name]["workflow-summary.json"])
+    for job in summary["jobs"]:
+        if job["job"].startswith("browser-"):
+            job.update(dict.fromkeys(STARTUP_FIELDS))
+    artifact_id = next(
+        value["id"] for value in provider.artifacts if value["name"] == name
+    )
+    provider.files[name]["workflow-summary.json"] = encoded(summary)
+    provider.set_archive(artifact_id, name)
+    receipt = reuse.verify(provider, TARGET, now=NOW)
+    assert all(
+        job[field] is None
+        for job in receipt["donor_cost"]["jobs"]
+        if job["job"].startswith("browser-")
+        for field in STARTUP_FIELDS
+    )
+    next(job for job in summary["jobs"] if job["job"].startswith("browser-"))[
+        "startup_build_ms"
+    ] = 0
+    provider.files[name]["workflow-summary.json"] = encoded(summary)
+    provider.set_archive(artifact_id, name)
+    with pytest.raises(ValueError, match="donor-workflow-receipt"):
+        reuse.verify(provider, TARGET, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "private",
+        "source",
+        "run",
+        "shard",
+        "phase-bool",
+        "extra-member",
+        "fake-workflow-phase",
+        "extra-summary",
+    ],
+)
+def test_startup_donor_extension_is_closed_and_independently_recomputed(
+    provider, tmp_path, damage
+):
+    startup_archives(provider, tmp_path)
+    name = "browser-timing-desktop-chromium-shard-1-attempt-1"
+    member = "browser-summary.json"
+    summary = json.loads(provider.files[name][member])
+    if damage == "private":
+        summary["startup"]["stdout"] = "PLANTED_PRIVATE_STARTUP_TOKEN"
+    elif damage in {"source", "run", "shard"}:
+        key, value = {
+            "source": ("source_sha", "f" * 40),
+            "run": ("run_id", 55),
+            "shard": ("shard", 2),
+        }[damage]
+        summary["startup"][key] = value
+    elif damage == "phase-bool":
+        summary["startup"]["phases"][2]["duration_ms"] = False
+    elif damage == "extra-member":
+        provider.files[name]["startup.jsonl"] = b"unapproved extra member"
+    elif damage == "fake-workflow-phase":
+        name, member = "workflow-timing-attempt-1", "workflow-summary.json"
+        summary = json.loads(provider.files[name][member])
+        next(job for job in summary["jobs"] if job["job"].startswith("browser-"))[
+            "startup_build_ms"
+        ] = 0
+    else:
+        summary["unapproved"] = "PLANTED_PRIVATE_STARTUP_TOKEN"
+    provider.files[name][member] = encoded(summary)
+    artifact_id = next(
+        value["id"] for value in provider.artifacts if value["name"] == name
+    )
+    provider.set_archive(artifact_id, name)
+    with pytest.raises(ValueError):
+        reuse.verify(provider, TARGET, now=NOW)
 
 
 def test_equal_squash_tree_and_empty_run_pr_array_reuses_original_full_receipts(
