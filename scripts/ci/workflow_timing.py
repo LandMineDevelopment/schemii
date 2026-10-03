@@ -12,11 +12,23 @@ from urllib.request import Request, urlopen
 if __package__:
     from .classify_changes import load_classification
     from .summary import load, summarize as lane_summary
-    from .test_selection import JOB_NAMES, expected_jobs, expected_lanes
+    from .test_selection import (
+        JOB_NAMES,
+        expected_jobs,
+        expected_lanes,
+        expected_scope,
+        valid_scope,
+    )
 else:
     from classify_changes import load_classification
     from summary import load, summarize as lane_summary
-    from test_selection import JOB_NAMES, expected_jobs, expected_lanes
+    from test_selection import (
+        JOB_NAMES,
+        expected_jobs,
+        expected_lanes,
+        expected_scope,
+        valid_scope,
+    )
 
 
 REPORT_JOB_NAMES = {
@@ -244,10 +256,30 @@ def test_evidence(directory, *, lane="source", profile=None, identity=None):
     invalid = 0
     for path in directory.rglob("*.jsonl"):
         try:
-            result = lane_summary(load(path))
+            records = load(path)
+            result = lane_summary(records)
             key = result["lane"], result["project"], result["shard"]
             if key not in expected or key in observed:
                 raise ValueError("Invalid lane evidence")
+            if expected_scope(profile, key) is not None:
+                result["scope"] = {
+                    "profile": profile,
+                    "planned": sorted(
+                        record["test_id"]
+                        for record in records
+                        if record["kind"] == "plan"
+                    ),
+                    "observed": [
+                        {
+                            field: record[field]
+                            for field in ("test_id", "source_id", "outcome", "attempt")
+                        }
+                        for record in records
+                        if record["kind"] == "attempt"
+                    ],
+                }
+                if not valid_scope(profile, key, result["scope"]):
+                    raise ValueError("Incomplete selected coverage")
             observed[key] = result
         except (ValueError, OSError, KeyError, TypeError):
             invalid += 1
@@ -325,10 +357,10 @@ def main():
     if args.reuse:
         reuse = json.loads(args.reuse.read_text())
         if __package__:
-            from .reuse_acceptance import MODE, current_reuse_jobs
+            from .reuse_acceptance import current_reuse_jobs, valid_receipt_mode
         else:
-            from reuse_acceptance import MODE, current_reuse_jobs
-        if reuse.get("mode") != MODE or any(
+            from reuse_acceptance import current_reuse_jobs, valid_receipt_mode
+        if not valid_receipt_mode(reuse) or any(
             reuse.get("target", {}).get(key) != value for key, value in identity.items()
         ):
             raise ValueError("Invalid reuse identity")
@@ -383,7 +415,7 @@ def main():
     if reuse:
         # Donor tests/cost retain their original cohort; current execution totals
         # include only the fresh classification, reports and static controls.
-        result["acceptance_mode"] = MODE
+        result["acceptance_mode"] = reuse["mode"]
         result["reuse"] = reuse
     else:
         evidence = test_evidence(

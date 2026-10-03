@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { balanceFiles, OBSERVATION, OBSERVED_COSTS, PROJECTS } from '../../scripts/ci/browser-shards.mjs';
-import { inventoryFiles, invocation } from '../../scripts/ci/run-browser-shard.mjs';
+import { balanceFiles, coverageProfile, OBSERVATION, OBSERVED_COSTS, PROJECTS } from '../../scripts/ci/browser-shards.mjs';
+import { inventoryFiles, invocation, scopedInventory } from '../../scripts/ci/run-browser-shard.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -125,4 +125,73 @@ test('a freshly added nested spec is discovered and scheduled exactly once per i
     assert.equal(required.filter(item => item.file === 'nested/brand-new.spec.js').length, 2);
     assert.equal(required.length, 6);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+const cacheProfile = 'schemer-result-cache';
+const cli = resolve(root, 'node_modules/@playwright/test/cli.js');
+function discovery(project, files) {
+  const environment = { ...process.env };
+  delete environment.SCHEMII_E2E_FILE_MANIFEST;
+  const command = files ? invocation(project, files, 1, true, environment, 3)
+    : { command: process.execPath, args: [cli, 'test', `--project=${project}`, '--list', '--reporter=json'], env: environment };
+  const result = spawnSync(command.command, command.args, { cwd: root, env: command.env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  return JSON.parse(result.stdout);
+}
+function specs(report) {
+  const found = [];
+  function visit(suite) { found.push(...suite.specs || []); for (const child of suite.suites || []) visit(child); }
+  report.suites.forEach(visit);
+  return found;
+}
+
+// Actual collection only: no browser, global setup or application is launched.
+test('cache profile actual whole-file discovery equals the frozen both-device three-shard union', () => {
+  const policy = coverageProfile(cacheProfile);
+  for (const project of PROJECTS) {
+    const baseline = discovery(project);
+    const shards = scopedInventory(baseline, root, project, policy);
+    assert.equal(shards.length, 3);
+    const actual = [];
+    for (const [index, files] of shards.entries()) {
+      // Exercise the real CLI, including poisoned inherited file selection.
+      const result = spawnSync(process.execPath,
+        [resolve(root, 'scripts/ci/run-browser-shard.mjs'), `--profile=${cacheProfile}`, `--project=${project}`, `--shard=${index + 1}/3`, '--list'],
+        { cwd: root, env: { ...process.env, SCHEMII_E2E_FILE_MANIFEST: JSON.stringify([policy.files[0]]) }, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+      assert.equal(result.status, 0, result.stderr + result.stdout);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.config.workers, 1);
+      assert.equal(report.config.fullyParallel, false);
+      assert.equal(report.config.shard, null);
+      assert.deepEqual(inventoryFiles(report, root), [...files].sort());
+      const cases = specs(report);
+      assert.ok(cases.every(spec => spec.tests.length === 1 && spec.tests[0].projectName === project));
+      const ids = cases.map(spec => createHash('sha256').update(spec.id).digest('hex')).sort();
+      assert.deepEqual(ids, files.flatMap(file => policy.browser[project].files[file]).sort());
+      actual.push(...ids);
+    }
+    assert.equal(actual.length, 65);
+    assert.equal(new Set(actual).size, actual.length);
+    assert.deepEqual(actual.sort(), Object.values(policy.browser[project].files).flat().sort());
+    assert.equal(policy.browser[project].allowed_skips.length, 1);
+  }
+});
+
+test('cache profile discovery refuses missing files, omitted cases and polluted project identity', () => {
+  const policy = coverageProfile(cacheProfile);
+  for (const project of PROJECTS) {
+    const report = discovery(project);
+    for (const missing of ['tests/e2e/schemoo-repetition-live.spec.js', 'tests/e2e/schemoo-column-comparisons.spec.js']) {
+      const narrowed = discovery(project, policy.files.filter(file => file !== missing));
+      assert.throws(() => scopedInventory(narrowed, root, project, policy), /Missing or changed expected browser cases/);
+    }
+    for (const damage of ['case', 'project', 'duplicate']) {
+      const changed = structuredClone(report);
+      const item = specs(changed).find(spec => spec.file === 'schemer-dashboards.spec.js');
+      if (damage === 'case') item.id = 'a-shortened-but-self-consistent-case';
+      if (damage === 'project') item.tests[0].projectName = 'outside-project';
+      if (damage === 'duplicate') item.tests.push(structuredClone(item.tests[0]));
+      assert.throws(() => scopedInventory(changed, root, project, policy), /Missing or changed|Invalid selected/);
+    }
+  }
 });

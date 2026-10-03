@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { balanceFiles, manifestPattern, PROJECTS } from './browser-shards.mjs';
+import { balanceFiles, coverageProfile, manifestPattern, PROJECTS } from './browser-shards.mjs';
 import { invocation, parseOptions, run } from './run-browser-shard.mjs';
 
 const file = name => `tests/e2e/${name}.spec.js`;
@@ -107,4 +107,32 @@ test('programmatic invalid plans fail before starting discovery', () => {
   ]) {
     assert.throws(() => run(options, '/nonexistent-browser-plan'), /Invalid browser|shard count/);
   }
+});
+
+const cacheProfile = 'schemer-result-cache';
+
+test('cache profile policy and arguments reject shortened scope, unknown profiles and filters', () => {
+  const policy = coverageProfile(cacheProfile);
+  for (const damage of ['schema', 'missing', 'shard', 'case', 'skip', 'project']) {
+    const changed = structuredClone(policy);
+    const inventory = changed.browser[PROJECTS[0]];
+    if (damage === 'schema') changed.schema = true;
+    if (damage === 'missing') changed.files.pop();
+    if (damage === 'shard') inventory.shards[1] = inventory.shards[0];
+    if (damage === 'case') Object.values(inventory.files)[0].length = 0;
+    if (damage === 'skip') inventory.allowed_skips.push('a'.repeat(64));
+    if (damage === 'project') delete changed.browser[PROJECTS[1]];
+    assert.throws(() => coverageProfile(cacheProfile, changed));
+  }
+  assert.deepEqual(parseOptions([`--project=${PROJECTS[0]}`, '--shard=1/3', `--profile=${cacheProfile}`, '--plan']), { project: PROJECTS[0], shard: 1, shardCount: 3, profile: cacheProfile, plan: true, list: false });
+  assert.equal(coverageProfile('full'), undefined);
+  assert.equal(coverageProfile('e2e-tests'), undefined);
+  assert.throws(() => run({ project: PROJECTS[0], shard: 1, shardCount: 3, profile: 'invented' }, '/not-a-checkout'), /Unknown browser coverage profile/);
+  for (const extra of ['--grep=one-case', '--grep-invert=other-case', '--file=tests/e2e/accounts.spec.js', '--profile=invented']) {
+    assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, '--shard=1/3', extra]));
+  }
+  assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, '--shard=1/2', `--profile=${cacheProfile}`]), /all three/);
+  assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, '--shard=1/3', `--profile=${cacheProfile}`, '--profile=full']));
+  assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, '--shard=1/3', '--profile=', '--profile=full']));
+  assert.throws(() => run({ project: PROJECTS[0], shard: 1, shardCount: 3, profile: null }, '/not-a-checkout'), /Unknown browser coverage profile/);
 });

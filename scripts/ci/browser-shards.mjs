@@ -1,6 +1,7 @@
 // Whole-file scheduling preserves serialized shared-account setup/cleanup.
 // Costs include first-attempt fixture setup, body and teardown, not retries.
 import { isAbsolute, normalize } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 export const PROJECTS = ['desktop-chromium', 'android-chromium'];
 export const OBSERVATION = Object.freeze({
@@ -158,3 +159,41 @@ export const OBSERVED_COSTS = Object.freeze({
   "tests/e2e/workspace-lifecycle.spec.js": { 'desktop-chromium': 7170, 'android-chromium': 10338 },
   "tests/e2e/workspace-rename.spec.js": { 'desktop-chromium': 2541, 'android-chromium': 2937 },
 });
+
+// Loaded only for the reviewed product owner; ordinary discovery stays unchanged.
+export function coverageProfile(profile, policy = undefined) {
+  if (['full', 'e2e-tests'].includes(profile)) return undefined;
+  if (profile !== 'schemer-result-cache') throw new Error('Unknown browser coverage profile');
+  policy ??= JSON.parse(readFileSync(new URL('./coverage-profiles.json', import.meta.url), 'utf8'));
+  if (!policy || Object.keys(policy).sort().join(',') !== 'browser,files,profile,python,schema'
+      || policy.schema !== 1 || policy.profile !== profile
+      || !Array.isArray(policy.files) || policy.files.length !== 8 || new Set(policy.files).size !== 8
+      || Object.keys(policy.browser).sort().join(',') !== [...PROJECTS].sort().join(',')) {
+    throw new Error('Invalid browser coverage policy');
+  }
+  policy.files.forEach(validateFile);
+  for (const project of PROJECTS) {
+    const inventory = policy.browser[project];
+    if (!inventory || Object.keys(inventory).sort().join(',') !== 'allowed_skips,files,shards'
+        || Object.keys(inventory.files).sort().join(',') !== [...policy.files].sort().join(',')) {
+      throw new Error('Missing expected browser files');
+    }
+    const cases = Object.values(inventory.files).flat();
+    if (Object.values(inventory.files).some(ids => !Array.isArray(ids) || !ids.length)
+        || cases.some(id => typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id))
+        || new Set(cases).size !== cases.length
+        || !Array.isArray(inventory.allowed_skips) || inventory.allowed_skips.length !== 1
+        || inventory.files['tests/e2e/schemer-ai-live.spec.js']?.length !== 1
+        || inventory.allowed_skips[0] !== inventory.files['tests/e2e/schemer-ai-live.spec.js'][0]) {
+      throw new Error('Invalid browser coverage cases');
+    }
+    const assigned = inventory.shards?.flat();
+    if (!Array.isArray(inventory.shards) || inventory.shards.length !== 3
+        || inventory.shards.some(files => !Array.isArray(files) || !files.length)
+        || assigned.length !== policy.files.length || new Set(assigned).size !== policy.files.length
+        || assigned.some(file => !policy.files.includes(file))) {
+      throw new Error('Missing or duplicate browser shard files');
+    }
+  }
+  return policy;
+}

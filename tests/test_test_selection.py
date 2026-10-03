@@ -1,9 +1,11 @@
 """Selected checks must retain ownership closure and fail closed on unknown changes."""
 
+import copy
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -12,6 +14,11 @@ import pytest
 from scripts.ci.classify_changes import classify, load_classification
 from scripts.ci.required_gate import CONTROL_NEEDS, evaluate
 from scripts.ci.test_selection import (
+    CACHE_PROFILE,
+    CACHE_SOURCE,
+    CACHE_TEST,
+    coverage_policy,
+    expected_scope,
     JOB_NAMES,
     PATHS,
     PROFILES,
@@ -493,11 +500,43 @@ def raw_lane(key, outcome="passed"):
     ]
 
 
+def scoped_raw_lane(key):
+    expected = expected_scope(CACHE_PROFILE, key)
+    if expected is None:
+        return raw_lane(key)
+    template = raw_lane(key)
+    meta = {
+        key: template[0][key] for key in template[0] if key not in {"kind", "planned"}
+    }
+    return [
+        {**meta, "kind": "start", "planned": len(expected)},
+        *[{**meta, "kind": "plan", "test_id": test} for test in expected],
+        *[
+            {
+                **template[2],
+                "test_id": test,
+                "source_id": owner["source_id"],
+                "outcome": "skipped" if owner["allow_skip"] else "passed",
+                "skip": "declared-or-runtime" if owner["allow_skip"] else "none",
+            }
+            for test, owner in expected.items()
+        ],
+        template[-1],
+    ]
+
+
 def selected_evidence(root, profile):
     root.mkdir(exist_ok=True)
     for lane, project, shard in expected_lanes(profile):
         (root / f"{lane}-{project}-{shard}.jsonl").write_text(
-            "\n".join(json.dumps(value) for value in raw_lane((lane, project, shard)))
+            "\n".join(
+                json.dumps(value)
+                for value in (
+                    scoped_raw_lane((lane, project, shard))
+                    if profile == CACHE_PROFILE
+                    else raw_lane((lane, project, shard))
+                )
+            )
         )
     return collect_evidence(root, profile=profile, identity=IDENTITY)
 
@@ -791,7 +830,11 @@ def test_local_configured_pg_runs_before_missing_browser_boundary(
         ],
     }
     assert local_selection.execute(tmp_path, selected) == 2
-    assert observed == [["npm", "test"], local_selection.POSTGRES_COMMAND]
+    assert observed == [
+        ["npm", "test"],
+        [sys.executable, *local_selection.POSTGRES_COMMAND[1:]],
+    ]
+    assert selected["commands"][1] == local_selection.POSTGRES_COMMAND
     assert "Browser acceptance pending" in capsys.readouterr().err
 
 
@@ -809,3 +852,325 @@ def test_local_feedback_retains_every_selected_deterministic_command(profile):
     assert all(argv not in feedback for argv in selected if argv[0] == "./start.sh")
     assert local_selection.POSTGRES_COMMAND not in feedback
     assert local_selection.BROWSER_BOUNDARY not in feedback
+
+
+@pytest.mark.parametrize(
+    "paths, expected",
+    [
+        ([CACHE_SOURCE], CACHE_PROFILE),
+        ([CACHE_SOURCE, CACHE_TEST], CACHE_PROFILE),
+        ([CACHE_TEST], "frontend-tests"),
+        ([CACHE_TEST, "tests/frontend/csv.test.js"], "frontend-tests"),
+        ([CACHE_SOURCE, CACHE_TEST, "tests/frontend/csv.test.js"], "full"),
+        ([CACHE_SOURCE, "src/schemii/schemer/web/studio.js"], "full"),
+        ([CACHE_SOURCE, "tests/e2e/schemer-dashboards.spec.js"], "full"),
+        ([CACHE_SOURCE, "tests/test_frontend.py"], "full"),
+        ([CACHE_SOURCE, "scripts/ci/coverage-profiles.json"], "full"),
+    ],
+)
+def test_cache_source_present_exact_pair_precedence(repository, paths, expected):
+    root, _ = repository
+    for path in paths:
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("baseline\n")
+    base = commit(root)
+    for path in paths:
+        (root / path).write_text("changed\n")
+    # Dirty and staged selection proves the complete union before hosted proof.
+    assert local_selection.plan(root, base)["classification"]["profile"] == expected
+    git(root, "add", ".")
+    assert local_selection.plan(root, base)["classification"]["profile"] == expected
+    head = commit(root)
+    assert classify(root, "pull_request", base, head)["profile"] == expected
+    assert classify(root, "push", base, head)["profile"] == "full"
+    assert classify(root, "workflow_dispatch", base, head)["profile"] == "full"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "new",
+        "delete",
+        "rename",
+        "mode",
+        "symlink",
+        "index",
+        "mixed-staged",
+        "hidden-mode",
+    ],
+)
+def test_cache_profile_unsafe_git_boundaries_stay_full(repository, damage):
+    root, base = repository
+    source = root / CACHE_SOURCE
+    if damage == "new":
+        source.unlink()
+        base = commit(root)
+        source.write_text("new\n")
+    elif damage == "delete":
+        source.unlink()
+    elif damage == "rename":
+        source.rename(source.with_name("cache-renamed.js"))
+    elif damage == "mode":
+        source.chmod(0o755)
+    elif damage == "symlink":
+        source.unlink()
+        source.symlink_to("unowned.js")
+    elif damage == "index":
+        git(root, "update-index", "--assume-unchanged", CACHE_SOURCE)
+        source.write_text("hidden\n")
+    elif damage == "mixed-staged":
+        source.write_text("changed\n")
+        shared = root / "package.json"
+        shared.write_text("original\n")
+        base = commit(root)
+        shared.write_text("staged change\n")
+        git(root, "add", "package.json")
+        shared.write_text("original\n")
+        source.write_text("changed again\n")
+    else:
+        git(root, "config", "core.fileMode", "false")
+        source.write_text("changed\n")
+    assert local_selection.plan(root, base)["classification"]["profile"] == "full"
+    if damage not in {"index", "hidden-mode", "mixed-staged"}:
+        assert classify(root, "pull_request", base, commit(root))["profile"] == "full"
+
+
+def test_cache_complete_closure_and_scoped_backup_workflow_contract():
+    policy = coverage_policy()
+    expected = {
+        "schemer-dashboards",
+        "shared-report-live",
+        "schemoo-column-comparisons",
+        "schemoo-repetition-live",
+        "schemer-ai-live",
+        "account-brand-navigation",
+        "accounts",
+        "quick-start",
+    }
+    assert set(policy["files"]) == {f"tests/e2e/{file}.spec.js" for file in expected}
+    selected = commands(CACHE_PROFILE, "origin/main")
+    assert selected[0] == ["npm", "test"]
+    assert [
+        "python",
+        "scripts/ci/python-tests.py",
+        "tests/test_frontend.py",
+    ] in selected
+    browser = [argv for argv in selected if "scripts/ci/run-browser-shard.mjs" in argv]
+    assert len(browser) == 6
+    assert all(
+        f"--profile={CACHE_PROFILE}" in argv and argv[-2].endswith("/3")
+        for argv in browser
+    )
+    assert not any("--backup" in argv for argv in selected)
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    step = workflow.split(
+        "- name: Verify metadata backup recovery in an isolated database\n", 1
+    )[1].split("- name:", 1)[0]
+    condition = f"matrix.project == 'desktop-chromium' && matrix.shard == 1 && needs.classify.outputs.profile != '{CACHE_PROFILE}'"
+    assert f"if: {condition}\n" in step
+    assert "./start.sh --backup" in step and "./start.sh --verify-backup" in step
+    assert "--profile=${{ needs.classify.outputs.profile }}" in workflow
+
+
+@pytest.mark.parametrize("lane", ["python", "browser"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "case",
+        "file",
+        "source",
+        "extra",
+        "skip",
+        "missing-end",
+        "failed",
+        "recovered",
+        "stale",
+        "duplicate-shard",
+    ],
+)
+def test_cache_receipts_require_independent_whole_inventory(tmp_path, lane, damage):
+    selected_evidence(tmp_path, CACHE_PROFILE)
+    key = (
+        ("python", "none", 0)
+        if lane == "python"
+        else ("browser", "desktop-chromium", 2)
+    )
+    path = tmp_path / f"{key[0]}-{key[1]}-{key[2]}.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    attempts = [record for record in records if record["kind"] == "attempt"]
+    if damage in {"case", "file"}:
+        removed = (
+            {attempts[0]["test_id"]}
+            if damage == "case"
+            else {
+                v["test_id"]
+                for v in attempts
+                if v["source_id"] == attempts[0]["source_id"]
+            }
+        )
+        records = [v for v in records if v.get("test_id") not in removed]
+        records[0]["planned"] -= len(removed)
+    elif damage == "source":
+        attempts[0]["source_id"] = "f" * 64
+    elif damage == "extra":
+        records[0]["planned"] += 1
+        records.insert(1, {**records[1], "test_id": "f" * 64})
+        records.insert(-1, {**attempts[0], "test_id": "f" * 64})
+    elif damage == "skip":
+        next(v for v in attempts if v["outcome"] == "passed")["outcome"] = "skipped"
+    elif damage == "missing-end":
+        records.pop()
+    elif damage == "failed":
+        attempts[0]["outcome"] = "failed"
+    elif damage == "recovered":
+        attempts[0]["outcome"] = "failed"
+        records.insert(-1, {**attempts[0], "attempt": 1, "outcome": "passed"})
+    elif damage == "stale":
+        for record in records:
+            record["run_attempt"] = 2
+    else:
+        (tmp_path / "duplicate.jsonl").write_text(path.read_text())
+    path.write_text("\n".join(json.dumps(record) for record in records))
+    assert (
+        collect_evidence(tmp_path, profile=CACHE_PROFILE, identity=IDENTITY)["complete"]
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["missing", "case", "source", "skip", "profile", "duplicate", "shard", "stale"],
+)
+def test_cache_gate_rejects_spoofed_self_consistent_scope(tmp_path, damage):
+    args = selected_gate(tmp_path, CACHE_PROFILE)
+    assert evaluate(*args)[0]
+    receipt = next(
+        value
+        for value in args[3]["test_evidence"]["lanes"]
+        if value["lane"] == "browser" and value["shard"] == 2
+    )
+    scope = receipt["scope"]
+    if damage == "missing":
+        receipt.pop("scope")
+    elif damage == "case":
+        removed = scope["observed"].pop()["test_id"]
+        scope["planned"].remove(removed)
+    elif damage == "source":
+        scope["observed"][0]["source_id"] = "f" * 64
+    elif damage == "skip":
+        next(v for v in scope["observed"] if v["outcome"] == "passed")["outcome"] = (
+            "skipped"
+        )
+    elif damage == "profile":
+        scope["profile"] = "full"
+    elif damage == "duplicate":
+        scope["observed"].append(copy.deepcopy(scope["observed"][0]))
+    elif damage == "shard":
+        receipt["shard"] = 1
+    else:
+        receipt["source_sha"] = "f" * 40
+    assert not evaluate(*args)[0]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "boolean-schema",
+        "schema",
+        "profile",
+        "missing-file",
+        "duplicate-shard",
+        "case",
+        "skip",
+    ],
+)
+def test_cache_policy_rejects_malformed_frozen_inventory(monkeypatch, damage):
+    policy = coverage_policy()
+    if damage == "boolean-schema":
+        policy["schema"] = True
+    elif damage == "schema":
+        policy["schema"] = 2
+    elif damage == "profile":
+        policy["profile"] = "full"
+    elif damage == "missing-file":
+        policy["files"].pop()
+    elif damage == "duplicate-shard":
+        policy["browser"]["desktop-chromium"]["shards"][1] = policy["browser"][
+            "desktop-chromium"
+        ]["shards"][0]
+    elif damage == "case":
+        next(iter(policy["python"]["files"].values())).append("not-a-case-hash")
+    else:
+        policy["python"]["allowed_skips"] = [
+            next(iter(policy["python"]["files"].values()))[0]
+        ]
+    monkeypatch.setattr("scripts.ci.test_selection.json.loads", lambda _: policy)
+    with pytest.raises(ValueError):
+        coverage_policy()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["full", "source", "reused-full-pr", "reused-schemer-result-cache-pr", "invented"],
+)
+def test_gate_never_accepts_unverified_acceptance_mode(tmp_path, mode):
+    args = selected_gate(tmp_path, "frontend-tests")
+    args[3]["acceptance_mode"] = mode
+    assert evaluate(*args) == (False, "unverified-reuse-proof")
+
+
+def test_workflow_suppresses_duplicate_layers_only_for_the_two_verified_modes():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    parts = re.split(r"^  ([a-z-]+):\n", workflow, flags=re.MULTILINE)
+    sections = dict(zip(parts[1::2], parts[2::2], strict=True))
+    modes = {"reused-full-pr", "reused-schemer-result-cache-pr"}
+    for job in ("test", "postgres-integration", "browser-smoke"):
+        condition = next(
+            line.strip()[4:]
+            for line in sections[job].splitlines()
+            if line.strip().startswith("if: ")
+        )
+        guard = condition[condition.index("needs.classify.outputs.acceptance") :]
+        for mode in [*modes, "source", "invented", "", "reused-frontend-tests-pr"]:
+            expression = re.sub(
+                r"needs\.classify\.outputs\.acceptance != '([^']+)'",
+                lambda match: str(mode != match[1]),
+                guard,
+            )
+            assert re.fullmatch(r"[TrueFals &|()]+", expression)
+            assert eval(
+                expression.replace("&&", "and").replace("||", "or"),
+                {"__builtins__": {}},
+            ) == (mode not in modes)
+    assert "outputs.acceptance" not in next(
+        line
+        for line in sections["static-quality"].splitlines()
+        if line.strip().startswith("if: ")
+    )
+    # Proof transport accepts only those explicit modes, including both shell branches.
+    positive = "outputs.acceptance == 'reused-full-pr' ||"
+    assert workflow.count(positive) == 3
+    assert workflow.count("== 'reused-schemer-result-cache-pr' ]]; then") == 2
+
+
+@pytest.mark.parametrize("command", ["python", "python3"])
+def test_local_children_keep_planner_interpreter_without_path_activation(
+    tmp_path, monkeypatch, capsys, command
+):
+    monkeypatch.setenv("PATH", "/not-an-activated-python-environment")
+    argv = [
+        command,
+        "-c",
+        "import json,pathlib,sys; pathlib.Path('interpreter.json').write_text(json.dumps({'executable':sys.executable,'prefix':sys.prefix}))",
+    ]
+    selected = {
+        "classification": {"valid": True, "profile": CACHE_PROFILE},
+        "layers": ["python"],
+        "commands": [argv],
+    }
+    assert local_selection.execute(tmp_path, selected, feedback=True) == 0
+    actual = json.loads((tmp_path / "interpreter.json").read_text())
+    assert actual == {"executable": sys.executable, "prefix": sys.prefix}
+    assert selected["commands"] == [argv]
+    assert f"+ {sys.executable} " in capsys.readouterr().out

@@ -38,7 +38,7 @@ substitute for a focused regression or a faithful controlled failure.
    Node/Python commands and the required source CI layers. A narrow selection
    is feedback during development, not permission to omit acceptance.
 
-Use `python scripts/test-changes.py --base origin/main` to print the actual
+Use `.venv/bin/python scripts/test-changes.py --base origin/main` to print the actual
 Git comparison, committed/staged/unstaged changed paths, untracked status and all
 required commands. Existing owned regular-file modifications with stable Git and
 working-tree modes retain their profile before commit. The union of each diff
@@ -51,6 +51,8 @@ Git configurations that disable executable-mode or symlink discovery also force
 full checks, since they can conceal changes outside the visible diff.
 
 Use `--feedback` to execute the selected deterministic checks during development.
+Python child checks use the planner's interpreter, so direct virtual-environment
+invocation works without changing PATH or activating another environment.
 The plan explicitly lists any required PostgreSQL/browser layers as pending;
 successful feedback is not full acceptance. `--run` executes the complete plan
 and stops on the first failed check or missing prerequisite at that layer's
@@ -64,8 +66,8 @@ command remains `./start.sh`; deployment leases still apply.
 A strict schema-2 descriptor selects one reviewed profile from the complete
 PR merge-base-to-head diff. Only modifications to frozen existing regular files
 with unchanged modes qualify; new siblings, shared helpers, mixed families,
-renames, deletions, symlinks, dependencies, startup, CI policy and every product
-source change select full acceptance. Source/test/tooling pushes to main run full
+renames, deletions, symlinks, dependencies, startup, CI policy and unmapped
+product source changes select full acceptance. Source/test/tooling pushes to main run full
 acceptance unless the exact-tree post-merge proof below succeeds. Manual dispatch
 always runs full acceptance. The existing positively verified audit
 report shortcut remains available on both PRs and main.
@@ -77,11 +79,33 @@ report shortcut remains available on both PRs and main.
 | existing backend test leaves | Node, static Python, complete deterministic Python |
 | existing frontend test leaves | complete Node |
 | existing E2E test leaves | Node and complete desktop + Android browser acceptance |
+| Schemer result-cache source, optionally with its existing direct Node regression | complete Node, whole frontend-serving Python file and frozen eight-file browser closure on both devices |
 | full | Node, static Python, complete Python, real PostgreSQL and all browser acceptance |
 
 The exact path lists and closures live in
 [scripts/ci/test_selection.py](../scripts/ci/test_selection.py). This first mapping
-accelerates tooling and test-only PRs; product changes retain full acceptance.
+accelerates tooling/test-only PRs and one independently reviewed product owner.
+The exact product owner is `src/schemii/schemer/web/result-cache.js`, alone or with
+an existing modification to `tests/frontend/schemer-result-cache.test.js`. The
+source must be present; direct-test-only changes keep their ordinary frontend
+profile. Additional source/test/shared paths and unsafe changes remain full.
+
+The product profile retains complete Node feedback, all of `tests/test_frontend.py`,
+and the eight whole browser files declared in
+[coverage-profiles.json](../scripts/ci/coverage-profiles.json), on desktop and
+Android with the same six isolated stacks and one worker per stack. Node protects
+cache budgets, cancellation, subscriber ordering and decoded results. Mounted
+browser cases retain real independently granted reports, streamed drills/exports,
+persistence/recovery and Schemoo-to-Schemer inputs. The optional live-AI case
+retains its existing prerequisite limit; its skip is not provider acceptance.
+
+Actual unfiltered discovery must equal the independently reviewed frozen case
+inventory before scoped browser execution. Raw-derived Python/browser plans and
+source identities must equal that same inventory at the gate; a self-consistent
+smaller plan cannot pass. Whole files are assigned disjointly across the three
+shards per device. Editing their source or the policy selects full acceptance and
+requires deliberate inventory review. Unknown profiles, missing cases and extra
+filters are rejected rather than silently narrowing coverage.
 Complete CI Python uses `python scripts/ci/python-tests.py`: two isolated processes
 keep the inspection fixture consumers together and all other discovery in the
 other process, merging one strict canonical receipt. Explicit tooling arguments
@@ -162,7 +186,9 @@ Python quality against the intended base, explicitly configured real PostgreSQL
 and all six browser legs. A narrower reviewed profile omits only its documented
 unrelated layers. Browser CI uses the canonical
 HTTPS stack through `./start.sh`; it does not replace manual native-agent UI
-acceptance in #73/#137. Backup recovery remains an isolated-database check.
+acceptance in #73/#137. Full/default browser acceptance retains the isolated-database backup recovery
+check. The exact cache profile omits this unrelated unchanged launcher/storage
+check; its mounted persistence and export coverage remains required.
 Live provider/report specs require their own authenticated fixture prerequisites;
 track their skips and ownership rather than treating a green default run as proof.
 Full capacity ramps/soaks in #135/#136 stay outside the normal PR feedback path.
@@ -175,6 +201,20 @@ equal the current checked-out main tree, including workflow, policy, tests and
 dependencies. The donor must be the actual CI workflow's unique successful
 attempt-one PR run for that final head, with all 13 jobs passed and all nine raw
 test lanes complete with zero first-attempt failures or retry recoveries.
+
+One additional closed mode supports the selected Schemer cache PR. Main retains
+full classification, but both admission and the independent gate must re-prove
+that the entire push is the exact existing cache source or source/direct-test pair,
+with the donor comparison/base equal to main's previous commit and the same
+reviewed policy bytes. The original selected donor must have exactly eight complete
+raw lanes (Node, frontend Python and six browser legs), eleven original artifacts,
+and thirteen provider jobs: eleven successful with static/PostgreSQL intentionally
+skipped. Its Python/browser case/source/outcome inventory must match the current
+frozen scope, including only documented prerequisite skips. The same repository,
+unique final-head, actual workflow, tree/parent, attempt-one and 24-hour checks
+apply. Arbitrary selected profiles, mixed or batched main changes and changed
+bases/policies fall back to full acceptance. This avoids accelerating a PR only
+to repeat full application testing immediately after its accepted merge.
 
 Admission downloads bounded, digest-checked original artifacts and validates
 their schemas, identities and completeness. The gate independently repeats
@@ -193,11 +233,13 @@ evidence is retained, and disposable validation directories clean up at their
 own context boundary.
 
 The implementation is [reuse_acceptance.py](../scripts/ci/reuse_acceptance.py).
-Natural main run 36775876339 repeated a tree already accepted by its final PR:
-402 seconds to final completion and 37.517 input-job minutes. Its duplicated
-unit, PostgreSQL and six browser jobs account for 36.917 runner-minutes. These
-are the work available to avoid; the next ordinary eligible merge establishes
-actual optimized elapsed time. Environment-dependent external services and
+The ordinary identical-tree [PR177](https://github.com/LandMineDevelopment/schemii/actions/runs/37072329849)
+and [main177](https://github.com/LandMineDevelopment/schemii/actions/runs/37073332970)
+observations measured 382 versus 69 seconds, saving 313 seconds (5m13s).
+Total executed runner-minutes were 34.117 versus 1.150. This is one natural
+full-PR/main comparison across different events, not a percentile guarantee.
+Scoped product-profile hosted speed still requires the next legitimate ordinary
+product change; do not create sampling PRs or dispatch full runs to manufacture it. Environment-dependent external services and
 hosted runner images are not made immutable by tree equality; the bounded age
 and unchanged same-repository execution contract are the reuse policy.
 
