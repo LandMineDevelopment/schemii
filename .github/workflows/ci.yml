@@ -235,9 +235,6 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - name: Verify browser discovery and shard coverage
-        if: matrix.project == 'desktop-chromium' && matrix.shard == 1
-        run: node --test tests/browser-infrastructure/shards.test.mjs
       - name: Check installed runtime and plan exact Ubuntu font payloads
         id: browser-dependencies
         run: node scripts/ci/browser-dependencies.mjs plan
@@ -266,7 +263,12 @@ jobs:
           SCHEMII_START_TIMING_FILE: ${{ github.workspace }}/artifacts/ci-timing/startup.jsonl
           CI_TELEMETRY_PROJECT: ${{ matrix.project }}
           CI_TELEMETRY_SHARD: ${{ matrix.shard }}
-        run: ./start.sh
+        run: |
+          if [[ '${{ matrix.project }}' == 'desktop-chromium' && '${{ matrix.shard }}' == '1' ]]; then
+            node scripts/ci/prepare-browser-stack.mjs --discovery
+          else
+            ./start.sh
+          fi
       - name: Prepare independent browser accounts and private fixtures
         id: parallel-accounts
         if: needs.classify.outputs.profile == 'full' || needs.classify.outputs.profile == 'e2e-tests'

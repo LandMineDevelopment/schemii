@@ -52,11 +52,12 @@ def test_startup_collection_keeps_exact_browser_artifact_and_selected_topology()
         in startup
     )
     assert workflow.index("run: mkdir -p artifacts/ci-timing") < workflow.index(
-        "run: ./start.sh"
+        "      - name: Start the canonical application stack"
     )
     assert "CI_TELEMETRY_PROJECT: ${{ matrix.project }}" in startup
     assert "CI_TELEMETRY_SHARD: ${{ matrix.shard }}" in startup
-    assert "run: ./start.sh" in startup
+    assert "node scripts/ci/prepare-browser-stack.mjs --discovery" in startup
+    assert "            ./start.sh" in startup
     assert "matrix: ${{ fromJSON(needs.classify.outputs.browser_matrix) }}" in workflow
     assert "fail-fast: false" in workflow
     validation = workflow.split("      - name: Validate public browser timing\n", 1)[

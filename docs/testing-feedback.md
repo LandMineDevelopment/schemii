@@ -249,6 +249,14 @@ Full capacity ramps/soaks in #135/#136 stay outside the normal PR feedback path.
 
 ### Two browser processes per full stack
 
+The first desktop lane overlaps collection-only infrastructure discovery with
+canonical launcher startup under one owned coordinator. Both must pass and stop
+before account preparation or browser cases begin. Discovery starts no browser,
+global fixture setup or application requests. Other lanes continue calling
+`./start.sh` directly. The Actions startup step measures this readiness barrier;
+the launcher's original receipt retains the actual build/replacement/readiness
+phases, so overlapping collection time is not added twice.
+
 Full and E2E CI prepare two independently authenticated accounts before any test
 body runs. Each account owns its connection profiles, imported catalogs,
 workspaces, storage state and private working directory. Preparation completes

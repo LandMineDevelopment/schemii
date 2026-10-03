@@ -764,9 +764,48 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
         and "SCHEMII_TEST_METADATA_DSN:" in postgres_step
     )
     browser = _service(workflow, "browser-smoke")
-    assert shlex.split(
-        _step_run(_named_step(browser, "Start the canonical application stack"))
-    ) == ["./start.sh"]
+    startup = _named_step(browser, "Start the canonical application stack")
+    command_log = tmp_path / "startup-commands.log"
+    command_bin = tmp_path / "startup-bin"
+    command_bin.mkdir()
+    for command in [command_bin / "node", tmp_path / "start.sh"]:
+        command.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$SCHEMII_COMMAND_LOG"\n'
+            'exit "${SCHEMII_COMMAND_STATUS:-0}"\n'
+        )
+        command.chmod(0o700)
+    for project, shard, status in [
+        ("desktop-chromium", "1", "0"),
+        ("desktop-chromium", "2", "0"),
+        ("android-chromium", "1", "0"),
+        ("desktop-chromium", "1", "1"),
+    ]:
+        command_log.unlink(missing_ok=True)
+        script = (
+            _step_run(startup)
+            .replace("${{ matrix.project }}", project)
+            .replace("${{ matrix.shard }}", shard)
+        )
+        invoked = subprocess.run(
+            ["bash", "-e", "-c", script],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "PATH": f"{command_bin}:{os.environ['PATH']}",
+                "SCHEMII_COMMAND_LOG": str(command_log),
+                "SCHEMII_COMMAND_STATUS": status,
+            },
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert invoked.returncode == int(status)
+        expected = (
+            f"{command_bin / 'node'} scripts/ci/prepare-browser-stack.mjs --discovery"
+            if project == "desktop-chromium" and shard == "1"
+            else "./start.sh "
+        )
+        assert command_log.read_text().splitlines() == [expected]
     browser_command = _step_run(_named_step(browser, "Exercise browser flows"))
     browser_command = (
         browser_command.replace("${{ matrix.project }}", "desktop-chromium")
@@ -793,18 +832,9 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
         f"--profile={profile}",
         "--parallel=2",
     ]
-    discovery = _named_step(browser, "Verify browser discovery and shard coverage")
-    assert shlex.split(_step_run(discovery)) == [
-        "node",
-        "--test",
-        "tests/browser-infrastructure/shards.test.mjs",
-    ]
-    assert "if: matrix.project == 'desktop-chromium' && matrix.shard == 1" in discovery
-    assert browser.count("tests/browser-infrastructure/shards.test.mjs") == 1
-    assert (
-        browser.index("run: npm ci")
-        < browser.index(discovery)
-        < browser.index("name: Start the canonical application stack")
+    assert "Verify browser discovery and shard coverage" not in browser
+    assert browser.index("run: npm ci") < browser.index(
+        "name: Start the canonical application stack"
     )
     assert "tests/browser-infrastructure" not in unit
     assert "run: npm ci" not in unit
