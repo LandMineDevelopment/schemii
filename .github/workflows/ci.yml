@@ -258,6 +258,8 @@ jobs:
           key: ${{ steps.browser-font-cache.outputs.cache-primary-key }}
       - name: Prepare startup timing output directory
         run: mkdir -p artifacts/ci-timing
+      - name: Observe browser runner hardware
+        run: node --input-type=module -e 'import os from "node:os"; console.log(JSON.stringify({platform:os.platform(),arch:os.arch(),available_cpus:os.availableParallelism(),cpu_model:os.cpus()[0]?.model || null,total_memory_bytes:os.totalmem()}));'
       - name: Start the canonical application stack
         id: canonical-startup
         env:
@@ -265,13 +267,32 @@ jobs:
           CI_TELEMETRY_PROJECT: ${{ matrix.project }}
           CI_TELEMETRY_SHARD: ${{ matrix.shard }}
         run: ./start.sh
+      - name: Prepare independent browser accounts and private fixtures
+        id: parallel-accounts
+        if: needs.classify.outputs.profile == 'full' || needs.classify.outputs.profile == 'e2e-tests'
+        env:
+          SCHEMII_E2E_BOOTSTRAP: "1"
+        run: |
+          directory="${RUNNER_TEMP}/schemii-browser-accounts"
+          node tests/e2e/helpers/parallel-account.js prepare "$directory" --receipt="${GITHUB_WORKSPACE}/artifacts/ci-timing/parallel-prepare.json"
+          printf '%s\n' "SCHEMII_E2E_PARALLEL_ACCOUNTS_FILE=${directory}/accounts.json" >> "$GITHUB_ENV"
       - name: Exercise browser flows
         timeout-minutes: 28
         env:
           SCHEMII_E2E_BOOTSTRAP: "1"
           CI_TELEMETRY_FILE: artifacts/ci-timing/browser.jsonl
           CI_TELEMETRY_PROJECT: ${{ matrix.project }}
-        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/${{ matrix.total }} --profile=${{ needs.classify.outputs.profile }}
+        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/${{ matrix.total }} --profile=${{ needs.classify.outputs.profile }} --parallel=2
+      - name: Release owned browser accounts and disposable process directories
+        if: always() && (needs.classify.outputs.profile == 'full' || needs.classify.outputs.profile == 'e2e-tests')
+        run: |
+          directory="${RUNNER_TEMP}/schemii-browser-accounts"
+          if [[ -f "$directory/ownership.json" ]]; then
+            node tests/e2e/helpers/parallel-account.js cleanup "$directory" --receipt="${GITHUB_WORKSPACE}/artifacts/ci-timing/parallel-cleanup.json"
+          elif [[ '${{ steps.parallel-accounts.outcome }}' != 'skipped' ]]; then
+            echo 'Parallel account ownership receipt is missing.' >&2
+            exit 1
+          fi
       - name: Verify metadata backup recovery in an isolated database
         if: matrix.project == 'desktop-chromium' && matrix.shard == 1 && needs.classify.outputs.profile != 'schemer-result-cache' && needs.classify.outputs.profile != 'developer-inspection'
         run: |
