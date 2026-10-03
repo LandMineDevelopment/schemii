@@ -99,6 +99,7 @@ import { createMigrationReviewController } from "./migration-review.js";
 import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
 import { createDesignEditorControllers } from "./design-editors.js";
+import { bindCanvasFitControl } from "./loading-controls.js";
 
 const byId = id => document.getElementById(id);
 const dialogFocus = createDialogFocusController(document);
@@ -892,6 +893,13 @@ const canvas = new CatalogCanvas({
       : `${shown.toLocaleString()} of ${available.toLocaleString()} relationships shown`;
   },
 });
+const updateFitAvailability = bindCanvasFitControl({
+  button: elements.fitButton,
+  canvas,
+  getState: () => state,
+  showToast,
+  onFit: scheduleCanvasViewPersistence,
+});
 
 function selectedViewAnalysisContext(view = currentCatalogView()) {
   if (!isDesignWorkspace() || !state.activeWorkspace || !state.design || !view?.designId) return null;
@@ -1196,6 +1204,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, la
 }
 
 function updateHeader() {
+  updateFitAvailability();
   const designWorkspace = isDesignWorkspace();
   elements.workspaceTitle.textContent = state.activeWorkspace ? workspaceLabel(state.activeWorkspace) : "No workspace open";
   elements.runtimeDot.className = "status-dot";
@@ -1356,6 +1365,7 @@ async function bootstrap() {
   const layerGeneration = state.layerNavigationGeneration;
   setLayerState(requestedNavigation.layer);
   state.startupComplete = false;
+  updateFitAvailability();
   state.connectionsLoading = true;
   state.workspacesLoading = true;
   renderCatalogState();
@@ -4755,10 +4765,6 @@ function bindEvents() {
   elements.undoDesignButton.addEventListener("click", () => executeDesignHistoryMove("undo"));
   elements.redoDesignButton.addEventListener("click", () => executeDesignHistoryMove("redo"));
   elements.resetDesignButton.addEventListener("click", requestDesignBaselineReset);
-  elements.fitButton.addEventListener("click", () => {
-    if (!canvas.fit()) showToast("No live tables are available to fit.");
-    else scheduleCanvasViewPersistence();
-  });
   elements.zoomInButton.addEventListener("click", () => canvas.zoomBy(0.1));
   elements.zoomOutButton.addEventListener("click", () => canvas.zoomBy(-0.1));
   elements.zoomInButton.addEventListener("click", scheduleCanvasViewPersistence);
