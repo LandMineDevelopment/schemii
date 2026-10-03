@@ -11,7 +11,12 @@ import sys
 import pytest
 
 from scripts.ci.classify_changes import classify, load_classification, readme_index_only
-from scripts.ci.test_selection import expected_lanes, source_job_names
+from scripts.ci.test_selection import (
+    NATIVE_MARKDOWN,
+    NATIVE_SKILL,
+    expected_lanes,
+    source_job_names,
+)
 from scripts.ci.required_gate import CONTROL_NEEDS, SOURCE_NEEDS, evaluate
 from scripts.ci.workflow_timing import (
     REPORT_JOB_NAMES,
@@ -118,6 +123,38 @@ def report_workflow(root, event, base, head):
     )
 
 
+def test_native_companion_workflow_cli_keeps_native_closure_and_validates_both_documents(
+    repository,
+):
+    root, _ = repository
+    write(
+        root,
+        NATIVE_SKILL,
+        "---\nname: stock-t3-agents\ndescription: Native workflow instructions.\n---\n\nRead [the runbook](../../../testing/agents/README.md).\n",
+    )
+    write(
+        root,
+        "testing/agents/README.md",
+        "# Native agents\n\nRead [the skill](../../.agents/skills/stock-t3-agents/SKILL.md).\n",
+    )
+    write(root, "testing/agents/browser.py", "# Native source\n")
+    base = commit(root)
+    for path in NATIVE_MARKDOWN:
+        write(root, path, (root / path).read_text() + "\nReviewed instructions.\n")
+    write(root, "testing/agents/browser.py", "# Updated native source\n")
+    head = commit(root)
+    classification, code, receipt = report_workflow(root, "pull_request", base, head)
+    assert classification["profile"] == "native" and classification["lane"] == "source"
+    assert classification["markdown"] == sorted(NATIVE_MARKDOWN)
+    assert code == 0 and receipt["files"] == 2 and receipt["outcome"] == "success"
+    outputs = dict(
+        line.split("=", 1) for line in (root / "github-output").read_text().splitlines()
+    )
+    assert all(outputs[layer] == "true" for layer in ("node", "static", "python"))
+    assert all(outputs[layer] == "false" for layer in ("postgres", "browser"))
+    assert outputs["python_paths"] == "testing/agents"
+
+
 @pytest.mark.parametrize("path,lane", [("src/app.py", "source"), (REPORT, "reports")])
 def test_workflow_checkout_runs_base_added_classifier_for_an_existing_pr(
     repository, path, lane
@@ -210,7 +247,7 @@ def test_workflow_checkout_runs_base_added_classifier_for_an_existing_pr(
 
 @pytest.mark.parametrize("event", ["push", "pull_request"])
 @pytest.mark.parametrize("change", ["modify", "rename", "delete"])
-def test_existing_front_matter_skill_uses_full_ci_without_report_title_policy(
+def test_existing_front_matter_skill_is_validated_with_exact_native_pr_ownership(
     repository, event, change
 ):
     root, _ = repository
@@ -218,6 +255,7 @@ def test_existing_front_matter_skill_uses_full_ci_without_report_title_policy(
     original = (ROOT / skill).read_text()
     assert original.startswith("---\n")
     write(root, skill, original)
+    write(root, "testing/agents/README.md", "# Native assignment protocol\n")
     base = commit(root)
     if change == "modify":
         write(root, skill, original + "\nPreserve explicit task ownership.\n")
@@ -227,8 +265,12 @@ def test_existing_front_matter_skill_uses_full_ci_without_report_title_policy(
         (root / skill).unlink()
     classified, status, receipt = report_workflow(root, event, base, commit(root))
     assert classified["valid"] and classified["lane"] == "source"
-    assert classified["markdown"] == []
-    assert status == 0 and receipt["outcome"] == "success" and receipt["files"] == 0
+    assert classified["profile"] == (
+        "native" if event == "pull_request" and change == "modify" else "full"
+    )
+    assert classified["markdown"] == ([skill] if change == "modify" else [])
+    assert status == 0 and receipt["outcome"] == "success"
+    assert receipt["files"] == (1 if change == "modify" else 0)
 
 
 @pytest.mark.parametrize("change", ["rename", "delete"])

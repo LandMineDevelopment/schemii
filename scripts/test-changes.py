@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "ci"))
 from classify_changes import classify, git  # noqa: E402
-from test_selection import commands, layers, select_paths  # noqa: E402
+from test_selection import NATIVE_MARKDOWN, commands, layers, select_paths  # noqa: E402
 
 
 POSTGRES_COMMAND = [
@@ -106,6 +106,7 @@ def feedback_commands(selected: list[list[str]]) -> list[list[str]]:
 
 
 def plan(root: Path, base: str) -> dict:
+    native_markdown = []
     try:
         head = git(root, "rev-parse", "HEAD").decode().strip()
         base_sha = (
@@ -141,6 +142,13 @@ def plan(root: Path, base: str) -> dict:
         dirty = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
         changed = committed + staged + unstaged + [("?", [path]) for path in untracked]
         paths = sorted({path for _, names in changed for path in names})
+        native_markdown = sorted(
+            path
+            for path in set(paths) | set(unverified)
+            if path in NATIVE_MARKDOWN
+            and (root / path).is_file()
+            and not (root / path).is_symlink()
+        )
         profile = select_paths(changed)
         safe = False
         if (
@@ -177,11 +185,12 @@ def plan(root: Path, base: str) -> dict:
                 else "verified-owned-local-change"
                 if safe
                 else "local-source-or-unknown-change",
-                markdown=[],
+                markdown=native_markdown,
             )
         # Preserve rename/copy status and both paths without trusting porcelain text as a selector.
         local_status = [os.fsdecode(item) for item in dirty.split(b"\0") if item]
     except (OSError, ValueError, subprocess.SubprocessError):
+        native_markdown = []
         classification = {
             "schema": 2,
             "valid": False,
@@ -195,6 +204,18 @@ def plan(root: Path, base: str) -> dict:
         }
         paths, local_status, unverified = [], [], []
     selected_commands = commands(classification["profile"], base)
+    if native_markdown:
+        selected_commands.insert(
+            0,
+            [
+                "python3",
+                "scripts/ci/validate_reports.py",
+                "--native-documents",
+                *native_markdown,
+                "--output",
+                ".schemii/test-selection/native-documents.json",
+            ],
+        )
     return {
         "classification": classification,
         "changed_paths": paths,
