@@ -756,7 +756,20 @@ class LauncherTests(unittest.TestCase):
         ).start()
         self.popen = mock.patch.object(browser.subprocess, "Popen").start()
         self.process = self.popen.return_value
-        self.process.pid = os.getpid()
+        # A Popen fake must never borrow pytest's real session/group identity.
+        # Launcher controls use synthetic ownership; real group lifecycle belongs
+        # to the separate faithful subprocess regressions.
+        self.process.pid = 2**30
+        real_birth_tick = browser.process_birth_tick
+        mock.patch.object(
+            browser,
+            "process_birth_tick",
+            side_effect=lambda pid: (
+                123456 if pid == self.process.pid else real_birth_tick(pid)
+            ),
+        ).start()
+        mock.patch.object(browser.os, "getsid", return_value=2**30 + 1).start()
+        mock.patch.object(browser.os, "getpgid", return_value=2**30 + 2).start()
         self.process.wait.return_value = 0
         self.process.poll.return_value = 0
         self.umask = mock.patch.object(browser.os, "umask").start()
