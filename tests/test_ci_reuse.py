@@ -22,6 +22,9 @@ from scripts.ci.test_selection import (
     CACHE_PROFILE,
     CACHE_SOURCE,
     CACHE_TEST,
+    INSPECTION_PROFILE,
+    INSPECTION_SOURCES,
+    INSPECTION_TEST,
     SOURCE_NEEDS,
     expected_lanes,
     expected_jobs,
@@ -999,7 +1002,7 @@ def test_gate_cli_revalidates_live_donor_after_admission(
     assert "private" not in capsys.readouterr().out
 
 
-def cache_repository(root, *, paired=False, stale_policy=False):
+def cache_repository(root, *, paired=False, stale_policy=False, profile=CACHE_PROFILE):
     root.mkdir()
 
     def git(*args):
@@ -1013,7 +1016,12 @@ def cache_repository(root, *, paired=False, stale_policy=False):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((current / relative).read_bytes())
-    for relative in (CACHE_SOURCE, CACHE_TEST):
+    source_files = (
+        (CACHE_SOURCE, CACHE_TEST)
+        if profile == CACHE_PROFILE
+        else (*sorted(INSPECTION_SOURCES), INSPECTION_TEST)
+    )
+    for relative in source_files:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("original cache fixture\n")
@@ -1022,9 +1030,14 @@ def cache_repository(root, *, paired=False, stale_policy=False):
     git("add", ".")
     git("commit", "--quiet", "-m", "current reviewed policy")
     before = git("rev-parse", "HEAD")
-    (root / CACHE_SOURCE).write_text("changed cache fixture\n")
+    for relative in (
+        (CACHE_SOURCE,) if profile == CACHE_PROFILE else sorted(INSPECTION_SOURCES)
+    ):
+        (root / relative).write_text("changed source fixture\n")
     if paired:
-        (root / CACHE_TEST).write_text("changed direct test fixture\n")
+        (
+            root / (CACHE_TEST if profile == CACHE_PROFILE else INSPECTION_TEST)
+        ).write_text("changed direct test fixture\n")
     git("commit", "--quiet", "-am", "cache change")
     head = git("rev-parse", "HEAD")
     target = {
@@ -1037,8 +1050,8 @@ def cache_repository(root, *, paired=False, stale_policy=False):
     return target
 
 
-def selected_raw(key, *, allowed_skip=False):
-    scope = expected_scope(CACHE_PROFILE, key)
+def selected_raw(key, *, allowed_skip=False, profile=CACHE_PROFILE, helper_extra=False):
+    scope = expected_scope(profile, key)
     if scope is None:
         return raw(key)
     meta = {
@@ -1046,6 +1059,11 @@ def selected_raw(key, *, allowed_skip=False):
         for key, value in raw(key)[0].items()
         if key not in {"kind", "planned"}
     }
+    if helper_extra and profile == INSPECTION_PROFILE and key == ("python", "none", 0):
+        scope[hashlib.sha256(b"new unfiltered helper case").hexdigest()] = {
+            "source_id": hashlib.sha256(INSPECTION_TEST.encode()).hexdigest(),
+            "allow_skip": False,
+        }
     tests = sorted(scope)
     return [
         {**meta, "kind": "start", "planned": len(tests)},
@@ -1074,7 +1092,15 @@ def selected_raw(key, *, allowed_skip=False):
     ]
 
 
-def cache_provider(root, checkout, target, *, allowed_skip=False):
+def cache_provider(
+    root,
+    checkout,
+    target,
+    *,
+    allowed_skip=False,
+    profile=CACHE_PROFILE,
+    helper_extra=False,
+):
     legacy = root / "legacy"
     legacy.mkdir()
     provider = Provider(legacy)
@@ -1102,11 +1128,11 @@ def cache_provider(root, checkout, target, *, allowed_skip=False):
     }
     provider.jobs = [
         job(name, {**DONOR, "head_sha": final_head}, outcome)
-        for name, outcome in reuse.CACHE_DONOR_JOBS.items()
+        for name, outcome in reuse.donor_job_outcomes(profile).items()
     ]
     manifest = {
         **classification(final_head, target["before"]),
-        "profile": CACHE_PROFILE,
+        "profile": profile,
         "reason": "verified-owned-pr-change",
     }
     provider.files = {
@@ -1115,14 +1141,16 @@ def cache_provider(root, checkout, target, *, allowed_skip=False):
     }
     selected = root / "selected-raw"
     selected.mkdir()
-    for key in sorted(expected_lanes(CACHE_PROFILE)):
+    for key in sorted(expected_lanes(profile)):
         lane, project, shard = key
         name = (
             f"{lane}-timing-attempt-1"
             if lane != "browser"
             else f"browser-timing-{project}-shard-{shard}-attempt-1"
         )
-        records = selected_raw(key, allowed_skip=allowed_skip)
+        records = selected_raw(
+            key, allowed_skip=allowed_skip, profile=profile, helper_extra=helper_extra
+        )
         data = b"\n".join(encoded(value) for value in records)
         provider.files[name] = {
             f"{lane}.jsonl": data,
@@ -1133,11 +1161,11 @@ def cache_provider(root, checkout, target, *, allowed_skip=False):
         (selected / (name + ".jsonl")).write_bytes(data)
     measured = {
         **summarize(
-            provider.run, provider.jobs, profile=CACHE_PROFILE, report_validation=True
+            provider.run, provider.jobs, profile=profile, report_validation=True
         ),
         **{**DONOR, "head_sha": final_head},
         "classification_valid": True,
-        "test_evidence": collect_evidence(selected, profile=CACHE_PROFILE),
+        "test_evidence": collect_evidence(selected, profile=profile),
     }
     provider.files["workflow-timing-attempt-1"] = {
         "workflow-summary.json": encoded(measured)
@@ -1444,7 +1472,9 @@ def test_full_receipt_shape_and_closed_mode_pairing_remain_compatible(provider):
     receipt = reuse.verify(provider, TARGET, now=NOW)
     assert reuse.valid_receipt_mode(receipt)
     assert "target_owner_proof" not in receipt
-    assert reuse.MODES == frozenset({reuse.MODE, reuse.CACHE_MODE})
+    assert reuse.MODES == frozenset(
+        {reuse.MODE, reuse.CACHE_MODE, reuse.INSPECTION_MODE}
+    )
     assert set(receipt) == {
         "schema",
         "mode",
@@ -1456,7 +1486,7 @@ def test_full_receipt_shape_and_closed_mode_pairing_remain_compatible(provider):
         "test_evidence",
         "donor_cost",
     }
-    for mode in (reuse.CACHE_MODE, "arbitrary", True, None, 1):
+    for mode in (reuse.CACHE_MODE, reuse.INSPECTION_MODE, "arbitrary", True, None, 1):
         assert not reuse.valid_receipt_mode({**receipt, "mode": mode})
 
 
@@ -1839,3 +1869,352 @@ def test_cache_donor_requires_current_full_six_main_skip_shape(selected_provider
     ]
     placeholder.append(job(reuse.SKIPPED_BROWSER, target, "skipped"))
     assert reuse.current_reuse_jobs(placeholder, target) and gate_for(placeholder)
+
+
+@pytest.fixture
+def inspection_provider(tmp_path):
+    checkout = tmp_path / "checkout"
+    target = cache_repository(checkout, paired=True, profile=INSPECTION_PROFILE)
+    return (
+        cache_provider(
+            tmp_path, checkout, target, profile=INSPECTION_PROFILE, helper_extra=True
+        ),
+        target,
+        checkout,
+    )
+
+
+def test_closed_inspection_donor_preserves_four_original_lanes_and_full_main_skip_proof(
+    inspection_provider,
+):
+    provider, target, checkout = inspection_provider
+    retained = {}
+    receipt = reuse.verify(provider, target, root=checkout, now=NOW, retained=retained)
+    assert receipt["mode"] == reuse.INSPECTION_MODE and reuse.valid_receipt_mode(
+        receipt
+    )
+    assert len(receipt["artifacts"]) == 7 and len(receipt["verified_jobs"]) == 9
+    assert len(receipt["test_evidence"]["lanes"]) == 4 and len(retained) == 8
+    assert sorted(
+        value["path"] for value in receipt["target_owner_proof"]["changes"]
+    ) == sorted([*INSPECTION_SOURCES, INSPECTION_TEST])
+    assert receipt["donor"]["source_sha"] == DONOR["source_sha"] != target["source_sha"]
+    python = next(
+        value
+        for value in receipt["test_evidence"]["lanes"]
+        if value["lane"] == "python"
+    )
+    assert len(python["scope"]["planned"]) == 88
+    assert reuse.recheck(receipt, provider, target, root=checkout, now=NOW) == receipt
+    jobs = current_inputs(target)
+    identity = {
+        key: target[key] for key in ("source_sha", "head_sha", "run_id", "run_attempt")
+    }
+    timing = {
+        **summarize(
+            provider.run, jobs, profile="full", report_validation=True, reused=True
+        ),
+        **identity,
+        "acceptance_mode": reuse.INSPECTION_MODE,
+        "reuse": receipt,
+    }
+    needs = {
+        name: {"result": "skipped" if name in reuse.EXPENSIVE_NEEDS else "success"}
+        for name in SOURCE_NEEDS | CONTROL_NEEDS
+    }
+    needs["classify"]["outputs"] = {"acceptance": reuse.INSPECTION_MODE}
+    result = evaluate(
+        classification(target["head_sha"], target["before"]),
+        needs,
+        jobs,
+        timing,
+        identity,
+        reuse=receipt,
+    )
+    assert result == (
+        True,
+        "verified-identical-tree-developer-inspection-pr-acceptance",
+    )
+    assert "test_evidence" not in timing
+    for damage in ("owner", "base", "scope", "mode"):
+        changed = copy.deepcopy(receipt)
+        if damage == "owner":
+            changed["target_owner_proof"]["changes"][0]["path"] = CACHE_SOURCE
+        elif damage == "base":
+            changed["target_owner_proof"]["base"] = "f" * 40
+        elif damage == "scope":
+            next(
+                value
+                for value in changed["test_evidence"]["lanes"]
+                if value["lane"] == "python"
+            )["scope"]["observed"][-1]["source_id"] = "f" * 64
+        else:
+            changed["mode"] = reuse.CACHE_MODE
+        assert not reuse.valid_receipt_mode(changed)
+        assert not evaluate(
+            classification(target["head_sha"], target["before"]),
+            needs,
+            jobs,
+            {**timing, "reuse": changed},
+            identity,
+            reuse=changed,
+        )[0]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "helper-only",
+        "mixed",
+        "stale-policy",
+        "mode",
+        "deleted",
+        "renamed",
+        "symlink",
+        "new",
+        "dirty",
+        "tip",
+    ],
+)
+def test_inspection_reuse_requires_complete_exact_current_regular_owner_proof(
+    inspection_provider, damage
+):
+    provider, target, checkout = inspection_provider
+    source = checkout / sorted(INSPECTION_SOURCES)[0]
+    if damage == "helper-only":
+        for path in INSPECTION_SOURCES:
+            (checkout / path).write_text("original cache fixture\n")
+    elif damage == "mixed":
+        (checkout / reuse.WORKFLOW_PATH).write_text("different workflow\n")
+    elif damage == "stale-policy":
+        (checkout / "scripts/ci/inspection-coverage.json").write_text(
+            "stale inspection policy\n"
+        )
+    elif damage == "mode":
+        source.chmod(0o755)
+    elif damage == "deleted":
+        source.unlink()
+    elif damage == "renamed":
+        source.rename(source.with_name("renamed.py"))
+    elif damage == "symlink":
+        source.unlink()
+        source.symlink_to("foreign")
+    elif damage == "new":
+        (source.parent / "new.py").write_text("new owner\n")
+    elif damage == "dirty":
+        source.write_text("dirty current inspection source\n")
+    else:
+        provider.tip["object"]["sha"] = "f" * 40
+    if damage not in {"dirty", "tip"}:
+        subprocess.run(["git", "add", "-A"], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "commit", "--quiet", "-m", "damaged owner fixture"],
+            cwd=checkout,
+            check=True,
+        )
+        target.update(
+            source_sha=subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+            ).strip(),
+            tree=subprocess.check_output(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=checkout, text=True
+            ).strip(),
+        )
+        with pytest.raises(ValueError):
+            reuse.target_owner_proof(target, checkout, profile=INSPECTION_PROFILE)
+    else:
+        with pytest.raises(ValueError):
+            reuse.verify(provider, target, root=checkout, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "minimum",
+        "foreign-extra",
+        "skip",
+        "retry",
+        "missing-plan",
+        "missing-attempt",
+        "filtered",
+        "browser-extra",
+        "browser-skip",
+        "jobs-cache",
+        "jobs-full",
+        "wrong-denominator",
+        "postgres-executed",
+        "missing-artifact",
+        "extra-artifact",
+        "classification",
+        "comparison-base",
+    ],
+)
+def test_inspection_donor_rejects_scope_topology_inventory_and_base_corruption(
+    inspection_provider, damage
+):
+    provider, target, checkout = inspection_provider
+    name = "python-timing-attempt-1"
+    if damage.startswith("jobs-"):
+        profile = CACHE_PROFILE if damage == "jobs-cache" else "full"
+        provider.jobs = [
+            job(key, DONOR, outcome)
+            for key, outcome in reuse.donor_job_outcomes(profile).items()
+        ]
+    elif damage == "wrong-denominator":
+        next(
+            value
+            for value in provider.jobs
+            if value["name"].startswith("Assembled browser smoke")
+        )["name"] = "Assembled browser smoke (desktop-chromium, shard 1/3)"
+    elif damage == "postgres-executed":
+        next(
+            value
+            for value in provider.jobs
+            if value["name"] == "Real PostgreSQL metadata behavior"
+        )["conclusion"] = "success"
+    elif damage == "missing-artifact":
+        provider.artifacts.pop()
+    elif damage == "extra-artifact":
+        provider.files["postgres-timing-attempt-1"] = {
+            "postgres.jsonl": b"{}",
+            "postgres-summary.json": b"{}",
+        }
+        provider.set_archive(100, "postgres-timing-attempt-1")
+    elif damage in {"classification", "comparison-base"}:
+        name = "ci-classification-attempt-1"
+        value = json.loads(provider.files[name]["ci-classification.json"])
+        value["profile" if damage == "classification" else "comparison_base"] = (
+            CACHE_PROFILE if damage == "classification" else "f" * 40
+        )
+        provider.files[name]["ci-classification.json"] = encoded(value)
+    else:
+        if damage.startswith("browser-"):
+            name = "browser-timing-desktop-chromium-shard-1-attempt-1"
+        lane = "browser" if name.startswith("browser") else "python"
+        records = [
+            json.loads(line)
+            for line in provider.files[name][lane + ".jsonl"].splitlines()
+        ]
+        attempts = [value for value in records if value["kind"] == "attempt"]
+        chosen = (
+            next(
+                value
+                for value in attempts
+                if value["test_id"]
+                == hashlib.sha256(b"new unfiltered helper case").hexdigest()
+            )
+            if lane == "python"
+            else attempts[0]
+        )
+        if damage in {"minimum", "filtered"}:
+            chosen = next(
+                value for value in attempts if value["test_id"] != chosen["test_id"]
+            )
+            records = [
+                value for value in records if value.get("test_id") != chosen["test_id"]
+            ]
+            records[0]["planned"] -= 1
+        elif damage == "foreign-extra":
+            chosen["source_id"] = hashlib.sha256(
+                b"tests/test_route_inspection.py"
+            ).hexdigest()
+        elif damage in {"skip", "browser-skip"}:
+            chosen.update(outcome="skipped", skip="declared-or-runtime")
+        elif damage == "retry":
+            chosen["attempt"] = 1
+        elif damage == "missing-plan":
+            records = [
+                value
+                for value in records
+                if not (
+                    value["kind"] == "plan" and value["test_id"] == chosen["test_id"]
+                )
+            ]
+        elif damage == "missing-attempt":
+            records.remove(chosen)
+        else:
+            extra = copy.deepcopy(chosen)
+            extra["test_id"] = "f" * 64
+            records.insert(
+                -1,
+                {
+                    **{
+                        key: records[0][key]
+                        for key in (
+                            "schema",
+                            "source_sha",
+                            "run_id",
+                            "run_attempt",
+                            "lane",
+                            "project",
+                            "shard",
+                        )
+                    },
+                    "kind": "plan",
+                    "test_id": extra["test_id"],
+                },
+            )
+            records.insert(-1, extra)
+            records[0]["planned"] += 1
+        provider.files[name][lane + ".jsonl"] = b"\n".join(
+            encoded(value) for value in records
+        )
+    if damage not in {
+        "jobs-cache",
+        "jobs-full",
+        "wrong-denominator",
+        "postgres-executed",
+        "missing-artifact",
+        "extra-artifact",
+    }:
+        artifact = next(value for value in provider.artifacts if value["name"] == name)
+        provider.set_archive(artifact["id"], name)
+    with pytest.raises(ValueError):
+        reuse.verify(provider, target, root=checkout, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "damage", ["owner-proof", "policy", "provider-base", "attempt", "raw"]
+)
+def test_inspection_gate_repeats_live_provenance_and_owner_checks(
+    inspection_provider, damage
+):
+    provider, target, checkout = inspection_provider
+    receipt = reuse.verify(provider, target, root=checkout, now=NOW)
+    if damage == "owner-proof":
+        receipt["target_owner_proof"]["policy_blobs"][reuse.WORKFLOW_PATH] = "f" * 40
+    elif damage == "policy":
+        (checkout / "scripts/ci/inspection-coverage.json").write_text(
+            "changed current policy\n"
+        )
+    elif damage == "provider-base":
+        provider.pr["base"]["sha"] = "f" * 40
+    elif damage == "attempt":
+        provider.run["run_attempt"] = 2
+    else:
+        provider.bytes[provider.artifacts[0]["id"]] = b"corrupt bytes"
+    with pytest.raises(ValueError):
+        reuse.recheck(receipt, provider, target, root=checkout, now=NOW)
+
+
+@pytest.mark.parametrize("error", [False, True])
+def test_inspection_validation_scratch_cleans_itself_on_success_and_rejection(
+    inspection_provider, monkeypatch, tmp_path, error
+):
+    provider, target, checkout = inspection_provider
+    monkeypatch.setattr(reuse.tempfile, "tempdir", str(tmp_path))
+    observed = []
+    original = provider.archive
+
+    def archive(identity):
+        observed.extend(tmp_path.glob("schemii-acceptance-*"))
+        return original(identity)
+
+    provider.archive = archive
+    if error:
+        (checkout / sorted(INSPECTION_SOURCES)[0]).write_text("dirty source\n")
+        with pytest.raises(ValueError):
+            reuse.verify(provider, target, root=checkout, now=NOW)
+    else:
+        reuse.verify(provider, target, root=checkout, now=NOW)
+    assert observed and all(not path.exists() for path in observed)

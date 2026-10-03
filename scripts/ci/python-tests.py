@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.ci.summary import META, load, summarize  # noqa: E402
+from scripts.ci.test_selection import INSPECTION_PROFILE, INSPECTION_PYTHON, valid_scope  # noqa: E402
 
 
 INSPECTION = (
@@ -236,7 +237,16 @@ def run(selectors=(), *, root=ROOT, environment=None, temporary_parent=None):
     destination = environment.get("CI_TELEMETRY_FILE")
     if destination:
         Path(destination).unlink(missing_ok=True)
+    inspection = (
+        environment.get("CI_TEST_PROFILE") == INSPECTION_PROFILE
+        or tuple(selectors) == INSPECTION_PYTHON
+    )
     try:
+        if inspection and (
+            tuple(selectors) != INSPECTION_PYTHON
+            or environment.get("PYTEST_ADDOPTS", "").strip()
+        ):
+            raise ValueError("Inspection acceptance requires whole unfiltered files")
         groups = partitions(root, selectors)
     except (ValueError, SyntaxError, OSError):
         print("Python test selection is invalid; no tests were run.", file=sys.stderr)
@@ -283,6 +293,7 @@ def run(selectors=(), *, root=ROOT, environment=None, temporary_parent=None):
                             f"--basetemp={private / f'tmp-{index}'}",
                             "-o",
                             f"cache_dir={private / f'cache-{index}'}",
+                            *(["-o", "addopts="] if inspection else []),
                             *group,
                         ],
                         cwd=root,
@@ -318,6 +329,8 @@ def run(selectors=(), *, root=ROOT, environment=None, temporary_parent=None):
             except (ValueError, OSError):
                 print("Python test evidence is incomplete or invalid.", file=sys.stderr)
                 return 128 + requested if requested else error_status(statuses)
+            # Retain the validated original outcomes before pass-only admission;
+            # a failed or skipped selected case must remain available as evidence.
             if destination:
                 output = Path(destination)
                 output.parent.mkdir(parents=True, exist_ok=True)
@@ -335,6 +348,41 @@ def run(selectors=(), *, root=ROOT, environment=None, temporary_parent=None):
                 return 128 + requested
             if not result["complete"]:
                 return error_status(statuses)
+            if inspection:
+                try:
+                    accepted = valid_scope(
+                        INSPECTION_PROFILE,
+                        ("python", "none", 0),
+                        {
+                            "profile": INSPECTION_PROFILE,
+                            "planned": sorted(
+                                record["test_id"]
+                                for record in merged
+                                if record["kind"] == "plan"
+                            ),
+                            "observed": [
+                                {
+                                    key: record[key]
+                                    for key in (
+                                        "test_id",
+                                        "source_id",
+                                        "outcome",
+                                        "attempt",
+                                    )
+                                }
+                                for record in merged
+                                if record["kind"] == "attempt"
+                            ],
+                        },
+                    )
+                except (ValueError, OSError):
+                    accepted = False
+                if not accepted:
+                    print(
+                        "Python inspection acceptance inventory or outcomes are invalid.",
+                        file=sys.stderr,
+                    )
+                    return 1
             return 1 if result["outcome"] == "failed" else 0
     except OSError:
         print(

@@ -1,7 +1,8 @@
 // Whole-file scheduling preserves serialized shared-account setup/cleanup.
 // Costs include first-attempt fixture setup, body and teardown, not retries.
 import { isAbsolute, normalize } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, lstatSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 export const PROJECTS = ['desktop-chromium', 'android-chromium'];
 export const OBSERVATION = Object.freeze({
@@ -51,12 +52,13 @@ export function manifestPattern(value) {
 }
 
 export function validateShardCount(count) {
-  if (![2, 3, 6].includes(count)) throw new Error('Browser shard count must be 2, 3 or 6');
+  if (![1, 2, 3, 6].includes(count)) throw new Error('Browser shard count must be 1, 2, 3 or 6');
   return count;
 }
 
 export function balanceFiles(files, project, costs = OBSERVED_COSTS, shardCount = 2) {
   validateShardCount(shardCount);
+  if (shardCount === 1) throw new Error('One browser shard is reserved for the reviewed inspection profile, not balancing; invalid shard count');
   if (!PROJECTS.includes(project)) throw new Error('Unknown browser project');
   if (!Array.isArray(files) || !files.length || new Set(files).size !== files.length) {
     throw new Error('Discovered browser files must be nonempty and unique');
@@ -160,9 +162,10 @@ export const OBSERVED_COSTS = Object.freeze({
   "tests/e2e/workspace-rename.spec.js": { 'desktop-chromium': 2541, 'android-chromium': 2937 },
 });
 
-// Loaded only for the reviewed product owner; ordinary discovery stays unchanged.
+// Loaded only for the two reviewed product owners; ordinary discovery stays unchanged.
 export function coverageProfile(profile, policy = undefined) {
   if (['full', 'e2e-tests'].includes(profile)) return undefined;
+  if (profile === 'developer-inspection') return inspectionCoverage(policy);
   if (profile !== 'schemer-result-cache') throw new Error('Unknown browser coverage profile');
   policy ??= JSON.parse(readFileSync(new URL('./coverage-profiles.json', import.meta.url), 'utf8'));
   if (!policy || Object.keys(policy).sort().join(',') !== 'browser,files,profile,python,schema'
@@ -193,6 +196,45 @@ export function coverageProfile(profile, policy = undefined) {
         || assigned.length !== policy.files.length || new Set(assigned).size !== policy.files.length
         || assigned.some(file => !policy.files.includes(file))) {
       throw new Error('Missing or duplicate browser shard files');
+    }
+  }
+  return policy;
+}
+
+
+function inspectionCoverage(policy) {
+  const files = ['tests/e2e/shared-ui-audit.spec.js', 'tests/e2e/ai-diagnostic-permissions.spec.js'];
+  policy ??= JSON.parse(readFileSync(new URL('./inspection-coverage.json', import.meta.url), 'utf8'));
+  if (!policy || Object.keys(policy).sort().join(',') !== 'browser,files,frozen_sha256,profile,python,schema'
+      || policy.schema !== 1 || policy.profile !== 'developer-inspection'
+      || JSON.stringify(policy.files) !== JSON.stringify(files)
+      || Object.keys(policy.browser).sort().join(',') !== [...PROJECTS].sort().join(',')) {
+    throw new Error('Invalid inspection browser policy');
+  }
+  for (const project of PROJECTS) {
+    const inventory = policy.browser[project];
+    if (!inventory || Object.keys(inventory).sort().join(',') !== 'allowed_skips,files,shards'
+        || Object.keys(inventory.files).sort().join(',') !== [...files].sort().join(',')
+        || JSON.stringify(inventory.allowed_skips) !== '[]'
+        || JSON.stringify(inventory.shards) !== JSON.stringify([files])) {
+      throw new Error('Invalid inspection browser inventory');
+    }
+    const cases = Object.values(inventory.files).flat();
+    if (files.some((file, index) => !Array.isArray(inventory.files[file])
+        || inventory.files[file].length !== [5, 2][index])
+        || cases.some(id => typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id))
+        || new Set(cases).size !== 7) throw new Error('Invalid inspection browser cases');
+  }
+  const frozen = [...files, 'tests/test_database_inspection.py', 'tests/test_developer_inspection.py',
+    'tests/test_route_inspection.py', 'tests/test_system_inspection.py', 'tests/test_frontend.py',
+    'tests/test_application_structure.py', 'tests/test_runtime_hardening.py'];
+  if (!policy.frozen_sha256 || Object.keys(policy.frozen_sha256).sort().join(',') !== frozen.sort().join(',')) {
+    throw new Error('Invalid frozen inspection files');
+  }
+  for (const file of frozen) {
+    const path = new URL('../../' + file, import.meta.url);
+    if (!lstatSync(path).isFile() || createHash('sha256').update(readFileSync(path)).digest('hex') !== policy.frozen_sha256[file]) {
+      throw new Error('Changed frozen inspection source');
     }
   }
   return policy;

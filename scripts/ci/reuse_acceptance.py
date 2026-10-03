@@ -1,4 +1,4 @@
-"""Reuse reviewed full or cache-only PR receipts for an identical main tree.
+"""Reuse reviewed full, cache or inspection PR receipts for an identical main tree.
 
 Admission is best effort; the gate repeats it independently and fails closed.
 No artifact is executed, and donor identities never become current-run receipts.
@@ -28,8 +28,7 @@ if __package__:
     from .summary import summarize as lane_summary
     from .test_selection import (
         CACHE_PROFILE,
-        CACHE_SOURCE,
-        CACHE_TEST,
+        INSPECTION_PROFILE,
         expected_jobs,
         expected_lanes,
         expected_scope,
@@ -52,8 +51,7 @@ else:
     from summary import summarize as lane_summary
     from test_selection import (
         CACHE_PROFILE,
-        CACHE_SOURCE,
-        CACHE_TEST,
+        INSPECTION_PROFILE,
         expected_jobs,
         expected_lanes,
         expected_scope,
@@ -76,12 +74,14 @@ else:
 WORKFLOW_PATH = ".github/workflows/ci.yml"
 MODE = "reused-full-pr"
 CACHE_MODE = "reused-schemer-result-cache-pr"
-MODES = frozenset({MODE, CACHE_MODE})
+INSPECTION_MODE = "reused-developer-inspection-pr"
+MODES = frozenset({MODE, CACHE_MODE, INSPECTION_MODE})
 POLICY_FILES = frozenset(
     {
         WORKFLOW_PATH,
         "scripts/ci/test_selection.py",
         "scripts/ci/coverage-profiles.json",
+        "scripts/ci/inspection-coverage.json",
         "scripts/ci/classify_changes.py",
         "scripts/ci/required_gate.py",
         "scripts/ci/reuse_acceptance.py",
@@ -123,7 +123,10 @@ def positive(value):
 
 def donor_job_outcomes(profile):
     """Two independent donor topologies, each with its own required exclusions."""
-    require(profile in {"full", CACHE_PROFILE}, "unsupported-donor-profile")
+    require(
+        profile in {"full", CACHE_PROFILE, INSPECTION_PROFILE},
+        "unsupported-donor-profile",
+    )
     selected = expected_jobs(profile)
     return {
         **{
@@ -138,6 +141,7 @@ def donor_job_outcomes(profile):
 
 DONOR_JOBS = set(donor_job_outcomes("full"))
 CACHE_DONOR_JOBS = donor_job_outcomes(CACHE_PROFILE)
+INSPECTION_DONOR_JOBS = donor_job_outcomes(INSPECTION_PROFILE)
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -251,7 +255,10 @@ class GitHub:
 
 
 def artifact_files(profile="full"):
-    require(profile in {"full", CACHE_PROFILE}, "unsupported-donor-profile")
+    require(
+        profile in {"full", CACHE_PROFILE, INSPECTION_PROFILE},
+        "unsupported-donor-profile",
+    )
     values = {
         "ci-classification-attempt-1": {"ci-classification.json"},
         "report-validation-attempt-1": {"report-validation.json"},
@@ -271,23 +278,30 @@ def artifact_files(profile="full"):
 
 ARTIFACT_FILES = artifact_files()
 CACHE_ARTIFACT_FILES = artifact_files(CACHE_PROFILE)
+INSPECTION_ARTIFACT_FILES = artifact_files(INSPECTION_PROFILE)
 
 
 def donor_profile(artifacts):
-    """Only two closed artifact contracts; caller/profile labels are not authority."""
+    """Only three closed artifact contracts; caller/profile labels are not authority."""
     names = {value.get("name") for value in artifacts}
     if len(artifacts) == len(ARTIFACT_FILES) and names == set(ARTIFACT_FILES):
         return "full"
+    if len(artifacts) == len(CACHE_ARTIFACT_FILES) and names == set(
+        CACHE_ARTIFACT_FILES
+    ):
+        return CACHE_PROFILE
     require(
-        len(artifacts) == len(CACHE_ARTIFACT_FILES)
-        and names == set(CACHE_ARTIFACT_FILES),
+        len(artifacts) == len(INSPECTION_ARTIFACT_FILES)
+        and names == set(INSPECTION_ARTIFACT_FILES),
         "donor-artifacts",
     )
-    return CACHE_PROFILE
+    return INSPECTION_PROFILE
 
 
-def target_owner_proof(target, root=None):
+def target_owner_proof(target, root=None, *, profile=CACHE_PROFILE):
     """Recompute complete Git ownership and unchanged current policy, never a label."""
+    require(profile in {CACHE_PROFILE, INSPECTION_PROFILE}, "unsupported-donor-profile")
+    prefix = "cache" if profile == CACHE_PROFILE else "inspection"
     root = Path.cwd() if root is None else Path(root)
     before, head = target["before"], target["source_sha"]
     require(
@@ -296,22 +310,20 @@ def target_owner_proof(target, root=None):
         and git(root, "rev-parse", "HEAD").decode().strip() == head
         and git(root, "rev-parse", "HEAD^{tree}").decode().strip() == target["tree"]
         and not git(root, "status", "--porcelain", "--untracked-files=no"),
-        "cache-checkout-source",
+        prefix + "-checkout-source",
     )
     git(root, "merge-base", "--is-ancestor", before, head)
     complete = changes(root, before, head)
     require(
         bool(complete)
-        and select_paths(complete) == CACHE_PROFILE
-        and {path for _, paths in complete for path in paths}
-        in ({CACHE_SOURCE}, {CACHE_SOURCE, CACHE_TEST})
+        and select_paths(complete) == profile
         and all(status == "M" and len(paths) == 1 for status, paths in complete),
-        "cache-target-owner",
+        prefix + "-target-owner",
     )
 
     def entry(commit, path):
         values = git(root, "ls-tree", "-z", commit, "--", path).split(b"\0")
-        require(len(values) == 2 and values[1] == b"", "cache-tree-entry")
+        require(len(values) == 2 and values[1] == b"", prefix + "-tree-entry")
         identity, name = values[0].split(b"\t")
         mode, kind, blob = identity.decode().split()
         require(
@@ -319,7 +331,7 @@ def target_owner_proof(target, root=None):
             and mode in {"100644", "100755"}
             and kind == "blob"
             and sha(blob),
-            "cache-tree-entry",
+            prefix + "-tree-entry",
         )
         return mode, blob
 
@@ -327,7 +339,7 @@ def target_owner_proof(target, root=None):
     for _, (path,) in sorted(complete):
         old_mode, old_blob = entry(before, path)
         new_mode, new_blob = entry(head, path)
-        require(old_mode == new_mode, "cache-file-mode")
+        require(old_mode == new_mode, prefix + "-file-mode")
         changed.append(
             {
                 "status": "M",
@@ -346,11 +358,11 @@ def target_owner_proof(target, root=None):
         current_blob = hashlib.sha1(
             b"blob " + str(len(data)).encode() + b"\0" + data
         ).hexdigest()
-        require(old == new and new[1] == current_blob, "cache-policy-changed")
+        require(old == new and new[1] == current_blob, prefix + "-policy-changed")
         policy_blobs[path] = new[1]
     return {
         "schema": 1,
-        "profile": CACHE_PROFILE,
+        "profile": profile,
         "base": before,
         "head": head,
         "changes": changed,
@@ -371,6 +383,7 @@ def valid_receipt_mode(receipt):
                 classification.get("profile") == "full"
                 and "target_owner_proof" not in receipt
             )
+        profile = CACHE_PROFILE if receipt["mode"] == CACHE_MODE else INSPECTION_PROFILE
         proof, target = receipt.get("target_owner_proof"), receipt.get("target")
         if not isinstance(proof, dict) or not isinstance(target, dict):
             return False
@@ -379,20 +392,31 @@ def valid_receipt_mode(receipt):
             != {"schema", "profile", "base", "head", "changes", "policy_blobs"}
             or type(proof["schema"]) is not int
             or proof["schema"] != 1
-            or proof["profile"] != CACHE_PROFILE
+            or proof["profile"] != profile
             or proof["base"] != target["before"]
             or proof["head"] != target["source_sha"]
             or classification.get("valid") is not True
             or classification.get("lane") != "source"
-            or classification.get("profile") != CACHE_PROFILE
+            or classification.get("profile") != profile
             or classification.get("base") != classification.get("comparison_base")
             or classification.get("base") != target["before"]
         ):
             return False
         entries = proof["changes"]
-        if not isinstance(entries, list) or [
-            value.get("path") for value in entries
-        ] not in ([CACHE_SOURCE], sorted([CACHE_SOURCE, CACHE_TEST])):
+        if (
+            not isinstance(entries, list)
+            or not entries
+            or any(
+                not isinstance(value, dict) or not isinstance(value.get("path"), str)
+                for value in entries
+            )
+        ):
+            return False
+        paths = [value["path"] for value in entries]
+        if (
+            paths != sorted(set(paths))
+            or select_paths([("M", [path]) for path in paths]) != profile
+        ):
             return False
         if any(
             not isinstance(value, dict)
@@ -408,7 +432,7 @@ def valid_receipt_mode(receipt):
         if (
             not isinstance(evidence, dict)
             or not isinstance(donor, dict)
-            or evidence.get("profile") != CACHE_PROFILE
+            or evidence.get("profile") != profile
             or evidence.get("complete") is not True
             or classification.get("head") != donor.get("head_sha")
         ):
@@ -416,7 +440,7 @@ def valid_receipt_mode(receipt):
         lanes = evidence.get("lanes")
         if (
             not isinstance(lanes, list)
-            or len(lanes) != len(expected_lanes(CACHE_PROFILE))
+            or len(lanes) != len(expected_lanes(profile))
             or any(
                 not isinstance(value, dict) or type(value.get("shard")) is not int
                 for value in lanes
@@ -426,7 +450,7 @@ def valid_receipt_mode(receipt):
         keys = [
             (value.get("lane"), value.get("project"), value["shard"]) for value in lanes
         ]
-        if set(keys) != expected_lanes(CACHE_PROFILE) or any(
+        if set(keys) != expected_lanes(profile) or any(
             value.get("complete") is not True
             or value.get("outcome") != "passed"
             or type(value.get("first_attempt_failures")) is not int
@@ -440,7 +464,7 @@ def valid_receipt_mode(receipt):
                     for field in ("source_sha", "run_id", "run_attempt")
                 },
             )
-            or not valid_scope(CACHE_PROFILE, key, value.get("scope"))
+            or not valid_scope(profile, key, value.get("scope"))
             for value, key in zip(lanes, keys)
         ):
             return False
@@ -450,7 +474,7 @@ def valid_receipt_mode(receipt):
             and set(blobs) == POLICY_FILES
             and all(sha(value) for value in blobs.values())
         )
-    except (KeyError, TypeError, AttributeError):
+    except (KeyError, TypeError, AttributeError, ValueError, OSError):
         return False
 
 
@@ -690,7 +714,7 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
         client, target, donor_id, now=now
     )
     profile = donor_profile(artifacts)
-    expected_files = ARTIFACT_FILES if profile == "full" else CACHE_ARTIFACT_FILES
+    expected_files = artifact_files(profile)
     checkout = Path.cwd() if root is None else Path(root)
     with tempfile.TemporaryDirectory(prefix="schemii-acceptance-") as temporary:
         root = Path(temporary)
@@ -719,13 +743,15 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
             "donor-classification",
         )
         owner_proof = None
-        if profile == CACHE_PROFILE:
+        if profile in {CACHE_PROFILE, INSPECTION_PROFILE}:
             require(
                 classification["comparison_base"] == classification["base"]
                 and classification["reason"] == "verified-owned-pr-change",
-                "cache-donor-base",
+                "cache-donor-base"
+                if profile == CACHE_PROFILE
+                else "inspection-donor-base",
             )
-            owner_proof = target_owner_proof(target, checkout)
+            owner_proof = target_owner_proof(target, checkout, profile=profile)
         report = json_value(
             (root / "report-validation-attempt-1/report-validation.json").read_bytes()
         )
@@ -816,7 +842,12 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
                     for value in evidence["lanes"]
                     if (value["lane"], value["project"], value["shard"]) == key
                 )["scope"]
-                require(valid_scope(profile, key, scoped), "cache-donor-scope")
+                require(
+                    valid_scope(profile, key, scoped),
+                    "cache-donor-scope"
+                    if profile == CACHE_PROFILE
+                    else "inspection-donor-scope",
+                )
                 summary["scope"] = scoped
             expected_archive = (
                 f"{lane}-timing-attempt-1"
@@ -841,12 +872,20 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
         )
         if owner_proof is not None:
             require(
-                equal_json(owner_proof, target_owner_proof(target, checkout)),
-                "cache-owner-changed",
+                equal_json(
+                    owner_proof, target_owner_proof(target, checkout, profile=profile)
+                ),
+                "cache-owner-changed"
+                if profile == CACHE_PROFILE
+                else "inspection-owner-changed",
             )
         receipt = {
             "schema": 1,
-            "mode": MODE if profile == "full" else CACHE_MODE,
+            "mode": MODE
+            if profile == "full"
+            else CACHE_MODE
+            if profile == CACHE_PROFILE
+            else INSPECTION_MODE,
             "target": target,
             "donor": {
                 **donor_identity,
@@ -898,7 +937,11 @@ def recheck(receipt, client, target, *, now=None, root=None):
             "test_evidence",
             "donor_cost",
         }
-        | ({"target_owner_proof"} if receipt.get("mode") == CACHE_MODE else set())
+        | (
+            {"target_owner_proof"}
+            if receipt.get("mode") in {CACHE_MODE, INSPECTION_MODE}
+            else set()
+        )
         and type(receipt["schema"]) is int
         and receipt["schema"] == 1
         and valid_receipt_mode(receipt)

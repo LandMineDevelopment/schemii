@@ -212,6 +212,7 @@ def evaluate_reused(classification, needs, jobs, timing, identity, reuse):
     if __package__:
         from .reuse_acceptance import (
             CACHE_MODE,
+            INSPECTION_MODE,
             EXPENSIVE_NEEDS,
             current_reuse_jobs,
             valid_receipt_mode,
@@ -219,6 +220,7 @@ def evaluate_reused(classification, needs, jobs, timing, identity, reuse):
     else:
         from reuse_acceptance import (
             CACHE_MODE,
+            INSPECTION_MODE,
             EXPENSIVE_NEEDS,
             current_reuse_jobs,
             valid_receipt_mode,
@@ -244,6 +246,8 @@ def evaluate_reused(classification, needs, jobs, timing, identity, reuse):
     return True, (
         "verified-identical-tree-schemer-result-cache-pr-acceptance"
         if reuse["mode"] == CACHE_MODE
+        else "verified-identical-tree-developer-inspection-pr-acceptance"
+        if reuse["mode"] == INSPECTION_MODE
         else "verified-identical-tree-full-pr-acceptance"
     )
 

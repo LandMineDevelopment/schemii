@@ -998,3 +998,63 @@ def test_malformed_or_unproven_classification_receipt_is_rejected(tmp_path, muta
     path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="classification"):
         load_classification(path)
+
+
+def test_inspection_classifier_cli_outputs_fixed_whole_python_and_two_browser_legs(
+    repository, tmp_path
+):
+    from scripts.ci.test_selection import (
+        INSPECTION_PROFILE,
+        INSPECTION_PYTHON,
+        INSPECTION_SOURCES,
+    )
+
+    root, _ = repository
+    owner = sorted(INSPECTION_SOURCES)[0]
+    write(root, owner, "original source owner\n")
+    base = commit(root)
+    write(root, owner, "changed source owner\n")
+    head = commit(root)
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps({"pull_request": {"base": {"sha": base}, "head": {"sha": head}}})
+    )
+    output = tmp_path / "github-output"
+    manifest = tmp_path / "manifest.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "scripts/ci/classify_changes.py"),
+            "--output",
+            str(manifest),
+        ],
+        cwd=root,
+        env={
+            **os.environ,
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_EVENT_PATH": str(event),
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert load_classification(manifest)["profile"] == INSPECTION_PROFILE
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["python_paths"].split() == list(INSPECTION_PYTHON)
+    assert (
+        values["static"]
+        == values["node"]
+        == values["python"]
+        == values["browser"]
+        == "true"
+    )
+    assert values["postgres"] == "false"
+    assert json.loads(values["browser_matrix"]) == {
+        "include": [
+            {"project": project, "shard": 1, "total": 1}
+            for project in ("desktop-chromium", "android-chromium")
+        ]
+    }

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { balanceFiles, coverageProfile, manifestPattern, PROJECTS } from './browser-shards.mjs';
-import { invocation, parseOptions, run } from './run-browser-shard.mjs';
+import { invocation, parseOptions, run, scopedInventory } from './run-browser-shard.mjs';
 
 const file = name => `tests/e2e/${name}.spec.js`;
 
@@ -179,4 +180,68 @@ test('cache profile policy and arguments reject shortened scope, unknown profile
   assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, '--shard=1/3', `--profile=${cacheProfile}`, '--profile=full']));
   assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, '--shard=1/3', '--profile=', '--profile=full']));
   assert.throws(() => run({ project: PROJECTS[0], shard: 1, shardCount: 3, profile: null }, '/not-a-checkout'), /Unknown browser coverage profile/);
+});
+
+const inspectionProfile = 'developer-inspection';
+test('inspection profile preserves both whole files with one isolated stack per device', () => {
+  const policy = coverageProfile(inspectionProfile);
+  assert.deepEqual(policy.files, ['tests/e2e/shared-ui-audit.spec.js', 'tests/e2e/ai-diagnostic-permissions.spec.js']);
+  for (const project of PROJECTS) {
+    assert.deepEqual(policy.browser[project].shards, [policy.files]);
+    assert.equal(Object.values(policy.browser[project].files).flat().length, 7);
+    assert.deepEqual(policy.browser[project].allowed_skips, []);
+    assert.deepEqual(parseOptions([`--project=${project}`, '--shard=1/1', `--profile=${inspectionProfile}`]),
+      {project, shard:1, shardCount:1, profile:inspectionProfile, list:false, plan:false});
+    const command = invocation(project, policy.files, 1, false, {}, 1);
+    assert.deepEqual(JSON.parse(command.env.SCHEMII_E2E_FILE_MANIFEST), policy.files);
+    assert.equal(command.env.CI_TELEMETRY_SHARD, '1');
+    assert.equal(command.args.some(arg => arg.startsWith('--workers') || arg.startsWith('--shard')), false);
+    for (const total of [2,3,6]) {
+      assert.throws(() => parseOptions([`--project=${project}`, `--shard=1/${total}`, `--profile=${inspectionProfile}`]), /one browser shard/);
+      assert.throws(() => run({project,shard:1,shardCount:total,profile:inspectionProfile}, '/nonexistent'), /one browser shard/);
+    }
+    for (const extra of ['--grep=one', '--grep-invert=one', '--file=other', '--shard=1/1']) {
+      assert.throws(() => parseOptions([`--project=${project}`, '--shard=1/1', `--profile=${inspectionProfile}`, extra]));
+    }
+    for (const profile of ['full','e2e-tests','schemer-result-cache']) {
+      assert.throws(() => parseOptions([`--project=${project}`, '--shard=1/1', `--profile=${profile}`]));
+    }
+    assert.throws(() => parseOptions([`--project=${project}`, '--shard=1/1']));
+  }
+});
+
+test('inspection policy rejects changed frozen source, topology, cases or allowed skips', () => {
+  const policy = coverageProfile(inspectionProfile);
+  for (const damage of ['file','case','extra-case','shard','skip','hash','project']) {
+    const changed = structuredClone(policy);
+    const inventory = changed.browser[PROJECTS[0]];
+    if (damage === 'file') changed.files.pop();
+    if (damage === 'case') inventory.files[changed.files[0]].pop();
+    if (damage === 'extra-case') inventory.files[changed.files[0]].push('f'.repeat(64));
+    if (damage === 'shard') inventory.shards.push(inventory.shards[0]);
+    if (damage === 'skip') inventory.allowed_skips.push('f'.repeat(64));
+    if (damage === 'hash') changed.frozen_sha256[changed.files[0]] = 'f'.repeat(64);
+    if (damage === 'project') delete changed.browser[PROJECTS[1]];
+    assert.throws(() => coverageProfile(inspectionProfile, changed));
+  }
+});
+
+test('inspection unfiltered discovery requires every fixed project case exactly once', () => {
+  for (const project of PROJECTS) {
+    const policy = structuredClone(coverageProfile(inspectionProfile));
+    const specs = policy.files.flatMap((file, fileIndex) => Array.from({length:[5,2][fileIndex]}, (_,index) => ({file, id:`fixture-${project}-${file}-${index}`, tests:[{projectName:project}]})));
+    for (const file of policy.files) policy.browser[project].files[file] = specs.filter(spec => spec.file === file).map(spec => createHash('sha256').update(spec.id).digest('hex')).sort();
+    const report = {config:{rootDir:'/owned'}, suites:[{specs}]};
+    assert.deepEqual(scopedInventory(report, '/owned', project, policy), [policy.files]);
+    for (const damage of ['missing','extra','duplicate','project','error']) {
+      const changed = structuredClone(report);
+      const found = changed.suites[0].specs;
+      if (damage === 'missing') found.pop();
+      if (damage === 'extra') found.push({...found[0],id:'foreign-extra-case'});
+      if (damage === 'duplicate') found.push(structuredClone(found[0]));
+      if (damage === 'project') found[0].tests[0].projectName = 'unknown';
+      if (damage === 'error') changed.errors = [{message:'synthetic failure'}];
+      assert.throws(() => scopedInventory(changed, '/owned', project, policy));
+    }
+  }
 });

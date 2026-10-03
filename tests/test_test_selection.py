@@ -1,6 +1,7 @@
 """Selected checks must retain ownership closure and fail closed on unknown changes."""
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -17,6 +18,11 @@ from scripts.ci.test_selection import (
     CACHE_PROFILE,
     CACHE_SOURCE,
     CACHE_TEST,
+    INSPECTION_PROFILE,
+    INSPECTION_SOURCES,
+    INSPECTION_TEST,
+    INSPECTION_PYTHON,
+    valid_scope,
     coverage_policy,
     expected_scope,
     source_job_names,
@@ -502,8 +508,8 @@ def raw_lane(key, outcome="passed"):
     ]
 
 
-def scoped_raw_lane(key):
-    expected = expected_scope(CACHE_PROFILE, key)
+def scoped_raw_lane(key, profile=CACHE_PROFILE):
+    expected = expected_scope(profile, key)
     if expected is None:
         return raw_lane(key)
     template = raw_lane(key)
@@ -534,8 +540,8 @@ def selected_evidence(root, profile):
             "\n".join(
                 json.dumps(value)
                 for value in (
-                    scoped_raw_lane((lane, project, shard))
-                    if profile == CACHE_PROFILE
+                    scoped_raw_lane((lane, project, shard), profile)
+                    if profile in {CACHE_PROFILE, INSPECTION_PROFILE}
                     else raw_lane((lane, project, shard))
                 )
             )
@@ -972,7 +978,7 @@ def test_cache_complete_closure_and_scoped_backup_workflow_contract():
     step = workflow.split(
         "- name: Verify metadata backup recovery in an isolated database\n", 1
     )[1].split("- name:", 1)[0]
-    condition = f"matrix.project == 'desktop-chromium' && matrix.shard == 1 && needs.classify.outputs.profile != '{CACHE_PROFILE}'"
+    condition = f"matrix.project == 'desktop-chromium' && matrix.shard == 1 && needs.classify.outputs.profile != '{CACHE_PROFILE}' && needs.classify.outputs.profile != '{INSPECTION_PROFILE}'"
     assert f"if: {condition}\n" in step
     assert "./start.sh --backup" in step and "./start.sh --verify-backup" in step
     assert "--profile=${{ needs.classify.outputs.profile }}" in workflow
@@ -1125,11 +1131,15 @@ def test_gate_never_accepts_unverified_acceptance_mode(tmp_path, mode):
     assert evaluate(*args) == (False, "unverified-reuse-proof")
 
 
-def test_workflow_suppresses_duplicate_layers_only_for_the_two_verified_modes():
+def test_workflow_suppresses_duplicate_layers_only_for_the_closed_verified_modes():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     parts = re.split(r"^  ([a-z-]+):\n", workflow, flags=re.MULTILINE)
     sections = dict(zip(parts[1::2], parts[2::2], strict=True))
-    modes = {"reused-full-pr", "reused-schemer-result-cache-pr"}
+    modes = {
+        "reused-full-pr",
+        "reused-schemer-result-cache-pr",
+        "reused-developer-inspection-pr",
+    }
     for job in ("test", "postgres-integration", "browser-smoke"):
         condition = next(
             line.strip()[4:]
@@ -1156,7 +1166,7 @@ def test_workflow_suppresses_duplicate_layers_only_for_the_two_verified_modes():
     # Proof transport accepts only those explicit modes, including both shell branches.
     positive = "outputs.acceptance == 'reused-full-pr' ||"
     assert workflow.count(positive) == 3
-    assert workflow.count("== 'reused-schemer-result-cache-pr' ]]; then") == 2
+    assert workflow.count("== 'reused-developer-inspection-pr' ]]; then") == 2
 
 
 @pytest.mark.parametrize("command", ["python", "python3"])
@@ -1187,6 +1197,7 @@ def test_local_children_keep_planner_interpreter_without_path_activation(
         ("full", 6, 15, 19),
         ("e2e-tests", 6, 13, 19),
         (CACHE_PROFILE, 3, 8, 13),
+        (INSPECTION_PROFILE, 1, 4, 9),
         ("frontend-tests", 6, 1, 19),
     ],
 )
@@ -1437,3 +1448,291 @@ def test_excluded_browser_topology_is_complete_expanded_or_one_exact_literal(
             )["complete"]
             is False
         )
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        [sorted(INSPECTION_SOURCES)[0]],
+        [sorted(INSPECTION_SOURCES)[-1]],
+        sorted(INSPECTION_SOURCES),
+        [*sorted(INSPECTION_SOURCES), INSPECTION_TEST],
+    ],
+)
+def test_inspection_exact_source_present_ownership_selects_pr_and_local(
+    repository, paths
+):
+    root, _ = repository
+    for path in [*INSPECTION_SOURCES, INSPECTION_TEST]:
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("original inspected owner\n")
+    base = commit(root)
+    for path in paths:
+        (root / path).write_text("reviewed source change\n")
+    assert (
+        local_selection.plan(root, base)["classification"]["profile"]
+        == INSPECTION_PROFILE
+    )
+    head = commit(root)
+    assert classify(root, "pull_request", base, head)["profile"] == INSPECTION_PROFILE
+    assert classify(root, "push", base, head)["profile"] == "full"
+    assert classify(root, "workflow_dispatch", base, head)["profile"] == "full"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "new",
+        "delete",
+        "rename",
+        "mode",
+        "symlink",
+        "mixed-cache",
+        "fixture",
+        "graph-test",
+        "unknown",
+    ],
+)
+def test_inspection_unsafe_or_mixed_change_conservatively_falls_back(
+    repository, damage
+):
+    root, _ = repository
+    path = root / sorted(INSPECTION_SOURCES)[0]
+    path.write_text("original inspection source\n")
+    base = commit(root)
+    path.write_text("changed inspection source\n")
+    if damage == "delete":
+        path.unlink()
+    elif damage == "rename":
+        path.rename(path.with_name("renamed.py"))
+    elif damage == "mode":
+        path.chmod(0o755)
+    elif damage == "symlink":
+        path.unlink()
+        path.symlink_to("foreign")
+    else:
+        other = root / {
+            "new": "src/schemii/common/new_inspection.py",
+            "mixed-cache": CACHE_SOURCE,
+            "fixture": "tests/inspection_fixtures.py",
+            "graph-test": "tests/test_system_inspection.py",
+            "unknown": "src/schemii/common/system_inspection.py",
+        }.get(damage, "tests/new_helper.py")
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_text("another owner\n")
+    assert local_selection.plan(root, base)["classification"]["profile"] == "full"
+    assert classify(root, "pull_request", base, commit(root))["profile"] == "full"
+
+
+def test_inspection_direct_helper_only_keeps_complete_backend_test_profile():
+    assert select_paths([("M", [INSPECTION_TEST])]) == "backend-tests"
+    assert (
+        select_paths(
+            [("M", [INSPECTION_TEST]), ("M", ["tests/test_route_inspection.py"])]
+        )
+        == "backend-tests"
+    )
+    for status in ("A", "D", "T", "R100"):
+        assert select_paths([(status, [sorted(INSPECTION_SOURCES)[0]])]) == "full"
+
+
+def test_inspection_complete_closure_independent_minimum_and_backup_contract():
+    policy = coverage_policy(INSPECTION_PROFILE)
+    assert PYTHON_PATHS[INSPECTION_PROFILE] == INSPECTION_PYTHON
+    assert len(policy["python"]["files"]) == 8
+    assert sum(map(len, policy["python"]["files"].values())) == 87
+    assert len(policy["python"]["files"][INSPECTION_TEST]) == 7
+    assert (
+        len(policy["frozen_sha256"]) == 9
+        and INSPECTION_TEST not in policy["frozen_sha256"]
+    )
+    assert len(expected_lanes(INSPECTION_PROFILE)) == 4
+    for project in ("desktop-chromium", "android-chromium"):
+        assert sum(map(len, policy["browser"][project]["files"].values())) == 7
+        assert policy["browser"][project]["shards"] == [policy["files"]]
+        assert policy["browser"][project]["allowed_skips"] == []
+    selected = commands(INSPECTION_PROFILE, "origin/main")
+    assert selected[:3] == [
+        ["npm", "test"],
+        ["python", "scripts/check_python_quality.py", "origin/main"],
+        ["python", "scripts/ci/python-tests.py", *INSPECTION_PYTHON],
+    ]
+    browser = [argv for argv in selected if "scripts/ci/run-browser-shard.mjs" in argv]
+    assert len(browser) == 2 and all("--shard=1/1" in argv for argv in browser)
+    assert not any(
+        "--backup" in argv or "tests/integration" in argv for argv in selected
+    )
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert (
+        "needs.classify.outputs.profile != 'schemer-result-cache' && needs.classify.outputs.profile != 'developer-inspection'"
+        in workflow
+    )
+    assert "CI_TEST_PROFILE: ${{ needs.classify.outputs.profile }}" in workflow
+
+
+def inspection_scope(key, extra=False):
+    expected = expected_scope(INSPECTION_PROFILE, key)
+    result = {
+        "profile": INSPECTION_PROFILE,
+        "planned": sorted(expected),
+        "observed": [
+            {
+                "test_id": test,
+                "source_id": owner["source_id"],
+                "outcome": "passed",
+                "attempt": 0,
+            }
+            for test, owner in expected.items()
+        ],
+    }
+    if extra:
+        test = hashlib.sha256(b"new helper discovered case").hexdigest()
+        result["planned"] = sorted([*result["planned"], test])
+        result["observed"].append(
+            {
+                "test_id": test,
+                "source_id": hashlib.sha256(INSPECTION_TEST.encode()).hexdigest(),
+                "outcome": "passed",
+                "attempt": 0,
+            }
+        )
+    return result
+
+
+def test_inspection_dynamic_helper_plan_adds_complete_first_attempt_passes_only():
+    key = ("python", "none", 0)
+    scope = inspection_scope(key, extra=True)
+    assert len(scope["planned"]) == 88 and valid_scope(INSPECTION_PROFILE, key, scope)
+    assert valid_scope(INSPECTION_PROFILE, key, inspection_scope(key))
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "minimum",
+        "missing-plan",
+        "missing-attempt",
+        "duplicate-plan",
+        "duplicate-attempt",
+        "unsorted",
+        "skip",
+        "failed",
+        "retry",
+        "foreign-source",
+        "profile",
+        "nonhash",
+    ],
+)
+def test_inspection_dynamic_helper_scope_corruption_fails_closed(damage):
+    key = ("python", "none", 0)
+    scope = inspection_scope(key, extra=True)
+    extra = scope["observed"][-1]
+    if damage == "minimum":
+        required = coverage_policy(INSPECTION_PROFILE)["python"]["files"][
+            INSPECTION_TEST
+        ][0]
+        scope["planned"].remove(required)
+        scope["observed"] = [
+            value for value in scope["observed"] if value["test_id"] != required
+        ]
+    elif damage == "missing-plan":
+        scope["planned"].remove(extra["test_id"])
+    elif damage == "missing-attempt":
+        scope["observed"].pop()
+    elif damage == "duplicate-plan":
+        scope["planned"].append(extra["test_id"])
+    elif damage == "duplicate-attempt":
+        scope["observed"].append(copy.deepcopy(extra))
+    elif damage == "unsorted":
+        scope["planned"].reverse()
+    elif damage in {"skip", "failed"}:
+        extra["outcome"] = "skipped" if damage == "skip" else "failed"
+    elif damage == "retry":
+        extra["attempt"] = 1
+    elif damage == "foreign-source":
+        extra["source_id"] = hashlib.sha256(
+            b"tests/test_route_inspection.py"
+        ).hexdigest()
+    elif damage == "profile":
+        scope["profile"] = CACHE_PROFILE
+    else:
+        scope["planned"][-1] = "not-a-hash"
+    assert not valid_scope(INSPECTION_PROFILE, key, scope)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["missing", "extra", "skip", "source", "retry", "node-lane", "browser-denominator"],
+)
+def test_inspection_raw_and_gate_reject_corrupt_or_extra_owned_receipts(
+    tmp_path, damage
+):
+    args = selected_gate(tmp_path, INSPECTION_PROFILE)
+    assert evaluate(*args)[0]
+    evidence = args[3]["test_evidence"]
+    receipt = next(value for value in evidence["lanes"] if value["lane"] == "browser")
+    scope = receipt["scope"]
+    if damage == "missing":
+        removed = scope["observed"].pop()["test_id"]
+        scope["planned"].remove(removed)
+    elif damage == "extra":
+        extra = copy.deepcopy(scope["observed"][0])
+        extra["test_id"] = "f" * 64
+        scope["observed"].append(extra)
+        scope["planned"] = sorted([*scope["planned"], extra["test_id"]])
+    elif damage == "skip":
+        scope["observed"][0]["outcome"] = "skipped"
+    elif damage == "source":
+        scope["observed"][0]["source_id"] = "f" * 64
+    elif damage == "retry":
+        scope["observed"][0]["attempt"] = 1
+    elif damage == "node-lane":
+        evidence["lanes"] = [
+            value for value in evidence["lanes"] if value["lane"] != "node"
+        ]
+    else:
+        next(
+            value
+            for value in args[2]
+            if value["name"].startswith("Assembled browser smoke")
+        )["name"] = "Assembled browser smoke (desktop-chromium, shard 1/3)"
+    assert not evaluate(*args)[0]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing-file",
+        "extra-file",
+        "case",
+        "skip",
+        "dynamic-owner",
+        "shards",
+        "hash",
+        "profile",
+    ],
+)
+def test_inspection_frozen_policy_corruption_is_rejected(monkeypatch, damage):
+    policy = coverage_policy(INSPECTION_PROFILE)
+    if damage == "missing-file":
+        policy["python"]["files"].pop("tests/test_route_inspection.py")
+    elif damage == "extra-file":
+        policy["python"]["files"]["tests/foreign.py"] = ["f" * 64]
+    elif damage == "case":
+        policy["python"]["files"][INSPECTION_TEST].pop()
+    elif damage == "skip":
+        policy["python"]["allowed_skips"] = [
+            policy["python"]["files"][INSPECTION_TEST][0]
+        ]
+    elif damage == "dynamic-owner":
+        policy["python"]["dynamic_file"] = "tests/test_route_inspection.py"
+    elif damage == "shards":
+        policy["browser"]["desktop-chromium"]["shards"] *= 2
+    elif damage == "hash":
+        policy["frozen_sha256"]["tests/test_route_inspection.py"] = "f" * 64
+    else:
+        policy["profile"] = CACHE_PROFILE
+    monkeypatch.setattr("scripts.ci.test_selection.json.loads", lambda _: policy)
+    with pytest.raises(ValueError):
+        coverage_policy(INSPECTION_PROFILE)

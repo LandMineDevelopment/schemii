@@ -10,6 +10,29 @@ import re
 CACHE_PROFILE = "schemer-result-cache"
 CACHE_SOURCE = "src/schemii/schemer/web/result-cache.js"
 CACHE_TEST = "tests/frontend/schemer-result-cache.test.js"
+INSPECTION_PROFILE = "developer-inspection"
+INSPECTION_SOURCES = frozenset(
+    {
+        "src/schemii/common/source_inspection.py",
+        "src/schemii/common/api/inspection.py",
+        "src/schemii/common/postgres/inspection.py",
+    }
+)
+INSPECTION_TEST = "tests/test_source_inspection.py"
+INSPECTION_PYTHON = (
+    "tests/test_source_inspection.py",
+    "tests/test_route_inspection.py",
+    "tests/test_database_inspection.py",
+    "tests/test_system_inspection.py",
+    "tests/test_developer_inspection.py",
+    "tests/test_frontend.py",
+    "tests/test_application_structure.py",
+    "tests/test_runtime_hardening.py",
+)
+INSPECTION_BROWSER = (
+    "tests/e2e/shared-ui-audit.spec.js",
+    "tests/e2e/ai-diagnostic-permissions.spec.js",
+)
 
 PROFILES = frozenset(
     {
@@ -22,6 +45,7 @@ PROFILES = frozenset(
         "frontend-tests",
         "e2e-tests",
         CACHE_PROFILE,
+        INSPECTION_PROFILE,
     }
 )
 LAYERS = {
@@ -34,10 +58,12 @@ LAYERS = {
     "frontend-tests": frozenset({"node"}),
     "e2e-tests": frozenset({"node", "browser"}),
     CACHE_PROFILE: frozenset({"node", "python", "browser"}),
+    INSPECTION_PROFILE: frozenset({"static", "node", "python", "browser"}),
 }
 # Tooling closes over harness/load consumers without involving installed application owners.
 PYTHON_PATHS = {
     CACHE_PROFILE: ("tests/test_frontend.py",),
+    INSPECTION_PROFILE: INSPECTION_PYTHON,
     "native": ("testing/agents",),
     "harness": ("testing/agents", "testing/harness", "tests/test_load_planner.py"),
     "load": ("testing/agents", "testing/harness", "tests/test_load_planner.py"),
@@ -53,7 +79,11 @@ SOURCE_JOB_NAMES = {
 def browser_shards(profile: str) -> tuple[int, ...]:
     """Closed hosted topology; excluded profiles retain full skip verification."""
     layers(profile)
-    return tuple(range(1, 4 if profile == CACHE_PROFILE else 7))
+    return (
+        (1,)
+        if profile == INSPECTION_PROFILE
+        else tuple(range(1, 4 if profile == CACHE_PROFILE else 7))
+    )
 
 
 def browser_matrix(profile: str) -> dict:
@@ -129,9 +159,10 @@ def expected_lanes(profile: str) -> set[tuple[str, str, int]]:
 
 # Frozen existing leaves, independently traced to consumers at main3e67404.
 # Shared helpers/configuration, new files and documentation fall back full.
-# The only product owner is the independently reviewed result-cache singleton/pair.
+# Product selection is closed to the reviewed cache and inspection source owners.
 PATHS = {
     CACHE_PROFILE: frozenset({CACHE_SOURCE}),
+    INSPECTION_PROFILE: INSPECTION_SOURCES,
     "native": frozenset(
         """
 .codex/agents/developer.toml
@@ -463,6 +494,14 @@ tests/e2e/workspace-rename.spec.js
 
 def select_paths(changes: list[tuple[str, list[str]]]) -> str:
     """Select only modifications wholly within one independently owned family."""
+    changed = {path for _, paths in changes for path in paths}
+    if changed & INSPECTION_SOURCES:
+        safe = all(status == "M" and len(paths) == 1 for status, paths in changes)
+        return (
+            INSPECTION_PROFILE
+            if safe and changed <= INSPECTION_SOURCES | {INSPECTION_TEST}
+            else "full"
+        )
     # The direct test keeps its existing family unless its source is also present.
     if any(CACHE_SOURCE in paths for _, paths in changes):
         safe = all(status == "M" and len(paths) == 1 for status, paths in changes)
@@ -550,8 +589,12 @@ def commands(profile: str, base: str) -> list[list[str]]:
     return result
 
 
-def coverage_policy() -> dict:
+def coverage_policy(profile=CACHE_PROFILE) -> dict:
     """Reviewed frozen discovery, independent of supplied classification/receipts."""
+    if profile == INSPECTION_PROFILE:
+        return inspection_policy()
+    if profile != CACHE_PROFILE:
+        raise ValueError("Unknown coverage policy")
     policy = json.loads(Path(__file__).with_name("coverage-profiles.json").read_text())
     if (
         set(policy) != {"schema", "profile", "files", "python", "browser"}
@@ -627,9 +670,12 @@ def coverage_policy() -> dict:
 
 def expected_scope(profile, key):
     """Return independently required cases for scoped Python/browser lanes only."""
-    if profile != CACHE_PROFILE or key[0] not in {"python", "browser"}:
+    if profile not in {CACHE_PROFILE, INSPECTION_PROFILE} or key[0] not in {
+        "python",
+        "browser",
+    }:
         return None
-    policy = coverage_policy()
+    policy = coverage_policy(profile)
     lane, project, shard = key
     if lane == "python" and (project, shard) == ("none", 0):
         inventory = policy["python"]
@@ -661,11 +707,21 @@ def valid_scope(profile, key, scope):
         not isinstance(scope, dict)
         or set(scope) != {"profile", "planned", "observed"}
         or scope["profile"] != profile
-        or scope["planned"] != sorted(expected)
+    ):
+        return False
+    planned = scope["planned"]
+    dynamic = profile == INSPECTION_PROFILE and key == ("python", "none", 0)
+    if not isinstance(planned, list) or any(
+        not isinstance(test, str) or not re.fullmatch(r"[0-9a-f]{64}", test)
+        for test in planned
+    ):
+        return False
+    if planned != sorted(set(planned)) or (
+        not set(expected) <= set(planned) if dynamic else planned != sorted(expected)
     ):
         return False
     observed = scope["observed"]
-    if not isinstance(observed, list) or len(observed) != len(expected):
+    if not isinstance(observed, list) or len(observed) != len(planned):
         return False
     seen = set()
     for value in observed:
@@ -679,16 +735,108 @@ def valid_scope(profile, key, scope):
         test = value["test_id"]
         if (
             not isinstance(test, str)
-            or test not in expected
+            or test not in planned
             or test in seen
             or type(value["attempt"]) is not int
             or value["attempt"] != 0
         ):
             return False
         seen.add(test)
-        owner = expected[test]
+        owner = expected.get(
+            test,
+            {
+                "source_id": hashlib.sha256(INSPECTION_TEST.encode()).hexdigest(),
+                "allow_skip": False,
+            },
+        )
         if value["source_id"] != owner["source_id"] or value["outcome"] not in (
             {"passed", "skipped"} if owner["allow_skip"] else {"passed"}
         ):
             return False
-    return seen == set(expected)
+    return seen == set(planned)
+
+
+def inspection_policy() -> dict:
+    """Require seven frozen Python files, two browser files and the whole helper."""
+    policy = json.loads(
+        Path(__file__).with_name("inspection-coverage.json").read_text()
+    )
+    if (
+        not isinstance(policy, dict)
+        or set(policy)
+        != {"schema", "profile", "files", "python", "browser", "frozen_sha256"}
+        or type(policy["schema"]) is not int
+        or policy["schema"] != 1
+        or policy["profile"] != INSPECTION_PROFILE
+        or policy["files"] != list(INSPECTION_BROWSER)
+    ):
+        raise ValueError("Invalid inspection coverage policy")
+    if not isinstance(policy["browser"], dict) or set(policy["browser"]) != set(
+        BROWSER_PROJECTS
+    ):
+        raise ValueError("Invalid inspection coverage projects")
+    counts = dict(zip(INSPECTION_PYTHON, (7, 8, 3, 21, 8, 29, 4, 7)))
+    for project, inventory in [
+        ("python", policy["python"]),
+        *policy["browser"].items(),
+    ]:
+        fields = {
+            "files",
+            "allowed_skips",
+            "dynamic_file" if project == "python" else "shards",
+        }
+        expected_files = (
+            counts if project == "python" else dict(zip(INSPECTION_BROWSER, (5, 2)))
+        )
+        if (
+            not isinstance(inventory, dict)
+            or set(inventory) != fields
+            or inventory["allowed_skips"] != []
+            or not isinstance(inventory["files"], dict)
+            or set(inventory["files"]) != set(expected_files)
+        ):
+            raise ValueError("Invalid inspection coverage inventory")
+        ids = []
+        for file, expected_count in expected_files.items():
+            tests = inventory["files"][file]
+            if (
+                not isinstance(tests, list)
+                or len(tests) != expected_count
+                or tests != sorted(tests)
+                or any(
+                    not isinstance(test, str) or not re.fullmatch(r"[0-9a-f]{64}", test)
+                    for test in tests
+                )
+            ):
+                raise ValueError("Invalid inspection coverage cases")
+            ids.extend(tests)
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate inspection coverage case")
+        if (
+            project == "python"
+            and inventory["dynamic_file"] != INSPECTION_TEST
+            or project != "python"
+            and inventory["shards"] != [list(INSPECTION_BROWSER)]
+        ):
+            raise ValueError("Invalid inspection coverage topology")
+    frozen = policy["frozen_sha256"]
+    files = (set(INSPECTION_PYTHON) - {INSPECTION_TEST}) | set(INSPECTION_BROWSER)
+    if (
+        not isinstance(frozen, dict)
+        or set(frozen) != files
+        or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in frozen.values()
+        )
+    ):
+        raise ValueError("Invalid frozen inspection source")
+    root = Path(__file__).resolve().parents[2]
+    for file, digest in frozen.items():
+        path = root / file
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != digest
+        ):
+            raise ValueError("Changed frozen inspection source")
+    return policy
