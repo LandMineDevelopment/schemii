@@ -1,12 +1,47 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import reporter from './node-reporter.mjs';
 import PlaywrightReporter from './playwright-reporter.mjs';
+import { hash } from './timing.mjs';
 
 const secret = 'PLANTED_PASSWORD_TOKEN_AUTHORIZATION_cookie_7ce19';
+
+test('private execution cwd retains original case/source/line and refuses receipt replacement', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'schemii-original-source-'));
+  const cwd = process.cwd();
+  const previous = { file: process.env.CI_TELEMETRY_FILE, root: process.env.SCHEMII_E2E_SOURCE_ROOT };
+  const root = fileURLToPath(new URL('../../', import.meta.url)).replace(/\/$/, '');
+  try {
+    process.chdir(directory);
+    process.env.SCHEMII_E2E_SOURCE_ROOT = root;
+    process.env.CI_TELEMETRY_FILE = join(directory, 'browser.jsonl');
+    const item = { id: 'unchanged-original-id', location: { file: resolve(root, 'tests/e2e/sql-console.spec.js'), line: 323 },
+      parent: { project: () => ({ name: 'desktop-chromium' }) } };
+    const instance = new PlaywrightReporter();
+    instance.onBegin({ shard: null }, { allTests: () => [item] });
+    instance.onTestEnd(item, { status: 'failed', retry: 0, duration: 5 });
+    instance.onEnd({ status: 'failed' });
+    const before = readFileSync(process.env.CI_TELEMETRY_FILE, 'utf8');
+    const record = before.trim().split('\n').map(JSON.parse).find(value => value.kind === 'attempt');
+    assert.equal(record.test_id, hash(item.id));
+    assert.equal(record.source_id, hash('tests/e2e/sql-console.spec.js'));
+    assert.equal(record.source_line, 323);
+    assert.throws(() => new PlaywrightReporter().onBegin({ shard: null }, { allTests: () => [item] }), /EEXIST/);
+    assert.equal(readFileSync(process.env.CI_TELEMETRY_FILE, 'utf8'), before);
+    process.env.SCHEMII_E2E_SOURCE_ROOT = directory;
+    assert.throws(() => new PlaywrightReporter().onBegin({ shard: null }, { allTests: () => [item] }), /Invalid original/);
+  } finally {
+    process.chdir(cwd);
+    for (const [key, value] of [['CI_TELEMETRY_FILE', previous.file], ['SCHEMII_E2E_SOURCE_ROOT', previous.root]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('Node public timing strips arbitrary event text and distinguishes pass/fail/skip/cancel', async () => {
   async function* events() {
@@ -71,6 +106,58 @@ test('Playwright cancellation covers planned but unstarted tests once', () => {
   } finally {
     if (previous === undefined) delete process.env.CI_TELEMETRY_FILE;
     else process.env.CI_TELEMETRY_FILE = previous;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Playwright custom file shards retain lane identities without native sharding', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'schemii-timing-shard-'));
+  const previousFile = process.env.CI_TELEMETRY_FILE;
+  const previousShard = process.env.CI_TELEMETRY_SHARD;
+  try {
+    process.env.CI_TELEMETRY_FILE = join(directory, 'browser.jsonl');
+    const item = { id: 'owned-case', location: { file: '/tests/e2e/synthetic.spec.js', line: 1 },
+      parent: { project: () => ({ name: 'android-chromium' }) } };
+    for (const [config, value, expected] of [
+      [{ shard: null }, '1', 1],
+      [{ shard: null }, '2', 2],
+      [{ shard: null }, '3', 3],
+      [{ shard: null }, '4', 4],
+      [{ shard: null }, '5', 5],
+      [{ shard: null }, '6', 6],
+      [{ shard: { current: 3 } }, '2', 3],
+      [{ shard: { current: 1 } }, '2', 1],
+      [{ shard: { current: 6 } }, '2', 6],
+      [{ shard: { current: 6 } }, '7', 6],
+      [{ shard: null }, '0', 0],
+      [{ shard: null }, '', 0],
+    ]) {
+      process.env.CI_TELEMETRY_SHARD = value;
+      const instance = new PlaywrightReporter();
+      instance.onBegin(config, { allTests: () => [item] });
+      instance.onTestEnd(item, { status: 'failed', retry: 0, duration: 5 });
+      instance.onEnd({ status: 'failed' });
+      const records = readFileSync(process.env.CI_TELEMETRY_FILE, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepEqual(records.map(record => record.kind), ['start', 'plan', 'attempt', 'end']);
+      assert.ok(records.every(record => record.shard === expected && record.project === 'android-chromium'));
+      assert.equal(records.find(record => record.kind === 'attempt').outcome, 'failed');
+      assert.equal(records.at(-1).outcome, 'failed');
+    }
+    for (const invalid of ['7', '-1', '1.5', '2/2', 'NaN', 'Infinity', 'not-a-number']) {
+      process.env.CI_TELEMETRY_SHARD = invalid;
+      assert.throws(() => new PlaywrightReporter().onBegin({ shard: null }, { allTests: () => [item] }),
+        /Invalid timing lane/);
+    }
+    process.env.CI_TELEMETRY_SHARD = '2';
+    for (const invalid of [7, -1, 1.5, '6', 'not-a-number']) {
+      assert.throws(() => new PlaywrightReporter().onBegin({ shard: { current: invalid } }, { allTests: () => [item] }),
+        /Invalid timing lane/);
+    }
+  } finally {
+    if (previousFile === undefined) delete process.env.CI_TELEMETRY_FILE;
+    else process.env.CI_TELEMETRY_FILE = previousFile;
+    if (previousShard === undefined) delete process.env.CI_TELEMETRY_SHARD;
+    else process.env.CI_TELEMETRY_SHARD = previousShard;
     rmSync(directory, { recursive: true, force: true });
   }
 });

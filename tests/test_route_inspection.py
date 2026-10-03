@@ -32,6 +32,7 @@ def test_developer_route_inspection_is_opt_in_and_hidden_from_openapi(
     response = enabled.get("/_developer/routes")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+    assert response.json() == inspection_http_documents["documents"]["routes"]
     assert "/_developer/routes" not in enabled.get("/openapi.json").json()["paths"]
 
 

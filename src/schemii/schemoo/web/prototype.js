@@ -52,7 +52,7 @@ const previewRootHost = element("div", { className: "stack" });
 previewHost.after(previewRootHost);
 const previewLibrary = createPreviewLibrary({
   host: previewHost,
-  onPendingChange: refreshModelLibraryActions,
+  onPendingChange: () => { refreshModelLibraryActions(); save(); },
   getContext: () => ({ draft, catalog, definitionDirty: !!model && !!draft && changedParts(model, draft, $("model-name").value.trim()).definition }),
   isBlocked: () => busy || saving || conflicted || !model,
   applyExplore: explore => {
@@ -101,10 +101,11 @@ function renderObjectSourceIssues(){
   const section=element("section",{className:"editor-section source-change-section",attrs:{id:"object-source-issues"}},[helpHeading("Source changes","drift"),...relevant.map(sourceIssueNotice)]);
   $("selection-inspector").prepend(section);
 }
+function saveBlocked() { return saving || busy || conflicted || previewLibrary.isPending(); }
 function save() {
   if (!model || !draft) return;
   dirty = Object.values(changedParts(model, draft, $("model-name").value.trim(), initialLayout)).some(Boolean);
-  $("save-model").disabled = saving || conflicted || !dirty;
+  $("save-model").disabled = saveBlocked() || !dirty;
   $("draft-status").textContent = conflicted ? "Save conflict · reload to continue" : saving ? "Saving model…" : dirty ? "Unsaved changes" : `Saved · revision ${model.revision} · read-only preview`;
   previewLibrary.render();
 }
@@ -562,6 +563,7 @@ async function run(analyze = null) {
   // A click event is not an analysis request.
   if (typeof analyze !== "boolean") analyze = null;
   busy = true; $("model-shell").inert = true; document.querySelector(".topbar").inert = true; $("run").disabled = true; explainQuery.disabled = true; analyzeQuery.disabled = true;
+  save();
   queryController = new AbortController(); stopQuery.hidden = false; stopQuery.disabled = false;
   showError(); dock("results");
   const started = Date.now();
@@ -595,6 +597,7 @@ async function run(analyze = null) {
     $("results").replaceChildren(element("p", {className:"empty",text:error.message}));
   } finally {
     clearInterval(timer); $("model-shell").inert = false; document.querySelector(".topbar").inert = false; busy = false; queryController = null; stopQuery.hidden = true;
+    save();
     $("run").disabled = !plan; explainQuery.disabled = !plan; analyzeQuery.disabled = !plan;
   }
 }
@@ -727,7 +730,7 @@ async function loadModel(id) {
 }
 
 async function saveModel() {
-  if (!model || saving || busy || conflicted || previewLibrary.isPending()) return;
+  if (!model || saveBlocked()) return;
   if (!$("model-name").value.trim()) { showError("Give the model a name before saving."); $("model-name").focus(); return; }
   saving=true; $("workbench").inert=true; $("model-name").disabled=true; save(); showError();
   const parts=splitDraft(draft), differences=changedParts(model,draft,$("model-name").value.trim(),initialLayout);

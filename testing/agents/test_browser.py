@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import selectors
 import stat
 import subprocess
 import sys
@@ -527,13 +528,64 @@ class GuardianProcessTests(ArtifactFixture):
         script = f"""
 import importlib.util
 from pathlib import Path
-import sys
+import json, os, sys
 spec = importlib.util.spec_from_file_location('stub_browser', {str(Path(browser.__file__))!r})
 browser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser)
 browser.REPOSITORY_ROOT = Path(sys.argv[1])
 browser.shutil.which = lambda name: sys.executable
 browser.command = lambda npx, chromium, output: [sys.executable, '-c', {child!r}, str(output)]
+# Exercise real process ownership and escalation without spending the production
+# grace period in every default test run. The requested grace is still asserted.
+original_wait = browser.subprocess.Popen.wait
+def observed_wait(process, timeout=None):
+    if timeout != 5:
+        return original_wait(process, timeout=timeout)
+    evidence = {{'pid': process.pid, 'requested_timeout': timeout, 'timed_out': False}}
+    try:
+        return original_wait(process, timeout=0.05)
+    except browser.subprocess.TimeoutExpired:
+        evidence['timed_out'] = True
+        raise
+    finally:
+        receipt = browser.REPOSITORY_ROOT / 'shutdown-grace.json'
+        attempts = json.loads(receipt.read_text()) if receipt.exists() else []
+        attempts.append(evidence)
+        receipt.write_text(json.dumps(attempts))
+browser.subprocess.Popen.wait = observed_wait
+
+original_guard = browser._guard_session
+def observed_guard(session):
+    original_sleep = browser.time.sleep
+    original_birth_tick = browser.process_birth_tick
+    observed_owners = {{}}
+    def observed_birth_tick(pid):
+        tick = original_birth_tick(pid)
+        if pid in (session.metadata['pid'], session.metadata['child_pid']):
+            observed_owners[pid] = tick
+        return tick
+    browser.process_birth_tick = observed_birth_tick
+    def observed_poll(seconds):
+        if seconds != 1:
+            raise AssertionError('Production guardian polling policy changed')
+        if (observed_owners.get(session.metadata['pid'], -1) is None
+            and observed_owners.get(session.metadata['child_pid'])
+                == session.metadata['child_birth_tick']):
+            # This acknowledgment occurs after the actual guardian's ownership
+            # decision, while the captured stdio child still holds its context.
+            observed = browser.REPOSITORY_ROOT / 'guardian-owner-observed.json'
+            if not observed.exists():
+                temporary = observed.with_suffix('.tmp')
+                temporary.write_text(json.dumps({{
+                    'guardian_pid': os.getpid(),
+                    'child_pid': session.metadata['child_pid'],
+                    'child_birth_tick': session.metadata['child_birth_tick']}}))
+                temporary.replace(observed)
+        observed_owners.clear()
+        original_sleep(0.02)
+    browser.time.sleep = observed_poll
+    original_guard(session)
+browser._guard_session = observed_guard
 if not {guardian!r}:
     browser._start_guardian = lambda session: None
 raise SystemExit(browser.main([]))
@@ -616,13 +668,9 @@ raise SystemExit(browser.main([]))
             self.assertFalse(target.startswith(("pipe:", "socket:")))
         os.killpg(process.pid, browser.signal.SIGKILL)
         process.wait(timeout=5)
-        # The captured child still owns the connection until its inherited stdin closes.
-        time.sleep(1.1)
-        self.assertTrue((path / "output" / "temporary.dat").exists())
-        self.assertEqual(
-            browser.process_birth_tick(guardian), metadata["guardian_birth_tick"]
-        )
-        process.stdin.close()
+        # The backend's private pipe closes with its relay owner even while the
+        # caller's upstream transport remains open; no inherited descriptor leaks.
+        self.assertFalse(process.stdin.closed)
         self.wait_for(
             lambda: not path.exists(), "Guardian did not remove ended connection output"
         )
@@ -653,6 +701,14 @@ raise SystemExit(browser.main([]))
         process.terminate()
         self.assertEqual(process.wait(timeout=7), 143)
         self.assertLess(time.monotonic() - started, 7)
+        self.assertEqual(
+            json.loads((self.repository / "shutdown-grace.json").read_text())[0],
+            {
+                "pid": metadata["child_pid"],
+                "requested_timeout": 5,
+                "timed_out": True,
+            },
+        )
         self.assertFalse(path.exists())
         self.assertIsNone(browser.process_birth_tick(metadata["child_pid"]))
         self.assertFalse(Path(f"/proc/{metadata['guardian_pid']}").exists())
@@ -700,7 +756,20 @@ class LauncherTests(unittest.TestCase):
         ).start()
         self.popen = mock.patch.object(browser.subprocess, "Popen").start()
         self.process = self.popen.return_value
-        self.process.pid = os.getpid()
+        # A Popen fake must never borrow pytest's real session/group identity.
+        # Launcher controls use synthetic ownership; real group lifecycle belongs
+        # to the separate faithful subprocess regressions.
+        self.process.pid = 2**30
+        real_birth_tick = browser.process_birth_tick
+        mock.patch.object(
+            browser,
+            "process_birth_tick",
+            side_effect=lambda pid: (
+                123456 if pid == self.process.pid else real_birth_tick(pid)
+            ),
+        ).start()
+        mock.patch.object(browser.os, "getsid", return_value=2**30 + 1).start()
+        mock.patch.object(browser.os, "getpgid", return_value=2**30 + 2).start()
         self.process.wait.return_value = 0
         self.process.poll.return_value = 0
         self.umask = mock.patch.object(browser.os, "umask").start()
@@ -710,6 +779,18 @@ class LauncherTests(unittest.TestCase):
             browser, "_start_guardian", return_value=12346
         ).start()
         self.stop_guardian = mock.patch.object(browser, "_stop_guardian").start()
+        self.relay = mock.patch.object(
+            browser, "relay", side_effect=self.wait_transport
+        ).start()
+
+    def wait_transport(self, backend):
+        # Ownership/launcher controls mock only the transport seam. Real relay
+        # framing, callbacks and lifecycle are covered by subprocess tests below.
+        while True:
+            try:
+                return backend.process.wait(timeout=browser.OUTPUT_SWEEP_SECONDS)
+            except subprocess.TimeoutExpired:
+                browser.expire_output(backend.session, time.time())
 
     def launch(self, args=None):
         with (
@@ -766,8 +847,8 @@ class LauncherTests(unittest.TestCase):
             self.popen.call_args.kwargs,
             {
                 "env": mock.ANY,
-                "stdin": None,
-                "stdout": None,
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
                 "stderr": None,
                 "start_new_session": True,
             },
@@ -779,7 +860,10 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(self.output().parent.exists())
         self.assertEqual(self.stdout.getvalue(), "")
         self.assertEqual(self.stderr.getvalue(), "")
-        self.assertEqual(self.signals.call_count, 6)
+        self.assertEqual(
+            {call.args[0] for call in self.signals.call_args_list},
+            {browser.signal.SIGINT, browser.signal.SIGTERM},
+        )
         self.guardian.assert_called_once()
         self.stop_guardian.assert_called_once_with(12346)
 
@@ -913,6 +997,731 @@ class LauncherTests(unittest.TestCase):
                 self.assertFalse((self.repository / "artifacts").exists())
         self.assertEqual(self.stdout.getvalue(), "")
         self.assertIn("accepts no arguments", self.stderr.getvalue())
+
+
+class RelayProcessTests(ArtifactFixture):
+    """Use real stdio/process ownership; the backend speaks the pinned MCP framing."""
+
+    def launch(self, roots=False):
+        backend_code = r"""
+import json, os, signal, subprocess, sys
+from pathlib import Path
+output = Path(sys.argv[1])
+pending = {}
+client_initialized = False
+def send(message):
+    print(json.dumps(message, separators=(',', ':')), flush=True)
+def result(identity, payload):
+    send({'jsonrpc':'2.0','id':identity,'result':payload})
+def initialized(identity):
+    result(identity, {'protocolVersion':'2024-11-05',
+        'capabilities':{'tools':{}},'serverInfo':{'name':'owned-fake','version':'1'}})
+for raw in sys.stdin.buffer:
+    message = json.loads(raw)
+    method = message.get('method')
+    if method == 'initialize':
+        if 'roots' in message['params'].get('capabilities', {}):
+            pending[7] = ('initialize', message['id'])
+            send({'jsonrpc':'2.0','id':7,'method':'roots/list'})
+        elif (output.parents[3] / 'incompatible').exists():
+            result(message['id'], {'protocolVersion':'wrong','capabilities':{}})
+        else:
+            initialized(message['id'])
+    elif method == 'notifications/initialized':
+        client_initialized = True
+    elif method == 'ping':
+        if message['id'] == 'launch-ready':
+            (output / 'launch-ready.json').write_text(json.dumps({'initialized':client_initialized}))
+        result(message['id'], {})
+    elif method == 'tools/list':
+        result(message['id'], {'tools':[{'name':'browser_close','inputSchema':{'type':'object'}}]})
+    elif method == 'tools/call':
+        name = message['params']['name']
+        (output / 'calls.jsonl').open('a').write(json.dumps({'id':message['id'],'name':name})+'\n')
+        args = message['params'].get('arguments', {})
+        if name == 'hold':
+            pending[8] = ('hold', message['id'])
+            send({'jsonrpc':'2.0','id':8,'method':'roots/list'})
+        elif name == 'crash':
+            raise SystemExit(9)
+        elif name == 'browser_close' and args.get('mode') == 'late':
+            pending[9] = ('late', message['id'])
+            send({'jsonrpc':'2.0','method':'notifications/message','params':{'level':'info','data':'close pending'}})
+        elif name == 'browser_close' and args.get('mode') == 'rpc-error':
+            send({'jsonrpc':'2.0','id':message['id'],'error':{'code':-32603,'message':'original failure'}})
+        elif name == 'browser_close' and args.get('mode') in ('tool-error', 'malformed'):
+            result(message['id'], {'content':[], 'isError':True if args['mode']=='tool-error' else 1})
+        else:
+            if name == 'descendant':
+                ready = output / 'descendant.ready'
+                child = subprocess.Popen([sys.executable,'-c',
+                    'import signal,time,sys;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path(sys.argv[1]).touch();time.sleep(60)', str(ready)])
+                import time
+                while not ready.exists():
+                    time.sleep(.01)
+                (output / 'descendant.pid').write_text(str(child.pid))
+            if name == 'browser_close' and args.get('mode') == 'unsafe':
+                output.parent.chmod(0o755)
+            result(message['id'], {'content':[{'type':'image','data':'AAEC','mimeType':'image/png'}]})
+    elif method == 'notifications/cancelled' and 9 in pending:
+        _, identity = pending.pop(9)
+        result(identity, {'content':[]})
+    elif method is None:
+        kind, identity = pending.pop(message['id'])
+        if kind == 'initialize':
+            initialized(identity)
+        else:
+            send({'jsonrpc':'2.0','method':'notifications/message','params':{'level':'info','data':'owned notification'}})
+            result(identity, {'content':[]})
+"""
+        script = f"""
+import importlib.util, sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('owned_browser',{str(Path(browser.__file__))!r})
+browser=importlib.util.module_from_spec(spec);spec.loader.exec_module(browser)
+browser.REPOSITORY_ROOT=Path(sys.argv[1])
+browser.shutil.which=lambda name:sys.executable
+browser.command=lambda npx,chromium,output:[sys.executable,'-u','-c',{backend_code!r},str(output)]
+raise SystemExit(browser.main([]))
+"""
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", script, str(self.repository)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self.process = process
+        self.frames = browser.Frames()
+        self.messages = []
+        self.addCleanup(self.stop, process)
+        self.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"roots": {}} if roots else {},
+                    "clientInfo": {"name": "focused-test", "version": "1"},
+                },
+            }
+        )
+        if roots:
+            callback = self.receive(
+                lambda message: message.get("method") == "roots/list"
+            )
+            self.send({"jsonrpc": "2.0", "id": callback["id"], "result": {"roots": []}})
+        self.receive(lambda message: message.get("id") == 1)
+        self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        # A sent notification may still be queued when release arrives. Its
+        # following backend ping response proves the initialization traffic drained.
+        self.send({"jsonrpc": "2.0", "id": "launch-ready", "method": "ping"})
+        ready = self.receive(lambda message: message.get("id") == "launch-ready")
+        self.assertEqual(ready["result"], {})
+        return self.session()
+
+    def stop(self, process):
+        if process.poll() is None:
+            process.stdin.close()
+            try:
+                process.wait(timeout=7)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        for handle in (process.stdin, process.stdout, process.stderr):
+            if not handle.closed:
+                handle.close()
+
+    def send(self, message):
+        self.process.stdin.write(browser.Relay.encoded(message))
+        self.process.stdin.flush()
+
+    def call(self, identity, name, arguments=None):
+        self.send(
+            {
+                "jsonrpc": "2.0",
+                "id": identity,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments or {}},
+            }
+        )
+
+    def receive(self, predicate, timeout=5):
+        deadline = time.monotonic() + timeout
+        with selectors.DefaultSelector() as reader:
+            reader.register(self.process.stdout, selectors.EVENT_READ)
+            while time.monotonic() < deadline:
+                for index, message in enumerate(self.messages):
+                    if predicate(message):
+                        return self.messages.pop(index)
+                if not reader.select(timeout=0.05):
+                    continue
+                data = os.read(self.process.stdout.fileno(), 65536)
+                if not data:
+                    self.fail(self.process.stderr.read().decode())
+                self.messages.extend(
+                    message for message, _ in self.frames.receive(data)
+                )
+        self.fail("Owned relay response did not arrive")
+
+    def session(self):
+        paths = list((self.repository / "artifacts/native-browsers").glob("session-*"))
+        self.assertEqual(len(paths), 1)
+        return paths[0], json.loads((paths[0] / "session.json").read_text())
+
+    def released(self, owned):
+        path, metadata = owned
+        self.assertFalse(path.exists())
+        for key in ("child", "guardian"):
+            self.assertIsNone(browser.process_birth_tick(metadata[f"{key}_pid"]))
+        self.assertIsNone(self.process.poll(), "The native endpoint must remain alive")
+
+    def test_launch_observes_backend_initialized_notification_before_returning(self):
+        owned = self.launch(roots=True)
+        self.assertEqual(
+            json.loads((owned[0] / "output/launch-ready.json").read_text()),
+            {"initialized": True},
+        )
+        self.assertFalse((owned[0] / "output/calls.jsonl").exists())
+
+    def test_close_releases_generation_inline_images_then_same_endpoint_reinitializes(
+        self,
+    ):
+        owned = self.launch()
+        peer = browser.create_session(self.repository)
+        marker = peer.path / "output/peer.dat"
+        marker.write_text("live peer")
+        self.call("7", "navigate")
+        image = self.receive(lambda message: message.get("id") == "7")
+        self.assertEqual(image["result"]["content"][0]["data"], "AAEC")
+        exported = self.repository / "selected-evidence.json"
+        exported.write_text(json.dumps(image))
+        self.call(7, "browser_close")
+        self.receive(lambda message: message.get("id") == 7)
+        self.assertFalse(owned[0].exists())
+        self.assertEqual(exported.read_text(), json.dumps(image))
+        self.assertEqual(marker.read_text(), "live peer")
+        self.send({"jsonrpc": "2.0", "id": "ping", "method": "ping"})
+        self.assertEqual(
+            self.receive(lambda message: message.get("id") == "ping")["result"], {}
+        )
+        self.assertFalse(owned[0].exists())
+        self.call(8, "navigate")
+        self.receive(lambda message: message.get("id") == 8)
+        paths = list((self.repository / "artifacts/native-browsers").glob("session-*"))
+        paths.remove(peer.path)
+        self.assertEqual(len(paths), 1)
+        self.assertNotEqual(paths[0], owned[0])
+        self.call(9, "browser_close")
+        self.receive(lambda message: message.get("id") == 9)
+        self.assertFalse(paths[0].exists())
+
+    def test_release_inventory_and_active_owned_transport_exit(self):
+        owned = self.launch()
+        self.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = self.receive(lambda message: message.get("id") == 2)["result"]["tools"]
+        self.assertEqual(
+            [tool["name"] for tool in tools], ["browser_close", "browser_release"]
+        )
+        self.assertEqual(
+            tools[1]["inputSchema"],
+            {"type": "object", "properties": {}, "additionalProperties": False},
+        )
+        peer = browser.create_session(self.repository)
+        marker = peer.path / "output/peer.txt"
+        marker.write_text("live peer")
+        self.addCleanup(browser.cleanup_session, peer)
+        self.call("release", "browser_release")
+        response = self.receive(lambda message: message.get("id") == "release")
+        self.assertIs(response["result"]["isError"], False)
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertFalse(owned[0].exists())
+        for key in ("pid", "child_pid", "guardian_pid"):
+            self.assertIsNone(browser.process_birth_tick(owned[1][key]))
+        self.assertEqual(self.process.stdout.read(), b"")
+        self.assertEqual(marker.read_text(), "live peer")
+
+    def test_release_dormant_endpoint_without_backend_reallocation(self):
+        owned = self.launch()
+        self.call(2, "browser_close")
+        self.receive(lambda message: message.get("id") == 2)
+        self.released(owned)
+        self.call(3, "browser_release")
+        self.assertIs(
+            self.receive(lambda message: message.get("id") == 3)["result"]["isError"],
+            False,
+        )
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertEqual(list(owned[0].parent.glob("session-*")), [])
+
+    def test_release_busy_callback_rejects_without_cancelling_or_replaying_work(self):
+        owned = self.launch(roots=True)
+        self.call(2, "hold")
+        callback = self.receive(lambda message: message.get("method") == "roots/list")
+        self.call(3, "browser_release")
+        self.assertIn(
+            "busy",
+            self.receive(lambda message: message.get("id") == 3)["error"]["message"],
+        )
+        self.assertTrue(owned[0].exists())
+        self.assertIsNone(self.process.poll())
+        self.send({"jsonrpc": "2.0", "id": callback["id"], "result": {"roots": []}})
+        self.receive(lambda message: message.get("id") == 2)
+        calls = [
+            json.loads(line)
+            for line in (owned[0] / "output/calls.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(calls, [{"id": 2, "name": "hold"}])
+        self.call(4, "browser_release")
+        self.receive(lambda message: message.get("id") == 4)
+        self.assertEqual(self.process.wait(timeout=5), 0)
+
+    def test_release_cleanup_failure_is_one_error_without_false_success(self):
+        owned = self.launch()
+        owned[0].chmod(0o755)
+        self.call(2, "browser_release")
+        response = self.receive(lambda message: message.get("id") == 2)
+        self.assertIn("could not be released", response["error"]["message"])
+        self.assertEqual(self.process.wait(timeout=5), 2)
+        self.assertEqual(self.process.stdout.read(), b"")
+        self.assertTrue(owned[0].exists())
+
+    def test_close_barrier_drains_callbacks_and_never_kills_queued_navigation(self):
+        owned = self.launch(roots=True)
+        self.call("8", "hold")
+        callback = self.receive(lambda message: message.get("method") == "roots/list")
+        self.call(2, "browser_close")
+        self.call(3, "navigate")
+        self.send({"jsonrpc": "2.0", "id": callback["id"], "result": {"roots": []}})
+        self.receive(lambda message: message.get("id") == "8")
+        self.receive(lambda message: message.get("id") == 2)
+        self.assertFalse(owned[0].exists())
+        callback = self.receive(lambda message: message.get("method") == "roots/list")
+        self.send({"jsonrpc": "2.0", "id": callback["id"], "result": {"roots": []}})
+        self.receive(lambda message: message.get("id") == 3)
+        fresh, _ = self.session()
+        calls = [
+            json.loads(line)
+            for line in (fresh / "output/calls.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(calls, [{"id": 3, "name": "navigate"}])
+        self.assertTrue(
+            any(
+                message.get("method") == "notifications/message"
+                for message in self.messages
+            )
+        )
+
+    def test_failed_or_malformed_close_and_cancelled_late_success_never_release(self):
+        owned = self.launch()
+        for identity, mode in enumerate(("rpc-error", "tool-error", "malformed"), 2):
+            self.call(identity, "browser_close", {"mode": mode})
+            response = self.receive(lambda message: message.get("id") == identity)
+            self.assertTrue(owned[0].exists())
+            if mode == "rpc-error":
+                self.assertEqual(response["error"]["message"], "original failure")
+            else:
+                self.assertEqual(
+                    response["result"]["isError"], True if mode == "tool-error" else 1
+                )
+        self.call(5, "browser_close", {"mode": "late"})
+        self.receive(
+            lambda message: message.get("params", {}).get("data") == "close pending"
+        )
+        self.send(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 5},
+            }
+        )
+        self.assertEqual(
+            self.receive(lambda message: message.get("id") == 5)["result"],
+            {"content": []},
+        )
+        self.assertTrue(owned[0].exists())
+
+    def test_cancellation_of_queued_navigation_does_not_execute_it(self):
+        owned = self.launch()
+        self.call(2, "hold")
+        callback = self.receive(lambda message: message.get("method") == "roots/list")
+        self.call(3, "browser_close")
+        self.call(4, "navigate")
+        self.send(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 4},
+            }
+        )
+        self.assertEqual(
+            self.receive(lambda message: message.get("id") == 4)["error"]["code"],
+            -32800,
+        )
+        self.send({"jsonrpc": "2.0", "id": callback["id"], "result": {"roots": []}})
+        self.receive(lambda message: message.get("id") == 2)
+        self.receive(lambda message: message.get("id") == 3)
+        self.released(owned)
+        self.assertEqual(
+            list((self.repository / "artifacts/native-browsers").glob("session-*")), []
+        )
+
+    def test_cleanup_failure_returns_one_explicit_error_preserving_unsafe_output(self):
+        owned = self.launch()
+        self.call(2, "browser_close", {"mode": "unsafe"})
+        response = self.receive(lambda message: message.get("id") == 2)
+        self.assertIn("could not be released", response["error"]["message"])
+        self.assertEqual(self.process.wait(timeout=5), 2)
+        self.assertEqual(self.process.stdout.read(), b"")
+        self.assertTrue(owned[0].exists())
+
+    def test_backend_crash_returns_failure_without_replaying_call(self):
+        self.launch()
+        self.call(2, "crash")
+        self.assertIn(
+            "not replayed",
+            self.receive(lambda message: message.get("id") == 2)["error"]["message"],
+        )
+        self.assertEqual(self.process.wait(timeout=5), 2)
+        self.assertEqual(
+            list((self.repository / "artifacts/native-browsers").glob("session-*")), []
+        )
+
+    def test_incompatible_private_initialize_fails_without_forwarding_followup(self):
+        owned = self.launch()
+        self.call(2, "browser_close")
+        self.receive(lambda message: message.get("id") == 2)
+        self.released(owned)
+        (self.repository / "incompatible").touch()
+        self.call(3, "navigate")
+        self.assertIn(
+            "not replayed",
+            self.receive(lambda message: message.get("id") == 3)["error"]["message"],
+        )
+        self.assertEqual(self.process.wait(timeout=5), 2)
+
+    def test_descendant_ignoring_term_is_gone_before_close_success(self):
+        owned = self.launch()
+        self.call(2, "descendant")
+        self.receive(lambda message: message.get("id") == 2)
+        descendant = int((owned[0] / "output/descendant.pid").read_text())
+        self.assertIsNotNone(browser.process_birth_tick(descendant))
+        self.call(3, "browser_close")
+        self.receive(lambda message: message.get("id") == 3, timeout=12)
+        self.released(owned)
+        self.assertIsNone(browser.process_birth_tick(descendant))
+
+    def test_signal_during_release_finishes_owned_teardown_before_endpoint_exit(self):
+        owned = self.launch()
+        self.call(2, "descendant")
+        self.receive(lambda message: message.get("id") == 2)
+        descendant = int((owned[0] / "output/descendant.pid").read_text())
+        self.call(3, "browser_close")
+        deadline = time.monotonic() + 3
+        while browser.process_birth_tick(owned[1]["child_pid"]) is not None:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        # Leader exited, ignoring descendant remains: interruption hits release.
+        self.assertIsNotNone(browser.process_birth_tick(descendant))
+        self.process.terminate()
+        self.assertEqual(self.process.wait(timeout=12), 143)
+        self.assertFalse(owned[0].exists())
+        self.assertIsNone(browser.process_birth_tick(descendant))
+        self.assertIsNone(browser.process_birth_tick(owned[1]["guardian_pid"]))
+
+    def test_eof_while_dormant_and_signal_while_privately_initializing_clean_ownership(
+        self,
+    ):
+        owned = self.launch(roots=True)
+        self.call(2, "browser_close")
+        self.receive(lambda message: message.get("id") == 2)
+        self.released(owned)
+        self.call(3, "navigate")
+        self.receive(lambda message: message.get("method") == "roots/list")
+        initializing = self.session()
+        self.process.terminate()
+        self.assertEqual(self.process.wait(timeout=5), 143)
+        self.assertFalse(initializing[0].exists())
+        self.assertIsNone(browser.process_birth_tick(initializing[1]["child_pid"]))
+        self.assertIsNone(browser.process_birth_tick(initializing[1]["guardian_pid"]))
+
+        # Another isolated endpoint reaches dormant state then shuts down by EOF.
+        self.launch()
+        self.call(2, "browser_close")
+        self.receive(lambda message: message.get("id") == 2)
+        self.process.stdin.close()
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertEqual(
+            list((self.repository / "artifacts/native-browsers").glob("session-*")), []
+        )
+
+
+class RelayFrameTests(unittest.TestCase):
+    def test_split_and_multiple_frames_preserve_original_bytes_and_typed_ids(self):
+        frames = browser.Frames()
+        first = b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n'
+        second = b'{"jsonrpc":"2.0","id":"1","method":"ping"}\n'
+        self.assertEqual(list(frames.receive(first[:12])), [])
+        parsed = list(frames.receive(first[12:] + second))
+        self.assertEqual([raw for _, raw in parsed], [first, second])
+        self.assertNotEqual(
+            browser._request_id(parsed[0][0]), browser._request_id(parsed[1][0])
+        )
+
+    def test_malformed_and_oversized_frames_fail_with_fixed_errors(self):
+        for value in (
+            b"not-json\n",
+            b"[]\n",
+            b'{"jsonrpc":"2.0","id":true,"method":"ping"}\n',
+        ):
+            with self.subTest(value=value), self.assertRaises(browser.ProtocolError):
+                list(browser.Frames().receive(value))
+        with mock.patch.object(browser, "MAX_MESSAGE_BYTES", 8):
+            for value in (b"x" * 9, b"x" * 9 + b"\n"):
+                with self.assertRaises(browser.ProtocolError):
+                    list(browser.Frames().receive(value))
+
+    def make_relay(self):
+        incoming, writer = os.pipe()
+        reader, outgoing = os.pipe()
+        for descriptor in (incoming, writer, reader, outgoing):
+            self.addCleanup(os.close, descriptor)
+        backend = mock.Mock()
+        backend.process = None
+        relay = browser.Relay(backend, incoming, outgoing)
+        self.addCleanup(relay.selector.close)
+        return relay, reader
+
+    def test_private_initialize_ids_avoid_client_collision_and_never_leak(self):
+        relay, _ = self.make_relay()
+        collision = "schemii-private-" + "a" * 32
+        request = {"jsonrpc": "2.0", "id": collision, "method": "tools/list"}
+        relay.requests[(str, collision)] = "tools/list"
+        relay.deferred = [(request, relay.encoded(request))]
+        relay.initialize = {"protocolVersion": "2024-11-05", "capabilities": {}}
+        relay.identity = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": {"name": "fake"},
+        }
+        relay.initialized = relay.encoded(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        )
+        with mock.patch.object(
+            browser.secrets, "token_hex", side_effect=["a" * 32, "b" * 32]
+        ):
+            relay.progress()
+        self.assertEqual(relay.private_id, (str, "schemii-private-" + "b" * 32))
+        response = {
+            "jsonrpc": "2.0",
+            "id": relay.private_id[1],
+            "result": relay.identity,
+        }
+        relay.server(response, relay.encoded(response))
+        self.assertEqual(relay.to_client, b"")
+        self.assertIsNone(relay.private_id)
+        self.assertEqual(relay.deferred[0][0], request)
+
+    def ready_for_release(self):
+        relay, reader = self.make_relay()
+        relay.backend.session = None
+        relay.identity = {"protocolVersion": "2024-11-05", "capabilities": {}}
+        relay.initialized = b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+        return relay, reader
+
+    def release_request(self, identity=1, **params):
+        return {
+            "jsonrpc": "2.0",
+            "id": identity,
+            "method": "tools/call",
+            "params": {"name": "browser_release", "arguments": {}, **params},
+        }
+
+    def test_release_rejects_target_and_malformed_arguments_without_cleanup(self):
+        for params in (
+            {"arguments": {"pid": 123}},
+            {"arguments": []},
+            {"arguments": None},
+            {"target": "peer"},
+            {"_meta": None},
+        ):
+            with self.subTest(params=params):
+                relay, _ = self.ready_for_release()
+                request = self.release_request(**params)
+                relay.client(request, relay.encoded(request))
+                self.assertEqual(json.loads(relay.to_client)["error"]["code"], -32602)
+                relay.backend.close.assert_not_called()
+                self.assertFalse(relay.releasing)
+
+    def test_release_rejects_each_unsafe_pending_boundary(self):
+        states = {
+            "identity": None,
+            "initialized": None,
+            "requests": {(int, 7): "tools/call"},
+            "inflight": {(int, 7): "tools/call"},
+            "callbacks": {(str, "root")},
+            "closing": [{"id": 7}, b"close", None, False],
+            "private_id": (str, "private"),
+            "deferred": [("pending", b"pending")],
+            "to_client": bytearray(b"pending"),
+            "to_backend": bytearray(b"pending"),
+        }
+        for name, value in states.items():
+            with self.subTest(name=name):
+                relay, _ = self.ready_for_release()
+                setattr(relay, name, value)
+                request = self.release_request()
+                relay.client(request, relay.encoded(request))
+                self.assertIn(b"busy", relay.to_client)
+                relay.backend.close.assert_not_called()
+                self.assertFalse(relay.releasing)
+        relay, _ = self.ready_for_release()
+        relay.backend_frames.buffer.extend(b'{"jsonrpc":')
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        self.assertIn(b"busy", relay.to_client)
+        relay.backend.close.assert_not_called()
+
+    def test_release_rejects_unread_backend_callback_before_frame_admission(self):
+        relay, _ = self.ready_for_release()
+        incoming, outgoing = os.pipe()
+        for descriptor in (incoming, outgoing):
+            self.addCleanup(os.close, descriptor)
+        relay.backend.process = mock.Mock(stdout=incoming)
+        os.write(outgoing, b'{"jsonrpc":"2.0","id":"root","method":"roots/list"}\n')
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        self.assertIn(b"busy", relay.to_client)
+        relay.backend.close.assert_not_called()
+
+    def test_release_drains_partial_writes_then_returns_without_backend_revival(self):
+        relay, reader = self.ready_for_release()
+        request = self.release_request(identity="release", _meta={"progressToken": 3})
+        relay.client(request, relay.encoded(request))
+        expected = bytes(relay.to_client)
+        self.assertTrue(relay.releasing)
+        relay.backend.close.assert_called_once_with()
+        original = os.write
+        with mock.patch.object(
+            browser.os, "write", side_effect=lambda fd, data: original(fd, data[:17])
+        ) as write:
+            self.assertEqual(relay.run(), 0)
+            self.assertGreater(write.call_count, 1)
+        self.assertEqual(os.read(reader, len(expected)), expected)
+        self.assertIs(json.loads(expected)["result"]["isError"], False)
+        relay.backend.start.assert_not_called()
+
+    def test_release_refuses_same_batch_followup_and_duplicate_without_replay(self):
+        relay, _ = self.ready_for_release()
+        request = self.release_request()
+        followup = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/call",
+            "params": {
+                "name": "browser_navigate",
+                "arguments": {"url": "data:text/html,owned"},
+            },
+        }
+        for message, raw in relay.client_frames.receive(
+            relay.encoded(request) + relay.encoded(followup) + relay.encoded(request)
+        ):
+            relay.client(message, raw)
+        relay.progress()
+        responses = [json.loads(line) for line in relay.to_client.splitlines()]
+        self.assertEqual([response["id"] for response in responses], [1, "1"])
+        self.assertIn("permanently released", responses[1]["error"]["message"])
+        self.assertEqual(relay.to_backend, b"")
+        self.assertEqual(relay.deferred, [])
+        relay.backend.start.assert_not_called()
+        relay.backend.close.assert_called_once_with()
+
+    def test_release_broken_output_is_failure_after_owned_cleanup(self):
+        relay, _ = self.ready_for_release()
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        with mock.patch.object(browser.os, "write", side_effect=BrokenPipeError):
+            with self.assertRaises(BrokenPipeError):
+                relay.run()
+        self.assertTrue(relay.to_client)
+        relay.backend.close.assert_called_once_with()
+        relay.backend.start.assert_not_called()
+
+    def test_release_stalled_output_is_bounded_and_does_not_restart_backend(self):
+        relay, _ = self.ready_for_release()
+        while True:
+            try:
+                os.write(relay.outgoing, b"x" * 65536)
+            except BlockingIOError:
+                break
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        started = time.monotonic()
+        with self.assertRaisesRegex(browser.ProtocolError, "fully flushed"):
+            relay.run()
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertTrue(relay.to_client)
+        relay.backend.close.assert_called_once_with()
+        relay.backend.start.assert_not_called()
+
+    def test_release_inventory_preserves_original_schema_and_rejects_collisions(self):
+        for tools in ([{"name": "browser_release"}], [None]):
+            relay, _ = self.ready_for_release()
+            relay.inflight[(int, 1)] = "tools/list"
+            relay.requests[(int, 1)] = "tools/list"
+            message = {"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}}
+            with self.assertRaises(browser.ProtocolError):
+                relay.server(message, relay.encoded(message))
+            self.assertEqual(relay.to_client, b"")
+
+    def test_failure_flush_is_bounded_when_upstream_stops_reading(self):
+        relay, _ = self.make_relay()
+        while True:
+            try:
+                os.write(relay.outgoing, b"x" * 65536)
+            except BlockingIOError:
+                break
+        relay.error((int, 1), "fixed transport failure")
+        started = time.monotonic()
+        relay.flush_failure()
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertTrue(relay.to_client)
+
+    def test_pending_and_byte_budgets_fail_before_unbounded_admission(self):
+        relay, _ = self.make_relay()
+        with mock.patch.object(browser, "MAX_RELAY_BYTES", 8):
+            with self.assertRaises(browser.ProtocolError):
+                relay.queue(relay.to_client, b"x" * 9)
+        relay.to_client.clear()
+        with mock.patch.object(browser, "MAX_PENDING_REQUESTS", 1):
+            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+            relay.client(request, relay.encoded(request))
+            request["id"] = 2
+            with self.assertRaises(browser.ProtocolError):
+                relay.client(request, relay.encoded(request))
+
+    def test_departed_live_descendant_cannot_authorize_a_reused_group(self):
+        process = mock.Mock(pid=123)
+        process._schemii_group = {12: 50}
+        with (
+            mock.patch.object(browser.os, "listdir", return_value=["12", "123"]),
+            mock.patch.object(
+                browser,
+                "process_birth_tick",
+                side_effect=lambda pid: 50 if pid == 12 else 60,
+            ),
+            mock.patch.object(
+                browser.os, "getpgid", side_effect=lambda pid: 999 if pid == 12 else 123
+            ),
+            mock.patch.object(
+                browser.os, "getsid", side_effect=lambda pid: 999 if pid == 12 else 123
+            ),
+            mock.patch.object(browser.os, "killpg") as kill,
+        ):
+            with self.assertRaises(browser.ArtifactError):
+                browser._stop_child(process)
+        kill.assert_not_called()
 
 
 if __name__ == "__main__":

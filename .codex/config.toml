@@ -18,7 +18,7 @@ startup_timeout_sec = 30
 tool_timeout_sec = 60
 # Normal browser inputs and evidence only. No arbitrary JavaScript or page APIs.
 enabled_tools = [
-  "browser_close", "browser_resize", "browser_console_messages",
+  "browser_close", "browser_release", "browser_resize", "browser_console_messages",
   "browser_handle_dialog", "browser_emulate_media", "browser_file_upload",
   "browser_drop", "browser_find", "browser_fill_form", "browser_press_key",
   "browser_type", "browser_mouse_move_xy", "browser_mouse_click_xy",

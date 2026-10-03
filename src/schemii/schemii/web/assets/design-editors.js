@@ -26,9 +26,89 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     renderTypesBrowser,
     renderFunctionsBrowser,
     selectedDesignTable,
+    askConfirmation,
   } = helpers;
 
   const editorIds = { view: null, type: null, routine: null, trigger: null };
+  const editors = {
+    view: {
+      dialog: elements.designViewDialog,
+      read: () => [elements.designViewName.value, elements.designViewKind.value,
+        elements.designViewDefinition.value,
+        elements.designViewKind.value === "materialized_view" ? elements.designViewPopulate.checked : null],
+    },
+    type: { dialog: elements.designTypeDialog, read: () => [elements.designTypeDefinition.value] },
+    routine: { dialog: elements.designRoutineDialog, read: () => [elements.designRoutineDefinition.value] },
+    trigger: { dialog: elements.designTriggerDialog, read: () => [elements.designTriggerDefinition.value] },
+  };
+  const savedDrafts = new Map();
+  let discardPending = false;
+  const draftSnapshot = kind => JSON.stringify(editors[kind].read());
+  const hasDraft = kind => editors[kind].dialog.open
+    && savedDrafts.has(kind) && savedDrafts.get(kind) !== draftSnapshot(kind);
+
+  function resetEditor(kind) {
+    savedDrafts.delete(kind);
+    draftAnalysis[kind].reset();
+    editorIds[kind] = null;
+  }
+
+  function discardDrafts(kinds = Object.keys(editors)) {
+    for (const kind of kinds) {
+      resetEditor(kind);
+      if (editors[kind].dialog.open) editors[kind].dialog.close();
+    }
+  }
+
+  async function requestDiscardDrafts(kinds = Object.keys(editors)) {
+    if (state.designSubmitting) {
+      showToast("Wait for the design save to finish before leaving the editor.");
+      return false;
+    }
+    if (discardPending) return false;
+    const dirty = kinds.filter(hasDraft);
+    if (dirty.length) {
+      discardPending = true;
+      const discard = await new Promise(resolve => askConfirmation({
+        title: "Discard unsaved changes?",
+        message: `Your unsaved ${dirty.join(", ")} ${dirty.length === 1 ? "draft has" : "drafts have"} not been saved to this design. Keep editing to preserve your changes.`,
+        label: "Discard changes",
+        cancelLabel: "Keep editing",
+        callback: () => resolve(true),
+        onCancel: () => resolve(false),
+      }));
+      discardPending = false;
+      if (!discard) return false;
+    }
+    discardDrafts(kinds);
+    return true;
+  }
+
+  function requestCloseDialog(dialog) {
+    const kind = Object.keys(editors).find(key => editors[key].dialog === dialog);
+    if (!kind) return false;
+    void requestDiscardDrafts([kind]);
+    return true;
+  }
+
+  function finishSavedDraft(kind, submittedDraft, objectId) {
+    savedDrafts.set(kind, submittedDraft);
+    // Edits made during the request belong to the next save.
+    if (hasDraft(kind)) {
+      editorIds[kind] = objectId;
+      const label = kind[0].toUpperCase() + kind.slice(1);
+      elements[`saveDesign${label}Button`].textContent = `Save ${kind}`;
+      elements[`design${label}Title`].textContent = `Edit ${kind}`;
+      replace(elements[`design${label}Status`], element("span", {
+        text: "The submitted draft was saved. Your newer changes still need to be saved.",
+      }));
+      return false;
+    }
+    resetEditor(kind);
+    editors[kind].dialog.close();
+    return true;
+  }
+
   let previewOutputOrdinal = null;
   const draftAnalysis = {
     view: createDraftAnalysisLifecycle({
@@ -100,13 +180,14 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     renderDesignViewPreview();
   }
 
-  function openDesignViewEditor(viewId = null) {
+  async function openDesignViewEditor(viewId = null) {
     if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
     const view = viewId ? state.design.content.views.find(item => item.id === viewId) : null;
     if (viewId && !view) {
       showToast("The selected view is no longer in this design.", { error: true });
       return;
     }
+    if (!await requestDiscardDrafts()) return;
     editorIds.view = view?.id || null;
     draftAnalysis.view.reset();
     previewOutputOrdinal = null;
@@ -125,6 +206,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
       ? `SELECT\n    *\nFROM ${quoteSqlIdentifier(firstTable.name)}`
       : "SELECT\n    1 AS example");
     updateDesignViewPopulation();
+    savedDrafts.set("view", draftSnapshot("view"));
     openDialog(elements.designViewDialog);
     renderDesignViewPreview();
     scheduleDesignViewPreview(0);
@@ -134,6 +216,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
   async function submitDesignView(event) {
     event.preventDefault();
     if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
+    const submittedDraft = draftSnapshot("view");
     const editing = Boolean(editorIds.view);
     let result;
     try {
@@ -148,17 +231,17 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
       replace(elements.designViewStatus, errorPanel(error));
       return;
     }
-    if (!await flushLayoutBeforeTransition()) return;
     state.designSubmitting = true;
     elements.saveDesignViewButton.disabled = true;
     updateDesignControls();
     replace(elements.designViewStatus, element("span", { text: "Validating the query and saving the desired view…" }));
     try {
+      if (!await flushLayoutBeforeTransition()) return;
       const design = await replaceActiveDesign(result.content, {
         selectedViewId: result.view.id,
       });
       if (!design) return;
-      elements.designViewDialog.close();
+      finishSavedDraft("view", submittedDraft, result.view.id);
       state.selectedViewOutputOrdinal = null;
       syncWorkspaceNavigation("replace");
       showToast(`${editing ? "Updated" : "Created"} ${result.view.name} in design revision ${design.revision}.`);
@@ -244,13 +327,14 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     });
   }
 
-  function openDesignTypeEditor(typeId = null) {
+  async function openDesignTypeEditor(typeId = null) {
     if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
     const designType = typeId ? (state.design.content.types || []).find(item => item.id === typeId) : null;
     if (typeId && !designType) {
       showToast("The selected type is no longer in this design.", { error: true });
       return;
     }
+    if (!await requestDiscardDrafts()) return;
     editorIds.type = designType?.id || null;
     draftAnalysis.type.reset();
     elements.designTypeForm.reset();
@@ -258,6 +342,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     elements.designTypeTitle.textContent = designType ? `Edit ${designType.name}` : "Create enum or domain";
     elements.saveDesignTypeButton.textContent = designType ? "Save type" : "Create type";
     elements.designTypeDefinition.value = designType?.definition || "CREATE TYPE order_status AS ENUM (\n    'draft',\n    'submitted',\n    'fulfilled',\n    'cancelled'\n);";
+    savedDrafts.set("type", draftSnapshot("type"));
     openDialog(elements.designTypeDialog);
     renderDesignTypePreview();
     scheduleDesignTypeAnalysis(0);
@@ -267,6 +352,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
   async function submitDesignType(event) {
     event.preventDefault();
     if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
+    const submittedDraft = draftSnapshot("type");
     const editing = Boolean(editorIds.type);
     const definition = elements.designTypeDefinition.value.trim();
     state.designSubmitting = true;
@@ -282,9 +368,9 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
       if (!await flushLayoutBeforeTransition()) return;
       const design = await replaceActiveDesign(result.content);
       if (!design) return;
-      elements.designTypeDialog.close();
+      const closed = finishSavedDraft("type", submittedDraft, result.designType.id);
       renderTypesBrowser();
-      openDialog(elements.typesDialog);
+      if (closed) openDialog(elements.typesDialog);
       showToast(`${editing ? "Updated" : "Created"} ${analysis.kind} ${analysis.name} in design revision ${design.revision}.`);
     } catch (error) {
       replace(elements.designTypeStatus, conflictPanel(error));
@@ -355,13 +441,14 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     });
   }
 
-  function openDesignRoutineEditor(routineId = null) {
+  async function openDesignRoutineEditor(routineId = null) {
     if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
     const routine = routineId ? state.design.content.functions.find(item => item.id === routineId) : null;
     if (routineId && !routine) {
       showToast("The selected routine is no longer in this design.", { error: true });
       return;
     }
+    if (!await requestDiscardDrafts()) return;
     editorIds.routine = routine?.id || null;
     draftAnalysis.routine.reset();
     elements.designRoutineForm.reset();
@@ -369,6 +456,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     elements.designRoutineTitle.textContent = routine ? `Edit ${routine.name}` : "Create function or procedure";
     elements.saveDesignRoutineButton.textContent = routine ? "Save routine" : "Create routine";
     elements.designRoutineDefinition.value = routine?.definition || "";
+    savedDrafts.set("routine", draftSnapshot("routine"));
     openDialog(elements.designRoutineDialog);
     renderDesignRoutinePreview();
     if (routine) scheduleDesignRoutineAnalysis(0);
@@ -378,6 +466,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
   async function submitDesignRoutine(event) {
     event.preventDefault();
     if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
+    const submittedDraft = draftSnapshot("routine");
     const editing = Boolean(editorIds.routine);
     const definition = elements.designRoutineDefinition.value.trim();
     state.designSubmitting = true;
@@ -393,9 +482,9 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
       if (!await flushLayoutBeforeTransition()) return;
       const design = await replaceActiveDesign(result.content);
       if (!design) return;
-      elements.designRoutineDialog.close();
+      const closed = finishSavedDraft("routine", submittedDraft, result.routine.id);
       renderFunctionsBrowser();
-      openDialog(elements.functionsDialog);
+      if (closed) openDialog(elements.functionsDialog);
       showToast(`${editing ? "Updated" : "Created"} ${routineSignature(analysis)} in design revision ${design.revision}.`);
     } catch (error) {
       replace(elements.designRoutineStatus, conflictPanel(error));
@@ -491,7 +580,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     ].join("\n");
   }
 
-  function openDesignTriggerEditor(triggerId = null, relationName = null) {
+  async function openDesignTriggerEditor(triggerId = null, relationName = null) {
     if (!isDesignWorkspace() || !state.design || state.catalogLoading) return;
     const trigger = triggerId ? (state.design.content.triggers || []).find(item => item.id === triggerId) : null;
     if (triggerId && !trigger) {
@@ -503,6 +592,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
       showToast("Create a table or view before adding a trigger.", { error: true });
       return;
     }
+    if (!await requestDiscardDrafts()) return;
     editorIds.trigger = trigger?.id || null;
     draftAnalysis.trigger.reset();
     elements.designTriggerForm.reset();
@@ -511,6 +601,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     elements.saveDesignTriggerButton.textContent = trigger ? "Save trigger" : "Create trigger";
     elements.deleteDesignTriggerButton.hidden = !trigger;
     elements.designTriggerDefinition.value = trigger?.definition || defaultTriggerDefinition(fallbackRelation);
+    savedDrafts.set("trigger", draftSnapshot("trigger"));
     openDialog(elements.designTriggerDialog);
     renderDesignTriggerPreview();
     scheduleDesignTriggerAnalysis(0);
@@ -520,6 +611,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
   async function submitDesignTrigger(event) {
     event.preventDefault();
     if (state.designSubmitting || !isDesignWorkspace() || !state.design) return;
+    const submittedDraft = draftSnapshot("trigger");
     const editing = Boolean(editorIds.trigger);
     const definition = elements.designTriggerDefinition.value.trim();
     state.designSubmitting = true;
@@ -538,7 +630,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
         selectedTableId: relationTable?.id || state.selectedTableId,
       });
       if (!design) return;
-      elements.designTriggerDialog.close();
+      finishSavedDraft("trigger", submittedDraft, result.trigger.id);
       showToast(`${editing ? "Updated" : "Created"} ${triggerIdentity(analysis)} in design revision ${design.revision}.`);
     } catch (error) {
       replace(elements.designTriggerStatus, conflictPanel(error));
@@ -555,6 +647,10 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
   }
 
   return {
+    get hasDraft() { return Object.keys(editors).some(hasDraft); },
+    requestDiscardDrafts,
+    discardDrafts,
+    requestCloseDialog,
     openDesignViewEditor,
     submitDesignView,
     confirmDeleteDesignView,
@@ -562,8 +658,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     scheduleDesignViewPreview,
     updateDesignViewPopulation,
     closeDesignViewEditor() {
-      draftAnalysis.view.reset();
-      editorIds.view = null;
+      if (!editors.view.dialog.open) resetEditor("view");
     },
     openDesignTypeEditor,
     submitDesignType,
@@ -571,8 +666,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     renderDesignTypePreview,
     scheduleDesignTypeAnalysis,
     closeDesignTypeEditor() {
-      draftAnalysis.type.reset();
-      editorIds.type = null;
+      if (!editors.type.dialog.open) resetEditor("type");
     },
     openDesignRoutineEditor,
     submitDesignRoutine,
@@ -580,8 +674,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     renderDesignRoutinePreview,
     scheduleDesignRoutineAnalysis,
     closeDesignRoutineEditor() {
-      draftAnalysis.routine.reset();
-      editorIds.routine = null;
+      if (!editors.routine.dialog.open) resetEditor("routine");
     },
     openDesignTriggerEditor,
     submitDesignTrigger,
@@ -589,8 +682,7 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
     renderDesignTriggerPreview,
     scheduleDesignTriggerAnalysis,
     closeDesignTriggerEditor() {
-      draftAnalysis.trigger.reset();
-      editorIds.trigger = null;
+      if (!editors.trigger.dialog.open) resetEditor("trigger");
     },
     currentTriggerEditorId: () => editorIds.trigger,
   };
