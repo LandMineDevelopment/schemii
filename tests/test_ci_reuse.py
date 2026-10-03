@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 import pytest
@@ -2218,3 +2219,160 @@ def test_inspection_validation_scratch_cleans_itself_on_success_and_rejection(
     else:
         reuse.verify(provider, target, root=checkout, now=NOW)
     assert observed and all(not path.exists() for path in observed)
+
+
+@pytest.mark.parametrize("profile", [INSPECTION_PROFILE, CACHE_PROFILE])
+def test_selected_main_gate_cli_rechecks_with_the_configured_checkout_history(
+    tmp_path, monkeypatch, capsys, profile
+):
+    repository = tmp_path / "repository"
+    target = cache_repository(repository, paired=True, profile=profile)
+    final_head = target["source_sha"]
+    merged = subprocess.check_output(
+        [
+            "git",
+            "commit-tree",
+            target["tree"],
+            "-p",
+            target["before"],
+            "-p",
+            final_head,
+            "-m",
+            "owned conventional main merge",
+        ],
+        cwd=repository,
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/heads/main", merged], cwd=repository, check=True
+    )
+    target.update(source_sha=merged, head_sha=merged)
+    provider = cache_provider(tmp_path, repository, target, profile=profile)
+    monkeypatch.setattr(reuse.tempfile, "tempdir", str(tmp_path))
+    validation_paths = []
+    original_archive = provider.archive
+
+    def download(artifact_id):
+        validation_paths.extend(tmp_path.glob("schemii-acceptance-*"))
+        return original_archive(artifact_id)
+
+    provider.archive = download
+    receipt = reuse.verify(provider, target, root=repository, now=NOW)
+    jobs = current_inputs(target)
+    needs = {
+        name: {"result": "skipped" if name in reuse.EXPENSIVE_NEEDS else "success"}
+        for name in SOURCE_NEEDS | CONTROL_NEEDS
+    }
+    needs["classify"]["outputs"] = {"acceptance": receipt["mode"]}
+    identity = {
+        key: target[key] for key in ("source_sha", "head_sha", "run_id", "run_attempt")
+    }
+    timing = {
+        **summarize(
+            provider.run, jobs, profile="full", report_validation=True, reused=True
+        ),
+        **identity,
+        "acceptance_mode": receipt["mode"],
+        "reuse": receipt,
+    }
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+    ).read_text()
+    gate_section = workflow.split("\n  required-gate:\n", 1)[1]
+    checkout_options = gate_section.split("      - uses: actions/checkout@v4\n", 1)[
+        1
+    ].split("      - ", 1)[0]
+    configured_depth = re.search(
+        r"^\s+fetch-depth: (\d+)$", checkout_options, re.MULTILINE
+    )
+    depth = int(configured_depth[1]) if configured_depth else 1
+    original_recheck = reuse.recheck
+    monkeypatch.setattr(
+        reuse,
+        "recheck",
+        lambda receipt, client, target: original_recheck(
+            receipt, client, target, now=NOW
+        ),
+    )
+    monkeypatch.setattr(reuse, "GitHub", lambda *args: provider)
+    monkeypatch.setattr(
+        gate, "api", lambda path: {"total_count": len(jobs), "jobs": jobs}
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="schemii-main-gate-", dir=tmp_path
+    ) as private:
+        checkout = Path(private) / "checkout"
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--no-local",
+                *([f"--depth={depth}"] if depth else []),
+                "--branch=main",
+                str(repository),
+                str(checkout),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=20,
+        )
+        artifacts = checkout / "artifacts"
+        artifacts.mkdir()
+        for name, value in {
+            "classification.json": classification(
+                target["source_sha"], target["before"]
+            ),
+            "workflow-summary.json": timing,
+            "reuse.json": receipt,
+            "event.json": {
+                "before": target["before"],
+                "after": target["source_sha"],
+                "forced": False,
+                "deleted": False,
+                "repository": {
+                    "id": target["repository_id"],
+                    "full_name": target["repository"],
+                },
+            },
+        }.items():
+            (artifacts / name).write_bytes(encoded(value))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "required_gate.py",
+                "--classification",
+                str(artifacts / "classification.json"),
+                "--timing",
+                str(artifacts / "workflow-summary.json"),
+                "--reuse",
+                str(artifacts / "reuse.json"),
+            ],
+        )
+        for name, value in {
+            "GITHUB_EVENT_PATH": str(artifacts / "event.json"),
+            "GITHUB_TOKEN": "private-token",
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_SHA": target["source_sha"],
+            "CI_TELEMETRY_SHA": target["source_sha"],
+            "CI_TELEMETRY_HEAD_SHA": target["head_sha"],
+            "CI_NEEDS": json.dumps(needs),
+            "GITHUB_REPOSITORY": target["repository"],
+            "GITHUB_RUN_ID": str(target["run_id"]),
+            "GITHUB_RUN_ATTEMPT": str(target["run_attempt"]),
+        }.items():
+            monkeypatch.setenv(name, value)
+        with monkeypatch.context() as working_directory:
+            working_directory.chdir(checkout)
+            passed = gate.main()
+            provider.run["run_attempt"] = 2
+            rejected = gate.main()
+    assert not Path(private).exists()
+    assert validation_paths and all(not path.exists() for path in validation_paths)
+    assert passed == 0, "Configured gate checkout cannot revalidate the admitted owner"
+    assert rejected == 1
+    public = capsys.readouterr().out
+    assert "private" not in public
+    assert "verified-identical-tree-" in public
