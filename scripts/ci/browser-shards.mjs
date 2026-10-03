@@ -92,6 +92,63 @@ export function balanceFiles(files, project, costs = OBSERVED_COSTS, shardCount 
   return { project, shards, unknownFiles: unknown.sort(), fallbackMs: fallback };
 }
 
+// Shared administrator/provider/physical-target/capacity leaves finish first.
+// Only the individually reviewed owner-scoped leaves may overlap. New files
+// stay serial until their actual shared effects have been reviewed.
+export const PARALLEL_FILES = Object.freeze([
+  'account-brand-navigation', 'ai-assistant', 'ai-copy-handoff', 'ai-diagnostic-permissions',
+  'ai-failure-recovery', 'ai-model-switch', 'ai-provider-settings', 'connection-lifecycle',
+  'console-preferences', 'console-toolbar', 'design-editor-lifecycle', 'inspector-data',
+  'inspector-editor', 'migration-disabled-apply', 'migration-review-mobile', 'permission-bundles',
+  'product-navigation', 'query-plan-table', 'quick-start-schemii', 'quick-start',
+  'schemer-dashboards', 'schemoo-ai', 'schemoo-aliases', 'schemoo-canvas-overlap',
+  'schemoo-column-comparisons', 'schemoo-column-filters', 'schemoo-connection-colors',
+  'schemoo-derived', 'schemoo-diagnostics', 'schemoo-dropdowns', 'schemoo-filter-authoring',
+  'schemoo-filter-dialog', 'schemoo-filter-navigation', 'schemoo-help', 'schemoo-membership',
+  'schemoo-model-dependencies-live', 'schemoo-model-editor-audit', 'schemoo-model-library',
+  'schemoo-pinch', 'schemoo-preview-fields', 'schemoo-prototype', 'schemoo-repetition-live',
+  'schemoo-saved-previews', 'schemoo-source-reconciliation', 'shared-ui-accessibility',
+  'shared-ui-audit', 'sql-console', 'toast-history-behavior', 'workspace-lifecycle', 'workspace-rename',
+].map(name => `tests/e2e/${name}.spec.js`));
+
+export function parallelFiles(files, project) {
+  if (!Array.isArray(files) || !files.length || new Set(files).size !== files.length) {
+    throw new Error('Browser shard files must be nonempty and unique');
+  }
+  files.forEach(validateFile);
+  const concurrent = files.filter(file => PARALLEL_FILES.includes(file));
+  // One candidate has no useful overlap; retain the complete serial scope.
+  if (concurrent.length < 2) return { serial: [...files].sort(), parallel: [] };
+  return { serial: files.filter(file => !PARALLEL_FILES.includes(file)).sort(),
+    parallel: balanceFiles(concurrent, project).shards.map(shard => shard.files) };
+}
+
+// Opt-in outer routing minimizes serial + max(two serialized children), rather
+// than a serial total that would leave the old outer shard as the bottleneck.
+// Weights are the same observations used by the default unchanged scheduler.
+export function balanceParallelFiles(files, project, costs = OBSERVED_COSTS, shardCount = 6) {
+  const baseline = balanceFiles(files, project, costs, shardCount);
+  const weighted = files.map(file => ({ file, cost: costs[file]?.[project] ?? baseline.fallbackMs }))
+    .sort((a, b) => b.cost - a.cost || (a.file < b.file ? -1 : 1));
+  const bins = Array.from({ length: shardCount }, () => ({ files: [], serialMs: 0, parallelMs: [0, 0] }));
+  const total = bin => bin.serialMs + Math.max(...bin.parallelMs);
+  for (const parallel of [false, true]) for (const item of weighted.filter(item => PARALLEL_FILES.includes(item.file) === parallel)) {
+    const candidates = bins.map((bin, index) => {
+      const side = bin.parallelMs[0] <= bin.parallelMs[1] ? 0 : 1;
+      return { bin, index, side, next: parallel
+        ? bin.serialMs + Math.max(bin.parallelMs[side] + item.cost, bin.parallelMs[1 - side])
+        : total(bin) + item.cost };
+    }).sort((a, b) => a.next - b.next || total(a.bin) - total(b.bin) || a.bin.files.length - b.bin.files.length || a.index - b.index);
+    const selected = candidates[0];
+    selected.bin.files.push(item.file);
+    if (parallel) selected.bin.parallelMs[selected.side] += item.cost;
+    else selected.bin.serialMs += item.cost;
+  }
+  if (bins.some(bin => !bin.files.length)) throw new Error('Every browser shard must own at least one file');
+  return { project, shards: bins.map(bin => ({ files: bin.files.sort(), estimatedMs: total(bin) })),
+    unknownFiles: baseline.unknownFiles, fallbackMs: baseline.fallbackMs };
+}
+
 // Seed weights come from one complete natural run; skipped attempts retain
 // their measured setup/teardown cost. Only actual discovered profile scopes
 // receive weights. These observations do not predict future wall-clock gains.

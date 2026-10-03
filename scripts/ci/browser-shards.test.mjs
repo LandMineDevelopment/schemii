@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { balanceFiles, coverageProfile, manifestPattern, PROJECTS } from './browser-shards.mjs';
+import { balanceFiles, balanceParallelFiles, coverageProfile, manifestPattern, parallelFiles, PARALLEL_FILES, PROJECTS } from './browser-shards.mjs';
 import { invocation, parseOptions, run, scopedInventory } from './run-browser-shard.mjs';
 
 const file = name => `tests/e2e/${name}.spec.js`;
@@ -244,4 +244,51 @@ test('inspection unfiltered discovery requires every fixed project case exactly 
       assert.throws(() => scopedInventory(changed, '/owned', project, policy));
     }
   }
+});
+
+const serialRisk = ['account-audit', 'accounts', 'ai-design-batch-live', 'ai-read-live',
+  'ai-structured-read-live', 'bulk-jobs', 'console-shared-capacity', 'query-diagnostics',
+  'raw-console', 'raw-copy-streaming', 'schemer-ai-live', 'semantic-api-owned', 'shared-report-live'].map(file);
+
+test('reviewed overlap leaves exclude every shared-risk file and unknown leaves remain serial', () => {
+  assert.equal(PARALLEL_FILES.length, 50);
+  assert.equal(new Set(PARALLEL_FILES).size, 50);
+  assert.ok(serialRisk.every(path => !PARALLEL_FILES.includes(path)));
+  const selected = [...serialRisk, ...PARALLEL_FILES, file('future')];
+  for (const project of PROJECTS) {
+    const partition = parallelFiles(selected, project);
+    assert.deepEqual(partition.serial, [...serialRisk, file('future')].sort());
+    assert.equal(partition.parallel.length, 2);
+    assert.ok(partition.parallel.every(group => group.length));
+    assert.deepEqual(partition.parallel.flat().sort(), [...PARALLEL_FILES].sort());
+    assert.deepEqual(parallelFiles(selected.toReversed(), project), partition);
+  }
+  assert.deepEqual(parallelFiles([PARALLEL_FILES[0], file('future')], PROJECTS[0]),
+    {serial: [PARALLEL_FILES[0], file('future')].sort(), parallel: []});
+});
+
+test('opt-in phase-aware six-stack routing retains exact disjoint whole-file inventory', () => {
+  for (const project of PROJECTS) {
+    const selected = [...serialRisk, ...PARALLEL_FILES, file('future')];
+    const plan = balanceParallelFiles(selected, project);
+    assert.deepEqual(plan, balanceParallelFiles(selected.toReversed(), project));
+    assert.deepEqual(plan.shards.flatMap(shard => shard.files).sort(), selected.sort());
+    assert.equal(new Set(plan.shards.flatMap(shard => shard.files)).size, selected.length);
+    assert.ok(plan.shards.every(shard => parallelFiles(shard.files, project).parallel.length === 2 && parallelFiles(shard.files, project).parallel.every(group => group.length)));
+    for (const shard of plan.shards) {
+      const partition = parallelFiles(shard.files, project);
+      assert.ok(partition.serial.every(path => serialRisk.includes(path) || path === file('future')));
+    }
+    assert.deepEqual(balanceFiles(selected, project, undefined, 6), balanceFiles(selected.toReversed(), project, undefined, 6));
+  }
+});
+
+test('parallel opt-in is closed and cannot alter selected small-profile topology', () => {
+  assert.equal(parseOptions(['--project=desktop-chromium', '--shard=1/6', '--profile=full', '--parallel=2']).parallel, 2);
+  for (const extra of ['--parallel=1', '--parallel=3', '--parallel=02', '--parallel=2 --workers=2']) {
+    assert.throws(() => parseOptions(['--project=desktop-chromium', '--shard=1/6', '--profile=full', extra]));
+  }
+  assert.throws(() => parseOptions(['--project=desktop-chromium', '--shard=1/6', '--parallel=2']));
+  assert.throws(() => parseOptions(['--project=desktop-chromium', '--shard=1/6', '--profile=full', '--parallel=2', '--parallel=2']));
+  assert.throws(() => run({project: PROJECTS[0], shard:1, shardCount:6, profile:'full', parallel:3}, '/nonexistent'));
 });

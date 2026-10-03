@@ -1,6 +1,6 @@
 import { relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { attempt, hash, metadata, milliseconds, writer } from './timing.mjs';
+import { attempt, hash, metadata, milliseconds, originalSourceRoot, writer } from './timing.mjs';
 
 export default class TimingReporter {
   onError() {
@@ -10,13 +10,15 @@ export default class TimingReporter {
   }
 
   onBegin(config, suite) {
+    this.sourceRoot = originalSourceRoot() || process.cwd();
     this.started = performance.now();
     this.tests = suite.allTests();
     this.completed = new Set();
     const projects = new Set(this.tests.map(test => test.parent.project().name));
     const project = projects.size === 1 ? [...projects][0] : process.env.CI_TELEMETRY_PROJECT;
     this.write = writer(process.env.CI_TELEMETRY_FILE || 'artifacts/ci-timing/browser.jsonl',
-      metadata('browser', project, config.shard?.current || Number(process.env.CI_TELEMETRY_SHARD || 0)));
+      metadata('browser', project, config.shard?.current || Number(process.env.CI_TELEMETRY_SHARD || 0)),
+      { exclusive: process.env.SCHEMII_E2E_SOURCE_ROOT !== undefined });
     this.write({ kind: 'start', planned: this.tests.length });
     for (const test of this.tests) this.write({ kind: 'plan', test_id: hash(test.id) });
   }
@@ -34,7 +36,7 @@ export default class TimingReporter {
       if (step.title === 'Before Hooks') setup += step.duration;
       if (step.title === 'After Hooks') teardown += step.duration;
     }
-    this.write(attempt(test.id, relative(process.cwd(), test.location.file),
+    this.write(attempt(test.id, relative(this.sourceRoot, test.location.file),
       test.location.line, result.retry, outcome, setup,
       Math.max(0, result.duration - setup - teardown), teardown));
   }
@@ -43,7 +45,7 @@ export default class TimingReporter {
     if (!this.write) return; // Global setup/collection may fail before onBegin.
     for (const test of this.tests) {
       if (!this.completed.has(test.id)) this.write(attempt(test.id,
-        relative(process.cwd(), test.location.file), test.location.line, 0,
+        relative(this.sourceRoot, test.location.file), test.location.line, 0,
         result.status === 'interrupted' ? 'cancelled' : 'not-run', 0, 0, 0));
     }
     this.write({ kind: 'end', outcome: this.infrastructureFailed ? 'error' : { passed: 'passed', failed: 'failed',
