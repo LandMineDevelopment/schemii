@@ -86,6 +86,8 @@ test("header and settings model pickers refresh availability without changing co
 });
 
 test("assistant keeps proposals and outcomes with the turn that created them", async ({ page, request }) => {
+  // Install before navigation so native and controlled timer handles never mix.
+  await page.clock.install();
   const activeWorkspace = await workspace(request);
   await assistantFixture(page, request, activeWorkspace.id);
   const chatId = `chat_${"a".repeat(32)}`;
@@ -236,6 +238,8 @@ test("assistant keeps proposals and outcomes with the turn that created them", a
   expect(bodyBounds).not.toBeNull();
   expect(buttonBounds).not.toBeNull();
   expect(buttonBounds.x + buttonBounds.width).toBeLessThanOrEqual(bodyBounds.x + bodyBounds.width);
+  // Freeze only this review's arming window; content checks must not consume it.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await turns.nth(1).getByRole("button", { name: "Review design changes" }).click();
   const review = page.getByRole("dialog", { name: "Review proposed action" });
   await expect(review).toBeVisible();
@@ -245,10 +249,15 @@ test("assistant keeps proposals and outcomes with the turn that created them", a
   await expect(review).toContainText("Live migration is a separate action");
   const confirm = review.getByRole("button", { name: "Save to design" });
   await expect(confirm).toBeDisabled();
+  await page.clock.runFor(349);
+  await expect(confirm).toBeDisabled();
+  await page.clock.runFor(1);
   await expect(confirm).toBeEnabled();
   expect(executionRequests).toBe(0);
   await review.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(review).toBeHidden();
+  expect(executionRequests).toBe(0);
+  await page.clock.resume();
 });
 
 test("migration recovery approval explains bundled conflict choices and outcome checks", async ({ page, request }) => {
