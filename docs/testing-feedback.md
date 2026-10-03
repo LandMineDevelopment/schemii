@@ -1,6 +1,8 @@
 # Testing feedback and coverage
 
-The supported deterministic commands are `npm test` and `python -m pytest -q`.
+The supported complete deterministic commands are `npm test` and
+`python scripts/ci/python-tests.py`, shared by local feedback and CI. Use
+`python -m pytest -q PATH` for focused Python regressions.
 Use the constrained Python bootstrap in [testing/README.md](../testing/README.md).
 Default Python discovery includes `tests/` and `testing/`; it does not launch the
 application or opt-in load/browser work. CI runs the Node checks before Python
@@ -149,10 +151,16 @@ Full and cache topology and coverage stay unchanged. The retained ordinary full
 observation suggests roughly 1.8–2 minutes of source-critical savings, but only a
 future ordinary selected run can establish actual elapsed savings.
 
-Complete CI Python uses `python scripts/ci/python-tests.py`: two isolated processes
-keep the inspection fixture consumers together and all other discovery in the
-other process, merging one strict canonical receipt. Explicit tooling arguments
-use the same runner. Full and E2E acceptance use six isolated hosted application
+Complete CI Python uses `python scripts/ci/python-tests.py`: the inspection fixture
+consumers stay together in one isolated process. Default runs with at least four
+available affinity CPUs run seven independent CI/native control files in a third
+process; normal pytest discovery in the remaining process ignores precisely those
+two owned groups. Smaller or unknown CPU capacity retains two processes, and
+explicit tooling arguments retain their existing selection behavior. All groups
+merge one strict canonical receipt. The PR186 phase model suggests roughly one
+minute of Python-step savings; ordinary current-head CI must establish the actual
+wall reduction, and browser work may still dominate the workflow. Full and E2E
+acceptance use six isolated hosted application
 stacks per device; the frozen cache profile keeps three. Each stack retains
 serialized whole-file execution and every selected case.
 The gate derives exact expected jobs and receipt lanes from the profile, requires
