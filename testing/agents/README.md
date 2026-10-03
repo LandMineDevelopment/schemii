@@ -117,10 +117,19 @@ operation cleans only this endpoint's backend, helper and disposable directory,
 fully writes its success response, then exits the stdio endpoint. It rejects
 target arguments and release while requests, callbacks, initialization or queued
 backend traffic are pending. Cleanup or response-write failure is explicit;
-failed calls are never replayed. Use `browser_close` when same-thread browser
-follow-up is needed. Terminal release requires a fresh thread for future browser
-use; ordinary turn completion alone is not a reason to destroy a reusable
-connection.
+failed calls are never replayed. Use `browser_close` when retaining this connection
+for browser follow-up. Terminal release prevents browser follow-up on that
+connection; future browser use needs a new transport. Ordinary turn completion
+alone is not a reason to destroy a reusable connection.
+
+On each resumed turn and before finishing, inspect the current exposed tools and
+connection state. A previous release or completed/interrupted thread status does
+not prove current transport cleanup. In observed sessions, resumed work received
+new host-initialized connections after earlier releases; do not assume the host
+will provide one. Export selected evidence and close/release only your current own
+connection as appropriate, preserving active peers and their data. Report actual
+call acknowledgements and observed resource lifecycle; if process/session removal
+was not checked, say so instead of claiming it was observed.
 
 The tool is advertised through standard MCP `tools/list` and enabled in project
 configuration. Existing endpoints and provider tool lists do not reload it.
