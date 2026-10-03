@@ -615,8 +615,9 @@ def test_node_runner_cancellation_stops_owned_child_and_keeps_incomplete_evidenc
 
 
 @pytest.mark.parametrize("include_load", [False, True])
+@pytest.mark.parametrize("profile", ["full", "schemer-result-cache"])
 def test_ci_executes_unit_browser_and_real_postgres_behavior(
-    tmp_path: Path, include_load: bool
+    tmp_path: Path, include_load: bool, profile: str
 ) -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
@@ -765,14 +766,17 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
         _step_run(_named_step(browser, "Start the canonical application stack"))
     ) == ["./start.sh"]
     browser_command = _step_run(_named_step(browser, "Exercise browser flows"))
-    browser_command = browser_command.replace(
-        "${{ matrix.project }}", "desktop-chromium"
-    ).replace("${{ matrix.shard }}", "1")
+    browser_command = (
+        browser_command.replace("${{ matrix.project }}", "desktop-chromium")
+        .replace("${{ matrix.shard }}", "1")
+        .replace("${{ needs.classify.outputs.profile }}", profile)
+    )
     assert shlex.split(browser_command) == [
         "node",
         "scripts/ci/run-browser-shard.mjs",
         "--project=desktop-chromium",
         "--shard=1/3",
+        f"--profile={profile}",
     ]
     discovery = _named_step(browser, "Verify browser discovery and shard coverage")
     assert shlex.split(_step_run(discovery)) == [
