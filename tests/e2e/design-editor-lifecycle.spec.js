@@ -38,7 +38,10 @@ async function seedWorkspace(request, workspaceId) {
           indexes: [],
         }],
         relationships: [],
-        functions: [],
+        functions: [{
+          id: designId("function"),
+          definition: "CREATE FUNCTION handle_draft_analysis_orders_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;",
+        }],
         views: [],
         triggers: [],
       },
@@ -49,6 +52,8 @@ async function seedWorkspace(request, workspaceId) {
 const editors = [
   {
     name: "view",
+    createButton: "#create-view-button",
+    validDefinition: "SELECT id FROM draft_analysis_orders",
     endpoint: "view-analysis",
     dialog: "#design-view-dialog",
     definition: "#design-view-definition",
@@ -62,6 +67,8 @@ const editors = [
   },
   {
     name: "type",
+    createButton: "#create-type-button",
+    validDefinition: "CREATE TYPE protected_status AS ENUM ('draft', 'saved');",
     endpoint: "type-analysis",
     dialog: "#design-type-dialog",
     definition: "#design-type-definition",
@@ -74,6 +81,8 @@ const editors = [
   },
   {
     name: "routine",
+    createButton: "#create-function-button",
+    validDefinition: "CREATE FUNCTION protected_value() RETURNS integer LANGUAGE SQL AS $$ SELECT 1 $$;",
     endpoint: "routine-analysis",
     dialog: "#design-routine-dialog",
     definition: "#design-routine-definition",
@@ -86,6 +95,8 @@ const editors = [
   },
   {
     name: "trigger",
+    createButton: "#create-trigger-button",
+    validDefinition: "CREATE TRIGGER protected_changes AFTER INSERT ON draft_analysis_orders FOR EACH ROW EXECUTE FUNCTION handle_draft_analysis_orders_change();",
     endpoint: "trigger-analysis",
     dialog: "#design-trigger-dialog",
     definition: "#design-trigger-definition",
@@ -184,6 +195,7 @@ test("all four design editors fence rapid, stale, and post-close draft analyses"
       await definition.fill(`${editor.name} slow_old_draft`);
       await staleStarted.promise;
       await dialog.locator("[data-close-dialog]").first().click();
+      await page.locator("#confirm-action").click();
       await expect(dialog).toBeHidden();
       closedAndReopening = true;
       await editor.open(page);
@@ -200,6 +212,7 @@ test("all four design editors fence rapid, stale, and post-close draft analyses"
       await expect(preview).toContainText(`${editor.name} reopened response`);
 
       await dialog.locator("[data-close-dialog]").first().click();
+      if (editor.name === "routine") await page.locator("#confirm-action").click();
       await expect(dialog).toBeHidden();
       await page.unroute(`**${API_ROOT}/${workspaceId}/design/${editor.endpoint}`);
     }
@@ -218,5 +231,186 @@ test("all four design editors fence rapid, stale, and post-close draft analyses"
         }
       }
     }
+  }
+});
+
+
+async function deleteWorkspace(request, workspaceId) {
+  const response = await request.get(`${API_ROOT}/${workspaceId}`);
+  if (response.status() === 404) return;
+  const current = await responseJson(response, "Read draft-protection workspace for cleanup");
+  const deleted = await request.delete(`${API_ROOT}/${workspaceId}?expectedRevision=${encodeURIComponent(current.revision)}`);
+  if (!deleted.ok() && deleted.status() !== 404) {
+    throw new Error(`Delete draft-protection workspace failed (${deleted.status()}): ${await deleted.text()}`);
+  }
+}
+
+async function fillValidDraft(page, editor) {
+  if (editor.name === "view") await page.locator("#design-view-name").fill("protected_view");
+  await page.locator(editor.definition).fill(editor.validDefinition);
+}
+
+async function expectUnloadProtection(page, protectedDraft) {
+  expect(await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    return !window.dispatchEvent(event);
+  })).toBe(protectedDraft);
+}
+
+for (const editor of editors) {
+  test(`${editor.name} drafts protect close, Escape, reload and replacement, then clear only after a successful save`, async ({ page, request }) => {
+    let workspaceId = null;
+    try {
+      const workspace = await createWorkspace(request);
+      workspaceId = workspace.id;
+      await seedWorkspace(request, workspaceId);
+      await page.goto(`/?workspace=${workspaceId}&layer=${editor.name === "view" ? "views" : "tables"}`);
+      await expect(page.locator("#workspace-title")).toHaveText(workspace.name);
+      const dialog = page.locator(editor.dialog);
+      const definition = page.locator(editor.definition);
+      const confirmation = page.locator("#confirm-dialog");
+
+      await editor.open(page);
+      await expectUnloadProtection(page, false);
+      await dialog.locator("[data-close-dialog]").first().click();
+      await expect(dialog).toBeHidden();
+      await expect(confirmation).toBeHidden();
+
+      await editor.open(page);
+      const initial = await definition.inputValue();
+      await definition.fill(`${initial} temporary edit`);
+      await expectUnloadProtection(page, true);
+      await definition.fill(initial);
+      await expectUnloadProtection(page, false);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await expect(confirmation).toBeHidden();
+
+      await editor.open(page);
+      await fillValidDraft(page, editor);
+      await page.keyboard.press("Escape");
+      await expect(confirmation).toBeVisible();
+      await confirmation.getByRole("button", { name: "Keep editing", exact: true }).last().click();
+      await expect(dialog).toBeVisible();
+      await expect(definition).toHaveValue(editor.validDefinition);
+      await page.keyboard.press("Escape");
+      await expect(confirmation).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(confirmation).toBeHidden();
+      await expect(dialog).toBeVisible();
+      await expectUnloadProtection(page, true);
+
+      const unloadEvent = page.waitForEvent("dialog");
+      const reload = page.evaluate(() => window.location.reload());
+      const warning = await unloadEvent;
+      expect(warning.type()).toBe("beforeunload");
+      await warning.dismiss();
+      await reload;
+      await expect(dialog).toBeVisible();
+      await expect(definition).toHaveValue(editor.validDefinition);
+
+      await dialog.locator("[data-close-dialog]").first().click();
+      await confirmation.getByRole("button", { name: "Discard changes", exact: true }).click();
+      await expect(dialog).toBeHidden();
+      await expectUnloadProtection(page, false);
+
+      await editor.open(page);
+      await fillValidDraft(page, editor);
+      // Exercise the existing replacement command while its prior editor is still open.
+      await page.locator(editor.createButton).evaluate(button => button.click());
+      await expect(confirmation).toBeVisible();
+      await confirmation.getByRole("button", { name: "Keep editing", exact: true }).last().click();
+      await expect(definition).toHaveValue(editor.validDefinition);
+      await page.locator(editor.createButton).evaluate(button => button.click());
+      await confirmation.getByRole("button", { name: "Discard changes", exact: true }).click();
+      await expect(dialog).toBeVisible();
+      await expect(definition).toHaveValue(initial);
+      await expectUnloadProtection(page, false);
+      await fillValidDraft(page, editor);
+
+      const designRoute = `**${API_ROOT}/${workspaceId}/design`;
+      await page.route(designRoute, route => route.request().method() === "PUT"
+        ? route.fulfill({ status: 409, json: { error: { code: "design_conflict", message: "Controlled draft save failure" } } })
+        : route.continue());
+      await dialog.locator("button[type=submit]").click();
+      await expect(page.locator(`#design-${editor.name}-status`)).toContainText("Controlled draft save failure");
+      await expectUnloadProtection(page, true);
+      await expect(dialog).toBeVisible();
+      await page.unroute(designRoute);
+      await dialog.locator("button[type=submit]").click();
+      await expect(dialog).toBeHidden();
+      await expect(confirmation).toBeHidden();
+      await expectUnloadProtection(page, false);
+      if (editor.name === "type" || editor.name === "routine") await page.keyboard.press("Escape");
+    } finally {
+      if (workspaceId) await deleteWorkspace(request, workspaceId);
+    }
+  });
+}
+
+test("unsaved object drafts guard workspace Back, workspace replacement and application switching without repeated prompts", async ({ page, request }) => {
+  const owned = [];
+  try {
+    const first = await createWorkspace(request);
+    owned.push(first.id);
+    await seedWorkspace(request, first.id);
+    const second = await createWorkspace(request);
+    owned.push(second.id);
+    await seedWorkspace(request, second.id);
+    await page.goto(`/?workspace=${first.id}&layer=views`);
+    await expect(page.locator("#workspace-title")).toHaveText(first.name);
+    const openWorkspace = async workspace => {
+      await page.locator("#workspaces-button").click();
+      await page.locator("#workspaces-list .manager-card").filter({ hasText: workspace.name })
+        .getByRole("button", { name: "Open", exact: true }).click();
+      await expect(page.locator("#workspace-title")).toHaveText(workspace.name);
+    };
+    await openWorkspace(second);
+    const editor = editors[0];
+    await editor.open(page);
+    await fillValidDraft(page, editor);
+    const confirmation = page.locator("#confirm-dialog");
+    await page.goBack();
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole("button", { name: "Keep editing", exact: true }).last().click();
+    await expect(page).toHaveURL(new RegExp(`workspace=${second.id}`));
+    await expect(page.locator("#workspace-title")).toHaveText(second.name);
+    await expect(page.locator(editor.definition)).toHaveValue(editor.validDefinition);
+    await expect(confirmation).toBeHidden();
+    await page.goBack();
+    await confirmation.getByRole("button", { name: "Discard changes", exact: true }).click();
+    await expect(page.locator("#workspace-title")).toHaveText(first.name);
+    await expect(page).toHaveURL(new RegExp(`workspace=${first.id}`));
+    await expect(page.locator(editor.dialog)).toBeHidden();
+
+    await editor.open(page);
+    await fillValidDraft(page, editor);
+    await page.locator("#workspaces-button").evaluate(button => button.click());
+    const replace = page.locator("#workspaces-list .manager-card").filter({ hasText: second.name })
+      .getByRole("button", { name: "Open", exact: true });
+    await replace.click();
+    await confirmation.getByRole("button", { name: "Keep editing", exact: true }).last().click();
+    await expect(page.locator("#workspace-title")).toHaveText(first.name);
+    await expect(page.locator(editor.definition)).toHaveValue(editor.validDefinition);
+    await replace.click();
+    await confirmation.getByRole("button", { name: "Discard changes", exact: true }).click();
+    await expect(page.locator("#workspace-title")).toHaveText(second.name);
+    await expect(page.locator(editor.dialog)).toBeHidden();
+
+    await editor.open(page);
+    await fillValidDraft(page, editor);
+    const link = page.locator('.ui-product-navigation a[href="/schemoo"]');
+    await link.evaluate(anchor => anchor.click());
+    await confirmation.getByRole("button", { name: "Keep editing", exact: true }).last().click();
+    await expect(page).toHaveURL(new RegExp(`workspace=${second.id}`));
+    await expect(page.locator(editor.definition)).toHaveValue(editor.validDefinition);
+    let duplicateUnloadWarnings = 0;
+    page.on("dialog", async warning => { duplicateUnloadWarnings++; await warning.dismiss(); });
+    await link.evaluate(anchor => anchor.click());
+    await confirmation.getByRole("button", { name: "Discard changes", exact: true }).click();
+    await expect(page).toHaveURL(/\/schemoo$/);
+    expect(duplicateUnloadWarnings).toBe(0);
+  } finally {
+    for (const workspaceId of owned.reverse()) await deleteWorkspace(request, workspaceId);
   }
 });

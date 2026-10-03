@@ -149,8 +149,13 @@ This is an interaction prototype, not a published semantic engine:
 Checks: `.venv/bin/python -m pytest -q tests/test_schemoo_prototype.py
 tests/test_schemoo_filters.py tests/test_schemoo_routes.py` and
 `npx playwright test tests/e2e/schemoo-prototype.spec.js` against a running stack.
-Optional live SQL semantics: `SCHEMOO_LIVE_TESTS=1 .venv/bin/python -m pytest -q
-tests/test_schemoo_sql_live.py` (synthetic read-only CTE fixtures, no warehouse writes).
+PostgreSQL row/value semantics run in ordinary integration CI:
+`.venv/bin/python -m pytest -q tests/integration/test_schemoo_semantic_results.py
+tests/integration/test_schemer_calendar_results.py`. For local execution, explicitly
+select a disposable database with `SCHEMII_TEST_METADATA_DSN` and
+`SCHEMII_TEST_METADATA_PASSWORD`; no personal workspace or live-test flag is needed.
+See [the oracle coverage map](../../../docs/postgres-oracle-coverage.md) for the
+unique invariants, fixture ownership and authenticated assembled API check.
 Use only `./start.sh` to build/refresh the application.
 
 ## Model assistant

@@ -615,8 +615,11 @@ def test_node_runner_cancellation_stops_owned_child_and_keeps_incomplete_evidenc
 
 
 @pytest.mark.parametrize("include_load", [False, True])
+@pytest.mark.parametrize(
+    "profile", ["full", "schemer-result-cache", "developer-inspection"]
+)
 def test_ci_executes_unit_browser_and_real_postgres_behavior(
-    tmp_path: Path, include_load: bool
+    tmp_path: Path, include_load: bool, profile: str
 ) -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
@@ -729,7 +732,14 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
 
     python_step = _named_step(unit, "Deterministic Python behavior")
     python_args = shlex.split(_step_run(python_step))
-    assert python_args[:3] == ["python", "-m", "pytest"]
+    assert python_args == [
+        "python",
+        "scripts/ci/python-tests.py",
+        "${{",
+        "needs.classify.outputs.python_paths",
+        "}}",
+    ]
+    # Empty paths mean complete discovery; fixed tooling arguments are selected by classifier.
     assert not any(
         argument.split("=", 1)[0]
         in {"-k", "-m", "--collect-only", "--ignore", "--deselect"}
@@ -754,10 +764,78 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
         and "SCHEMII_TEST_METADATA_DSN:" in postgres_step
     )
     browser = _service(workflow, "browser-smoke")
-    assert shlex.split(
-        _step_run(_named_step(browser, "Start the canonical application stack"))
-    ) == ["./start.sh"]
-    assert shlex.split(_step_run(_named_step(browser, "Exercise browser flows")))[
-        :3
-    ] == ["npm", "run", "test:e2e"]
+    startup = _named_step(browser, "Start the canonical application stack")
+    command_log = tmp_path / "startup-commands.log"
+    command_bin = tmp_path / "startup-bin"
+    command_bin.mkdir()
+    for command in [command_bin / "node", tmp_path / "start.sh"]:
+        command.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$SCHEMII_COMMAND_LOG"\n'
+            'exit "${SCHEMII_COMMAND_STATUS:-0}"\n'
+        )
+        command.chmod(0o700)
+    for project, shard, status in [
+        ("desktop-chromium", "1", "0"),
+        ("desktop-chromium", "2", "0"),
+        ("android-chromium", "1", "0"),
+        ("desktop-chromium", "1", "1"),
+    ]:
+        command_log.unlink(missing_ok=True)
+        script = (
+            _step_run(startup)
+            .replace("${{ matrix.project }}", project)
+            .replace("${{ matrix.shard }}", shard)
+        )
+        invoked = subprocess.run(
+            ["bash", "-e", "-c", script],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "PATH": f"{command_bin}:{os.environ['PATH']}",
+                "SCHEMII_COMMAND_LOG": str(command_log),
+                "SCHEMII_COMMAND_STATUS": status,
+            },
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert invoked.returncode == int(status)
+        expected = (
+            f"{command_bin / 'node'} scripts/ci/prepare-browser-stack.mjs --discovery"
+            if project == "desktop-chromium" and shard == "1"
+            else "./start.sh "
+        )
+        assert command_log.read_text().splitlines() == [expected]
+    browser_command = _step_run(_named_step(browser, "Exercise browser flows"))
+    browser_command = (
+        browser_command.replace("${{ matrix.project }}", "desktop-chromium")
+        .replace("${{ matrix.shard }}", "1")
+        .replace(
+            "${{ matrix.total }}",
+            "3"
+            if profile == "schemer-result-cache"
+            else "1"
+            if profile == "developer-inspection"
+            else "6",
+        )
+        .replace("${{ needs.classify.outputs.profile }}", profile)
+    )
+    assert shlex.split(browser_command) == [
+        "node",
+        "scripts/ci/run-browser-shard.mjs",
+        "--project=desktop-chromium",
+        "--shard=1/3"
+        if profile == "schemer-result-cache"
+        else "--shard=1/1"
+        if profile == "developer-inspection"
+        else "--shard=1/6",
+        f"--profile={profile}",
+        "--parallel=2",
+    ]
+    assert "Verify browser discovery and shard coverage" not in browser
+    assert browser.index("run: npm ci") < browser.index(
+        "name: Start the canonical application stack"
+    )
+    assert "tests/browser-infrastructure" not in unit
+    assert "run: npm ci" not in unit
     assert shlex.split(package["scripts"]["test:e2e"]) == ["playwright", "test"]

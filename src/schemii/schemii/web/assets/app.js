@@ -52,6 +52,7 @@ import {
   replaceColumnDisplayOrder,
 } from "/assets/common/column-display-order.js";
 import { applyJsonDelta } from "/assets/common/json-delta.js";
+import { performDesignHistoryMove } from "./design-history.js";
 import {
   createChangeTransitionManager,
   elementFullyVisible,
@@ -64,6 +65,7 @@ import { assertUnavailableControls, bindUnavailableControls } from "./unavailabl
 import { closeDetailsMenus, createDialogFocusController, createIconButton, createIconElement, createStatePanel, DockPane, downloadContent, initializeUi } from "./ui.js";
 import {
   extractLinkedSqlDraft,
+  createWorkspaceNavigationHistory,
   readWorkspaceNavigation,
   readWorkspacePreferences,
   updateWorkspacePreferences,
@@ -544,6 +546,7 @@ const state = {
   layoutError: null,
   preservedLayout: null,
   confirmCallback: null,
+  confirmCancelCallback: null,
   confirmBusy: false,
   dependencyImpactRootId: null,
   dependencyImpactLoading: false,
@@ -557,6 +560,7 @@ const state = {
   restoringNavigation: false,
 };
 
+const navigationHistory = createWorkspaceNavigationHistory(window.history);
 const designEditors = createDesignEditorControllers({
   api,
   state,
@@ -586,6 +590,7 @@ const designEditors = createDesignEditorControllers({
     renderTypesBrowser: () => renderTypesBrowser(),
     renderFunctionsBrowser: () => renderFunctionsBrowser(),
     selectedDesignTable: () => selectedDesignTable(),
+    askConfirmation,
   },
 });
 const {
@@ -1098,8 +1103,7 @@ function syncWorkspaceNavigation(historyMode = "replace") {
   const next = workspaceNavigationHref(window.location.href, currentWorkspaceNavigation());
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next === current) return;
-  const method = historyMode === "push" ? "pushState" : "replaceState";
-  window.history[method](null, "", next);
+  navigationHistory.write(historyMode, next);
 }
 
 function persistCanvasView() {
@@ -1158,6 +1162,7 @@ function applyWorkspaceNavigation(navigation) {
 
 async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, layerGeneration = state.layerNavigationGeneration } = {}) {
   const generation = ++state.navigationGeneration;
+  if (!await designEditors.requestDiscardDrafts() || generation !== state.navigationGeneration) return false;
   const wasRestoring = state.restoringNavigation;
   state.restoringNavigation = true;
   let restored = false;
@@ -1625,8 +1630,14 @@ async function testConnection(connection) {
   renderConnections();
 }
 
-function askConfirmation({ title, message, label, callback, tone = "danger" }) {
+function askConfirmation({ title, message, label, callback, onCancel = null, cancelLabel = "Cancel", tone = "danger" }) {
+  state.confirmCancelCallback?.();
+  state.confirmCancelCallback = onCancel;
   state.confirmCallback = callback;
+  for (const cancel of elements.confirmDialog.querySelectorAll("[data-confirm-cancel]")) {
+    if (cancel.hasAttribute("aria-label")) cancel.setAttribute("aria-label", cancelLabel);
+    else cancel.textContent = cancelLabel;
+  }
   elements.confirmTitle.textContent = title;
   elements.confirmMessage.textContent = message;
   elements.confirmAction.textContent = label;
@@ -2375,6 +2386,7 @@ function confirmDeleteWorkspace(workspace) {
 }
 
 function clearActiveWorkspace({ historyMode = "replace" } = {}) {
+  designEditors.discardDrafts();
   const workspaceId = state.activeWorkspace?.id;
   persistCanvasView();
   workspaceOperations.invalidate();
@@ -2444,6 +2456,7 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
 
 async function openWorkspace(workspace, { historyMode = "push" } = {}) {
   if (!await flushLayoutBeforeTransition()) return false;
+  if (!await designEditors.requestDiscardDrafts()) return false;
   persistCanvasView();
   workspaceOperations.invalidate();
   viewAnalysis.clear();
@@ -3446,56 +3459,35 @@ async function executeDesignHistoryMove(direction) {
 async function executeDesignHistoryMoveConfirmed(direction) {
   if (!state.activeWorkspace || !state.design || state.historySubmitting) return;
   if (!await flushLayoutBeforeTransition()) return;
-  const workspaceId = state.activeWorkspace.id;
-  const expectedDesignRevision = state.design.revision;
-  const rollback = {
-    design: state.design,
-    layout: state.designLayout,
-    history: state.designHistory,
-    activeLayer: state.activeLayer,
-    selectedTableId: state.selectedTableId,
-    selectedViewId: state.selectedViewId,
-  };
-  const delta = state.designHistory?.[direction]?.delta || [];
-  const action = state.designHistory?.[direction] || null;
-  let previewApplied = false;
-  let presentation = null;
   let reloadAfterFailure = false;
   state.historySubmitting = true;
   updateDesignControls();
   const operation = beginWorkspaceMutation();
   try {
-    if (delta.length) {
-      const preview = await applyDesignHistoryPreview(delta);
-      presentation = preview.presentation;
-      previewApplied = true;
-    }
-    const mutation = await api[direction === "undo" ? "undoDesign" : "redoDesign"](
-      workspaceId,
-      { expectedDesignRevision },
-      { signal: operation.signal },
-    );
-    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
-    const previewMatches = previewApplied
-      && JSON.stringify(state.design.content) === JSON.stringify(mutation.design.content);
-    applyDesignHistoryMutation(mutation, { cue: !previewMatches, render: !previewMatches });
-    const result = presentation?.headline || action?.title || "Design changed";
-    const next = state.designHistory?.[direction]?.title;
-    showToast(`${result} · ${direction} complete.${next ? ` Next ${direction}: ${next}.` : ""}`);
-  } catch (error) {
-    if (!operation.isCurrent() || state.activeWorkspace?.id !== workspaceId) return;
-    if (previewApplied) {
-      changeCues.clear();
-      applyDesignHistoryMutation(rollback, { cue: false });
-      commitWorkspaceState({
-        selectedTableId: rollback.selectedTableId,
-        selectedViewId: rollback.selectedViewId,
-      });
-      setLayer(rollback.activeLayer, { historyMode: "replace" });
-    }
-    errorToast(error);
-    if (error instanceof ApiError && ["design_changed", "nothing_to_undo", "nothing_to_redo"].includes(error.code)) {
-      reloadAfterFailure = true;
+    const result = await performDesignHistoryMove({
+      state, direction, operation,
+      applyPreview: applyDesignHistoryPreview,
+      requestMove: (move, ...args) => api[move === "undo" ? "undoDesign" : "redoDesign"](...args),
+      applyMutation: applyDesignHistoryMutation,
+      restorePreview: rollback => {
+        changeCues.clear();
+        applyDesignHistoryMutation(rollback, { cue: false });
+        commitWorkspaceState({
+          selectedTableId: rollback.selectedTableId,
+          selectedViewId: rollback.selectedViewId,
+        });
+        setLayer(rollback.activeLayer, { historyMode: "replace" });
+      },
+    });
+    if (!result) return;
+    if (result.error) {
+      errorToast(result.error);
+      reloadAfterFailure = result.error instanceof ApiError
+        && ["design_changed", "nothing_to_undo", "nothing_to_redo"].includes(result.error.code);
+    } else {
+      const headline = result.presentation?.headline || result.action?.title || "Design changed";
+      const next = state.designHistory?.[direction]?.title;
+      showToast(`${headline} · ${direction} complete.${next ? ` Next ${direction}: ${next}.` : ""}`);
     }
   } finally {
     operation.finish();
@@ -4699,8 +4691,32 @@ function bindEvents() {
 
   document.addEventListener("click", event => {
     const close = event.target.closest("[data-close-dialog]");
-    if (close) close.closest("dialog")?.close();
+    if (close) {
+      const dialog = close.closest("dialog");
+      if (!designEditors.requestCloseDialog(dialog)) dialog?.close();
+    }
   });
+  for (const dialog of [elements.designViewDialog, elements.designTypeDialog,
+    elements.designRoutineDialog, elements.designTriggerDialog]) {
+    dialog.addEventListener("cancel", event => {
+      event.preventDefault();
+      designEditors.requestCloseDialog(dialog);
+    });
+  }
+  document.getElementById("product-navigation").addEventListener("click", event => {
+    if (!designEditors.hasDraft || event.defaultPrevented || event.button !== 0
+        || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    const control = event.target.closest("a, button");
+    if (!control || (control.tagName === "A" && (control.target === "_blank" || control.hasAttribute("download")))) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const href = control.tagName === "A" ? control.href : null;
+    void designEditors.requestDiscardDrafts().then(discard => {
+      if (!discard) return;
+      if (href) window.location.assign(href);
+      else control.click();
+    });
+  }, true);
   document.addEventListener("keydown", event => {
     if (event.key === "Escape" && (state.relationshipAuthoring || state.keyAuthoring || state.indexAuthoring)) cancelColumnAuthoring();
     const target = event.target;
@@ -4739,12 +4755,23 @@ function bindEvents() {
   elements.deleteReviewedConnection.addEventListener("click", deleteReviewedConnection);
   document.querySelectorAll("[data-confirm-cancel]").forEach(button => button.addEventListener("click", () => {
     state.confirmCallback = null;
+    const onCancel = state.confirmCancelCallback;
+    state.confirmCancelCallback = null;
+    onCancel?.();
     elements.confirmDialog.close();
   }));
+  elements.confirmDialog.addEventListener("close", () => {
+    if (elements.confirmDialog.open) return;
+    state.confirmCallback = null;
+    const onCancel = state.confirmCancelCallback;
+    state.confirmCancelCallback = null;
+    onCancel?.();
+  });
   elements.confirmAction.addEventListener("click", async () => {
     if (state.confirmBusy || !state.confirmCallback) return;
     const callback = state.confirmCallback;
     state.confirmCallback = null;
+    state.confirmCancelCallback = null;
     elements.confirmDialog.close();
     state.confirmBusy = true;
     try {
@@ -4918,8 +4945,9 @@ function bindEvents() {
   elements.designTriggerDefinition.addEventListener("input", () => scheduleDesignTriggerAnalysis());
   elements.deleteDesignTriggerButton.addEventListener("click", () => {
     const triggerId = designEditors.currentTriggerEditorId();
-    elements.designTriggerDialog.close();
-    confirmDeleteDesignTrigger({ id: triggerId });
+    void designEditors.requestDiscardDrafts(["trigger"]).then(discard => {
+      if (discard) confirmDeleteDesignTrigger({ id: triggerId });
+    });
   });
   elements.designTriggerDialog.addEventListener("close", () => {
     designEditors.closeDesignTriggerEditor();
@@ -4990,12 +5018,18 @@ function bindEvents() {
   });
   window.addEventListener("pagehide", persistCanvasView);
   window.addEventListener("beforeunload", event => {
-    if (!tableEditor.hasDraft && !sqlConsole.hasOpenTransaction()) return;
+    if (!tableEditor.hasDraft && !designEditors.hasDraft && !sqlConsole.hasOpenTransaction()) return;
     event.preventDefault();
     event.returnValue = "";
   });
-  window.addEventListener("popstate", () => {
-    restoreWorkspaceNavigation(readWorkspaceNavigation(window.location.href)).catch(errorToast);
+  window.addEventListener("popstate", event => {
+    const traversal = navigationHistory.beginTraversal(event.state);
+    if (!traversal) return;
+    restoreWorkspaceNavigation(readWorkspaceNavigation(window.location.href)).then(restored => {
+      if (restored) navigationHistory.commitTraversal(traversal);
+      else navigationHistory.cancelTraversal(traversal,
+        workspaceNavigationHref(window.location.href, currentWorkspaceNavigation()));
+    }).catch(errorToast);
   });
 }
 

@@ -175,6 +175,32 @@ thread first. Cleanup keeps the deployment lease if owned shutdown is unresolved
 Other native peers, user data, retained fixtures and selected exported evidence
 remain intact. Completed/interrupt status does not close transports.
 
+After the ledger stops and releases its reservations, `cleanup-sweep` accepts
+the explicit `schemii-native-wave-v1` fixture contract alongside the existing
+full/followup versions. Unknown versions remain rejected. The workspace receipt
+map must match the stopped run's accounts and lane order, exact workspace IDs,
+tag/prefix and creation flags. A map row for an account absent from that run
+does not authorize login or deletion. Cleanup holds the lifecycle, exclusive
+deployment and account-reservation guards across validation and mutation.
+
+For every bound native connection, cleanup requires observed context closure,
+stopped transport/guardian and removed temporary output. It rechecks recorded
+supervisor, child, guardian and browser PID birth identities and output absence;
+missing ownership, live processes, unknown closure or remaining output block
+before login. This refusal gate never signals a process or removes browser output.
+Use the owning worker's `browser_close` and the coordinator's `native-release`
+first; completion alone cannot establish shutdown.
+
+A retained writer workspace may be assigned with `writerCreated:false`; the
+flag controls workspace deletion, not write permission. Preparation must still
+verify its exact authenticated account, connection/namespace/database, marked
+writer profile and grants, peer denial and initial desired/live emptiness.
+Declare only exact run-prefixed SQL objects and operations in its fixture.
+Keep the retained workspace and profile; cleanup-sweep removes only exact
+created workspace IDs or receipted run app creations. It does not clean SQL
+tables or rows. Their creation and scoped cleanup need their own observed
+receipts and authorized workflow before the wave can claim cleanup parity.
+
 Reports separate execution and independently reviewed acceptance, with intended,
 completed and reviewed coverage, findings and cleanup reasons. Old saved reports
 without these receipts stay review-pending. No declaration in this runbook proves

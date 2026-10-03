@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from pathlib import Path
@@ -25,9 +26,11 @@ class FakeClient:
     fail_after_create = None
     deletes = []
     delete_failure = None
+    logins: list[str] = []
 
     def login(self, slot):
         self.username = slot["username"]
+        self.logins.append(self.username)
 
     def logout(self):
         pass
@@ -80,6 +83,7 @@ class SchemiiOwnershipTest(unittest.TestCase):
         FakeClient.fail_after_create = None
         FakeClient.deletes = []
         FakeClient.delete_failure = None
+        FakeClient.logins = []
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -300,6 +304,221 @@ class SchemiiOwnershipTest(unittest.TestCase):
         run_file = self.root / "qa-test-run" / "manifest.json"
         run_file.write_text(json.dumps(run))
         return output, run_file, run
+
+    def prepared_native_wave(self, reuse_writers=True):
+        accounts = tuple(f"qa_designer_{number:03}" for number in (3, 4, 5, 6, 7, 8, 9, 10, 15, 18, 11))
+        known = {slot["username"] for slot in self.slots}
+        self.slots.extend({"username": username, "provisioned": True, "connectionId": "pg_" + "1" * 32}
+                          for username in accounts if username not in known)
+        slots = {slot["username"]: slot for slot in self.slots}
+        for index, username in enumerate(accounts):
+            slot = slots[username]
+            FakeClient.workspaces[username] = [{
+                "id": wid(10000 + index), "name": "retained reader", "revision": 2,
+                "createdAt": "2026-09-26T11:00:00Z", "connectionId": slot["connectionId"],
+                "database": "schemii_qa", "namespace": username,
+            }]
+            if username in WRITERS and reuse_writers:
+                FakeClient.workspaces[username].append({
+                    "id": wid(20000 + index), "name": "retained writer", "revision": 2,
+                    "createdAt": "2026-09-26T11:00:00Z", "connectionId": slot["writableConnectionId"],
+                    "database": "schemii_qa", "namespace": slot["writableSchema"],
+                })
+        output = self.root / "workspaces.json"
+        fixture = seed(self.root, "test1", output, accounts)
+        run_file = self.root / "qa-test-run" / "manifest.json"
+        run_file.parent.mkdir(exist_ok=True)
+        run_file.with_name("controller-owner.json").write_text(json.dumps({"pid": 2147483647, "birthTick": "1"}))
+        lanes = []
+        for index, username in enumerate(accounts):
+            item = fixture["lanes"][username]
+            lanes.append({"id": f"lane-{index + 1}", "username": username,
+                "role": "reviewer" if username == accounts[-1] else "tester", "native": {
+                    "pid": 2147483600 + index, "birthTick": "1",
+                    "childPid": 2147483500 + index, "childBirthTick": "1",
+                    "guardianPid": 2147483400 + index, "guardianBirthTick": "1",
+                    "directory": str(self.root / f"released-native-{index}"), "browserProcesses": [],
+                    "closedAt": "2026-09-26T14:00:00Z", "cleanup": {
+                        "context": "closed-observed", "transport": "stopped", "guardian": "stopped",
+                        "temporaryOutput": "removed-observed", "checkedAt": "2026-09-26T14:00:01Z",
+                    },
+                }, "resources": {
+                    "scratchPrefix": item["prefix"], "workspaceTag": fixture["tag"],
+                    "seedOwnership": {key: item[key] for key in ("localCreated", "readerCreated", "writerCreated")},
+                    **{key: item[key] for key in ("localWorkspaceId", "readerWorkspaceId", "writerWorkspaceId")},
+                }})
+        run = {"id": "qa-test-run", "status": "stopped", "browser": "native", "controller": "t3",
+               "createdAt": "2026-09-26T12:00:00Z", "fixtureMode": "declared-retained-resources",
+               "fixtureVersion": "schemii-native-wave-v1", "accounts": list(accounts), "lanes": lanes}
+        run_file.write_text(json.dumps(run))
+        FakeClient.logins = []
+        return output, run_file, run, fixture
+
+    def test_native_wave_cleanup_preserves_retained_targets_and_live_peer(self):
+        output, run_file, run, fixture = self.prepared_native_wave()
+        first = run["accounts"][1]
+        scratch = {"id": wid(30000), "name": fixture["lanes"][first]["prefix"] + "scratch",
+                   "createdAt": "2026-09-26T13:00:00Z", "revision": 3}
+        FakeClient.workspaces[first].append(scratch)
+        run["lanes"][1]["resources"]["cleanupReceipts"] = [{
+            "kind": "workspace", "id": scratch["id"], "createdAt": scratch["createdAt"], "name": scratch["name"],
+        }]
+        peer = "qa_designer_001"
+        FakeClient.workspaces[peer] = [{"id": wid(40000), "name": "peer data", "revision": 1}]
+        peer_objects = copy.deepcopy(FakeClient.workspaces[peer])
+        reservations = self.root / ".git/qa-account-leases"
+        reservations.mkdir()
+        peer_lease = reservations / (peer + ".json")
+        peer_lease.write_text(json.dumps({"runId": "qa-live-peer"}))
+        run_file.write_text(json.dumps(run))
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
+                            registry_load=lambda state: {"slots": self.slots}):
+            totals = cleanup(self.root, output, run_file)
+            self.assertEqual(totals, {"chats": 0, "workspaces": 12, "connections": 0, "pending": 0})
+            self.assertEqual(cleanup(self.root, output, run_file),
+                             {"chats": 0, "workspaces": 0, "connections": 0, "pending": 0})
+        for username in run["accounts"]:
+            item = fixture["lanes"][username]
+            self.assertFalse(item["readerCreated"])
+            expected = {item["readerWorkspaceId"]}
+            if username in WRITERS:
+                self.assertFalse(item["writerCreated"])
+                expected.add(item["writerWorkspaceId"])
+            self.assertEqual({item["id"] for item in FakeClient.workspaces[username]}, expected)
+        self.assertEqual(FakeClient.workspaces[peer], peer_objects)
+        self.assertEqual(json.loads(peer_lease.read_text()), {"runId": "qa-live-peer"})
+        self.assertNotIn(peer, FakeClient.logins)
+
+    def test_native_wave_exact_created_writer_receipts_are_cleaned(self):
+        output, run_file, run, fixture = self.prepared_native_wave(reuse_writers=False)
+        for username in WRITERS:
+            self.assertTrue(fixture["lanes"][username]["writerCreated"])
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
+                            registry_load=lambda state: {"slots": self.slots}):
+            totals = cleanup(self.root, output, run_file)
+        self.assertEqual(totals, {"chats": 0, "workspaces": 14, "connections": 0, "pending": 0})
+        for username in run["accounts"]:
+            self.assertEqual({item["id"] for item in FakeClient.workspaces[username]},
+                             {fixture["lanes"][username]["readerWorkspaceId"]})
+
+    def test_native_wave_rejects_tampered_binding_before_login(self):
+        output, run_file, run, fixture = self.prepared_native_wave()
+        counterexamples = []
+        for field, value, message in (
+            ("fixtureVersion", "schemii-native-wave-v2", "not a Schemii sweep"),
+            ("fixtureMode", "harness-only-no-app-data-writes", "not a Schemii sweep"),
+            ("status", "cleanup-pending", "stopped or completed"),
+            ("id", "qa-another-run", "Run ID"),
+        ):
+            changed = copy.deepcopy(run)
+            changed[field] = value
+            counterexamples.append((field, changed, message))
+        for field, resource_value, message in (
+            ("scratchPrefix", "qa_peer_004_", "tag or prefix"),
+            ("workspaceTag", "another-tag", "tag differs"),
+            ("writerWorkspaceId", fixture["lanes"]["qa_designer_010"]["writerWorkspaceId"], "Workspace ID differs"),
+            ("seedOwnership", {"localCreated": True, "readerCreated": False, "writerCreated": True}, "ownership differs"),
+        ):
+            changed = copy.deepcopy(run)
+            changed["lanes"][1]["resources"][field] = resource_value
+            counterexamples.append((field, changed, message))
+        changed = copy.deepcopy(run)
+        changed["lanes"][0], changed["lanes"][1] = changed["lanes"][1], changed["lanes"][0]
+        counterexamples.append(("lane order", changed, "lanes do not match"))
+        for name, changed, message in counterexamples:
+            with self.subTest(counterexample=name):
+                run_file.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, message):
+                    cleanup(self.root, output, run_file)
+                self.assertEqual(FakeClient.logins, [])
+                self.assertEqual(FakeClient.deletes, [])
+
+    def test_native_wave_unbound_historical_account_receipt_is_not_owned(self):
+        output, run_file, run, fixture = self.prepared_native_wave()
+        run["accounts"].remove("qa_designer_004")
+        run["lanes"] = [lane for lane in run["lanes"] if lane["username"] != "qa_designer_004"]
+        fixture["lanes"]["qa_designer_004"]["writerCreated"] = True
+        output.write_text(json.dumps(fixture))
+        untouched = copy.deepcopy(FakeClient.workspaces["qa_designer_004"])
+        owned = owned_workspaces(fixture, run, run_file)
+        self.assertNotIn("qa_designer_004", owned)
+        run_file.write_text(json.dumps(run))
+        with patch.multiple("testing.harness.cleanup_schemii_sweep", Client=FakeClient,
+                            registry_load=lambda state: {"slots": self.slots}):
+            cleanup(self.root, output, run_file)
+        self.assertEqual(FakeClient.workspaces["qa_designer_004"], untouched)
+        self.assertNotIn("qa_designer_004", FakeClient.logins)
+
+    def test_native_wave_live_recorded_process_blocks_even_with_stopped_receipt(self):
+        output, run_file, run, _ = self.prepared_native_wave()
+        live_pid = os.getpid()
+        live = {"pid": live_pid, "birthTick": process_birth(live_pid)}
+        for kind, pid, tick in (
+            ("supervisor", "pid", "birthTick"),
+            ("child", "childPid", "childBirthTick"),
+            ("guardian", "guardianPid", "guardianBirthTick"),
+            ("browser", None, None),
+        ):
+            with self.subTest(kind=kind):
+                changed = copy.deepcopy(run)
+                native = changed["lanes"][0]["native"]
+                if kind == "browser":
+                    native["browserProcesses"] = [live]
+                else:
+                    native[pid], native[tick] = live["pid"], live["birthTick"]
+                run_file.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, f"native {kind}.*still live"):
+                    cleanup(self.root, output, run_file)
+                self.assertEqual(process_birth(live_pid), live["birthTick"])
+                self.assertEqual(FakeClient.logins, [])
+                self.assertEqual(FakeClient.deletes, [])
+
+    def test_native_wave_unobserved_cleanup_or_unknown_identity_blocks(self):
+        output, run_file, run, _ = self.prepared_native_wave()
+        counterexamples = []
+        for key, value in (("context", "unknown"), ("transport", "live"),
+                           ("guardian", "live"), ("temporaryOutput", "present")):
+            changed = copy.deepcopy(run)
+            changed["lanes"][0]["native"]["cleanup"][key] = value
+            counterexamples.append((key, changed, "Native cleanup is unresolved"))
+        for key, owner_value, message in (
+            ("closedAt", None, "Native cleanup is unresolved"),
+            ("guardianBirthTick", None, "ownership record is incomplete"),
+            ("childPid", None, "ownership record is incomplete"),
+            ("browserProcesses", None, "browser ownership is incomplete"),
+            ("directory", "relative-output", "output ownership is incomplete"),
+        ):
+            changed = copy.deepcopy(run)
+            changed["lanes"][0]["native"][key] = owner_value
+            counterexamples.append((key, changed, message))
+        for name, changed, message in counterexamples:
+            with self.subTest(counterexample=name):
+                run_file.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, message):
+                    cleanup(self.root, output, run_file)
+                self.assertEqual(FakeClient.logins, [])
+                self.assertEqual(FakeClient.deletes, [])
+        output_directory = Path(run["lanes"][0]["native"]["directory"])
+        output_directory.mkdir()
+        run_file.write_text(json.dumps(run))
+        with self.assertRaisesRegex(ValueError, "temporary output still exists"):
+            cleanup(self.root, output, run_file)
+        self.assertTrue(output_directory.is_dir())
+        self.assertEqual(FakeClient.logins, [])
+        self.assertEqual(FakeClient.deletes, [])
+
+    def test_native_wave_active_account_reservation_blocks_and_survives(self):
+        output, run_file, run, _ = self.prepared_native_wave()
+        reservations = self.root / ".git/qa-account-leases"
+        reservations.mkdir()
+        lease = reservations / (run["accounts"][0] + ".json")
+        receipt = {"runId": "qa-new-owner", "pid": os.getpid(), "birthTick": process_birth(os.getpid())}
+        lease.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError, "reserved by an active or unresolved run"):
+            cleanup(self.root, output, run_file)
+        self.assertEqual(json.loads(lease.read_text()), receipt)
+        self.assertEqual(FakeClient.logins, [])
+        self.assertEqual(FakeClient.deletes, [])
 
     def test_completed_result_still_rejects_live_controller_and_children(self):
         output, run_file, run = self.prepared_run()
