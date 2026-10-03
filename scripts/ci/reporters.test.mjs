@@ -84,10 +84,17 @@ test('Playwright custom file shards retain lane identities without native shardi
     const item = { id: 'owned-case', location: { file: '/tests/e2e/synthetic.spec.js', line: 1 },
       parent: { project: () => ({ name: 'android-chromium' }) } };
     for (const [config, value, expected] of [
+      [{ shard: null }, '1', 1],
       [{ shard: null }, '2', 2],
       [{ shard: null }, '3', 3],
+      [{ shard: null }, '4', 4],
+      [{ shard: null }, '5', 5],
+      [{ shard: null }, '6', 6],
       [{ shard: { current: 3 } }, '2', 3],
       [{ shard: { current: 1 } }, '2', 1],
+      [{ shard: { current: 6 } }, '2', 6],
+      [{ shard: { current: 6 } }, '7', 6],
+      [{ shard: null }, '0', 0],
       [{ shard: null }, '', 0],
     ]) {
       process.env.CI_TELEMETRY_SHARD = value;
@@ -96,13 +103,19 @@ test('Playwright custom file shards retain lane identities without native shardi
       instance.onTestEnd(item, { status: 'failed', retry: 0, duration: 5 });
       instance.onEnd({ status: 'failed' });
       const records = readFileSync(process.env.CI_TELEMETRY_FILE, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepEqual(records.map(record => record.kind), ['start', 'plan', 'attempt', 'end']);
       assert.ok(records.every(record => record.shard === expected && record.project === 'android-chromium'));
       assert.equal(records.find(record => record.kind === 'attempt').outcome, 'failed');
       assert.equal(records.at(-1).outcome, 'failed');
     }
-    for (const invalid of ['4', '2/2', 'NaN']) {
+    for (const invalid of ['7', '-1', '1.5', '2/2', 'NaN', 'Infinity', 'not-a-number']) {
       process.env.CI_TELEMETRY_SHARD = invalid;
       assert.throws(() => new PlaywrightReporter().onBegin({ shard: null }, { allTests: () => [item] }),
+        /Invalid timing lane/);
+    }
+    process.env.CI_TELEMETRY_SHARD = '2';
+    for (const invalid of [7, -1, 1.5, '6', 'not-a-number']) {
+      assert.throws(() => new PlaywrightReporter().onBegin({ shard: { current: invalid } }, { allTests: () => [item] }),
         /Invalid timing lane/);
     }
   } finally {
