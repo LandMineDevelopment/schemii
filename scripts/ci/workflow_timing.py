@@ -301,6 +301,9 @@ def test_evidence(directory, *, lane="source", profile=None, identity=None):
             key = result["lane"], result["project"], result["shard"]
             if key not in expected or key in observed:
                 raise ValueError("Invalid lane evidence")
+            # Valid known-lane observations retain their original reliability
+            # metrics even when stricter selected acceptance rejects the scope.
+            observed[key] = result
             if expected_scope(profile, key) is not None:
                 result["scope"] = {
                     "profile": profile,
@@ -320,7 +323,6 @@ def test_evidence(directory, *, lane="source", profile=None, identity=None):
                 }
                 if not valid_scope(profile, key, result["scope"]):
                     raise ValueError("Incomplete selected coverage")
-            observed[key] = result
         except (ValueError, OSError, KeyError, TypeError):
             invalid += 1
     values = list(observed.values())
