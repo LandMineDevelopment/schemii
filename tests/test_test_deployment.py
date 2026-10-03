@@ -791,6 +791,7 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
         if profile == "developer-inspection"
         else "--shard=1/6",
         f"--profile={profile}",
+        "--parallel=2",
     ]
     discovery = _named_step(browser, "Verify browser discovery and shard coverage")
     assert shlex.split(_step_run(discovery)) == [

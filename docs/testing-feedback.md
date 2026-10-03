@@ -282,12 +282,14 @@ termination and waits for reaping, including descendants that retain pipes after
 their leader exits. The small ownership ledger remains useful private evidence.
 
 For deliberately scheduled local acceptance, prepare a fresh private directory
-with `node tests/e2e/helpers/parallel-account.js prepare ABSOLUTE_DIRECTORY`
-and explicit bootstrap consent/owned credentials. Export its `accounts.json`
+with `node tests/e2e/helpers/parallel-account.js prepare ABSOLUTE_DIRECTORY
+--receipt=ABSOLUTE_PREPARE_RECEIPT` and explicit bootstrap consent/owned
+credentials. Export its `accounts.json`
 path, then run the coordinator's assigned project/shard with `--parallel=2`.
-After every child has stopped, use the same helper's `cleanup` command. Its
-optional `--receipt=ABSOLUTE_FILE` writes a fixed status receipt outside the
-disposable directory. An existing primary must already have the canonical
+After every child has stopped, use `node tests/e2e/helpers/parallel-account.js
+cleanup ABSOLUTE_DIRECTORY --receipt=ABSOLUTE_CLEANUP_RECEIPT`. Both commands
+require a fresh absolute receipt path outside the disposable directory and write
+a fixed status receipt. An existing primary must already have the canonical
 bookstore fixture as its first database workspace; preparation rejects conflicting
 existing work rather than reordering or deleting it. This workflow requires the
 canonical launcher and deployment lease and does not replace native manual QA.
