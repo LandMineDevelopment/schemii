@@ -111,6 +111,24 @@ never discarded merely because they are idle. Failed calls are never replayed.
 
 Always call `browser_close` before a worker finishes. A completed or interrupted
 turn can retain its MCP connection for follow-up; it is not transport shutdown.
+When the browser connection is genuinely finished, export selected evidence and
+call the project-owned `browser_release` tool with no arguments. This terminal
+operation cleans only this endpoint's backend, helper and disposable directory,
+fully writes its success response, then exits the stdio endpoint. It rejects
+target arguments and release while requests, callbacks, initialization or queued
+backend traffic are pending. Cleanup or response-write failure is explicit;
+failed calls are never replayed. Use `browser_close` when same-thread browser
+follow-up is needed. Terminal release requires a fresh thread for future browser
+use; ordinary turn completion alone is not a reason to destroy a reusable
+connection.
+
+The tool is advertised through standard MCP `tools/list` and enabled in project
+configuration. Existing endpoints and provider tool lists do not reload it.
+A fresh child can inherit its parent's old allowlist, so verify the actual
+inventory in a fresh provider session before claiming activation. If the tool
+is unavailable, close the backend and report the retained endpoint; do not
+claim transport closure. No T3 source change or private host shutdown RPC is used.
+
 Closing the native agent/session, when supported, ends the transport and removes
 its temporary directory. Stock Codex can kill the launcher before normal cleanup
 finishes. A small connection-owned cleanup process survives that targeted shutdown,
@@ -136,6 +154,14 @@ run and destructive disposable lifecycle checks outside ordinary CI. Native
 turn interruption still requires an actual coordinator interruption/follow-up;
 the current collaboration surface exposes no session-close control. Neither
 completion nor interruption implies MCP transport shutdown.
+
+For a coordinator-owned, bounded terminal control, run
+`python3 testing/agents/verify_browser_cleanup.py --cwd "$PWD" --terminal-only`.
+It uses fresh disposable stock clients to test active-backend and
+close-then-release success acknowledgements, complete endpoint cleanup, a live
+peer, exactly one rejected same-thread browser follow-up, and fresh-thread use.
+It does not repeat the unchanged ten-minute TTL, budget or forced/orphan campaign.
+The result is mechanical lifecycle evidence, not Schemii application acceptance.
 
 With thirteen available slots, twelve children can each own a browser. For manual
 acceptance reserve one of those children for independent review: at most eleven

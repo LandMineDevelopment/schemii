@@ -15,6 +15,7 @@ BROWSER_COMMAND = (
 )
 BROWSER_TOOLS = {
     "browser_close",
+    "browser_release",
     "browser_resize",
     "browser_console_messages",
     "browser_handle_dialog",
@@ -63,7 +64,7 @@ def browser_policy(config: dict) -> dict:
         "isolated_stdio_policy_valid": valid,
         "runtime_browser_isolation": "unverified",
         "artifact_cleanup": (
-            "successful_browser_close; owned_connection_exit; orphan_sweep_on_start"
+            "successful_browser_close; terminal_browser_release; owned_connection_exit; orphan_sweep_on_start"
         )
         if valid
         else "unverified",

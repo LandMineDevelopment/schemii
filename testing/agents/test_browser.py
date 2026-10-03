@@ -1199,6 +1199,76 @@ raise SystemExit(browser.main([]))
         self.receive(lambda message: message.get("id") == 9)
         self.assertFalse(paths[0].exists())
 
+    def test_release_inventory_and_active_owned_transport_exit(self):
+        owned = self.launch()
+        self.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = self.receive(lambda message: message.get("id") == 2)["result"]["tools"]
+        self.assertEqual(
+            [tool["name"] for tool in tools], ["browser_close", "browser_release"]
+        )
+        self.assertEqual(
+            tools[1]["inputSchema"],
+            {"type": "object", "properties": {}, "additionalProperties": False},
+        )
+        peer = browser.create_session(self.repository)
+        marker = peer.path / "output/peer.txt"
+        marker.write_text("live peer")
+        self.addCleanup(browser.cleanup_session, peer)
+        self.call("release", "browser_release")
+        response = self.receive(lambda message: message.get("id") == "release")
+        self.assertIs(response["result"]["isError"], False)
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertFalse(owned[0].exists())
+        for key in ("pid", "child_pid", "guardian_pid"):
+            self.assertIsNone(browser.process_birth_tick(owned[1][key]))
+        self.assertEqual(self.process.stdout.read(), b"")
+        self.assertEqual(marker.read_text(), "live peer")
+
+    def test_release_dormant_endpoint_without_backend_reallocation(self):
+        owned = self.launch()
+        self.call(2, "browser_close")
+        self.receive(lambda message: message.get("id") == 2)
+        self.released(owned)
+        self.call(3, "browser_release")
+        self.assertIs(
+            self.receive(lambda message: message.get("id") == 3)["result"]["isError"],
+            False,
+        )
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        self.assertEqual(list(owned[0].parent.glob("session-*")), [])
+
+    def test_release_busy_callback_rejects_without_cancelling_or_replaying_work(self):
+        owned = self.launch(roots=True)
+        self.call(2, "hold")
+        callback = self.receive(lambda message: message.get("method") == "roots/list")
+        self.call(3, "browser_release")
+        self.assertIn(
+            "busy",
+            self.receive(lambda message: message.get("id") == 3)["error"]["message"],
+        )
+        self.assertTrue(owned[0].exists())
+        self.assertIsNone(self.process.poll())
+        self.send({"jsonrpc": "2.0", "id": callback["id"], "result": {"roots": []}})
+        self.receive(lambda message: message.get("id") == 2)
+        calls = [
+            json.loads(line)
+            for line in (owned[0] / "output/calls.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(calls, [{"id": 2, "name": "hold"}])
+        self.call(4, "browser_release")
+        self.receive(lambda message: message.get("id") == 4)
+        self.assertEqual(self.process.wait(timeout=5), 0)
+
+    def test_release_cleanup_failure_is_one_error_without_false_success(self):
+        owned = self.launch()
+        owned[0].chmod(0o755)
+        self.call(2, "browser_release")
+        response = self.receive(lambda message: message.get("id") == 2)
+        self.assertIn("could not be released", response["error"]["message"])
+        self.assertEqual(self.process.wait(timeout=5), 2)
+        self.assertEqual(self.process.stdout.read(), b"")
+        self.assertTrue(owned[0].exists())
+
     def test_close_barrier_drains_callbacks_and_never_kills_queued_navigation(self):
         owned = self.launch(roots=True)
         self.call("8", "hold")
@@ -1434,6 +1504,158 @@ class RelayFrameTests(unittest.TestCase):
         self.assertEqual(relay.to_client, b"")
         self.assertIsNone(relay.private_id)
         self.assertEqual(relay.deferred[0][0], request)
+
+    def ready_for_release(self):
+        relay, reader = self.make_relay()
+        relay.backend.session = None
+        relay.identity = {"protocolVersion": "2024-11-05", "capabilities": {}}
+        relay.initialized = b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+        return relay, reader
+
+    def release_request(self, identity=1, **params):
+        return {
+            "jsonrpc": "2.0",
+            "id": identity,
+            "method": "tools/call",
+            "params": {"name": "browser_release", "arguments": {}, **params},
+        }
+
+    def test_release_rejects_target_and_malformed_arguments_without_cleanup(self):
+        for params in (
+            {"arguments": {"pid": 123}},
+            {"arguments": []},
+            {"arguments": None},
+            {"target": "peer"},
+            {"_meta": None},
+        ):
+            with self.subTest(params=params):
+                relay, _ = self.ready_for_release()
+                request = self.release_request(**params)
+                relay.client(request, relay.encoded(request))
+                self.assertEqual(json.loads(relay.to_client)["error"]["code"], -32602)
+                relay.backend.close.assert_not_called()
+                self.assertFalse(relay.releasing)
+
+    def test_release_rejects_each_unsafe_pending_boundary(self):
+        states = {
+            "identity": None,
+            "initialized": None,
+            "requests": {(int, 7): "tools/call"},
+            "inflight": {(int, 7): "tools/call"},
+            "callbacks": {(str, "root")},
+            "closing": [{"id": 7}, b"close", None, False],
+            "private_id": (str, "private"),
+            "deferred": [("pending", b"pending")],
+            "to_client": bytearray(b"pending"),
+            "to_backend": bytearray(b"pending"),
+        }
+        for name, value in states.items():
+            with self.subTest(name=name):
+                relay, _ = self.ready_for_release()
+                setattr(relay, name, value)
+                request = self.release_request()
+                relay.client(request, relay.encoded(request))
+                self.assertIn(b"busy", relay.to_client)
+                relay.backend.close.assert_not_called()
+                self.assertFalse(relay.releasing)
+        relay, _ = self.ready_for_release()
+        relay.backend_frames.buffer.extend(b'{"jsonrpc":')
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        self.assertIn(b"busy", relay.to_client)
+        relay.backend.close.assert_not_called()
+
+    def test_release_rejects_unread_backend_callback_before_frame_admission(self):
+        relay, _ = self.ready_for_release()
+        incoming, outgoing = os.pipe()
+        for descriptor in (incoming, outgoing):
+            self.addCleanup(os.close, descriptor)
+        relay.backend.process = mock.Mock(stdout=incoming)
+        os.write(outgoing, b'{"jsonrpc":"2.0","id":"root","method":"roots/list"}\n')
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        self.assertIn(b"busy", relay.to_client)
+        relay.backend.close.assert_not_called()
+
+    def test_release_drains_partial_writes_then_returns_without_backend_revival(self):
+        relay, reader = self.ready_for_release()
+        request = self.release_request(identity="release", _meta={"progressToken": 3})
+        relay.client(request, relay.encoded(request))
+        expected = bytes(relay.to_client)
+        self.assertTrue(relay.releasing)
+        relay.backend.close.assert_called_once_with()
+        original = os.write
+        with mock.patch.object(
+            browser.os, "write", side_effect=lambda fd, data: original(fd, data[:17])
+        ) as write:
+            self.assertEqual(relay.run(), 0)
+            self.assertGreater(write.call_count, 1)
+        self.assertEqual(os.read(reader, len(expected)), expected)
+        self.assertIs(json.loads(expected)["result"]["isError"], False)
+        relay.backend.start.assert_not_called()
+
+    def test_release_refuses_same_batch_followup_and_duplicate_without_replay(self):
+        relay, _ = self.ready_for_release()
+        request = self.release_request()
+        followup = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/call",
+            "params": {
+                "name": "browser_navigate",
+                "arguments": {"url": "data:text/html,owned"},
+            },
+        }
+        for message, raw in relay.client_frames.receive(
+            relay.encoded(request) + relay.encoded(followup) + relay.encoded(request)
+        ):
+            relay.client(message, raw)
+        relay.progress()
+        responses = [json.loads(line) for line in relay.to_client.splitlines()]
+        self.assertEqual([response["id"] for response in responses], [1, "1"])
+        self.assertIn("permanently released", responses[1]["error"]["message"])
+        self.assertEqual(relay.to_backend, b"")
+        self.assertEqual(relay.deferred, [])
+        relay.backend.start.assert_not_called()
+        relay.backend.close.assert_called_once_with()
+
+    def test_release_broken_output_is_failure_after_owned_cleanup(self):
+        relay, _ = self.ready_for_release()
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        with mock.patch.object(browser.os, "write", side_effect=BrokenPipeError):
+            with self.assertRaises(BrokenPipeError):
+                relay.run()
+        self.assertTrue(relay.to_client)
+        relay.backend.close.assert_called_once_with()
+        relay.backend.start.assert_not_called()
+
+    def test_release_stalled_output_is_bounded_and_does_not_restart_backend(self):
+        relay, _ = self.ready_for_release()
+        while True:
+            try:
+                os.write(relay.outgoing, b"x" * 65536)
+            except BlockingIOError:
+                break
+        request = self.release_request()
+        relay.client(request, relay.encoded(request))
+        started = time.monotonic()
+        with self.assertRaisesRegex(browser.ProtocolError, "fully flushed"):
+            relay.run()
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertTrue(relay.to_client)
+        relay.backend.close.assert_called_once_with()
+        relay.backend.start.assert_not_called()
+
+    def test_release_inventory_preserves_original_schema_and_rejects_collisions(self):
+        for tools in ([{"name": "browser_release"}], [None]):
+            relay, _ = self.ready_for_release()
+            relay.inflight[(int, 1)] = "tools/list"
+            relay.requests[(int, 1)] = "tools/list"
+            message = {"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}}
+            with self.assertRaises(browser.ProtocolError):
+                relay.server(message, relay.encoded(message))
+            self.assertEqual(relay.to_client, b"")
 
     def test_failure_flush_is_bounded_when_upstream_stops_reading(self):
         relay, _ = self.make_relay()

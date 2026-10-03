@@ -675,6 +675,9 @@ class Relay:
         self.initialized = None
         self.deadline = None
         self.expiry = time.monotonic() + OUTPUT_SWEEP_SECONDS
+        self.releasing = False
+        self.release_id = None
+        self.release_deadline = None
         self.original_blocking = {}
         for descriptor in (incoming, outgoing):
             self.original_blocking[descriptor] = os.get_blocking(descriptor)
@@ -727,6 +730,15 @@ class Relay:
         self.queue(self.to_backend, raw)
 
     def client(self, message: dict, raw: bytes):
+        if self.releasing:
+            if "method" in message and "id" in message:
+                identity = _request_id(message)
+                if identity != self.release_id:
+                    self.error(
+                        identity,
+                        "Browser connection is permanently released; use a fresh thread.",
+                    )
+            return
         if "method" not in message:
             identity = _request_id(message)
             if identity not in self.callbacks:
@@ -762,6 +774,13 @@ class Relay:
         identity = _request_id(message)
         if identity in self.requests:
             raise ProtocolError("Duplicate MCP request identity.")
+        if (
+            message["method"] == "tools/call"
+            and isinstance(message.get("params"), dict)
+            and message["params"].get("name") == "browser_release"
+        ):
+            self.release(message)
+            return
         if self.backend.process is None and message["method"] == "ping":
             self.queue(
                 self.to_client,
@@ -796,6 +815,71 @@ class Relay:
             for key in ("protocolVersion", "capabilities", "serverInfo")
         }
 
+    def release(self, message: dict):
+        identity = _request_id(message)
+        params = message["params"]
+        if (
+            set(params) - {"name", "arguments", "_meta"}
+            or not isinstance(params.get("arguments", {}), dict)
+            or params.get("arguments", {})
+            or ("_meta" in params and not isinstance(params["_meta"], dict))
+        ):
+            self.error(
+                identity, "browser_release accepts no target or arguments.", -32602
+            )
+            return
+        unread = False
+        if self.backend.process is not None:
+            # A queued server callback is unsafe even before its frame is read.
+            with selectors.DefaultSelector() as reader:
+                reader.register(self.backend.process.stdout, selectors.EVENT_READ)
+                unread = bool(reader.select(timeout=0))
+        if (
+            self.identity is None
+            or self.initialized is None
+            or self.requests
+            or self.inflight
+            or self.callbacks
+            or self.closing
+            or self.private_id is not None
+            or self.deferred
+            or self.to_client
+            or self.to_backend
+            or self.backend_frames.buffer
+            or unread
+        ):
+            self.error(
+                identity, "Browser connection is busy; release was not performed."
+            )
+            return
+        self.releasing = True
+        self.release_id = identity
+        self.detach()
+        try:
+            self.backend.close()
+        except (OSError, ArtifactError, subprocess.TimeoutExpired):
+            self.error(identity, "Owned browser resources could not be released.")
+            raise
+        self.queue(
+            self.to_client,
+            self.encoded(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Browser connection released. Future browser use requires a fresh thread.",
+                            }
+                        ],
+                        "isError": False,
+                    },
+                }
+            ),
+        )
+        self.release_deadline = time.monotonic() + 1
+
     def server(self, message: dict, raw: bytes):
         if "method" in message:
             if "id" in message:
@@ -821,6 +905,28 @@ class Relay:
         method = self.inflight.pop(identity)
         if method == "initialize" and "error" not in message:
             self.identity = self.negotiated(message.get("result"))
+        if method == "tools/list" and "error" not in message:
+            result = message.get("result")
+            if not isinstance(result, dict) or not isinstance(
+                result.get("tools"), list
+            ):
+                raise ProtocolError("Invalid MCP tool inventory.")
+            if not all(isinstance(tool, dict) for tool in result["tools"]):
+                raise ProtocolError("Invalid MCP tool inventory.")
+            if any(tool.get("name") == "browser_release" for tool in result["tools"]):
+                raise ProtocolError("Backend cannot advertise the local release tool.")
+            result["tools"].append(
+                {
+                    "name": "browser_release",
+                    "description": "Permanently close only this browser MCP connection and its temporary resources. Export selected evidence first. Future browser use requires a fresh thread. browser_close instead keeps this connection reusable.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                }
+            )
+            raw = self.encoded(message)
         if self.closing and identity == _request_id(self.closing[0]):
             result = message.get("result")
             succeeded = (
@@ -837,6 +943,8 @@ class Relay:
         self.queue(self.to_client, raw)
 
     def progress(self):
+        if self.releasing:
+            return
         if (
             self.closing
             and not self.inflight
@@ -925,7 +1033,9 @@ class Relay:
                     pass
 
     def interests(self):
-        desired = {self.incoming: (selectors.EVENT_READ, "client")}
+        desired = (
+            {} if self.releasing else {self.incoming: (selectors.EVENT_READ, "client")}
+        )
         if self.to_client:
             desired[self.outgoing] = (selectors.EVENT_WRITE, "output")
         if self.backend.process is not None:
@@ -961,6 +1071,15 @@ class Relay:
     def run(self):
         try:
             while True:
+                if self.releasing and not self.to_client:
+                    return 0
+                if (
+                    self.release_deadline is not None
+                    and time.monotonic() >= self.release_deadline
+                ):
+                    raise ProtocolError(
+                        "Terminal release response could not be fully flushed."
+                    )
                 self.progress()
                 self.check_budget()
                 self.interests()

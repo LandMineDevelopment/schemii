@@ -460,18 +460,212 @@ def verify(cwd: Path, timeout: float, expiry: bool) -> dict:
     return summary
 
 
+def terminal_inventory(connection: Connection, client: dict) -> None:
+    response = connection.server.request(
+        "mcpServerStatus/list",
+        {
+            "threadId": client["thread"],
+            "serverName": probe.SERVER,
+            "detail": "full",
+            "limit": 100,
+        },
+    )
+    probe.require(
+        not response.get("nextCursor"), "Terminal inventory exceeded its bounded page"
+    )
+    entries = response.get("data", [])
+    probe.require(
+        len(entries) == 1, "Terminal inventory did not select one owned endpoint"
+    )
+    entry = entries[0]
+    probe.require(
+        entry.get("name") == probe.SERVER
+        and entry.get("runtimeStatus") == "connected"
+        and not entry.get("toolsError"),
+        "Terminal endpoint did not connect",
+    )
+    tools = [
+        tool
+        for tool in entry.get("tools", {}).values()
+        if tool.get("name") == "browser_release"
+    ]
+    probe.require(len(tools) == 1, "Fresh provider did not advertise browser_release")
+    schema = tools[0].get("inputSchema")
+    probe.require(
+        schema == {"type": "object", "properties": {}, "additionalProperties": False},
+        "Terminal release accepts unexpected targets",
+    )
+
+
+def check_terminal_release(
+    connection: Connection, client: dict, *, dormant: bool
+) -> dict:
+    terminal_inventory(connection, client)
+    generation = probe.generation_snapshot(connection.server, client)
+    close = None
+    if dormant:
+        connection.call(client, "browser_close")
+        close = probe.assert_generation_released(connection.server, generation)
+    # Even an uncertain release must not be retried by the generic close loop.
+    # Owned app-server shutdown remains the bounded finalizer on every outcome.
+    connection.clients.remove(client)
+    started = time.monotonic()
+    response = connection.server.request(
+        "mcpServer/tool/call",
+        {
+            "threadId": client["thread"],
+            "server": probe.SERVER,
+            "tool": "browser_release",
+            "arguments": {},
+        },
+    )
+    probe.require(
+        response.get("isError") is False, "Terminal release did not acknowledge success"
+    )
+    probe.require(
+        probe.text_content(response)
+        == "Browser connection released. Future browser use requires a fresh thread.",
+        "Terminal release returned an unexpected acknowledgement",
+    )
+    ack_seconds = round(time.monotonic() - started, 3)
+    identities = generation["released"] | {generation["endpoint"]}
+    path = generation["session"]
+    seconds = wait_for(
+        lambda: (
+            not any(
+                probe.identity(record) in identities
+                for record in probe.process_snapshot().values()
+            )
+            and not path.exists()
+            and not path.is_symlink()
+        ),
+        "Terminal release retained owned endpoint, generation or output",
+        timeout=min(connection.server.timeout, 15),
+    )
+    # Exactly one deliberate rejected call; no cleanup RPC targets this client.
+    try:
+        connection.call(client, "browser_snapshot")
+    except probe.ProbeError:
+        pass
+    else:
+        raise probe.ProbeError("Released same-thread browser unexpectedly reopened")
+    probe.require(
+        not any(
+            probe.identity(record) in identities
+            for record in probe.process_snapshot().values()
+        )
+        and not set(
+            probe.owned_sessions(
+                connection.root, connection.baseline, connection.server
+            )
+        )
+        - connection.sessions,
+        "Rejected follow-up recreated browser resources",
+    )
+    connection.server.request(
+        "config/read", {"cwd": str(connection.cwd), "includeLayers": False}
+    )
+    return {
+        "state": "dormant" if dormant else "active",
+        "success_acknowledged": True,
+        "ack_seconds": ack_seconds,
+        "cleanup_seconds": seconds,
+        "owned_process_identities": len(identities),
+        "remaining_owned_process_entries": 0,
+        "remaining_owned_directories": 0,
+        "post_release_rejected_calls": 1,
+        "parent_app_server_usable": True,
+        "browser_close": close,
+    }
+
+
+def verify_terminal(cwd: Path, timeout: float) -> dict:
+    """Bounded stock-client terminal proof, without unchanged TTL/stress controls."""
+    summary = {
+        "result": "failed",
+        "ai_turns_started": 0,
+        "session_directories_manually_removed": 0,
+        "limits": [
+            "Disposable fresh stock provider; existing parent allowlists do not reload.",
+            "Synthetic mechanical lifecycle proof; no Schemii application acceptance.",
+            "Unchanged expiry, budget, forced/orphan boundaries reuse prior evidence.",
+        ],
+        "sources": {
+            name: hashlib.sha256((cwd / name).read_bytes()).hexdigest()
+            for name in (
+                "testing/agents/browser.py",
+                "testing/agents/verify_browser_cleanup.py",
+                ".codex/config.toml",
+            )
+        },
+    }
+    connection = None
+    try:
+        connection = Connection(cwd, timeout)
+        peer = connection.start()
+        marker = peer["session"] / "output/terminal-peer.dat"
+        marker.write_bytes(b"live peer")
+        results = []
+        for dormant in (False, True):
+            client = connection.start()
+            results.append(check_terminal_release(connection, client, dormant=dormant))
+            check_peer(connection, peer, marker)
+            fresh = connection.start()
+            probe.require(
+                "Native cleanup probe"
+                in probe.text_content(connection.call(fresh, "browser_snapshot")),
+                "Fresh browser thread failed after release",
+            )
+        summary["terminal_release"] = results
+        summary["live_peer_preserved"] = True
+        summary["fresh_thread_browser_usable"] = True
+        summary["result"] = "passed"
+    except probe.ProbeError as error:
+        summary["reason"] = str(error)
+    except KeyboardInterrupt:
+        summary["reason"] = "Terminal cleanup probe interrupted"
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        summary["reason"] = (
+            f"Unexpected terminal probe failure ({type(error).__name__})"
+        )
+    finally:
+        if connection is not None:
+            try:
+                owned = connection.capture()
+                connection.shutdown()
+                summary["final_cleanup"] = assert_released(connection, owned)
+            except (OSError, probe.ProbeError, ValueError):
+                summary["result"] = "failed"
+                summary.setdefault(
+                    "reason",
+                    "Owned terminal probe cleanup did not complete automatically",
+                )
+    return summary
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--timeout", type=float, default=45)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--include-expiry", action="store_true", help="Also wait ten real minutes"
+    )
+    modes.add_argument(
+        "--terminal-only",
+        action="store_true",
+        help="Only prove explicit terminal release in fresh stock clients",
     )
     args = parser.parse_args()
     if not 1 <= args.timeout <= 300:
         parser.error("--timeout must be between 1 and 300 seconds")
     os.umask(0o077)
-    result = verify(args.cwd.resolve(strict=True), args.timeout, args.include_expiry)
+    cwd = args.cwd.resolve(strict=True)
+    result = (
+        verify_terminal(cwd, args.timeout)
+        if args.terminal_only
+        else verify(cwd, args.timeout, args.include_expiry)
+    )
     print(json.dumps(result, separators=(",", ":")))
     return 0 if result["result"] == "passed" else 2
 

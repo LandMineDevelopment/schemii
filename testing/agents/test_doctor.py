@@ -171,7 +171,7 @@ class NativeBrowserPolicyTests(unittest.TestCase):
         self.assertEqual(result["runtime_browser_isolation"], "unverified")
         self.assertEqual(
             result["artifact_cleanup"],
-            "successful_browser_close; owned_connection_exit; orphan_sweep_on_start",
+            "successful_browser_close; terminal_browser_release; owned_connection_exit; orphan_sweep_on_start",
         )
 
     def test_missing_and_remote_shared_servers_do_not_claim_isolation(self):
@@ -182,6 +182,14 @@ class NativeBrowserPolicyTests(unittest.TestCase):
         self.assertFalse(
             doctor.browser_policy(self.config)["isolated_stdio_policy_valid"]
         )
+
+    def test_terminal_release_must_be_allowed_without_claiming_runtime_activation(self):
+        self.config["mcp_servers"]["schemii_browser"]["enabled_tools"].remove(
+            "browser_release"
+        )
+        result = doctor.browser_policy(self.config)
+        self.assertFalse(result["isolated_stdio_policy_valid"])
+        self.assertEqual(result["artifact_cleanup"], "unverified")
 
     def test_arbitrary_javascript_or_no_allowlist_prevents_readiness(self):
         for tools in (
