@@ -205,9 +205,11 @@ test('workflow preserves engine, device lanes, one-worker scheduling, launcher a
   assert.doesNotMatch(save, /always\(\)|continue-on-error/);
   assert.ok(workflow.indexOf('actions/cache/restore@v4') < workflow.indexOf('browser-dependencies.mjs prepare'));
   assert.ok(workflow.indexOf('browser-dependencies.mjs prepare') < workflow.indexOf('actions/cache/save@v4'));
-  assert.ok(workflow.indexOf('actions/cache/save@v4') < workflow.indexOf('run: ./start.sh'));
+  assert.ok(workflow.indexOf('actions/cache/save@v4') < workflow.indexOf('name: Start the canonical application stack'));
   assert.match(workflow, /run: node scripts\/ci\/run-browser-shard.mjs --project=\$\{\{ matrix.project \}\} --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ matrix.total \}\} --profile=\$\{\{ needs.classify.outputs.profile \}\}/);
-  assert.match(workflow, /run: node --test tests\/browser-infrastructure\/shards.test.mjs/);
+  const startup = workflow.split('      - name: Start the canonical application stack')[1].split('      - name:')[0];
+  assert.match(startup, /node scripts\/ci\/prepare-browser-stack.mjs --discovery/);
+  assert.match(startup, /^\s*\.\/start\.sh$/m);
 });
 
 test('browser CLI uses the installed public package bin rather than an unexported subpath', () => {

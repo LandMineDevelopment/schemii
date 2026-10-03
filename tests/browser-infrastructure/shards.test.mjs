@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { balanceFiles, coverageProfile, OBSERVATION, OBSERVED_COSTS, PROJECTS } from '../../scripts/ci/browser-shards.mjs';
+import { balanceFiles, balanceParallelFiles, parallelFiles, coverageProfile, OBSERVATION, OBSERVED_COSTS, PROJECTS } from '../../scripts/ci/browser-shards.mjs';
 import { inventoryFiles, invocation, scopedInventory } from '../../scripts/ci/run-browser-shard.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -78,6 +78,23 @@ function proveInventory(cwd, baseline, shardCount = 2, profile = undefined) {
 test('real six-way Playwright discovery proves exact project/test coverage and transport scope', t => {
   const baseline = discover(root);
   const required = proveInventory(root, baseline, 6, 'full');
+  // Reuse this real discovery for the opted-in routing proof; another set of
+  // CLI collection processes would repeat work without strengthening the union.
+  for (const project of PROJECTS) {
+    const expected = required.filter(item => item.project === project);
+    const files = [...new Set(expected.map(item => `tests/e2e/${item.file}`))];
+    const plan = balanceParallelFiles(files, project, OBSERVED_COSTS, 6);
+    const routed = [];
+    for (const lane of plan.shards) {
+      const phases = parallelFiles(lane.files, project);
+      const assigned = [...phases.serial, ...phases.parallel.flat()];
+      assert.deepEqual([...assigned].sort(), [...lane.files].sort());
+      assert.equal(new Set(assigned).size, assigned.length);
+      routed.push(...expected.filter(item => assigned.includes(`tests/e2e/${item.file}`)));
+    }
+    assert.equal(new Set(routed.map(item => item.id)).size, routed.length);
+    assert.deepEqual(routed.map(item => item.id).sort(), expected.map(item => item.id).sort());
+  }
   t.diagnostic(JSON.stringify(Object.fromEntries(PROJECTS.map(project => {
     const selected = required.filter(item => item.project === project);
     return [project, { files: new Set(selected.map(item => item.file)).size, cases: selected.length, shards: 6 }];

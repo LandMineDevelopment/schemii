@@ -161,8 +161,9 @@ merge one strict canonical receipt. The PR186 phase model suggests roughly one
 minute of Python-step savings; ordinary current-head CI must establish the actual
 wall reduction, and browser work may still dominate the workflow. Full and E2E
 acceptance use six isolated hosted application
-stacks per device; the frozen cache profile keeps three. Each stack retains
-serialized whole-file execution and every selected case.
+stacks per device; the frozen cache profile keeps three. Full/E2E stacks use the
+owned two-process execution described below. Selected cache and inspection
+profiles retain their existing single-process whole-file execution.
 The gate derives exact expected jobs and receipt lanes from the profile, requires
 selected layers to succeed, and requires excluded workflow needs to be skipped.
 Missing/duplicate/stale/failed/recovered selected receipts cannot pass.
@@ -245,6 +246,67 @@ check; its mounted persistence and export coverage remains required.
 Live provider/report specs require their own authenticated fixture prerequisites;
 track their skips and ownership rather than treating a green default run as proof.
 Full capacity ramps/soaks in #135/#136 stay outside the normal PR feedback path.
+
+### Two browser processes per full stack
+
+The first desktop lane overlaps collection-only infrastructure discovery with
+canonical launcher startup under one owned coordinator. Both must pass and stop
+before account preparation or browser cases begin. Discovery starts no browser,
+global fixture setup or application requests. Other lanes continue calling
+`./start.sh` directly. The Actions startup step measures this readiness barrier;
+the launcher's original receipt retains the actual build/replacement/readiness
+phases, so overlapping collection time is not added twice.
+
+Full and E2E CI prepare two independently authenticated accounts before any test
+body runs. Each account owns its connection profiles, imported catalogs,
+workspaces, storage state and private working directory. Preparation completes
+both catalog imports before the serial phase, including shared-target DDL tests.
+The accounts still use the same seeded PostgreSQL targets: account isolation
+does not make shared databases or server admission limits independent.
+
+The coordinator runs `scripts/ci/run-browser-shard.mjs --parallel=2` against the
+prepared `SCHEMII_E2E_PARALLEL_ACCOUNTS_FILE`. Within each stack, reviewed files
+that exercise shared DDL, global capacity, administrator/shared profiles or live
+provider configuration run first in one process. The remaining positively
+reviewed files run in two overlapping processes, each with one Playwright worker.
+Unknown files stay serial until their ownership is reviewed. Cases remain within
+their original whole file; retries, skips and acceptance coverage are unchanged.
+The six-stack routing balances the serial cost plus the slower overlapping group,
+rather than dividing a serial plan and leaving its shared phase as the bottleneck.
+
+Actual discovery proves the original case inventory. Child receipts retain
+original source/case identities despite their private working directories, and
+the joined receipt must contain every original case exactly once. Missing,
+duplicate, foreign, cancelled or malformed child evidence fails acceptance.
+Public browser artifacts retain the same three validated members; credentials,
+storage state, screenshots and private ownership ledgers are not uploaded.
+
+CI's always-run cleanup owns secondary fixtures/account deletion and both
+disposable process roots after children have stopped. It preserves the primary
+account, existing work, live peers and dependency caches. A failed or uncertain
+write retains its ownership intent for targeted recovery; cleanup failure fails
+the job. Process cancellation owns only its captured child groups, bounds
+termination and waits for reaping, including descendants that retain pipes after
+their leader exits. The small ownership ledger remains useful private evidence.
+
+For deliberately scheduled local acceptance, prepare a fresh private directory
+with `node tests/e2e/helpers/parallel-account.js prepare ABSOLUTE_DIRECTORY
+--receipt=ABSOLUTE_PREPARE_RECEIPT` and explicit bootstrap consent/owned
+credentials. Export its `accounts.json`
+path, then run the coordinator's assigned project/shard with `--parallel=2`.
+After every child has stopped, use `node tests/e2e/helpers/parallel-account.js
+cleanup ABSOLUTE_DIRECTORY --receipt=ABSOLUTE_CLEANUP_RECEIPT`. Both commands
+require a fresh absolute receipt path outside the disposable directory and write
+a fixed status receipt. An existing primary must already have the canonical
+bookstore fixture as its first database workspace; preparation rejects conflicting
+existing work rather than reordering or deleting it. This workflow requires the
+canonical launcher and deployment lease and does not replace native manual QA.
+Developers continue using focused checks; a new agent or merge does not authorize
+another full acceptance run.
+For changes to CI dispatch or shared runners, run complete cheap Node feedback
+once before pushing: its workflow contracts cover adjacent paths that a narrow
+name filter can miss. Reuse that pass until relevant source changes; it does not
+authorize repeating Python, database or browser acceptance locally.
 
 ### Identical-tree post-merge acceptance
 
