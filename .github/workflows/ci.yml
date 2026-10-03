@@ -24,8 +24,21 @@ jobs:
     name: Classify complete change
     runs-on: ubuntu-24.04
     timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       lane: ${{ steps.classify.outputs.lane }}
+      profile: ${{ steps.classify.outputs.profile }}
+      static: ${{ steps.classify.outputs.static }}
+      node: ${{ steps.classify.outputs.node }}
+      python: ${{ steps.classify.outputs.python }}
+      postgres: ${{ steps.classify.outputs.postgres }}
+      browser: ${{ steps.classify.outputs.browser }}
+      browser_matrix: ${{ steps.classify.outputs.browser_matrix }}
+      python_paths: ${{ steps.classify.outputs.python_paths }}
+      acceptance: ${{ steps.reuse.outputs.acceptance }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,6 +52,19 @@ jobs:
         with:
           name: ci-classification-attempt-${{ github.run_attempt }}
           path: artifacts/ci-classification.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Admit recent identical-tree proven PR acceptance
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/reuse_acceptance.py --classification artifacts/ci-classification.json --output artifacts/acceptance-reuse/reuse.json
+      - name: Retain verified donor evidence with its original identities
+        if: steps.reuse.outputs.acceptance == 'reused-full-pr' || steps.reuse.outputs.acceptance == 'reused-schemer-result-cache-pr' || steps.reuse.outputs.acceptance == 'reused-developer-inspection-pr' || steps.reuse.outputs.acceptance == 'reused-native-pr'
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-reuse-attempt-${{ github.run_attempt }}
+          path: artifacts/acceptance-reuse
           if-no-files-found: error
           retention-days: 7
 
@@ -67,7 +93,7 @@ jobs:
 
   static-quality:
     name: Incremental Python static quality
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.static == 'true'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -87,7 +113,7 @@ jobs:
 
   test:
     name: Node and deterministic Python behavior
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.node == 'true' && needs.classify.outputs.acceptance != 'reused-full-pr' && needs.classify.outputs.acceptance != 'reused-schemer-result-cache-pr' && needs.classify.outputs.acceptance != 'reused-developer-inspection-pr' && needs.classify.outputs.acceptance != 'reused-native-pr'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -114,22 +140,28 @@ jobs:
             artifacts/ci-timing/node-summary.json
           retention-days: 7
       - uses: actions/setup-python@v5
+        if: needs.classify.outputs.python == 'true'
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
+      - if: needs.classify.outputs.python == 'true'
+        run: python -m pip install --upgrade pip
+      - if: needs.classify.outputs.python == 'true'
+        run: python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
       - name: Deterministic Python behavior
+        if: needs.classify.outputs.python == 'true'
         env:
           CI_TELEMETRY_FILE: artifacts/ci-timing/python.jsonl
-        run: python -m pytest -q -p scripts.ci.pytest_timing
-      - run: python -m compileall -q src tests testing
+          CI_TEST_PROFILE: ${{ needs.classify.outputs.profile }}
+        run: python scripts/ci/python-tests.py ${{ needs.classify.outputs.python_paths }}
+      - if: needs.classify.outputs.python == 'true'
+        run: python -m compileall -q src tests testing
       - name: Validate public Python timing
         id: python-timing
-        if: always()
+        if: always() && needs.classify.outputs.python == 'true'
         run: python3 scripts/ci/summary.py artifacts/ci-timing/python.jsonl artifacts/ci-timing/python-summary.json
       - name: Publish public Python timing
-        if: always() && steps.python-timing.outcome == 'success'
+        if: always() && needs.classify.outputs.python == 'true' && steps.python-timing.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: python-timing-attempt-${{ github.run_attempt }}
@@ -140,7 +172,7 @@ jobs:
 
   postgres-integration:
     name: Real PostgreSQL metadata behavior
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.postgres == 'true' && needs.classify.outputs.acceptance != 'reused-full-pr' && needs.classify.outputs.acceptance != 'reused-schemer-result-cache-pr' && needs.classify.outputs.acceptance != 'reused-developer-inspection-pr' && needs.classify.outputs.acceptance != 'reused-native-pr'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -188,16 +220,14 @@ jobs:
           retention-days: 7
 
   browser-smoke:
-    name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/2)
-    if: always() && !cancelled() && needs.classify.outputs.lane != 'reports'
+    name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/${{ matrix.total }})
+    if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.browser == 'true' && needs.classify.outputs.acceptance != 'reused-full-pr' && needs.classify.outputs.acceptance != 'reused-schemer-result-cache-pr' && needs.classify.outputs.acceptance != 'reused-developer-inspection-pr' && needs.classify.outputs.acceptance != 'reused-native-pr'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      matrix:
-        project: [desktop-chromium, android-chromium]
-        shard: [1, 2]
+      matrix: ${{ fromJSON(needs.classify.outputs.browser_matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -205,25 +235,75 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - name: Check installed runtime and plan exact Ubuntu font payloads
+        id: browser-dependencies
+        run: node scripts/ci/browser-dependencies.mjs plan
+      - name: Reuse authenticated immutable font archives
+        id: browser-font-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.browser-dependencies.outputs.cache_dir }}
+          key: ${{ steps.browser-dependencies.outputs.cache_key }}
+      - name: Prepare complete fonts and validate Chromium runtime
+        id: browser-runtime
+        run: node scripts/ci/browser-dependencies.mjs prepare
+      - name: Retain verified immutable font archives before application execution
+        if: success() && steps.browser-runtime.outcome == 'success' && steps.browser-font-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.browser-dependencies.outputs.cache_dir }}
+          key: ${{ steps.browser-font-cache.outputs.cache-primary-key }}
+      - name: Prepare startup timing output directory
+        run: mkdir -p artifacts/ci-timing
+      - name: Observe browser runner hardware
+        run: node --input-type=module -e 'import os from "node:os"; console.log(JSON.stringify({platform:os.platform(),arch:os.arch(),available_cpus:os.availableParallelism(),cpu_model:os.cpus()[0]?.model || null,total_memory_bytes:os.totalmem()}));'
       - name: Start the canonical application stack
-        run: ./start.sh
+        id: canonical-startup
+        env:
+          SCHEMII_START_TIMING_FILE: ${{ github.workspace }}/artifacts/ci-timing/startup.jsonl
+          CI_TELEMETRY_PROJECT: ${{ matrix.project }}
+          CI_TELEMETRY_SHARD: ${{ matrix.shard }}
+        run: |
+          if [[ '${{ matrix.project }}' == 'desktop-chromium' && '${{ matrix.shard }}' == '1' ]]; then
+            node scripts/ci/prepare-browser-stack.mjs --discovery
+          else
+            ./start.sh
+          fi
+      - name: Prepare independent browser accounts and private fixtures
+        id: parallel-accounts
+        if: needs.classify.outputs.profile == 'full' || needs.classify.outputs.profile == 'e2e-tests'
+        env:
+          SCHEMII_E2E_BOOTSTRAP: "1"
+        run: |
+          directory="${RUNNER_TEMP}/schemii-browser-accounts"
+          node tests/e2e/helpers/parallel-account.js prepare "$directory" --receipt="${GITHUB_WORKSPACE}/artifacts/ci-timing/parallel-prepare.json"
+          printf '%s\n' "SCHEMII_E2E_PARALLEL_ACCOUNTS_FILE=${directory}/accounts.json" >> "$GITHUB_ENV"
       - name: Exercise browser flows
         timeout-minutes: 28
         env:
           SCHEMII_E2E_BOOTSTRAP: "1"
           CI_TELEMETRY_FILE: artifacts/ci-timing/browser.jsonl
           CI_TELEMETRY_PROJECT: ${{ matrix.project }}
-        run: npm run test:e2e -- --project=${{ matrix.project }} --shard=${{ matrix.shard }}/2
+        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/${{ matrix.total }} --profile=${{ needs.classify.outputs.profile }} --parallel=2
+      - name: Release owned browser accounts and disposable process directories
+        if: always() && (needs.classify.outputs.profile == 'full' || needs.classify.outputs.profile == 'e2e-tests')
+        run: |
+          directory="${RUNNER_TEMP}/schemii-browser-accounts"
+          if [[ -f "$directory/ownership.json" ]]; then
+            node tests/e2e/helpers/parallel-account.js cleanup "$directory" --receipt="${GITHUB_WORKSPACE}/artifacts/ci-timing/parallel-cleanup.json"
+          elif [[ '${{ steps.parallel-accounts.outcome }}' != 'skipped' ]]; then
+            echo 'Parallel account ownership receipt is missing.' >&2
+            exit 1
+          fi
       - name: Verify metadata backup recovery in an isolated database
-        if: matrix.project == 'desktop-chromium' && matrix.shard == 1
+        if: matrix.project == 'desktop-chromium' && matrix.shard == 1 && needs.classify.outputs.profile != 'schemer-result-cache' && needs.classify.outputs.profile != 'developer-inspection'
         run: |
           ./start.sh --backup artifacts/recovery-smoke
           ./start.sh --verify-backup artifacts/recovery-smoke
       - name: Validate public browser timing
         id: browser-timing
         if: always()
-        run: python3 scripts/ci/summary.py artifacts/ci-timing/browser.jsonl artifacts/ci-timing/browser-summary.json
+        run: python3 scripts/ci/workflow_timing.py --inputs artifacts/ci-timing/browser.jsonl --startup "${{ github.workspace }}/artifacts/ci-timing/startup.jsonl" --output artifacts/ci-timing/browser-summary.json
       - name: Publish public browser timing, including failed first attempts
         if: always() && steps.browser-timing.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -232,6 +312,22 @@ jobs:
           path: |
             artifacts/ci-timing/browser.jsonl
             artifacts/ci-timing/browser-summary.json
+            artifacts/ci-timing/browser-dependencies.json
+          retention-days: 7
+
+      - name: Validate failed canonical startup diagnostic
+        id: startup-diagnostic
+        if: failure() && steps.canonical-startup.outcome == 'failure'
+        env:
+          CI_TELEMETRY_PROJECT: ${{ matrix.project }}
+          CI_TELEMETRY_SHARD: ${{ matrix.shard }}
+        run: python3 scripts/ci/workflow_timing.py --startup "${{ github.workspace }}/artifacts/ci-timing/startup.jsonl" --failed-startup --output artifacts/ci-timing/startup-diagnostic.json
+      - name: Publish validated failed startup diagnostic
+        if: failure() && steps.canonical-startup.outcome == 'failure' && steps.startup-diagnostic.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: startup-diagnostic-${{ matrix.project }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: artifacts/ci-timing/startup-diagnostic.json
           retention-days: 7
 
   timing-rollup:
@@ -251,16 +347,27 @@ jobs:
           name: ci-classification-attempt-${{ github.run_attempt }}
           path: artifacts
       - name: Download only public timing evidence
-        if: always() && needs.classify.outputs.lane != 'reports'
+        if: always() && needs.classify.outputs.lane != 'reports' && needs.classify.outputs.acceptance != 'reused-full-pr' && needs.classify.outputs.acceptance != 'reused-schemer-result-cache-pr' && needs.classify.outputs.acceptance != 'reused-developer-inspection-pr' && needs.classify.outputs.acceptance != 'reused-native-pr'
         uses: actions/download-artifact@v4
         with:
           pattern: '*-timing*-attempt-${{ github.run_attempt }}'
           path: artifacts/ci-timing/lanes
-      - name: Collect workflow dispatch, queue, setup and execution timings
+      - name: Download original donor acceptance evidence
+        if: needs.classify.outputs.acceptance == 'reused-full-pr' || needs.classify.outputs.acceptance == 'reused-schemer-result-cache-pr' || needs.classify.outputs.acceptance == 'reused-developer-inspection-pr' || needs.classify.outputs.acceptance == 'reused-native-pr'
+        uses: actions/download-artifact@v4
+        with:
+          name: acceptance-reuse-attempt-${{ github.run_attempt }}
+          path: artifacts/acceptance-reuse
+      - name: Collect workflow dispatch, start delay, setup and execution timings
         env:
           GITHUB_TOKEN: ${{ github.token }}
         if: always()
-        run: python3 scripts/ci/workflow_timing.py --classification artifacts/ci-classification.json --inputs artifacts/ci-timing/lanes --output artifacts/ci-timing/workflow-summary.json
+        run: |
+          reuse_args=()
+          if [[ "${{ needs.classify.outputs.acceptance }}" == 'reused-full-pr' || "${{ needs.classify.outputs.acceptance }}" == 'reused-schemer-result-cache-pr' || "${{ needs.classify.outputs.acceptance }}" == 'reused-developer-inspection-pr' || "${{ needs.classify.outputs.acceptance }}" == 'reused-native-pr' ]]; then
+            reuse_args=(--reuse artifacts/acceptance-reuse/reuse.json)
+          fi
+          python3 scripts/ci/workflow_timing.py --classification artifacts/ci-classification.json --inputs artifacts/ci-timing/lanes --output artifacts/ci-timing/workflow-summary.json "${reuse_args[@]}"
       - name: Publish public workflow timing
         if: always()
         uses: actions/upload-artifact@v4
@@ -278,8 +385,11 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: ci-classification-attempt-${{ github.run_attempt }}
@@ -289,8 +399,19 @@ jobs:
         with:
           name: workflow-timing-attempt-${{ github.run_attempt }}
           path: artifacts/ci-timing
+      - name: Download donor proof for independent provider revalidation
+        if: needs.classify.outputs.acceptance == 'reused-full-pr' || needs.classify.outputs.acceptance == 'reused-schemer-result-cache-pr' || needs.classify.outputs.acceptance == 'reused-developer-inspection-pr' || needs.classify.outputs.acceptance == 'reused-native-pr'
+        uses: actions/download-artifact@v4
+        with:
+          name: acceptance-reuse-attempt-${{ github.run_attempt }}
+          path: artifacts/acceptance-reuse
       - name: Resolve report validation or every required source layer
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci/required_gate.py --classification artifacts/ci-classification.json --timing artifacts/ci-timing/workflow-summary.json
+        run: |
+          reuse_args=()
+          if [[ "${{ needs.classify.outputs.acceptance }}" == 'reused-full-pr' || "${{ needs.classify.outputs.acceptance }}" == 'reused-schemer-result-cache-pr' || "${{ needs.classify.outputs.acceptance }}" == 'reused-developer-inspection-pr' || "${{ needs.classify.outputs.acceptance }}" == 'reused-native-pr' ]]; then
+            reuse_args=(--reuse artifacts/acceptance-reuse/reuse.json)
+          fi
+          python3 scripts/ci/required_gate.py --classification artifacts/ci-classification.json --timing artifacts/ci-timing/workflow-summary.json "${reuse_args[@]}"

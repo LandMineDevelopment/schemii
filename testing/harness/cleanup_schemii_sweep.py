@@ -41,6 +41,34 @@ def require_stopped(run: dict, run_file: Path) -> None:
                 raise ValueError(f"{kind} launch ownership is unresolved for {lane.get('id')}")
             if lane.get(kind) is not None:
                 records.append((f"{kind} for {lane.get('id')}", lane[kind]))
+        native = lane.get("native")
+        if native is not None:
+            if not isinstance(native, dict):
+                raise ValueError(f"Native ownership record is incomplete for {lane.get('id')}")
+            cleanup = native.get("cleanup")
+            if (not isinstance(native.get("closedAt"), str) or not native["closedAt"]
+                    or not isinstance(cleanup, dict)
+                    or cleanup.get("context") != "closed-observed"
+                    or cleanup.get("transport") != "stopped"
+                    or cleanup.get("guardian") != "stopped"
+                    or cleanup.get("temporaryOutput") != "removed-observed"):
+                raise ValueError(f"Native cleanup is unresolved for {lane.get('id')}; close and release the owned transport first")
+            directory = native.get("directory")
+            if not isinstance(directory, str) or not os.path.isabs(directory):
+                raise ValueError(f"Native output ownership is incomplete for {lane.get('id')}")
+            if os.path.lexists(directory):
+                raise ValueError(f"Native temporary output still exists for {lane.get('id')}; wait for owned transport cleanup")
+            for kind, pid, tick in (
+                ("supervisor", "pid", "birthTick"),
+                ("child", "childPid", "childBirthTick"),
+                ("guardian", "guardianPid", "guardianBirthTick"),
+            ):
+                records.append((f"native {kind} for {lane.get('id')}",
+                                {"pid": native.get(pid), "birthTick": native.get(tick)}))
+            browsers = native.get("browserProcesses")
+            if not isinstance(browsers, list):
+                raise ValueError(f"Native browser ownership is incomplete for {lane.get('id')}")
+            records.extend((f"native browser for {lane.get('id')}", owner) for owner in browsers)
     for kind, record in records:
         if (not isinstance(record, dict) or type(record.get("pid")) is not int or record["pid"] < 1
                 or not isinstance(record.get("birthTick"), str) or not record["birthTick"].isdigit()):
@@ -95,7 +123,9 @@ def owned_workspaces(workspaces: dict, run: dict, run_file: Path) -> dict[str, s
         raise ValueError("Run ID does not match its manifest path")
     if run.get("status") not in ("stopped", "passed", "finished-with-gaps"):
         raise ValueError("Cleanup requires a stopped or completed harness run")
-    if run.get("fixtureVersion") not in {"schemii-full-qa-v1", "schemii-followup-qa-v1"} or run.get("fixtureMode") != "declared-retained-resources":
+    if run.get("fixtureVersion") not in {
+        "schemii-full-qa-v1", "schemii-followup-qa-v1", "schemii-native-wave-v1",
+    } or run.get("fixtureMode") != "declared-retained-resources":
         raise ValueError("Run is not a Schemii sweep with declared fixtures")
     accounts = run.get("accounts", [])
     if (not isinstance(accounts, list) or not accounts or len(accounts) != len(set(accounts))

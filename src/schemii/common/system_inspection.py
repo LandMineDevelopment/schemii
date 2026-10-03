@@ -5,11 +5,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
-import textwrap
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, get_args, get_type_hints
+from typing import Any, TypeAlias, get_args, get_type_hints
 from starlette.background import BackgroundTasks
 
 from fastapi import FastAPI
@@ -27,7 +26,6 @@ from schemii.common.source_inspection import (
     direct_call_sites,
     is_first_party,
     pydantic_model_tree,
-    python_object_id,
 )
 
 
@@ -49,6 +47,9 @@ _MAX_BINDING_DEPTH = 5
 _MAX_MODELS_PER_ROUTE_ROLE = 32
 _MAX_JOURNEY_NODES = 768
 _JOURNEY_STAGES = ("api", "internals", "database", "response")
+_IterationContainer: TypeAlias = (
+    ast.For | ast.AsyncFor | ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+)
 
 
 def _annotation_types(annotation: object) -> list[type[object]]:
@@ -122,18 +123,25 @@ class RuntimeBindingIndex:
         self.truncated = False
         self._seen: set[int] = set()
         self._binding_keys: set[tuple[str, str, tuple[str, ...]]] = set()
-        self._source_trees: dict[object, ast.AST | None] = {}
+        self._iteration_containers: dict[object, tuple[_IterationContainer, ...]] = {}
         self._visit(services, path="services", depth=0)
         for name, instance in self.application_state.items():
             self._visit(instance, path=f"state.{name}", depth=0)
 
-    def _source_tree(self, subject: object) -> ast.AST | None:
-        if subject not in self._source_trees:
-            try:
-                self._source_trees[subject] = ast.parse(textwrap.dedent(inspect.getsource(subject)))
-            except (OSError, TypeError, SyntaxError):
-                self._source_trees[subject] = None
-        return self._source_trees[subject]
+    def _source_tree(self, subject: object) -> ast.Module | None:
+        return self.registry.source_tree(subject)
+
+    def _source_iterations(self, subject: object) -> tuple[_IterationContainer, ...]:
+        if subject not in self._iteration_containers:
+            tree = self._source_tree(subject)
+            self._iteration_containers[subject] = tuple(
+                node for node in ast.walk(tree)
+                if isinstance(node, (
+                    ast.For, ast.AsyncFor, ast.ListComp, ast.SetComp,
+                    ast.DictComp, ast.GeneratorExp,
+                ))
+            ) if tree is not None else ()
+        return self._iteration_containers[subject]
 
     def _annotations(self, owner_type: type[object]) -> dict[str, object]:
         annotations = _type_hints(owner_type)
@@ -530,25 +538,21 @@ class RuntimeBindingIndex:
         subject = inspect.unwrap(callable_subject)
         owner_type = self._owner_type(subject)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and owner_type is not None:
-            tree = self._source_tree(subject)
             methods = []
-            if tree is not None:
-                for container in ast.walk(tree):
-                    if not isinstance(container, (ast.For, ast.AsyncFor, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for container in self._source_iterations(subject):
+                if not (container.lineno <= getattr(node, "lineno", 0) <= container.end_lineno):
+                    continue
+                loops = [container] if isinstance(container, (ast.For, ast.AsyncFor)) else container.generators
+                for loop in loops:
+                    if not isinstance(loop.target, ast.Name) or loop.target.id != node.value.id:
                         continue
-                    if not (container.lineno <= getattr(node, "lineno", 0) <= container.end_lineno):
+                    parts = attribute_parts(loop.iter)
+                    if not parts or len(parts) != 2 or parts[0] not in {"self", "cls"}:
                         continue
-                    loops = [container] if isinstance(container, (ast.For, ast.AsyncFor)) else container.generators
-                    for loop in loops:
-                        if not isinstance(loop.target, ast.Name) or loop.target.id != node.value.id:
-                            continue
-                        parts = attribute_parts(loop.iter)
-                        if not parts or len(parts) != 2 or parts[0] not in {"self", "cls"}:
-                            continue
-                        for candidate in self.field_types.get((owner_type, parts[1]), ()):
-                            method = getattr(candidate, node.attr, None)
-                            if method is not None and method not in methods:
-                                methods.append(method)
+                    for candidate in self.field_types.get((owner_type, parts[1]), ()):
+                        method = getattr(candidate, node.attr, None)
+                        if method is not None and method not in methods:
+                            methods.append(method)
             if methods:
                 return tuple(ResolvedCall(method, "runtime-iteration") for method in methods)
         return (self.resolve(node, callable_subject=subject),)
@@ -1027,7 +1031,7 @@ def build_developer_system_document(application: FastAPI) -> dict[str, Any]:
         unresolved_calls: list[dict[str, Any]] = []
         calls_truncated = False
         resolved_sites = []
-        for site in direct_call_sites(subject):
+        for site in direct_call_sites(subject, registry=registry):
             expressions = [(site.node.func, False)]
             target = site.node.func
             if (isinstance(target, ast.Attribute) and target.attr == "add_task"

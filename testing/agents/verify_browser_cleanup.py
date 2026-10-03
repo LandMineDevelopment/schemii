@@ -85,7 +85,7 @@ class Connection:
         )["config"]
         self.overrides = probe.ephemeral_overrides(config)
 
-    def start(self) -> dict:
+    def start(self, *, navigate: bool = True) -> dict:
         result = self.server.request(
             "thread/start",
             {"cwd": str(self.cwd), "ephemeral": True, "config": self.overrides},
@@ -94,13 +94,15 @@ class Connection:
         client = {"thread": result["thread"]["id"]}
         self.clients.append(client)
         probe.inventory(self.server, client["thread"])
-        path, metadata = probe.wait_session(
-            self.root, self.baseline, self.sessions, self.server
-        )
-        client.update(session=path, metadata=metadata)
-        self.sessions.add(path)
-        self.call(client, "browser_navigate", {"url": PAGE})
+        self.track(client)
+        if navigate:
+            self.call(client, "browser_navigate", {"url": PAGE})
         return client
+
+    def track(self, client: dict):
+        probe.track_generation(
+            self.server, client, self.root, self.baseline, self.sessions
+        )
 
     def call(self, client: dict, tool: str, arguments=None):
         return probe.call(self.server, client["thread"], tool, arguments)
@@ -125,7 +127,9 @@ def assert_released(connection: Connection, owned: set[tuple[int, int]]) -> dict
                 probe.identity(record) in owned
                 for record in probe.process_snapshot().values()
             )
-            and not any(path.exists() for path in connection.sessions)
+            and not any(
+                path.exists() or path.is_symlink() for path in connection.sessions
+            )
         ),
         "Owned transports left process entries or disposable directories",
     )
@@ -140,7 +144,7 @@ def assert_released(connection: Connection, owned: set[tuple[int, int]]) -> dict
         "live_owned_processes": len(live_identities(owned)),
         "remaining_owned_process_entries": len(remaining_entries),
         "remaining_owned_directories": sum(
-            path.exists() for path in connection.sessions
+            path.exists() or path.is_symlink() for path in connection.sessions
         ),
     }
 
@@ -151,6 +155,93 @@ def check_peer(connection: Connection, client: dict, marker: Path):
     probe.require(
         "Native cleanup probe" in probe.text_content(result), "Live peer failed"
     )
+
+
+def check_close_reopen(connection: Connection, client: dict, *, used: bool) -> dict:
+    """Prove generation release, repeat close, and a fresh same-thread backend."""
+    if used:
+        probe.result_json(
+            connection.call(
+                client,
+                "browser_run_code_unsafe",
+                {
+                    "code": """async (page) => {
+                      await page.context().addCookies([{name:'cleanup_probe',
+                        value:'owned',url:'https://native-probe.invalid'}]);
+                      await page.evaluate(() => document.body.dataset.probe='owned');
+                      return {ready:true};
+                    }"""
+                },
+            )
+        )
+    generation = probe.generation_snapshot(connection.server, client)
+    started = time.monotonic()
+    connection.call(client, "browser_close")
+    close_seconds = round(time.monotonic() - started, 3)
+    released = probe.assert_generation_released(connection.server, generation)
+    connection.call(client, "browser_close")
+    repeated = probe.assert_generation_released(connection.server, generation)
+    started = time.monotonic()
+    connection.call(client, "browser_navigate", {"url": PAGE})
+    connection.track(client)
+    probe.inventory(connection.server, client["thread"])
+    reopened = probe.generation_snapshot(connection.server, client)
+    reopen_seconds = round(time.monotonic() - started, 3)
+    state = probe.result_json(
+        connection.call(
+            client,
+            "browser_run_code_unsafe",
+            {
+                "code": """async (page) => ({
+                  cookies:(await page.context().cookies('https://native-probe.invalid')).length,
+                  marker:await page.evaluate(() => document.body.dataset.probe || null),
+                  pages:page.context().pages().length,title:await page.title()
+                })"""
+            },
+        )
+    )
+    probe.require(
+        state.get("cookies") == 0
+        and state.get("marker") is None
+        and state.get("pages") == 1
+        and state.get("title") == "Native cleanup probe",
+        "Reopened same-thread browser retained prior context state",
+    )
+    return {
+        "used_before_close": used,
+        "close_response_seconds": close_seconds,
+        "close_release": released,
+        "repeated_close_release": repeated,
+        "reopened_generation": reopened["roles"],
+        "reopen_seconds": reopen_seconds,
+        "fresh_context": True,
+        "native_transport_shutdown": False,
+    }
+
+
+def check_failed_call(connection: Connection, client: dict) -> dict:
+    generation = probe.generation_snapshot(connection.server, client)
+    try:
+        connection.call(
+            client,
+            "browser_evaluate",
+            {"function": "() => { throw new Error('Synthetic probe failure'); }"},
+        )
+    except probe.ProbeError as error:
+        probe.require(
+            str(error) == "Browser primitive failed: browser_evaluate",
+            "Synthetic failed call did not preserve its tool error",
+        )
+    else:
+        raise probe.ProbeError("Synthetic failed browser call unexpectedly succeeded")
+    after = probe.generation_snapshot(connection.server, client)
+    probe.require(
+        generation["endpoint"] == after["endpoint"]
+        and generation["leaders"] == after["leaders"]
+        and generation["session"].exists(),
+        "Failed browser call released or replaced its active generation",
+    )
+    return {"explicit_failure_preserved": True, "calls": 1, "generation_retained": True}
 
 
 def check_budget(connection: Connection, client: dict) -> dict:
@@ -241,6 +332,7 @@ def verify(cwd: Path, timeout: float, expiry: bool) -> dict:
             "Forced tests target only recorded disposable identities, never the attached T3 session.",
             "Native turn interruption is a coordinator test; this utility does not request inference turns.",
             "Stock thread/unsubscribe has a grace period; owned app-server exit ends these transports.",
+            "browser_close releases backend generations; its lightweight native endpoint remains alive.",
         ],
     }
     connections = []
@@ -256,10 +348,10 @@ def verify(cwd: Path, timeout: float, expiry: bool) -> dict:
         client = normal.start()
         summary["budget"] = check_budget(normal, client)
         check_peer(peer, peer_client, peer_marker)
-        normal.call(client, "browser_close")
-        probe.require(client["session"].exists(), "browser_close ended the transport")
-        normal.call(client, "browser_navigate", {"url": PAGE})
+        summary["failed_call"] = check_failed_call(normal, client)
+        summary["close_reopen"] = check_close_reopen(normal, client, used=True)
         summary["browser_close_retains_transport"] = True
+        check_peer(peer, peer_client, peer_marker)
         if expiry:
             summary["real_ten_minute_expiry"] = check_expiry(
                 normal, client, peer_marker
@@ -267,6 +359,28 @@ def verify(cwd: Path, timeout: float, expiry: bool) -> dict:
         owned = normal.capture()
         summary["normal_shutdown"] = normal.shutdown()
         summary["normal_shutdown"].update(assert_released(normal, owned))
+        check_peer(peer, peer_client, peer_marker)
+
+        unused = Connection(cwd, timeout)
+        connections.append(unused)
+        client = unused.start(navigate=False)
+        summary["never_used_close_reopen"] = check_close_reopen(
+            unused, client, used=False
+        )
+        owned = unused.capture()
+        unused.shutdown()
+        summary["never_used_shutdown"] = assert_released(unused, owned)
+        check_peer(peer, peer_client, peer_marker)
+
+        signaled = Connection(cwd, timeout)
+        connections.append(signaled)
+        client = signaled.start()
+        owned = signaled.capture()
+        metadata = client["metadata"]
+        signal_owned(metadata["pid"], metadata["birth_tick"], signal.SIGTERM)
+        signaled.server.close()
+        signaled.closed = True
+        summary["signaled_launcher_shutdown"] = assert_released(signaled, owned)
         check_peer(peer, peer_client, peer_marker)
 
         forced = Connection(cwd, timeout)
@@ -277,11 +391,8 @@ def verify(cwd: Path, timeout: float, expiry: bool) -> dict:
         signal_owned(
             supervisor["pid"], supervisor["birth_tick"], signal.SIGKILL, group=True
         )
-        # The live MCP child keeps its connection/output until the client exits.
-        time.sleep(1.1)
-        probe.require(
-            client["session"].exists(), "Guardian removed a live child session"
-        )
+        # Closing inherited relay pipes can make the child exit immediately.
+        # Require bounded final cleanup, regardless of that exit timing.
         forced.server.close()
         forced.closed = True
         summary["forced_launcher_shutdown"] = assert_released(forced, owned)
@@ -325,6 +436,8 @@ def verify(cwd: Path, timeout: float, expiry: bool) -> dict:
         summary["result"] = "passed"
     except probe.ProbeError as error:
         summary["reason"] = str(error)
+    except KeyboardInterrupt:
+        summary["reason"] = "Mechanical cleanup probe interrupted"
     except (OSError, ValueError, KeyError, TypeError) as error:
         summary["reason"] = f"Unexpected cleanup probe failure ({type(error).__name__})"
     finally:
@@ -347,18 +460,212 @@ def verify(cwd: Path, timeout: float, expiry: bool) -> dict:
     return summary
 
 
+def terminal_inventory(connection: Connection, client: dict) -> None:
+    response = connection.server.request(
+        "mcpServerStatus/list",
+        {
+            "threadId": client["thread"],
+            "serverName": probe.SERVER,
+            "detail": "full",
+            "limit": 100,
+        },
+    )
+    probe.require(
+        not response.get("nextCursor"), "Terminal inventory exceeded its bounded page"
+    )
+    entries = response.get("data", [])
+    probe.require(
+        len(entries) == 1, "Terminal inventory did not select one owned endpoint"
+    )
+    entry = entries[0]
+    probe.require(
+        entry.get("name") == probe.SERVER
+        and entry.get("runtimeStatus") == "connected"
+        and not entry.get("toolsError"),
+        "Terminal endpoint did not connect",
+    )
+    tools = [
+        tool
+        for tool in entry.get("tools", {}).values()
+        if tool.get("name") == "browser_release"
+    ]
+    probe.require(len(tools) == 1, "Fresh provider did not advertise browser_release")
+    schema = tools[0].get("inputSchema")
+    probe.require(
+        schema == {"type": "object", "properties": {}, "additionalProperties": False},
+        "Terminal release accepts unexpected targets",
+    )
+
+
+def check_terminal_release(
+    connection: Connection, client: dict, *, dormant: bool
+) -> dict:
+    terminal_inventory(connection, client)
+    generation = probe.generation_snapshot(connection.server, client)
+    close = None
+    if dormant:
+        connection.call(client, "browser_close")
+        close = probe.assert_generation_released(connection.server, generation)
+    # Even an uncertain release must not be retried by the generic close loop.
+    # Owned app-server shutdown remains the bounded finalizer on every outcome.
+    connection.clients.remove(client)
+    started = time.monotonic()
+    response = connection.server.request(
+        "mcpServer/tool/call",
+        {
+            "threadId": client["thread"],
+            "server": probe.SERVER,
+            "tool": "browser_release",
+            "arguments": {},
+        },
+    )
+    probe.require(
+        response.get("isError") is False, "Terminal release did not acknowledge success"
+    )
+    probe.require(
+        probe.text_content(response)
+        == "Browser connection released. Future browser use requires a fresh thread.",
+        "Terminal release returned an unexpected acknowledgement",
+    )
+    ack_seconds = round(time.monotonic() - started, 3)
+    identities = generation["released"] | {generation["endpoint"]}
+    path = generation["session"]
+    seconds = wait_for(
+        lambda: (
+            not any(
+                probe.identity(record) in identities
+                for record in probe.process_snapshot().values()
+            )
+            and not path.exists()
+            and not path.is_symlink()
+        ),
+        "Terminal release retained owned endpoint, generation or output",
+        timeout=min(connection.server.timeout, 15),
+    )
+    # Exactly one deliberate rejected call; no cleanup RPC targets this client.
+    try:
+        connection.call(client, "browser_snapshot")
+    except probe.ProbeError:
+        pass
+    else:
+        raise probe.ProbeError("Released same-thread browser unexpectedly reopened")
+    probe.require(
+        not any(
+            probe.identity(record) in identities
+            for record in probe.process_snapshot().values()
+        )
+        and not set(
+            probe.owned_sessions(
+                connection.root, connection.baseline, connection.server
+            )
+        )
+        - connection.sessions,
+        "Rejected follow-up recreated browser resources",
+    )
+    connection.server.request(
+        "config/read", {"cwd": str(connection.cwd), "includeLayers": False}
+    )
+    return {
+        "state": "dormant" if dormant else "active",
+        "success_acknowledged": True,
+        "ack_seconds": ack_seconds,
+        "cleanup_seconds": seconds,
+        "owned_process_identities": len(identities),
+        "remaining_owned_process_entries": 0,
+        "remaining_owned_directories": 0,
+        "post_release_rejected_calls": 1,
+        "parent_app_server_usable": True,
+        "browser_close": close,
+    }
+
+
+def verify_terminal(cwd: Path, timeout: float) -> dict:
+    """Bounded stock-client terminal proof, without unchanged TTL/stress controls."""
+    summary = {
+        "result": "failed",
+        "ai_turns_started": 0,
+        "session_directories_manually_removed": 0,
+        "limits": [
+            "Disposable fresh stock provider; existing parent allowlists do not reload.",
+            "Synthetic mechanical lifecycle proof; no Schemii application acceptance.",
+            "Unchanged expiry, budget, forced/orphan boundaries reuse prior evidence.",
+        ],
+        "sources": {
+            name: hashlib.sha256((cwd / name).read_bytes()).hexdigest()
+            for name in (
+                "testing/agents/browser.py",
+                "testing/agents/verify_browser_cleanup.py",
+                ".codex/config.toml",
+            )
+        },
+    }
+    connection = None
+    try:
+        connection = Connection(cwd, timeout)
+        peer = connection.start()
+        marker = peer["session"] / "output/terminal-peer.dat"
+        marker.write_bytes(b"live peer")
+        results = []
+        for dormant in (False, True):
+            client = connection.start()
+            results.append(check_terminal_release(connection, client, dormant=dormant))
+            check_peer(connection, peer, marker)
+            fresh = connection.start()
+            probe.require(
+                "Native cleanup probe"
+                in probe.text_content(connection.call(fresh, "browser_snapshot")),
+                "Fresh browser thread failed after release",
+            )
+        summary["terminal_release"] = results
+        summary["live_peer_preserved"] = True
+        summary["fresh_thread_browser_usable"] = True
+        summary["result"] = "passed"
+    except probe.ProbeError as error:
+        summary["reason"] = str(error)
+    except KeyboardInterrupt:
+        summary["reason"] = "Terminal cleanup probe interrupted"
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        summary["reason"] = (
+            f"Unexpected terminal probe failure ({type(error).__name__})"
+        )
+    finally:
+        if connection is not None:
+            try:
+                owned = connection.capture()
+                connection.shutdown()
+                summary["final_cleanup"] = assert_released(connection, owned)
+            except (OSError, probe.ProbeError, ValueError):
+                summary["result"] = "failed"
+                summary.setdefault(
+                    "reason",
+                    "Owned terminal probe cleanup did not complete automatically",
+                )
+    return summary
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--timeout", type=float, default=45)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--include-expiry", action="store_true", help="Also wait ten real minutes"
+    )
+    modes.add_argument(
+        "--terminal-only",
+        action="store_true",
+        help="Only prove explicit terminal release in fresh stock clients",
     )
     args = parser.parse_args()
     if not 1 <= args.timeout <= 300:
         parser.error("--timeout must be between 1 and 300 seconds")
     os.umask(0o077)
-    result = verify(args.cwd.resolve(strict=True), args.timeout, args.include_expiry)
+    cwd = args.cwd.resolve(strict=True)
+    result = (
+        verify_terminal(cwd, args.timeout)
+        if args.terminal_only
+        else verify(cwd, args.timeout, args.include_expiry)
+    )
     print(json.dumps(result, separators=(",", ":")))
     return 0 if result["result"] == "passed" else 2
 

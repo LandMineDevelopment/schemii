@@ -45,7 +45,7 @@ async function succeeds(request, session, sql, mode = 'manual') {
   return result;
 }
 
-test('raw session preserves temporary objects, settings, savepoints, and same-session plans', async ({ request }) => {
+test('raw session preserves temporary objects, settings, savepoints, and same-session plans', { tag: '@request-only' }, async ({ request }) => {
   const ctx = await context(request), session = await open(request, ctx);
   const table = `raw_${randomUUID().replaceAll('-', '')}`;
   try {
@@ -74,7 +74,7 @@ test('raw session preserves temporary objects, settings, savepoints, and same-se
   } finally { await request.delete(session); }
 });
 
-test('commit timing preserves per-statement commits and rolls back a failed whole run', async ({ request }) => {
+test('commit timing preserves per-statement commits and rolls back a failed whole run', { tag: '@request-only' }, async ({ request }) => {
   const ctx = await context(request), session = await open(request, ctx);
   const table = `raw_${randomUUID().replaceAll('-', '')}`;
   try {
@@ -100,7 +100,7 @@ test('commit timing preserves per-statement commits and rolls back a failed whol
   } finally { await request.delete(session); }
 });
 
-test('COPY streams CSV through the current session and preserves the explicit transaction', async ({ request }) => {
+test('COPY streams CSV through the current session and preserves the explicit transaction', { tag: '@request-only' }, async ({ request }) => {
   const ctx = await context(request), session = await open(request, ctx);
   const table = `raw_${randomUUID().replaceAll('-', '')}`;
   try {
