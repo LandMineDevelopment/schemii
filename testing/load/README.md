@@ -102,6 +102,106 @@ Full stress is never a default PR check.
 
 ## Independent observation and recovery
 
+The optional launcher receipt and read-only collector provide real OS and
+application ownership samples. They do not establish run-specific backend/job
+attribution or generator headroom, so capacity remains ineligible. When preparing
+a fresh deployment, set an absolute **new** task-owned receipt path before the
+supported launcher runs. `SCHEMII_RUNTIME_RECEIPT` adds no container access to the
+application or collector: only `./start.sh` reads selected container identities
+after its health checks, under the existing deployment lease. It refuses an
+existing receipt rather than adopting or overwriting another task's evidence.
+
+```bash
+install -d -m 700 /private/load-campaign
+export SCHEMII_RUNTIME_RECEIPT=/private/load-campaign/runtime.json
+./test.sh load prepare --plan /private/load-plan.json \
+  --accounts qa_report_author_001,qa_report_author_002 \
+  --credentials-file .schemii/testing/credentials.json \
+  --observer-file /private/load-campaign/observation.json \
+  --k6-bin .schemii/tools/k6/2.3.0/k6
+# After preparation is ready, run this collector in a separate owned terminal.
+node testing/load/observer.mjs \
+  --runtime-receipt /private/load-campaign/runtime.json \
+  --output /private/load-campaign/observation.json \
+  --credentials-file /private/admin-credentials.json --account ADMIN_USERNAME \
+  --seconds 7200
+# While the collector remains live, dispatch and inspect the owned load run.
+./test.sh load run --run LOAD_ID
+./test.sh load status --run LOAD_ID
+./test.sh load report --run LOAD_ID
+./test.sh load cleanup --run LOAD_ID
+# Stop the collector with Ctrl-C in its own terminal after recovery/cleanup evidence.
+```
+
+The foundation must validate the fresh observer at dispatch, after preparation's
+rebuild; an observer of the previous deployment cannot serve the new run. A reused
+deployment needs its original validated receipt, not a manufactured new identity.
+Keep admin credentials separate from retained load accounts, and do not broaden a
+load account's grants. Without the optional admin pair the collector still samples
+OS resources, but internal gauges remain unavailable. Authentication, fixture
+work, observer requests (one every five seconds), cleanup and readiness probes are
+outside the measured arrival totals and add disclosed background traffic.
+
+The collector checks boot identity, root PID/birth, cgroup device/inode and live
+process membership on each sample. It records every configured stack service's
+cgroup memory charge, the strictest ancestor memory/CPU quota, cumulative CPU and
+throttling usec, process identities/RSS/threads and readable FD counts; vanished
+members and unavailable FD readings are disclosed. RSS
+is the sum of process RSS and can count shared pages more than once.
+CPU percentage uses monotonic elapsed time with 100% representing one CPU core;
+it is not normalized to the container's quota. Sampling duration also uses the
+monotonic clock. The existing
+RSS guard is supplemented by a conservative 85% cgroup-charge guard; a rejected
+sample stops arrivals through the existing observer-unavailable gate. Shared
+ancestor budgets compete with peer cgroups and are not dedicated capacity.
+
+`GET /api/v1/admin/runtime-observation` requires an authenticated administrator
+and reports no SQL, profile/account IDs, result tokens or source rows. Its gauges
+come from each owning registry/condition, not one cross-service atomic snapshot.
+The collector matches the endpoint's namespace PID to the launcher's app cgroup.
+It reports one API process only when that is the cgroup's single process;
+additional processes leave API worker count unverified. The three source
+admission lanes report reserved permits separately from established native
+connection handles. Established handles are application ownership counts, not
+an independent `pg_stat_activity` census. Managed read/manual transaction/raw
+session handles contribute to retained sessions. Native cursor counts include
+primary and replay/export cursors; result-page tokens remain separate. A busy
+cursor or registry is unavailable immediately instead of waiting behind source
+I/O. Metadata admission reuses the reviewed factory snapshot. Memory-only or
+unsupported adapters remain explicitly unavailable.
+
+Private `observation.json.jsonl` retains numeric samples and qualifications, and
+`observation.json.owner.json` records the collector's PID/birth and stop receipt.
+Output is bounded to 20 MiB and three hours; exceeding the budget or losing the
+recorded application stops the collector and invalidates its current reading.
+SIGINT/SIGTERM close the observer's HTTP client and log out its own admin session.
+Its exact private authentication receipt is removed only after successful logout.
+Failed logout retains that receipt and marks cleanup pending. After forced exit,
+reconcile only this observer's recorded cookie with:
+
+```bash
+node testing/load/observer.mjs --recover /private/load-campaign/observation.json
+```
+
+Recovery refuses a live PID/birth, validates the recorded account identity before
+logout, and converges when the session is already expired. Durable receipts/logs
+remain for audit; temporary atomic-write files are removed. Forced exit before a
+login cookie has been received and durably recorded cannot recover an unknown
+session; normal authentication expiry still applies to that window. Recovery is
+an explicit ownership action, not an automatically running cleanup guardian.
+No guardian, browser, container management socket or persistent collector daemon
+is introduced. Controlled SIGTERM/SIGKILL tests prove the collector's process and
+receipt behavior with synthetic authentication; live application authentication
+cleanup remains a campaign acceptance check.
+
+The existing public report allowlist strips qualification fields and process
+identities. Retain/review the selected private collector receipt and log alongside
+the public report before interpreting its gauges. Unknown owned-backend/job
+counts, ingress socket counts, database monitoring visibility, effective CPU-set
+allocation, event-loop lag and cohosted generator headroom are **not** written as
+zero. They remain separate campaign requirements; OS sampling and internal
+handles cannot by themselves prove source release or safe capacity.
+
 `--allow-unobserved` is allowed only for smoke protocol work and leaves recovery
 unverified and capacity ineligible. Other recipes require `--observer-file` pointing
 to a private mode-0600 JSON file, refreshed independently at least every 5s:
@@ -130,7 +230,7 @@ rows, credentials, cookies and labels derived from them never enter public repor
 Observations older than 15s or RSS at/above 85% of the app limit stop the generator.
 Ten-second post-arrival drain must return all six resource gauges to their captured
 baseline. A completed stream or explicit close is not proof of source release.
-The observer implementation, real process count/effective budgets, control-plane
+Live collector verification, fully qualified API process count, control-plane
 recovery probe, cancellation deadlines and independently reviewed cleanup remain
 live acceptance requirements. Reports always keep capacityEligible false in this
 foundation until those independent campaign gates are implemented and verified.
