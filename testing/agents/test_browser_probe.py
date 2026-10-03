@@ -62,6 +62,194 @@ class CleanupSignalOwnershipTests(unittest.TestCase):
             )
 
 
+class TerminalReleaseProbeTests(unittest.TestCase):
+    def inventory(self, schema=None):
+        return {
+            "data": [
+                {
+                    "name": probe.SERVER,
+                    "runtimeStatus": "connected",
+                    "tools": {
+                        "local": {
+                            "name": "browser_release",
+                            "inputSchema": schema
+                            or {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                }
+            ]
+        }
+
+    def connection(self, path):
+        client = {"thread": "terminal", "session": path}
+        connection = Mock()
+        connection.clients = [client, {"thread": "peer"}]
+        connection.sessions = {path}
+        connection.server.timeout = 1
+        connection.server.request.side_effect = [
+            self.inventory(),
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Browser connection released. Future browser use requires a fresh thread.",
+                    }
+                ],
+                "isError": False,
+            },
+            {},
+        ]
+        connection.call.side_effect = probe.ProbeError("Disposable endpoint is closed")
+        return connection, client
+
+    def generation(self, path):
+        return {
+            "endpoint": (10, 100),
+            "released": {(20, 200), (30, 300)},
+            "session": path,
+        }
+
+    def test_terminal_inventory_requires_actual_scoped_no_target_tool(self):
+        connection = Mock()
+        for response in (
+            {"data": []},
+            {"data": [], "nextCursor": "more"},
+            self.inventory(
+                {"type": "object", "properties": {"pid": {"type": "integer"}}}
+            ),
+        ):
+            connection.server.request.return_value = response
+            with self.assertRaises(probe.ProbeError):
+                cleanup_probe.terminal_inventory(connection, {"thread": "terminal"})
+        connection.server.request.return_value = self.inventory()
+        cleanup_probe.terminal_inventory(connection, {"thread": "terminal"})
+        self.assertEqual(
+            connection.server.request.call_args.args[0], "mcpServerStatus/list"
+        )
+        self.assertEqual(
+            connection.server.request.call_args.args[1]["threadId"], "terminal"
+        )
+
+    def test_terminal_success_excludes_released_client_from_generic_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "released"
+            connection, client = self.connection(path)
+            with (
+                patch.object(
+                    probe, "generation_snapshot", return_value=self.generation(path)
+                ),
+                patch.object(probe, "process_snapshot", return_value={}),
+                patch.object(probe, "owned_sessions", return_value={}),
+            ):
+                result = cleanup_probe.check_terminal_release(
+                    connection, client, dormant=False
+                )
+            self.assertEqual(connection.clients, [{"thread": "peer"}])
+            connection.call.assert_called_once_with(client, "browser_snapshot")
+            self.assertEqual(result["post_release_rejected_calls"], 1)
+            self.assertEqual(result["remaining_owned_process_entries"], 0)
+            request = connection.server.request.call_args_list[1]
+            self.assertEqual(
+                request.args,
+                (
+                    "mcpServer/tool/call",
+                    {
+                        "threadId": "terminal",
+                        "server": probe.SERVER,
+                        "tool": "browser_release",
+                        "arguments": {},
+                    },
+                ),
+            )
+            self.assertEqual(
+                connection.server.request.call_args_list[2].args[0], "config/read"
+            )
+
+    def test_uncertain_terminal_release_is_not_retried_by_generic_finalization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "released"
+            connection, client = self.connection(path)
+            connection.server.request.side_effect = [
+                self.inventory(),
+                probe.ProbeError("Terminal acknowledgement failed"),
+            ]
+            with patch.object(
+                probe, "generation_snapshot", return_value=self.generation(path)
+            ):
+                with self.assertRaisesRegex(probe.ProbeError, "acknowledgement"):
+                    cleanup_probe.check_terminal_release(
+                        connection, client, dormant=False
+                    )
+            self.assertEqual(connection.clients, [{"thread": "peer"}])
+            connection.call.assert_not_called()
+
+    def test_dormant_release_proves_close_first_then_one_rejected_followup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "released"
+            connection, client = self.connection(path)
+            connection.call.side_effect = [
+                {},
+                probe.ProbeError("Disposable endpoint is closed"),
+            ]
+            with (
+                patch.object(
+                    probe, "generation_snapshot", return_value=self.generation(path)
+                ),
+                patch.object(
+                    probe,
+                    "assert_generation_released",
+                    return_value={"native_transport_shutdown": False},
+                ) as closed,
+                patch.object(probe, "process_snapshot", return_value={}),
+                patch.object(probe, "owned_sessions", return_value={}),
+            ):
+                result = cleanup_probe.check_terminal_release(
+                    connection, client, dormant=True
+                )
+            self.assertEqual(
+                [entry.args[1] for entry in connection.call.call_args_list],
+                ["browser_close", "browser_snapshot"],
+            )
+            closed.assert_called_once()
+            self.assertEqual(result["state"], "dormant")
+
+    def test_terminal_false_success_or_backend_revival_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "released"
+            for response in (
+                {"isError": True},
+                {"isError": 0},
+                {"isError": False, "content": []},
+            ):
+                connection, client = self.connection(path)
+                connection.server.request.side_effect = [self.inventory(), response]
+                with patch.object(
+                    probe, "generation_snapshot", return_value=self.generation(path)
+                ):
+                    with self.assertRaises(probe.ProbeError):
+                        cleanup_probe.check_terminal_release(
+                            connection, client, dormant=False
+                        )
+                connection.call.assert_not_called()
+            connection, client = self.connection(path)
+            connection.call.side_effect = None
+            connection.call.return_value = {}
+            with (
+                patch.object(
+                    probe, "generation_snapshot", return_value=self.generation(path)
+                ),
+                patch.object(probe, "process_snapshot", return_value={}),
+            ):
+                with self.assertRaisesRegex(probe.ProbeError, "unexpectedly reopened"):
+                    cleanup_probe.check_terminal_release(
+                        connection, client, dormant=False
+                    )
+
+
 class CleanupInitializationTests(unittest.TestCase):
     def test_failed_or_interrupted_initialization_closes_transport_before_reraising(
         self,

@@ -19,8 +19,15 @@ report the discovery limit.
   mechanical isolation first; follow the native-browser section of the runbook.
   Omit browser output filenames, inspect returned images and copy only selected
   evidence to its assigned task location. Temporary output expires after ten
-  minutes and is removed on connection shutdown; call `browser_close` before
-  finishing and close the native session when a supported control is available.
+  minutes and is removed on connection shutdown. Call `browser_close` before
+  finishing to release the heavy backend while preserving same-thread follow-up.
+  When the browser connection is genuinely finished, export selected evidence
+  and call `browser_release` with no arguments if actually exposed. It permanently
+  ends only this MCP connection; future browser use requires a fresh thread.
+  Keep connections needed for follow-up reusable. Existing endpoints cannot reload
+  new tools, and fresh children may inherit a stale parent allowlist: verify
+  activation in a fresh provider session and report unavailable terminal controls
+  or retained endpoints honestly.
 - Give each developer a linked worktree/task branch and narrow owned paths.
   Native children share files; verify isolation before editing and preserve
   others' changes. Include exactly one `SCHEMII_ASSIGNMENT {JSON}` line in each
