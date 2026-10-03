@@ -80,11 +80,12 @@ report shortcut remains available on both PRs and main.
 | existing frontend test leaves | complete Node |
 | existing E2E test leaves | Node and complete desktop + Android browser acceptance |
 | Schemer result-cache source, optionally with its existing direct Node regression | complete Node, whole frontend-serving Python file and frozen eight-file browser closure on both devices |
+| Developer inspection source, optionally with its direct helper regression file | complete Node, static Python, eight whole Python files and two mounted browser files on both devices |
 | full | Node, static Python, complete Python, real PostgreSQL and all browser acceptance |
 
 The exact path lists and closures live in
 [scripts/ci/test_selection.py](../scripts/ci/test_selection.py). This first mapping
-accelerates tooling/test-only PRs and one independently reviewed product owner.
+accelerates tooling/test-only PRs and two independently reviewed product owners.
 The exact product owner is `src/schemii/schemer/web/result-cache.js`, alone or with
 an existing modification to `tests/frontend/schemer-result-cache.test.js`. The
 source must be present; direct-test-only changes keep their ordinary frontend
@@ -106,6 +107,29 @@ smaller plan cannot pass. Whole files are assigned disjointly across the three
 shards per device. Editing their source or the policy selects full acceptance and
 requires deliberate inventory review. Unknown profiles, missing cases and extra
 filters are rejected rather than silently narrowing coverage.
+The `developer-inspection` profile requires a modification to at least one of
+`source_inspection.py`, `common/api/inspection.py`, or
+`common/postgres/inspection.py`, optionally with the existing
+`tests/test_source_inspection.py`. Direct-helper-only changes keep complete backend
+checks. All eight Python files run whole and unfiltered: source, route, database,
+system and developer inspection, frontend serving, application structure and runtime
+hardening. [inspection-coverage.json](../scripts/ci/inspection-coverage.json) requires
+87 original Python cases as a minimum. Every newly discovered helper case must also
+pass on attempt zero, with its exact helper source identity; no other frozen Python
+file can supply extra cases. The other seven Python files retain their reviewed
+source hashes and exact inventories. Ambient pytest filters are rejected, and the
+runner preserves the existing four installed-inspection files in one process.
+
+Mounted `shared-ui-audit.spec.js` and `ai-diagnostic-permissions.spec.js` run whole
+on desktop and Android, one exclusively owned stack per device, with all fourteen
+cases required and no skips. They protect actual generated documents, startup and
+map consumers. Standalone PostgreSQL execution and launcher backup recovery are
+excluded because these owners derive static inspection metadata; the selected
+mounted graph still uses the standard configured stack and fixture preparation.
+Full and cache topology and coverage stay unchanged. The retained ordinary full
+observation suggests roughly 1.8–2 minutes of source-critical savings, but only a
+future ordinary selected run can establish actual elapsed savings.
+
 Complete CI Python uses `python scripts/ci/python-tests.py`: two isolated processes
 keep the inspection fixture consumers together and all other discovery in the
 other process, merging one strict canonical receipt. Explicit tooling arguments
@@ -204,7 +228,7 @@ dependencies. The donor must be the actual CI workflow's unique successful
 attempt-one PR run for that final head, with all 19 jobs passed and all fifteen raw
 test lanes complete with zero first-attempt failures or retry recoveries.
 
-One additional closed mode supports the selected Schemer cache PR. Main retains
+Two additional closed modes support the selected Schemer cache and developer-inspection PRs. Main retains
 full classification, but both admission and the independent gate must re-prove
 that the entire push is the exact existing cache source or source/direct-test pair,
 with the donor comparison/base equal to main's previous commit and the same
@@ -217,6 +241,15 @@ unique final-head, actual workflow, tree/parent, attempt-one and 24-hour checks
 apply. Arbitrary selected profiles, mixed or batched main changes and changed
 bases/policies fall back to full acceptance. This avoids accelerating a PR only
 to repeat full application testing immediately after its accepted merge.
+
+Inspection reuse additionally proves the complete main push modifies only its
+three source leaves and optional direct helper, with source present, unchanged
+regular modes, the exact donor base and the same current policy bytes. Its donor
+has nine provider jobs (eight successful and PostgreSQL intentionally skipped),
+seven artifacts and four complete original raw lanes. The frozen graph/mounted
+inventory and complete dynamic helper plan are independently revalidated at
+admission and the gate. Main retains full classification and fresh report/static
+checks while avoiding duplicate acceptance for that identical tested tree.
 
 Admission downloads bounded, digest-checked original artifacts and validates
 their schemas, identities and completeness. The gate independently repeats

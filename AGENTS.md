@@ -42,8 +42,9 @@ GitHub schedules required PR/main checks automatically. Respect its selected
 profile and strict gate; do not bypass them or launch duplicate runs for samples.
 An identical-tree main merge can reuse a recent full PR's validated original
 receipts through CI admission and the independent gate recheck. The exact reviewed
-cache profile also supports reuse when both checks independently prove the entire
-push has the same owner, base, policy and original scoped inventory. Main otherwise
+cache and developer-inspection profiles also support reuse when both checks
+independently prove the entire push has the same owner, base, policy and original
+scoped inventory. Main otherwise
 retains full acceptance. Inspect that automatic verdict; a merge is not a reason
 to rerun accepted work manually.
 Keep full stress campaigns and ten-minute browser cleanup probes outside ordinary

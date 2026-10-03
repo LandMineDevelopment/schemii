@@ -1,11 +1,14 @@
 """Public timing must detect retries/incompleteness without copying fixture secrets."""
 
 import copy
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +21,13 @@ from scripts.ci.workflow_timing import (
 )
 
 
-from scripts.ci.test_selection import source_job_names
+from scripts.ci.test_selection import (
+    source_job_names,
+    INSPECTION_PROFILE,
+    INSPECTION_PYTHON,
+    INSPECTION_TEST,
+    expected_scope,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -819,3 +828,150 @@ test('valid', async () => {{ expect(1).toBe(1); }});
     summary = summarize([json.loads(line) for line in output.read_text().splitlines()])
     assert summary["attempts"] == summary["attempt_outcomes"]["passed"] == 1
     assert summary["outcome"] == "error" and summary["complete"] is False
+
+
+def inspection_runner():
+    spec = importlib.util.spec_from_file_location(
+        "inspection_python_runner", ROOT / "scripts/ci/python-tests.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "selectors,addopts",
+    [
+        (INSPECTION_PYTHON[:-1], ""),
+        ((*INSPECTION_PYTHON[:-1], INSPECTION_PYTHON[-1] + "::test_filtered"), ""),
+        ((*INSPECTION_PYTHON, "-k", "one"), ""),
+        (INSPECTION_PYTHON, "-k one"),
+        (INSPECTION_PYTHON, "--deselect=tests/test_source_inspection.py::test_new"),
+    ],
+)
+def test_inspection_python_runner_rejects_filtered_or_partial_acceptance_before_execution(
+    tmp_path, monkeypatch, selectors, addopts
+):
+    module = inspection_runner()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Filtered selection started a child")
+
+    monkeypatch.setattr(module.subprocess, "Popen", forbidden)
+    assert (
+        module.run(
+            selectors,
+            root=tmp_path,
+            environment={
+                "CI_TEST_PROFILE": INSPECTION_PROFILE,
+                "PYTEST_ADDOPTS": addopts,
+            },
+        )
+        == 4
+    )
+
+
+def test_inspection_python_runner_keeps_installed_four_and_whole_dynamic_helper_groups(
+    tmp_path,
+):
+    module = inspection_runner()
+    for file in INSPECTION_PYTHON:
+        path = tmp_path / file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def test_owned_whole_file(): pass\n")
+    groups = module.partitions(tmp_path, INSPECTION_PYTHON)
+    assert len(groups) == 2 and set(groups[0]) == set(module.INSPECTION)
+    assert INSPECTION_PYTHON[0] in groups[1]
+    selected = [
+        item for group in groups for item in group if not item.startswith("--ignore=")
+    ]
+    assert sorted(selected) == sorted(INSPECTION_PYTHON) and all(
+        "::" not in item for item in selected
+    )
+
+
+@pytest.mark.parametrize("outcome", ["passed", "failed", "skipped"])
+def test_inspection_python_runner_retains_complete_original_evidence_before_acceptance(
+    tmp_path, monkeypatch, outcome
+):
+    module = inspection_runner()
+    environment = {
+        "CI_TEST_PROFILE": INSPECTION_PROFILE,
+        "CI_TELEMETRY_FILE": str(tmp_path / "published.jsonl"),
+        "CI_TELEMETRY_SHA": "a" * 40,
+        "CI_TELEMETRY_RUN_ID": "1",
+        "CI_TELEMETRY_RUN_ATTEMPT": "1",
+    }
+    meta = module.expected_metadata(environment)
+    inventory = expected_scope(INSPECTION_PROFILE, ("python", "none", 0))
+    extra = hashlib.sha256(
+        b"tests/test_source_inspection.py::test_new_case"
+    ).hexdigest()
+    inventory[extra] = {
+        "source_id": hashlib.sha256(INSPECTION_TEST.encode()).hexdigest(),
+        "allow_skip": False,
+    }
+    planned = sorted(inventory)
+    original = [
+        {**meta, "kind": "start", "planned": len(planned)},
+        *({**meta, "kind": "plan", "test_id": test} for test in planned),
+        *(
+            {
+                **meta,
+                "kind": "attempt",
+                "test_id": test,
+                "source_id": inventory[test]["source_id"],
+                "source_line": 1,
+                "attempt": 0,
+                "outcome": outcome if test == extra else "passed",
+                "skip": "declared-or-runtime"
+                if test == extra and outcome == "skipped"
+                else "none",
+                "setup_ms": 1,
+                "execution_ms": 1,
+                "teardown_ms": 1,
+            }
+            for test in planned
+        ),
+        {
+            **meta,
+            "kind": "end",
+            "outcome": "failed" if outcome == "failed" else "passed",
+            "wall_ms": 0,
+        },
+    ]
+    original_jsonl = "".join(
+        json.dumps(value, separators=(",", ":")) + "\n" for value in original
+    )
+    private_directories = []
+
+    def completed_partition(*args, **kwargs):
+        receipt = Path(kwargs["env"]["CI_TELEMETRY_FILE"])
+        private_directories.append(receipt.parent)
+        receipt.write_text(original_jsonl)
+        return SimpleNamespace(pid=123456)
+
+    monkeypatch.setattr(module, "partitions", lambda root, selectors: [list(selectors)])
+    monkeypatch.setattr(module.subprocess, "Popen", completed_partition)
+    monkeypatch.setattr(module, "birth_tick", lambda pid: None)
+    monkeypatch.setattr(module.os, "waitid", lambda *args: object())
+    monkeypatch.setattr(
+        module, "stop_children", lambda children, requested: [int(outcome == "failed")]
+    )
+    monkeypatch.setattr(module.time, "perf_counter", lambda: 0)
+    status = module.run(
+        INSPECTION_PYTHON,
+        root=tmp_path,
+        environment=environment,
+        temporary_parent=tmp_path,
+    )
+
+    output = Path(environment["CI_TELEMETRY_FILE"])
+    assert output.exists(), "A complete original receipt was discarded"
+    assert [json.loads(line) for line in output.read_text().splitlines()] == original
+    assert output.read_text().splitlines()[1:-1] == original_jsonl.splitlines()[1:-1]
+    assert status == (0 if outcome == "passed" else 1)
+    assert summarize(original)["complete"] is True
+    assert private_directories and all(
+        not directory.exists() for directory in private_directories
+    )

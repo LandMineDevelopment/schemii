@@ -52,10 +52,11 @@ function validateShard(project, shard, shardCount) {
 
 function profileForShards(profile, shardCount) {
   const policy = coverageProfile(profile === undefined ? 'full' : profile);
-  if (policy && shardCount !== 3) throw new Error('Selected profile requires all three browser shards');
+  if (policy?.profile === 'developer-inspection' && shardCount !== 1) throw new Error('Inspection profile requires its one browser shard');
+  if (policy?.profile === 'schemer-result-cache' && shardCount !== 3) throw new Error('Selected profile requires all three browser shards');
   // Explicit profiles are the hosted acceptance contract. Historical standalone
   // two/three-way local discovery remains available without a profile flag.
-  if (!policy && profile !== undefined && shardCount !== 6) {
+  if (!policy && (profile !== undefined || shardCount === 1) && shardCount !== 6) {
     throw new Error('Full and E2E profiles require all six browser shards');
   }
   return policy;
@@ -113,13 +114,13 @@ export function parseOptions(args) {
     else if (argument === '--plan') options.plan = true;
     else if (argument.startsWith('--profile=') && !Object.hasOwn(options, 'profile')) options.profile = argument.slice(10);
     else if (argument.startsWith('--project=') && !options.project) options.project = argument.slice(10);
-    else if (/^--shard=[1-6]\/[236]$/.test(argument) && !options.shard) {
+    else if (/^--shard=[1-6]\/[1236]$/.test(argument) && !options.shard) {
       const [current, total] = argument.slice(8).split('/').map(Number);
       options.shard = current;
       // Keep the existing exported two-way options shape and default intact.
       if (total !== 2) options.shardCount = total;
     }
-    else throw new Error('Use --project=PROFILE --shard=CURRENT/2, CURRENT/3 or CURRENT/6, optionally --profile=full|e2e-tests|schemer-result-cache and --plan or --list');
+    else throw new Error('Use --project=PROFILE --shard=CURRENT/1, CURRENT/2, CURRENT/3 or CURRENT/6, optionally --profile=full|e2e-tests|schemer-result-cache|developer-inspection and --plan or --list');
   }
   validateShard(options.project, options.shard, options.shardCount ?? 2);
   profileForShards(options.profile, options.shardCount ?? 2);
