@@ -256,7 +256,14 @@ jobs:
         with:
           path: ${{ steps.browser-dependencies.outputs.cache_dir }}
           key: ${{ steps.browser-font-cache.outputs.cache-primary-key }}
+      - name: Prepare startup timing output directory
+        run: mkdir -p artifacts/ci-timing
       - name: Start the canonical application stack
+        id: canonical-startup
+        env:
+          SCHEMII_START_TIMING_FILE: ${{ github.workspace }}/artifacts/ci-timing/startup.jsonl
+          CI_TELEMETRY_PROJECT: ${{ matrix.project }}
+          CI_TELEMETRY_SHARD: ${{ matrix.shard }}
         run: ./start.sh
       - name: Exercise browser flows
         timeout-minutes: 28
@@ -273,7 +280,7 @@ jobs:
       - name: Validate public browser timing
         id: browser-timing
         if: always()
-        run: python3 scripts/ci/summary.py artifacts/ci-timing/browser.jsonl artifacts/ci-timing/browser-summary.json
+        run: python3 scripts/ci/workflow_timing.py --inputs artifacts/ci-timing/browser.jsonl --startup "${{ github.workspace }}/artifacts/ci-timing/startup.jsonl" --output artifacts/ci-timing/browser-summary.json
       - name: Publish public browser timing, including failed first attempts
         if: always() && steps.browser-timing.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -283,6 +290,21 @@ jobs:
             artifacts/ci-timing/browser.jsonl
             artifacts/ci-timing/browser-summary.json
             artifacts/ci-timing/browser-dependencies.json
+          retention-days: 7
+
+      - name: Validate failed canonical startup diagnostic
+        id: startup-diagnostic
+        if: failure() && steps.canonical-startup.outcome == 'failure'
+        env:
+          CI_TELEMETRY_PROJECT: ${{ matrix.project }}
+          CI_TELEMETRY_SHARD: ${{ matrix.shard }}
+        run: python3 scripts/ci/workflow_timing.py --startup "${{ github.workspace }}/artifacts/ci-timing/startup.jsonl" --failed-startup --output artifacts/ci-timing/startup-diagnostic.json
+      - name: Publish validated failed startup diagnostic
+        if: failure() && steps.canonical-startup.outcome == 'failure' && steps.startup-diagnostic.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: startup-diagnostic-${{ matrix.project }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: artifacts/ci-timing/startup-diagnostic.json
           retention-days: 7
 
   timing-rollup:
@@ -313,7 +335,7 @@ jobs:
         with:
           name: acceptance-reuse-attempt-${{ github.run_attempt }}
           path: artifacts/acceptance-reuse
-      - name: Collect workflow dispatch, queue, setup and execution timings
+      - name: Collect workflow dispatch, start delay, setup and execution timings
         env:
           GITHUB_TOKEN: ${{ github.token }}
         if: always()

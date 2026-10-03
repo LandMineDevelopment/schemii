@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 if __package__:
     from .classify_changes import load_classification
+    from .startup_timing import load_startup, validate_startup
     from .summary import load, summarize as lane_summary
     from .test_selection import (
         source_job_names,
@@ -21,6 +22,7 @@ if __package__:
     )
 else:
     from classify_changes import load_classification
+    from startup_timing import load_startup, validate_startup
     from summary import load, summarize as lane_summary
     from test_selection import (
         source_job_names,
@@ -108,6 +110,56 @@ def sum_durations(values):
     return None if any(value is None for value in values) else sum(values)
 
 
+STARTUP_FIELDS = {
+    "startup_build_ms": "build",
+    "startup_replacement_ms": "replacement",
+    "startup_up_readiness_ms": "readiness",
+}
+
+
+def startup_durations(startup):
+    phases = {
+        value["phase"]: value["duration_ms"] for value in startup.get("phases", [])
+    }
+    return {field: phases.get(phase) for field, phase in STARTUP_FIELDS.items()}
+
+
+def browser_summary(records, startup):
+    """The sole approved extension of the existing browser summary archive member."""
+    result = lane_summary(records)
+    startup = validate_startup(startup)
+    if (
+        result["lane"] != "browser"
+        or startup["source_kind"] != "hosted"
+        or startup["outcome"] != "passed"
+        or not matches_identity(
+            startup,
+            {
+                key: result[key]
+                for key in ("source_sha", "run_id", "run_attempt", "project", "shard")
+            },
+        )
+    ):
+        raise ValueError("Invalid browser startup identity")
+    result["startup"] = startup
+    return result
+
+
+def startup_jobs(evidence, profile):
+    """Bind measured phases to the selected topology, never an ambient shard count."""
+    names = source_job_names(profile)
+    result = {}
+    for value in evidence["lanes"]:
+        if "startup" not in value:
+            continue
+        prefix = f"Assembled browser smoke ({value['project']}, shard {value['shard']}/"
+        selected = [label for name, label in names.items() if name.startswith(prefix)]
+        if value["lane"] != "browser" or len(selected) != 1 or selected[0] in result:
+            raise ValueError("Invalid startup topology")
+        result[selected[0]] = validate_startup(value["startup"])
+    return result
+
+
 def valid_browser_jobs(jobs, profile, *, excluded=False):
     """Require one exact topology; a literal may replace all excluded legs only."""
     expected = {
@@ -141,7 +193,14 @@ def valid_browser_jobs(jobs, profile, *, excluded=False):
 
 
 def summarize(
-    run, jobs, *, lane="source", profile=None, report_validation=False, reused=False
+    run,
+    jobs,
+    *,
+    lane="source",
+    profile=None,
+    report_validation=False,
+    reused=False,
+    startup=None,
 ):
     profile = profile or ("reports" if lane == "reports" else "full")
     if (lane == "reports") != (profile == "reports"):
@@ -201,10 +260,10 @@ def summarize(
             ):
                 early = duration(start, timestamp(step.get("completed_at")))
         execution = sum_durations(execution_steps)
-        startup = sum_durations(startup_steps)
+        startup_ms = sum_durations(startup_steps)
         setup = None
-        if wall is not None and execution is not None and startup is not None:
-            residual = wall - execution - startup
+        if wall is not None and execution is not None and startup_ms is not None:
+            residual = wall - execution - startup_ms
             setup = residual if residual >= 0 else None
         conclusion = job.get("conclusion")
         records.append(
@@ -225,12 +284,14 @@ def summarize(
                 "dispatch_to_start_ms": duration(created, start),
                 "after_workflow_start_ms": duration(dispatched, start),
                 "wall_ms": wall,
-                "startup_ms": startup,
+                "startup_ms": startup_ms,
                 "test_steps_ms": execution,
                 "setup_and_other_ms": setup,
                 "first_node_feedback_ms": early,
             }
         )
+        if startup is not None and label.startswith("browser-"):
+            records[-1].update(startup_durations(startup.get(label, {})))
     observed = {record["job"] for record in records}
     end_times = [
         timestamp(job.get("completed_at"))
@@ -298,6 +359,17 @@ def test_evidence(directory, *, lane="source", profile=None, identity=None):
         try:
             records = load(path)
             result = lane_summary(records)
+            summary_path = path.with_name(path.stem + "-summary.json")
+            if result["lane"] == "browser" and summary_path.is_file():
+                if summary_path.stat().st_size > 20 * 1024 * 1024:
+                    raise ValueError("Timing evidence exceeds size budget")
+                saved = json.loads(summary_path.read_text())
+                if "startup" in saved:
+                    result = browser_summary(records, saved["startup"])
+                    if json.dumps(saved, sort_keys=True, allow_nan=False) != json.dumps(
+                        result, sort_keys=True, allow_nan=False
+                    ):
+                        raise ValueError("Invalid browser summary extension")
             key = result["lane"], result["project"], result["shard"]
             if key not in expected or key in observed:
                 raise ValueError("Invalid lane evidence")
@@ -369,10 +441,45 @@ def test_evidence(directory, *, lane="source", profile=None, identity=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--inputs", type=Path, required=True)
+    parser.add_argument("--inputs", type=Path)
+    parser.add_argument("--startup", type=Path)
+    parser.add_argument("--failed-startup", action="store_true")
     parser.add_argument("--classification", type=Path)
     parser.add_argument("--reuse", type=Path)
     args = parser.parse_args()
+    if args.startup:
+        args.output.unlink(missing_ok=True)
+        try:
+            identity = current_identity(os.environ)
+            startup = load_startup(args.startup)
+            expected = {
+                key: identity[key] for key in ("source_sha", "run_id", "run_attempt")
+            }
+            if startup["source_kind"] != "hosted" or not matches_identity(
+                startup, expected
+            ):
+                raise ValueError("Invalid startup cohort")
+            if args.failed_startup:
+                if (
+                    args.inputs is not None
+                    or startup["outcome"] == "passed"
+                    or startup["project"] != os.environ.get("CI_TELEMETRY_PROJECT")
+                    or str(startup["shard"]) != os.environ.get("CI_TELEMETRY_SHARD")
+                ):
+                    raise ValueError("Invalid failed startup identity")
+                result = startup
+            elif args.inputs is not None:
+                result = browser_summary(load(args.inputs), startup)
+            else:
+                raise ValueError("Missing browser timing")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+            raise SystemExit("Startup timing validation failed") from None
+        print("Startup timing validated")
+        return
+    if args.inputs is None or args.failed_startup:
+        parser.error("workflow rollup requires --inputs")
     identity = current_identity(os.environ)
     repository = os.environ["GITHUB_REPOSITORY"]
     run_id = os.environ["GITHUB_RUN_ID"]
@@ -467,6 +574,12 @@ def main():
             identity=identity,
         )
         result["test_evidence"] = evidence
+        # A fresh receipt format publishes unknown measurements explicitly. Donor
+        # validation can still recompute a retained older format without relabeling it.
+        measured_startup = startup_jobs(evidence, classification["profile"])
+        for job in result.get("jobs", []):
+            if job["job"].startswith("browser-"):
+                job.update(startup_durations(measured_startup.get(job["job"], {})))
         result["complete"] = result["complete"] and evidence["complete"]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
