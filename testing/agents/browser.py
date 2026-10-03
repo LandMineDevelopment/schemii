@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import selectors
 import shutil
 import signal
 import stat
@@ -24,6 +25,10 @@ SESSION_NAME = re.compile(r"session-[0-9a-f]{32}\Z")
 OUTPUT_TTL_SECONDS = 600
 OUTPUT_SWEEP_SECONDS = 30
 GUARDIAN_POLL_SECONDS = 1
+MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+MAX_RELAY_BYTES = 128 * 1024 * 1024
+MAX_PENDING_REQUESTS = 256
+INITIALIZE_TIMEOUT_SECONDS = 30
 
 
 class ArtifactError(RuntimeError):
@@ -469,6 +474,9 @@ def _signal_child(process: subprocess.Popen, signum: int) -> None:
 
 
 def _stop_child(process: subprocess.Popen) -> None:
+    if isinstance(getattr(process, "_schemii_group", None), dict):
+        _stop_group(process)
+        return
     if process.poll() is None:
         _signal_child(process, signal.SIGTERM)
         try:
@@ -476,6 +484,534 @@ def _stop_child(process: subprocess.Popen) -> None:
         except subprocess.TimeoutExpired:
             _signal_child(process, signal.SIGKILL)
             process.wait()
+
+
+def _group_members(process: subprocess.Popen) -> dict[int, int]:
+    captured = process._schemii_group
+    verified = False
+    for pid, tick in captured.items():
+        try:
+            if (
+                process_birth_tick(pid) == tick
+                and os.getpgid(pid) == process.pid
+                and os.getsid(pid) == process.pid
+            ):
+                verified = True
+                break
+        except ProcessLookupError:
+            pass
+    members = {}
+    for name in os.listdir("/proc"):
+        if not name.isdecimal():
+            continue
+        pid = int(name)
+        try:
+            if os.getpgid(pid) == process.pid and os.getsid(pid) == process.pid:
+                tick = process_birth_tick(pid)
+                if tick is not None:
+                    members[pid] = tick
+        except ProcessLookupError:
+            pass
+    if members and not verified:
+        raise ArtifactError("Live browser group ownership cannot be verified.")
+    captured.update(members)
+    return members
+
+
+def _stop_group(process: subprocess.Popen) -> None:
+    """An exited npm leader is not proof that its owned descendants exited."""
+    members = _group_members(process)
+    if members:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    timed_out = False
+    started = time.monotonic()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    while not timed_out and _group_members(process):
+        if time.monotonic() - started >= 5:
+            timed_out = True
+            break
+        time.sleep(0.02)
+    if timed_out:
+        # A captured live member proves this group has not been reused.
+        if _group_members(process):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while _group_members(process):
+            if time.monotonic() >= deadline:
+                raise ArtifactError("Owned browser processes could not be stopped.")
+            time.sleep(0.02)
+
+
+class ProtocolError(RuntimeError):
+    """A malformed or incompatible transport cannot be continued safely."""
+
+
+def _request_id(message: dict) -> tuple[type, int | str]:
+    value = message.get("id")
+    if type(value) not in (int, str):
+        raise ProtocolError("Invalid MCP request identity.")
+    return type(value), value
+
+
+class Frames:
+    """Bounded newline-delimited JSON, the pinned SDK's stdio framing."""
+
+    def __init__(self):
+        self.buffer = bytearray()
+
+    def receive(self, data: bytes):
+        self.buffer.extend(data)
+        while b"\n" in self.buffer:
+            boundary = self.buffer.index(b"\n")
+            if boundary > MAX_MESSAGE_BYTES:
+                raise ProtocolError("MCP message exceeds the framing limit.")
+            raw = bytes(self.buffer[: boundary + 1])
+            del self.buffer[: boundary + 1]
+            try:
+                message = json.loads(raw)
+            except (ValueError, UnicodeError, RecursionError) as error:
+                raise ProtocolError("Invalid MCP JSON frame.") from error
+            if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                raise ProtocolError("Invalid MCP envelope.")
+            if "method" in message:
+                if not isinstance(message["method"], str):
+                    raise ProtocolError("Invalid MCP method.")
+                if "id" in message:
+                    _request_id(message)
+            elif "id" not in message or ("result" in message) == ("error" in message):
+                raise ProtocolError("Invalid MCP response.")
+            yield message, raw
+        if len(self.buffer) > MAX_MESSAGE_BYTES:
+            raise ProtocolError("MCP message exceeds the framing limit.")
+
+
+class Backend:
+    """One generation's process group, guardian and inode-bound output."""
+
+    def __init__(self, npx: str, chromium: str, environment: dict):
+        self.npx, self.chromium, self.environment = npx, chromium, environment
+        self.session = self.process = self.guardian = None
+
+    def start(self):
+        if self.session is not None:
+            raise ProtocolError("A live browser generation cannot be replaced.")
+        self.session = create_session(REPOSITORY_ROOT)
+        self.process = subprocess.Popen(
+            command(self.npx, self.chromium, self.session.path / "output"),
+            env=self.environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            start_new_session=True,
+        )
+        _record_child(self.session, self.process.pid)
+        # Only a verified new session leader establishes process-group ownership.
+        if os.getsid(self.process.pid) == self.process.pid:
+            self.process._schemii_group = {
+                self.process.pid: self.session.metadata["child_birth_tick"]
+            }
+            _group_members(self.process)
+        self.guardian = _start_guardian(self.session)
+
+    def close(self):
+        deferred_signal = []
+        handlers = {}
+
+        def defer(signum, frame):
+            if not deferred_signal:
+                deferred_signal.append(signum)
+
+        # A release is a finalizer too: interruption cannot strand a partially
+        # stopped generation after its ownership references have been cleared.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handler = signal.getsignal(signum)
+            if handler != signal.SIG_IGN:
+                handlers[signum] = signal.signal(signum, defer)
+        completed = False
+        try:
+            if self.process is not None:
+                _stop_child(self.process)
+            if self.session is not None:
+                cleanup_session(self.session)
+            completed = True
+        finally:
+            try:
+                if self.guardian is not None:
+                    _stop_guardian(self.guardian)
+            finally:
+                if self.process is not None:
+                    for handle in (self.process.stdin, self.process.stdout):
+                        if handle is not None:
+                            handle.close()
+                self.session = self.process = self.guardian = None
+                for signum, handler in handlers.items():
+                    signal.signal(signum, handler)
+        if completed and deferred_signal:
+            raise ShutdownRequested(deferred_signal[0])
+
+
+class Relay:
+    """Keep the native endpoint while explicitly closed generations are released."""
+
+    def __init__(self, backend: Backend, incoming: int, outgoing: int):
+        self.backend, self.incoming, self.outgoing = backend, incoming, outgoing
+        self.selector = selectors.DefaultSelector()
+        self.client_frames, self.backend_frames = Frames(), Frames()
+        self.to_client, self.to_backend = bytearray(), bytearray()
+        self.requests, self.inflight, self.callbacks = {}, {}, set()
+        self.deferred = []
+        self.closing = None
+        self.initialize = self.identity = self.private_id = None
+        self.initialized = None
+        self.deadline = None
+        self.expiry = time.monotonic() + OUTPUT_SWEEP_SECONDS
+        self.original_blocking = {}
+        for descriptor in (incoming, outgoing):
+            self.original_blocking[descriptor] = os.get_blocking(descriptor)
+            os.set_blocking(descriptor, False)
+
+    def queue(self, target: bytearray, raw: bytes):
+        target.extend(raw)
+        self.check_budget()
+
+    def check_budget(self):
+        buffered = sum(
+            map(
+                len,
+                (
+                    self.to_client,
+                    self.to_backend,
+                    self.client_frames.buffer,
+                    self.backend_frames.buffer,
+                ),
+            )
+        )
+        buffered += sum(len(raw) for _, raw in self.deferred)
+        if self.closing is not None:
+            buffered += len(self.closing[1]) + len(self.closing[2] or b"")
+        if (
+            buffered > MAX_RELAY_BYTES
+            or len(self.requests) + len(self.callbacks) > MAX_PENDING_REQUESTS
+        ):
+            raise ProtocolError("MCP relay exceeds its bounded admission budget.")
+
+    @staticmethod
+    def encoded(message: dict) -> bytes:
+        return json.dumps(message, separators=(",", ":")).encode() + b"\n"
+
+    def error(self, identity, message: str, code: int = -32603):
+        self.queue(
+            self.to_client,
+            self.encoded(
+                {
+                    "jsonrpc": "2.0",
+                    "id": identity[1],
+                    "error": {"code": code, "message": message},
+                }
+            ),
+        )
+
+    def forward(self, message: dict, raw: bytes):
+        if "method" in message and "id" in message:
+            self.inflight[_request_id(message)] = message["method"]
+        self.queue(self.to_backend, raw)
+
+    def client(self, message: dict, raw: bytes):
+        if "method" not in message:
+            identity = _request_id(message)
+            if identity not in self.callbacks:
+                raise ProtocolError("Unmatched MCP callback response.")
+            self.callbacks.remove(identity)
+            self.queue(self.to_backend, raw)
+            return
+        if "id" not in message:
+            if message["method"] == "notifications/cancelled":
+                params = message.get("params", {})
+                if not isinstance(params, dict):
+                    raise ProtocolError("Invalid MCP cancellation parameters.")
+                cancelled = _request_id({"id": params.get("requestId")})
+                if self.closing and _request_id(self.closing[0]) == cancelled:
+                    self.closing[3] = True
+                for index, (queued, _) in enumerate(self.deferred):
+                    if "id" in queued and _request_id(queued) == cancelled:
+                        self.deferred.pop(index)
+                        self.requests.pop(cancelled)
+                        self.error(
+                            cancelled, "MCP request cancelled before execution.", -32800
+                        )
+                        return
+            if message["method"] == "notifications/initialized":
+                self.initialized = raw
+                if self.backend.process is None or self.private_id is not None:
+                    return
+            if self.backend.process is None or self.private_id is not None:
+                self.deferred.append((message, raw))
+            else:
+                self.queue(self.to_backend, raw)
+            return
+        identity = _request_id(message)
+        if identity in self.requests:
+            raise ProtocolError("Duplicate MCP request identity.")
+        if self.backend.process is None and message["method"] == "ping":
+            self.queue(
+                self.to_client,
+                self.encoded({"jsonrpc": "2.0", "id": message["id"], "result": {}}),
+            )
+            return
+        self.requests[identity] = message["method"]
+        self.check_budget()
+        if self.closing or self.private_id is not None or self.backend.process is None:
+            self.deferred.append((message, raw))
+        elif (
+            message["method"] == "tools/call"
+            and isinstance(message.get("params"), dict)
+            and message["params"].get("name") == "browser_close"
+        ):
+            self.closing = [message, raw, None, False]
+        else:
+            if message["method"] == "initialize":
+                self.initialize = message.get("params")
+            self.forward(message, raw)
+
+    @staticmethod
+    def negotiated(result):
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("protocolVersion"), str)
+            or not isinstance(result.get("capabilities"), dict)
+        ):
+            raise ProtocolError("Invalid MCP initialization response.")
+        return {
+            key: result.get(key)
+            for key in ("protocolVersion", "capabilities", "serverInfo")
+        }
+
+    def server(self, message: dict, raw: bytes):
+        if "method" in message:
+            if "id" in message:
+                identity = _request_id(message)
+                if identity in self.callbacks:
+                    raise ProtocolError("Duplicate MCP callback identity.")
+                self.callbacks.add(identity)
+            self.queue(self.to_client, raw)
+            return
+        identity = _request_id(message)
+        if identity == self.private_id:
+            if (
+                "error" in message
+                or self.negotiated(message.get("result")) != self.identity
+            ):
+                raise ProtocolError("Recreated MCP capabilities are incompatible.")
+            self.private_id = self.deadline = None
+            if self.initialized:
+                self.queue(self.to_backend, self.initialized)
+            return
+        if identity not in self.inflight:
+            raise ProtocolError("Unmatched MCP backend response.")
+        method = self.inflight.pop(identity)
+        if method == "initialize" and "error" not in message:
+            self.identity = self.negotiated(message.get("result"))
+        if self.closing and identity == _request_id(self.closing[0]):
+            result = message.get("result")
+            succeeded = (
+                "error" not in message
+                and isinstance(result, dict)
+                and isinstance(result.get("content"), list)
+                and ("isError" not in result or result["isError"] is False)
+            )
+            if succeeded and not self.closing[3]:
+                self.closing[2] = raw
+                return
+            self.closing = None
+        self.requests.pop(identity)
+        self.queue(self.to_client, raw)
+
+    def progress(self):
+        if (
+            self.closing
+            and not self.inflight
+            and not self.callbacks
+            and not self.to_backend
+            and not self.backend_frames.buffer
+        ):
+            message, raw, response, cancelled = self.closing
+            identity = _request_id(message)
+            if response is not None:
+                if cancelled:
+                    self.closing = None
+                    self.requests.pop(identity)
+                    self.queue(self.to_client, response)
+                    return
+                try:
+                    self.detach()
+                    self.backend.close()
+                except (OSError, ArtifactError, subprocess.TimeoutExpired):
+                    self.requests.pop(identity)
+                    self.closing = None
+                    self.error(
+                        identity, "Owned browser resources could not be released."
+                    )
+                    raise
+                self.closing = None
+                self.requests.pop(identity)
+                self.queue(self.to_client, response)
+            elif cancelled:
+                self.closing = None
+                self.requests.pop(identity)
+                self.error(identity, "MCP request cancelled before execution.", -32800)
+            else:
+                self.forward(message, raw)
+        if not self.closing and self.private_id is None and self.deferred:
+            if self.backend.process is None:
+                # Flush the close acknowledgement before allocating a follow-up.
+                if self.to_client:
+                    return
+                if not any("id" in message for message, _ in self.deferred):
+                    return
+                if (
+                    self.initialize is None
+                    or self.identity is None
+                    or self.initialized is None
+                ):
+                    raise ProtocolError(
+                        "No successful MCP initialization can be restored."
+                    )
+                self.backend.start()
+                self.backend_frames = Frames()
+                self.expiry = time.monotonic() + OUTPUT_SWEEP_SECONDS
+                value = f"schemii-private-{secrets.token_hex(16)}"
+                self.private_id = (str, value)
+                while (
+                    self.private_id in self.requests
+                    or self.private_id in self.callbacks
+                ):
+                    value = f"schemii-private-{secrets.token_hex(16)}"
+                    self.private_id = (str, value)
+                self.deadline = time.monotonic() + INITIALIZE_TIMEOUT_SECONDS
+                self.queue(
+                    self.to_backend,
+                    self.encoded(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": value,
+                            "method": "initialize",
+                            "params": self.initialize,
+                        }
+                    ),
+                )
+                return
+            while self.deferred and not self.closing:
+                message, raw = self.deferred.pop(0)
+                if "id" in message:
+                    self.requests.pop(_request_id(message))
+                self.client(message, raw)
+
+    def detach(self):
+        if self.backend.process is not None:
+            for handle in (self.backend.process.stdin, self.backend.process.stdout):
+                try:
+                    self.selector.unregister(handle.fileno())
+                except KeyError:
+                    pass
+
+    def interests(self):
+        desired = {self.incoming: (selectors.EVENT_READ, "client")}
+        if self.to_client:
+            desired[self.outgoing] = (selectors.EVENT_WRITE, "output")
+        if self.backend.process is not None:
+            process = self.backend.process
+            os.set_blocking(process.stdout.fileno(), False)
+            os.set_blocking(process.stdin.fileno(), False)
+            desired[process.stdout.fileno()] = (selectors.EVENT_READ, "server")
+            if self.to_backend:
+                desired[process.stdin.fileno()] = (selectors.EVENT_WRITE, "backend")
+        for descriptor in list(self.selector.get_map()):
+            if descriptor not in desired:
+                self.selector.unregister(descriptor)
+        for descriptor, (events, label) in desired.items():
+            if descriptor in self.selector.get_map():
+                self.selector.modify(descriptor, events, label)
+            else:
+                self.selector.register(descriptor, events, label)
+
+    def flush_failure(self):
+        # An unresponsive upstream must not prevent bounded resource cleanup.
+        deadline = time.monotonic() + 1
+        with selectors.DefaultSelector() as writer:
+            writer.register(self.outgoing, selectors.EVENT_WRITE)
+            while self.to_client and time.monotonic() < deadline:
+                if not writer.select(timeout=0.05):
+                    continue
+                try:
+                    written = os.write(self.outgoing, self.to_client[:65536])
+                except (BrokenPipeError, BlockingIOError):
+                    break
+                del self.to_client[:written]
+
+    def run(self):
+        try:
+            while True:
+                self.progress()
+                self.check_budget()
+                self.interests()
+                for key, _ in self.selector.select(timeout=0.1):
+                    if key.data in {"output", "backend"}:
+                        target = (
+                            self.to_client if key.data == "output" else self.to_backend
+                        )
+                        written = os.write(key.fd, target[:65536])
+                        del target[:written]
+                        continue
+                    data = os.read(key.fd, 65536)
+                    if not data:
+                        if key.data == "client":
+                            if self.client_frames.buffer:
+                                raise ProtocolError("Truncated MCP client frame.")
+                            return 0
+                        raise ProtocolError("Browser backend ended unexpectedly.")
+                    frames = (
+                        self.client_frames
+                        if key.data == "client"
+                        else self.backend_frames
+                    )
+                    for message, raw in frames.receive(data):
+                        if key.data == "client":
+                            self.client(message, raw)
+                        else:
+                            self.server(message, raw)
+                        self.check_budget()
+                    if key.data == "server":
+                        _group_members(self.backend.process)
+                if self.deadline is not None and time.monotonic() > self.deadline:
+                    raise ProtocolError("Browser initialization timed out.")
+                if self.backend.session is not None and time.monotonic() >= self.expiry:
+                    expire_output(self.backend.session, time.time())
+                    self.expiry = time.monotonic() + OUTPUT_SWEEP_SECONDS
+        except (ProtocolError, OSError, ArtifactError, subprocess.TimeoutExpired):
+            for identity in self.requests:
+                self.error(
+                    identity, "Browser transport failed; the request was not replayed."
+                )
+            self.flush_failure()
+            raise
+        finally:
+            self.selector.close()
+            for descriptor, blocking in self.original_blocking.items():
+                os.set_blocking(descriptor, blocking)
+
+
+def relay(backend: Backend) -> int:
+    return Relay(backend, sys.stdin.fileno(), sys.stdout.fileno()).run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -496,49 +1032,41 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    session = None
-    process = None
-    guardian = None
+    backend = None
     handlers = {}
     result = 2
     try:
-        session = create_session(REPOSITORY_ROOT)
         # Ambient MCP settings can override isolation even with fixed CLI flags.
         server_environment = {
             name: value
             for name, value in os.environ.items()
             if not name.startswith("PLAYWRIGHT_MCP_")
         }
-        process = subprocess.Popen(
-            command(npx, chromium, session.path / "output"),
-            env=server_environment,
-            stdin=None,
-            stdout=None,
-            stderr=None,
-            start_new_session=True,
-        )
+        backend = Backend(npx, chromium, server_environment)
 
         def shutdown(received, frame):
             # Repeated cancellation must not interrupt the bounded finalizer.
             for signum in handlers:
                 signal.signal(signum, signal.SIG_IGN)
-            _signal_child(process, received)
+            if backend.process is not None:
+                _signal_child(backend.process, received)
             raise ShutdownRequested(received)
 
         for signum in (signal.SIGINT, signal.SIGTERM):
             handlers[signum] = signal.signal(signum, shutdown)
-        _record_child(session, process.pid)
-        guardian = _start_guardian(session)
-        while True:
-            try:
-                result = process.wait(timeout=OUTPUT_SWEEP_SECONDS)
-                break
-            except subprocess.TimeoutExpired:
-                expire_output(session, time.time())
+        backend.start()
+        result = relay(backend)
         result = 128 - result if result < 0 else result
     except ShutdownRequested as shutdown:
         result = 128 + shutdown.signum
-    except (ArtifactError, OSError, ValueError, IndexError):
+    except (
+        ArtifactError,
+        ProtocolError,
+        OSError,
+        ValueError,
+        IndexError,
+        subprocess.TimeoutExpired,
+    ):
         print(
             "Schemii browser MCP setup failed. Check tool installation, the warmed package cache, "
             "checkout ownership and private artifact permissions.",
@@ -550,12 +1078,10 @@ def main(argv: list[str] | None = None) -> int:
         for signum in handlers:
             signal.signal(signum, signal.SIG_IGN)
         try:
-            if process is not None:
-                _stop_child(process)
-            if session is not None:
+            if backend is not None:
                 try:
-                    cleanup_session(session)
-                except (ArtifactError, OSError):
+                    backend.close()
+                except (ArtifactError, OSError, subprocess.TimeoutExpired):
                     print(
                         "Schemii browser MCP could not remove its temporary session output. "
                         "Unrelated data was preserved.",
@@ -563,12 +1089,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     result = 2
         finally:
-            try:
-                if guardian is not None:
-                    _stop_guardian(guardian)
-            finally:
-                for signum, handler in handlers.items():
-                    signal.signal(signum, handler)
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
     return result
 
 

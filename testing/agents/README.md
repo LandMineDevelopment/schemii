@@ -102,9 +102,16 @@ least every thirty seconds while the connection runs. Copy only selected report
 or finding evidence to its declared task-owned location before expiry/shutdown.
 Session ownership metadata sits outside the evicted output directory.
 
+Export selected evidence before calling `browser_close`. A successful close now
+stops that connection's Playwright backend and cleanup helper and removes its
+temporary session directory. Only the small Python stdio endpoint stays alive for
+stock Codex follow-up: the next browser call starts a fresh isolated backend and
+repeats its genuine MCP initialization. Open browser contexts and active calls are
+never discarded merely because they are idle. Failed calls are never replayed.
+
 Always call `browser_close` before a worker finishes. A completed or interrupted
-turn can retain its MCP connection for follow-up; it is not shutdown. Closing the
-native agent/session, when supported, ends the transport and automatically removes
+turn can retain its MCP connection for follow-up; it is not transport shutdown.
+Closing the native agent/session, when supported, ends the transport and removes
 its temporary directory. Stock Codex can kill the launcher before normal cleanup
 finishes. A small connection-owned cleanup process survives that targeted shutdown,
 closes all inherited transport descriptors, waits for its recorded supervisor and
@@ -118,7 +125,8 @@ remain untouched. No permanent cleanup service or browser/controller daemon is a
 
 The cleanup verification uses disposable stock Codex app-servers and ephemeral
 threads, without AI turns, app writes or a replacement browser launcher. It
-exercises normal transport exit, browser-close retention, the 20 MiB soft budget
+exercises normal transport exit, browser-close backend release and same-thread
+follow-up, the 20 MiB soft budget
 including an oversized current image, supervisor and app-server SIGKILL, and
 recovery after the supervisor and guardian both die. A separate live peer stays
 usable throughout. It checks captured PID/start-tick identities, never process

@@ -62,7 +62,9 @@ def browser_policy(config: dict) -> dict:
         "configured": bool(server),
         "isolated_stdio_policy_valid": valid,
         "runtime_browser_isolation": "unverified",
-        "artifact_cleanup": "owned_connection_exit; orphan_sweep_on_start"
+        "artifact_cleanup": (
+            "successful_browser_close; owned_connection_exit; orphan_sweep_on_start"
+        )
         if valid
         else "unverified",
     }
