@@ -43,17 +43,43 @@ PYTHON_PATHS = {
     "load": ("testing/agents", "testing/harness", "tests/test_load_planner.py"),
 }
 BROWSER_PROJECTS = ("desktop-chromium", "android-chromium")
-BROWSER_SHARDS = (1, 2, 3)
-JOB_NAMES = {
+SOURCE_JOB_NAMES = {
     "Incremental Python static quality": "static",
     "Node and deterministic Python behavior": "unit",
     "Real PostgreSQL metadata behavior": "postgres",
-    **{
-        f"Assembled browser smoke ({project}, shard {shard}/3)": f"browser-{project}-{shard}"
-        for project in BROWSER_PROJECTS
-        for shard in BROWSER_SHARDS
-    },
 }
+
+
+def browser_shards(profile: str) -> tuple[int, ...]:
+    """Closed hosted topology; excluded profiles retain full skip verification."""
+    layers(profile)
+    return tuple(range(1, 4 if profile == CACHE_PROFILE else 7))
+
+
+def browser_matrix(profile: str) -> dict:
+    shards = browser_shards(profile)
+    return {
+        "include": [
+            {"project": project, "shard": shard, "total": len(shards)}
+            for project in BROWSER_PROJECTS
+            for shard in shards
+        ]
+    }
+
+
+def source_job_names(profile: str) -> dict[str, str]:
+    shards = browser_shards(profile)
+    total = len(shards)
+    return {
+        **SOURCE_JOB_NAMES,
+        **{
+            f"Assembled browser smoke ({project}, shard {shard}/{total})": f"browser-{project}-{shard}-of-{total}"
+            for project in BROWSER_PROJECTS
+            for shard in shards
+        },
+    }
+
+
 SOURCE_NEEDS = frozenset(
     {"static-quality", "test", "postgres-integration", "browser-smoke"}
 )
@@ -80,7 +106,7 @@ def expected_jobs(profile: str) -> dict[str, str]:
     selected = layers(profile)
     return {
         name: label
-        for name, label in JOB_NAMES.items()
+        for name, label in source_job_names(profile).items()
         if label in selected
         or label == "unit"
         and {"node", "python"} & selected
@@ -96,7 +122,7 @@ def expected_lanes(profile: str) -> set[tuple[str, str, int]]:
     } | {
         ("browser", project, shard)
         for project in BROWSER_PROJECTS
-        for shard in BROWSER_SHARDS
+        for shard in browser_shards(profile)
         if "browser" in selected
     }
 
@@ -504,11 +530,11 @@ def commands(profile: str, base: str) -> list[list[str]]:
                 "node",
                 "scripts/ci/run-browser-shard.mjs",
                 f"--project={project}",
-                f"--shard={shard}/3",
-                *([f"--profile={profile}"] if profile == CACHE_PROFILE else []),
+                f"--shard={shard}/{len(browser_shards(profile))}",
+                f"--profile={profile}",
             ]
             for project in BROWSER_PROJECTS
-            for shard in BROWSER_SHARDS
+            for shard in browser_shards(profile)
         )
         if profile == "full":
             result.extend(
@@ -608,7 +634,11 @@ def expected_scope(profile, key):
     if lane == "python" and (project, shard) == ("none", 0):
         inventory = policy["python"]
         files = list(inventory["files"])
-    elif lane == "browser" and project in BROWSER_PROJECTS and shard in BROWSER_SHARDS:
+    elif (
+        lane == "browser"
+        and project in BROWSER_PROJECTS
+        and shard in browser_shards(profile)
+    ):
         inventory = policy["browser"][project]
         files = inventory["shards"][shard - 1]
     else:

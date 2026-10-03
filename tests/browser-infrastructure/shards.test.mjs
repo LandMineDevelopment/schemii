@@ -37,7 +37,7 @@ function cases(report) {
   return found;
 }
 
-function proveInventory(cwd, baseline, shardCount = 2) {
+function proveInventory(cwd, baseline, shardCount = 2, profile = undefined) {
   const required = cases(baseline);
   const actual = [];
   for (const project of PROJECTS) {
@@ -51,7 +51,17 @@ function proveInventory(cwd, baseline, shardCount = 2) {
     assert.deepEqual(new Set(inventoryFiles(projectReport, cwd)), new Set(projectFiles));
     for (const [index, shard] of plan.shards.entries()) {
       assert.ok(shard.files.length > 0, 'every browser lane must own files');
-      const selected = discover(cwd, invocation(project, shard.files, index + 1, true, process.env, shardCount));
+      // One real CLI leg per device proves discovery clears inherited filters.
+      // Other legs exercise the same manifest without rediscovering twice each.
+      const command = profile === undefined || index !== shardCount - 1
+        ? invocation(project, shard.files, index + 1, true, process.env, shardCount)
+        : {
+          args: [resolve(root, 'scripts/ci/run-browser-shard.mjs'), `--profile=${profile}`,
+            `--project=${project}`, `--shard=${index + 1}/${shardCount}`, '--list'],
+          // Full discovery must clear an inherited narrower file selection.
+          env: { ...process.env, SCHEMII_E2E_FILE_MANIFEST: JSON.stringify([shard.files[0]]) },
+        };
+      const selected = discover(cwd, command);
       assert.equal(selected.config.workers, 1);
       assert.equal(selected.config.fullyParallel, false);
       assert.equal(selected.config.shard, null);
@@ -65,9 +75,13 @@ function proveInventory(cwd, baseline, shardCount = 2) {
   return required;
 }
 
-test('real Playwright discovery proves exact project/test coverage and transport scope', () => {
+test('real six-way Playwright discovery proves exact project/test coverage and transport scope', t => {
   const baseline = discover(root);
-  const required = proveInventory(root, baseline, 3);
+  const required = proveInventory(root, baseline, 6, 'full');
+  t.diagnostic(JSON.stringify(Object.fromEntries(PROJECTS.map(project => {
+    const selected = required.filter(item => item.project === project);
+    return [project, { files: new Set(selected.map(item => item.file)).size, cases: selected.length, shards: 6 }];
+  }))));
   // The pinned JSON reporter removes the leading '@' from tag labels.
   const requests = required.filter(item => item.tags.includes('request-only'));
   assert.equal(requests.length, 7);
@@ -114,16 +128,16 @@ test('a freshly added nested spec is discovered and scheduled exactly once per i
         testMatch:manifestPattern(process.env.SCHEMII_E2E_FILE_MANIFEST),
         projects:[{name:'desktop-chromium'},{name:'android-chromium',grepInvert:/@request-only/}] });
     `);
-    for (const path of ['existing.spec.js', 'another.spec.js', 'nested/brand-new.spec.js']) {
+    for (const path of ['existing.spec.js', 'another.spec.js', 'third.spec.js', 'fourth.spec.js', 'fifth.spec.js', 'nested/brand-new.spec.js']) {
       writeFileSync(resolve(directory, 'tests/e2e', path), `
         import { test } from '@playwright/test';
         test('a visible invariant', async () => {});
       `);
     }
     const baseline = discover(directory);
-    const required = proveInventory(directory, baseline, 3);
+    const required = proveInventory(directory, baseline, 6);
     assert.equal(required.filter(item => item.file === 'nested/brand-new.spec.js').length, 2);
-    assert.equal(required.length, 6);
+    assert.equal(required.length, 12);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

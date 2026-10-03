@@ -769,13 +769,16 @@ def test_ci_executes_unit_browser_and_real_postgres_behavior(
     browser_command = (
         browser_command.replace("${{ matrix.project }}", "desktop-chromium")
         .replace("${{ matrix.shard }}", "1")
+        .replace(
+            "${{ matrix.total }}", "3" if profile == "schemer-result-cache" else "6"
+        )
         .replace("${{ needs.classify.outputs.profile }}", profile)
     )
     assert shlex.split(browser_command) == [
         "node",
         "scripts/ci/run-browser-shard.mjs",
         "--project=desktop-chromium",
-        "--shard=1/3",
+        "--shard=1/3" if profile == "schemer-result-cache" else "--shard=1/6",
         f"--profile={profile}",
     ]
     discovery = _named_step(browser, "Verify browser discovery and shard coverage")

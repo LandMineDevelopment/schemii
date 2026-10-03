@@ -36,6 +36,7 @@ jobs:
       python: ${{ steps.classify.outputs.python }}
       postgres: ${{ steps.classify.outputs.postgres }}
       browser: ${{ steps.classify.outputs.browser }}
+      browser_matrix: ${{ steps.classify.outputs.browser_matrix }}
       python_paths: ${{ steps.classify.outputs.python_paths }}
       acceptance: ${{ steps.reuse.outputs.acceptance }}
     steps:
@@ -218,16 +219,14 @@ jobs:
           retention-days: 7
 
   browser-smoke:
-    name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/3)
+    name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/${{ matrix.total }})
     if: always() && !cancelled() && needs.classify.result == 'success' && needs.classify.outputs.browser == 'true' && needs.classify.outputs.acceptance != 'reused-full-pr' && needs.classify.outputs.acceptance != 'reused-schemer-result-cache-pr'
     needs: classify
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      matrix:
-        project: [desktop-chromium, android-chromium]
-        shard: [1, 2, 3]
+      matrix: ${{ fromJSON(needs.classify.outputs.browser_matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -264,7 +263,7 @@ jobs:
           SCHEMII_E2E_BOOTSTRAP: "1"
           CI_TELEMETRY_FILE: artifacts/ci-timing/browser.jsonl
           CI_TELEMETRY_PROJECT: ${{ matrix.project }}
-        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/3 --profile=${{ needs.classify.outputs.profile }}
+        run: node scripts/ci/run-browser-shard.mjs --project=${{ matrix.project }} --shard=${{ matrix.shard }}/${{ matrix.total }} --profile=${{ needs.classify.outputs.profile }}
       - name: Verify metadata backup recovery in an isolated database
         if: matrix.project == 'desktop-chromium' && matrix.shard == 1 && needs.classify.outputs.profile != 'schemer-result-cache'
         run: |

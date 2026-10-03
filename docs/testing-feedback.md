@@ -109,12 +109,14 @@ filters are rejected rather than silently narrowing coverage.
 Complete CI Python uses `python scripts/ci/python-tests.py`: two isolated processes
 keep the inspection fixture consumers together and all other discovery in the
 other process, merging one strict canonical receipt. Explicit tooling arguments
-use the same runner. Browser acceptance uses three isolated hosted application
-stacks per device, retaining serialized whole-file execution and every case.
+use the same runner. Full and E2E acceptance use six isolated hosted application
+stacks per device; the frozen cache profile keeps three. Each stack retains
+serialized whole-file execution and every selected case.
 The gate derives exact expected jobs and receipt lanes from the profile, requires
 selected layers to succeed, and requires excluded workflow needs to be skipped.
-Missing/duplicate/stale/failed/recovered selected receipts cannot pass; full and
-browser profiles require all six browser legs. Unknown step time remains `null`.
+Missing/duplicate/stale/failed/recovered selected receipts cannot pass.
+Full and E2E profiles require all twelve browser legs; cache requires six.
+Unknown step time remains `null`.
 
 For scale only, natural main run 36763414216 attempt 1 took 474 seconds to its
 source critical path: unit wall 258 seconds and browser walls 354–457 seconds.
@@ -183,7 +185,7 @@ attempts and let GitHub schedule required PR/main acceptance automatically.
 
 For a full profile, acceptance comprises Node and complete Python, incremental
 Python quality against the intended base, explicitly configured real PostgreSQL
-and all six browser legs. A narrower reviewed profile omits only its documented
+and all twelve browser legs. A narrower reviewed profile omits only its documented
 unrelated layers. Browser CI uses the canonical
 HTTPS stack through `./start.sh`; it does not replace manual native-agent UI
 acceptance in #73/#137. Full/default browser acceptance retains the isolated-database backup recovery
@@ -199,7 +201,7 @@ For an ordinary push to main, CI can reuse a same-repository merged PR's full
 acceptance from the preceding 24 hours. The tested prospective merge tree must
 equal the current checked-out main tree, including workflow, policy, tests and
 dependencies. The donor must be the actual CI workflow's unique successful
-attempt-one PR run for that final head, with all 13 jobs passed and all nine raw
+attempt-one PR run for that final head, with all 19 jobs passed and all fifteen raw
 test lanes complete with zero first-attempt failures or retry recoveries.
 
 One additional closed mode supports the selected Schemer cache PR. Main retains
@@ -303,7 +305,7 @@ phase measurements do not replace the complete job/test outcome and identity
 requirements of the acceptance gate.
 
 The rollup validates downloaded timing records again and requires the exact selected
-test lanes (nine for full acceptance), one source/run/attempt cohort, all expected jobs and complete test
+test lanes (fifteen for full acceptance), one source/run/attempt cohort, all expected jobs and complete test
 lifecycle records. Missing shards/footers, cancelled or unstarted cases and API
 collection failure mark it incomplete. A failed-but-fully-observed attempt remains
 distinct from an incomplete run. First-attempt rate excludes skips/cancelled/

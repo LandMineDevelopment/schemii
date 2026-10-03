@@ -19,7 +19,9 @@ from scripts.ci.test_selection import (
     CACHE_TEST,
     coverage_policy,
     expected_scope,
-    JOB_NAMES,
+    source_job_names,
+    browser_shards,
+    browser_matrix,
     PATHS,
     PROFILES,
     SOURCE_NEEDS,
@@ -99,8 +101,8 @@ def test_frozen_paths_are_existing_disjoint_leaves_with_no_policy_or_shared_help
     assert "tests/test_load_planner.py" in PYTHON_PATHS["harness"]
     assert "python" not in layers("frontend-tests")
     assert "python" not in layers("e2e-tests")
-    assert len(expected_lanes("full")) == 9
-    assert len(expected_lanes("e2e-tests")) == 7
+    assert len(expected_lanes("full")) == 15
+    assert len(expected_lanes("e2e-tests")) == 13
 
 
 @pytest.mark.parametrize(
@@ -569,7 +571,7 @@ def selected_gate(root, profile):
     }
     jobs = [
         job(name, "success" if name in expected_jobs(profile) else "skipped")
-        for name in JOB_NAMES
+        for name in source_job_names(profile)
     ]
     timing = {
         **summarize({"created_at": "2026-09-30T00:00:00Z"}, jobs, profile=profile),
@@ -585,7 +587,7 @@ def test_selected_gate_requires_all_and_only_owned_layers(tmp_path, profile):
     assert evaluate(*args)[0]
     classification, needs, jobs, timing, identity = args
     assert timing["not_applicable_jobs"] == sorted(
-        set(JOB_NAMES.values()) - set(expected_jobs(profile).values())
+        set(source_job_names(profile).values()) - set(expected_jobs(profile).values())
     )
     for name in required_needs(profile):
         damaged = {**needs, name: {"result": "skipped"}}
@@ -705,12 +707,15 @@ def test_local_execution_runs_required_sentinels_and_stops_on_actual_failure(tmp
     assert local_selection.execute(tmp_path, selected) == 1
 
 
-def test_full_local_plan_preserves_launcher_pg_and_all_six_browser_commands():
+def test_full_local_plan_preserves_launcher_pg_and_all_twelve_browser_commands():
     argv = commands("full", "origin/main")
     assert ["python", "scripts/ci/python-tests.py"] in argv
     assert ["./start.sh"] in argv
     browser = [value for value in argv if "scripts/ci/run-browser-shard.mjs" in value]
-    assert len(browser) == 6 and len({tuple(value) for value in browser}) == 6
+    assert len(browser) == 12 and len({tuple(value) for value in browser}) == 12
+    assert all(
+        value[-2].endswith("/6") and value[-1] == "--profile=full" for value in browser
+    )
     assert any("tests/integration" in value for value in argv)
     assert all("docker" not in value and "sudo" not in value for value in argv)
 
@@ -1174,3 +1179,261 @@ def test_local_children_keep_planner_interpreter_without_path_activation(
     assert actual == {"executable": sys.executable, "prefix": sys.prefix}
     assert selected["commands"] == [argv]
     assert f"+ {sys.executable} " in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "profile,total,lanes,provider_jobs",
+    [
+        ("full", 6, 15, 19),
+        ("e2e-tests", 6, 13, 19),
+        (CACHE_PROFILE, 3, 8, 13),
+        ("frontend-tests", 6, 1, 19),
+    ],
+)
+def test_closed_browser_topology_has_independent_exact_matrix_and_lane_oracles(
+    profile, total, lanes, provider_jobs
+):
+    assert browser_shards(profile) == tuple(range(1, total + 1))
+    expected_matrix = {
+        "include": [
+            {"project": project, "shard": shard, "total": total}
+            for project in ("desktop-chromium", "android-chromium")
+            for shard in range(1, total + 1)
+        ]
+    }
+    assert browser_matrix(profile) == expected_matrix
+    provider = source_job_names(profile)
+    assert (
+        len(provider) + 4 == provider_jobs
+    )  # classify/report/timing/gate are separate controls.
+    assert {
+        name for name in provider if name.startswith("Assembled browser smoke (")
+    } == {
+        f"Assembled browser smoke ({project}, shard {shard}/{total})"
+        for project in ("desktop-chromium", "android-chromium")
+        for shard in range(1, total + 1)
+    }
+    assert len(expected_lanes(profile)) == lanes
+    assert all(
+        f"-of-{total}" in label
+        for label in provider.values()
+        if label.startswith("browser-")
+    )
+    for function in (browser_shards, browser_matrix, source_job_names):
+        with pytest.raises(ValueError):
+            function("unknown")
+    browser = [
+        argv
+        for argv in commands(profile, "origin/main")
+        if "scripts/ci/run-browser-shard.mjs" in argv
+    ]
+    if "browser" in layers(profile):
+        assert len(browser) == 2 * total
+        assert {tuple(argv[-3:]) for argv in browser} == {
+            (f"--project={project}", f"--shard={shard}/{total}", f"--profile={profile}")
+            for project in ("desktop-chromium", "android-chromium")
+            for shard in range(1, total + 1)
+        }
+    else:
+        assert browser == []
+
+
+@pytest.mark.parametrize(
+    "profile,path,total",
+    [
+        ("full", "package.json", 6),
+        (CACHE_PROFILE, CACHE_SOURCE, 3),
+        ("e2e-tests", "tests/e2e/accounts.spec.js", 6),
+    ],
+)
+def test_classifier_exports_the_exact_closed_browser_matrix(
+    repository, profile, path, total
+):
+    root, _ = repository
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("baseline\n")
+    base = commit(root)
+    target.write_text("changed\n")
+    head = commit(root)
+    payload = root / "event.json"
+    payload.write_text(
+        json.dumps({"pull_request": {"base": {"sha": base}, "head": {"sha": head}}})
+    )
+    output = root / "outputs"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/ci/classify_changes.py"),
+            "--output",
+            str(root / "classification.json"),
+        ],
+        cwd=root,
+        env={
+            **os.environ,
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_EVENT_PATH": str(payload),
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    fields = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert fields["profile"] == profile
+    assert json.loads(fields["browser_matrix"]) == {
+        "include": [
+            {"project": project, "shard": shard, "total": total}
+            for project in ("desktop-chromium", "android-chromium")
+            for shard in range(1, total + 1)
+        ]
+    }
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert "browser_matrix: ${{ steps.classify.outputs.browser_matrix }}" in workflow
+    assert "matrix: ${{ fromJSON(needs.classify.outputs.browser_matrix) }}" in workflow
+    assert (
+        "name: Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/${{ matrix.total }})"
+        in workflow
+    )
+    assert "--shard=${{ matrix.shard }}/${{ matrix.total }}" in workflow
+
+
+@pytest.mark.parametrize("profile", ["full", CACHE_PROFILE])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "wrong-total",
+        "mixed",
+        "missing",
+        "duplicate",
+        "literal",
+        "raw-extra",
+        "old-full-three",
+    ],
+)
+def test_profile_gate_rejects_wrong_total_mixed_or_incomplete_topology(
+    tmp_path, profile, damage
+):
+    from scripts.ci.workflow_timing import SKIPPED_BROWSER
+
+    args = selected_gate(tmp_path, profile)
+    assert evaluate(*args)[0]
+    jobs = args[2]
+    browser = [
+        job for job in jobs if job["name"].startswith("Assembled browser smoke (")
+    ]
+    total = 3 if profile == CACHE_PROFILE else 6
+    other = 6 if total == 3 else 3
+    if damage in {"wrong-total", "mixed"}:
+        for job in browser if damage == "wrong-total" else browser[:1]:
+            job["name"] = job["name"].replace(f"/{total})", f"/{other})")
+    elif damage == "missing":
+        jobs.remove(browser[-1])
+    elif damage == "duplicate":
+        jobs.append(copy.deepcopy(browser[0]))
+    elif damage == "literal":
+        browser[0]["name"] = SKIPPED_BROWSER
+    elif damage == "raw-extra":
+        receipt = args[3]["test_evidence"]["lanes"][-1]
+        args[3]["test_evidence"]["lanes"].append(
+            {
+                **receipt,
+                "lane": "browser",
+                "project": "desktop-chromium",
+                "shard": total + 1,
+            }
+        )
+    else:
+        if profile == "full":
+            jobs[:] = [
+                job
+                for job in jobs
+                if not job["name"].startswith("Assembled browser smoke (")
+                or any(f"shard {index}/" in job["name"] for index in (1, 2, 3))
+            ]
+            for job in jobs:
+                job["name"] = job["name"].replace("/6)", "/3)")
+            evidence = args[3]["test_evidence"]
+            evidence["lanes"] = [
+                value
+                for value in evidence["lanes"]
+                if value["lane"] != "browser" or value["shard"] <= 3
+            ]
+        else:
+            browser[0]["name"] = browser[0]["name"].replace("/3)", "/6)")
+    assert not evaluate(*args)[0]
+    if damage not in {"raw-extra"}:
+        assert (
+            summarize({"created_at": "2026-09-30T00:00:00Z"}, jobs, profile=profile)[
+                "complete"
+            ]
+            is False
+        )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        None,
+        "partial",
+        "wrong-total",
+        "mixed",
+        "literal-plus-expanded",
+        "duplicate-literal",
+        "succeeded-literal",
+        "old-literal",
+    ],
+)
+def test_excluded_browser_topology_is_complete_expanded_or_one_exact_literal(
+    tmp_path, damage
+):
+    from scripts.ci.workflow_timing import SKIPPED_BROWSER
+
+    args = selected_gate(tmp_path, "frontend-tests")
+    jobs = args[2]
+    browser = [
+        job for job in jobs if job["name"].startswith("Assembled browser smoke (")
+    ]
+    assert len(browser) == 12
+    if damage == "partial":
+        jobs.remove(browser[-1])
+    elif damage in {"wrong-total", "mixed"}:
+        for value in browser if damage == "wrong-total" else browser[:1]:
+            value["name"] = value["name"].replace("/6)", "/3)")
+    elif damage in {
+        "literal-plus-expanded",
+        "duplicate-literal",
+        "succeeded-literal",
+        "old-literal",
+    }:
+        literal = {**browser[0], "name": SKIPPED_BROWSER}
+        if damage != "literal-plus-expanded":
+            jobs[:] = [value for value in jobs if value not in browser]
+        jobs.append(literal)
+        if damage == "duplicate-literal":
+            jobs.append(copy.deepcopy(literal))
+        elif damage == "succeeded-literal":
+            literal["conclusion"] = "success"
+        elif damage == "old-literal":
+            literal["name"] = (
+                "Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/3)"
+            )
+    if damage is None:
+        assert evaluate(*args)[0]
+        jobs[:] = [value for value in jobs if value not in browser]
+        jobs.append({**browser[0], "name": SKIPPED_BROWSER})
+        assert evaluate(*args)[0]
+        assert (
+            summarize(
+                {"created_at": "2026-09-30T00:00:00Z"}, jobs, profile="frontend-tests"
+            )["complete"]
+            is True
+        )
+    else:
+        assert evaluate(*args)[0] is False
+        assert (
+            summarize(
+                {"created_at": "2026-09-30T00:00:00Z"}, jobs, profile="frontend-tests"
+            )["complete"]
+            is False
+        )

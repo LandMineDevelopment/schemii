@@ -51,7 +51,7 @@ export function manifestPattern(value) {
 }
 
 export function validateShardCount(count) {
-  if (![2, 3].includes(count)) throw new Error('Browser shard count must be 2 or 3');
+  if (![2, 3, 6].includes(count)) throw new Error('Browser shard count must be 2, 3 or 6');
   return count;
 }
 

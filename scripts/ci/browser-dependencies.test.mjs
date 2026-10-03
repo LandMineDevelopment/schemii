@@ -189,8 +189,9 @@ test('every outline font asset, TTC face and existing stock face must remain vis
 test('workflow preserves engine, device lanes, one-worker scheduling, launcher and strict gates', () => {
   const workflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
   // Use full workflow for ordered commands; do not run a browser or application.
-  assert.match(workflow, /project: \[desktop-chromium, android-chromium\]/);
-  assert.match(workflow, /shard: \[1, 2, 3\]/);
+  assert.match(workflow, /browser_matrix: \$\{\{ steps.classify.outputs.browser_matrix \}\}/);
+  assert.match(workflow, /matrix: \$\{\{ fromJSON\(needs.classify.outputs.browser_matrix\) \}\}/);
+  assert.match(workflow, /name: Assembled browser smoke \(\$\{\{ matrix.project \}\}, shard \$\{\{ matrix.shard \}\}\/\$\{\{ matrix.total \}\}\)/);
   assert.match(workflow, /run: node scripts\/ci\/browser-dependencies.mjs plan/);
   assert.match(workflow, /uses: actions\/cache\/restore@v4/);
   assert.match(workflow, /uses: actions\/cache\/save@v4/);
@@ -205,7 +206,7 @@ test('workflow preserves engine, device lanes, one-worker scheduling, launcher a
   assert.ok(workflow.indexOf('actions/cache/restore@v4') < workflow.indexOf('browser-dependencies.mjs prepare'));
   assert.ok(workflow.indexOf('browser-dependencies.mjs prepare') < workflow.indexOf('actions/cache/save@v4'));
   assert.ok(workflow.indexOf('actions/cache/save@v4') < workflow.indexOf('run: ./start.sh'));
-  assert.match(workflow, /run: node scripts\/ci\/run-browser-shard.mjs --project=\$\{\{ matrix.project \}\} --shard=\$\{\{ matrix.shard \}\}\/3/);
+  assert.match(workflow, /run: node scripts\/ci\/run-browser-shard.mjs --project=\$\{\{ matrix.project \}\} --shard=\$\{\{ matrix.shard \}\}\/\$\{\{ matrix.total \}\} --profile=\$\{\{ needs.classify.outputs.profile \}\}/);
   assert.match(workflow, /run: node --test tests\/browser-infrastructure\/shards.test.mjs/);
 });
 
