@@ -44,6 +44,23 @@ class NativeConnection:
         self.closed = True
 
 
+class TransactionConnection(NativeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self._autocommit = False
+        self.autocommit_error: Exception | None = None
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        if self.autocommit_error is not None:
+            raise self.autocommit_error
+        self._autocommit = value
+
+
 @pytest.fixture
 def config(tmp_path) -> MetadataConfig:
     password = tmp_path / "password"
@@ -111,6 +128,42 @@ def test_concurrent_admission_rejects_before_connect_and_recovers(config) -> Non
         assert factory.admission_snapshot().active == 1
     assert factory.admission_snapshot().active == 0
     assert all(connection.closed for connection in connected)
+    factory.close()
+
+
+def test_autocommit_assignment_changes_native_transaction_mode(config) -> None:
+    native = TransactionConnection()
+    factory = MetadataConnectionFactory(config, lambda *_a, **_kw: native)
+    with factory() as connection:
+        assert connection.autocommit is False
+        connection.autocommit = True
+        assert native.autocommit is True
+        native.autocommit = False
+        assert connection.autocommit is False
+        connection.autocommit = True
+        connection.autocommit = False
+        assert native.autocommit is False
+        assert factory.admission_snapshot().active == 1
+    assert native.closed
+    assert factory.admission_snapshot().active == 0
+    factory.close()
+
+
+def test_autocommit_native_rejection_remains_visible_and_keeps_permit(config) -> None:
+    native = TransactionConnection()
+    failure = psycopg.ProgrammingError("transaction is already in progress")
+    native.autocommit_error = failure
+    factory = MetadataConnectionFactory(config, lambda *_a, **_kw: native)
+    with factory() as connection:
+        with pytest.raises(psycopg.ProgrammingError) as raised:
+            connection.autocommit = True
+        assert raised.value is failure
+        assert connection.autocommit is False
+        assert native.autocommit is False
+        assert not native.closed
+        assert factory.admission_snapshot().active == 1
+    assert native.closed
+    assert factory.admission_snapshot().active == 0
     factory.close()
 
 
