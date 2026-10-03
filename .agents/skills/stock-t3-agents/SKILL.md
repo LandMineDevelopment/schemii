@@ -23,7 +23,14 @@ report the discovery limit.
   finishing to release the heavy backend while preserving same-thread follow-up.
   When the browser connection is genuinely finished, export selected evidence
   and call `browser_release` with no arguments if actually exposed. It permanently
-  ends only this MCP connection; future browser use requires a fresh thread.
+  ends only this MCP connection; browser follow-up cannot resume on that connection.
+  On each resumed turn and before finishing, inspect the current exposed tools and
+  connection state. A previous release or completed/interrupted thread status does
+  not prove current transport cleanup: resumed work may receive a new connection
+  from the host. Do not assume one exists or will be provided. Close/release only
+  your current own connection as appropriate, preserving active peers and their
+  data. Report actual acknowledgements and the resource lifecycle you observed;
+  distinguish unchecked process/session removal from confirmed cleanup.
   Keep connections needed for follow-up reusable. Existing endpoints cannot reload
   new tools, and fresh children may inherit a stale parent allowlist: verify
   activation in a fresh provider session and report unavailable terminal controls
