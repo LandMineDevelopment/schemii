@@ -1008,6 +1008,7 @@ import json, os, signal, subprocess, sys
 from pathlib import Path
 output = Path(sys.argv[1])
 pending = {}
+client_initialized = False
 def send(message):
     print(json.dumps(message, separators=(',', ':')), flush=True)
 def result(identity, payload):
@@ -1026,7 +1027,11 @@ for raw in sys.stdin.buffer:
             result(message['id'], {'protocolVersion':'wrong','capabilities':{}})
         else:
             initialized(message['id'])
+    elif method == 'notifications/initialized':
+        client_initialized = True
     elif method == 'ping':
+        if message['id'] == 'launch-ready':
+            (output / 'launch-ready.json').write_text(json.dumps({'initialized':client_initialized}))
         result(message['id'], {})
     elif method == 'tools/list':
         result(message['id'], {'tools':[{'name':'browser_close','inputSchema':{'type':'object'}}]})
@@ -1109,6 +1114,11 @@ raise SystemExit(browser.main([]))
             self.send({"jsonrpc": "2.0", "id": callback["id"], "result": {"roots": []}})
         self.receive(lambda message: message.get("id") == 1)
         self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        # A sent notification may still be queued when release arrives. Its
+        # following backend ping response proves the initialization traffic drained.
+        self.send({"jsonrpc": "2.0", "id": "launch-ready", "method": "ping"})
+        ready = self.receive(lambda message: message.get("id") == "launch-ready")
+        self.assertEqual(ready["result"], {})
         return self.session()
 
     def stop(self, process):
@@ -1166,6 +1176,14 @@ raise SystemExit(browser.main([]))
         for key in ("child", "guardian"):
             self.assertIsNone(browser.process_birth_tick(metadata[f"{key}_pid"]))
         self.assertIsNone(self.process.poll(), "The native endpoint must remain alive")
+
+    def test_launch_observes_backend_initialized_notification_before_returning(self):
+        owned = self.launch(roots=True)
+        self.assertEqual(
+            json.loads((owned[0] / "output/launch-ready.json").read_text()),
+            {"initialized": True},
+        )
+        self.assertFalse((owned[0] / "output/calls.jsonl").exists())
 
     def test_close_releases_generation_inline_images_then_same_endpoint_reinitializes(
         self,
