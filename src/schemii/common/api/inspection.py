@@ -127,6 +127,7 @@ def _direct_calls(
     source_start_line: int | None,
     services: object,
     register: Any,
+    registry: SourceRegistry | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     return inspect_direct_calls(
         endpoint,
@@ -138,6 +139,7 @@ def _direct_calls(
         ),
         register=register,
         limit=_MAX_CALLS_PER_ROUTE,
+        registry=registry,
     )
 
 
@@ -230,6 +232,7 @@ def build_developer_route_document(application: FastAPI) -> dict[str, Any]:
             source_start_line=registry.get(endpoint_id)["location"]["sourceStartLine"],
             services=services,
             register=register,
+            registry=registry,
         )
         related_ids = [
             endpoint_id,

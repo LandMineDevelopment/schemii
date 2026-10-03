@@ -770,11 +770,19 @@ def direct_call_sites(
     return collector.sites
 
 
-def direct_call_nodes(subject: object) -> list[ast.Call]:
-    try:
-        source = inspect.getsource(inspect.unwrap(subject))
-        tree = ast.parse(textwrap.dedent(source))
-    except (IndentationError, OSError, SyntaxError, TypeError):
+def direct_call_nodes(
+    subject: object,
+    *,
+    registry: SourceRegistry | None = None,
+) -> list[ast.Call]:
+    """Collect calls using this document's source, or a fresh standalone read."""
+
+    tree = (
+        registry.source_tree(subject)
+        if registry is not None
+        else _read_source(subject).tree
+    )
+    if tree is None:
         return []
     function = next(
         (
@@ -804,12 +812,13 @@ def inspect_direct_calls(
     register: Callable[..., str | None],
     limit: int,
     decorate: CallDecorator | None = None,
+    registry: SourceRegistry | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Resolve one callable's direct first-party calls with stable bounds."""
 
     calls: list[dict[str, Any]] = []
     truncated = False
-    for node in direct_call_nodes(subject):
+    for node in direct_call_nodes(subject, registry=registry):
         called, resolution = resolver(node.func)
         if called is None or not is_first_party(called):
             continue

@@ -201,3 +201,293 @@ def test_unavailable_or_invalid_source_does_not_escape_source_analysis(
     assert registry.get(object_id)["docstring"] is None
     assert registry.source_tree(_source_subject) is None
     assert direct_call_sites(_source_subject, registry=registry) == []
+
+
+def test_direct_call_results_share_one_source_view_and_next_registry_reads_fresh(
+    monkeypatch,
+):
+    from schemii.common.source_inspection import direct_call_nodes, inspect_direct_calls
+
+    code = "def _source_subject():\n    return first_call()\n"
+    counts = {"reads": 0, "parses": 0}
+    original_parse = ast.parse
+
+    def source_lines(subject):
+        assert subject is _source_subject
+        counts["reads"] += 1
+        return code.splitlines(keepends=True), 10
+
+    def parse(source, *args, **kwargs):
+        counts["parses"] += 1
+        return original_parse(source, *args, **kwargs)
+
+    def calls(registry=None):
+        return inspect_direct_calls(
+            _source_subject,
+            source_start_line=10,
+            resolver=lambda node: (_source_subject, "module"),
+            register=lambda subject: source_inspection.python_object_id(subject),
+            limit=3,
+            registry=registry,
+        )
+
+    monkeypatch.setattr(source_inspection.inspect, "getsourcelines", source_lines)
+    monkeypatch.setattr(ast, "parse", parse)
+    first = SourceRegistry()
+    first.register(_source_subject)
+    original_calls = calls(first)
+    assert original_calls[0][0]["expression"] == "first_call"
+    assert original_calls[0][0]["line"] == 11
+    assert original_calls[1] is False
+    assert counts == {"reads": 1, "parses": 1}
+
+    code = "def _source_subject():\n    return second_call()\n"
+    assert calls(first) == original_calls
+    assert [
+        ast.unparse(node.func)
+        for node in direct_call_nodes(_source_subject, registry=first)
+    ] == ["first_call"]
+    assert counts == {"reads": 1, "parses": 1}
+    second = SourceRegistry()
+    second.register(_source_subject)
+    fresh_calls = calls(second)
+    assert fresh_calls[0][0]["expression"] == "second_call"
+    assert counts == {"reads": 2, "parses": 2}
+    assert calls() == fresh_calls
+    assert counts == {"reads": 3, "parses": 3}
+
+
+@pytest.mark.parametrize("definition", ["def", "async def"])
+def test_direct_calls_reuse_unwrapped_full_source_with_identical_scope_and_bounds(
+    monkeypatch, definition
+):
+    from functools import wraps
+
+    from schemii.common.source_inspection import direct_call_nodes, inspect_direct_calls
+
+    code = (
+        "@decorate(factory())\n"
+        f"{definition} _source_subject():\n"
+        '    """Static documentation."""\n'
+        "    def nested():\n"
+        "        hidden_function()\n"
+        "    class Nested:\n"
+        "        hidden_class()\n"
+        "    deferred = lambda: hidden_lambda()\n"
+        "    return outer(inner(), key=keyword_call())\n"
+    )
+    reads = []
+    parses = []
+    original_parse = ast.parse
+
+    def lines(subject):
+        assert subject is _source_subject
+        reads.append(subject)
+        return code.splitlines(keepends=True), 100
+
+    def parse(source, *args, **kwargs):
+        parses.append(source)
+        return original_parse(source, *args, **kwargs)
+
+    @wraps(_source_subject)
+    def wrapped():
+        raise AssertionError("Source inspection must not execute decorated callables")
+
+    monkeypatch.setattr(source_inspection.inspect, "getsourcelines", lines)
+    monkeypatch.setattr(ast, "parse", parse)
+    registry = SourceRegistry(
+        SourceInspectionLimits(source_limit=20, total_source_limit=20)
+    )
+    object_id = registry.register(wrapped)
+    metadata = registry.get(object_id)
+    assert metadata["source"]["truncated"] is True
+    assert metadata["source"]["sha256"] == hashlib.sha256(code.encode()).hexdigest()
+    assert metadata["location"]["definitionLine"] == 101
+    assert registry.source_characters <= 20
+    nodes = direct_call_nodes(wrapped, registry=registry)
+    assert [ast.unparse(node.func) for node in nodes] == [
+        "inner",
+        "keyword_call",
+        "outer",
+    ]
+
+    def calls(*, registry=None, limit=3, register=lambda subject: object_id):
+        return inspect_direct_calls(
+            wrapped,
+            source_start_line=100,
+            resolver=lambda node: (_source_subject, "module"),
+            register=register,
+            limit=limit,
+            decorate=lambda node: {"detail": ast.unparse(node)},
+            registry=registry,
+        )
+
+    cached, truncated = calls(registry=registry)
+    assert cached == [
+        {
+            "sequence": sequence,
+            "expression": name,
+            "objectId": object_id,
+            "resolution": "module",
+            "line": 108,
+            "detail": detail,
+        }
+        for sequence, (name, detail) in enumerate(
+            [
+                ("inner", "inner()"),
+                ("keyword_call", "keyword_call()"),
+                ("outer", "outer(inner(), key=keyword_call())"),
+            ],
+            start=1,
+        )
+    ]
+    assert truncated is False
+    assert calls(registry=registry, limit=2) == (cached[:2], True)
+    assert calls(registry=registry, register=lambda subject: None) == ([], False)
+    assert len(reads) == len(parses) == 1
+    assert calls() == (cached, False)
+    assert len(reads) == len(parses) == 2
+
+
+def _source_reuse_target() -> str:
+    raise AssertionError("Inspection must not execute the endpoint or its calls")
+
+
+_source_reuse_target.__module__ = "schemii.test_inspection"
+
+
+def test_route_document_reuses_registered_endpoint_source(monkeypatch) -> None:
+    import textwrap
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from schemii.common.api.inspection import build_developer_route_document
+
+    application = FastAPI()
+    application.state.services = SimpleNamespace()
+
+    def endpoint() -> str:
+        return _source_reuse_target()
+
+    endpoint.__module__ = "schemii.test_inspection"
+    application.get("/source-reuse", response_model=None)(endpoint)
+    original_lines = source_inspection.inspect.getsourcelines
+    original_parse = ast.parse
+    counts = {"reads": 0, "parses": 0}
+    lines, start_line = original_lines(endpoint)
+    expected_source = textwrap.dedent("".join(lines))
+
+    def source_lines(subject):
+        if subject is endpoint:
+            counts["reads"] += 1
+        return original_lines(subject)
+
+    def parse(source, *args, **kwargs):
+        if isinstance(source, str) and source.strip() == expected_source.strip():
+            counts["parses"] += 1
+        return original_parse(source, *args, **kwargs)
+
+    monkeypatch.setattr(source_inspection.inspect, "getsourcelines", source_lines)
+    monkeypatch.setattr(ast, "parse", parse)
+    document = build_developer_route_document(application)
+    route = document["routes"][0]
+    assert route["calls"] == [
+        {
+            "sequence": 1,
+            "expression": "_source_reuse_target",
+            "objectId": source_inspection.python_object_id(_source_reuse_target),
+            "resolution": "module",
+            "line": start_line + 1,
+        }
+    ]
+    assert counts == {"reads": 1, "parses": 1}
+
+
+def test_database_document_reuses_registered_callable_source(monkeypatch) -> None:
+    import inspect
+    import textwrap
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from schemii.common.postgres import inspection as database_inspection
+    from schemii.common.postgres.gateway import PostgresGateway
+
+    class _SourceReuseGateway(PostgresGateway):
+        def test_connection(self, connection):
+            return self._source_reuse_helper()
+
+        def _source_reuse_helper(self):
+            raise AssertionError(
+                "Inspection must not call the gateway or open a connection"
+            )
+
+    for subject in (
+        _SourceReuseGateway,
+        _SourceReuseGateway.test_connection,
+        _SourceReuseGateway._source_reuse_helper,
+    ):
+        subject.__module__ = "schemii.test_inspection"
+
+    application = FastAPI()
+    application.state.services = SimpleNamespace(postgres=_SourceReuseGateway())
+    implementation = _SourceReuseGateway.test_connection
+    original_lines = source_inspection.inspect.getsourcelines
+    original_parse = ast.parse
+    original_calls = database_inspection.inspect_direct_calls
+    lines, start_line = original_lines(implementation)
+    source = "".join(lines)
+    expected_sources = {textwrap.dedent(source), inspect.cleandoc(source)}
+    counts = {"reads": 0, "parses": 0}
+    analyzed = []
+
+    def source_lines(subject):
+        if subject is implementation:
+            counts["reads"] += 1
+        return original_lines(subject)
+
+    def parse(source, *args, **kwargs):
+        if isinstance(source, str) and source in expected_sources:
+            counts["parses"] += 1
+        return original_parse(source, *args, **kwargs)
+
+    def direct_calls(subject, **kwargs):
+        registry = kwargs.get("registry")
+        assert isinstance(registry, source_inspection.SourceRegistry)
+        assert registry.get(source_inspection.python_object_id(subject)) is not None
+        before = counts.copy()
+        result = original_calls(subject, **kwargs)
+        assert counts == before
+        analyzed.append(subject)
+        return result
+
+    monkeypatch.setattr(source_inspection.inspect, "getsourcelines", source_lines)
+    monkeypatch.setattr(ast, "parse", parse)
+    monkeypatch.setattr(database_inspection, "inspect_direct_calls", direct_calls)
+    document = database_inspection.build_developer_database_document(application)
+    operation = next(
+        item for item in document["operations"] if item["name"] == "test_connection"
+    )
+    callable_record = next(
+        item
+        for item in document["callables"]
+        if item["objectId"] == operation["implementationObjectId"]
+    )
+    assert callable_record["calls"] == [
+        {
+            "sequence": 1,
+            "expression": "self._source_reuse_helper",
+            "objectId": source_inspection.python_object_id(
+                _SourceReuseGateway._source_reuse_helper
+            ),
+            "resolution": "runtime-binding",
+            "line": start_line + 1,
+            "queryIds": [],
+        }
+    ]
+    assert implementation in analyzed
+    assert _SourceReuseGateway._source_reuse_helper in analyzed
+    assert len(operation["implementationDigest"]) == 64
+    # The separate inline-SQL pass intentionally keeps its existing normalization.
+    assert counts == {"reads": 2, "parses": 2}
