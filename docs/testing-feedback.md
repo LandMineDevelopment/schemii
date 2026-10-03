@@ -255,11 +255,11 @@ dependencies. The donor must be the actual CI workflow's unique successful
 attempt-one PR run for that final head, with all 19 jobs passed and all fifteen raw
 test lanes complete with zero first-attempt failures or retry recoveries.
 
-Two additional closed modes support the selected Schemer cache and developer-inspection PRs. Main retains
-full classification, but both admission and the independent gate must re-prove
-that the entire push is the exact existing cache source or source/direct-test pair,
+Three additional closed modes support the selected Schemer cache, developer-inspection
+and native-tooling PRs. Main retains full classification, but both admission and the
+independent gate must re-prove that the entire push belongs to that exact existing owner,
 with the donor comparison/base equal to main's previous commit and the same
-reviewed policy bytes. The original selected donor must have exactly eight complete
+reviewed policy bytes. The original cache donor must have exactly eight complete
 raw lanes (Node, frontend Python and six browser legs), eleven original artifacts,
 and thirteen provider jobs: eleven successful with static/PostgreSQL intentionally
 skipped. Its Python/browser case/source/outcome inventory must match the current
@@ -277,6 +277,23 @@ seven artifacts and four complete original raw lanes. The frozen graph/mounted
 inventory and complete dynamic helper plan are independently revalidated at
 admission and the gate. Main retains full classification and fresh report/static
 checks while avoiding duplicate acceptance for that identical tested tree.
+
+Native reuse requires the complete main push to modify only the existing native
+code, controls, configuration and two documentation companions in its frozen owner
+set, with unchanged regular modes, exact donor base and unchanged current policy.
+The original native donor retains complete Node and whole-directory
+`testing/agents` Python discovery: two complete original raw lanes and exactly five
+artifacts. Static/unit, classification, report validation, timing and the original
+gate must succeed; PostgreSQL and the browser matrix must be intentionally skipped.
+The browser exclusion may be the exact unexpanded provider placeholder or all
+twelve existing skipped legs, with no mixture, duplicate or extra job.
+Other tooling profiles share these archive names, so names only identify a
+candidate: the authenticated original classification and freshly recomputed complete
+native ownership must both agree. Harness, load and backend-test donors remain
+ineligible. Native's complete dynamic pytest plan uses the same immutable reviewed
+workflow, actual discovery and authenticated original-receipt trust as full donors;
+no smaller case list or frozen minimum is manufactured. Both admission and the gate
+repeat the raw receipt, provider, tree, base, owner and policy checks.
 
 Admission downloads bounded, digest-checked original artifacts and validates
 their schemas, identities and completeness. The gate independently repeats

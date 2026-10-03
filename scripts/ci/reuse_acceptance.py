@@ -1,4 +1,4 @@
-"""Reuse reviewed full, cache or inspection PR receipts for an identical main tree.
+"""Reuse reviewed full, cache, inspection or native PR receipts for an identical tree.
 
 Admission is best effort; the gate repeats it independently and fails closed.
 No artifact is executed, and donor identities never become current-run receipts.
@@ -81,7 +81,14 @@ WORKFLOW_PATH = ".github/workflows/ci.yml"
 MODE = "reused-full-pr"
 CACHE_MODE = "reused-schemer-result-cache-pr"
 INSPECTION_MODE = "reused-developer-inspection-pr"
-MODES = frozenset({MODE, CACHE_MODE, INSPECTION_MODE})
+NATIVE_MODE = "reused-native-pr"
+MODE_PROFILES = {
+    MODE: "full",
+    CACHE_MODE: CACHE_PROFILE,
+    INSPECTION_MODE: INSPECTION_PROFILE,
+    NATIVE_MODE: "native",
+}
+MODES = frozenset(MODE_PROFILES)
 POLICY_FILES = frozenset(
     {
         WORKFLOW_PATH,
@@ -128,18 +135,23 @@ def positive(value):
     return type(value) is int and value > 0
 
 
-def donor_job_outcomes(profile):
-    """Two independent donor topologies, each with its own required exclusions."""
+def donor_job_outcomes(profile, *, expanded_native_skips=False):
+    """Closed donor topologies, including native's intentional browser exclusion."""
     require(
-        profile in {"full", CACHE_PROFILE, INSPECTION_PROFILE},
+        profile in MODE_PROFILES.values(),
         "unsupported-donor-profile",
     )
     selected = expected_jobs(profile)
+    source = source_job_names(profile)
+    if profile == "native" and not expanded_native_skips:
+        source = {
+            name: label
+            for name, label in source.items()
+            if not label.startswith("browser-")
+        }
+        source[SKIPPED_BROWSER] = "browser-not-selected"
     return {
-        **{
-            name: "success" if name in selected else "skipped"
-            for name in source_job_names(profile)
-        },
+        **{name: "success" if name in selected else "skipped" for name in source},
         **{name: "success" for name in REPORT_JOB_NAMES},
         "Public workflow timing": "success",
         "CI validation": "success",
@@ -263,7 +275,7 @@ class GitHub:
 
 def artifact_files(profile="full"):
     require(
-        profile in {"full", CACHE_PROFILE, INSPECTION_PROFILE},
+        profile in MODE_PROFILES.values(),
         "unsupported-donor-profile",
     )
     values = {
@@ -286,10 +298,16 @@ def artifact_files(profile="full"):
 ARTIFACT_FILES = artifact_files()
 CACHE_ARTIFACT_FILES = artifact_files(CACHE_PROFILE)
 INSPECTION_ARTIFACT_FILES = artifact_files(INSPECTION_PROFILE)
+NATIVE_ARTIFACT_FILES = artifact_files("native")
 
 
 def donor_profile(artifacts):
-    """Only three closed artifact contracts; caller/profile labels are not authority."""
+    """Closed archive candidates; the original classification and owner must agree.
+
+    Native shares archive names with unsupported tooling profiles. Names alone
+    never authorize native reuse; verify checks the original native classification
+    and independently recomputes the complete target owner and policy proof.
+    """
     names = {value.get("name") for value in artifacts}
     if len(artifacts) == len(ARTIFACT_FILES) and names == set(ARTIFACT_FILES):
         return "full"
@@ -297,18 +315,29 @@ def donor_profile(artifacts):
         CACHE_ARTIFACT_FILES
     ):
         return CACHE_PROFILE
+    if len(artifacts) == len(INSPECTION_ARTIFACT_FILES) and names == set(
+        INSPECTION_ARTIFACT_FILES
+    ):
+        return INSPECTION_PROFILE
     require(
-        len(artifacts) == len(INSPECTION_ARTIFACT_FILES)
-        and names == set(INSPECTION_ARTIFACT_FILES),
+        len(artifacts) == len(NATIVE_ARTIFACT_FILES)
+        and names == set(NATIVE_ARTIFACT_FILES),
         "donor-artifacts",
     )
-    return INSPECTION_PROFILE
+    return "native"
 
 
 def target_owner_proof(target, root=None, *, profile=CACHE_PROFILE):
     """Recompute complete Git ownership and unchanged current policy, never a label."""
-    require(profile in {CACHE_PROFILE, INSPECTION_PROFILE}, "unsupported-donor-profile")
-    prefix = "cache" if profile == CACHE_PROFILE else "inspection"
+    require(
+        profile in {CACHE_PROFILE, INSPECTION_PROFILE, "native"},
+        "unsupported-donor-profile",
+    )
+    prefix = {
+        CACHE_PROFILE: "cache",
+        INSPECTION_PROFILE: "inspection",
+        "native": "native",
+    }[profile]
     root = Path.cwd() if root is None else Path(root)
     before, head = target["before"], target["source_sha"]
     require(
@@ -390,7 +419,7 @@ def valid_receipt_mode(receipt):
                 classification.get("profile") == "full"
                 and "target_owner_proof" not in receipt
             )
-        profile = CACHE_PROFILE if receipt["mode"] == CACHE_MODE else INSPECTION_PROFILE
+        profile = MODE_PROFILES[receipt["mode"]]
         proof, target = receipt.get("target_owner_proof"), receipt.get("target")
         if not isinstance(proof, dict) or not isinstance(target, dict):
             return False
@@ -671,7 +700,11 @@ def provider_binding(client, target, donor_id=None, *, now=None):
     jobs = client.collection(f"actions/runs/{run['id']}/attempts/1/jobs", "jobs")
     artifacts = client.collection(f"actions/runs/{run['id']}/artifacts", "artifacts")
     profile = donor_profile(artifacts)
-    expected_outcomes = donor_job_outcomes(profile)
+    expected_outcomes = donor_job_outcomes(
+        profile,
+        expanded_native_skips=profile == "native"
+        and SKIPPED_BROWSER not in {job.get("name") for job in jobs},
+    )
     identity = {"run_id": run["id"], "run_attempt": 1, "head_sha": head["sha"]}
     require(
         len(jobs) == len(expected_outcomes)
@@ -750,13 +783,15 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
             "donor-classification",
         )
         owner_proof = None
-        if profile in {CACHE_PROFILE, INSPECTION_PROFILE}:
+        if profile != "full":
             require(
                 classification["comparison_base"] == classification["base"]
                 and classification["reason"] == "verified-owned-pr-change",
                 "cache-donor-base"
                 if profile == CACHE_PROFILE
-                else "inspection-donor-base",
+                else "inspection-donor-base"
+                if profile == INSPECTION_PROFILE
+                else "native-donor-base",
             )
             owner_proof = target_owner_proof(target, checkout, profile=profile)
         report = json_value(
@@ -898,15 +933,15 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
                 ),
                 "cache-owner-changed"
                 if profile == CACHE_PROFILE
-                else "inspection-owner-changed",
+                else "inspection-owner-changed"
+                if profile == INSPECTION_PROFILE
+                else "native-owner-changed",
             )
         receipt = {
             "schema": 1,
-            "mode": MODE
-            if profile == "full"
-            else CACHE_MODE
-            if profile == CACHE_PROFILE
-            else INSPECTION_MODE,
+            "mode": next(
+                mode for mode, value in MODE_PROFILES.items() if value == profile
+            ),
             "target": target,
             "donor": {
                 **donor_identity,
@@ -928,7 +963,7 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
                 ),
                 key=lambda value: value["name"],
             ),
-            "verified_jobs": sorted(donor_job_outcomes(profile)),
+            "verified_jobs": sorted(job["name"] for job in jobs),
             "classification": classification,
             "test_evidence": evidence,
             "donor_cost": {
@@ -960,7 +995,7 @@ def recheck(receipt, client, target, *, now=None, root=None):
         }
         | (
             {"target_owner_proof"}
-            if receipt.get("mode") in {CACHE_MODE, INSPECTION_MODE}
+            if receipt.get("mode") in {CACHE_MODE, INSPECTION_MODE, NATIVE_MODE}
             else set()
         )
         and type(receipt["schema"]) is int

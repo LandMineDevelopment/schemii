@@ -17,6 +17,7 @@ import pytest
 
 from scripts.ci import reuse_acceptance as reuse
 from scripts.ci import required_gate as gate
+from scripts.ci import workflow_timing as workflow
 from scripts.ci.required_gate import CONTROL_NEEDS, evaluate
 from scripts.ci.summary import summarize as lane_summary
 from scripts.ci.test_selection import (
@@ -26,6 +27,7 @@ from scripts.ci.test_selection import (
     INSPECTION_PROFILE,
     INSPECTION_SOURCES,
     INSPECTION_TEST,
+    PATHS,
     SOURCE_NEEDS,
     expected_lanes,
     expected_jobs,
@@ -831,9 +833,13 @@ def test_workflow_keeps_controls_fresh_and_uses_recheck_with_no_extra_donor_arti
             re.MULTILINE | re.DOTALL,
         )
     )
-    assert "acceptance != 'reused-full-pr'" not in sections["static-quality"]
-    for name in reuse.EXPENSIVE_NEEDS:
-        assert "acceptance != 'reused-full-pr'" in sections[name]
+    for mode in reuse.MODES:
+        assert f"acceptance != '{mode}'" not in sections["static-quality"]
+        for name in reuse.EXPENSIVE_NEEDS:
+            assert f"acceptance != '{mode}'" in sections[name]
+        assert f"acceptance == '{mode}'" in sections["classify"]
+        for name in ("timing-rollup", "required-gate"):
+            assert f"acceptance == '{mode}'" in sections[name]
     assert "timeout-minutes: 2" in sections["classify"]
     assert (
         "if: steps.reuse.outputs.acceptance == 'reused-full-pr'" in sections["classify"]
@@ -1229,11 +1235,11 @@ def cache_repository(root, *, paired=False, stale_policy=False, profile=CACHE_PR
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((current / relative).read_bytes())
-    source_files = (
-        (CACHE_SOURCE, CACHE_TEST)
-        if profile == CACHE_PROFILE
-        else (*sorted(INSPECTION_SOURCES), INSPECTION_TEST)
-    )
+    source_files = {
+        CACHE_PROFILE: (CACHE_SOURCE, CACHE_TEST),
+        INSPECTION_PROFILE: (*sorted(INSPECTION_SOURCES), INSPECTION_TEST),
+        "native": tuple(sorted(PATHS["native"])),
+    }[profile]
     for relative in source_files:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1243,13 +1249,21 @@ def cache_repository(root, *, paired=False, stale_policy=False, profile=CACHE_PR
     git("add", ".")
     git("commit", "--quiet", "-m", "current reviewed policy")
     before = git("rev-parse", "HEAD")
-    for relative in (
-        (CACHE_SOURCE,) if profile == CACHE_PROFILE else sorted(INSPECTION_SOURCES)
-    ):
+    sources = {
+        CACHE_PROFILE: (CACHE_SOURCE,),
+        INSPECTION_PROFILE: sorted(INSPECTION_SOURCES),
+        "native": ("testing/agents/browser.py",),
+    }[profile]
+    for relative in sources:
         (root / relative).write_text("changed source fixture\n")
     if paired:
         (
-            root / (CACHE_TEST if profile == CACHE_PROFILE else INSPECTION_TEST)
+            root
+            / {
+                CACHE_PROFILE: CACHE_TEST,
+                INSPECTION_PROFILE: INSPECTION_TEST,
+                "native": "testing/agents/test_browser.py",
+            }[profile]
         ).write_text("changed direct test fixture\n")
     git("commit", "--quiet", "-am", "cache change")
     head = git("rev-parse", "HEAD")
@@ -1686,7 +1700,7 @@ def test_full_receipt_shape_and_closed_mode_pairing_remain_compatible(provider):
     assert reuse.valid_receipt_mode(receipt)
     assert "target_owner_proof" not in receipt
     assert reuse.MODES == frozenset(
-        {reuse.MODE, reuse.CACHE_MODE, reuse.INSPECTION_MODE}
+        {reuse.MODE, reuse.CACHE_MODE, reuse.INSPECTION_MODE, reuse.NATIVE_MODE}
     )
     assert set(receipt) == {
         "schema",
@@ -1699,7 +1713,15 @@ def test_full_receipt_shape_and_closed_mode_pairing_remain_compatible(provider):
         "test_evidence",
         "donor_cost",
     }
-    for mode in (reuse.CACHE_MODE, reuse.INSPECTION_MODE, "arbitrary", True, None, 1):
+    for mode in (
+        reuse.CACHE_MODE,
+        reuse.INSPECTION_MODE,
+        reuse.NATIVE_MODE,
+        "arbitrary",
+        True,
+        None,
+        1,
+    ):
         assert not reuse.valid_receipt_mode({**receipt, "mode": mode})
 
 
@@ -1845,7 +1867,21 @@ def test_closed_donors_have_independent_exact_topology_contracts():
         "/3)" in name for name in cache if name.startswith("Assembled browser smoke (")
     )
     assert reuse.DONOR_JOBS == set(full) and reuse.CACHE_DONOR_JOBS == cache
-    for profile in ("e2e-tests", "native", "reports", "unknown"):
+    native = reuse.donor_job_outcomes("native")
+    assert len(native) == 8 and list(native.values()).count("success") == 6
+    assert {name for name, outcome in native.items() if outcome == "skipped"} == {
+        "Real PostgreSQL metadata behavior",
+        reuse.SKIPPED_BROWSER,
+    }
+    assert len(reuse.NATIVE_ARTIFACT_FILES) == 5 and len(expected_lanes("native")) == 2
+    for profile in (
+        "e2e-tests",
+        "harness",
+        "load",
+        "backend-tests",
+        "reports",
+        "unknown",
+    ):
         with pytest.raises(ValueError, match="unsupported-donor-profile"):
             reuse.donor_job_outcomes(profile)
         with pytest.raises(ValueError, match="unsupported-donor-profile"):
@@ -2433,7 +2469,7 @@ def test_inspection_validation_scratch_cleans_itself_on_success_and_rejection(
     assert observed and all(not path.exists() for path in observed)
 
 
-@pytest.mark.parametrize("profile", [INSPECTION_PROFILE, CACHE_PROFILE])
+@pytest.mark.parametrize("profile", [INSPECTION_PROFILE, CACHE_PROFILE, "native"])
 def test_selected_main_gate_cli_rechecks_with_the_configured_checkout_history(
     tmp_path, monkeypatch, capsys, profile
 ):
@@ -2588,3 +2624,443 @@ def test_selected_main_gate_cli_rechecks_with_the_configured_checkout_history(
     public = capsys.readouterr().out
     assert "private" not in public
     assert "verified-identical-tree-" in public
+
+
+@pytest.fixture
+def native_provider():
+    # New native controls own a disposable repository, archives and raw evidence.
+    with tempfile.TemporaryDirectory(prefix="schemii-native-reuse-") as temporary:
+        root = Path(temporary)
+        checkout = root / "checkout"
+        target = cache_repository(checkout, paired=True, profile="native")
+        yield cache_provider(root, checkout, target, profile="native"), target, checkout
+    assert not root.exists()
+
+
+def refresh_archive(provider, name):
+    artifact = next(value for value in provider.artifacts if value["name"] == name)
+    provider.set_archive(artifact["id"], name)
+
+
+@pytest.mark.parametrize("expanded", [False, True])
+def test_native_donor_retains_complete_original_cohort_and_intentional_skips(
+    native_provider, expanded
+):
+    provider, target, checkout = native_provider
+    if expanded:
+        provider.jobs = [
+            job(name, DONOR, outcome)
+            for name, outcome in reuse.donor_job_outcomes(
+                "native", expanded_native_skips=True
+            ).items()
+        ]
+        name = "workflow-timing-attempt-1"
+        measured = json.loads(provider.files[name]["workflow-summary.json"])
+        measured.update(
+            summarize(
+                provider.run, provider.jobs, profile="native", report_validation=True
+            )
+        )
+        provider.files[name]["workflow-summary.json"] = encoded(measured)
+        refresh_archive(provider, name)
+    retained = {}
+    receipt = reuse.verify(provider, target, root=checkout, now=NOW, retained=retained)
+    assert receipt["mode"] == reuse.NATIVE_MODE and reuse.valid_receipt_mode(receipt)
+    assert len(receipt["artifacts"]) == 5 and len(retained) == 4
+    assert len(receipt["verified_jobs"]) == (19 if expanded else 8)
+    assert receipt["donor"]["source_sha"] == DONOR["source_sha"] != target["source_sha"]
+    assert receipt["target_owner_proof"]["profile"] == "native"
+    assert {value["path"] for value in receipt["target_owner_proof"]["changes"]} == {
+        "testing/agents/browser.py",
+        "testing/agents/test_browser.py",
+    }
+    for lane in receipt["test_evidence"]["lanes"]:
+        assert lane["complete"] and lane["run_id"] == DONOR["run_id"]
+        assert lane["run_attempt"] == 1 and lane["source_sha"] == DONOR["source_sha"]
+        assert (
+            "scope" not in lane
+        )  # Original actual discovery; no invented case oracle.
+    for name, data in retained.items():
+        if name.endswith("jsonl"):
+            assert (
+                data.splitlines()
+                == provider.files[name.split("/")[0]][
+                    name.rsplit("/", 1)[1]
+                ].splitlines()
+            )
+    assert reuse.recheck(receipt, provider, target, root=checkout, now=NOW) == receipt
+
+
+@pytest.mark.parametrize("profile", ["harness", "load", "backend-tests", "full"])
+def test_native_artifact_candidate_cannot_authorize_a_same_shaped_other_profile(
+    native_provider, profile
+):
+    provider, target, checkout = native_provider
+    name = "ci-classification-attempt-1"
+    value = json.loads(provider.files[name]["ci-classification.json"])
+    value["profile"] = profile
+    provider.files[name]["ci-classification.json"] = encoded(value)
+    refresh_archive(provider, name)
+    assert reuse.donor_profile(provider.artifacts) == "native"
+    with pytest.raises(ValueError, match="donor-classification"):
+        reuse.verify(provider, target, root=checkout, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "mixed",
+        "new",
+        "deleted",
+        "renamed",
+        "mode",
+        "symlink",
+        "policy",
+        "dirty",
+        "stale-policy",
+        "base",
+        "source",
+        "tree",
+    ],
+)
+def test_native_owner_requires_the_complete_diff_and_unchanged_loaded_policy(
+    native_provider, damage
+):
+    _, target, checkout = native_provider
+    source = checkout / "testing/agents/browser.py"
+    if damage == "mixed":
+        (checkout / "foreign.md").write_text("different owner\n")
+    elif damage == "new":
+        source.with_name("new.py").write_text("new native sibling\n")
+    elif damage == "deleted":
+        source.unlink()
+    elif damage == "renamed":
+        source.rename(source.with_name("renamed.py"))
+    elif damage == "mode":
+        source.chmod(0o755)
+    elif damage == "symlink":
+        source.unlink()
+        source.symlink_to("foreign")
+    elif damage == "policy":
+        (checkout / reuse.WORKFLOW_PATH).write_text("changed contract\n")
+    elif damage == "dirty":
+        source.write_text("tracked dirty native source\n")
+    elif damage == "stale-policy":
+        path = checkout / reuse.WORKFLOW_PATH
+        path.write_text("different loaded policy\n")
+        subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "commit", "--quiet", "-m", "stale policy"], cwd=checkout, check=True
+        )
+        target["before"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+        ).strip()
+        source.write_text("later native change\n")
+    else:
+        target[{"base": "before", "source": "source_sha", "tree": "tree"}[damage]] = (
+            "f" * 40
+        )
+    if damage in {
+        "mixed",
+        "new",
+        "deleted",
+        "renamed",
+        "mode",
+        "symlink",
+        "policy",
+        "stale-policy",
+    }:
+        subprocess.run(["git", "add", "-A"], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "commit", "--quiet", "-m", "owner damage"], cwd=checkout, check=True
+        )
+        target.update(
+            source_sha=subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+            ).strip(),
+            tree=subprocess.check_output(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=checkout, text=True
+            ).strip(),
+        )
+    with pytest.raises((ValueError, subprocess.CalledProcessError)):
+        reuse.target_owner_proof(target, checkout, profile="native")
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing-job",
+        "duplicate-job",
+        "failed-gate",
+        "static-skipped",
+        "postgres-executed",
+        "browser-executed",
+        "mixed-browser",
+        "partial-browser",
+        "job-cohort",
+        "comparison-base",
+        "missing-artifact",
+        "duplicate-artifact",
+        "digest",
+        "missing-plan",
+        "duplicate-plan",
+        "missing-attempt",
+        "empty",
+        "canceled",
+        "failed",
+        "recovered",
+        "raw-source",
+        "raw-run",
+        "raw-attempt",
+        "private",
+        "saved-summary",
+        "donor-tree",
+        "donor-base",
+    ],
+)
+def test_native_original_jobs_archives_and_raw_discovery_fail_closed(
+    native_provider, damage
+):
+    provider, target, checkout = native_provider
+    name = None
+    if damage == "missing-job":
+        provider.jobs.pop()
+    elif damage == "duplicate-job":
+        provider.jobs.append(copy.deepcopy(provider.jobs[0]))
+    elif damage in {
+        "failed-gate",
+        "static-skipped",
+        "postgres-executed",
+        "browser-executed",
+        "job-cohort",
+    }:
+        chosen = {
+            "failed-gate": "CI validation",
+            "static-skipped": "Incremental Python static quality",
+            "postgres-executed": "Real PostgreSQL metadata behavior",
+            "browser-executed": reuse.SKIPPED_BROWSER,
+            "job-cohort": "CI validation",
+        }[damage]
+        value = next(item for item in provider.jobs if item["name"] == chosen)
+        if damage == "job-cohort":
+            value["run_attempt"] = 2
+        else:
+            value["conclusion"] = (
+                "failure"
+                if damage == "failed-gate"
+                else "skipped"
+                if damage == "static-skipped"
+                else "success"
+            )
+    elif damage == "mixed-browser":
+        provider.jobs.append(
+            job(
+                "Assembled browser smoke (desktop-chromium, shard 1/6)",
+                DONOR,
+                "skipped",
+            )
+        )
+    elif damage == "partial-browser":
+        next(item for item in provider.jobs if item["name"] == reuse.SKIPPED_BROWSER)[
+            "name"
+        ] = "Assembled browser smoke (desktop-chromium, shard 1/6)"
+    elif damage in {"missing-artifact", "duplicate-artifact"}:
+        if damage == "missing-artifact":
+            provider.artifacts.pop()
+        else:
+            provider.artifacts.append(copy.deepcopy(provider.artifacts[0]))
+    elif damage == "digest":
+        provider.bytes[provider.artifacts[0]["id"]] = b"corrupt original bytes"
+    elif damage in {"donor-tree", "donor-base"}:
+        commit = provider.commits[DONOR["source_sha"]]
+        if damage == "donor-tree":
+            commit["tree"]["sha"] = "f" * 40
+        else:
+            commit["parents"][0]["sha"] = "f" * 40
+    elif damage == "comparison-base":
+        name = "ci-classification-attempt-1"
+        value = json.loads(provider.files[name]["ci-classification.json"])
+        value["comparison_base"] = "f" * 40
+        provider.files[name]["ci-classification.json"] = encoded(value)
+    elif damage == "saved-summary":
+        name = "workflow-timing-attempt-1"
+        value = json.loads(provider.files[name]["workflow-summary.json"])
+        value["test_evidence"]["lanes"][0]["source_sha"] = "f" * 40
+        provider.files[name]["workflow-summary.json"] = encoded(value)
+    else:
+        name = "python-timing-attempt-1"
+        records = [
+            json.loads(line)
+            for line in provider.files[name]["python.jsonl"].splitlines()
+        ]
+        attempt = next(item for item in records if item["kind"] == "attempt")
+        plan = next(item for item in records if item["kind"] == "plan")
+        if damage == "missing-plan":
+            records.remove(plan)
+        elif damage == "duplicate-plan":
+            records.insert(1, dict(plan))
+            records[0]["planned"] += 1
+        elif damage == "missing-attempt":
+            records.remove(attempt)
+        elif damage == "empty":
+            records = [records[0], records[-1]]
+            records[0]["planned"] = 0
+        elif damage == "canceled":
+            records[-1]["outcome"] = "cancelled"
+        elif damage == "failed":
+            attempt["outcome"] = records[-1]["outcome"] = "failed"
+        elif damage == "recovered":
+            attempt["outcome"] = "failed"
+            records.insert(-1, {**attempt, "attempt": 1, "outcome": "passed"})
+        elif damage in {"raw-source", "raw-run", "raw-attempt"}:
+            field, value = {
+                "raw-source": ("source_sha", "f" * 40),
+                "raw-run": ("run_id", 90),
+                "raw-attempt": ("run_attempt", 2),
+            }[damage]
+            for item in records:
+                item[field] = value
+        else:
+            attempt["stdout"] = "PLANTED_PRIVATE_VALUE"
+        provider.files[name]["python.jsonl"] = b"\n".join(
+            encoded(value) for value in records
+        )
+    if name:
+        refresh_archive(provider, name)
+    with pytest.raises(ValueError):
+        reuse.verify(provider, target, root=checkout, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "damage", ["owner", "mode", "classification", "policy", "base", "attempt", "raw"]
+)
+def test_native_gate_independently_repeats_original_and_current_proof(
+    native_provider, damage
+):
+    provider, target, checkout = native_provider
+    receipt = reuse.verify(provider, target, root=checkout, now=NOW)
+    if damage == "owner":
+        receipt["target_owner_proof"]["changes"][0]["path"] = "testing/harness/cli.mjs"
+    elif damage == "mode":
+        receipt["mode"] = reuse.MODE
+    elif damage == "classification":
+        receipt["classification"]["profile"] = "harness"
+    elif damage == "policy":
+        (checkout / reuse.WORKFLOW_PATH).write_text("changed after admission\n")
+    elif damage == "base":
+        provider.pr["base"]["sha"] = "f" * 40
+    elif damage == "attempt":
+        provider.run["run_attempt"] = 2
+    else:
+        provider.bytes[provider.artifacts[0]["id"]] = b"corrupt after admission"
+    with pytest.raises(ValueError):
+        reuse.recheck(receipt, provider, target, root=checkout, now=NOW)
+
+
+def test_native_admission_and_rollup_cli_keep_original_evidence_separate(
+    native_provider, monkeypatch, capsys
+):
+    provider, target, checkout = native_provider
+    root = checkout.parent
+    manifest, event, output = [
+        root / name for name in ("classification.json", "event.json", "outputs")
+    ]
+    manifest.write_bytes(
+        encoded(classification(target["source_sha"], target["before"]))
+    )
+    event.write_bytes(
+        encoded(
+            {
+                "before": target["before"],
+                "after": target["source_sha"],
+                "forced": False,
+                "deleted": False,
+                "repository": {
+                    "id": target["repository_id"],
+                    "full_name": target["repository"],
+                },
+            }
+        )
+    )
+    receipt_path = root / "admission/reuse.json"
+    for name, value in {
+        "GITHUB_EVENT_PATH": str(event),
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_TOKEN": "private-token",
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_SHA": target["source_sha"],
+        "CI_TELEMETRY_SHA": target["source_sha"],
+        "CI_TELEMETRY_HEAD_SHA": target["head_sha"],
+        "GITHUB_REPOSITORY": target["repository"],
+        "GITHUB_RUN_ID": str(target["run_id"]),
+        "GITHUB_RUN_ATTEMPT": "1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(checkout)
+    monkeypatch.setattr(reuse, "GitHub", lambda *args: provider)
+    original_verify = reuse.verify
+    monkeypatch.setattr(
+        reuse,
+        "verify",
+        lambda client, target, *, retained: original_verify(
+            client, target, now=NOW, retained=retained
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reuse_acceptance.py",
+            "--classification",
+            str(manifest),
+            "--output",
+            str(receipt_path),
+        ],
+    )
+    assert reuse.main() == 0
+    assert output.read_text() == "acceptance=" + reuse.NATIVE_MODE + "\n"
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["donor"]["run_id"] == DONOR["run_id"]
+    assert len(list((receipt_path.parent / "donor").rglob("*.jsonl"))) == 2
+    jobs = current_inputs(target)
+    current_run = {
+        **provider.run,
+        "id": target["run_id"],
+        "head_sha": target["head_sha"],
+    }
+    monkeypatch.setattr(
+        workflow,
+        "api",
+        lambda path: (
+            {"total_count": len(jobs), "jobs": jobs}
+            if "/jobs?" in path
+            else current_run
+        ),
+    )
+    rollup = root / "workflow-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "workflow_timing.py",
+            "--classification",
+            str(manifest),
+            "--inputs",
+            str(receipt_path.parent),
+            "--reuse",
+            str(receipt_path),
+            "--output",
+            str(rollup),
+        ],
+    )
+    workflow.main()
+    measured = json.loads(rollup.read_text())
+    assert measured["complete"] and measured["acceptance_mode"] == reuse.NATIVE_MODE
+    assert measured["source_sha"] == target["source_sha"]
+    assert measured["reuse"] == receipt and "test_evidence" not in measured
+    assert (
+        measured["reuse"]["test_evidence"]["lanes"][0]["source_sha"]
+        == DONOR["source_sha"]
+    )
+    assert "private-token" not in capsys.readouterr().out
