@@ -26,7 +26,7 @@ from scripts.ci.test_selection import (
     expected_lanes,
     expected_jobs,
     required_needs,
-    JOB_NAMES,
+    source_job_names,
     expected_scope,
 )
 from scripts.ci.workflow_timing import summarize, test_evidence as collect_evidence
@@ -269,9 +269,9 @@ def test_equal_squash_tree_and_empty_run_pr_array_reuses_original_full_receipts(
     )
     assert receipt["verified_jobs"] == sorted(reuse.DONOR_JOBS)
     assert (
-        len(receipt["artifacts"]) == 12 and len(receipt["test_evidence"]["lanes"]) == 9
+        len(receipt["artifacts"]) == 18 and len(receipt["test_evidence"]["lanes"]) == 15
     )
-    assert len(retained) == 18 and all("dependencies" not in name for name in retained)
+    assert len(retained) == 30 and all("dependencies" not in name for name in retained)
     assert reuse.recheck(receipt, provider, TARGET, now=NOW) == receipt
     for name, value in retained.items():
         if name.endswith("jsonl"):
@@ -625,7 +625,7 @@ def test_workflow_keeps_controls_fresh_and_uses_recheck_with_no_extra_donor_arti
     assert "reuse_acceptance.py" in sections["classify"]
     assert "--reuse artifacts/acceptance-reuse/reuse.json" in sections["required-gate"]
     assert "pull-requests: read" in sections["required-gate"]
-    assert len(reuse.DONOR_JOBS) == 13 and len(reuse.ARTIFACT_FILES) == 12
+    assert len(reuse.DONOR_JOBS) == 19 and len(reuse.ARTIFACT_FILES) == 18
 
 
 def test_main_cli_falls_back_without_provider_errors_or_credentials(tmp_path):
@@ -855,7 +855,7 @@ def test_current_literal_skipped_matrix_is_valid_only_for_an_excluded_browser_la
     selected = expected_jobs(profile)
     jobs = [
         job(name, outcome="success" if name in selected else "skipped")
-        for name in JOB_NAMES
+        for name in source_job_names(profile)
         if not name.startswith("Assembled browser smoke (")
     ]
     jobs += [job(name) for name in reuse.REPORT_JOB_NAMES]
@@ -899,7 +899,9 @@ def test_current_literal_skipped_matrix_is_valid_only_for_an_excluded_browser_la
         altered = copy.deepcopy(jobs)
         placeholder = altered[-1]
         if damage == "legacy":
-            placeholder["name"] = reuse.SKIPPED_BROWSER.replace("/3)", "/2)")
+            placeholder["name"] = (
+                "Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/3)"
+            )
         elif damage == "suffix":
             placeholder["name"] += " arbitrary"
         elif damage == "failed":
@@ -1098,9 +1100,10 @@ def cache_provider(root, checkout, target, *, allowed_skip=False):
             "parents": [{"sha": value} for value in parents],
         },
     }
-    for value in provider.jobs:
-        value["conclusion"] = reuse.CACHE_DONOR_JOBS[value["name"]]
-        value["head_sha"] = final_head
+    provider.jobs = [
+        job(name, {**DONOR, "head_sha": final_head}, outcome)
+        for name, outcome in reuse.CACHE_DONOR_JOBS.items()
+    ]
     manifest = {
         **classification(final_head, target["before"]),
         "profile": CACHE_PROFILE,
@@ -1574,3 +1577,265 @@ def test_selected_scope_corruption_cannot_pass_mode_helper_or_gate(selected_prov
     assert not reuse.valid_receipt_mode(receipt)
     with pytest.raises(ValueError, match="reuse-receipt"):
         reuse.recheck(receipt, provider, target, root=checkout, now=NOW)
+
+
+def test_closed_donors_have_independent_exact_topology_contracts():
+    full, cache = (
+        reuse.donor_job_outcomes("full"),
+        reuse.donor_job_outcomes(CACHE_PROFILE),
+    )
+    assert len(full) == 19 and set(full.values()) == {"success"}
+    assert len(cache) == 13 and list(cache.values()).count("success") == 11
+    assert {name for name, outcome in cache.items() if outcome == "skipped"} == {
+        "Incremental Python static quality",
+        "Real PostgreSQL metadata behavior",
+    }
+    assert len(reuse.ARTIFACT_FILES) == 18 and len(expected_lanes("full")) == 15
+    assert (
+        len(reuse.CACHE_ARTIFACT_FILES) == 11
+        and len(expected_lanes(CACHE_PROFILE)) == 8
+    )
+    assert all(
+        "/6)" in name for name in full if name.startswith("Assembled browser smoke (")
+    )
+    assert all(
+        "/3)" in name for name in cache if name.startswith("Assembled browser smoke (")
+    )
+    assert reuse.DONOR_JOBS == set(full) and reuse.CACHE_DONOR_JOBS == cache
+    for profile in ("e2e-tests", "native", "reports", "unknown"):
+        with pytest.raises(ValueError, match="unsupported-donor-profile"):
+            reuse.donor_job_outcomes(profile)
+        with pytest.raises(ValueError, match="unsupported-donor-profile"):
+            reuse.artifact_files(profile)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "old-full-three",
+        "cache-jobs",
+        "wrong-denominator",
+        "missing-six",
+        "extra-cache-leg",
+        "classification-cache",
+        "raw-collapsed-six",
+    ],
+)
+def test_full_donor_rejects_old_or_cross_profile_topology(provider, damage):
+    if damage == "old-full-three":
+        provider.artifacts = [
+            value
+            for value in provider.artifacts
+            if "browser-timing-" not in value["name"]
+            or any(f"-shard-{shard}-" in value["name"] for shard in (1, 2, 3))
+        ]
+        provider.jobs = [
+            value
+            for value in provider.jobs
+            if not value["name"].startswith("Assembled browser smoke (")
+            or any(f"shard {shard}/" in value["name"] for shard in (1, 2, 3))
+        ]
+        for value in provider.jobs:
+            value["name"] = value["name"].replace("/6)", "/3)")
+    elif damage == "cache-jobs":
+        provider.jobs = [
+            job(name, outcome=outcome)
+            for name, outcome in reuse.CACHE_DONOR_JOBS.items()
+        ]
+    elif damage in {"wrong-denominator", "extra-cache-leg"}:
+        chosen = next(
+            value
+            for value in provider.jobs
+            if value["name"].startswith("Assembled browser smoke (")
+        )
+        other = {**chosen, "name": chosen["name"].replace("/6)", "/3)")}
+        if damage == "wrong-denominator":
+            chosen["name"] = other["name"]
+        else:
+            provider.jobs.append(other)
+    elif damage == "missing-six":
+        provider.artifacts = [
+            value
+            for value in provider.artifacts
+            if value["name"] != "browser-timing-desktop-chromium-shard-6-attempt-1"
+        ]
+    elif damage == "classification-cache":
+        name = "ci-classification-attempt-1"
+        value = json.loads(provider.files[name]["ci-classification.json"])
+        value.update(profile=CACHE_PROFILE, reason="verified-owned-pr-change")
+        provider.files[name]["ci-classification.json"] = encoded(value)
+        provider.set_archive(
+            next(value["id"] for value in provider.artifacts if value["name"] == name),
+            name,
+        )
+    else:
+        name = "browser-timing-desktop-chromium-shard-6-attempt-1"
+        records = [
+            json.loads(line)
+            for line in provider.files[name]["browser.jsonl"].splitlines()
+        ]
+        for value in records:
+            value["shard"] = 3
+        provider.files[name]["browser.jsonl"] = b"\n".join(
+            encoded(value) for value in records
+        )
+        provider.files[name]["browser-summary.json"] = encoded(lane_summary(records))
+        provider.set_archive(
+            next(value["id"] for value in provider.artifacts if value["name"] == name),
+            name,
+        )
+    with pytest.raises(ValueError):
+        reuse.verify(provider, TARGET, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "full-jobs",
+        "wrong-denominator",
+        "extra-full-leg",
+        "raw-four",
+        "extra-four-artifact",
+        "classification-full",
+    ],
+)
+def test_cache_donor_rejects_full_topology_even_for_overlapping_raw_indices(
+    selected_provider, damage
+):
+    provider, target, checkout = selected_provider
+    if damage == "full-jobs":
+        provider.jobs = [job(name) for name in reuse.DONOR_JOBS]
+    elif damage in {"wrong-denominator", "extra-full-leg"}:
+        chosen = next(
+            value
+            for value in provider.jobs
+            if value["name"].startswith("Assembled browser smoke (")
+        )
+        other = {**chosen, "name": chosen["name"].replace("/3)", "/6)")}
+        if damage == "wrong-denominator":
+            chosen["name"] = other["name"]
+        else:
+            provider.jobs.append(other)
+    elif damage == "raw-four":
+        name = "browser-timing-desktop-chromium-shard-3-attempt-1"
+        records = [
+            json.loads(line)
+            for line in provider.files[name]["browser.jsonl"].splitlines()
+        ]
+        for value in records:
+            value["shard"] = 4
+        provider.files[name]["browser.jsonl"] = b"\n".join(
+            encoded(value) for value in records
+        )
+        provider.files[name]["browser-summary.json"] = encoded(lane_summary(records))
+        provider.set_archive(
+            next(value["id"] for value in provider.artifacts if value["name"] == name),
+            name,
+        )
+    elif damage == "extra-four-artifact":
+        name = "browser-timing-desktop-chromium-shard-4-attempt-1"
+        provider.files[name] = provider.files[
+            "browser-timing-desktop-chromium-shard-3-attempt-1"
+        ]
+        provider.set_archive(100, name)
+    else:
+        name = "ci-classification-attempt-1"
+        value = json.loads(provider.files[name]["ci-classification.json"])
+        value.update(profile="full", reason="source-or-unknown-change")
+        provider.files[name]["ci-classification.json"] = encoded(value)
+        provider.set_archive(
+            next(value["id"] for value in provider.artifacts if value["name"] == name),
+            name,
+        )
+    with pytest.raises(ValueError):
+        reuse.verify(provider, target, root=checkout, now=NOW)
+
+
+def test_cache_donor_requires_current_full_six_main_skip_shape(selected_provider):
+    provider, target, checkout = selected_provider
+    receipt = reuse.verify(provider, target, root=checkout, now=NOW)
+    jobs = [job(name, target) for name in reuse.REPORT_JOB_NAMES]
+    jobs += [
+        job(
+            name,
+            target,
+            "success" if name == "Incremental Python static quality" else "skipped",
+        )
+        for name in source_job_names("full")
+    ]
+    assert len(jobs) == 17 and reuse.current_reuse_jobs(jobs, target)
+    identity = {
+        key: target[key] for key in ("source_sha", "head_sha", "run_id", "run_attempt")
+    }
+    needs = {
+        name: {"result": "skipped" if name in reuse.EXPENSIVE_NEEDS else "success"}
+        for name in SOURCE_NEEDS | CONTROL_NEEDS
+    }
+    needs["classify"]["outputs"] = {"acceptance": reuse.CACHE_MODE}
+
+    def gate_for(values):
+        timing = {
+            **summarize(
+                provider.run,
+                values,
+                profile="full",
+                report_validation=True,
+                reused=True,
+            ),
+            **identity,
+            "acceptance_mode": reuse.CACHE_MODE,
+            "reuse": receipt,
+        }
+        assert "test_evidence" not in timing
+        return evaluate(
+            classification(target["head_sha"], target["before"]),
+            needs,
+            values,
+            timing,
+            identity,
+            reuse=receipt,
+        )[0]
+
+    assert gate_for(jobs)
+    for damage in (
+        "cache-three",
+        "partial",
+        "wrong-total",
+        "mixed-placeholder",
+        "duplicate",
+        "successful-six",
+    ):
+        damaged = copy.deepcopy(jobs)
+        browser = next(
+            value
+            for value in damaged
+            if value["name"].startswith("Assembled browser smoke (")
+        )
+        if damage == "cache-three":
+            damaged = [
+                value
+                for value in damaged
+                if not value["name"].startswith("Assembled browser smoke (")
+                or any(f"shard {shard}/" in value["name"] for shard in (1, 2, 3))
+            ]
+            for value in damaged:
+                value["name"] = value["name"].replace("/6)", "/3)")
+        elif damage == "partial":
+            damaged.remove(browser)
+        elif damage == "wrong-total":
+            browser["name"] = browser["name"].replace("/6)", "/3)")
+        elif damage == "mixed-placeholder":
+            damaged.append(job(reuse.SKIPPED_BROWSER, target, "skipped"))
+        elif damage == "duplicate":
+            damaged.append(copy.deepcopy(browser))
+        else:
+            browser["conclusion"] = "success"
+        assert not reuse.current_reuse_jobs(damaged, target)
+        assert not gate_for(damaged)
+    placeholder = [
+        value
+        for value in jobs
+        if not value["name"].startswith("Assembled browser smoke (")
+    ]
+    placeholder.append(job(reuse.SKIPPED_BROWSER, target, "skipped"))
+    assert reuse.current_reuse_jobs(placeholder, target) and gate_for(placeholder)

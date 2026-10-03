@@ -10,7 +10,7 @@ export const milliseconds = value => Number.isFinite(value) && value >= 0 ? Math
 export function metadata(lane, project = 'none', shard = 0) {
   if (!['node', 'python', 'postgres', 'browser'].includes(lane)
       || !['none', 'desktop-chromium', 'android-chromium'].includes(project)
-      || ![0, 1, 2, 3].includes(shard)
+      || ![0, 1, 2, 3, 4, 5, 6].includes(shard)
       || (lane !== 'browser' && (project !== 'none' || shard !== 0))
       || (lane === 'browser' && project === 'none')) throw new Error('Invalid timing lane');
   const sha = process.env.CI_TELEMETRY_SHA || '';

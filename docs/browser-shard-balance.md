@@ -1,5 +1,47 @@
 # Measured whole-file browser scheduling
 
+## Current topology and projected opportunity
+
+Full and E2E acceptance use six independently launched application stacks per
+device, each with one serialized browser worker. The frozen Schemer cache profile
+keeps three stacks per device. The closed profile policy supplies the matrix,
+planner commands, exact provider job names and receipt lanes. Mixed denominators,
+missing lanes and selected skipped placeholders cannot establish acceptance.
+Full acceptance has fifteen raw lanes and nineteen provider jobs; cache retains
+eight raw lanes and thirteen jobs. Exact-tree main reuse validates these donor
+contracts independently and retains the donor's original source and topology.
+
+Five retained ordinary browser cohorts contain the same 486 cases across 63
+desktop and 60 Android files, with twelve existing prerequisite skips and no
+first-attempt browser failures or recoveries. Sources are
+[PR176](https://github.com/LandMineDevelopment/schemii/actions/runs/37071230960),
+[main176](https://github.com/LandMineDevelopment/schemii/actions/runs/37072035481),
+[PR177](https://github.com/LandMineDevelopment/schemii/actions/runs/37072329849),
+[PR178's initial run](https://github.com/LandMineDevelopment/schemii/actions/runs/37079614264)
+and [PR178's final run](https://github.com/LandMineDevelopment/schemii/actions/runs/37080185261).
+The initial PR178 workflow failed a separate Python fixture assertion; its
+complete browser receipts supply browser timing evidence only.
+
+Replaying the same whole-file scheduler and existing weights at six stacks per
+device projects a 117–138 second browser step versus observed maxima of
+248–257 seconds: approximately two minutes less browser execution. The model
+adds the cohort's observed median reporter residual, around seven seconds, but
+does not include a guarantee about queueing, launch variation or other limiting
+jobs. Six additional stack setups add approximately 9–11 runner-minutes per
+full run. Elapsed time and aggregate runner work must be reported separately.
+Refreshing weights had a median zero-second benefit in held-out projections,
+so the delivered weights remain unchanged.
+
+The largest measured indivisible file, `sql-console.spec.js`, cost about
+54 seconds desktop and 52 seconds Android. The projections still miss the
+1.15 slowest/fastest balance target in several cohorts, reaching 1.51; this
+does not close the ten-run monitoring requirement in #128. Actual speed and
+hosted capacity require the ordinary current-source CI run. No suite or sampling
+PR was launched to create the preceding projections. These checks do not prove
+manual UI acceptance or native harness replacement.
+
+The sections below retain the historical two-stack delivery evidence.
+
 Implementation for [#128](https://github.com/LandMineDevelopment/schemii/issues/128),
 using [#125](https://github.com/LandMineDevelopment/schemii/issues/125) per-attempt
 receipts delivered by [PR #148](https://github.com/LandMineDevelopment/schemii/pull/148).

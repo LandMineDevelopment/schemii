@@ -34,6 +34,7 @@ if __package__:
         expected_lanes,
         expected_scope,
         select_paths,
+        source_job_names,
         valid_scope,
     )
     from .workflow_timing import (
@@ -57,6 +58,7 @@ else:
         expected_lanes,
         expected_scope,
         select_paths,
+        source_job_names,
         valid_scope,
     )
     from workflow_timing import (
@@ -75,17 +77,6 @@ WORKFLOW_PATH = ".github/workflows/ci.yml"
 MODE = "reused-full-pr"
 CACHE_MODE = "reused-schemer-result-cache-pr"
 MODES = frozenset({MODE, CACHE_MODE})
-DONOR_JOBS = (
-    set(expected_jobs("full"))
-    | set(REPORT_JOB_NAMES)
-    | {"Public workflow timing", "CI validation"}
-)
-CACHE_DONOR_JOBS = {
-    name: "success"
-    if name in expected_jobs(CACHE_PROFILE) or name not in expected_jobs("full")
-    else "skipped"
-    for name in DONOR_JOBS
-}
 POLICY_FILES = frozenset(
     {
         WORKFLOW_PATH,
@@ -128,6 +119,25 @@ def sha(value):
 
 def positive(value):
     return type(value) is int and value > 0
+
+
+def donor_job_outcomes(profile):
+    """Two independent donor topologies, each with its own required exclusions."""
+    require(profile in {"full", CACHE_PROFILE}, "unsupported-donor-profile")
+    selected = expected_jobs(profile)
+    return {
+        **{
+            name: "success" if name in selected else "skipped"
+            for name in source_job_names(profile)
+        },
+        **{name: "success" for name in REPORT_JOB_NAMES},
+        "Public workflow timing": "success",
+        "CI validation": "success",
+    }
+
+
+DONOR_JOBS = set(donor_job_outcomes("full"))
+CACHE_DONOR_JOBS = donor_job_outcomes(CACHE_PROFILE)
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -630,15 +640,11 @@ def provider_binding(client, target, donor_id=None, *, now=None):
     jobs = client.collection(f"actions/runs/{run['id']}/attempts/1/jobs", "jobs")
     artifacts = client.collection(f"actions/runs/{run['id']}/artifacts", "artifacts")
     profile = donor_profile(artifacts)
-    expected_outcomes = (
-        CACHE_DONOR_JOBS
-        if profile == CACHE_PROFILE
-        else {name: "success" for name in DONOR_JOBS}
-    )
+    expected_outcomes = donor_job_outcomes(profile)
     identity = {"run_id": run["id"], "run_attempt": 1, "head_sha": head["sha"]}
     require(
-        len(jobs) == len(DONOR_JOBS)
-        and {job.get("name") for job in jobs} == DONOR_JOBS
+        len(jobs) == len(expected_outcomes)
+        and {job.get("name") for job in jobs} == set(expected_outcomes)
         and current_jobs(jobs, identity)
         and all(
             job.get("status") == "completed"
@@ -862,7 +868,7 @@ def verify(client, target, *, donor_id=None, now=None, retained=None, root=None)
                 ),
                 key=lambda value: value["name"],
             ),
-            "verified_jobs": sorted(DONOR_JOBS),
+            "verified_jobs": sorted(donor_job_outcomes(profile)),
             "classification": classification,
             "test_evidence": evidence,
             "donor_cost": {

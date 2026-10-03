@@ -13,7 +13,7 @@ if __package__:
     from .classify_changes import load_classification
     from .summary import load, summarize as lane_summary
     from .test_selection import (
-        JOB_NAMES,
+        source_job_names,
         expected_jobs,
         expected_lanes,
         expected_scope,
@@ -23,7 +23,7 @@ else:
     from classify_changes import load_classification
     from summary import load, summarize as lane_summary
     from test_selection import (
-        JOB_NAMES,
+        source_job_names,
         expected_jobs,
         expected_lanes,
         expected_scope,
@@ -37,9 +37,7 @@ REPORT_JOB_NAMES = {
 }
 # GitHub retains the literal matrix expression when job-level selection skips
 # expansion. Only this exact current placeholder may represent an excluded lane.
-SKIPPED_BROWSER = (
-    "Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/3)"
-)
+SKIPPED_BROWSER = "Assembled browser smoke (${{ matrix.project }}, shard ${{ matrix.shard }}/${{ matrix.total }})"
 TEST_STEPS = {
     "Fast frontend and harness feedback",
     "Deterministic Python behavior",
@@ -110,6 +108,38 @@ def sum_durations(values):
     return None if any(value is None for value in values) else sum(values)
 
 
+def valid_browser_jobs(jobs, profile, *, excluded=False):
+    """Require one exact topology; a literal may replace all excluded legs only."""
+    expected = {
+        name
+        for name in source_job_names(profile)
+        if name.startswith("Assembled browser smoke (")
+    }
+    observed = [
+        job
+        for job in jobs
+        if isinstance(job.get("name"), str)
+        and job["name"].startswith("Assembled browser smoke (")
+    ]
+    if excluded and len(observed) == 1 and observed[0]["name"] == SKIPPED_BROWSER:
+        return (
+            observed[0].get("status") == "completed"
+            and observed[0].get("conclusion") == "skipped"
+        )
+    names = [job["name"] for job in observed]
+    return (
+        len(names) == len(expected)
+        and set(names) == expected
+        and (
+            not excluded
+            or all(
+                job.get("status") == "completed" and job.get("conclusion") == "skipped"
+                for job in observed
+            )
+        )
+    )
+
+
 def summarize(
     run, jobs, *, lane="source", profile=None, report_validation=False, reused=False
 ):
@@ -119,7 +149,8 @@ def summarize(
     created = timestamp(run.get("created_at"))
     dispatched = timestamp(run.get("run_started_at"))
     records = []
-    labels = {**JOB_NAMES, **REPORT_JOB_NAMES}
+    source_names = source_job_names(profile)
+    labels = {**source_names, **REPORT_JOB_NAMES}
     expected = {"static"} if reused else set(expected_jobs(profile).values())
     browser_excluded = reused or not any(
         value.startswith("browser-") for value in expected
@@ -132,7 +163,7 @@ def summarize(
     unexpected_source_jobs = sum(
         isinstance(job.get("name"), str)
         and job["name"].startswith("Assembled browser smoke (")
-        and job["name"] not in JOB_NAMES
+        and job["name"] not in source_names
         and not (browser_excluded and job["name"] == SKIPPED_BROWSER)
         for job in jobs
     )
@@ -141,7 +172,7 @@ def summarize(
         if label is None:
             continue
         if (
-            label in JOB_NAMES.values() or label == "browser-not-selected"
+            label in source_names.values() or label == "browser-not-selected"
         ) and label not in expected:
             not_applicable.append({"job": label, "outcome": job.get("conclusion")})
             continue
@@ -215,6 +246,15 @@ def summarize(
         "workflow_dispatch_delay_ms": duration(created, dispatched),
         "unexpected_source_jobs": unexpected_source_jobs,
         "complete": not unexpected_source_jobs
+        and (
+            profile == "reports"
+            and not any(
+                isinstance(job.get("name"), str)
+                and job["name"].startswith("Assembled browser smoke (")
+                for job in jobs
+            )
+            or valid_browser_jobs(jobs, profile, excluded=browser_excluded)
+        )
         and len({record["job"] for record in not_applicable}) == len(not_applicable)
         and len(records) == len(expected)
         and observed == expected
@@ -226,7 +266,7 @@ def summarize(
         and all(record["outcome"] == "skipped" for record in not_applicable),
         "missing_jobs": sorted(expected - observed),
         "jobs": sorted(records, key=lambda record: record["job"]),
-        "not_applicable_jobs": sorted(set(JOB_NAMES.values()) - expected),
+        "not_applicable_jobs": sorted(set(source_names.values()) - expected),
         "critical_path_ms": duration(created, max(end_times)) if end_times else None,
         "total_job_minutes": round(total_job_ms / 60000, 3)
         if total_job_ms is not None
@@ -386,7 +426,7 @@ def main():
                 [
                     job
                     for job in jobs["jobs"]
-                    if job.get("name") in JOB_NAMES
+                    if job.get("name") in source_job_names(classification["profile"])
                     or job.get("name") in REPORT_JOB_NAMES
                 ],
                 identity,

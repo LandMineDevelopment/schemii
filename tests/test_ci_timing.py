@@ -11,12 +11,14 @@ import pytest
 
 from scripts.ci.summary import summarize, valid
 from scripts.ci.workflow_timing import (
-    JOB_NAMES,
     duration,
     timestamp,
     summarize as workflow_summary,
     test_evidence as collect_evidence,
 )
+
+
+from scripts.ci.test_selection import source_job_names
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -371,7 +373,7 @@ def test_workflow_queue_setup_execution_missing_shards_and_secrets():
                 }
             ],
         }
-        for name in JOB_NAMES
+        for name in source_job_names("full")
     ]
     summary = workflow_summary(run, jobs)
     assert SECRET not in json.dumps(summary)
@@ -384,7 +386,7 @@ def test_workflow_queue_setup_execution_missing_shards_and_secrets():
         == 15000
     )
     assert summary["critical_path_ms"] == 45000
-    assert summary["total_job_minutes"] == 4.5
+    assert summary["total_job_minutes"] == 7.5
     missing = workflow_summary(run, jobs[:-1])
     assert missing["complete"] is False and len(missing["missing_jobs"]) == 1
     cancelled = copy.deepcopy(jobs)
@@ -408,7 +410,7 @@ def successful_workflow_jobs(steps=()):
             "conclusion": "success",
             "steps": copy.deepcopy(list(steps)),
         }
-        for name in JOB_NAMES
+        for name in source_job_names("full")
     ]
 
 
@@ -439,18 +441,20 @@ def test_completed_job_with_observed_missing_browser_step_ends_keeps_unknowns():
         },
     ]
     jobs = successful_workflow_jobs()
-    next(job for job in jobs if job["name"].endswith("(android-chromium, shard 2/3)"))[
+    next(job for job in jobs if job["name"].endswith("(android-chromium, shard 2/6)"))[
         "steps"
     ] = steps
     summary = workflow_summary(WORKFLOW_RUN, jobs)
     job = next(
-        item for item in summary["jobs"] if item["job"] == "browser-android-chromium-2"
+        item
+        for item in summary["jobs"]
+        if item["job"] == "browser-android-chromium-2-of-6"
     )
     assert job["wall_ms"] == 608000 and job["startup_ms"] == 58000
     assert job["test_steps_ms"] is None and job["setup_and_other_ms"] is None
     assert job["outcome"] == "success" and summary["complete"] is True
     assert summary["critical_path_ms"] == 732000
-    assert summary["total_job_minutes"] == round(9 * 608000 / 60000, 3)
+    assert summary["total_job_minutes"] == round(15 * 608000 / 60000, 3)
 
 
 @pytest.mark.parametrize("phase", ["test", "startup"])
@@ -615,7 +619,9 @@ def test_reversed_job_interval_is_unknown_and_cannot_establish_completeness():
     jobs[0]["completed_at"] = "2026-09-30T14:07:56Z"
     summary = workflow_summary(WORKFLOW_RUN, jobs)
     job = next(
-        item for item in summary["jobs"] if item["job"] == JOB_NAMES[jobs[0]["name"]]
+        item
+        for item in summary["jobs"]
+        if item["job"] == source_job_names("full")[jobs[0]["name"]]
     )
     assert job["wall_ms"] is None and job["setup_and_other_ms"] is None
     assert summary["total_job_minutes"] is None and summary["complete"] is False
@@ -637,7 +643,7 @@ def test_timestamp_requires_timezone_and_preserves_equivalent_offsets():
 
 def test_missing_or_mixed_source_evidence_cannot_establish_complete_run(tmp_path):
     assert collect_evidence(tmp_path)["complete"] is False
-    assert len(collect_evidence(tmp_path)["missing_lanes"]) == 9
+    assert len(collect_evidence(tmp_path)["missing_lanes"]) == 15
     expected = [
         ("node", "none", 0),
         ("python", "none", 0),
@@ -645,7 +651,7 @@ def test_missing_or_mixed_source_evidence_cannot_establish_complete_run(tmp_path
         *(
             ("browser", project, shard)
             for project in ("desktop-chromium", "android-chromium")
-            for shard in (1, 2, 3)
+            for shard in (1, 2, 3, 4, 5, 6)
         ),
     ]
     for index, (lane, project, shard) in enumerate(expected):
@@ -678,7 +684,7 @@ def test_one_complete_but_stale_cohort_cannot_supply_current_attempt_evidence(
         *(
             ("browser", project, shard)
             for project in ("desktop-chromium", "android-chromium")
-            for shard in (1, 2, 3)
+            for shard in (1, 2, 3, 4, 5, 6)
         ),
     ]
     for index, (lane, project, shard) in enumerate(expected):
@@ -694,7 +700,7 @@ def test_one_complete_but_stale_cohort_cannot_supply_current_attempt_evidence(
     stale = collect_evidence(tmp_path, identity={**identity, field: current})
     assert stale["complete"] is False
     assert (
-        stale["first_attempt_passes"] == 9
+        stale["first_attempt_passes"] == 15
     )  # Retain observations without calling them current acceptance.
 
 

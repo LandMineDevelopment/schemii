@@ -11,10 +11,9 @@ import sys
 import pytest
 
 from scripts.ci.classify_changes import classify, load_classification, readme_index_only
-from scripts.ci.test_selection import expected_lanes
+from scripts.ci.test_selection import expected_lanes, source_job_names
 from scripts.ci.required_gate import CONTROL_NEEDS, SOURCE_NEEDS, evaluate
 from scripts.ci.workflow_timing import (
-    JOB_NAMES,
     REPORT_JOB_NAMES,
     summarize,
     test_evidence as collect_evidence,
@@ -464,7 +463,7 @@ def jobs():
             "conclusion": "success",
             **{key: IDENTITY[key] for key in ("run_id", "run_attempt", "head_sha")},
         }
-        for name in JOB_NAMES
+        for name in source_job_names("full")
     ]
 
 
@@ -809,10 +808,13 @@ def test_report_timing_marks_source_tests_inapplicable_without_a_pass_denominato
         }
         for name in REPORT_JOB_NAMES
     ]
-    observed += [{"name": name, "conclusion": "skipped"} for name in JOB_NAMES]
+    observed += [
+        {"name": name, "status": "completed", "conclusion": "skipped"}
+        for name in source_job_names("reports")
+    ]
     result = summarize(run, observed, lane="reports", report_validation=True)
     assert result["complete"] and result["lane"] == "reports"
-    assert result["not_applicable_jobs"] == sorted(JOB_NAMES.values())
+    assert result["not_applicable_jobs"] == sorted(source_job_names("reports").values())
     evidence = collect_evidence(tmp_path, lane="reports")
     assert evidence["complete"] and evidence["applicable"] is False
     assert (

@@ -15,15 +15,16 @@ if __package__:
         expected_jobs,
         expected_lanes,
         required_needs,
+        source_job_names,
         valid_scope,
     )
     from .workflow_timing import (
-        JOB_NAMES,
         SKIPPED_BROWSER,
         api,
         current_identity,
         current_jobs,
         matches_identity,
+        valid_browser_jobs,
     )
 else:
     from classify_changes import load_classification
@@ -33,15 +34,16 @@ else:
         expected_jobs,
         expected_lanes,
         required_needs,
+        source_job_names,
         valid_scope,
     )
     from workflow_timing import (
-        JOB_NAMES,
         SKIPPED_BROWSER,
         api,
         current_identity,
         current_jobs,
         matches_identity,
+        valid_browser_jobs,
     )
 
 
@@ -156,14 +158,19 @@ def evaluate(
         needs[name].get("result") != "skipped" for name in SOURCE_NEEDS - selected_needs
     ):
         return False, "unexpected-source-outcome"
+    source_names = source_job_names(profile)
     selected_jobs = expected_jobs(profile)
     browser_excluded = not any(
         value.startswith("browser-") for value in selected_jobs.values()
     )
+    if (profile != "reports" or jobs) and not valid_browser_jobs(
+        jobs, profile, excluded=browser_excluded
+    ):
+        return False, "unexpected-source-matrix-leg"
     observed = [
         job
         for job in jobs
-        if job.get("name") in JOB_NAMES
+        if job.get("name") in source_names
         or browser_excluded
         and job.get("name") == SKIPPED_BROWSER
     ]
@@ -186,7 +193,7 @@ def evaluate(
         )
         or any(
             job.get("name", "").startswith("Assembled browser smoke (")
-            and job["name"] not in JOB_NAMES
+            and job["name"] not in source_names
             and not (browser_excluded and job["name"] == SKIPPED_BROWSER)
             for job in jobs
         )

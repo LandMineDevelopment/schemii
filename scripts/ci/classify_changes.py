@@ -11,9 +11,21 @@ import subprocess
 
 
 if __package__:
-    from .test_selection import PROFILES, layers, select_paths, PYTHON_PATHS
+    from .test_selection import (
+        PROFILES,
+        layers,
+        select_paths,
+        PYTHON_PATHS,
+        browser_matrix,
+    )
 else:
-    from test_selection import PROFILES, layers, select_paths, PYTHON_PATHS
+    from test_selection import (
+        PROFILES,
+        layers,
+        select_paths,
+        PYTHON_PATHS,
+        browser_matrix,
+    )
 
 
 REPORTS = {"docs/browser-shard-balance.md"}
@@ -291,6 +303,11 @@ def main() -> int:
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             output.write("lane=" + result["lane"] + "\n")
             output.write("profile=" + result["profile"] + "\n")
+            output.write(
+                "browser_matrix="
+                + json.dumps(browser_matrix(result["profile"]), separators=(",", ":"))
+                + "\n"
+            )
             for layer in ("static", "node", "python", "postgres", "browser"):
                 output.write(
                     layer + "=" + str(layer in layers(result["profile"])).lower() + "\n"

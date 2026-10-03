@@ -50,6 +50,17 @@ function validateShard(project, shard, shardCount) {
   }
 }
 
+function profileForShards(profile, shardCount) {
+  const policy = coverageProfile(profile === undefined ? 'full' : profile);
+  if (policy && shardCount !== 3) throw new Error('Selected profile requires all three browser shards');
+  // Explicit profiles are the hosted acceptance contract. Historical standalone
+  // two/three-way local discovery remains available without a profile flag.
+  if (!policy && profile !== undefined && shardCount !== 6) {
+    throw new Error('Full and E2E profiles require all six browser shards');
+  }
+  return policy;
+}
+
 export function invocation(project, files, shard, list, environment = process.env, shardCount = 2) {
   validateShard(project, shard, shardCount);
   if (!Array.isArray(files) || !files.length || new Set(files).size !== files.length) {
@@ -71,8 +82,7 @@ export function invocation(project, files, shard, list, environment = process.en
 export function run(options, cwd = process.cwd()) {
   const { shardCount = 2 } = options;
   validateShard(options.project, options.shard, shardCount);
-  const policy = coverageProfile(options.profile === undefined ? 'full' : options.profile);
-  if (policy && shardCount !== 3) throw new Error('Selected profile requires all three browser shards');
+  const policy = profileForShards(options.profile, shardCount);
   const environment = { ...process.env };
   delete environment.SCHEMII_E2E_FILE_MANIFEST;
   const discovered = spawnSync(process.execPath,
@@ -103,17 +113,16 @@ export function parseOptions(args) {
     else if (argument === '--plan') options.plan = true;
     else if (argument.startsWith('--profile=') && !Object.hasOwn(options, 'profile')) options.profile = argument.slice(10);
     else if (argument.startsWith('--project=') && !options.project) options.project = argument.slice(10);
-    else if (/^--shard=[1-3]\/[23]$/.test(argument) && !options.shard) {
+    else if (/^--shard=[1-6]\/[236]$/.test(argument) && !options.shard) {
       const [current, total] = argument.slice(8).split('/').map(Number);
       options.shard = current;
       // Keep the existing exported two-way options shape and default intact.
       if (total !== 2) options.shardCount = total;
     }
-    else throw new Error('Use --project=PROFILE --shard=CURRENT/2 or CURRENT/3, optionally --profile=full|e2e-tests|schemer-result-cache and --plan or --list');
+    else throw new Error('Use --project=PROFILE --shard=CURRENT/2, CURRENT/3 or CURRENT/6, optionally --profile=full|e2e-tests|schemer-result-cache and --plan or --list');
   }
   validateShard(options.project, options.shard, options.shardCount ?? 2);
-  coverageProfile(options.profile === undefined ? 'full' : options.profile);
-  if (options.profile === 'schemer-result-cache' && options.shardCount !== 3) throw new Error('Selected profile requires all three browser shards');
+  profileForShards(options.profile, options.shardCount ?? 2);
   if (options.plan && options.list) throw new Error('Choose only one of --plan or --list');
   return options;
 }

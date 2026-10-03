@@ -28,6 +28,24 @@ test('three-way plans retain deterministic cost, file-count and shard-index orde
     [[file('a'), file('d')], [file('b'), file('e')], [file('c'), file('f')]]);
 });
 
+test('six-way whole-file plans preserve every file, deterministic balance and nonempty zero-cost lanes', () => {
+  const files = Array.from({ length: 12 }, (_, index) => file(String(index).padStart(2, '0')));
+  const costs = Object.fromEntries(files.map((path, index) => [path, { 'desktop-chromium': 12 - index }]));
+  const plan = balanceFiles(files, PROJECTS[0], costs, 6);
+  assert.deepEqual(plan.shards.map(shard => shard.estimatedMs), Array(6).fill(13));
+  assert.deepEqual(plan, balanceFiles(files.toReversed(), PROJECTS[0], costs, 6));
+  assert.equal(plan.shards.length, 6);
+  assert.ok(plan.shards.every(shard => shard.files.length === 2));
+  assert.deepEqual(plan.shards.flatMap(shard => shard.files).sort(), files);
+  const zeroCosts = Object.fromEntries(files.map(path => [path, { 'desktop-chromium': 0 }]));
+  assert.deepEqual(balanceFiles(files, PROJECTS[0], zeroCosts, 6).shards.map(shard => shard.files),
+    Array.from({ length: 6 }, (_, index) => [files[index], files[index + 6]]));
+  const unknown = balanceFiles(files, PROJECTS[0], {}, 6);
+  assert.deepEqual(unknown.unknownFiles, files);
+  assert.deepEqual(unknown.shards.flatMap(shard => shard.files).sort(), files);
+  assert.throws(() => balanceFiles(files.slice(0, 5), PROJECTS[0], costs, 6), /at least one file/);
+});
+
 test('new files receive a profile-specific median estimate and remain scheduled', () => {
   const costs = { [file('a')]: { 'desktop-chromium': 3000, 'android-chromium': 6000 } };
   for (const project of PROJECTS) {
@@ -45,7 +63,7 @@ test('new files receive a profile-specific median estimate and remain scheduled'
 
 test('plans reject unsupported counts, duplicate files and insufficient nonempty shards', () => {
   const files = ['a', 'b', 'c'].map(file);
-  for (const count of [0, 1, 4, 2.5, NaN, Infinity, '3', null]) {
+  for (const count of [0, 1, 4, 5, 7, 2.5, NaN, Infinity, '3', '6', null]) {
     assert.throws(() => balanceFiles(files, PROJECTS[0], {}, count), /shard count/);
   }
   for (const selected of [[], [file('a'), file('a'), file('b')]]) {
@@ -83,7 +101,15 @@ test('custom shard invocation never forwards native sharding or increases concur
     assert.deepEqual(parseOptions([`--project=${PROJECTS[0]}`, `--shard=${shard}/3`, '--list']),
       { project: PROJECTS[0], shard, shardCount: 3, list: true, plan: false });
   }
-  for (const shard of ['0/3', '4/3', '3/2', '1/1', '1/4', '01/3', '1/03', 'NaN/3', '1.5/3']) {
+  for (const shard of [1, 2, 3, 4, 5, 6]) {
+    const six = invocation(PROJECTS[0], [file('a')], shard, true, { PRESERVE: 'unchanged' }, 6);
+    assert.equal(six.args.some(value => value.startsWith('--shard') || value.startsWith('--workers')), false);
+    assert.equal(six.env.CI_TELEMETRY_SHARD, String(shard));
+    assert.equal(six.env.PRESERVE, 'unchanged');
+    assert.deepEqual(parseOptions([`--project=${PROJECTS[0]}`, `--shard=${shard}/6`, '--list']),
+      { project: PROJECTS[0], shard, shardCount: 6, list: true, plan: false });
+  }
+  for (const shard of ['0/3', '4/3', '3/2', '1/1', '1/4', '1/5', '7/6', '1/7', '01/3', '1/03', 'NaN/3', '1.5/3']) {
     assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, `--shard=${shard}`]));
   }
   for (const [current, total] of [[3, 2], [4, 3], [0, 3], [1.5, 3], [1, '3'], [1, 4]]) {
@@ -95,6 +121,24 @@ test('custom shard invocation never forwards native sharding or increases concur
   assert.throws(() => parseOptions(['--project=desktop-chromium', '--shard=1/2', '--shard=2/2']));
   assert.throws(() => parseOptions(['--project=desktop-chromium', '--shard=1/3', '--shard=2/3']));
   assert.throws(() => parseOptions(['--project=desktop-chromium', '--shard=1/3', '--list', '--plan']));
+});
+
+test('explicit hosted profiles reject the wrong topology before discovery', () => {
+  for (const project of PROJECTS) for (const profile of ['full', 'e2e-tests']) {
+    for (const shard of [1, 6]) {
+      assert.deepEqual(parseOptions([`--project=${project}`, `--shard=${shard}/6`, `--profile=${profile}`, '--plan']),
+        { project, shard, shardCount: 6, profile, plan: true, list: false });
+    }
+    for (const shardCount of [2, 3]) {
+      assert.throws(() => parseOptions([`--project=${project}`, `--shard=1/${shardCount}`, `--profile=${profile}`]), /all six/);
+      assert.throws(() => run({ project, shard: 1, shardCount, profile }, '/not-a-checkout'), /all six/);
+    }
+    assert.throws(() => run({ project, shard: 1, profile }, '/not-a-checkout'), /all six/);
+  }
+  for (const shardCount of [2, 6]) {
+    assert.throws(() => parseOptions([`--project=${PROJECTS[0]}`, `--shard=1/${shardCount}`, '--profile=schemer-result-cache']), /all three/);
+    assert.throws(() => run({ project: PROJECTS[0], shard: 1, shardCount, profile: 'schemer-result-cache' }, '/not-a-checkout'), /all three/);
+  }
 });
 
 test('programmatic invalid plans fail before starting discovery', () => {
