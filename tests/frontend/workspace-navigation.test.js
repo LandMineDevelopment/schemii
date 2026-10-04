@@ -5,6 +5,7 @@ import {
   extractLinkedSqlDraft,
   readWorkspaceNavigation,
   createWorkspaceNavigationHistory,
+  createWorkspaceNavigationController,
   readWorkspacePreferences,
   updateWorkspacePreferences,
   workspaceNavigationHref,
@@ -221,3 +222,50 @@ for (const direction of ["Back", "Forward"]) {
     assert.equal(acceptedOrigin.originIndex, 1);
   });
 }
+
+
+test("manual workspace opening supersedes a pending URL restore before its next history push", () => {
+  const navigation = createWorkspaceNavigationController();
+  const initial = navigation.begin({ restore: true });
+  assert.equal(navigation.restoring, true);
+  const manual = navigation.begin();
+  assert.equal(initial.isCurrent(), false);
+  assert.equal(initial.signal.aborted, true);
+  assert.equal(manual.isCurrent(), true);
+  assert.equal(navigation.restoring, false, "manual history must not inherit the pending restore's suppression");
+  initial.finish();
+  assert.equal(manual.isCurrent(), true);
+  assert.equal(navigation.restoring, false);
+  manual.finish();
+});
+
+test("a superseded restoration cannot finish or suppress a newer restoration owner", () => {
+  const navigation = createWorkspaceNavigationController();
+  const initial = navigation.begin({ restore: true });
+  const manual = navigation.begin();
+  const back = navigation.begin({ restore: true });
+  initial.finish();
+  manual.finish();
+  assert.equal(back.isCurrent(), true);
+  assert.equal(navigation.restoring, true);
+  back.finish();
+  assert.equal(navigation.restoring, false);
+});
+
+
+test("late startup API completion cannot reclaim an in-flight manual workspace owner", async () => {
+  const navigation = createWorkspaceNavigationController();
+  const startup = navigation.begin({ restore: true });
+  let releaseRuntime;
+  const runtime = new Promise(resolve => { releaseRuntime = resolve; });
+  const startupFinished = runtime.then(() => startup.finish());
+  const manual = navigation.begin();
+  assert.equal(navigation.restoring, false);
+  releaseRuntime();
+  await startupFinished;
+  assert.equal(startup.isCurrent(), false);
+  assert.equal(manual.isCurrent(), true);
+  assert.equal(manual.signal.aborted, false);
+  assert.equal(navigation.restoring, false);
+  manual.finish();
+});
