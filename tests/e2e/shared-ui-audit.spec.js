@@ -72,6 +72,9 @@ test('conditional schema rows follow the selected form state', async ({ page }) 
   await page.route('**/api/v1/connections?product=schemii', route => route.fulfill({ json: { connections: connectionsFixture } }));
   await page.setViewportSize({ width: 320, height: 740 });
   await page.goto('/');
+  // Bootstrap clears design dialogs before rendering this empty-workspace state.
+  // Wait before directly opening any of the four form-layout fixtures below.
+  await expect(page.locator('#catalog-state').getByText('Open a schema workspace', { exact: true })).toBeVisible();
   const viewDialog = page.locator('#design-view-dialog');
   await viewDialog.evaluate(dialog => dialog.showModal());
   const populateRow = viewDialog.locator('#design-view-population-row');
