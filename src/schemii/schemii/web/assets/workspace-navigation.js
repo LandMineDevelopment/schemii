@@ -1,3 +1,5 @@
+import { createLatestRequestController } from "./request-coordinator.js";
+
 const LAYERS = new Set(["tables", "views", "sql"]);
 const VIEW_KINDS = new Set(["view", "materialized_view"]);
 const DOCK_STATES = new Set(["expanded", "minimized", "dismissed"]);
@@ -176,6 +178,27 @@ export function createWorkspaceNavigationHistory(history) {
         restoringIndex = currentIndex;
         history.go(currentIndex - traversal.targetIndex);
       } else write("replace", currentHref);
+    },
+  };
+}
+
+
+/** Own asynchronous URL restoration separately from synchronous selection updates. */
+export function createWorkspaceNavigationController() {
+  const requests = createLatestRequestController();
+  let restoration = null;
+  return {
+    get restoring() { return Boolean(restoration?.isCurrent()); },
+    begin({ restore = false } = {}) {
+      const request = requests.begin();
+      restoration = restore ? request : null;
+      return Object.freeze({
+        ...request,
+        finish() {
+          if (restoration === request) restoration = null;
+          request.finish();
+        },
+      });
     },
   };
 }

@@ -414,3 +414,82 @@ test("unsaved object drafts guard workspace Back, workspace replacement and appl
     for (const workspaceId of owned.reverse()) await deleteWorkspace(request, workspaceId);
   }
 });
+
+
+for (const loadingPhase of ["initial snapshot", "readiness"]) {
+  test(`manual workspace opening preserves dirty Back navigation while the ${loadingPhase} is delayed`, async ({ page, request }) => {
+    const owned = [];
+    const initialRequested = deferred();
+    const releaseInitial = deferred();
+    const initialRouteFinished = deferred();
+    try {
+      const first = await createWorkspace(request);
+      owned.push(first.id);
+      await seedWorkspace(request, first.id);
+      const second = await createWorkspace(request);
+      owned.push(second.id);
+      await seedWorkspace(request, second.id);
+      const endpoint = loadingPhase === "readiness"
+        ? "**/api/v1/readiness" : `**${API_ROOT}/${first.id}/design/snapshot`;
+      await page.route(endpoint, async route => {
+        initialRequested.resolve();
+        await releaseInitial.promise;
+        try { await route.continue(); }
+        finally { initialRouteFinished.resolve(); }
+      }, { times: 1 });
+
+      await page.goto(`/?workspace=${first.id}&layer=views`);
+      await initialRequested.promise;
+      if (loadingPhase === "initial snapshot") {
+        await expect(page.locator("#workspace-title")).toHaveText(first.name);
+      } else await expect(page.locator("#catalog-state")).toContainText("Loading active server state");
+      await expect(page.locator("#create-view-button")).toBeDisabled();
+      const initialHistory = await page.evaluate(() => ({
+        length: window.history.length,
+        index: window.history.state.schemiiNavigationIndex,
+      }));
+      await page.locator("#workspaces-button").click();
+      const openSecond = page.locator("#workspaces-list .manager-card").filter({ hasText: second.name })
+        .getByRole("button", { name: "Open", exact: true });
+      await expect(openSecond).toBeEnabled();
+      await openSecond.click();
+      await expect(page).toHaveURL(new RegExp(`workspace=${second.id}`));
+      await expect(page.locator("#workspace-title")).toHaveText(second.name);
+      await expect(page.locator("#create-view-button")).toBeEnabled();
+      if (loadingPhase === "readiness") {
+        await expect(page.locator("#catalog-state")).toContainText("Loading active server state");
+      }
+      expect(await page.evaluate(() => ({
+        length: window.history.length,
+        index: window.history.state.schemiiNavigationIndex,
+      }))).toEqual({ length: initialHistory.length + 1, index: initialHistory.index + 1 });
+
+      // Finishing either startup phase must not reclaim the newer workspace's navigation.
+      releaseInitial.resolve();
+      await initialRouteFinished.promise;
+      await expect(page.locator("#catalog-state")).toBeEmpty();
+      await expect(page.locator("#workspace-title")).toHaveText(second.name);
+      await expect(page).toHaveURL(new RegExp(`workspace=${second.id}.*layer=views`));
+      const editor = editors[0];
+      await editor.open(page);
+      await fillValidDraft(page, editor);
+      const confirmation = page.locator("#confirm-dialog");
+      await page.goBack();
+      await expect(confirmation).toBeVisible();
+      await confirmation.getByRole("button", { name: "Keep editing", exact: true }).last().click();
+      await expect(page).toHaveURL(new RegExp(`workspace=${second.id}`));
+      await expect(page.locator("#workspace-title")).toHaveText(second.name);
+      await expect(page.locator(editor.definition)).toHaveValue(editor.validDefinition);
+      await expect(confirmation).toBeHidden();
+      await page.goBack();
+      await confirmation.getByRole("button", { name: "Discard changes", exact: true }).click();
+      await expect(page).toHaveURL(new RegExp(`workspace=${first.id}`));
+      await expect(page.locator("#workspace-title")).toHaveText(first.name);
+      await expect(page.locator("#create-view-button")).toBeEnabled();
+      await expect(page.locator(editor.dialog)).toBeHidden();
+    } finally {
+      releaseInitial.resolve();
+      for (const workspaceId of owned.reverse()) await deleteWorkspace(request, workspaceId);
+    }
+  });
+}
