@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 import threading
+from types import SimpleNamespace
 
 import pytest
+from psycopg import pq
 
 from schemii.common.postgres.console.gateway import (
     PsycopgConsoleReadSession,
@@ -24,6 +26,9 @@ class Connection:
         self.signals = 0
         self.commits = 0
         self.executed = []
+        self.lock = threading.RLock()
+        self.info = SimpleNamespace(encoding="utf-8")
+        self.pgconn = Wire(self)
 
     def cursor(self, **kwargs):
         return Cursor(self)
@@ -39,10 +44,45 @@ class Connection:
     def close(self):
         pass
 
-    def wait(self):
+    def _start_query(self):
+        return "start"
+
+    def wait(self, action=None):
+        if action == "start":
+            return None
+        if action == "send" and not self.block_execute:
+            return None
+        if action == "fetch":
+            if self.pgconn.pending:
+                self.pgconn.pending = False
+                self.pgconn.transaction_status = pq.TransactionStatus.INTRANS
+                return SimpleNamespace(status=pq.ExecStatus.COMMAND_OK,
+                                       nfields=0, command_status=b"UPDATE 1")
+            return None
         self.started.set()
         assert self.cancelled.wait(3), "query did not receive cancellation"
         raise RuntimeError("PostgreSQL cancelled query")
+
+
+class Wire:
+    transaction_status = pq.TransactionStatus.IDLE
+    def __init__(self, connection):
+        self.connection = connection
+        self.pending = False
+    def send_query_params(self, statement, parameters):
+        self.connection.executed.append(statement.decode())
+        self.pending = True
+        self.transaction_status = pq.TransactionStatus.ACTIVE
+    def set_single_row_mode(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def wire_incremental(monkeypatch):
+    from schemii.common.postgres.console import incremental
+    monkeypatch.setattr(incremental.generators, "send", lambda pg: "send")
+    monkeypatch.setattr(incremental.generators, "fetch", lambda pg: "fetch")
+    monkeypatch.setattr(incremental, "Transformer", lambda _: None)
 
 
 class Cursor:
@@ -166,20 +206,11 @@ def test_stop_does_not_cancel_or_rewrite_an_already_dispatched_commit():
 def test_cancel_fences_remaining_batch_statements():
     registry = QueryCancellationRegistry()
     connection = Connection()
-    original = connection.cursor
-
-    def cursor(**kwargs):
-        result = original(**kwargs)
-        execute = result.execute
-
-        def execute_and_stop(statement):
-            execute(statement)
-            registry.cancel("owner", "chat")
-
-        result.execute = execute_and_stop
-        return result
-
-    connection.cursor = cursor
+    send = connection.pgconn.send_query_params
+    def send_and_stop(statement, parameters):
+        send(statement, parameters)
+        registry.cancel("owner", "chat")
+    connection.pgconn.send_query_params = send_and_stop
     with registry.scope("owner", "chat", "turn"):
         with pytest.raises(PostgresConsoleCancelledError):
             execute_console_statements(connection, ["UPDATE first", "UPDATE second"])

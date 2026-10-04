@@ -75,3 +75,75 @@ after setup DDL. Raw initialization still sets its namespace search path and
 remains idle before the explicit transaction. The rollback, lock/backend release
 and retained-admission checks are unchanged, and expiry/dispatch fixture setup
 failures also close their owned raw sessions.
+
+## Managed result execution
+
+Managed SELECT, command-only statements and DML RETURNING use libpq single-row
+delivery before conversion and preview byte checks. Each validated statement is
+sent once using extended query protocol. PostgreSQL's terminal result supplies
+column metadata even for zero rows, and the completed command receipt. Psycopg
+loaders retain typed values and existing JSON conversion rules. A byte/cell cap
+raises the existing explicit limit error; it never returns incomplete rows as a
+complete result or replays a write. Interrupted delivery is cancelled/drained
+before reuse. Broken cleanup closes the owned connection and releases admission.
+The existing transaction owner still governs commit/rollback after an error.
+
+Retained named reads fetch variable-width or unrecognized types one row at a
+time, retaining accepted rows and at most one carry row. Built-in boolean, int2,
+int4, int8, float4 and float8 columns may batch using an allowance of 128 bytes
+per row plus 128 bytes per cell, limited by remaining page bytes and requested
+rows. Their scalar JSON/wire output fits 32 bytes per value, including int64
+extremes and floating-point exponents; the allowance also reserves native
+metadata, Python objects, pointers, containers and conversion copies. Numeric,
+text, arrays, domains and unknown types never use a sampled width estimate.
+Many-column rows reduce the batch down to one. This is a conservative batching
+allowance, not an allocator or whole-process RSS guarantee. Forward ordering,
+snapshot ownership, separate export cursors and owner-scoped cancellation remain
+the same. A cell/page limit closes the consumed forward snapshot, releases its
+native admission and invalidates the service's cursors; retry requires rerun
+rather than silently skipping the rejected row.
+
+The opt-in probe's `--named-latency` comparison alternates seven fresh bigint
+page snapshots between the old 1,000-row batch reference, a one-row reference
+and current budget-derived fixed-scalar batching, with identical conversion and
+byte checks. `--fixed-scalar --mode named` measures the corresponding RSS path.
+
+The configured JSON byte caps are not a whole-process RSS limit. Python object
+overhead, serialization copies and native input/result buffers add memory. A
+single PostgreSQL row/value must be received before conversion: an oversized
+cell can allocate substantially more than the 256 KiB serialized cell limit.
+For fixed row/column width, expected retained memory stops growing with source
+row count once the preview is rejected. RSS plateau/tolerance and the native
+buffer allowance require isolated real-driver measurement. No measured plateau
+is claimed by unit tests or the implementation alone.
+
+`scripts/console_memory_probe.py` compares a buffered reference of the old
+execute-before-limit boundary with current incremental delivery. Each sample
+runs in a fresh child process, records `/proc` RSS, `ru_maxrss`, phase timing,
+fixture cell size and driver/server versions, then verifies rollback and a fresh
+read. RETURNING owns a connection-local temporary table; it vanishes on exit.
+The probe terminates its owned child on timeout/interruption. Credentials stay
+in the explicit private integration environment. Run only in a scheduled real
+PostgreSQL window, for example:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/console_memory_probe.py \
+  --rows 1000 10000 100000 --width 8192 --path select
+PYTHONPATH=src .venv/bin/python scripts/console_memory_probe.py \
+  --rows 1000 10000 100000 --width 8192 --path returning
+PYTHONPATH=src .venv/bin/python scripts/console_memory_probe.py \
+  --rows 1000 10000 100000 --width 8192 --mode named
+```
+
+Large buffered references intentionally expose the former native memory cost;
+choose staged counts that fit the host. The probe is opt-in and ordinary PR
+feedback never launches it. Real result/RETURNING/cell-limit and source-state
+regressions are in `tests/integration/test_postgres_gateway_execution.py`.
+
+
+Measured PostgreSQL 18.6/Psycopg 3.3.4 acceptance for source `253feb9` is retained in
+[the Console resource evidence report](../testing/benchmarks/evidence/console-20260929/README.md).
+It includes 24 real-driver cases, row-count RSS comparisons, scalar-page latency,
+pathological single-cell allocation and automatic owned-fixture cleanup. Those
+shared-host results establish the tested driver/lifecycle behavior; they do not
+establish UI acceptance or production server capacity.
