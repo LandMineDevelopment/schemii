@@ -66,6 +66,7 @@ import { closeDetailsMenus, createDialogFocusController, createIconButton, creat
 import {
   extractLinkedSqlDraft,
   createWorkspaceNavigationHistory,
+  createWorkspaceNavigationController,
   readWorkspaceNavigation,
   readWorkspacePreferences,
   updateWorkspacePreferences,
@@ -555,12 +556,12 @@ const state = {
   toastTimer: null,
   canvasResizeFrame: null,
   preferenceTimer: null,
-  navigationGeneration: 0,
   layerNavigationGeneration: 0,
   restoringNavigation: false,
 };
 
 const navigationHistory = createWorkspaceNavigationHistory(window.history);
+const workspaceNavigation = createWorkspaceNavigationController();
 const designEditors = createDesignEditorControllers({
   api,
   state,
@@ -1098,8 +1099,12 @@ function currentWorkspaceNavigation() {
   };
 }
 
+function isRestoringWorkspaceNavigation() {
+  return state.restoringNavigation || workspaceNavigation.restoring;
+}
+
 function syncWorkspaceNavigation(historyMode = "replace") {
-  if (!historyMode || !state.startupComplete || state.restoringNavigation) return;
+  if (!historyMode || isRestoringWorkspaceNavigation()) return;
   const next = workspaceNavigationHref(window.location.href, currentWorkspaceNavigation());
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next === current) return;
@@ -1116,13 +1121,13 @@ function persistCanvasView() {
 }
 
 function scheduleCanvasViewPersistence() {
-  if (!state.activeWorkspace || state.restoringNavigation) return;
+  if (!state.activeWorkspace || isRestoringWorkspaceNavigation()) return;
   window.clearTimeout(state.preferenceTimer);
   state.preferenceTimer = window.setTimeout(persistCanvasView, 120);
 }
 
 function persistInspectorState(paneState) {
-  if (!inspectorPreferenceReady || state.restoringNavigation || !state.activeWorkspace) return;
+  if (!inspectorPreferenceReady || isRestoringWorkspaceNavigation() || !state.activeWorkspace) return;
   if (!["expanded", "minimized", "dismissed"].includes(paneState)) return;
   updateWorkspacePreferences(workspaceStorage(), state.activeWorkspace.id, {
     inspector: paneState,
@@ -1160,15 +1165,19 @@ function applyWorkspaceNavigation(navigation) {
   }
 }
 
-async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, layerGeneration = state.layerNavigationGeneration } = {}) {
-  const generation = ++state.navigationGeneration;
-  if (!await designEditors.requestDiscardDrafts() || generation !== state.navigationGeneration) return false;
-  const wasRestoring = state.restoringNavigation;
-  state.restoringNavigation = true;
+async function restoreWorkspaceNavigation(navigation, {
+  notifyMissing = true,
+  layerGeneration = state.layerNavigationGeneration,
+  navigationRequest = null,
+} = {}) {
+  const request = navigationRequest || workspaceNavigation.begin({ restore: true });
   let restored = false;
   try {
+    if (!request.isCurrent()) return false;
+    if (!await designEditors.requestDiscardDrafts() || !request.isCurrent()) return false;
     if (!navigation.workspaceId) {
       if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
+      if (!request.isCurrent()) return false;
       clearActiveWorkspace({ historyMode: null });
       if (layerGeneration === state.layerNavigationGeneration) setLayer("tables", { historyMode: null });
       restored = true;
@@ -1178,6 +1187,7 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, la
     const workspace = state.workspaces.find(item => item.id === navigation.workspaceId);
     if (!workspace) {
       if (state.activeWorkspace && !await flushLayoutBeforeTransition()) return false;
+      if (!request.isCurrent()) return false;
       clearActiveWorkspace({ historyMode: null });
       if (layerGeneration === state.layerNavigationGeneration) setLayer("tables", { historyMode: null });
       if (notifyMissing) showToast("The workspace saved in this browser URL no longer exists.", { error: true });
@@ -1185,17 +1195,17 @@ async function restoreWorkspaceNavigation(navigation, { notifyMissing = true, la
       return true;
     }
     if (state.activeWorkspace?.id !== workspace.id || !state.catalog) {
-      if (!await openWorkspace(workspace, { historyMode: null })) return false;
+      if (!await openWorkspace(workspace, { historyMode: null, navigationRequest: request })) return false;
     }
-    if (generation !== state.navigationGeneration || !state.catalog) return false;
+    if (!request.isCurrent() || !state.catalog) return false;
     // A layer chosen during loading is newer than the URL being restored.
     applyWorkspaceNavigation(layerGeneration === state.layerNavigationGeneration
       ? navigation : { ...navigation, layer: state.activeLayer, tableId: null, table: null, viewId: null, view: null, viewKind: null });
     restored = true;
     return true;
   } finally {
-    state.restoringNavigation = wasRestoring;
-    if (restored && generation === state.navigationGeneration) syncWorkspaceNavigation("replace");
+    request.finish();
+    if (restored && request.isCurrent()) syncWorkspaceNavigation("replace");
   }
 }
 
@@ -1356,6 +1366,7 @@ async function loadRuntime() {
 }
 
 async function bootstrap() {
+  const request = workspaceNavigation.begin({ restore: true });
   const requestedNavigation = readWorkspaceNavigation(window.location.href);
   const layerGeneration = state.layerNavigationGeneration;
   setLayerState(requestedNavigation.layer);
@@ -1365,11 +1376,21 @@ async function bootstrap() {
   renderCatalogState();
   renderConnections();
   renderWorkspaces();
-  await Promise.all([loadRuntime(), loadConnections(), loadWorkspaces()]);
-  state.startupComplete = true;
-  await restoreWorkspaceNavigation(requestedNavigation, { notifyMissing: true, layerGeneration });
-  renderCatalogState();
-  updateHeader();
+  try {
+    await Promise.all([loadRuntime(), loadConnections(), loadWorkspaces()]);
+    state.startupComplete = true;
+    if (request.isCurrent()) {
+      await restoreWorkspaceNavigation(requestedNavigation, {
+        notifyMissing: true,
+        layerGeneration,
+        navigationRequest: request,
+      });
+    }
+  } finally {
+    request.finish();
+    renderCatalogState();
+    updateHeader();
+  }
 }
 
 async function loadConnections() {
@@ -2454,32 +2475,38 @@ function invalidateActiveCatalog({ preservePendingLayout = false, expectedConnec
   });
 }
 
-async function openWorkspace(workspace, { historyMode = "push" } = {}) {
-  if (!await flushLayoutBeforeTransition()) return false;
-  if (!await designEditors.requestDiscardDrafts()) return false;
-  persistCanvasView();
-  workspaceOperations.invalidate();
-  viewAnalysis.clear();
-  resetLayoutSaveState();
-  state.columnOrderModes.clear();
-  state.catalogError = null;
-  state.layoutConflict = false;
-  state.layoutConflictKind = null;
-  cancelColumnAuthoring();
-  commitWorkspaceState({
-    activeWorkspace: workspace,
-    design: null,
-    designLayout: null,
-    designHistory: null,
-    catalog: null,
-    databaseCatalog: null,
-    selectedTableId: null,
-    selectedViewId: null,
-  });
-  syncWorkspaceNavigation(historyMode);
-  await loadActiveWorkspace({ clearConflictOnSuccess: true });
-  if (state.catalog && state.activeWorkspace?.id === workspace.id) restoreCanvasView(workspace.id);
-  return true;
+async function openWorkspace(workspace, { historyMode = "push", navigationRequest = null } = {}) {
+  const request = navigationRequest || workspaceNavigation.begin();
+  try {
+    if (!await flushLayoutBeforeTransition() || !request.isCurrent()) return false;
+    if (!await designEditors.requestDiscardDrafts() || !request.isCurrent()) return false;
+    persistCanvasView();
+    workspaceOperations.invalidate();
+    viewAnalysis.clear();
+    resetLayoutSaveState();
+    state.columnOrderModes.clear();
+    state.catalogError = null;
+    state.layoutConflict = false;
+    state.layoutConflictKind = null;
+    cancelColumnAuthoring();
+    commitWorkspaceState({
+      activeWorkspace: workspace,
+      design: null,
+      designLayout: null,
+      designHistory: null,
+      catalog: null,
+      databaseCatalog: null,
+      selectedTableId: null,
+      selectedViewId: null,
+    });
+    syncWorkspaceNavigation(historyMode);
+    await loadActiveWorkspace({ clearConflictOnSuccess: true });
+    if (!request.isCurrent() || state.activeWorkspace?.id !== workspace.id) return false;
+    if (state.catalog) restoreCanvasView(workspace.id);
+    return true;
+  } finally {
+    if (!navigationRequest) request.finish();
+  }
 }
 
 async function loadActiveWorkspace(options = {}) {
@@ -2512,7 +2539,7 @@ async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
     });
     const navigation = readWorkspaceNavigation(window.location.href);
     // An enclosing navigation restore owns the final selection after loading.
-    if (!state.restoringNavigation && navigation.workspaceId === workspaceId) {
+    if (!isRestoringWorkspaceNavigation() && navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
       syncWorkspaceNavigation("replace");
     }
@@ -2591,7 +2618,7 @@ async function loadActiveCatalog({ clearConflictOnSuccess = false } = {}) {
     renderWorkspaces();
     const navigation = readWorkspaceNavigation(window.location.href);
     // An enclosing navigation restore owns the final selection after loading.
-    if (!state.restoringNavigation && navigation.workspaceId === workspaceId) {
+    if (!isRestoringWorkspaceNavigation() && navigation.workspaceId === workspaceId) {
       applyWorkspaceNavigation(navigation);
       syncWorkspaceNavigation("replace");
     }
