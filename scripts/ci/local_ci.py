@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import secrets
 import signal
 import ssl
 import stat
@@ -186,6 +187,14 @@ def prerequisites(argv: list[str], environment: dict[str, str]) -> str | None:
     ):
         return "PostgreSQL acceptance needs both SCHEMII_TEST_METADATA_DSN and SCHEMII_TEST_METADATA_PASSWORD for an owned disposable database."
     if argv == planner.BROWSER_BOUNDARY:
+        if any(
+            name in environment
+            for name in ("SCHEMII_E2E_USERNAME", "SCHEMII_E2E_PASSWORD")
+        ) and not all(
+            environment.get(name)
+            for name in ("SCHEMII_E2E_USERNAME", "SCHEMII_E2E_PASSWORD")
+        ):
+            return "Browser acceptance needs both SCHEMII_E2E_USERNAME and SCHEMII_E2E_PASSWORD when either is explicitly supplied."
         if (
             environment.get("SCHEMII_E2E_BASE_URL", LOCAL_URL) != LOCAL_URL
             or environment.get("SCHEMII_TEST_APP_PORT", "8001") != "8001"
@@ -532,6 +541,28 @@ def run_selected(
                     environment["SCHEMII_SECRET_DIRECTORY"] = str(
                         Path(primary.removeprefix("worktree ")) / ".schemii/secrets"
                     )
+                if environment.get("SCHEMII_E2E_BOOTSTRAP") == "1" and not any(
+                    environment.get(name)
+                    for name in (
+                        "SCHEMII_E2E_CREDENTIALS_FILE",
+                        "SCHEMII_E2E_USERNAME",
+                        "SCHEMII_E2E_PASSWORD",
+                    )
+                ):
+                    credential_file = run / "browser-credentials.json"
+                    write_json(
+                        credential_file,
+                        {
+                            "username": "e2e_admin_" + run.name.rsplit("-", 1)[1],
+                            "password": secrets.token_urlsafe(32),
+                        },
+                    )
+                    environment["SCHEMII_E2E_CREDENTIALS_FILE"] = str(credential_file)
+                    # Keep the one generated account usable across same-stack
+                    # shards. Existing installations still require a successful
+                    # login; bootstrap never resets or claims an existing admin.
+                    receipt["browser_credentials"] = credential_file.name
+                    write_json(receipt_path, receipt)
             command = list(argv)
             if command[0] in {"python", "python3"}:
                 command[0] = sys.executable

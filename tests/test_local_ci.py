@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -640,3 +641,154 @@ def test_browser_retry_recovery_retains_failed_attempt_and_never_proves_acceptan
     assert not raw_path.with_suffix(".summary.json").exists()
     for output in ("artifacts/playwright-results", "artifacts/playwright-auth"):
         assert stat.S_IMODE((repository / output).stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"SCHEMII_E2E_USERNAME": "partial-user"},
+        {"SCHEMII_E2E_PASSWORD": "private-partial-sentinel"},
+        {"SCHEMII_E2E_USERNAME": "", "SCHEMII_E2E_PASSWORD": ""},
+    ],
+)
+def test_bootstrap_consent_cannot_replace_partial_explicit_credentials(
+    repository, monkeypatch, credentials
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
+    seen = controlled(monkeypatch)
+    code, path, receipt = execute(
+        repository,
+        selected(
+            repository, "e2e-tests", [runner.planner.BROWSER_BOUNDARY, ["./start.sh"]]
+        ),
+    )
+    assert code == 2 and receipt["status"] == "pending"
+    assert receipt["reason"] == "missing-prerequisite" and seen == []
+    assert not (path.parent / "browser-credentials.json").exists()
+    assert "private-partial-sentinel" not in path.read_text()
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None, reason="Actual account-auth helper requires Node"
+)
+@pytest.mark.parametrize("populated", [False, True])
+def test_run_owned_bootstrap_file_supports_actual_helper_sequential_setup_and_login(
+    repository, monkeypatch, populated, capsys
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    secret_dir = repository / ".schemii/secrets"
+    secret_dir.mkdir(parents=True, mode=0o700)
+    (secret_dir / "account_setup_token").write_text("controlled setup token")
+    if populated:
+        runner.write_json(
+            repository / ".schemii/auth-state.json",
+            {
+                "username": "existing-user",
+                "password": "existing-owned-password",
+                "setup_calls": 0,
+                "login_calls": 0,
+            },
+        )
+    module = (
+        Path(runner.__file__).resolve().parents[2] / "tests/e2e/helpers/account-auth.js"
+    ).as_uri()
+    node_control = """
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { authenticateBrowserAccount } from MODULE;
+const path = '.schemii/auth-state.json';
+const previous = existsSync(path) ? JSON.parse(readFileSync(path)) : null;
+let state = previous;
+const response = (ok, value = {}) => ({ ok: () => ok, status: () => ok ? 200 : 401, json: async () => value });
+const context = {
+  get: async url => { assert.equal(url, '/api/v1/auth/status'); return response(true, { enabled: true, setup_required: !state }); },
+  post: async (url, { data }) => {
+    if (url === '/api/v1/auth/setup') {
+      assert.equal(state, null);
+      assert.equal(data.setup_token, 'controlled setup token');
+      state = { username: data.username, password: data.password, setup_calls: 1, login_calls: 0 };
+    } else {
+      assert.equal(url, '/api/v1/auth/login');
+      if (!state || data.username !== state.username || data.password !== state.password) return response(false);
+      state.login_calls += 1;
+    }
+    writeFileSync(path, JSON.stringify(state), { mode: 0o600 });
+    return response(true, { is_admin: true });
+  },
+};
+assert.equal(statSync(process.env.SCHEMII_E2E_CREDENTIALS_FILE).mode & 0o777, 0o600);
+const { credentials, identity } = await authenticateBrowserAccount(context, process.env);
+assert.equal(identity.is_admin, true);
+assert.equal(credentials.password.length >= 40, true);
+const meta = { schema: 1, source_sha: process.env.CI_TELEMETRY_SHA, run_id: Number(process.env.CI_TELEMETRY_RUN_ID), run_attempt: 1, lane: 'browser', project: process.env.CI_TELEMETRY_PROJECT, shard: Number(process.env.CI_TELEMETRY_SHARD) };
+const hash = value => createHash('sha256').update(value).digest('hex');
+const test_id = hash('bootstrap continuity');
+const records = [
+  { ...meta, kind: 'start', planned: 1 },
+  { ...meta, kind: 'plan', test_id },
+  { ...meta, kind: 'attempt', test_id, source_id: hash('source.txt'), source_line: 1, attempt: 0, outcome: 'passed', skip: 'none', setup_ms: 1, execution_ms: 1, teardown_ms: 0 },
+  { ...meta, kind: 'end', outcome: 'passed', wall_ms: 2 },
+];
+writeFileSync(process.env.CI_TELEMETRY_FILE, records.map(record => JSON.stringify(record)).join('\\n') + '\\n');
+""".replace("MODULE", json.dumps(module))
+    paths = []
+    original_invoke = runner.invoke
+
+    def invoke(root, command, environment, lease=None):
+        if "CI_TELEMETRY_FILE" not in environment:
+            return 0
+        paths.append(environment["SCHEMII_E2E_CREDENTIALS_FILE"])
+        return original_invoke(
+            root, ["node", "--input-type=module", "-e", node_control], environment
+        )
+
+    monkeypatch.setattr(runner, "invoke", invoke)
+    monkeypatch.setattr(
+        runner, "verify_deployment", lambda: [{"url": runner.LOCAL_URL, "status": 200}]
+    )
+
+    def browser(index):
+        return [
+            "node",
+            "scripts/ci/run-browser-shard.mjs",
+            "--project=desktop-chromium",
+            f"--shard={index}/6",
+            "--profile=full",
+        ]
+
+    plan = selected(
+        repository,
+        "full",
+        [runner.planner.BROWSER_BOUNDARY, ["./start.sh"], browser(1), browser(2)],
+    )
+    code, receipt_path, receipt = execute(repository, plan)
+    credentials_path = receipt_path.parent / "browser-credentials.json"
+    assert receipt["browser_credentials"] == "browser-credentials.json"
+    assert stat.S_IMODE(credentials_path.stat().st_mode) == 0o600
+    credentials = json.loads(credentials_path.read_text())
+    captured = capsys.readouterr()
+    assert (
+        credentials["password"]
+        not in receipt_path.read_text() + captured.out + captured.err
+    )
+    assert (
+        credentials["username"]
+        not in receipt_path.read_text() + captured.out + captured.err
+    )
+    state = json.loads((repository / ".schemii/auth-state.json").read_text())
+    if populated:
+        assert code == 1 and receipt["acceptance"] is False
+        assert state == {
+            "username": "existing-user",
+            "password": "existing-owned-password",
+            "setup_calls": 0,
+            "login_calls": 0,
+        }
+        assert paths == [str(credentials_path)]
+    else:
+        assert code == 0 and receipt["acceptance"] is True
+        assert paths == [str(credentials_path), str(credentials_path)]
+        assert state["setup_calls"] == state["login_calls"] == 1
