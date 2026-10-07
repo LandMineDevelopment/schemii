@@ -4,15 +4,24 @@
 
 GitHub Actions is disabled. Local development owns feedback and acceptance using
 `./ci.sh`; Python 3.12 and Node 22 are the former hosted reference versions. For a
-fresh checkout, create a virtual environment and install the constrained development
-and quality dependencies:
+fresh checkout, create separate test and quality environments with constrained
+dependencies:
 
 ```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev,quality]'
+python3 -m venv .venv
+.venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
+python3 -m venv .venv-quality
+.venv-quality/bin/python -m pip install --constraint constraints.docker.txt --editable '.[quality]'
 ./ci.sh --plan --base origin/main
 ./ci.sh --feedback --base origin/main
 ```
+
+`./ci.sh` uses the checkout's `.venv` for tests and `.venv-quality` for static
+quality when present. `SCHEMII_CI_PYTHON` and `SCHEMII_CI_QUALITY_PYTHON` can select
+already prepared interpreters for linked worktrees. Keep quality free of test
+dependencies: they can change Mypy's imported module graph and expose unrelated
+legacy errors. The two environments preserve the former hosted setup without
+relaxing its type rules.
 
 `npm test` needs Node, not an npm dependency installation; its frontend and harness
 tests use built-in Node modules. Default pytest discovery includes `tests/` and

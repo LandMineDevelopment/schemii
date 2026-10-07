@@ -312,12 +312,13 @@ Frontend module tests cover state and rendering contracts without requiring a
 running server.
 
 The incremental static-quality gate uses Ruff `0.16.9` and Mypy `2.3.1`, pinned
-in the optional `quality` dependency group. Install it alongside the test tools,
-then run it against the intended fetched base branch:
+in the optional `quality` dependency group. Keep its environment separate from
+the test tools, matching the former hosted quality job:
 
 ```bash
-.venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev,quality]'
-.venv/bin/python scripts/check_python_quality.py origin/main
+python3 -m venv .venv-quality
+.venv-quality/bin/python -m pip install --constraint constraints.docker.txt --editable '.[quality]'
+.venv-quality/bin/python scripts/check_python_quality.py origin/main
 ```
 
 Ruff applies its configured lint rules and formatter to all new Python files and
@@ -326,7 +327,11 @@ legacy Python files receive only undefined or unbound-name checks; they are not
 reformatted wholesale. Mypy requires complete function signatures in the two
 selected modules and checks their function bodies. This explicit boundary keeps
 new files in lint and format checks while type coverage expands without forcing
-unrelated changes across the older codebase. The local plan supplies its comparison
+unrelated changes across the older codebase. `./ci.sh` uses `.venv-quality/bin/python`
+for this step when present; `SCHEMII_CI_QUALITY_PYTHON` selects an explicitly prepared
+quality interpreter elsewhere. Test dependencies can change Mypy's imported
+module graph, so use the quality-only environment rather than suppressing errors.
+The local plan supplies its comparison
 base to this script. An unavailable base fails clearly instead of silently skipping
 quality checks. See [the testing policy](docs/testing-feedback.md) and
 [developer setup](testing/README.md) for required layers and evidence reuse.

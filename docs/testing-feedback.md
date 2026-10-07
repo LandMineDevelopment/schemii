@@ -39,7 +39,7 @@ substitute for a focused regression or a faithful controlled failure.
    `python -m pytest -q`. Keep installed-graph, real-database or mounted checks
    whenever the invariant depends on those boundaries.
 3. Run incremental Python quality against the intended branch base with
-   `python scripts/check_python_quality.py BASE`, using the constrained quality
+   `.venv-quality/bin/python scripts/check_python_quality.py BASE`, using the constrained quality-only
    environment. An unavailable comparison stops the check; resolve the intended
    base before continuing rather than treating an empty selection as validation.
 4. When ownership is unknown or a change crosses boundaries, use the broader
