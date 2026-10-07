@@ -390,7 +390,10 @@ def target_owner_proof(target, root=None, *, profile=CACHE_PROFILE):
     for path in sorted(POLICY_FILES):
         old = entry(before, path)
         new = entry(head, path)
-        data = (current_policy / path).read_bytes()
+        # Keep the original hosted policy identity while reading the retained
+        # contract fixture. Local acceptance never invokes hosted reuse.
+        source_path = "testing/ci/hosted-workflow.yml" if path == WORKFLOW_PATH else path
+        data = (current_policy / source_path).read_bytes()
         current_blob = hashlib.sha1(
             b"blob " + str(len(data)).encode() + b"\0" + data
         ).hexdigest()
