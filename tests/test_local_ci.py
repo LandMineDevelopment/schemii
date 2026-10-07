@@ -96,7 +96,14 @@ def records(environment, lane=None, outcome="passed", skipped=False):
 
 
 def controlled(
-    monkeypatch, *, code=0, missing=False, mutate=False, mismatched=False, skipped=False
+    monkeypatch,
+    *,
+    code=0,
+    missing=False,
+    mutate=False,
+    mismatched=False,
+    skipped=False,
+    recovered=False,
 ):
     original = runner.invoke
     seen = []
@@ -115,6 +122,9 @@ def controlled(
         if mismatched:
             for record in payload:
                 record["source_sha"] = "0" * 40
+        if payload and recovered:
+            payload[2]["outcome"] = "failed"
+            payload.insert(-1, {**payload[2], "attempt": 1, "outcome": "passed"})
         body = "import json, os\nfrom pathlib import Path\n"
         if payload and not missing:
             body += f"Path(os.environ['CI_TELEMETRY_FILE']).write_text('\\n'.join(json.dumps(value) for value in {payload!r}) + '\\n')\n"
@@ -568,3 +578,65 @@ def test_explicit_unavailable_quality_interpreter_never_falls_back(
     assert code == 2 and receipt["status"] == "pending"
     assert receipt["reason"] == "quality-interpreter-unavailable"
     assert receipt["pending_layers"] == ["static"] and seen == []
+
+
+def test_child_public_fixture_retains_caller_mask_while_owned_receipts_stay_private(
+    repository, monkeypatch
+):
+    original_invoke = runner.invoke
+    caller_mask = os.umask(0o022)
+
+    def invoke(root, argv, environment, lease=None):
+        payload = records(environment)
+        body = "import json, os\nfrom pathlib import Path\n"
+        body += "file = Path('.schemii/public-credential-fixture.json')\nfile.touch(mode=0o644)\nassert file.stat().st_mode & 0o777 == 0o644\n"
+        body += f"Path(os.environ['CI_TELEMETRY_FILE']).write_text('\\n'.join(json.dumps(value) for value in {payload!r}) + '\\n')\n"
+        return original_invoke(root, [sys.executable, "-c", body], environment)
+
+    monkeypatch.setattr(runner, "invoke", invoke)
+    try:
+        code, path, receipt = execute(repository)
+        assert code == 0 and receipt["acceptance"] is True
+        assert (
+            stat.S_IMODE(
+                (repository / ".schemii/public-credential-fixture.json").stat().st_mode
+            )
+            == 0o644
+        )
+        for item in path.parent.rglob("*"):
+            assert stat.S_IMODE(item.stat().st_mode) == (
+                0o700 if item.is_dir() else 0o600
+            )
+    finally:
+        os.umask(caller_mask)
+
+
+def test_browser_retry_recovery_retains_failed_attempt_and_never_proves_acceptance(
+    repository, monkeypatch
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    controlled(monkeypatch, recovered=True)
+    monkeypatch.setattr(
+        runner, "verify_deployment", lambda: [{"url": runner.LOCAL_URL, "status": 200}]
+    )
+    browser = [
+        "node",
+        "scripts/ci/run-browser-shard.mjs",
+        "--project=desktop-chromium",
+        "--shard=1/6",
+        "--profile=full",
+    ]
+    plan = selected(
+        repository, "full", [runner.planner.BROWSER_BOUNDARY, ["./start.sh"], browser]
+    )
+    code, path, receipt = execute(repository, plan)
+    assert code == 1 and receipt["status"] == "incomplete"
+    assert receipt["acceptance"] is False
+    assert receipt["commands"][-1]["exit_code"] == 0
+    raw_path = path.parent / receipt["commands"][-1]["timing_evidence"]
+    summary = runner.summarize(runner.load(raw_path))
+    assert summary["complete"] is True and summary["outcome"] == "passed"
+    assert summary["first_attempt_failures"] == summary["retry_recovered"] == 1
+    assert not raw_path.with_suffix(".summary.json").exists()
+    for output in ("artifacts/playwright-results", "artifacts/playwright-auth"):
+        assert stat.S_IMODE((repository / output).stat().st_mode) == 0o700

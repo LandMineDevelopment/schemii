@@ -374,6 +374,8 @@ def evidence(
         or not summary["complete"]
         or summary["outcome"] != "passed"
         or not summary["first_attempt_eligible"]
+        or summary["first_attempt_failures"] != 0
+        or summary["retry_recovered"] != 0
     ):
         raise ValueError("Incomplete or mismatched timing evidence")
     if key[0] == "postgres" and summary["attempt_outcomes"]["skipped"]:
@@ -434,7 +436,6 @@ def run_selected(
     write_json(receipt_path, receipt)
     print(f"Local CI receipt: {receipt_path}", flush=True)
     started = time.perf_counter()
-    old_umask = os.umask(0o077)
     lease_context = None
     lease = None
     code = 2
@@ -572,6 +573,9 @@ def run_selected(
                 command_dir = run / f"command-{index:02d}"
                 command_dir.mkdir(mode=0o700)
                 telemetry = command_dir / "timing.jsonl"
+                # Reporters truncate this owned file while preserving its mode.
+                # Child test fixtures retain the caller's ordinary umask.
+                telemetry.touch(mode=0o600, exist_ok=False)
                 child_env.update(
                     CI_TELEMETRY_FILE=str(telemetry),
                     CI_TELEMETRY_LANE=key[0],
@@ -586,6 +590,11 @@ def run_selected(
                         f"--test-reporter-destination={telemetry}",
                     ]
                 if key[0] == "browser":
+                    for output in (
+                        "artifacts/playwright-results",
+                        "artifacts/playwright-auth",
+                    ):
+                        private_directory(root / output)
                     child_env["CI"] = (
                         "1"  # Existing retry/reporting policy, with every attempt retained.
                     )
@@ -698,7 +707,6 @@ def run_selected(
                 flush=True,
             )
         finally:
-            os.umask(old_umask)
             for signum, handler in handlers.items():
                 signal.signal(signum, handler)
 
