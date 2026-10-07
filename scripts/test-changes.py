@@ -253,9 +253,12 @@ def execute(root: Path, selected: dict, *, feedback: bool = False) -> int:
         )
         selected_commands = feedback_commands(selected_commands)
     for argv in selected_commands:
-        if argv == POSTGRES_COMMAND and not os.environ.get("SCHEMII_TEST_METADATA_DSN"):
+        if argv == POSTGRES_COMMAND and not all(
+            os.environ.get(name)
+            for name in ("SCHEMII_TEST_METADATA_DSN", "SCHEMII_TEST_METADATA_PASSWORD")
+        ):
             print(
-                "PostgreSQL acceptance pending: SCHEMII_TEST_METADATA_DSN is required; remaining checks have not run.",
+                "PostgreSQL acceptance pending: SCHEMII_TEST_METADATA_DSN and SCHEMII_TEST_METADATA_PASSWORD are required; remaining checks have not run.",
                 file=sys.stderr,
             )
             return 2
