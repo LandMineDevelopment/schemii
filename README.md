@@ -329,8 +329,9 @@ selected modules and checks their function bodies. This explicit boundary keeps
 new files in lint and format checks while type coverage expands without forcing
 unrelated changes across the older codebase. `./ci.sh` uses `.venv-quality/bin/python`
 for this step when present; `SCHEMII_CI_QUALITY_PYTHON` selects an explicitly prepared
-quality interpreter elsewhere. Test dependencies can change Mypy's imported
-module graph, so use the quality-only environment rather than suppressing errors.
+quality interpreter elsewhere. Install the project into that environment from
+the checkout being checked: reusing another checkout's editable installation
+changes Mypy's imported module graph.
 The local plan supplies its comparison
 base to this script. An unavailable base fails clearly instead of silently skipping
 quality checks. See [the testing policy](docs/testing-feedback.md) and

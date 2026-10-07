@@ -18,10 +18,11 @@ python3 -m venv .venv-quality
 
 `./ci.sh` uses the checkout's `.venv` for tests and `.venv-quality` for static
 quality when present. `SCHEMII_CI_PYTHON` and `SCHEMII_CI_QUALITY_PYTHON` can select
-already prepared interpreters for linked worktrees. Keep quality free of test
-dependencies: they can change Mypy's imported module graph and expose unrelated
-legacy errors. The two environments preserve the former hosted setup without
-relaxing its type rules.
+prepared interpreters elsewhere. Install the project from the checkout being
+checked, especially for quality: another worktree's editable installation changes
+Mypy's imported module graph. The two environments preserve the former hosted
+setup without relaxing its type rules; a correctly prepared combined environment
+also works.
 
 `npm test` needs Node, not an npm dependency installation; its frontend and harness
 tests use built-in Node modules. Default pytest discovery includes `tests/` and
