@@ -832,3 +832,96 @@ def test_deterministic_python_never_inherits_live_database_credentials_but_postg
     assert calls == (["python"] if feedback else ["python", "postgres"])
     assert all(os.environ[name] == value for name, value in credentials.items())
     assert not any(value in path.read_text() for value in credentials.values())
+
+
+def test_private_artifact_parent_survives_playwright_results_replacement_and_preserves_peers(
+    repository, monkeypatch
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    (repository / ".gitignore").write_text(".schemii/\nartifacts/\n")
+    artifact_root = repository / "artifacts"
+    artifact_root.mkdir(mode=0o755)
+    peer = artifact_root / "peer-evidence.txt"
+    peer.write_text("retained peer evidence")
+    peer_mode = peer.stat().st_mode
+    original_invoke = runner.invoke
+    caller_mask = os.umask(0o022)
+
+    def invoke(root, command, environment, lease=None):
+        if "CI_TELEMETRY_FILE" not in environment:
+            return 0
+        payload = records(environment)
+        body = "import json, os, shutil\nfrom pathlib import Path\n"
+        body += "root = Path('artifacts')\nassert root.stat().st_mode & 0o777 == 0o700\nresults = root / 'playwright-results'\nshutil.rmtree(results)\nresults.mkdir(mode=0o755)\nfile = results / 'replacement-trace.txt'\nfile.write_text('controlled browser output')\nassert results.stat().st_mode & 0o777 == 0o755\nassert file.stat().st_mode & 0o777 == 0o644\n"
+        body += f"Path(os.environ['CI_TELEMETRY_FILE']).write_text('\\n'.join(json.dumps(record) for record in {payload!r}) + '\\n')\n"
+        return original_invoke(root, [sys.executable, "-c", body], environment)
+
+    monkeypatch.setattr(runner, "invoke", invoke)
+    monkeypatch.setattr(
+        runner, "verify_deployment", lambda: [{"url": runner.LOCAL_URL, "status": 200}]
+    )
+    browser = [
+        "node",
+        "scripts/ci/run-browser-shard.mjs",
+        "--project=desktop-chromium",
+        "--shard=1/6",
+        "--profile=full",
+    ]
+    plan = selected(
+        repository, "full", [runner.planner.BROWSER_BOUNDARY, ["./start.sh"], browser]
+    )
+    try:
+        code, _, receipt = execute(repository, plan)
+    finally:
+        os.umask(caller_mask)
+    assert code == 0 and receipt["acceptance"] is True
+    assert stat.S_IMODE(artifact_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((artifact_root / "playwright-results").stat().st_mode) == 0o755
+    assert (
+        stat.S_IMODE(
+            (artifact_root / "playwright-results/replacement-trace.txt").stat().st_mode
+        )
+        == 0o644
+    )
+    assert (
+        peer.read_text() == "retained peer evidence"
+        and peer.stat().st_mode == peer_mode
+    )
+
+
+def test_browser_artifact_symlink_is_rejected_without_changing_peer_directory(
+    repository, monkeypatch
+):
+    monkeypatch.setenv("SCHEMII_E2E_BOOTSTRAP", "1")
+    (repository / ".gitignore").write_text(".schemii/\nartifacts\n")
+    peer = repository / "peer-artifacts"
+    peer.mkdir(mode=0o755)
+    (peer / "evidence.txt").write_text("retained peer evidence")
+    before = peer.stat().st_mode
+    (repository / "artifacts").symlink_to(peer, target_is_directory=True)
+    monkeypatch.setattr(
+        runner, "invoke", lambda root, command, environment, lease=None: 0
+    )
+    monkeypatch.setattr(
+        runner, "verify_deployment", lambda: [{"url": runner.LOCAL_URL, "status": 200}]
+    )
+    browser = [
+        "node",
+        "scripts/ci/run-browser-shard.mjs",
+        "--project=desktop-chromium",
+        "--shard=1/6",
+        "--profile=full",
+    ]
+    code, _, receipt = execute(
+        repository,
+        selected(
+            repository,
+            "full",
+            [runner.planner.BROWSER_BOUNDARY, ["./start.sh"], browser],
+        ),
+    )
+    assert code == 2 and receipt["acceptance"] is False
+    assert receipt["status"] == "incomplete"
+    assert peer.stat().st_mode == before
+    assert [path.name for path in peer.iterdir()] == ["evidence.txt"]
+    assert (peer / "evidence.txt").read_text() == "retained peer evidence"

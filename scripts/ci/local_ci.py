@@ -631,6 +631,7 @@ def run_selected(
                     ]
                 if key[0] == "browser":
                     for output in (
+                        "artifacts",
                         "artifacts/playwright-results",
                         "artifacts/playwright-auth",
                     ):
