@@ -792,3 +792,43 @@ writeFileSync(process.env.CI_TELEMETRY_FILE, records.map(record => JSON.stringif
         assert code == 0 and receipt["acceptance"] is True
         assert paths == [str(credentials_path), str(credentials_path)]
         assert state["setup_calls"] == state["login_calls"] == 1
+
+
+@pytest.mark.parametrize("feedback", [True, False])
+def test_deterministic_python_never_inherits_live_database_credentials_but_postgres_does(
+    repository, monkeypatch, feedback
+):
+    credentials = {
+        "SCHEMII_TEST_METADATA_DSN": "owned-disposable-database",
+        "SCHEMII_TEST_METADATA_PASSWORD": "private-owned-db-password",
+    }
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
+    calls = []
+
+    def invoke(root, command, environment, lease=None):
+        lane = environment["CI_TELEMETRY_LANE"]
+        if lane == "python":
+            assert not any(name in environment for name in credentials)
+        else:
+            assert lane == "postgres"
+            assert all(
+                environment[name] == value for name, value in credentials.items()
+            )
+        calls.append(lane)
+        Path(environment["CI_TELEMETRY_FILE"]).write_text(
+            "\n".join(json.dumps(record) for record in records(environment)) + "\n"
+        )
+        return 0
+
+    monkeypatch.setattr(runner, "invoke", invoke)
+    plan = selected(
+        repository,
+        "full",
+        [["python", "scripts/ci/python-tests.py"], runner.planner.POSTGRES_COMMAND],
+    )
+    code, path, receipt = execute(repository, plan, feedback=feedback)
+    assert code == 0 and receipt["acceptance"] == (not feedback)
+    assert calls == (["python"] if feedback else ["python", "postgres"])
+    assert all(os.environ[name] == value for name, value in credentials.items())
+    assert not any(value in path.read_text() for value in credentials.values())

@@ -599,6 +599,15 @@ def run_selected(
                 }:
                     del child_env[key]
             key = lane_for(argv)
+            if key and key[0] == "python":
+                # Default discovery includes the opt-in integration family.
+                # Its real execution belongs exclusively to the PostgreSQL
+                # lane, even when the operator configured those prerequisites.
+                for name in (
+                    "SCHEMII_TEST_METADATA_DSN",
+                    "SCHEMII_TEST_METADATA_PASSWORD",
+                ):
+                    child_env.pop(name, None)
             telemetry = None
             if key:
                 command_dir = run / f"command-{index:02d}"
