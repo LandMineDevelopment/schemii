@@ -15,6 +15,19 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_hosted_workflow_is_archived_without_executable_actions_workflows() -> None:
+    archive = ROOT / "testing/ci/hosted-workflow.yml"
+    assert archive.is_file() and not archive.is_symlink()
+    assert not archive.is_relative_to(ROOT / ".github/workflows")
+    workflow = archive.read_text(encoding="utf-8")
+    assert "jobs:\n" in workflow and "  required-gate:\n" in workflow
+    assert not [
+        path
+        for path in (ROOT / ".github/workflows").rglob("*")
+        if path.suffix.lower() in {".yml", ".yaml"}
+    ], "Hosted workflow fixtures must stay outside GitHub's executable directory"
+
+
 def _service(compose: str, name: str) -> str:
     lines = compose.splitlines()
     start = lines.index(f"  {name}:")
@@ -621,7 +634,7 @@ def test_node_runner_cancellation_stops_owned_child_and_keeps_incomplete_evidenc
 def test_ci_executes_unit_browser_and_real_postgres_behavior(
     tmp_path: Path, include_load: bool, profile: str
 ) -> None:
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text(encoding="utf-8")
 
     unit = _service(workflow, "test")
     node_step = _named_step(unit, "Fast frontend and harness feedback")

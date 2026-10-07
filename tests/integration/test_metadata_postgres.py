@@ -122,6 +122,9 @@ def test_postgres_metadata_migrates_persists_encrypts_and_reports_ready(
 
     assert reopened.connection_factory is not None
     with reopened.connection_factory() as connection:
+        metadata_host = connection.info.host
+        metadata_port = connection.info.port
+        metadata_user = connection.info.user
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -146,10 +149,10 @@ def test_postgres_metadata_migrates_persists_encrypts_and_reports_ready(
 
     forbidden = PostgresConnectionCreate(
         name="Metadata bypass",
-        host="127.0.0.1",
-        port=5432,
+        host=metadata_host,
+        port=metadata_port,
         database="a_different_database_on_the_same_server",
-        username="postgres",
+        username=metadata_user,
     )
     with pytest.raises(ConnectionTargetForbiddenError):
         reopened.target_policy.validate(forbidden)

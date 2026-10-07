@@ -171,7 +171,13 @@ def test_workflow_checkout_runs_base_added_classifier_for_an_existing_pr(
         "scripts/ci/test_selection.py",
         ".github/workflows/ci.yml",
     ):
-        write(root, file, (ROOT / file).read_text())
+        # Keep the historical provider identity in this synthetic hosted checkout.
+        source = (
+            "testing/ci/hosted-workflow.yml"
+            if file == ".github/workflows/ci.yml"
+            else file
+        )
+        write(root, file, (ROOT / source).read_text())
     write(root, "src/base-only.py", "# Unrelated base advance\n")
     base = commit(root)
     command(root, "merge", "--quiet", "--no-ff", head, "-m", "prospective PR merge")

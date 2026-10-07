@@ -159,8 +159,8 @@ recovery after the supervisor and guardian both die. A separate live peer stays
 usable throughout. It checks captured PID/start-tick identities, never process
 names, and never manually removes a disposable session directory. The optional
 expiry run waits for a fresh screenshot to age ten real minutes. Keep that long
-run and destructive disposable lifecycle checks outside ordinary CI. Native
-turn interruption still requires an actual coordinator interruption/follow-up;
+run and destructive disposable lifecycle checks outside ordinary local feedback.
+Native turn interruption still requires an actual coordinator interruption/follow-up;
 the current collaboration surface exposes no session-close control. Neither
 completion nor interruption implies MCP transport shutdown.
 
@@ -185,8 +185,10 @@ and records their source, command, scope, outcome and evidence. Developers use t
 [change planner and feedback inventory](../../docs/testing-feedback.md). Reviewers
 inspect actual existing evidence independently and reproduce material gaps instead
 of repeating a complete suite by default. New threads, handoffs and merge delivery
-do not justify duplicate local suites or manually dispatched CI. Required current-head
-workflow checks and manual scenario/fixture ownership gates still apply.
+do not justify duplicate local suites. GitHub Actions is disabled; inspect the
+private source-bound receipts from `./ci.sh` against the current PR head instead
+of waiting for hosted checks. Successful `./ci.sh --feedback` may leave required
+acceptance pending. Manual scenario/fixture ownership gates still apply.
 
 Prepare a developer's linked Git worktree and task branch before dispatch. Read
 the existing changes and assign narrow files; never switch another chat's checkout

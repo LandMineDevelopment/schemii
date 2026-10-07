@@ -41,10 +41,13 @@ report the discovery limit.
   spawn task, with actual workspace, ownership and focused verification steps.
 - Apply the testing and verification reuse section of `AGENTS.md`. The coordinator
   owns acceptance scheduling: assign focused checks, record source-bound evidence
-  and inspect existing current-head PR results. Reviewers inspect that evidence
-  and reproduce material gaps; handoffs and merges do not justify another full
-  local suite or a manually dispatched CI run. Use the shared change planner and
-  retain the workflow's required profile and gate.
+  and inspect existing local receipts against the current PR head. Reviewers
+  inspect that evidence and reproduce material gaps; handoffs and merges do not justify another full
+  local suite. GitHub Actions is disabled: use `./ci.sh --plan` for the shared
+  change planner, `./ci.sh --feedback` for deterministic feedback with acceptance
+  pending, and coordinator-scheduled `./ci.sh` for the complete selected local
+  plan. Keep receipts and browser evidence private; never require hosted checks
+  or dispatch Actions to manufacture evidence.
 - For coordinated UI acceptance, follow the existing harness runbook to prepare
   `./test.sh --controller t3`. Dispatch ready isolated lanes, claim each to the
   actual returned agent ID, then send its private session file. Workers keep that

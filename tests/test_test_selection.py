@@ -831,6 +831,7 @@ def test_local_configured_pg_runs_before_missing_browser_boundary(
     tmp_path, monkeypatch, capsys
 ):
     monkeypatch.setenv("SCHEMII_TEST_METADATA_DSN", "owned-test-dsn")
+    monkeypatch.setenv("SCHEMII_TEST_METADATA_PASSWORD", "owned-test-password")
     for name in (
         "SCHEMII_E2E_BOOTSTRAP",
         "SCHEMII_E2E_CREDENTIALS_FILE",
@@ -989,7 +990,7 @@ def test_cache_complete_closure_and_scoped_backup_workflow_contract():
         for argv in browser
     )
     assert not any("--backup" in argv for argv in selected)
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text()
     step = workflow.split(
         "- name: Verify metadata backup recovery in an isolated database\n", 1
     )[1].split("- name:", 1)[0]
@@ -1288,7 +1289,7 @@ def assert_workflow_reuse_contract(workflow):
 
 
 def test_workflow_suppresses_duplicate_layers_only_for_the_closed_verified_modes():
-    assert_workflow_reuse_contract((ROOT / ".github/workflows/ci.yml").read_text())
+    assert_workflow_reuse_contract((ROOT / "testing/ci/hosted-workflow.yml").read_text())
 
 
 REUSE_GUARD_TARGETS = [
@@ -1309,7 +1310,7 @@ REUSE_GUARD_TARGETS = [
     "damage", ["missing-native", "unsupported", "junction", "comparison"]
 )
 def test_workflow_reuse_guard_mutations_are_rejected(target, damage):
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text()
     job, kind = target
     section = workflow_sections(workflow)[job]
     positive = kind != "negative"
@@ -1357,7 +1358,7 @@ def test_workflow_reuse_guard_mutations_are_rejected(target, damage):
 
 
 def test_workflow_reuse_guard_accepts_reordered_literal_modes():
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text()
     for variable in (
         "steps.reuse.outputs.acceptance",
         "needs.classify.outputs.acceptance",
@@ -1381,7 +1382,7 @@ def test_workflow_reuse_guard_accepts_reordered_literal_modes():
 
 @pytest.mark.parametrize("job", ["timing-rollup", "required-gate"])
 def test_workflow_reuse_guard_rejects_unconditionally_forwarded_proof(job):
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text()
     section = workflow_sections(workflow)[job]
     assignment = "reuse_args=(--reuse artifacts/acceptance-reuse/reuse.json)"
     changed = section.replace(f"            {assignment}\n", "", 1).replace(
@@ -1522,7 +1523,7 @@ def test_classifier_exports_the_exact_closed_browser_matrix(
             for shard in range(1, total + 1)
         ]
     }
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text()
     assert "browser_matrix: ${{ steps.classify.outputs.browser_matrix }}" in workflow
     assert "matrix: ${{ fromJSON(needs.classify.outputs.browser_matrix) }}" in workflow
     assert (
@@ -1786,7 +1787,7 @@ def test_inspection_complete_closure_independent_minimum_and_backup_contract():
     assert not any(
         "--backup" in argv or "tests/integration" in argv for argv in selected
     )
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text()
     assert (
         "needs.classify.outputs.profile != 'schemer-result-cache' && needs.classify.outputs.profile != 'developer-inspection'"
         in workflow

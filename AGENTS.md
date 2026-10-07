@@ -20,33 +20,35 @@ The launcher may use Docker on the host as an implementation detail. Application
 ## Testing and verification reuse
 
 Read [the testing feedback policy](docs/testing-feedback.md) before choosing checks.
-Inspect the current PR head, existing checks and retained evidence before running
-tests. Use `.venv/bin/python scripts/test-changes.py --base origin/main` for the complete
-change plan; choose the cheapest faithful regression for the edit during development.
+Inspect the current PR head and retained local evidence before running tests.
+Use `./ci.sh --plan --base origin/main` for the complete change plan; choose the
+cheapest faithful regression for the edit during development.
 The planner includes committed, staged and unstaged changes. Proven modifications
 to existing owned leaves retain their profile before commit; unknown, untracked,
-mixed or unsafe changes conservatively select full acceptance. Use `--feedback`
+mixed or unsafe changes conservatively select full acceptance. Use `./ci.sh --feedback`
 for deterministic feedback with real database/browser acceptance explicitly pending;
 that does not require repeating every acceptance layer after each edit.
 
 The coordinator owns acceptance scheduling. Assign developers focused checks and
 reviewers evidence inspection, with reproduction only for a material gap or finding.
 Record the command, scope, source, outcome and evidence location. Reuse successful
-checks whose tested source is still applicable; verify required hosted checks against
-the current PR head before merging. A new agent, handoff, review, worktree or merge
-is not a reason to repeat a local full suite or manually dispatch/rerun CI. Broaden
-or repeat checks only for relevant source changes, failures, missing evidence or an
-explicit acceptance requirement. Preserve failed attempts; do not retry them away.
+checks whose tested source and scope still apply to the current PR head. A new
+agent, handoff, review, worktree or merge is not a reason to repeat a local full
+suite. Broaden or repeat checks only for relevant source changes, failures,
+missing evidence or an explicit acceptance requirement. Preserve failed attempts;
+do not retry them away.
 
-GitHub schedules required PR/main checks automatically. Respect its selected
-profile and strict gate; do not bypass them or launch duplicate runs for samples.
-An identical-tree main merge can reuse a recent full PR's validated original
-receipts through CI admission and the independent gate recheck. The exact reviewed
-cache and developer-inspection profiles also support reuse when both checks
-independently prove the entire push has the same owner, base, policy and original
-scoped inventory. Main otherwise
-retains full acceptance. Inspect that automatic verdict; a merge is not a reason
-to rerun accepted work manually.
+GitHub Actions is disabled for this repository. `./ci.sh` runs the complete selected
+local acceptance plan; `./ci.sh --full` deliberately selects every layer. Inspect
+the private source-bound receipts and required layer statuses before claiming
+acceptance or merging. Successful feedback with pending layers is incomplete.
+Provision an explicitly disposable external PostgreSQL database and password for
+real-database checks. Browser acceptance needs test-owned credentials or explicit
+bootstrap consent on a disposable stack, the canonical launcher and deployment
+lease. Keep credentials, logs, screenshots and traces private. Do not require or
+wait for hosted checks, restore hosted workflows, or dispatch Actions to generate
+evidence. The archived workflow and hosted reuse tools preserve historical
+contracts; they do not establish current local acceptance.
 Keep full stress campaigns and ten-minute browser cleanup probes outside ordinary
 feedback unless their ownership boundary changed or deliberate lifecycle acceptance
 is assigned. Test/CI/instruction-only changes do not require an application rebuild.

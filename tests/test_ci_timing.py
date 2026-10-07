@@ -43,7 +43,7 @@ SECRET = "PLANTED_PASSWORD_TOKEN_AUTHORIZATION_cookie_7ce19"
 
 
 def test_startup_collection_keeps_exact_browser_artifact_and_selected_topology():
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / "testing/ci/hosted-workflow.yml").read_text()
     startup = workflow.split(
         "      - name: Start the canonical application stack\n", 1
     )[1].split("      - name:", 1)[0]
