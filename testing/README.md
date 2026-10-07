@@ -55,6 +55,9 @@ Browser acceptance requires an owned test account through private
 `SCHEMII_E2E_CREDENTIALS_FILE` or explicit environment credentials, or explicit
 `SCHEMII_E2E_BOOTSTRAP=1` consent on a fresh disposable stack. It runs the selected
 desktop and Android shards and, where selected, isolated backup recovery. The
+local runner retains one mode-0600 bootstrap credential file privately for all
+shards and later explicit reuse. It never adopts an existing administrator; do
+not share that credential file with report evidence. The
 coordinator schedules this work, waits for manual QA leases to release, and uses
 `./start.sh` as the only application lifecycle command. Keep account state,
 screenshots, traces and receipts private. Missing prerequisites remain blocked

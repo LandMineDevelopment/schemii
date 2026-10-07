@@ -385,6 +385,12 @@ workspaces, and checks that their catalogs are reachable. It preserves existing
 connections and designs. It is off by default because the complete suite exercises
 shared settings and database contents. Use focused specs when testing against a
 personal stack.
+For `./ci.sh`, bootstrap without supplied credentials creates one private credential
+file in the run directory and reuses it across every selected shard. The receipt
+references its relative filename for later explicit reuse; no passwords are
+recorded in receipts. An existing populated installation still requires its owned
+test credentials. Preserve the bootstrap credential file with that disposable
+installation and exclude it from shared evidence.
 Keep screenshots, traces, reports and credentials private. The former hosted
 workflow is preserved only as a historical contract fixture in
 [testing/ci/hosted-workflow.yml](testing/ci/hosted-workflow.yml); no executable
