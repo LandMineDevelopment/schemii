@@ -1,28 +1,34 @@
 # Testing feedback and coverage
 
-The supported complete deterministic commands are `npm test` and
-`python scripts/ci/python-tests.py`, shared by local feedback and CI. Use
-`python -m pytest -q PATH` for focused Python regressions.
-Use the constrained Python bootstrap in [testing/README.md](../testing/README.md).
-Default Python discovery includes `tests/` and `testing/`; it does not launch the
-application or opt-in load/browser work. CI runs the Node checks before Python
-setup. Dispatch delay and setup time still contribute to hosted feedback; the
-30-second early-feedback target requires an ordinary hosted run, not a local claim.
+GitHub Actions is disabled for this repository. Development machines own testing
+through `./ci.sh`, using the existing change planner and reviewed coverage profiles.
+The former workflow is archived unchanged at
+[testing/ci/hosted-workflow.yml](../testing/ci/hosted-workflow.yml), outside
+GitHub's executable workflow directory. Its tests and provider-specific timing
+and reuse tools preserve historical contracts; they do not schedule acceptance
+or supply a current local pass. Do not wait for hosted checks or dispatch Actions.
 
-Local and CI Node execution share `npm test` and the single discovery runner
-`scripts/ci/node-tests.mjs`. It selects deterministic `.test.js`/`.test.mjs` files
-from frontend, harness, telemetry and the load-unit family when that family is
-present. Browser specs and executable load scenarios are excluded. Setting
-`CI_TELEMETRY_FILE` adds the approved reporters before the selected file arguments
-without changing discovery; there is no second CI test-glob list. The deployment
-contract check executes the actual CI command in a temporary four-family checkout
-and checks unique receipts, with planted opt-in files that fail if selected.
+```bash
+./ci.sh --plan --base origin/main       # Describe all selected commands
+./ci.sh --feedback --base origin/main   # Deterministic prefix; acceptance pending
+./ci.sh --base origin/main              # Complete selected local acceptance
+./ci.sh --full --base origin/main       # Deliberately select all layers
+```
+
+Use the constrained Python and quality bootstrap in
+[testing/README.md](../testing/README.md). The complete deterministic commands
+remain `npm test` and `python scripts/ci/python-tests.py`; focused Python
+regressions use `python -m pytest -q PATH`. Default discovery includes `tests/`
+and `testing/` once each and does not start the application, browser or opt-in
+load scenarios. `npm test` uses the single `scripts/ci/node-tests.mjs` discovery
+runner for frontend, harness, telemetry and the available load-unit family.
+Setting `CI_TELEMETRY_FILE` adds the approved reporter without changing discovery.
 
 ## During development
 
 Use the inventory below to choose the smallest check that exercises the changed
-invariant. Run it after each meaningful edit, then let the ordinary PR acceptance
-path cover the complete source change. Repeated full browser matrices are not a
+invariant. Run it after each meaningful edit, then schedule the selected local
+acceptance plan for the complete source change. Repeated full browser matrices are not a
 substitute for a focused regression or a faithful controlled failure.
 
 1. For frontend state, start with the relevant `node --test` files, or use
@@ -37,10 +43,10 @@ substitute for a focused regression or a faithful controlled failure.
    environment. An unavailable comparison stops the check; resolve the intended
    base before continuing rather than treating an empty selection as validation.
 4. When ownership is unknown or a change crosses boundaries, use the broader
-   Node/Python commands and the required source CI layers. A narrow selection
-   is feedback during development, not permission to omit acceptance.
+   Node/Python commands and the required source acceptance layers. A narrow
+   selection is feedback during development, not permission to omit acceptance.
 
-Use `.venv/bin/python scripts/test-changes.py --base origin/main` to print the actual
+Use `./ci.sh --plan --base origin/main` to print the actual
 Git comparison, committed/staged/unstaged changed paths, untracked status and all
 required commands. Existing owned regular-file modifications with stable Git and
 working-tree modes retain their profile before commit. The union of each diff
@@ -52,18 +58,132 @@ plan lists those paths as unverified rather than claiming they are unchanged.
 Git configurations that disable executable-mode or symlink discovery also force
 full checks, since they can conceal changes outside the visible diff.
 
-Use `--feedback` to execute the selected deterministic checks during development.
-Python child checks use the planner's interpreter, so direct virtual-environment
-invocation works without changing PATH or activating another environment.
-The plan explicitly lists any required PostgreSQL/browser layers as pending;
-successful feedback is not full acceptance. `--run` executes the complete plan
-and stops on the first failed check or missing prerequisite at that layer's
-boundary, so missing live credentials do not block earlier cheap checks.
-Real-database checks require `SCHEMII_TEST_METADATA_DSN`. Browser checks require
-explicitly owned account credentials or bootstrap consent. The application
-command remains `./start.sh`; deployment leases still apply.
+Use `./ci.sh --feedback` for the selected deterministic prefix. Python child
+checks use the selected virtual-environment interpreter. Successful feedback
+always has `acceptance: false`; the receipt lists any remaining database/browser
+work as pending. `./ci.sh` runs the complete selected plan and stops at the first
+failed command or missing prerequisite, after preserving the earlier outcomes.
+Missing live prerequisites do not block cheap checks that precede that layer.
+A failed, cancelled, incomplete or source-changing run is not acceptance.
 
-## Affected PR acceptance
+Each run creates a private directory under `.schemii/local-ci/` with a source-bound
+`receipt.json`, selected base/profile/mode, command status and elapsed time,
+pending layers and sanitized per-case timing summaries where supported. The
+source fingerprint includes dirty working-tree files; inspect it against the
+current source before reuse. Keep receipts, logs, screenshots, traces and account
+state private. No artifacts are uploaded automatically. Record prerequisite,
+setup and execution boundaries honestly; a local elapsed time cannot establish
+hosted queue savings. Preserve failed and blocked attempts.
+
+## Selected local acceptance
+
+The planner applies the complete committed/staged/unstaged change and selects the
+reviewed profile. Unknown or unsafe changes select full acceptance. The exact
+owned paths and closures live in
+[scripts/ci/test_selection.py](../scripts/ci/test_selection.py); the command list
+printed by `./ci.sh --plan` is authoritative for that checkout and base.
+
+| Profile | Required checks |
+| --- | --- |
+| native tooling and its two existing documentation companions | Node, static Python, all native Python controls and changed companion Markdown/link validation |
+| harness or load tooling | Node, static Python, native + harness + load-planner Python closure |
+| existing backend test leaves | Node, static Python, complete deterministic Python |
+| existing frontend test leaves | complete Node |
+| existing E2E test leaves | Node and complete desktop + Android browser acceptance |
+| Schemer result-cache source, optionally with its existing direct Node regression | complete Node, whole frontend-serving Python file and frozen eight-file browser closure on both devices |
+| Developer inspection source, optionally with its direct helper regression file | complete Node, static Python, eight whole Python files and two mounted browser files on both devices |
+| full | Node, static Python, complete Python, real PostgreSQL and all browser acceptance |
+
+Native documentation companions retain content/link validation before Node and
+native controls. The narrowly reviewed product profiles retain their whole-file
+Python and mounted browser closures; direct-test-only changes retain the ordinary
+test-owner profile. New dependencies, shared policy, added/removed files and mixed
+owners do not qualify for narrowed acceptance. `--full` deliberately selects every
+layer, regardless of a narrower change profile.
+
+Full acceptance includes Node, incremental static Python quality, complete Python
+and compile checks, real PostgreSQL, selected browser shards on both desktop
+Chromium and Android, and the launcher's isolated backup recovery smoke. Full
+stress ramps and ten-minute browser lifecycle probes stay outside normal feedback
+unless deliberately assigned. Test/CI/instruction-only changes do not require an
+application rebuild merely to show the change; a deliberately selected mounted
+browser layer still uses the canonical launcher.
+
+Real PostgreSQL requires both `SCHEMII_TEST_METADATA_DSN` and
+`SCHEMII_TEST_METADATA_PASSWORD` for an explicitly provisioned disposable external
+database. Tests create and clean owned schemas. Do not connect them to user data
+or the launcher's private metadata database, and do not invoke Docker directly.
+Browser acceptance needs owned test credentials through private
+`SCHEMII_E2E_CREDENTIALS_FILE` or explicit username/password variables, or explicit
+`SCHEMII_E2E_BOOTSTRAP=1` consent on a fresh disposable stack. Missing prerequisites
+are blocked, not skipped acceptance.
+
+The coordinator schedules mounted acceptance after manual QA deployment leases
+release. The local runner acquires the deployment/startup locks, uses `./start.sh`
+as the only application lifecycle command and verifies both canonical
+`https://localhost:8001` and Tailscale preview readiness before selected browser
+execution. Do not narrow the selected device/shard inventory through ambient
+filters or alternate origins. The browser suite does not replace authenticated
+native-agent manual UI acceptance in #73/#137. Live-provider specs have separate
+explicit prerequisites; their skips do not establish provider acceptance.
+
+## Pre-merge acceptance and reuse
+
+Inspect the complete change plan and existing local receipts before scheduling
+missing acceptance once. Independent review inspects the actual source, scope,
+commands, outcomes and evidence and reproduces material findings or missing
+proof with focused checks. A new agent, handoff, worktree, review or merge is not
+a reason to repeat a still-applicable check. Record what was run versus inspected.
+
+A retained receipt may be reused only while its tested source, comparison base,
+policy, selected inventory and required layers remain applicable to the current
+PR head. Verify those boundaries explicitly; a matching filename or green process
+exit is insufficient. Dirty-source evidence must be reconciled with the delivered
+tree rather than relabeled as a current-head run. Failures, source changes and
+missing/stale evidence justify fresh checks. Pending or blocked layers remain
+visible and prevent a complete acceptance claim. GitHub schedules no required
+PR/main checks for this repository. The historical hosted donor/gate protocol
+below is not a substitute for this local evidence review.
+
+Do not remove meaningful coverage, increase skips/timeouts or add retries to
+conceal failures. Prefer a cheaper oracle only when it detects the same plausible
+defect; distinguish source/package contracts from visible behavior guarantees.
+
+## Focused inventory
+
+Costs below are audit observations at the referenced baseline, not current
+percentiles. Focused commands are from the repository root and do not replace
+the broader acceptance path.
+
+| Ownership / invariant | Unique coverage / cheapest faithful oracle | Focused command | Observed cost and broader layer |
+| --- | --- | --- | --- |
+| Auth and exact connection ownership | Denial, revoked sessions and cross-owner fencing; in-memory API outcomes | `python -m pytest -q tests/test_account_auth.py tests/test_query_cancellation.py` | Part of the remaining ~68s Python suite; real PostgreSQL verifies persistence and role enforcement |
+| Migration execution | Stale revision/target, one execution, uncertain commit and no DDL replay; fake transport exercises lifecycle races | `python -m pytest -q tests/test_migration_execution.py` | Preserve real PostgreSQL rollback/catalog/restart and mounted UI review/apply paths |
+| Console and cancellation | Session owner/turn/revocation fences, cancellation and raw transaction state | `python -m pytest -q tests/test_raw_console.py tests/test_query_cancellation.py` | Unit reaping does not establish lifespan scheduling or real lock/admission release; retain real transport cases |
+| Semantic compiler | Safe AST, grain/filter/repetition and generated SQL contracts; pure compiler inputs | `python -m pytest -q tests/test_schemoo_filters.py tests/test_schemoo_repetition.py tests/test_schemoo_column_comparisons.py` | Real PostgreSQL result oracles cover type/NULL/calendar semantics that AST checks cannot |
+| Changed frontend state | State ordering, late responses, aborts, cache budgets and fixture ledgers; Node component outcomes | `node --test tests/frontend/request-coordinator.test.js tests/frontend/schemer-result-cache.test.js` | Whole Node suite: 395 passes, ~0.63–0.68s local / ~2s hosted at audit; browser adds physical geometry and persistence |
+| QA provisioning and cleanup | Owned fixture ledger, redaction, preserved peers and interrupted cleanup; temporary directories/mocked API | `python -m pytest -q testing/test_report_author_fixtures.py testing/harness` | 30 audit cases, ~0.08–0.14s; native guardrail cases are additionally collected, without duplicate unittest invocation |
+| Native stock-agent guardrails | Assignment, runtime capacity/config, isolated connection ownership and cleanup algorithms | `python -m pytest -q testing/agents` | Deterministic subprocess/temp-data regressions; mechanical isolation probes and authenticated manual acceptance remain separate |
+| Inspection graph | Graph completeness, no I/O/secrets, identity and derive-once; immutable document or small synthetic graph where faithful | `python -m pytest -q tests/test_developer_inspection.py tests/test_system_inspection.py tests/test_route_inspection.py tests/test_database_inspection.py` | 36 cases accounted for at least 149.46s / 67.2% of prior full run; fixture work tracked independently in #126 |
+| Mounted browser workflows | Save/reopen, keyboard focus, paging, permissions and mobile geometry; real UI plus exact persisted/result assertions | `npm run test:e2e -- --project=desktop-chromium tests/e2e/schemoo-model-editor-audit.spec.js` | Requires `./start.sh`, test-owned fixtures and released deployment leases; both devices and all selected shards remain required locally |
+
+Check actual collection with `python -m pytest --collect-only -q`. The September 29
+delivery baseline `77af33c` collected 1,628 default cases and 144 additional cases
+under `testing/`; the original omitted provisioning inventory is 30 of those.
+Counts grow as focused regressions land. Report collected, executed and skipped
+counts together; PostgreSQL skips do not prove database behavior.
+
+## Historical hosted workflow and measurements
+
+The following sections record the archived GitHub Actions contract and measured
+results before hosted execution was disabled. Hosted jobs, matrices, public
+artifact policies, automatic dispatch and provider donor verification below are
+historical reference and regression fixtures, not current execution or merge
+requirements. Keep their original identities and measured limitations; do not
+claim those timings describe the local runner or turn old hosted receipts into
+local acceptance. Current local policy is defined above.
+
+### Archived hosted profile and gate contract
 
 A strict schema-2 descriptor selects one reviewed profile from the complete
 PR merge-base-to-head diff. Only modifications to frozen existing regular files
@@ -105,7 +225,7 @@ Unknown siblings, other documentation, policy files, mixed owners and unsafe Git
 states retain full acceptance. Manual dispatch and main retain their existing full
 or positively verified reuse rules. This avoids unrelated installed-application,
 PostgreSQL and browser work for native instructions; actual selected-CI elapsed
-savings require a naturally occurring eligible change.
+savings had not been measured for every profile.
 
 The exact product owner is `src/schemii/schemer/web/result-cache.js`, alone or with
 an existing modification to `tests/frontend/schemer-result-cache.test.js`. The
@@ -148,8 +268,7 @@ map consumers. Standalone PostgreSQL execution and launcher backup recovery are
 excluded because these owners derive static inspection metadata; the selected
 mounted graph still uses the standard configured stack and fixture preparation.
 Full and cache topology and coverage stay unchanged. The retained ordinary full
-observation suggests roughly 1.8–2 minutes of source-critical savings, but only a
-future ordinary selected run can establish actual elapsed savings.
+observation suggests roughly 1.8–2 minutes of source-critical savings, but no ordinary selected run had yet established actual elapsed savings.
 
 Complete CI Python uses `python scripts/ci/python-tests.py`: the inspection fixture
 consumers stay together in one isolated process. Default runs with at least four
@@ -158,8 +277,7 @@ process; normal pytest discovery in the remaining process ignores precisely thos
 two owned groups. Smaller or unknown CPU capacity retains two processes, and
 explicit tooling arguments retain their existing selection behavior. All groups
 merge one strict canonical receipt. The PR186 phase model suggests roughly one
-minute of Python-step savings; ordinary current-head CI must establish the actual
-wall reduction, and browser work may still dominate the workflow. Full and E2E
+minute of Python-step savings; the predicted reduction was not measured on ordinary current-head CI, and browser work may still dominate the workflow. Full and E2E
 acceptance use six isolated hosted application
 stacks per device; the frozen cache profile keeps three. Full/E2E stacks use the
 owned two-process execution described below. Selected cache and inspection
@@ -174,10 +292,9 @@ For scale only, natural main run 36763414216 attempt 1 took 474 seconds to its
 source critical path: unit wall 258 seconds and browser walls 354–457 seconds.
 Omitting its PostgreSQL and four browser jobs would remove 29.167 job-minutes;
 retaining its unchanged unit job would imply a 277-second source path. This is
-an estimate from old job boundaries, not measured selective-CI speed. Fresh
-ordinary full and selected PR runs must establish actual elapsed savings.
+an estimate from old job boundaries, not measured selective-CI speed. Actual elapsed savings were not established by that estimate.
 
-## Ordinary hosted cost reference
+### Ordinary hosted cost reference
 
 The successful [PR #167 run, attempt 1](https://github.com/LandMineDevelopment/schemii/actions/runs/36666053425)
 checked out source `86edfe85bbe99cf984a9976e931243e33d3ad7fe`. This is one
@@ -198,56 +315,7 @@ include scheduling and dependencies; the available timestamps do not isolate
 pure runner queue time. Compare future ordinary runs at their recorded source
 and inventory, retaining failed attempts rather than selecting only green ones.
 
-## Focused inventory
-
-Costs below are audit observations at the referenced baseline, not current
-percentiles. Focused commands are from the repository root and do not replace
-the broader acceptance path.
-
-| Ownership / invariant | Unique coverage / cheapest faithful oracle | Focused command | Observed cost and broader layer |
-| --- | --- | --- | --- |
-| Auth and exact connection ownership | Denial, revoked sessions and cross-owner fencing; in-memory API outcomes | `python -m pytest -q tests/test_account_auth.py tests/test_query_cancellation.py` | Part of the remaining ~68s Python suite; real PostgreSQL verifies persistence and role enforcement |
-| Migration execution | Stale revision/target, one execution, uncertain commit and no DDL replay; fake transport exercises lifecycle races | `python -m pytest -q tests/test_migration_execution.py` | Preserve real PostgreSQL rollback/catalog/restart and mounted UI review/apply paths |
-| Console and cancellation | Session owner/turn/revocation fences, cancellation and raw transaction state | `python -m pytest -q tests/test_raw_console.py tests/test_query_cancellation.py` | Unit reaping does not establish lifespan scheduling or real lock/admission release; retain real transport cases |
-| Semantic compiler | Safe AST, grain/filter/repetition and generated SQL contracts; pure compiler inputs | `python -m pytest -q tests/test_schemoo_filters.py tests/test_schemoo_repetition.py tests/test_schemoo_column_comparisons.py` | Real PostgreSQL result oracles cover type/NULL/calendar semantics that AST checks cannot |
-| Changed frontend state | State ordering, late responses, aborts, cache budgets and fixture ledgers; Node component outcomes | `node --test tests/frontend/request-coordinator.test.js tests/frontend/schemer-result-cache.test.js` | Whole Node suite: 395 passes, ~0.63–0.68s local / ~2s hosted at audit; browser adds physical geometry and persistence |
-| QA provisioning and cleanup | Owned fixture ledger, redaction, preserved peers and interrupted cleanup; temporary directories/mocked API | `python -m pytest -q testing/test_report_author_fixtures.py testing/harness` | 30 audit cases, ~0.08–0.14s; native guardrail cases are additionally collected, without duplicate unittest invocation |
-| Native stock-agent guardrails | Assignment, runtime capacity/config, isolated connection ownership and cleanup algorithms | `python -m pytest -q testing/agents` | Deterministic subprocess/temp-data regressions; mechanical isolation probes and authenticated manual acceptance remain separate |
-| Inspection graph | Graph completeness, no I/O/secrets, identity and derive-once; immutable document or small synthetic graph where faithful | `python -m pytest -q tests/test_developer_inspection.py tests/test_system_inspection.py tests/test_route_inspection.py tests/test_database_inspection.py` | 36 cases accounted for at least 149.46s / 67.2% of prior full run; fixture work tracked independently in #126 |
-| Mounted browser workflows | Save/reopen, keyboard focus, paging, permissions and mobile geometry; real UI plus exact persisted/result assertions | `npm run test:e2e -- --project=desktop-chromium tests/e2e/schemoo-model-editor-audit.spec.js` | Requires `./start.sh`, test-owned fixtures and released deployment leases; all projects/shards remain in CI |
-
-Check actual collection with `python -m pytest --collect-only -q`. The September 29
-delivery baseline `77af33c` collected 1,628 default cases and 144 additional cases
-under `testing/`; the original omitted provisioning inventory is 30 of those.
-Counts grow as focused regressions land. Report collected, executed and skipped
-counts together; PostgreSQL skips do not prove database behavior.
-
-## Pre-merge acceptance and reuse
-
-Use the complete change plan and the current PR's selected profile. Inspect
-existing checks and their actual source-bound receipts before running acceptance;
-the coordinator schedules missing work once. A new agent, review, handoff, worktree
-or merge does not require another local full suite or a manually dispatched CI run.
-Independent review examines actual evidence and reproduces material findings or
-gaps with focused controls. Record commands, scope, tested source, outcomes and
-evidence locations; distinguish inspected evidence from checks you actually ran.
-Relevant source changes, failures and missing/stale evidence justify fresh checks.
-Passing required hosted checks must belong to the current PR head; preserve failed
-attempts and let GitHub schedule required PR/main acceptance automatically.
-
-For a full profile, acceptance comprises Node and complete Python, incremental
-Python quality against the intended base, explicitly configured real PostgreSQL
-and all twelve browser legs. A narrower reviewed profile omits only its documented
-unrelated layers. Browser CI uses the canonical
-HTTPS stack through `./start.sh`; it does not replace manual native-agent UI
-acceptance in #73/#137. Full/default browser acceptance retains the isolated-database backup recovery
-check. The exact cache profile omits this unrelated unchanged launcher/storage
-check; its mounted persistence and export coverage remains required.
-Live provider/report specs require their own authenticated fixture prerequisites;
-track their skips and ownership rather than treating a green default run as proof.
-Full capacity ramps/soaks in #135/#136 stay outside the normal PR feedback path.
-
-### Two browser processes per full stack
+#### Two browser processes per full stack
 
 The first desktop lane overlaps collection-only infrastructure discovery with
 canonical launcher startup under one owned coordinator. Both must pass and stop
@@ -308,7 +376,7 @@ once before pushing: its workflow contracts cover adjacent paths that a narrow
 name filter can miss. Reuse that pass until relevant source changes; it does not
 authorize repeating Python, database or browser acceptance locally.
 
-### Identical-tree post-merge acceptance
+#### Identical-tree post-merge acceptance
 
 For an ordinary push to main, CI can reuse a same-repository merged PR's full
 acceptance from the preceding 24 hours. The tested prospective merge tree must
@@ -379,8 +447,8 @@ and [main177](https://github.com/LandMineDevelopment/schemii/actions/runs/370733
 observations measured 382 versus 69 seconds, saving 313 seconds (5m13s).
 Total executed runner-minutes were 34.117 versus 1.150. This is one natural
 full-PR/main comparison across different events, not a percentile guarantee.
-Scoped product-profile hosted speed still requires the next legitimate ordinary
-product change; do not create sampling PRs or dispatch full runs to manufacture it. Environment-dependent external services and
+Scoped product-profile hosted speed was not measured for every product owner.
+Do not create sampling PRs or dispatch hosted runs to manufacture it. Environment-dependent external services and
 hosted runner images are not made immutable by tree equality; the bounded age
 and unchanged same-repository execution contract are the reuse policy.
 
@@ -388,7 +456,7 @@ Do not remove meaningful coverage, increase skips/timeouts or add retries to
 conceal failures. Prefer a cheaper oracle only when it detects the same plausible
 defect; distinguish source/package contracts from visible behavior guarantees.
 
-## Public CI timing and evidence policy
+### Public CI timing and evidence policy
 
 `npm test` uses one deterministic discovery path for frontend, harness, telemetry
 and available load-unit tests. Each required family, and any present optional
@@ -508,4 +576,4 @@ or application; it is additionally runnable after `npm ci`. The reporter-free
 228,822 bytes (~224 KiB). These single observations on a shared host suggest
 ~364ms overhead, not a percentile or controlled benchmark. The 12-case fixture
 subset emitted 7,319 bytes and completed in 0.05s with Python timing enabled.
-Hosted Python 3.12 / Node 22 behavior and ordinary-run overhead remain CI checks.
+Those observations do not establish compatibility or speed on other runtimes.

@@ -2,19 +2,21 @@
 
 ## Deterministic developer feedback
 
-CI uses Python 3.12 and Node 22. For a fresh checkout, create a virtual environment
-and install the constrained development dependencies:
+GitHub Actions is disabled. Local development owns feedback and acceptance using
+`./ci.sh`; Python 3.12 and Node 22 are the former hosted reference versions. For a
+fresh checkout, create a virtual environment and install the constrained development
+and quality dependencies:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev]'
-npm test
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev,quality]'
+./ci.sh --plan --base origin/main
+./ci.sh --feedback --base origin/main
 ```
 
 `npm test` needs Node, not an npm dependency installation; its frontend and harness
-tests use built-in Node modules. CI runs it before Python setup. Default pytest
-discovery includes `tests/` and the deterministic provisioning, cleanup and
+tests use built-in Node modules. Default pytest discovery includes `tests/` and
+the deterministic provisioning, cleanup and
 native-agent regressions under `testing/`, once each. No launcher rebuild is needed
 for these checks. PostgreSQL cases report skips unless their explicit integration
 credentials are supplied; live browser specs and load experiments are separate
@@ -25,13 +27,29 @@ the broad command.
 See [the feedback inventory](../docs/testing-feedback.md) for focused ownership
 commands, unique coverage, cost and the broader pre-merge acceptance path. A fast
 subset or a skipped/live/manual layer is not complete application acceptance.
-Use `.venv/bin/python scripts/test-changes.py --base origin/main` for the complete change plan
-including staged and unstaged edits. Add `--feedback` for selected deterministic
-checks with required database/browser acceptance explicitly pending. Inspect
+Use `./ci.sh --plan --base origin/main` for the complete change plan including
+staged and unstaged edits. `./ci.sh --feedback` runs selected deterministic checks
+with required database/browser acceptance explicitly pending. `./ci.sh` runs the
+complete selected plan; `./ci.sh --full` deliberately selects every layer. Inspect
 existing source-bound checks before scheduling acceptance. Follow
 [the verification reuse policy](../AGENTS.md): the coordinator assigns focused
 checks, reviewers inspect their actual evidence, and a handoff or merge does not
-justify another local full suite. Required hosted CI runs automatically.
+justify another local full suite. Private source-bound receipts retain failed,
+blocked and pending layers; a successful feedback command is not acceptance.
+
+Full database acceptance requires an explicitly provisioned disposable external
+PostgreSQL database, `SCHEMII_TEST_METADATA_DSN` and
+`SCHEMII_TEST_METADATA_PASSWORD`. The integration suite creates and removes owned
+schemas; never point it at user data or the launcher's private metadata database.
+Browser acceptance requires an owned test account through private
+`SCHEMII_E2E_CREDENTIALS_FILE` or explicit environment credentials, or explicit
+`SCHEMII_E2E_BOOTSTRAP=1` consent on a fresh disposable stack. It runs the selected
+desktop and Android shards and, where selected, isolated backup recovery. The
+coordinator schedules this work, waits for manual QA leases to release, and uses
+`./start.sh` as the only application lifecycle command. Keep account state,
+screenshots, traces and receipts private. Missing prerequisites remain blocked
+rather than silently skipped; there are no hosted artifact uploads or required
+Actions checks.
 
 ## Manual fixture setup
 

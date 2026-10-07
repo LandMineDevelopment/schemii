@@ -278,23 +278,42 @@ select and authenticate an approved provider before sending schema or row contex
 
 ## Development checks
 
-The test suite is split by the boundary it verifies. Run the fast Python behavior
-suite and buildless frontend module suite during development:
+GitHub Actions is disabled for this repository. Run feedback and acceptance in
+local development through the source-aware entrypoint:
 
 ```bash
-.venv/bin/python -m pytest -q
-npm test
+./ci.sh --plan --base origin/main
+./ci.sh --feedback --base origin/main
+# Coordinator-scheduled complete selected acceptance:
+./ci.sh --base origin/main
+# Deliberately select every layer:
+./ci.sh --full --base origin/main
 ```
 
-Python tests use explicitly selected in-memory repositories unless a test is in
-`tests/integration`. They should assert public behavior, transaction outcomes,
+The planner includes committed, staged and unstaged changes and conservatively
+selects full acceptance for unknown or mixed ownership. Feedback runs the selected
+deterministic prefix and always leaves acceptance incomplete. The default command
+runs the complete selected plan, stopping at a failed check or missing prerequisite;
+it does not turn pending database/browser work into a pass. Private receipts under
+`.schemii/local-ci/run-*/receipt.json` retain the source fingerprint, comparison
+base, selected profile, command timings and passed/failed/pending statuses, with
+sanitized per-case timing evidence where supported. Review the receipt against
+the current source before reusing it. A new agent, worktree, review or merge does
+not require repeating evidence that still applies. There are no required hosted
+checks or automatic artifact uploads.
+
+The suite is split by the boundary it verifies. Use `npm test`,
+`.venv/bin/python scripts/ci/python-tests.py` or focused `python -m pytest -q PATH`
+for the changed invariant. Python tests use explicitly selected in-memory
+repositories unless a test is in `tests/integration`. They should assert public
+behavior, transaction outcomes,
 and durable state transitions rather than source layout or fixed route counts.
 Frontend module tests cover state and rendering contracts without requiring a
 running server.
 
 The incremental static-quality gate uses Ruff `0.16.9` and Mypy `2.3.1`, pinned
 in the optional `quality` dependency group. Install it alongside the test tools,
-then run the same check used in CI with the fetched base branch:
+then run it against the intended fetched base branch:
 
 ```bash
 .venv/bin/python -m pip install --constraint constraints.docker.txt --editable '.[dev,quality]'
@@ -307,15 +326,16 @@ legacy Python files receive only undefined or unbound-name checks; they are not
 reformatted wholesale. Mypy requires complete function signatures in the two
 selected modules and checks their function bodies. This explicit boundary keeps
 new files in lint and format checks while type coverage expands without forcing
-unrelated changes across the older codebase. CI supplies the pull request base
-commit (or previous push commit) to this script. When a branch-creation push
-has GitHub's all-zero previous SHA, the script uses the checked-out commit's
-parent and prints that fallback; a root commit without a parent fails clearly
-instead of skipping the quality checks.
+unrelated changes across the older codebase. The local plan supplies its comparison
+base to this script. An unavailable base fails clearly instead of silently skipping
+quality checks. See [the testing policy](docs/testing-feedback.md) and
+[developer setup](testing/README.md) for required layers and evidence reuse.
 
 Real PostgreSQL integration tests require a disposable, externally reachable
-database and are enabled explicitly. The CI workflow provisions that database;
-the local launcher intentionally keeps its databases private.
+database and are enabled explicitly. Provision this test database separately;
+the local launcher intentionally keeps its databases private. Never use user data
+or the launcher's metadata database. Complete selected acceptance requires both
+the DSN and password; ordinary pytest skips without them are not database evidence.
 
 ```bash
 SCHEMII_TEST_METADATA_DSN='host=127.0.0.1 port=5432 dbname=schemii_test user=postgres' \
@@ -324,7 +344,8 @@ SCHEMII_TEST_METADATA_PASSWORD='replace-with-test-password' \
 ```
 
 Assembled browser tests exercise both desktop Chromium and an Android-sized
-viewport against the canonical application stack:
+viewport against the canonical application stack. Schedule them after manual QA
+releases its deployment lease, using an owned test account and fixtures:
 
 ```bash
 ./start.sh
@@ -337,7 +358,7 @@ For an already configured installation, provide explicit test credentials with
 `username` and `password` (a nested `admin` object is also accepted). Browser tests
 never claim or reset an existing administrator. First-admin setup is allowed only
 with the explicit bootstrap flag and a fresh installation. Session state is stored
-under ignored, private `artifacts/playwright-auth/` and is not a CI artifact.
+under ignored, private `artifacts/playwright-auth/` and must remain private.
 
 To verify Schemer against a connected real provider, run the opt-in smoke test
 after `./start.sh`. The admin test account needs an active ChatGPT Codex connection.
@@ -350,15 +371,18 @@ SCHEMII_LIVE_AI=1 SCHEMII_E2E_CREDENTIALS_FILE=/path/to/private-credentials.json
   npx playwright test tests/e2e/schemer-ai-live.spec.js --project=desktop-chromium
 ```
 
-Playwright keeps screenshots and traces only for failures under `artifacts/`.
-CI runs the complete suite against its disposable stack with
+Playwright keeps screenshots and traces only for failures under private `artifacts/`.
+To initialize a fresh disposable local test stack, explicitly consent with
 `SCHEMII_E2E_BOOTSTRAP=1`. This opt-in setup registers the launcher's bookstore,
 migration-demo, and organization fixtures through the HTTPS API, creates missing
 workspaces, and checks that their catalogs are reachable. It preserves existing
-connections and designs. The same flag can initialize a fresh local test stack;
-it is off by default because the complete suite exercises shared settings and
-database contents. Use focused specs when testing against a personal stack.
-CI uploads failure screenshots, traces, and its HTML report for seven days.
+connections and designs. It is off by default because the complete suite exercises
+shared settings and database contents. Use focused specs when testing against a
+personal stack.
+Keep screenshots, traces, reports and credentials private. The former hosted
+workflow is preserved only as a historical contract fixture in
+[testing/ci/hosted-workflow.yml](testing/ci/hosted-workflow.yml); no executable
+workflow remains under `.github/workflows/`.
 
 ## Seeded Docker test deployment
 

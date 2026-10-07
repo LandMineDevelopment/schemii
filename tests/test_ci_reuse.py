@@ -823,7 +823,7 @@ def test_archive_redirect_is_credential_free_and_bounded(monkeypatch):
 
 def test_workflow_keeps_controls_fresh_and_uses_recheck_with_no_extra_donor_artifact():
     workflow = (
-        Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+        Path(__file__).resolve().parents[1] / "testing/ci/hosted-workflow.yml"
     ).read_text()
     # Parse at job indentation, without needing a third-party YAML parser.
     sections = dict(
@@ -1234,7 +1234,13 @@ def cache_repository(root, *, paired=False, stale_policy=False, profile=CACHE_PR
     for relative in reuse.POLICY_FILES:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes((current / relative).read_bytes())
+        # Synthetic hosted donors retain the original provider workflow identity.
+        source = (
+            "testing/ci/hosted-workflow.yml"
+            if relative == reuse.WORKFLOW_PATH
+            else relative
+        )
+        path.write_bytes((current / source).read_bytes())
     source_files = {
         CACHE_PROFILE: (CACHE_SOURCE, CACHE_TEST),
         INSPECTION_PROFILE: (*sorted(INSPECTION_SOURCES), INSPECTION_TEST),
@@ -2524,7 +2530,7 @@ def test_selected_main_gate_cli_rechecks_with_the_configured_checkout_history(
         "reuse": receipt,
     }
     workflow = (
-        Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+        Path(__file__).resolve().parents[1] / "testing/ci/hosted-workflow.yml"
     ).read_text()
     gate_section = workflow.split("\n  required-gate:\n", 1)[1]
     checkout_options = gate_section.split("      - uses: actions/checkout@v4\n", 1)[

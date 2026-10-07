@@ -186,9 +186,9 @@ test('every outline font asset, TTC face and existing stock face must remain vis
   assert.throws(() => outlineFonts(path), /Unexpected font payload link/);
 });
 
-test('workflow preserves engine, device lanes, one-worker scheduling, launcher and strict gates', () => {
-  const workflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
-  // Use full workflow for ordered commands; do not run a browser or application.
+test('archived hosted workflow preserves engine, device lanes, one-worker scheduling, launcher and strict gates', () => {
+  const workflow = readFileSync(join(root, 'testing/ci/hosted-workflow.yml'), 'utf8');
+  // Use the historical workflow fixture for ordered commands; do not run a browser or application.
   assert.match(workflow, /browser_matrix: \$\{\{ steps.classify.outputs.browser_matrix \}\}/);
   assert.match(workflow, /matrix: \$\{\{ fromJSON\(needs.classify.outputs.browser_matrix\) \}\}/);
   assert.match(workflow, /name: Assembled browser smoke \(\$\{\{ matrix.project \}\}, shard \$\{\{ matrix.shard \}\}\/\$\{\{ matrix.total \}\}\)/);
