@@ -1,5 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execFileSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -109,12 +108,11 @@ export async function closeNativeReceipt(lane) {
   lane.native.cleanup = { context: 'closed-observed', transport: live?.birthTick === lane.native.birthTick || child?.birthTick === lane.native.childBirthTick ? 'live' : 'stopped', guardian: guardian?.birthTick === lane.native.guardianBirthTick ? 'live' : 'stopped', temporaryOutput: outputExists ? 'present' : 'removed-observed', checkedAt: new Date().toISOString() };
   return lane.native.cleanup;
 }
-// The interface has no native session-close control. Teardown therefore ends
-// only the bound extension transport; it does not close an agent/thread. pidfd
-// signaling cannot hit a newly reused PID between ownership checking and SIGTERM.
+// Only the owning endpoint can atomically decide whether its generation is idle.
+// A PID birth check cannot fence backend replacement on that reusable endpoint.
 const nativeCleanupComplete = cleanup => cleanup.transport === 'stopped' && cleanup.guardian === 'stopped' && cleanup.temporaryOutput === 'removed-observed';
 function terminalReleaseRequired() {
-  const error = new Error('Native generation output was removed, but its captured transport is still live. Call browser_release with no arguments in the owning native thread, then retry native-release. If unavailable, preserve the cleanup ledger and deployment lease; missing output cannot authorize terminating a reopened endpoint.');
+  const error = new Error('The captured native transport is still live. Call browser_release with no arguments in the owning native thread, then retry native-release. If unavailable, preserve the cleanup ledger and deployment lease; historical output or PID ownership cannot authorize terminating a reopened endpoint.');
   error.code = 'NATIVE_TERMINAL_RELEASE_REQUIRED';
   return error;
 }
@@ -136,30 +134,23 @@ export async function releaseNativeTransport(lane, browserRoot, { timeoutMs = 12
     let cleanup = await closeNativeReceipt(lane);
     if (nativeCleanupComplete(cleanup)) { attempt.status='complete'; return cleanup; }
     if (cleanup.transport === 'live') {
-      if (cleanup.temporaryOutput === 'removed-observed') throw terminalReleaseRequired();
-      let actual;
-      try { actual = await readNativeSession(lane.native.directory, browserRoot); }
-      catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-        // Close/release may finish during validation. Missing inner metadata or
-        // a live replacement remains unverified; never signal from old births.
-        cleanup = await closeNativeReceipt(lane);
-        if (nativeCleanupComplete(cleanup)) { attempt.status='complete'; return cleanup; }
-        if (cleanup.temporaryOutput === 'removed-observed') throw terminalReleaseRequired();
-        throw error;
+      if (cleanup.temporaryOutput === 'present') {
+        let actual;
+        try { actual = await readNativeSession(lane.native.directory, browserRoot); }
+        catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          // Close/release may finish during validation. Missing inner metadata
+          // remains unverified; never signal from historical ownership.
+          cleanup = await closeNativeReceipt(lane);
+          if (nativeCleanupComplete(cleanup)) { attempt.status='complete'; return cleanup; }
+          if (cleanup.temporaryOutput === 'removed-observed') throw terminalReleaseRequired();
+          throw error;
+        }
+        for (const field of ['dev','ino','pid','birthTick','childPid','childBirthTick']) if (actual[field] !== lane.native[field]) throw new Error('Native transport ownership changed; preserve this connection for inspection.');
       }
-      for (const field of ['dev','ino','pid','birthTick','childPid','childBirthTick']) if (actual[field] !== lane.native[field]) throw new Error('Native transport ownership changed; preserve this connection for inspection.');
-      const script = `import os,signal,sys
-pid=int(sys.argv[1]);tick=sys.argv[2]
-fd=os.pidfd_open(pid)
-try:
- fields=open('/proc/%s/stat'%pid).read().rsplit(')',1)[1].split()
- if fields[0]=='Z' or fields[19]!=tick: raise RuntimeError('Native supervisor ownership changed')
- signal.pidfd_send_signal(fd,signal.SIGTERM)
-finally: os.close(fd)
-`;
-      await promisify(execFile)('python3',['-c',script,String(actual.pid),actual.birthTick],{timeout:5000});
-      lane.native.termination = { mode:'harness-owned-extension-SIGTERM', agentSessionClosure:'unavailable-in-current-interface', at:new Date().toISOString() };
+      // Even still-present validated metadata can disappear and be replaced by
+      // a new backend before a signal. Use the endpoint's supported idle fence.
+      throw terminalReleaseRequired();
     }
     const deadline = Date.now() + timeoutMs;
     do {

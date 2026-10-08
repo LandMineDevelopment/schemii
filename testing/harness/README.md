@@ -386,8 +386,10 @@ removed output; repeated verification is safe. Missing generation output with a
 live endpoint returns explicit owning-thread terminal-release guidance, persists
 pending cleanup and retains the deployment lease. If that tool is unavailable,
 report the retained endpoint; an old PID does not authorize stopping a new backend.
-The harness only uses owned SIGTERM when current private directory/inode/process
-proof remains available. Neither path closes a native agent/thread.
+Even present private directory/inode/process proof cannot fence a later backend
+replacement on the same endpoint. The harness never signals native endpoints;
+their owning thread must use the supported terminal tool. Neither verification
+nor terminal release closes a native agent/thread.
 Execution-complete and review-pending are
 separate states. Existing isolated runs/evidence stay available until live native
 application acceptance and cleanup parity are demonstrated.

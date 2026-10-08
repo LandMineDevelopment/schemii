@@ -177,11 +177,14 @@ stdio endpoint. If the recorded output is gone but the endpoint remains live,
 `browser_release`, then retry verification. Missing output cannot prove the
 endpoint is still idle or authorize terminating a reopened backend. If terminal
 release is unavailable or busy, report the blocker and retain the endpoint/lease.
-Only a still-present, verified private connection path/inode/PID birth permits
-the harness's Linux pidfd SIGTERM fallback. It waits for captured supervisor,
-child, guardian and output removal and never deletes browser output. A live browser
-prevents release; call `browser_close` in its owning thread first. Cleanup keeps
-the deployment lease if owned shutdown is unresolved.
+Still-present private connection path/inode/PID proof also cannot fence a new
+backend on the same reusable endpoint between validation and signaling. Every
+live endpoint requires its owning thread's terminal release; the harness never
+signals native endpoints or deletes browser output. Existing present-directory
+ownership, replacement and symlink checks remain refusal gates. Verification
+waits for captured supervisor, child, guardian and output removal. A live browser
+prevents verification; call `browser_close` in its owning thread first. Cleanup
+keeps the deployment lease if owned shutdown is unresolved.
 Other native peers, user data, retained fixtures and selected exported evidence
 remain intact. Completed/interrupt status does not close transports.
 
