@@ -128,6 +128,7 @@ export function combineObservation(receipt, containers, internal, { previous = n
   }
   const managed = internal.sources?.console, raw = internal.sources?.raw;
   if (managed?.status === 'available' && raw?.status === 'available' &&
+      raw.counts?.registryStatus === 'available' &&
       finite(managed.counts?.readSessionHandles) && finite(managed.counts?.manualTransactionHandles) && finite(raw.counts?.registeredSessions)) {
     output.retainedSessions = managed.counts.readSessionHandles + managed.counts.manualTransactionHandles + raw.counts.registeredSessions;
     output.qualification.retainedSessionsScope = 'registered_managed_read_manual_transaction_and_raw_handles';

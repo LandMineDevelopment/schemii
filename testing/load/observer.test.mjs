@@ -26,7 +26,7 @@ async function fixture(t) {
 const internal = now => ({ version: 1, at: new Date(now).toISOString(), scope: 'process_aggregate', processPid: 1,
   sources: { source: { status: 'available', counts: { ordinary: { connections: 3, ordinaryPermits: 1, retainedPermits: 2 }, monitoring: { connections: 1 }, control: { connections: 0 } } },
     console: { status: 'available', counts: { readSessionHandles: 2, manualTransactionHandles: 1, nativeCursors: 5, resultPageTokens: 7 } },
-    raw: { status: 'available', counts: { registeredSessions: 3 } }, metadata: { status: 'available', counts: { active: 2, rejected: 4 } } } });
+    raw: { status: 'available', counts: { registryStatus: 'available', registeredSessions: 3 } }, metadata: { status: 'available', counts: { active: 2, rejected: 4 } } } });
 const receipt = { topology: { generatorPlacement: 'cohosted_unqualified' } };
 test('cgroup snapshot measures actual budgets/counters and aggregates RSS', async t => {
   const f = await fixture(t), sample = await sampleContainer(f.container, f);
@@ -61,6 +61,25 @@ test('busy cursor, wrong endpoint and stale internal observations never manufact
   assert(!('metadataActive' in combineObservation(receipt, { schemii: app }, internal(now - 20000), { now })));
   const unavailable = combineObservation(receipt, { schemii: { status: 'unavailable' } }, internal(now), { now });
   assert(!('appRssBytes' in unavailable));
+});
+test('busy or unqualified raw registry omits the combined session gauge without inventing zeros', async t => {
+  const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now();
+  for (const counts of [{ registryStatus: 'busy' },
+    { registryStatus: 'busy', registeredSessions: 0, openingSessions: 0 },
+    { registeredSessions: 0 }]) {
+    const value = internal(now); value.sources.raw.counts = counts;
+    const output = combineObservation(receipt, { schemii: app }, value, { now });
+    assert(!('retainedSessions' in output));
+    assert.equal(output.openCursors, 5);
+    assert.equal(output.sourceConnections, 4);
+    assert.deepEqual(output.internal.sources.raw.counts, counts);
+  }
+  const value = internal(now);
+  value.sources.raw.counts = { registryStatus: 'available', registeredSessions: 0, openingSessions: 0 };
+  value.sources.console.counts = { readSessionHandles: 0, manualTransactionHandles: 0, nativeCursors: 0 };
+  const empty = combineObservation(receipt, { schemii: app }, value, { now });
+  assert.equal(empty.retainedSessions, 0);
+  assert.equal(empty.openCursors, 0);
 });
 test('CPU percent uses cumulative usec across sample time; first/reset samples stay unknown', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now();

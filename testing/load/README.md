@@ -166,8 +166,14 @@ connection handles. Established handles are application ownership counts, not
 an independent `pg_stat_activity` census. Managed read/manual transaction/raw
 session handles contribute to retained sessions. Native cursor counts include
 primary and replay/export cursors; result-page tokens remain separate. A busy
-cursor or registry is unavailable immediately instead of waiting behind source
-I/O. Metadata admission reuses the reviewed factory snapshot. Memory-only or
+cursor or Console registry is unavailable immediately instead of waiting behind
+source I/O or native cleanup. Raw counts declare `registryStatus: available` only
+after acquiring their lock without waiting; contention returns `registryStatus: busy`
+without registered/opening counts. The endpoint preserves that qualification in
+the raw source's counts. The collector omits the entire combined `retainedSessions`
+gauge while raw counts are busy or unqualified, while independently known cursor
+and admission gauges remain usable. Available empty registries report real zero.
+Metadata admission reuses the reviewed factory snapshot. Memory-only or
 unsupported adapters remain explicitly unavailable.
 
 Private `observation.json.jsonl` retains numeric samples and qualifications, and
@@ -201,6 +207,19 @@ counts, ingress socket counts, database monitoring visibility, effective CPU-set
 allocation, event-loop lag and cohosted generator headroom are **not** written as
 zero. They remain separate campaign requirements; OS sampling and internal
 handles cannot by themselves prove source release or safe capacity.
+
+Collector orphan-session recovery is separate from campaign recovery. The current
+campaign recovery gate requires observed `ownedBackends` and `activeJobs`, which
+this aggregate collector deliberately cannot provide. A successful observation or
+authentication-cleanup smoke therefore leaves campaign recovery unverified and
+[#135](https://github.com/LandMineDevelopment/schemii/issues/135)/
+[#136](https://github.com/LandMineDevelopment/schemii/issues/136) incomplete.
+
+GitHub Actions is disabled. Use `./ci.sh --plan --base origin/main` for the selected
+local inventory and preserve its source-bound receipts, including failed attempts
+and pending live prerequisites. The coordinator schedules complete selected local
+acceptance and any bounded live observation/authentication-cleanup qualification;
+focused observer regressions do not establish deployment or campaign acceptance.
 
 `--allow-unobserved` is allowed only for smoke protocol work and leaves recovery
 unverified and capacity ineligible. Other recipes require `--observer-file` pointing

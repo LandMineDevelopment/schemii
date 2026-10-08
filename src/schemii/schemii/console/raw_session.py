@@ -145,9 +145,14 @@ class RawSessionService:
         self._clock = clock or time.monotonic
 
     def observation_snapshot(self):
-        """Read registered handles and in-flight opens without running source SQL."""
-        with self.lock:
-            return {"registeredSessions": len(self.sessions), "openingSessions": len(self.opening)}
+        """Never wait behind native cleanup to observe the registry."""
+        if not self.lock.acquire(blocking=False):
+            return {"registryStatus": "busy"}
+        try:
+            return {"registryStatus": "available", "registeredSessions": len(self.sessions),
+                    "openingSessions": len(self.opening)}
+        finally:
+            self.lock.release()
 
     def create(self, owner, workspace, body):
         _, target = self.console._workspace_target(owner, workspace, body.expected_workspace_revision)

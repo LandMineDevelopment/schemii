@@ -155,8 +155,96 @@ def test_raw_snapshot_reads_registered_and_opening_handles_without_source_querie
     owner.sessions["secret-session"] = object()
     owner.opening.add(("secret-owner", "secret-console"))
     assert owner.observation_snapshot() == {
+        "registryStatus": "available",
         "registeredSessions": 1,
         "openingSessions": 1,
+    }
+
+
+def test_raw_snapshot_does_not_wait_for_late_native_close_during_shutdown(monkeypatch):
+    from contextlib import nullcontext
+
+    from schemii.common.api.errors import ApiProblem
+    from schemii.schemii.console import raw_session as module
+
+    target = SimpleNamespace(
+        connection_id="private-profile",
+        connection_owner_id="private-owner",
+        connection_revision=1,
+        database="unused",
+        namespace="public",
+    )
+    console = SimpleNamespace(
+        _workspace_target=lambda *_: (None, target),
+        _validate_settings_revision=lambda *_: None,
+        _maximum_live_read_sessions=2,
+        _maximum_live_read_sessions_per_identity=2,
+        settings=lambda _: SimpleNamespace(row_page_size=100),
+        _page_memory_bytes=4096,
+    )
+    resolved = SimpleNamespace(owner_id="private-owner", revision=1, database="unused")
+    connecting, finish_connect, closing, finish_close, shutting_down = (
+        threading.Event() for _ in range(5)
+    )
+    closed = []
+
+    def close():
+        closing.set()
+        assert finish_close.wait(3)
+        closed.append(True)
+
+    native = SimpleNamespace(close=close)
+
+    def connect(*_, **__):
+        connecting.set()
+        assert finish_connect.wait(3)
+        return native
+
+    owner = RawSessionService(
+        console,
+        SimpleNamespace(use=lambda *_: nullcontext(resolved)),
+        SimpleNamespace(_connect=connect),
+    )
+    monkeypatch.setattr(module, "RawSession", lambda *_, **__: native)
+    wait_for = owner.opening_finished.wait_for
+
+    def wait_for_opening(predicate):
+        shutting_down.set()
+        return wait_for(predicate)
+
+    monkeypatch.setattr(owner.opening_finished, "wait_for", wait_for_opening)
+    body = SimpleNamespace(
+        console_id="private-console",
+        expected_workspace_revision=1,
+        expected_settings_revision=1,
+    )
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        opening = pool.submit(owner.create, "private-owner", "private-workspace", body)
+        try:
+            assert connecting.wait(1)
+            shutdown = pool.submit(owner.close)
+            assert shutting_down.wait(1)
+            finish_connect.set()
+            # create retires its late connection under the registry lock.
+            assert closing.wait(1)
+            snapshot = pool.submit(owner.observation_snapshot)
+            assert snapshot.result(timeout=0.5) == {"registryStatus": "busy"}
+            assert owner.sessions == {}
+            assert owner.opening == {("private-owner", "private-console")}
+            assert not opening.done() and not shutdown.done()
+            assert closed == []
+        finally:
+            finish_connect.set()
+            finish_close.set()
+        with pytest.raises(ApiProblem) as caught:
+            opening.result(timeout=1)
+        assert caught.value.status_code == 503
+        shutdown.result(timeout=1)
+    assert closed == [True]
+    assert owner.observation_snapshot() == {
+        "registryStatus": "available",
+        "registeredSessions": 0,
+        "openingSessions": 0,
     }
 
 
@@ -164,6 +252,56 @@ def test_raw_snapshot_reads_registered_and_opening_handles_without_source_querie
 class MetadataCounts:
     active: int = 2
     rejected: int = 3
+
+
+def test_runtime_snapshot_preserves_busy_raw_counts_and_other_known_domains():
+    from schemii.common.auth.routes import runtime_observation
+
+    raw = RawSessionService(None, None, None)
+    raw.sessions["private-session"] = object()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                services=SimpleNamespace(
+                    postgres=PsycopgPostgresGateway(),
+                    console=console_owner(),
+                    metadata=SimpleNamespace(
+                        connection_factory=SimpleNamespace(
+                            admission_snapshot=lambda: MetadataCounts()
+                        )
+                    ),
+                ),
+                raw_console=raw,
+            )
+        )
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def busy():
+        with raw.lock:
+            entered.set()
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(busy)
+        try:
+            assert entered.wait(1)
+            result = pool.submit(runtime_observation, request, actor="test-admin")
+            document = result.result(timeout=0.5)
+            assert document["sources"]["raw"] == {
+                "status": "available",
+                "counts": {"registryStatus": "busy"},
+            }
+            assert document["sources"]["console"]["counts"]["nativeCursors"] == 2
+            assert document["sources"]["metadata"]["counts"] == {
+                "active": 2,
+                "rejected": 3,
+            }
+            assert "private-" not in json.dumps(document)
+            assert len(raw.sessions) == 1
+        finally:
+            release.set()
+        holder.result(timeout=1)
 
 
 def test_runtime_snapshot_requires_authenticated_administrator_and_discloses_no_handles():
