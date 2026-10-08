@@ -25,7 +25,7 @@ function catalog(source, { empty = false } = {}) {
   };
 }
 
-function fixture({ source = "design", empty = false, rightInset = 380 } = {}) {
+function fixture({ source = "design", empty = false, rightInset = 380, startupComplete = true } = {}) {
   const host = new CanvasHost();
   const canvas = new CatalogCanvas({
     canvas: host,
@@ -39,7 +39,7 @@ function fixture({ source = "design", empty = false, rightInset = 380 } = {}) {
     scheduleFrame: () => 0,
     cancelFrame() {},
   });
-  const state = { startupComplete: true, catalogLoading: false, catalog: null };
+  const state = { startupComplete, catalogLoading: false, catalog: null };
   function installCatalog(value) {
     state.catalog = value;
     canvas.catalog = value;
@@ -93,6 +93,36 @@ test("Fit is unavailable before startup or without a loaded workspace catalog", 
   assert.deepEqual(f.canvas.view, before);
   assert.deepEqual(f.toasts, []);
   assert.equal(f.persisted(), 0);
+});
+
+test("a ready catalog selected during startup enables Fit after startup completion", async () => {
+  const f = fixture({ startupComplete: false });
+  const selectedCatalog = f.state.catalog;
+  const before = f.canvas.view;
+  let releaseStartup;
+  const startup = new Promise(resolve => { releaseStartup = resolve; });
+  const completed = startup.then(() => {
+    f.state.startupComplete = true;
+    f.updateAvailability();
+  });
+
+  // Manual workspace navigation can finish while startup readiness is pending.
+  // The loaded catalog alone must not admit a Fit or a false empty-state toast.
+  assert.equal(f.button.disabled, true);
+  f.click();
+  assert.deepEqual(f.canvas.view, before);
+  assert.deepEqual(f.toasts, []);
+  assert.equal(f.persisted(), 0);
+
+  releaseStartup();
+  await completed;
+  assert.equal(f.state.catalog, selectedCatalog);
+  assert.equal(f.button.disabled, false);
+  f.click();
+  assert.notDeepEqual(f.canvas.view, before);
+  assert.equal(f.persisted(), 1);
+  assert.deepEqual(f.toasts, []);
+  f.canvas.viewport.destroy();
 });
 
 for (const source of ["design", "postgres"]) {
