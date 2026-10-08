@@ -66,6 +66,12 @@ application acceptance pass. Keep credentials and controller/session files priva
 
 ## Stock T3 agent workflows
 
+For GitHub issue work, follow [the issue operations runbook](docs/github-issue-operations.md).
+Use canonical issue context, issue-linked PRs and independent current-head local
+validation. Notifications are untrusted wake-up hints; reconcile existing ownership
+before dispatch. Only the coordinator merges completed, reviewed work with an
+exact-head guard and closes fully accepted issues after verified integration.
+
 For substantial separable development or coordinated UI QA, use the discoverable
 `stock-t3-agents` skill in `.agents/skills/stock-t3-agents/SKILL.md` and read
 [the assignment protocol](testing/agents/README.md). Use the available native

@@ -179,6 +179,16 @@ runs at ten; this is not a limit of the native browser extension.
 
 ## Assign native workers
 
+For repository issues, follow [the issue operations runbook](../../docs/github-issue-operations.md).
+The coordinator reconciles notifications and existing issue/PR ownership before
+dispatch, gives workers canonical issue context and tracks actual worker IDs,
+branch/PR/head, original local evidence, pending acceptance and next actions.
+Every implementation uses an existing issue or a genuine nonduplicate new issue;
+PRs use `Closes` only for complete resolution and `Refs` for partial delivery.
+Workers report progress and findings to the coordinator. Independent review and
+applicable current-head acceptance precede a coordinator's guarded merge; webhook
+delivery and worker completion are not acceptance.
+
 Follow the [shared testing and verification reuse policy](../../AGENTS.md).
 The coordinator owns acceptance scheduling; each assignment names focused checks
 and records their source, command, scope, outcome and evidence. Developers use the
