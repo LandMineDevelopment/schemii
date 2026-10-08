@@ -53,7 +53,30 @@ disabled. Current focused command receipts remain private under the task's
 `.schemii/issue-reconciliation/` directory; their scope does not replace complete
 selected acceptance or the native trigger below.
 
-The original native viewport/navigation trigger still needs an independent UI
-rerun after the corrected source is built through `./start.sh`, both HTTPS origins
-are verified, and a new isolated lane owns the deployment lease. No application
-deployment or UI acceptance is claimed by these unit checks.
+Native run `qa-mv03xfs5-e3f6de4f` tested the integrated Fit source at `e6e17557`.
+Both isolated accounts observed “Loading saved design” with Fit disabled in the
+original mobile-to-desktop, inspector and owned-root sequence. Their pointer calls
+completed after loading, and neither captured a loading PNG. The desktop timing
+case remains blocked; ready Fit geometry and saved readback passed separately.
+The dependent mobile timing case was not executed. Mobile creation's late
+independent review receipt also remains pending under the recorded scenario-order
+guard. These gaps are preserved in the private run receipts.
+
+`tests/e2e/design-editor-lifecycle.spec.js` adds a separate mounted regression.
+It creates and revision-checks one owned three-column desired design, primes real
+mobile Fit, resizes to desktop and opens the inspector. Only then does it hold
+one genuine saved-design response fetched from the server. While delivery is held,
+it captures loading evidence, sends a visible mouse/touch action to the disabled
+control and separately dispatches the mounted click callback. Both must leave the
+camera unchanged and emit no false empty-state toast. The unchanged response is
+then delivered, and ready Fit must place the actual table inside desktop inspector
+and mobile viewport bounds. Cleanup uses only the exact newly created workspace
+ID. There is no product delay flag, fabricated snapshot or app-state injection.
+
+This mounted case has not yet run. The coordinator schedules the whole affected
+E2E owner on desktop and Android with explicit test-owned administrator credentials,
+zero retries and a verified source deployment under the shared lease. A pass would
+provide deterministic mounted admission and geometry evidence; it would not
+relabel the native timing cases, supply their missing loading PNG, resolve the
+late-review receipt or complete the broader selected acceptance. No application
+deployment or UI acceptance is claimed by the deterministic development checks.

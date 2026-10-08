@@ -493,3 +493,191 @@ for (const loadingPhase of ["initial snapshot", "readiness"]) {
     }
   });
 }
+
+test("Fit rejects pointer and callback actions while a real saved-design response is held, then fits the ready viewport", async ({ page, request }, testInfo) => {
+  let workspaceId = null;
+  let routeStarted = false;
+  let responseDelivered = false;
+  let released = false;
+  let heldRequests = 0;
+  let heldSnapshot = null;
+  const releaseResponse = deferred();
+  const routeFinished = deferred();
+  let endpoint = null;
+  let holdSnapshot = null;
+  const fit = page.locator("#fit-button");
+  const tableCard = page.locator('.table-card[data-table-name="qa_pilot_items"]');
+  const inspector = page.locator("#inspector");
+
+  const camera = () => page.locator("#canvas-stage").evaluate((stage, id) => ({
+    transform: stage.style.transform,
+    saved: JSON.parse(localStorage.getItem(`schemii.workspace-view.v1.${id}`) || "null")?.camera ?? null,
+  }), workspaceId);
+  const expectNoEmptyToast = async () => {
+    await expect(page.locator("#toast")).not.toContainText(/No (?:live|desired) tables are available to fit\./);
+    await expect(page.locator("#toast")).toBeHidden();
+  };
+  const attachImage = async name => testInfo.attach(name, {
+    body: await page.screenshot(), contentType: "image/png",
+  });
+  const expectFittedGeometry = async mobile => {
+    const geometry = await page.evaluate(isMobile => {
+      const rect = selector => {
+        const { left, right, top, bottom } = document.querySelector(selector).getBoundingClientRect();
+        return { left, right, top, bottom };
+      };
+      const canvas = rect("#canvas");
+      return {
+        card: rect('.table-card[data-table-name="qa_pilot_items"]'),
+        usable: {
+          left: canvas.left + (isMobile ? 18 : 75),
+          right: isMobile ? canvas.right - 18 : Math.min(canvas.right - 20, rect("#inspector").left - 20),
+          top: canvas.top + 65,
+          bottom: canvas.bottom - (isMobile ? 75 : 35),
+        },
+      };
+    }, mobile);
+    expect(geometry.card.left).toBeGreaterThanOrEqual(geometry.usable.left - 1);
+    expect(geometry.card.right).toBeLessThanOrEqual(geometry.usable.right + 1);
+    expect(geometry.card.top).toBeGreaterThanOrEqual(geometry.usable.top - 1);
+    expect(geometry.card.bottom).toBeLessThanOrEqual(geometry.usable.bottom + 1);
+    await expect(page.locator("#zoom-output")).toHaveText("125%");
+    await expectNoEmptyToast();
+    return geometry;
+  };
+
+  try {
+    const workspace = await createWorkspace(request);
+    workspaceId = workspace.id;
+    const current = await responseJson(await request.get(`${API_ROOT}/${workspaceId}/design`), "Read empty Fit design");
+    const idColumn = designId("column");
+    const table = {
+      id: designId("table"), name: "qa_pilot_items",
+      columns: [
+        { id: idColumn, name: "id", dataType: "integer", nullable: false },
+        { id: designId("column"), name: "label", dataType: "text", nullable: false },
+        { id: designId("column"), name: "qty", dataType: "integer", nullable: true },
+      ],
+      keys: [{ id: designId("key"), name: "qa_pilot_items_pk", kind: "primary", columnIds: [idColumn] }],
+      checks: [], indexes: [],
+    };
+    await responseJson(await request.put(`${API_ROOT}/${workspaceId}/design`, {
+      data: {
+        expectedDesignRevision: current.revision,
+        content: { types: [], tables: [table], relationships: [], functions: [], views: [], triggers: [] },
+      },
+    }), "Save owned Fit design");
+    const saved = await responseJson(await request.get(`${API_ROOT}/${workspaceId}/design/snapshot`), "Read saved Fit snapshot");
+    expect(saved.design.content.tables).toHaveLength(1);
+    expect(saved.design.content.tables[0]).toMatchObject(table);
+    await testInfo.attach("fit-owned-fixture", {
+      body: Buffer.from(JSON.stringify({ project: testInfo.project.name, workspaceId, tableId: table.id, revision: saved.design.revision })),
+      contentType: "application/json",
+    });
+
+    // Prime the actual mobile camera before recreating the original desktop trigger.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`/?workspace=${workspaceId}`);
+    await expect(page.locator("#workspace-title")).toHaveText(workspace.name);
+    await expect(tableCard).toBeVisible();
+    await expect(fit).toBeEnabled();
+    await fit.click();
+    await expectFittedGeometry(true);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await tableCard.click();
+    await expect(inspector).toBeVisible();
+
+    endpoint = `**${API_ROOT}/${workspaceId}/design/snapshot`;
+    holdSnapshot = async route => {
+      routeStarted = true;
+      heldRequests++;
+      try {
+        expect(route.request().method()).toBe("GET");
+        expect(new URL(route.request().url()).pathname).toBe(`${API_ROOT}/${workspaceId}/design/snapshot`);
+        // Fetch real server data; only its delivery to the mounted application is held.
+        const response = await route.fetch({ maxRetries: 0 });
+        const snapshot = await responseJson(response, "Fetch held real Fit snapshot");
+        expect(snapshot.design.revision).toBe(saved.design.revision);
+        expect(snapshot.design.content.tables).toHaveLength(1);
+        expect(snapshot.design.content.tables[0]).toMatchObject(table);
+        heldSnapshot = { revision: snapshot.design.revision };
+        await releaseResponse.promise;
+        await route.fulfill({ response });
+        responseDelivered = true;
+      } catch (error) {
+        heldSnapshot = { error };
+        await route.abort().catch(() => {});
+      } finally {
+        routeFinished.resolve();
+      }
+    };
+    await page.route(endpoint, holdSnapshot, { times: 1 });
+    await page.goto(`/?workspace=${workspaceId}`);
+    await expect.poll(() => heldSnapshot, { message: "The real owned saved-design response is fetched and held" }).not.toBeNull();
+    if (heldSnapshot.error) throw heldSnapshot.error;
+    await expect(page.locator("#catalog-state")).toContainText("Loading saved design");
+    await expect(page.locator("#workspace-title")).toHaveText(workspace.name);
+    await expect(fit).toBeVisible();
+    await expect(fit).toBeDisabled();
+    const heldCamera = await camera();
+    await attachImage("fit-held-loading");
+
+    // A disabled locator.click() would wait for readiness and miss this window.
+    const box = await fit.boundingBox();
+    expect(box).not.toBeNull();
+    const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    expect(released || responseDelivered).toBe(false);
+    if (testInfo.project.use.hasTouch) await page.touchscreen.tap(point.x, point.y);
+    else await page.mouse.click(point.x, point.y);
+    await expect(fit).toBeDisabled();
+    await expect(page.locator("#catalog-state")).toContainText("Loading saved design");
+    await expectNoEmptyToast();
+    expect(await camera()).toEqual(heldCamera);
+
+    // Separate callback oracle: dispatch reaches the live listener despite DOM suppression.
+    await fit.dispatchEvent("click");
+    await expect(fit).toBeDisabled();
+    await expectNoEmptyToast();
+    expect(await camera()).toEqual(heldCamera);
+    expect(released || responseDelivered).toBe(false);
+    expect(heldRequests).toBe(1);
+    await testInfo.attach("fit-held-admission", {
+      body: Buffer.from(JSON.stringify({ workspaceId, revision: heldSnapshot.revision, heldRequests, pointer: testInfo.project.use.hasTouch ? "touch" : "mouse", heldCamera })),
+      contentType: "application/json",
+    });
+
+    released = true;
+    releaseResponse.resolve();
+    await routeFinished.promise;
+    expect(responseDelivered).toBe(true);
+    await expect(tableCard).toBeVisible();
+    await expect(page.locator("#catalog-state")).toBeEmpty();
+    await expect(fit).toBeEnabled();
+    await tableCard.click();
+    await expect(inspector).toBeVisible();
+    const beforeReadyFit = await camera();
+    await fit.click();
+    expect((await camera()).transform).not.toBe(beforeReadyFit.transform);
+    const desktopGeometry = await expectFittedGeometry(false);
+    await attachImage("fit-ready-desktop-inspector");
+    await page.locator("#table-inspector-close").click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    const beforeMobileFit = await camera();
+    await fit.click();
+    expect((await camera()).transform).not.toBe(beforeMobileFit.transform);
+    const mobileGeometry = await expectFittedGeometry(true);
+    await attachImage("fit-ready-mobile");
+    await testInfo.attach("fit-ready-geometry", {
+      body: Buffer.from(JSON.stringify({ workspaceId, desktopGeometry, mobileGeometry })), contentType: "application/json",
+    });
+  } finally {
+    released = true;
+    releaseResponse.resolve();
+    try {
+      if (routeStarted) await routeFinished.promise;
+      if (endpoint && holdSnapshot) await page.unroute(endpoint, holdSnapshot);
+    } finally {
+      if (workspaceId) await deleteWorkspace(request, workspaceId);
+    }
+  }
+});
