@@ -34,7 +34,7 @@ const help = `Usage: ./test.sh COMMAND [options]
   run        Dispatch ready lanes through T3 or start isolated Codex workers
   claim      Bind a lane to an agent; returns private session-file path
   action     Drive only that agent's browser through its session file
-  native-release Stop only a finished/paused lane's owned extension transport
+  native-release Verify owned cleanup; live transports need the owner's browser_release
   native-auth Record visibly authenticated account identity and fresh image
   native-bind Bind claimed native lane to its live thread connection before login
   resource-receipt Record exact owned UI creation ID/name/time and fresh image
