@@ -508,13 +508,17 @@ test("Fit rejects pointer and callback actions while a real saved-design respons
   const fit = page.locator("#fit-button");
   const tableCard = page.locator('.table-card[data-table-name="qa_pilot_items"]');
   const inspector = page.locator("#inspector");
+  const uncaughtErrors = [];
+  const recordPageError = error => uncaughtErrors.push({ name: error.name, message: error.message });
+  const emptyToast = /No (?:live|desired) tables are available to fit\./;
+  page.on("pageerror", recordPageError);
 
   const camera = () => page.locator("#canvas-stage").evaluate((stage, id) => ({
     transform: stage.style.transform,
     saved: JSON.parse(localStorage.getItem(`schemii.workspace-view.v1.${id}`) || "null")?.camera ?? null,
   }), workspaceId);
   const expectNoEmptyToast = async () => {
-    await expect(page.locator("#toast")).not.toContainText(/No (?:live|desired) tables are available to fit\./);
+    await expect(page.locator("#toast")).not.toContainText(emptyToast);
     await expect(page.locator("#toast")).toBeHidden();
   };
   const attachImage = async name => testInfo.attach(name, {
@@ -634,8 +638,31 @@ test("Fit rejects pointer and callback actions while a real saved-design respons
     await expectNoEmptyToast();
     expect(await camera()).toEqual(heldCamera);
 
-    // Separate callback oracle: dispatch reaches the live listener despite DOM suppression.
-    await fit.dispatchEvent("click");
+    // Separate callback oracle: observe DOM synchronously after the live listener runs.
+    const callback = await fit.evaluate((button, id) => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      const toast = document.querySelector("#toast");
+      return {
+        disabled: button.disabled,
+        toast: { hidden: toast.hidden, text: toast.textContent },
+        camera: {
+          transform: document.querySelector("#canvas-stage").style.transform,
+          saved: JSON.parse(localStorage.getItem(`schemii.workspace-view.v1.${id}`) || "null")?.camera ?? null,
+        },
+      };
+    }, workspaceId);
+    // DOM listener exceptions do not reject dispatchEvent/evaluate. Query Playwright's
+    // server-recorded errors after that browser round trip as well as the event collector.
+    const recordedErrors = (await page.pageErrors({ filter: "all" })).map(error => ({ name: error.name, message: error.message }));
+    await testInfo.attach("fit-held-callback-errors", {
+      body: Buffer.from(JSON.stringify({ callback, recordedErrors, uncaughtErrors })), contentType: "application/json",
+    });
+    expect(recordedErrors, "No uncaught page error before or during the held Fit callback").toEqual([]);
+    expect(uncaughtErrors, "The scoped pageerror collector records no uncaught listener errors").toEqual([]);
+    expect(callback.disabled).toBe(true);
+    expect(callback.toast.hidden).toBe(true);
+    expect(callback.toast.text).not.toMatch(emptyToast);
+    expect(callback.camera).toEqual(heldCamera);
     await expect(fit).toBeDisabled();
     await expectNoEmptyToast();
     expect(await camera()).toEqual(heldCamera);
@@ -671,6 +698,7 @@ test("Fit rejects pointer and callback actions while a real saved-design respons
       body: Buffer.from(JSON.stringify({ workspaceId, desktopGeometry, mobileGeometry })), contentType: "application/json",
     });
   } finally {
+    page.off("pageerror", recordPageError);
     released = true;
     releaseResponse.resolve();
     try {

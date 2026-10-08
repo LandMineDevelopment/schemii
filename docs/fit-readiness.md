@@ -73,6 +73,14 @@ then delivered, and ready Fit must place the actual table inside desktop inspect
 and mobile viewport bounds. Cleanup uses only the exact newly created workspace
 ID. There is no product delay flag, fabricated snapshot or app-state injection.
 
+Independent source review at `006793f2` found that toast and camera assertions
+alone could miss an uncaught callback error when the loading catalog is null.
+The test now records `pageerror` before interactions and queries Playwright's
+recorded page errors after synchronous callback/DOM observation. Both error lists
+must be empty; any messages are retained privately before the assertion fails.
+The immediate toast/camera checks and retained empty-toast text assertion remain.
+The test removes its listener in cleanup without suppressing application errors.
+
 This mounted case has not yet run. The coordinator schedules the whole affected
 E2E owner on desktop and Android with explicit test-owned administrator credentials,
 zero retries and a verified source deployment under the shared lease. A pass would
