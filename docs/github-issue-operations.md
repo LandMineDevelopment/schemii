@@ -24,7 +24,11 @@ Ignore other repositories and unsupported events. Use the native PR watcher
 when waiting for review/check changes; a bounded reconciliation schedule covers
 missed deliveries and restarts without repeatedly launching tests.
 
-Keep a durable private operations ledger under `.schemii/issue-operations/`.
+Keep one durable private operations ledger under `.schemii/issue-ops/` in the
+primary repository checkout. Resolve that checkout from the repository's common
+Git directory (`git rev-parse --path-format=absolute --git-common-dir`); for this
+repository's normal layout, its parent is the primary checkout. Linked developer
+worktrees use that same coordinator ledger, never a separate worktree-local one.
 Record delivery IDs and repository state before external mutations, then record
 their outcomes. Serialize reconciliation in the coordinator; after an interrupted
 or uncertain write, read GitHub before replaying it. Deduplicate deliveries and
