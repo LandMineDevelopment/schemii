@@ -1,3 +1,5 @@
+import { createLatestRequestController } from "./request-coordinator.js";
+
 const LAYERS = new Set(["tables", "views", "sql"]);
 const VIEW_KINDS = new Set(["view", "materialized_view"]);
 const DOCK_STATES = new Set(["expanded", "minimized", "dismissed"]);
@@ -128,4 +130,75 @@ export function updateWorkspacePreferences(storage, workspaceId, patch) {
   } catch {
     return false;
   }
+}
+
+
+/** Preserve the current entry when a protected Back/Forward traversal is cancelled. */
+export function createWorkspaceNavigationHistory(history) {
+  const indexKey = "schemiiNavigationIndex";
+  const readIndex = value => Number.isSafeInteger(value?.[indexKey]) ? value[indexKey] : null;
+  let currentIndex = readIndex(history.state) ?? 0;
+  let restoringIndex = null;
+  let pendingTraversal = null;
+  let generation = 0;
+  const write = (mode, href) => {
+    if (mode === "push") {
+      currentIndex = (pendingTraversal?.targetIndex ?? currentIndex) + 1;
+      pendingTraversal = null;
+      generation++;
+    }
+    const index = pendingTraversal?.targetIndex ?? currentIndex;
+    const existing = history.state && typeof history.state === "object" ? history.state : {};
+    history[mode === "push" ? "pushState" : "replaceState"]({ ...existing, [indexKey]: index }, "", href);
+  };
+  write("replace", undefined);
+  return {
+    write,
+    beginTraversal(eventState) {
+      const targetIndex = readIndex(eventState);
+      if (restoringIndex !== null && targetIndex === restoringIndex) {
+        currentIndex = restoringIndex;
+        restoringIndex = null;
+        return null;
+      }
+      const traversal = { generation: ++generation, originIndex: currentIndex, targetIndex };
+      pendingTraversal = traversal;
+      return traversal;
+    },
+    commitTraversal(traversal) {
+      if (traversal.generation !== generation) return;
+      currentIndex = traversal.targetIndex ?? currentIndex;
+      pendingTraversal = null;
+    },
+    cancelTraversal(traversal, currentHref) {
+      if (traversal.generation !== generation) return;
+      pendingTraversal = null;
+      currentIndex = traversal.originIndex;
+      if (traversal.targetIndex !== null && traversal.targetIndex !== currentIndex) {
+        restoringIndex = currentIndex;
+        history.go(currentIndex - traversal.targetIndex);
+      } else write("replace", currentHref);
+    },
+  };
+}
+
+
+/** Own asynchronous URL restoration separately from synchronous selection updates. */
+export function createWorkspaceNavigationController() {
+  const requests = createLatestRequestController();
+  let restoration = null;
+  return {
+    get restoring() { return Boolean(restoration?.isCurrent()); },
+    begin({ restore = false } = {}) {
+      const request = requests.begin();
+      restoration = restore ? request : null;
+      return Object.freeze({
+        ...request,
+        finish() {
+          if (restoration === request) restoration = null;
+          request.finish();
+        },
+      });
+    },
+  };
 }

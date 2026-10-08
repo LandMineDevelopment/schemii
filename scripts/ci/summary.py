@@ -77,7 +77,7 @@ def valid(record):
     if record["lane"] == "browser":
         if record["project"] not in {"desktop-chromium", "android-chromium"} or record[
             "shard"
-        ] not in {0, 1, 2}:
+        ] not in {0, 1, 2, 3, 4, 5, 6}:
             return False
     elif record["project"] != "none" or record["shard"] != 0:
         return False

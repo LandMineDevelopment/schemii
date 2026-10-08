@@ -208,6 +208,7 @@ test("selection, cursor, and Run all target the intended statements", async ({ p
   const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
   const sql = "SELECT 11 AS marker;\nSELECT 22 AS marker;\nSELECT 33 AS marker;";
   await editor.fill(sql);
+  await expect(page.getByRole("button", { name: "Run current statement" })).toBeEnabled();
   await editor.evaluate((node, cursor) => {
     node.setSelectionRange(cursor, cursor);
     node.dispatchEvent(new Event("select", { bubbles: true }));

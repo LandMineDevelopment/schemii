@@ -129,6 +129,45 @@ fail() {
   exit 1
 }
 
+# Timing is opt-in for normal starts only. Disabled starts invoke no additional
+# external programs. EXIT observes the original status; RETURN cleanup traps in
+# certificate/secret helpers remain untouched. Only fixed phase names reach the
+# writer, never command arguments, errors, service output or secret values.
+SCHEMII_START_TIMING_ACTIVE=0
+startup_timing_exit() {
+  local launch_status="$?" outcome=failed
+  trap - EXIT
+  if (( SCHEMII_START_TIMING_ACTIVE )); then
+    if (( launch_status == 0 )); then outcome=passed
+    elif (( launch_status >= 128 )); then outcome=cancelled
+    fi
+    if ! python3 "$ROOT_DIR/scripts/ci/startup_timing.py" finish \
+        "$SCHEMII_START_TIMING_FILE" "$SCHEMII_START_TIMING_TOKEN" \
+        "$SCHEMII_START_TIMING_PHASE" "$outcome" "$SCHEMII_START_TIMING_PHASE_START" >/dev/null; then
+      printf 'Schemii startup error: launcher timing receipt could not be completed\n' >&2
+      # Keep a lifecycle failure's original status. A successful launch with
+      # unusable requested evidence is explicitly unsuccessful to its caller.
+      if (( launch_status == 0 )); then exit 1; fi
+    fi
+  fi
+  # Returning from EXIT retains Bash's original exit/signal behavior.
+  return 0
+}
+
+startup_timing_next() {
+  if (( SCHEMII_START_TIMING_ACTIVE )); then
+    local next_clock
+    if ! next_clock="$(python3 "$ROOT_DIR/scripts/ci/startup_timing.py" phase \
+        "$SCHEMII_START_TIMING_FILE" "$SCHEMII_START_TIMING_TOKEN" \
+        "$SCHEMII_START_TIMING_PHASE" "$2" "$SCHEMII_START_TIMING_PHASE_START")"; then
+      SCHEMII_START_TIMING_ACTIVE=0
+      fail "launcher timing phase could not be recorded"
+    fi
+    SCHEMII_START_TIMING_PHASE_START="$next_clock"
+    SCHEMII_START_TIMING_PHASE="$1"
+  fi
+}
+
 # A QA coordinator holds this lease for its whole run, including manual testing.
 # Resolve through Git so all linked worktrees protect the same deployment.
 # FD 3 is deliberately inherited across the launcher's stale-group re-exec.
@@ -270,6 +309,19 @@ if ! docker info >/dev/null 2>&1; then
     exec newgrp docker -c "$restart_command"
   fi
   fail "Docker is unavailable; confirm that the daemon is running and the current account belongs to the docker group"
+fi
+
+# Preflight (arguments, deployment lease, configuration and runtime access) is
+# deliberately outside the receipt. Start only after stale-group re-exec has
+# resolved, so no timing state changes the supported exec or signal contract.
+if [[ "$SCHEMII_LAUNCH_ACTION" == start && -n "${SCHEMII_START_TIMING_FILE-}" ]]; then
+  command -v python3 >/dev/null 2>&1 || fail "Python 3 is required only when launcher timing is enabled"
+  SCHEMII_START_TIMING_TOKEN="$(python3 "$ROOT_DIR/scripts/ci/startup_timing.py" begin \
+    "$SCHEMII_START_TIMING_FILE" "$ROOT_DIR")" || fail "launcher timing receipt could not be created"
+  SCHEMII_START_TIMING_PHASE_START="${SCHEMII_START_TIMING_TOKEN##*:}"
+  SCHEMII_START_TIMING_PHASE=preparation
+  SCHEMII_START_TIMING_ACTIVE=1
+  trap startup_timing_exit EXIT
 fi
 
 mkdir -p -m 700 -- "$(dirname -- "$SCHEMII_LAUNCH_LOCK_FILE")"
@@ -525,6 +577,7 @@ if [[ "$SCHEMII_LAUNCH_ACTION" == "test-ai-metadata" ]]; then
 fi
 
 printf 'Building the current Schemii application image...\n'
+startup_timing_next build passed
 if [[ -n "$SCHEMII_PI_PROTOTYPE_URL" ]]; then
   if ! docker "${compose_args[@]}" build schemii ai-prototype-runtime; then
     fail "the application or AI prototype runtime image could not be built; the running deployment was left unchanged"
@@ -533,6 +586,7 @@ elif ! docker "${compose_args[@]}" build schemii ai-prototype-runtime; then
   fail "the application image could not be built; the running deployment was left unchanged"
 fi
 
+startup_timing_next replacement passed
 # The launcher is also the restart boundary. Build first so a compilation
 # failure does not interrupt the last known-good HTTP processes.
 docker "${compose_args[@]}" rm --stop --force \
@@ -562,7 +616,9 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
 fi
 
 printf 'Building and starting the Schemii HTTPS deployment on 127.0.0.1:%s...\n' "$SCHEMII_TEST_APP_PORT"
+startup_timing_next readiness passed
 if ! docker "${compose_args[@]}" up --detach --remove-orphans --wait --wait-timeout "$SCHEMII_STARTUP_TIMEOUT"; then
+  startup_timing_next post-start failed
   printf 'Schemii did not become healthy. Current service state:\n' >&2
   docker "${compose_args[@]}" --profile demo-fixture ps --all >&2 || true
   printf 'Schemii service logs:\n' >&2
@@ -583,6 +639,7 @@ if ! docker "${compose_args[@]}" up --detach --remove-orphans --wait --wait-time
   fi
   fail "the application service did not become healthy"
 fi
+startup_timing_next post-start passed
 docker "${compose_args[@]}" ps
 if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
   if ! fixture_output="$(docker "${compose_args[@]}" --profile demo-fixture run --rm --no-deps demo-fixture 2>&1)"; then

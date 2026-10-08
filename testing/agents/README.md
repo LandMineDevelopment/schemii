@@ -102,9 +102,43 @@ least every thirty seconds while the connection runs. Copy only selected report
 or finding evidence to its declared task-owned location before expiry/shutdown.
 Session ownership metadata sits outside the evicted output directory.
 
+Export selected evidence before calling `browser_close`. A successful close now
+stops that connection's Playwright backend and cleanup helper and removes its
+temporary session directory. Only the small Python stdio endpoint stays alive for
+stock Codex follow-up: the next browser call starts a fresh isolated backend and
+repeats its genuine MCP initialization. Open browser contexts and active calls are
+never discarded merely because they are idle. Failed calls are never replayed.
+
 Always call `browser_close` before a worker finishes. A completed or interrupted
-turn can retain its MCP connection for follow-up; it is not shutdown. Closing the
-native agent/session, when supported, ends the transport and automatically removes
+turn can retain its MCP connection for follow-up; it is not transport shutdown.
+When the browser connection is genuinely finished, export selected evidence and
+call the project-owned `browser_release` tool with no arguments. This terminal
+operation cleans only this endpoint's backend, helper and disposable directory,
+fully writes its success response, then exits the stdio endpoint. It rejects
+target arguments and release while requests, callbacks, initialization or queued
+backend traffic are pending. Cleanup or response-write failure is explicit;
+failed calls are never replayed. Use `browser_close` when retaining this connection
+for browser follow-up. Terminal release prevents browser follow-up on that
+connection; future browser use needs a new transport. Ordinary turn completion
+alone is not a reason to destroy a reusable connection.
+
+On each resumed turn and before finishing, inspect the current exposed tools and
+connection state. A previous release or completed/interrupted thread status does
+not prove current transport cleanup. In observed sessions, resumed work received
+new host-initialized connections after earlier releases; do not assume the host
+will provide one. Export selected evidence and close/release only your current own
+connection as appropriate, preserving active peers and their data. Report actual
+call acknowledgements and observed resource lifecycle; if process/session removal
+was not checked, say so instead of claiming it was observed.
+
+The tool is advertised through standard MCP `tools/list` and enabled in project
+configuration. Existing endpoints and provider tool lists do not reload it.
+A fresh child can inherit its parent's old allowlist, so verify the actual
+inventory in a fresh provider session before claiming activation. If the tool
+is unavailable, close the backend and report the retained endpoint; do not
+claim transport closure. No T3 source change or private host shutdown RPC is used.
+
+Closing the native agent/session, when supported, ends the transport and removes
 its temporary directory. Stock Codex can kill the launcher before normal cleanup
 finishes. A small connection-owned cleanup process survives that targeted shutdown,
 closes all inherited transport descriptors, waits for its recorded supervisor and
@@ -118,16 +152,25 @@ remain untouched. No permanent cleanup service or browser/controller daemon is a
 
 The cleanup verification uses disposable stock Codex app-servers and ephemeral
 threads, without AI turns, app writes or a replacement browser launcher. It
-exercises normal transport exit, browser-close retention, the 20 MiB soft budget
+exercises normal transport exit, browser-close backend release and same-thread
+follow-up, the 20 MiB soft budget
 including an oversized current image, supervisor and app-server SIGKILL, and
 recovery after the supervisor and guardian both die. A separate live peer stays
 usable throughout. It checks captured PID/start-tick identities, never process
 names, and never manually removes a disposable session directory. The optional
 expiry run waits for a fresh screenshot to age ten real minutes. Keep that long
-run and destructive disposable lifecycle checks outside ordinary CI. Native
-turn interruption still requires an actual coordinator interruption/follow-up;
+run and destructive disposable lifecycle checks outside ordinary local feedback.
+Native turn interruption still requires an actual coordinator interruption/follow-up;
 the current collaboration surface exposes no session-close control. Neither
 completion nor interruption implies MCP transport shutdown.
+
+For a coordinator-owned, bounded terminal control, run
+`python3 testing/agents/verify_browser_cleanup.py --cwd "$PWD" --terminal-only`.
+It uses fresh disposable stock clients to test active-backend and
+close-then-release success acknowledgements, complete endpoint cleanup, a live
+peer, exactly one rejected same-thread browser follow-up, and fresh-thread use.
+It does not repeat the unchanged ten-minute TTL, budget or forced/orphan campaign.
+The result is mechanical lifecycle evidence, not Schemii application acceptance.
 
 With thirteen available slots, twelve children can each own a browser. For manual
 acceptance reserve one of those children for independent review: at most eleven
@@ -135,6 +178,27 @@ active testers plus that reviewer. The legacy isolated runner still caps its own
 runs at ten; this is not a limit of the native browser extension.
 
 ## Assign native workers
+
+For repository issues, follow [the issue operations runbook](../../docs/github-issue-operations.md).
+The coordinator reconciles notifications and existing issue/PR ownership before
+dispatch, gives workers canonical issue context and tracks actual worker IDs,
+branch/PR/head, original local evidence, pending acceptance and next actions.
+Every implementation uses an existing issue or a genuine nonduplicate new issue;
+PRs use `Closes` only for complete resolution and `Refs` for partial delivery.
+Workers report progress and findings to the coordinator. Independent review and
+applicable current-head acceptance precede a coordinator's guarded merge; webhook
+delivery and worker completion are not acceptance.
+
+Follow the [shared testing and verification reuse policy](../../AGENTS.md).
+The coordinator owns acceptance scheduling; each assignment names focused checks
+and records their source, command, scope, outcome and evidence. Developers use the
+[change planner and feedback inventory](../../docs/testing-feedback.md). Reviewers
+inspect actual existing evidence independently and reproduce material gaps instead
+of repeating a complete suite by default. New threads, handoffs and merge delivery
+do not justify duplicate local suites. GitHub Actions is disabled; inspect the
+private source-bound receipts from `./ci.sh` against the current PR head instead
+of waiting for hosted checks. Successful `./ci.sh --feedback` may leave required
+acceptance pending. Manual scenario/fixture ownership gates still apply.
 
 Prepare a developer's linked Git worktree and task branch before dispatch. Read
 the existing changes and assign narrow files; never switch another chat's checkout

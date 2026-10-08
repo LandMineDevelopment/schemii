@@ -1083,7 +1083,7 @@ class ConsoleService:
                 columns=list(result.query.columns), rows=[list(row) for row in rows],
                 next_cursor=next_cursor, truncated=result.query.truncated, expires_at=result.expires_at)
         except PostgresGatewayError as error:
-            if isinstance(error, (PostgresConsoleCancelledError, PostgresConsoleQueryError)):
+            if isinstance(error, (PostgresConsoleCancelledError, PostgresConsoleQueryError, PostgresConsoleLimitError)):
                 with self._transient_results_lock:
                     for item in self._transient_results.values():
                         if item.execution_id == execution_id:
@@ -1184,7 +1184,7 @@ class ConsoleService:
                         indexes = state.setdefault("completedStatementIndexes", [])
                         if result.query.statement_index not in indexes:
                             indexes.append(result.query.statement_index)
-                except (PostgresConsoleCancelledError, PostgresConsoleQueryError):
+                except (PostgresConsoleCancelledError, PostgresConsoleQueryError, PostgresConsoleLimitError):
                     with self._transient_results_lock:
                         for item in self._transient_results.values():
                             if item.execution_id == execution_id:

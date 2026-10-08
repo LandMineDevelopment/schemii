@@ -21,7 +21,6 @@ test("workspace labels rename without changing the design and survive reload", a
     expect((await (await request.get(path)).json()).name).toBe(name);
     await manager.getByRole("button", { name: `Rename ${name}`, exact: true }).click();
     await input.fill(`${name} updated`);
-    await page.screenshot({ path: "/tmp/schemii-workspace-rename.png" });
     await manager.getByRole("button", { name: "Save workspace name", exact: true }).click();
     await expect(manager.getByText(`${name} updated`, { exact: true })).toBeVisible();
     await expect(page.locator("#workspace-title")).toHaveText(`${name} updated`);

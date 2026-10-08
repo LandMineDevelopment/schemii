@@ -108,6 +108,14 @@ class _AdmittedConnection:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._connection, name)
 
+    @property
+    def autocommit(self) -> bool:
+        return self._connection.autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        self._connection.autocommit = value
+
     def __enter__(self) -> _AdmittedConnection:
         try:
             self._connection.__enter__()

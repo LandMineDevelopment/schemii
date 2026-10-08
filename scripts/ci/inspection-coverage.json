@@ -1,0 +1,174 @@
+{
+  "schema": 1,
+  "profile": "developer-inspection",
+  "files": [
+    "tests/e2e/shared-ui-audit.spec.js",
+    "tests/e2e/ai-diagnostic-permissions.spec.js"
+  ],
+  "python": {
+    "files": {
+      "tests/test_database_inspection.py": [
+        "14159f2d704110208ed3e41f285eaae6e41f0bc2cb8fd54900ce9b459db13aed",
+        "94fed1bf2d5442d32e2038a5ae5fa816e2f00fe6523ba554618a26252fef1380",
+        "dd9aef437b937dc2c5842b8d30384ed884fcff3851a3224872ccca16e17a64f4"
+      ],
+      "tests/test_developer_inspection.py": [
+        "11a02d52d927eef0c82ae715e8e7263c7074129d4ebf921f8d81d3cb347115a5",
+        "25ca60f13af18793e7d9f664c364c684ddad2a921359bd8a2507fea7b63bcb73",
+        "3a03c2e60fc294dbeda47151bf55044fa0a09a3d3d19e437a443f98854810806",
+        "575fd01d426b30fd3315087baf1b889d93de600ae46e58483122117ece4d3d2f",
+        "6ffb1664a309a060347873a1c1a0115c33c54ebbec4158de9bbb8783dec95603",
+        "a5036458c110ede985523f97af96f62503420ebe55c0be25168dbe48dd3b96f7",
+        "b0a57efe705f19bce0b36818adbc2aaac8bdc0cb92d27d095cb0cd88b98ed165",
+        "ddf868a46cd08225383942c338b657e6985f886c47b316ea0bdc5fd1604c6ebd"
+      ],
+      "tests/test_route_inspection.py": [
+        "0bb742ed0a02394c0022f27aa6e305f734fb18e67f8c830ee89200a5d7ea3547",
+        "0d09d5044681baa26efa908e0cce31fec7d86d97bee59437e5d52d1aae1a609b",
+        "255496d13eecbfe200d71827ee35272e0608d98af97916d45b9b69b34577759c",
+        "37b21c1736edea83913088c3d01700c0df6af174f2fd6c34a2eb18aafe4c69ab",
+        "86a11d58e9d616c5ab7d71bf06b9ff08cf694cc9f50eacd8b0a8b6957a65966d",
+        "979770e9d25f70318b08131459da7ca6cebc04e9eec4061778752cbfd488769a",
+        "ab6d00dfe7f581ac5e8a307e648b93eb2bce1483337089c4be7b9b99f6ca5d5b",
+        "d02cfbf17160bc6f6d02cd5e62e6e62441ea25d38c87c421ef9f50260a22bbe1"
+      ],
+      "tests/test_system_inspection.py": [
+        "0ac37f673310342c25973f6b18072179714e2ad12ffcb1f4624640a7fa7defbc",
+        "123def00726e4805de2b74d5ebd0e0a88e08076f8fc1c5619366917aee3bc4bb",
+        "148fcc79e51815727e38a302f8ca06c5458da18f3b79fca9b5ba91aca40da9a8",
+        "20364c2dd9482e38bf1cd0740b0ebaaf17da4415d68d6b4075961d397bf0dd9f",
+        "22ee2b14010bde642b47cbaa3b6a604beb4b0e428d0a3222e5846d92e8f53e21",
+        "285bc9bebc3ace60ad1013107fd7d617587fef6884eecda4a2667448c484c22e",
+        "37a24649f159c5b6dbbb19ad604b873092ab26230bf78910eccc4fc7a32a9357",
+        "4b9f308226c8864eea5f11c7f7967b3358fb89e404d07a9dc6bcca4ecc840e97",
+        "5d6906a85830f15bd8901c6b497353232240eecee58592c0f2c1077fcb0ce254",
+        "5fede60c2c28e0c9bd65cf37f42637a1f0851f17f61d5eb294da2dad44b9a6ff",
+        "660aea448383af0ff51cc2a161b9a2241bb55b62c880fbe50c0d5bb163621299",
+        "6bbeb91d3f04c9df281b87466d13157427745d2c02545c5765025f4bbb3ababd",
+        "7930513f0de0997f0b2290c68d510e8527351b8fe32c9886719eb1b613c58192",
+        "8c6ecfbaf5320bb2e4b547e5aa0742a729886dced0266f9eeb379c187c584f8b",
+        "9c8c09f571d4d7b4d5344ae6d9b1a8fb520fb90e48a2cdd5f555e50722575ece",
+        "bab16ef525720d717fe371843be7d37c8ecda51a73dacf60755e610b0ddb9d29",
+        "d2edc106f36000e6500490938ad26c70951038d7890f8c7ab9c86c97b0970ec2",
+        "d385c832963c796f0106ec1e4e9b46cf11a15e2f779c25382c2c224f9135da8e",
+        "d57c66e0e424891fc7234ed868c07aac221a8a468c1479c93bc670bd1baaf761",
+        "dccfc26de1bf36795b58845a51d741c1d9f69537916a5471f6c9eca75c6e1f66",
+        "f8b5e4d0b4133ba2edcc761f97c9c7766a5f6d503fdfbcf4ce3d28172d6b5251"
+      ],
+      "tests/test_application_structure.py": [
+        "0ca89216e4b4d3c1508e8da796e2842a77737cc351994802b169330fc53c399c",
+        "44c8e8e4a796aa36bae265a91573421e5d90bfe29e30f218d1870d85c7335a8b",
+        "85ba88a2ba9051f76ed04571dd7cb575dc057d9751a10e30c5ac5587aba0a19d",
+        "e816dcef388bcd2de71f35c0704a4afe131d9120258d7c99599d91ac308811f3"
+      ],
+      "tests/test_frontend.py": [
+        "008dbaa16662f0d674fa907903251ecab6c8d6105bace2a727e1ebd71dd5d1db",
+        "00c4efe6828d5fc943307ad5cea09ef2549a3281fa0a5bb2f5594eafdbd51ed9",
+        "1ed4cc005ce9af3d0741b8992e2a594cc0ca79b6e9ce5bd6b4b78dc77df7a9fe",
+        "297aaea6c071f596773a3f29c94c0712dd3ff10aaa0f795744e106d518e2a53d",
+        "3fda851feb2339c5e1b39b834582bb4503088ff61dffa8dee8bfdc1d826960a3",
+        "55695a51f4e7e507b3d6cd69ac3db3c9651ffee5f478a3e2d4008e9e74d0e420",
+        "6c4ce7976e5f01484652b527dd8bc5097ffc342c512efb669d468b51d6e7b5c3",
+        "7188ec034506314c11f3a104574bc39c37ec5bce09007ce7d6753778b00034ae",
+        "76dc8ac326393e273e44cb7fadf17bffce95c216d04cfc147122fba666e64938",
+        "81980c6b45f385af811032e390fb6410364dcfbc938040ddb947d2a73a209df0",
+        "8bfbf893d6bc4ebf5b8c8158f764324e511e5bc04190f88ca72659e232f8a73a",
+        "98eb96db5ab671bdad45e79cc0416618d2915f81f87f85a7653ac10c5f5dd424",
+        "994d3021267118de84b8fc66d04480f90367a2f1c527d43c36f28580b20d6922",
+        "9a9e59355a65c1c77c78e0845d357875fffde6fb6fa7c71745862ead9b1e6c7d",
+        "9dc09c28157569b243b6705a563c8862fb6e952379e222c4af1977f4cecab3e6",
+        "a33ab23571ec7864be2bd353d20d108ceaf93d3ada8d36971211ccf556c1e88f",
+        "aae38b4f587c799b8920e38d68321c3f80f42a926bae83752fdc49d3b715942f",
+        "aef3840f46b90b89784665a15d7b45de823f89ca0a9c996c082988c6031b162f",
+        "b0b2b05c6098abae05cff5e5dc60d0f7602529b93677104acc0f7d14c98b4593",
+        "b4619a28e77eaaf33ae309568eb1ec2b32ed75e4eaa41b36e90c16c3f17a6e71",
+        "b71ba512ecc6ce6db45e97aa34fab2f167f5d43273391595b6c307f59554f771",
+        "d238fd9eea4fd9acc20ceeb9cbe58ae63b0d05f5a48f25a3dd22e816920a93ed",
+        "d24899e544ff116ebb57de5920003da764694904c1114295ec96f74fbca67052",
+        "dc8b46cfe77a9bd8743e64cb1a056530e9c4263340c0f8bf9bf1db327217a133",
+        "e213bcd21552bc038baedac333119841be1ee07a7aa929815aceecf50d572da8",
+        "e8d3055d3f4342110b730283e5cdab3030828dc51dc5ea0b976aebb36f245c43",
+        "ea8ffe68f6f7817344cdf7011b9b9c9e390ec271923ba5dc7d3fc805baa2cc12",
+        "eeada2a2954400192c17ab39ea2c01ee72b7cc1a66232b72a01ff9ad5effced8",
+        "f626136e6e8ebc681d0c2f36064ed2b427d78220531abdabd61099f4468f2b84"
+      ],
+      "tests/test_runtime_hardening.py": [
+        "136956dd55779916e6af0ec1aba542a89fff17a7ec7b2cf3f27a84e355da785e",
+        "238d1b7a8a978397e05c7c5ff93c72649293bcba5dc4740d9de027eada101613",
+        "2e7657838122f4229ebace5422366768fefa89e550bd707bd0cff14381a094b2",
+        "405553eb3c138f2b1f9c289f3ae61284c8d9bd39f77d2f2ef2187149326a4755",
+        "b609d46b88625f4741b6d15880b079af2ff14cfa6f8a491c12cbb543c5011e8d",
+        "cde5ca36974098ea7ddb155f648f4175c83dd27bb9bafa27833b9cda3f5cc735",
+        "f44ac41f398f3109fc961f05990ea38d7a5734c920e5015f1efb448214c1e594"
+      ],
+      "tests/test_source_inspection.py": [
+        "0104fc9d8f1c94689a7954622f4336ea6ee4165a0155cd6fe302ac5959718974",
+        "1694dd888cb67e45f85ad57679ade6762517a7aae91cb8c0a37f19b131d90414",
+        "37a9fe49d308588543bacc3c38a973057302bbd66509e9352a59a529e55789b1",
+        "9e1901855bbec9a95b86caa235032a3f27392798996ad22a7c7ae01bdfa75674",
+        "a0617925e4ffb1e7575fe666459fd6dc317cd9b64bdc021c1c6fcc4d4e6baf57",
+        "af9a6faf130ccfd4d0e5254d28f03fe121624c6c4d3561e2127808376a466a03",
+        "b3d2d41b17919ca8dfac3e1fb5a47914d0d2b52fc63905f1df6bb4a53022bbd1"
+      ]
+    },
+    "allowed_skips": [],
+    "dynamic_file": "tests/test_source_inspection.py"
+  },
+  "browser": {
+    "desktop-chromium": {
+      "files": {
+        "tests/e2e/shared-ui-audit.spec.js": [
+          "13d7dd344ce7ce2d608703ad08dc22a3f822624fe2182bbe661455d0bd1e605b",
+          "2d481d9e1109e17873f26b817f4661fd3518de991f6fa77b69a0715a4a24314a",
+          "834331f18191b9bcd2045c2ca84a103a44d18d58a4f0188838e3990a853943ae",
+          "a10ed526aa5a6070c956ede66f27fbe49184b76ab22f16cccc30c6908eb3d8ee",
+          "aef1826f1d4dbdbc2e83b9695a6cf32d06bf54882ed6bcc434ebd438b1c63b94"
+        ],
+        "tests/e2e/ai-diagnostic-permissions.spec.js": [
+          "8ec63bb5741c52522b7b8c92c8f3197ed1f4f849e676c97c534791f102f6404a",
+          "bba0256166e3fb2118fdb948991c0728f508ee6c04440a340ad8d76296aa3fd4"
+        ]
+      },
+      "allowed_skips": [],
+      "shards": [
+        [
+          "tests/e2e/shared-ui-audit.spec.js",
+          "tests/e2e/ai-diagnostic-permissions.spec.js"
+        ]
+      ]
+    },
+    "android-chromium": {
+      "files": {
+        "tests/e2e/shared-ui-audit.spec.js": [
+          "2111277c616929a050cf24c7cfe4e7677f8b05b9620b18e9baac286b19d68d12",
+          "4ff4ece6409a5fbef0da65f1a45298ecd4c3f0ff59098192ce051aaa2961c948",
+          "7e8b46bf7da5b11c6268177e4a142c02d8128f881c09b5866d029420055b2aa8",
+          "84396bec97ba575ad0e164a591425cc8c6f2e5f60d71f5fc08ceea81e2506a2d",
+          "f70d7d83ad3ab3e350317bb95b0d97eaab04510b9b1de001586ed3149aca00fb"
+        ],
+        "tests/e2e/ai-diagnostic-permissions.spec.js": [
+          "4f90afb743695cbf4969447a14022acf505d4c82e6bebe1baffbfaf19969e18f",
+          "7fe128845a2467232cce39b7f0c422d952093ff2e88548615fb194456ebbef7f"
+        ]
+      },
+      "allowed_skips": [],
+      "shards": [
+        [
+          "tests/e2e/shared-ui-audit.spec.js",
+          "tests/e2e/ai-diagnostic-permissions.spec.js"
+        ]
+      ]
+    }
+  },
+  "frozen_sha256": {
+    "tests/test_database_inspection.py": "dafe61f181ca24a446eb9bc624d45ce98f0d88548b3eae858a46ca9e62aebdb2",
+    "tests/test_developer_inspection.py": "4e0da64eda5c195a9c91b5ac0353119311421f25d45c11111f48ea254a9308e6",
+    "tests/test_route_inspection.py": "68c5d8a907291d6bda9b51ab0c789f90ca854c4e8995a0522c3d9d19960aba22",
+    "tests/test_system_inspection.py": "5af2d220755677db25268ae98bbe7d5faa5d5bda67b0172e91ead3cf53b6103e",
+    "tests/test_application_structure.py": "46aeb00238b49d89918fe750dc86befc35020bdb902e5006040861eb78085085",
+    "tests/test_frontend.py": "a90fef6420a059549659a09ceaa22349b15d4cef512aa5c7a92332fee7c9b916",
+    "tests/test_runtime_hardening.py": "1b80a308b34d902a0e21812c1eedc8c108fbcb805c2fbb0d04f3c6811023e6ca",
+    "tests/e2e/shared-ui-audit.spec.js": "ced5e3da1d843ac53748296cbf5a882b7d8873f9a426fa30018092d394d162bd",
+    "tests/e2e/ai-diagnostic-permissions.spec.js": "196b0bd870b76b70111b5a808fae71e369ac9b1b45efad2392d8ea25f467420a"
+  }
+}

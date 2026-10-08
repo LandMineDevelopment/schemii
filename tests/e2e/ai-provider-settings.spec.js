@@ -183,6 +183,7 @@ test('administrator connects Codex then stages exact model policies from a user 
   ];
   const state = { connected: false, sourceConnected: true, grants: [], roleGrants: [], connections: [connection], models,
     verifiedModels: [], catalogCheckedAt: null, testCalls: 0, copiedBody: null };
+  await page.route('**/api/v1/admin/ai/zen', route => route.fulfill({ json: { connected: false, grants: [], roleGrants: [], connections: [] } }));
   await page.route('**/api/v1/admin/ai/shared-codex**', route => {
     const path = new URL(route.request().url()).pathname, method = route.request().method();
     if (path.endsWith('/shared-codex') && method === 'GET') return route.fulfill({ json: state });

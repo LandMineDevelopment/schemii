@@ -9,6 +9,7 @@ htmlcov/
 artifacts/
 
 .venv/
+.venv-quality/
 venv/
 node_modules/
 

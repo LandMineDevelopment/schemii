@@ -3,15 +3,22 @@
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import sys
 
 import pytest
 
 from scripts.ci.classify_changes import classify, load_classification, readme_index_only
+from scripts.ci.test_selection import (
+    NATIVE_MARKDOWN,
+    NATIVE_SKILL,
+    expected_lanes,
+    source_job_names,
+)
 from scripts.ci.required_gate import CONTROL_NEEDS, SOURCE_NEEDS, evaluate
 from scripts.ci.workflow_timing import (
-    JOB_NAMES,
     REPORT_JOB_NAMES,
     summarize,
     test_evidence as collect_evidence,
@@ -116,9 +123,137 @@ def report_workflow(root, event, base, head):
     )
 
 
+def test_native_companion_workflow_cli_keeps_native_closure_and_validates_both_documents(
+    repository,
+):
+    root, _ = repository
+    write(
+        root,
+        NATIVE_SKILL,
+        "---\nname: stock-t3-agents\ndescription: Native workflow instructions.\n---\n\nRead [the runbook](../../../testing/agents/README.md).\n",
+    )
+    write(
+        root,
+        "testing/agents/README.md",
+        "# Native agents\n\nRead [the skill](../../.agents/skills/stock-t3-agents/SKILL.md).\n",
+    )
+    write(root, "testing/agents/browser.py", "# Native source\n")
+    base = commit(root)
+    for path in NATIVE_MARKDOWN:
+        write(root, path, (root / path).read_text() + "\nReviewed instructions.\n")
+    write(root, "testing/agents/browser.py", "# Updated native source\n")
+    head = commit(root)
+    classification, code, receipt = report_workflow(root, "pull_request", base, head)
+    assert classification["profile"] == "native" and classification["lane"] == "source"
+    assert classification["markdown"] == sorted(NATIVE_MARKDOWN)
+    assert code == 0 and receipt["files"] == 2 and receipt["outcome"] == "success"
+    outputs = dict(
+        line.split("=", 1) for line in (root / "github-output").read_text().splitlines()
+    )
+    assert all(outputs[layer] == "true" for layer in ("node", "static", "python"))
+    assert all(outputs[layer] == "false" for layer in ("postgres", "browser"))
+    assert outputs["python_paths"] == "testing/agents"
+
+
+@pytest.mark.parametrize("path,lane", [("src/app.py", "source"), (REPORT, "reports")])
+def test_workflow_checkout_runs_base_added_classifier_for_an_existing_pr(
+    repository, path, lane
+):
+    root, fork = repository
+    command(root, "checkout", "--quiet", "-b", "existing-pr")
+    write(root, path, "# Existing PR change\n")
+    head = commit(root)
+    assert not (root / "scripts/ci/classify_changes.py").exists()
+
+    command(root, "checkout", "--quiet", "main")
+    for file in (
+        "scripts/ci/classify_changes.py",
+        "scripts/ci/test_selection.py",
+        ".github/workflows/ci.yml",
+    ):
+        # Keep the historical provider identity in this synthetic hosted checkout.
+        source = (
+            "testing/ci/hosted-workflow.yml"
+            if file == ".github/workflows/ci.yml"
+            else file
+        )
+        write(root, file, (ROOT / source).read_text())
+    write(root, "src/base-only.py", "# Unrelated base advance\n")
+    base = commit(root)
+    command(root, "merge", "--quiet", "--no-ff", head, "-m", "prospective PR merge")
+    merge = command(root, "rev-parse", "HEAD")
+    assert command(root, "rev-list", "--parents", "-n", "1", merge).split() == [
+        merge,
+        base,
+        head,
+    ]
+
+    # Read the actual merged workflow, not a duplicated checkout/command choice.
+    workflow = (root / ".github/workflows/ci.yml").read_text()
+    job = re.search(r"(?ms)^  classify:\n(.*?)(?=^  [\w-]+:|\Z)", workflow)[1]
+    checkout = re.search(
+        r"(?m)^      - uses: actions/checkout@v4\n((?:^        .*\n)*)", job
+    )[1]
+    options = dict(re.findall(r"(?m)^          ([\w-]+): (.+)$", checkout))
+    assert options["fetch-depth"] == "0"
+    revisions = {
+        "": merge,  # actions/checkout defaults to the triggering github.sha.
+        "${{ github.sha }}": merge,
+        "${{ github.event.pull_request.head.sha || github.sha }}": head,
+    }
+    assert options.get("ref", "") in revisions
+    revision = revisions[options.get("ref", "")]
+    args = shlex.split(re.search(r"(?m)^        run: (.+)$", job)[1])
+    assert args[:2] == ["python3", "scripts/ci/classify_changes.py"]
+    args[:1] = [sys.executable, "-S"]
+    output = root / args[args.index("--output") + 1]
+    event = root / "event.json"
+    event.write_text(
+        json.dumps({"pull_request": {"base": {"sha": base}, "head": {"sha": head}}})
+    )
+    env = {
+        **os.environ,
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_EVENT_PATH": str(event),
+        "GITHUB_SHA": merge,
+        "GITHUB_OUTPUT": str(root / "github-output"),
+    }
+
+    command(root, "checkout", "--quiet", "--detach", head)
+    broken = subprocess.run(
+        args, cwd=root, env=env, capture_output=True, text=True, timeout=10
+    )
+    assert broken.returncode == 2 and "No such file or directory" in broken.stderr
+    assert not output.exists()
+
+    command(root, "checkout", "--quiet", "--detach", revision)
+    corrected = subprocess.run(
+        args, cwd=root, env=env, capture_output=True, text=True, timeout=10
+    )
+    assert corrected.returncode == 0, corrected.stdout + corrected.stderr
+    result = load_classification(output)
+    assert command(root, "rev-parse", "HEAD") == merge
+    assert result["valid"] and result["lane"] == lane
+    assert result["base"] == base and result["head"] == head
+    assert result["comparison_base"] == fork
+    assert result["markdown"] == ([REPORT] if lane == "reports" else [])
+
+    # Having the control script at the merge cannot excuse a missing event ref.
+    for missing in ("base", "head"):
+        payload = {"base": {"sha": base}, "head": {"sha": head}}
+        payload[missing]["sha"] = "0" * 40
+        event.write_text(json.dumps({"pull_request": payload}))
+        rejected = subprocess.run(
+            args, cwd=root, env=env, capture_output=True, text=True, timeout=10
+        )
+        invalid = load_classification(output)
+        assert rejected.returncode == 1 and invalid["valid"] is False
+        assert invalid["lane"] == "source" and invalid["markdown"] == []
+
+
 @pytest.mark.parametrize("event", ["push", "pull_request"])
 @pytest.mark.parametrize("change", ["modify", "rename", "delete"])
-def test_existing_front_matter_skill_uses_full_ci_without_report_title_policy(
+def test_existing_front_matter_skill_is_validated_with_exact_native_pr_ownership(
     repository, event, change
 ):
     root, _ = repository
@@ -126,6 +261,7 @@ def test_existing_front_matter_skill_uses_full_ci_without_report_title_policy(
     original = (ROOT / skill).read_text()
     assert original.startswith("---\n")
     write(root, skill, original)
+    write(root, "testing/agents/README.md", "# Native assignment protocol\n")
     base = commit(root)
     if change == "modify":
         write(root, skill, original + "\nPreserve explicit task ownership.\n")
@@ -135,8 +271,12 @@ def test_existing_front_matter_skill_uses_full_ci_without_report_title_policy(
         (root / skill).unlink()
     classified, status, receipt = report_workflow(root, event, base, commit(root))
     assert classified["valid"] and classified["lane"] == "source"
-    assert classified["markdown"] == []
-    assert status == 0 and receipt["outcome"] == "success" and receipt["files"] == 0
+    assert classified["profile"] == (
+        "native" if event == "pull_request" and change == "modify" else "full"
+    )
+    assert classified["markdown"] == ([skill] if change == "modify" else [])
+    assert status == 0 and receipt["outcome"] == "success"
+    assert receipt["files"] == (1 if change == "modify" else 0)
 
 
 @pytest.mark.parametrize("change", ["rename", "delete"])
@@ -371,8 +511,31 @@ def jobs():
             "conclusion": "success",
             **{key: IDENTITY[key] for key in ("run_id", "run_attempt", "head_sha")},
         }
-        for name in JOB_NAMES
+        for name in source_job_names("full")
     ]
+
+
+def evidence(profile):
+    return {
+        "complete": True,
+        "profile": profile,
+        "lanes": [
+            {
+                "lane": lane,
+                "project": project,
+                "shard": shard,
+                "complete": True,
+                "outcome": "passed",
+                "first_attempt_failures": 0,
+                "retry_recovered": 0,
+                **{
+                    key: IDENTITY[key]
+                    for key in ("source_sha", "run_id", "run_attempt")
+                },
+            }
+            for lane, project, shard in sorted(expected_lanes(profile))
+        ],
+    }
 
 
 def gate(lane, required=None, observed=None, **classification):
@@ -380,13 +543,20 @@ def gate(lane, required=None, observed=None, **classification):
         {
             "valid": True,
             "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
             "reason": "verified-report-only",
             "head": IDENTITY["head_sha"],
             **classification,
         },
         needs(lane) if required is None else required,
         jobs() if observed is None else observed,
-        {"complete": True, "lane": lane, **IDENTITY},
+        {
+            "complete": True,
+            "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
+            "test_evidence": evidence("reports" if lane == "reports" else "full"),
+            **IDENTITY,
+        },
         IDENTITY,
     )[0]
 
@@ -404,6 +574,71 @@ def test_failed_cancelled_skipped_or_unfinished_source_matrix_leg_fails_gate(out
     observed = jobs()
     observed[-1]["conclusion"] = outcome
     assert not gate("source", observed=observed)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "none",
+        "failed-job",
+        "cancelled-job",
+        "missing-job",
+        "stale-attempt",
+        "missing-test-evidence",
+    ],
+)
+def test_unknown_step_measurement_preserves_strict_source_acceptance(damage, tmp_path):
+    observed = jobs()
+    for job in observed:
+        job.update(
+            started_at="2026-09-30T00:00:03Z",
+            completed_at="2026-09-30T00:00:10Z",
+            steps=[
+                {
+                    "name": "Exercise browser flows",
+                    "started_at": "2026-09-30T00:00:04Z",
+                    "completed_at": None,
+                }
+            ],
+        )
+    if damage in {"failed-job", "cancelled-job"}:
+        observed[0]["conclusion"] = "failure" if damage == "failed-job" else "cancelled"
+    elif damage == "missing-job":
+        observed.pop()
+    timing = {
+        **summarize(
+            {
+                "created_at": "2026-09-30T00:00:00Z",
+                "run_started_at": "2026-09-30T00:00:02Z",
+            },
+            observed,
+        ),
+        **IDENTITY,
+    }
+    assert all(
+        job["test_steps_ms"] is None and job["setup_and_other_ms"] is None
+        for job in timing["jobs"]
+    )
+    timing["test_evidence"] = evidence("full")
+    if damage == "stale-attempt":
+        timing["run_attempt"] = 1
+    elif damage == "missing-test-evidence":
+        # The real collector still requires all seven sanitized test lanes.
+        timing["test_evidence"] = collect_evidence(tmp_path, identity=IDENTITY)
+        timing["complete"] = timing["complete"] and timing["test_evidence"]["complete"]
+    passed, _ = evaluate(
+        {
+            "valid": True,
+            "lane": "source",
+            "profile": "full",
+            "head": IDENTITY["head_sha"],
+        },
+        needs("source"),
+        observed,
+        timing,
+        IDENTITY,
+    )
+    assert passed is (damage == "none")
 
 
 @pytest.mark.parametrize("lane", ["source", "reports"])
@@ -429,6 +664,7 @@ def test_incomplete_or_mismatched_timing_is_not_acceptance(lane):
     classification = {
         "valid": True,
         "lane": lane,
+        "profile": "reports" if lane == "reports" else "full",
         "reason": "verified-report-only",
         "head": IDENTITY["head_sha"],
     }
@@ -436,7 +672,12 @@ def test_incomplete_or_mismatched_timing_is_not_acceptance(lane):
         classification,
         needs(lane),
         jobs(),
-        {"complete": False, "lane": lane, **IDENTITY},
+        {
+            "complete": False,
+            "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
+            **IDENTITY,
+        },
         IDENTITY,
     )[0]
     assert not evaluate(
@@ -465,6 +706,7 @@ def test_stale_or_earlier_attempt_timing_cannot_establish_acceptance(
     classification = {
         "valid": True,
         "lane": lane,
+        "profile": "reports" if lane == "reports" else "full",
         "reason": "verified-report-only",
         "head": IDENTITY["head_sha"],
     }
@@ -472,7 +714,13 @@ def test_stale_or_earlier_attempt_timing_cannot_establish_acceptance(
         classification,
         needs(lane),
         jobs(),
-        {"complete": True, "lane": lane, **IDENTITY, field: stale},
+        {
+            "complete": True,
+            "lane": lane,
+            "profile": "reports" if lane == "reports" else "full",
+            **IDENTITY,
+            field: stale,
+        },
         IDENTITY,
     )
     assert not passed and reason == "stale-or-mismatched-workflow-evidence"
@@ -511,8 +759,9 @@ def test_actual_rollup_preserves_observations_but_rejects_stale_actions_response
     classification.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "lane": "reports",
+                "profile": "reports",
                 "valid": True,
                 "reason": "verified-report-only",
                 "base": "a" * 40,
@@ -607,10 +856,13 @@ def test_report_timing_marks_source_tests_inapplicable_without_a_pass_denominato
         }
         for name in REPORT_JOB_NAMES
     ]
-    observed += [{"name": name, "conclusion": "skipped"} for name in JOB_NAMES]
+    observed += [
+        {"name": name, "status": "completed", "conclusion": "skipped"}
+        for name in source_job_names("reports")
+    ]
     result = summarize(run, observed, lane="reports", report_validation=True)
     assert result["complete"] and result["lane"] == "reports"
-    assert result["not_applicable_jobs"] == sorted(JOB_NAMES.values())
+    assert result["not_applicable_jobs"] == sorted(source_job_names("reports").values())
     evidence = collect_evidence(tmp_path, lane="reports")
     assert evidence["complete"] and evidence["applicable"] is False
     assert (
@@ -672,8 +924,9 @@ def test_actual_stdlib_report_gate_resolves_success_and_docs_failures(
     classification.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "lane": "reports",
+                "profile": "reports",
                 "valid": True,
                 "reason": "verified-report-only",
                 "base": "a" * 40,
@@ -684,7 +937,17 @@ def test_actual_stdlib_report_gate_resolves_success_and_docs_failures(
         )
     )
     timing = tmp_path / "timing.json"
-    timing.write_text(json.dumps({"lane": "reports", "complete": True, **IDENTITY}))
+    timing.write_text(
+        json.dumps(
+            {
+                "lane": "reports",
+                "profile": "reports",
+                "complete": True,
+                "test_evidence": evidence("reports"),
+                **IDENTITY,
+            }
+        )
+    )
     required = needs("reports")
     required["report-validation"]["result"] = outcome
     # Arbitrary provider/debug content must not escape through gate diagnostics.
@@ -713,8 +976,9 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
     classification.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "lane": "source",
+                "profile": "full",
                 "valid": True,
                 "reason": "full-validation",
                 "base": "a" * 40,
@@ -725,7 +989,9 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
         )
     )
     timing = tmp_path / "timing.json"
-    timing.write_text(json.dumps({"lane": "source", "complete": True, **IDENTITY}))
+    timing.write_text(
+        json.dumps({"lane": "source", "profile": "full", "complete": True, **IDENTITY})
+    )
     env = {
         **os.environ,
         **identity_environment(),
@@ -754,10 +1020,10 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
 @pytest.mark.parametrize(
     "mutation",
     [
-        {"lane": "reports", "valid": False},
-        {"lane": "reports", "reason": "unknown"},
-        {"lane": "reports", "markdown": []},
-        {"lane": "reports", "markdown": ["AGENTS.md"]},
+        {"lane": "reports", "profile": "reports", "valid": False},
+        {"lane": "reports", "profile": "reports", "reason": "unknown"},
+        {"lane": "reports", "profile": "reports", "markdown": []},
+        {"lane": "reports", "profile": "reports", "markdown": ["AGENTS.md"]},
         {"markdown": ["../outside.md"]},
         {"markdown": ["report.md\nsecret.md"]},
         {"schema": True},
@@ -766,8 +1032,9 @@ def test_actual_source_gate_cannot_pass_when_actions_evidence_is_unavailable(tmp
 def test_malformed_or_unproven_classification_receipt_is_rejected(tmp_path, mutation):
     path = tmp_path / "classification.json"
     value = {
-        "schema": 1,
+        "schema": 2,
         "lane": "reports",
+        "profile": "reports",
         "valid": True,
         "reason": "verified-report-only",
         "base": "a" * 40,
@@ -779,3 +1046,63 @@ def test_malformed_or_unproven_classification_receipt_is_rejected(tmp_path, muta
     path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="classification"):
         load_classification(path)
+
+
+def test_inspection_classifier_cli_outputs_fixed_whole_python_and_two_browser_legs(
+    repository, tmp_path
+):
+    from scripts.ci.test_selection import (
+        INSPECTION_PROFILE,
+        INSPECTION_PYTHON,
+        INSPECTION_SOURCES,
+    )
+
+    root, _ = repository
+    owner = sorted(INSPECTION_SOURCES)[0]
+    write(root, owner, "original source owner\n")
+    base = commit(root)
+    write(root, owner, "changed source owner\n")
+    head = commit(root)
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps({"pull_request": {"base": {"sha": base}, "head": {"sha": head}}})
+    )
+    output = tmp_path / "github-output"
+    manifest = tmp_path / "manifest.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "scripts/ci/classify_changes.py"),
+            "--output",
+            str(manifest),
+        ],
+        cwd=root,
+        env={
+            **os.environ,
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_EVENT_PATH": str(event),
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert load_classification(manifest)["profile"] == INSPECTION_PROFILE
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["python_paths"].split() == list(INSPECTION_PYTHON)
+    assert (
+        values["static"]
+        == values["node"]
+        == values["python"]
+        == values["browser"]
+        == "true"
+    )
+    assert values["postgres"] == "false"
+    assert json.loads(values["browser_matrix"]) == {
+        "include": [
+            {"project": project, "shard": 1, "total": 1}
+            for project in ("desktop-chromium", "android-chromium")
+        ]
+    }
