@@ -242,7 +242,8 @@ command -v docker >/dev/null 2>&1 || fail "Docker is not installed or is not on 
 docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is unavailable"
 command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required to create the local HTTPS certificate"
 command -v flock >/dev/null 2>&1 || fail "flock is required to serialize local application lifecycle changes"
-if [[ -n "$SCHEMII_RUNTIME_RECEIPT" ]]; then
+if [[ -n "$SCHEMII_RUNTIME_RECEIPT" ]] &&
+   [[ "$SCHEMII_LAUNCH_ACTION" == start || "$SCHEMII_LAUNCH_ACTION" == prepare-testing ]]; then
   [[ "$SCHEMII_RUNTIME_RECEIPT" == /* ]] || fail "SCHEMII_RUNTIME_RECEIPT must be an absolute private path"
   [[ ! -e "$SCHEMII_RUNTIME_RECEIPT" && ! -L "$SCHEMII_RUNTIME_RECEIPT" ]] || fail "the runtime receipt already exists; use a new task-owned path"
   command -v node >/dev/null 2>&1 || fail "Node is required for the optional runtime observation receipt"
@@ -654,7 +655,8 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
 fi
 # Export only selected nonsecret ownership fields after successful health checks.
 # This optional action stays inside the launcher's existing deployment lease.
-if [[ -n "$SCHEMII_RUNTIME_RECEIPT" ]]; then
+if [[ -n "$SCHEMII_RUNTIME_RECEIPT" ]] &&
+   [[ "$SCHEMII_LAUNCH_ACTION" == start || "$SCHEMII_LAUNCH_ACTION" == prepare-testing ]]; then
   runtime_revision="$(git -C "$ROOT_DIR" rev-parse HEAD)" || fail "could not identify the observed source revision"
   if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]]; then runtime_revision+="+dirty"; fi
   runtime_container_ids="$(docker ps --quiet --filter label=com.docker.compose.project=schemii-test --filter status=running)" || fail "could not identify runtime containers"

@@ -110,6 +110,9 @@ supported launcher runs. `SCHEMII_RUNTIME_RECEIPT` adds no container access to t
 application or collector: only `./start.sh` reads selected container identities
 after its health checks, under the existing deployment lease. It refuses an
 existing receipt rather than adopting or overwriting another task's evidence.
+Normal starts and `--prepare-testing` validate and export this receipt; other
+launcher actions ignore the optional output, so a retained receipt does not block
+backup, log or fixture verification commands or require Node for them.
 
 ```bash
 install -d -m 700 /private/load-campaign

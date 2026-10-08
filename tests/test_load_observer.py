@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import importlib.util
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import threading
 import time
 from types import SimpleNamespace
@@ -402,11 +404,161 @@ def launcher_helpers():
     return module
 
 
-@pytest.mark.parametrize("healthy", [True, False])
-def test_launcher_exports_only_after_health_and_under_existing_lease(tmp_path, healthy):
+def mock_launcher_dispatch_modules(worktree):
+    recovery = worktree / "dev/recovery/recovery.sh"
+    recovery.parent.mkdir(parents=True)
+    recovery.write_text("""recovery_main() {
+  printf 'recovery:%s\\n' "$SCHEMII_LAUNCH_ACTION" >> "$COMMAND_LOG"
+}
+""")
+    testing = worktree / "testing/launcher.sh"
+    testing.parent.mkdir(parents=True)
+    testing.write_text("""testing_database_init_writable_registry() { :; }
+testing_database_prepare_writable_credential() { :; }
+testing_database_start() {
+  printf 'testing-start\\n' >> "$COMMAND_LOG"
+}
+testing_database_manage() {
+  printf 'testing-manage:%s:%s\\n' "$1" "$2" >> "$COMMAND_LOG"
+}
+""")
+
+
+@pytest.fixture
+def launcher_action_environment(tmp_path):
     helpers = launcher_helpers()
     worktree = tmp_path / "worktree"
     helpers._copy_launcher_worktree(worktree)
+    mock_launcher_dispatch_modules(worktree)
+    commands = tmp_path / "commands.log"
+    environment = helpers._mock_launcher_environment(
+        tmp_path,
+        [worktree],
+        commands,
+        tls_directory=tmp_path / "tls",
+        lock_file=tmp_path / "start.lock",
+        qa_state_directory=tmp_path / "qa",
+    )
+    # The real copied launcher runs with ordinary host tools, but no Node.
+    tools = tmp_path / "host-tools-without-node"
+    tools.mkdir()
+    for name in (
+        "bash",
+        "cat",
+        "chmod",
+        "chgrp",
+        "dirname",
+        "flock",
+        "mkdir",
+        "mktemp",
+        "mv",
+        "openssl",
+        "readlink",
+        "rm",
+        "rmdir",
+        "sed",
+        "stat",
+        "tr",
+        "wc",
+    ):
+        source = shutil.which(name)
+        assert source is not None
+        (tools / name).symlink_to(source)
+    environment["PATH"] = f"{tmp_path / 'mock-bin'}:{tools}"
+    assert shutil.which("node", path=environment["PATH"]) is None
+    return worktree, environment, commands
+
+
+def run_launcher_action(worktree, environment, arguments):
+    return subprocess.run(
+        [str(worktree / "start.sh"), *arguments],
+        cwd=worktree,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "dispatched"),
+    [
+        (["--backup", "unused"], "recovery:backup"),
+        (["--verify-backup", "unused"], "recovery:verify-backup"),
+        (["--restore-backup-new", "unused"], "recovery:restore-backup-new"),
+        (["--logs", "schemii"], "logs --no-color --tail 200 schemii"),
+        (["--verify-testing"], "testing-manage:verify:all"),
+        (
+            ["--check-testing-reset", "qa_designer_001"],
+            "testing-manage:check-reset:qa_designer_001",
+        ),
+        (
+            ["--verify-testing-writable", "qa_designer_004"],
+            "testing-manage:writer-verify:qa_designer_004",
+        ),
+        (
+            ["--prepare-testing-writable", "qa_designer_004"],
+            "testing-manage:writer-prepare:qa_designer_004",
+        ),
+    ],
+)
+def test_nonstarting_launcher_actions_ignore_retained_runtime_receipt(
+    tmp_path, launcher_action_environment, arguments, dispatched
+):
+    worktree, environment, commands = launcher_action_environment
+    receipt = tmp_path / "retained-runtime.json"
+    receipt.write_bytes(b'{"retained":"owned prior deployment"}\n')
+    environment["SCHEMII_RUNTIME_RECEIPT"] = str(receipt)
+    result = run_launcher_action(worktree, environment, arguments)
+    assert result.returncode == 0, result.stderr
+    recorded = commands.read_text()
+    assert dispatched in recorded
+    assert "runtime-export" not in recorded
+    assert "up --detach --remove-orphans" not in recorded
+    assert receipt.read_bytes() == b'{"retained":"owned prior deployment"}\n'
+
+
+@pytest.mark.parametrize("arguments", [[], ["--prepare-testing"]])
+def test_starting_launcher_actions_reject_retained_runtime_receipt(
+    tmp_path, launcher_action_environment, arguments
+):
+    worktree, environment, commands = launcher_action_environment
+    receipt = tmp_path / "retained-runtime.json"
+    receipt.write_text("retained")
+    environment["SCHEMII_RUNTIME_RECEIPT"] = str(receipt)
+    result = run_launcher_action(worktree, environment, arguments)
+    assert result.returncode != 0
+    assert "the runtime receipt already exists" in result.stderr
+    assert "build schemii" not in commands.read_text()
+    assert receipt.read_text() == "retained"
+
+
+@pytest.mark.parametrize("arguments", [[], ["--prepare-testing"]])
+def test_starting_launcher_actions_require_node_for_new_runtime_receipt(
+    tmp_path, launcher_action_environment, arguments
+):
+    worktree, environment, commands = launcher_action_environment
+    receipt = tmp_path / "new-runtime.json"
+    environment["SCHEMII_RUNTIME_RECEIPT"] = str(receipt)
+    result = run_launcher_action(worktree, environment, arguments)
+    assert result.returncode != 0
+    assert (
+        "Node is required for the optional runtime observation receipt" in result.stderr
+    )
+    assert "build schemii" not in commands.read_text()
+    assert not receipt.exists()
+
+
+@pytest.mark.parametrize("arguments", [[], ["--prepare-testing"]])
+@pytest.mark.parametrize("healthy", [True, False])
+def test_launcher_exports_only_after_health_and_under_existing_lease(
+    tmp_path, healthy, arguments
+):
+    helpers = launcher_helpers()
+    worktree = tmp_path / "worktree"
+    helpers._copy_launcher_worktree(worktree)
+    mock_launcher_dispatch_modules(worktree)
     commands = tmp_path / "commands.log"
     environment = helpers._mock_launcher_environment(
         tmp_path,
@@ -450,7 +602,7 @@ with open(os.environ["COMMAND_LOG"], "a") as output: output.write("runtime-expor
         )
     )
     environment["EXPORT_HEALTH_RESULT"] = "0" if healthy else "1"
-    result = helpers._run_mocked_launcher(worktree, environment)
+    result = run_launcher_action(worktree, environment, arguments)
     recorded = commands.read_text()
     if healthy:
         assert result.returncode == 0, result.stderr
