@@ -144,6 +144,16 @@ class RawSessionService:
         self.closed = False
         self._clock = clock or time.monotonic
 
+    def observation_snapshot(self):
+        """Never wait behind native cleanup to observe the registry."""
+        if not self.lock.acquire(blocking=False):
+            return {"registryStatus": "busy"}
+        try:
+            return {"registryStatus": "available", "registeredSessions": len(self.sessions),
+                    "openingSessions": len(self.opening)}
+        finally:
+            self.lock.release()
+
     def create(self, owner, workspace, body):
         _, target = self.console._workspace_target(owner, workspace, body.expected_workspace_revision)
         self.console._validate_settings_revision(owner, body.expected_settings_revision)
