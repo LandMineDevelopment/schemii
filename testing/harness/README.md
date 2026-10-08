@@ -377,10 +377,20 @@ legacy session handle with an unrelated native browser.
 
 `--parallel` counts native testers and reserves a separate selected reviewer
 account/lane. The guard checks the matching prepared backend and reported capacity.
-Normal browser close leaves the transport live. After actual `browser_close` and
-finish, `native-release --run RUN --lane LANE` terminates only the recorded owned
-extension supervisor and verifies automatic guardian/output cleanup; it does not
-claim to close a native agent/thread. Execution-complete and review-pending are
+Normal `browser_close` removes the backend, guardian and generation output while
+leaving the reusable stdio endpoint live. After exporting evidence, visible signout,
+`browser_close` and harness `finish`, a worker whose connection is genuinely done
+calls its own `browser_release` with no arguments. The coordinator then uses
+`native-release --run RUN --lane LANE` to observe stopped captured identities and
+removed output; repeated verification is safe. Missing generation output with a
+live endpoint returns explicit owning-thread terminal-release guidance, persists
+pending cleanup and retains the deployment lease. If that tool is unavailable,
+report the retained endpoint; an old PID does not authorize stopping a new backend.
+Even present private directory/inode/process proof cannot fence a later backend
+replacement on the same endpoint. The harness never signals native endpoints;
+their owning thread must use the supported terminal tool. Neither verification
+nor terminal release closes a native agent/thread.
+Execution-complete and review-pending are
 separate states. Existing isolated runs/evidence stay available until live native
 application acceptance and cleanup parity are demonstrated.
 
