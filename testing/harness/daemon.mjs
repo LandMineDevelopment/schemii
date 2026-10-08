@@ -300,7 +300,9 @@ async function controllerRequest(req){
       if(!nativeMode(run))throw new Error('Native release requires a prepared native run.');
       const l=lane(req.laneId);
       if(!['complete','paused','blocked'].includes(l.status))throw new Error('Finish or pause the owning worker before transport release.');
-      const cleanup=await releaseNativeTransport(l,browserRoot);await persist();return {lane:l.id,cleanup};
+      // Persist pending cleanup and original release guidance even on failure.
+      // A rejected release keeps the controller and deployment lease alive.
+      const cleanup=await releaseNativeTransport(l,browserRoot,{persist});return {lane:l.id,cleanup};
     }
     if(req.command==='advance'){await prepareWave();return {status:run.status,available:run.lanes.filter(l=>l.status==='ready').map(brief)};}
     if(req.command==='recover'){

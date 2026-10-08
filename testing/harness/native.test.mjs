@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, utimes, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, utimes, rm, symlink, rename, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { workspaceNavigationHref } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
 import { recordWorkerExit, recordWorkerBrowserClosure } from './leases.mjs';
-import { bindNative, readNativeSession, processIdentity, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, acceptance } from './native.mjs';
+import { writeJSON } from './store.mjs';
+import { bindNative, readNativeSession, processIdentity, nativeBrowserProcesses, closeNativeReceipt, releaseNativeTransport, beginScenario, assertCaptureState, importNativeFile, currentCapture, inspectionReceipt, inspectDownload, pendingScenarios, recordReview, recordNativeResource, nativeBrowserRoots, recoverNativeLane, acceptance } from './native.mjs';
 
 const fingerprint = 'a'.repeat(64);
 function fixture() {
@@ -249,36 +250,149 @@ test('recovery briefs include pending scenarios only and preserve failed/complet
   assert.equal(f.lane.scenarios[1].functional,'failed');
 });
 
-test('owned extension release ignores MCP browser flags, waits for automatic cleanup and preserves a live peer',async t=>{
+test('MCP browser argv flags do not identify a live Chromium executable',async t=>{
   const {spawn}=await import('node:child_process');
-  const {releaseNativeTransport}=await import('./native.mjs');
-  const directory=await mkdtemp(join(tmpdir(),'schemii-native-release-'));t.after(()=>rm(directory,{recursive:true,force:true}));
-  const root=join(directory,'native-browsers');await mkdir(root,{mode:0o700});
-  const launch=async name=>{
-    const session=join(root,`session-${name.repeat(32)}`);await mkdir(join(session,'output'),{recursive:true,mode:0o700});
-    const script=`import json,os,shutil,signal,sys,time
-path=sys.argv[1]
-fields=open('/proc/%s/stat'%os.getpid()).read().rsplit(')',1)[1].split()
-meta={'schema':1,'session_id':os.path.basename(path),'state':'running','pid':os.getpid(),'birth_tick':int(fields[19]),'child_pid':os.getpid(),'child_birth_tick':int(fields[19])}
-with open(path+'/session.json','w') as file: json.dump(meta,file)
-os.chmod(path+'/session.json',0o600)
-def stop(*args):
- shutil.rmtree(path)
- sys.exit(0)
-signal.signal(signal.SIGTERM,stop)
-print('ready',flush=True)
-while True: time.sleep(1)
+  const child=spawn('python3',['-u','-c','import sys;print("ready",flush=True);sys.stdin.read()','--browser','chromium'],{stdio:['pipe','pipe','pipe']});
+  const exited=new Promise(resolve=>child.once('exit',resolve));
+  t.after(async()=>{child.stdin.end();await exited;});
+  await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);});
+  const owner=await processIdentity(child.pid);
+  assert.deepEqual(await nativeBrowserProcesses({childPid:child.pid,childBirthTick:owner.birthTick}),[]);
+});
+
+test('present-generation release preserves a backend reopened after validation and a live peer',async t=>{
+  const relay=await relayFixture(t),f=fixture(),roots=[relay.owner.slice(0,relay.owner.lastIndexOf('/')),relay.peer.slice(0,relay.peer.lastIndexOf('/'))];
+  await bindNative(f.run,f.lane,relay.owner,roots);
+  const old={...f.lane.native};let reopened;
+  // The persistence boundary is after present-generation validation but before
+  // the coordinator receives its result. A supported close/reopen can occur
+  // here; historical validation must never authorize terminating that backend.
+  await assert.rejects(releaseNativeTransport(f.lane,roots,{persist:async()=>{
+    await relay.call('owner','browser_close');reopened=(await relay.call('owner','navigate')).ownership;
+  }}),/browser_release/);
+  assert.notEqual(reopened.directory,old.directory);
+  assert.equal((await processIdentity(old.pid)).birthTick,old.birthTick);
+  assert.equal((await processIdentity(reopened.metadata.child_pid)).birthTick,String(reopened.metadata.child_birth_tick));
+  assert.ok(await lstat(reopened.directory));assert.equal(f.lane.native.termination,undefined);
+  await relay.call('owner','navigate');await relay.call('peer','navigate');
+  await assert.rejects(releaseNativeTransport(f.lane,roots),/browser_release/);
+  await relay.call('owner','browser_release');await releaseNativeTransport(f.lane,roots);
+  await relay.call('peer','navigate');await relay.call('peer','browser_release');
+});
+
+async function relayFixture(t) {
+  const {spawn} = await import('node:child_process');
+  const {createInterface} = await import('node:readline');
+  // Reuse the existing disposable backend fixture while exercising the actual
+  // production Python Backend/Relay. No Chromium, app, account or inference.
+  const script = `import json,sys
+from testing.agents.test_browser import RelayProcessTests
+fixtures={}
+try:
+ for name in ('owner','peer'):
+  fixture=RelayProcessTests();fixture.setUp();fixtures[name]=fixture
+  fixture.launch()
+ print(json.dumps({name:{'directory':str(fixture.session()[0]),'metadata':fixture.session()[1]} for name,fixture in fixtures.items()}),flush=True)
+ for index,line in enumerate(sys.stdin,2):
+  request=json.loads(line);fixture=fixtures[request['name']]
+  fixture.call(index,request['tool'])
+  response=fixture.receive(lambda message:message.get('id')==index)
+  if request['tool']=='browser_release': fixture.process.wait(timeout=5)
+  if request['tool'] not in ('browser_close','browser_release'):
+   path,metadata=fixture.session();response['ownership']={'directory':str(path),'metadata':metadata}
+  print(json.dumps(response),flush=True)
+finally:
+ for fixture in fixtures.values(): fixture.doCleanups()
 `;
-    const child=spawn('python3',['-c',script,session,'--browser','chromium'],{stdio:['ignore','pipe','pipe']});
-    await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);child.once('exit',()=>reject(new Error('Owned fixture exited before ready')));});
-    t.after(()=>{try{child.kill('SIGTERM');}catch{}});return {session,child};
-  };
-  const own=await launch('e'),peer=await launch('f');
-  const f=fixture();await bindNative(f.run,f.lane,own.session,root);
-  const result=await releaseNativeTransport(f.lane,root,{timeoutMs:3000});
-  assert.equal(result.transport,'stopped');assert.equal(result.temporaryOutput,'removed-observed');
-  assert.equal(f.lane.native.termination.mode,'harness-owned-extension-SIGTERM');
-  assert.ok(await processIdentity(peer.child.pid));assert.ok(await readFile(join(peer.session,'session.json')));
+  const child = spawn('python3',['-u','-c',script],{cwd:new URL('../..',import.meta.url),stdio:['pipe','pipe','pipe']});
+  const lines=[],waiters=[];let failure,stderr='';
+  child.stderr.on('data',chunk=>stderr+=chunk);
+  const reader=createInterface({input:child.stdout});
+  reader.on('line',line=>{if(waiters.length)waiters.shift().resolve(JSON.parse(line));else lines.push(JSON.parse(line));});
+  child.once('error',error=>{failure=error;for(const waiter of waiters.splice(0))waiter.reject(error);});
+  const exited = new Promise(resolve=>child.once('exit',(code,signal)=>{
+    failure=new Error(`Disposable relay driver exited (${code ?? signal}): ${stderr}`);
+    for(const waiter of waiters.splice(0))waiter.reject(failure);resolve();
+  }));
+  t.after(async()=>{child.stdin.end();await exited;reader.close();});
+  const receive=()=>lines.length?Promise.resolve(lines.shift()):failure?Promise.reject(failure):new Promise((resolve,reject)=>waiters.push({resolve,reject}));
+  const initial=await receive(),captured={owner:[initial.owner],peer:[initial.peer]};
+  return {owner:initial.owner.directory,peer:initial.peer.directory,call:async(name,tool)=>{
+    child.stdin.write(JSON.stringify({name,tool})+'\n');const response=await receive();
+    assert.ok(!response.error && response.result?.isError!==true,JSON.stringify(response));
+    if(response.ownership && !captured[name].some(owner=>owner.directory===response.ownership.directory)) captured[name].push(response.ownership);
+    if(tool==='browser_release') for(const owner of captured[name]) {
+      await assert.rejects(lstat(owner.directory),{code:'ENOENT'});
+      for(const [pid,tick] of [['pid','birth_tick'],['child_pid','child_birth_tick'],['guardian_pid','guardian_birth_tick']]) {
+        assert.notEqual((await processIdentity(owner.metadata[pid]))?.birthTick,String(owner.metadata[tick]),'Terminal release retained a captured process identity');
+      }
+    }
+    return response;
+  }};
+}
+
+test('browser-close release requires the owning terminal tool, preserves pending state and is idempotent after exit',async t=>{
+  const relay=await relayFixture(t), f=fixture(), roots=[relay.owner.slice(0,relay.owner.lastIndexOf('/')),relay.peer.slice(0,relay.peer.lastIndexOf('/'))];
+  await bindNative(f.run,f.lane,relay.owner,roots);
+  const captured={...f.lane.native};
+  await relay.call('owner','browser_close');
+  const finished=await closeNativeReceipt(f.lane);
+  assert.equal(finished.context,'closed-observed');assert.equal(finished.transport,'live');
+  assert.equal(finished.guardian,'stopped');assert.equal(finished.temporaryOutput,'removed-observed');
+  f.lane.status='complete';f.lane.generation++;
+  const receipt=join(roots[0],'pending-release.json');
+  await assert.rejects(releaseNativeTransport(f.lane,roots,{persist:()=>writeJSON(receipt,f.lane)}),/browser_release/);
+  const persisted=JSON.parse(await readFile(receipt));
+  assert.equal(persisted.native.cleanup.transport,'live');assert.equal(persisted.native.cleanup.temporaryOutput,'removed-observed');
+  assert.equal(persisted.native.releaseAttempts.at(-1).status,'pending');
+  assert.match(persisted.native.releaseAttempts.at(-1).error,/browser_release/);
+  assert.equal(f.lane.native.termination,undefined);
+  assert.equal((await processIdentity(captured.pid)).birthTick,captured.birthTick);
+  await relay.call('peer','navigate'); // A separate live connection remains usable.
+  await relay.call('owner','browser_release');
+  const cleanup=await releaseNativeTransport(f.lane,roots);
+  assert.equal(cleanup.transport,'stopped');assert.equal(cleanup.guardian,'stopped');assert.equal(cleanup.temporaryOutput,'removed-observed');
+  const repeated=await releaseNativeTransport(f.lane,roots);
+  assert.equal(repeated.transport,'stopped');assert.equal(f.lane.native.termination,undefined);
+  assert.equal(f.lane.native.releaseAttempts[0].status,'pending');
+  assert.ok(f.lane.native.releaseAttempts.slice(1).every(attempt=>attempt.status==='complete'));
+  await relay.call('peer','navigate');await relay.call('peer','browser_release');
+});
+
+test('removed generation never authorizes killing a reopened endpoint or a reused PID',async t=>{
+  const relay=await relayFixture(t), f=fixture(), roots=[relay.owner.slice(0,relay.owner.lastIndexOf('/')),relay.peer.slice(0,relay.peer.lastIndexOf('/'))];
+  await bindNative(f.run,f.lane,relay.owner,roots);
+  const captured={...f.lane.native};
+  await relay.call('owner','browser_close');await relay.call('owner','navigate');
+  await assert.rejects(releaseNativeTransport(f.lane,roots),/browser_release/);
+  assert.equal(f.lane.native.termination,undefined);
+  await relay.call('owner','navigate');await relay.call('peer','navigate');
+  // A numeric PID now representing another birth is not our captured endpoint.
+  f.lane.native.birthTick=String(BigInt(captured.birthTick)-1n);
+  const cleanup=await releaseNativeTransport(f.lane,roots);
+  assert.equal(cleanup.transport,'stopped');
+  assert.equal((await processIdentity(captured.pid)).birthTick,captured.birthTick);
+  await relay.call('owner','navigate');await relay.call('peer','navigate');
+  await relay.call('owner','browser_release');await relay.call('peer','browser_release');
+});
+
+test('release keeps strict present-generation inode, metadata, symlink and registered-root checks',async t=>{
+  const f=fixture(), fs=await sessionFixture(t);
+  await bindNative(f.run,f.lane,fs.session,fs.browserRoot);
+  const metadata=join(fs.session,'session.json'),original=await readFile(metadata);
+  await rm(metadata);
+  await assert.rejects(releaseNativeTransport(f.lane,fs.browserRoot),/ENOENT/);
+  await writeFile(metadata,original,{mode:0o600});
+  await rename(fs.session,fs.session+'-original');await symlink(fs.session+'-original',fs.session);
+  await assert.rejects(releaseNativeTransport(f.lane,fs.browserRoot),/symlinks/);
+  await rm(fs.session);await rename(fs.session+'-original',fs.session);
+  f.lane.native.ino++;
+  await assert.rejects(releaseNativeTransport(f.lane,fs.browserRoot),/ownership changed/);
+  await assert.rejects(releaseNativeTransport(f.lane,join(fs.directory,'other-root')),/registered project checkout/);
+  assert.equal(f.lane.native.termination,undefined);
+  // An earlier saved completion cannot clear a newly refused release attempt.
+  f.lane.native.cleanup={transport:'stopped',guardian:'stopped',temporaryOutput:'removed-observed'};
+  assert.match(acceptance(f.run).reasons.join(),/native transport cleanup pending/);
 });
 
 

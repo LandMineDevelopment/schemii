@@ -1,5 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execFileSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -109,34 +108,64 @@ export async function closeNativeReceipt(lane) {
   lane.native.cleanup = { context: 'closed-observed', transport: live?.birthTick === lane.native.birthTick || child?.birthTick === lane.native.childBirthTick ? 'live' : 'stopped', guardian: guardian?.birthTick === lane.native.guardianBirthTick ? 'live' : 'stopped', temporaryOutput: outputExists ? 'present' : 'removed-observed', checkedAt: new Date().toISOString() };
   return lane.native.cleanup;
 }
-// The interface has no native session-close control. Teardown therefore ends
-// only the bound extension transport; it does not close an agent/thread. pidfd
-// signaling cannot hit a newly reused PID between ownership checking and SIGTERM.
-export async function releaseNativeTransport(lane, browserRoot, { timeoutMs = 12000 } = {}) {
+// Only the owning endpoint can atomically decide whether its generation is idle.
+// A PID birth check cannot fence backend replacement on that reusable endpoint.
+const nativeCleanupComplete = cleanup => cleanup.transport === 'stopped' && cleanup.guardian === 'stopped' && cleanup.temporaryOutput === 'removed-observed';
+function terminalReleaseRequired() {
+  const error = new Error('The captured native transport is still live. Call browser_release with no arguments in the owning native thread, then retry native-release. If unavailable, preserve the cleanup ledger and deployment lease; historical output or PID ownership cannot authorize terminating a reopened endpoint.');
+  error.code = 'NATIVE_TERMINAL_RELEASE_REQUIRED';
+  return error;
+}
+async function validateRecordedNativeOwnership(binding, browserRoot) {
+  const selected = await selectBrowserRoot(binding.directory, browserRoot);
+  if (dirname(binding.directory) !== await realpath(selected) || basename(binding.directory) !== binding.sessionId || !/^session-[a-f0-9]{32}$/.test(binding.sessionId)) throw new Error('Native cleanup requires its exact recorded connection directory.');
+  const owners = [[binding.pid,binding.birthTick],[binding.childPid,binding.childBirthTick]];
+  if (binding.guardianPid !== undefined) owners.push([binding.guardianPid,binding.guardianBirthTick]);
+  if (!Array.isArray(binding.browserProcesses)) throw new Error('Native browser ownership is incomplete; preserve cleanup for inspection.');
+  owners.push(...binding.browserProcesses.map(owner=>[owner.pid,owner.birthTick]));
+  if (owners.some(([pid,tick])=>!Number.isSafeInteger(pid)||pid<1||typeof tick!=='string'||!/^\d+$/.test(tick))) throw new Error('Native process ownership is incomplete; preserve cleanup for inspection.');
+}
+export async function releaseNativeTransport(lane, browserRoot, { timeoutMs = 12000, persist } = {}) {
   if (!lane.native) return { state: 'unbound' };
-  let cleanup = await closeNativeReceipt(lane);
-  if (cleanup.transport === 'live') {
-    const actual = await readNativeSession(lane.native.directory, browserRoot);
-    for (const field of ['dev','ino','pid','birthTick','childPid','childBirthTick']) if (actual[field] !== lane.native[field]) throw new Error('Native transport ownership changed; preserve this connection for inspection.');
-    const script = `import os,signal,sys
-pid=int(sys.argv[1]);tick=sys.argv[2]
-fd=os.pidfd_open(pid)
-try:
- fields=open('/proc/%s/stat'%pid).read().rsplit(')',1)[1].split()
- if fields[0]=='Z' or fields[19]!=tick: raise RuntimeError('Native supervisor ownership changed')
- signal.pidfd_send_signal(fd,signal.SIGTERM)
-finally: os.close(fd)
-`;
-    await promisify(execFile)('python3',['-c',script,String(actual.pid),actual.birthTick],{timeout:5000});
-    lane.native.termination = { mode:'harness-owned-extension-SIGTERM', agentSessionClosure:'unavailable-in-current-interface', at:new Date().toISOString() };
+  const attempt = { startedAt:new Date().toISOString(), status:'pending' };
+  (lane.native.releaseAttempts ||= []).push(attempt);
+  try {
+    await validateRecordedNativeOwnership(lane.native, browserRoot);
+    let cleanup = await closeNativeReceipt(lane);
+    if (nativeCleanupComplete(cleanup)) { attempt.status='complete'; return cleanup; }
+    if (cleanup.transport === 'live') {
+      if (cleanup.temporaryOutput === 'present') {
+        let actual;
+        try { actual = await readNativeSession(lane.native.directory, browserRoot); }
+        catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          // Close/release may finish during validation. Missing inner metadata
+          // remains unverified; never signal from historical ownership.
+          cleanup = await closeNativeReceipt(lane);
+          if (nativeCleanupComplete(cleanup)) { attempt.status='complete'; return cleanup; }
+          if (cleanup.temporaryOutput === 'removed-observed') throw terminalReleaseRequired();
+          throw error;
+        }
+        for (const field of ['dev','ino','pid','birthTick','childPid','childBirthTick']) if (actual[field] !== lane.native[field]) throw new Error('Native transport ownership changed; preserve this connection for inspection.');
+      }
+      // Even still-present validated metadata can disappear and be replaced by
+      // a new backend before a signal. Use the endpoint's supported idle fence.
+      throw terminalReleaseRequired();
+    }
+    const deadline = Date.now() + timeoutMs;
+    do {
+      cleanup = await closeNativeReceipt(lane);
+      if (nativeCleanupComplete(cleanup)) { attempt.status='complete'; return cleanup; }
+      await new Promise(resolve => setTimeout(resolve,100));
+    } while (Date.now() < deadline);
+    throw new Error('Native transport cleanup is pending; preserve its ledger and deployment lease. No files were manually deleted.');
+  } catch (error) {
+    attempt.error = String(error.message).split('\n')[0].slice(0,2000);
+    throw error;
+  } finally {
+    attempt.finishedAt = new Date().toISOString();
+    if (persist) await persist();
   }
-  const deadline = Date.now() + timeoutMs;
-  do {
-    cleanup = await closeNativeReceipt(lane);
-    if (cleanup.transport === 'stopped' && cleanup.guardian === 'stopped' && cleanup.temporaryOutput === 'removed-observed') return cleanup;
-    await new Promise(resolve => setTimeout(resolve,100));
-  } while (Date.now() < deadline);
-  throw new Error('Native transport cleanup is pending after owned SIGTERM; preserve its ledger and deployment lease. No files were manually deleted.');
 }
 function scenarioURL(run, lane, scenario, expectedState, requestedURL) {
   if (expectedState === 'denied') {
@@ -333,7 +362,7 @@ export function acceptance(run) {
     if (finding.verificationStatus === 'confirmed-defect' || finding.reviews?.some(review=>review.verdict==='confirmed-defect')) reasons.push(`${finding.id}: confirmed defect remains unresolved; independent remediation verification required`);
   }
   if (nativeMode(run)) for (const lane of testers) if(!lane.native?.authentication || lane.native.authentication.source !== run.deployment?.identity?.fingerprint)reasons.push(`${lane.id}: native authenticated UI observation pending`);
-  if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed')) reasons.push(`${lane.id}: native transport cleanup pending`);
+  if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed' || lane.native.releaseAttempts?.at(-1)?.status === 'pending')) reasons.push(`${lane.id}: native transport cleanup pending`);
   return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0), completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0), reviewed };
 }
 
