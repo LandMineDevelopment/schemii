@@ -1,0 +1,63 @@
+2026-09-29 21:00:28.444 EDT [1976338] LOG:  starting PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 16.2.1 20260810, 64-bit
+2026-09-29 21:00:28.444 EDT [1976338] LOG:  listening on IPv4 address "127.0.0.1", port 52121
+2026-09-29 21:00:28.444 EDT [1976338] LOG:  listening on Unix socket "/tmp/schemii-console-pg-2f6jmcmd/socket/.s.PGSQL.52121"
+2026-09-29 21:00:28.445 EDT [1976344] LOG:  database system was shut down at 2026-09-29 21:00:28 EDT
+2026-09-29 21:00:28.447 EDT [1976338] LOG:  database system is ready to accept connections
+2026-09-29 21:00:30.074 EDT [1976492] ERROR:  canceling statement due to user request
+2026-09-29 21:00:30.074 EDT [1976492] STATEMENT:  SELECT pg_sleep(30)
+2026-09-29 21:00:30.121 EDT [1976528] ERROR:  canceling statement due to user request
+2026-09-29 21:00:30.121 EDT [1976528] STATEMENT:  INSERT INTO cancel_marker VALUES (1); SELECT pg_sleep(30)
+2026-09-29 21:00:30.154 EDT [1976538] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.171 EDT [1976539] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.189 EDT [1976558] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.205 EDT [1976565] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.234 EDT [1976567] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.240 EDT [1976568] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.282 EDT [1976573] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.299 EDT [1976574] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.311 EDT [1976574] ERROR:  column "missing_column" does not exist
+2026-09-29 21:00:30.311 EDT [1976574] STATEMENT:  CREATE INDEX partial_table_missing_idx ON gateway_it_d2b9b648624d4a09957a35ac5177ec6c.partial_table (missing_column)
+2026-09-29 21:00:30.316 EDT [1976575] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.322 EDT [1976576] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.360 EDT [1976581] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.375 EDT [1976582] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.400 EDT [1976583] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.410 EDT [1976585] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.427 EDT [1976586] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.670 EDT [1976666] ERROR:  canceling statement due to user request
+2026-09-29 21:00:30.670 EDT [1976666] STATEMENT:  SELECT repeat('x', 8192) FROM generate_series(1, 100000)
+2026-09-29 21:00:30.780 EDT [1976687] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.809 EDT [1976692] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.845 EDT [1976698] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.898 EDT [1976705] ERROR:  canceling statement due to user request
+2026-09-29 21:00:30.898 EDT [1976705] STATEMENT:  SELECT pg_sleep(30)
+2026-09-29 21:00:30.940 EDT [1976732] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:30.949 EDT [1976732] ERROR:  canceling statement due to user request
+2026-09-29 21:00:30.949 EDT [1976732] STATEMENT:  FETCH FORWARD 256 FROM "schemii_read_0_6a8477b16bc8cf47"
+2026-09-29 21:00:30.992 EDT [1976741] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:31.002 EDT [1976741] ERROR:  canceling statement due to user request
+2026-09-29 21:00:31.002 EDT [1976741] STATEMENT:  FETCH FORWARD 256 FROM "schemii_read_0_499633d17f763881"
+2026-09-29 21:00:31.035 EDT [1976750] WARNING:  there is already a transaction in progress
+2026-09-29 21:00:31.072 EDT [1976754] ERROR:  canceling statement due to user request
+2026-09-29 21:00:31.072 EDT [1976754] STATEMENT:  SELECT pg_sleep(10)
+2026-09-29 21:00:31.098 EDT [1976760] ERROR:  canceling statement due to user request
+2026-09-29 21:00:31.098 EDT [1976760] STATEMENT:  FETCH FORWARD 1 FROM "schemii_read_0_afe8dc7b43a5bdba"
+2026-09-29 21:00:31.123 EDT [1976766] ERROR:  canceling statement due to user request
+2026-09-29 21:00:31.123 EDT [1976766] STATEMENT:  FETCH FORWARD 1 FROM "schemii_read_0_f7c3ccee37340c89"
+2026-09-29 21:00:35.141 EDT [1977264] ERROR:  canceling statement due to user request
+2026-09-29 21:00:35.141 EDT [1977264] STATEMENT:  SELECT repeat('x', 128) FROM generate_series(1, 50000)
+2026-09-29 21:00:35.650 EDT [1977286] ERROR:  canceling statement due to user request
+2026-09-29 21:00:35.650 EDT [1977286] STATEMENT:  SELECT repeat('x', 128) FROM generate_series(1, 100000)
+2026-09-29 21:00:38.068 EDT [1977642] ERROR:  canceling statement due to user request
+2026-09-29 21:00:38.068 EDT [1977642] STATEMENT:  SELECT repeat('x', 8192) FROM generate_series(1, 1000)
+2026-09-29 21:00:38.590 EDT [1977717] ERROR:  canceling statement due to user request
+2026-09-29 21:00:38.590 EDT [1977717] STATEMENT:  SELECT repeat('x', 8192) FROM generate_series(1, 10000)
+2026-09-29 21:00:39.094 EDT [1977740] ERROR:  canceling statement due to user request
+2026-09-29 21:00:39.094 EDT [1977740] STATEMENT:  SELECT repeat('x', 8192) FROM generate_series(1, 30000)
+2026-09-29 21:00:47.174 EDT [1976338] LOG:  received fast shutdown request
+2026-09-29 21:00:47.174 EDT [1976338] LOG:  aborting any active transactions
+2026-09-29 21:00:47.175 EDT [1976338] LOG:  background worker "logical replication launcher" (PID 1976347) exited with exit code 1
+2026-09-29 21:00:47.175 EDT [1976342] LOG:  shutting down
+2026-09-29 21:00:47.175 EDT [1976342] LOG:  checkpoint starting: shutdown immediate
+2026-09-29 21:00:47.177 EDT [1976342] LOG:  checkpoint complete: wrote 323 buffers (2.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.003 s; sync files=402, longest=0.001 s, average=0.000 s; distance=3698 kB, estimate=3698 kB; lsn=0/1B02EA0, redo lsn=0/1B02EA0
+2026-09-29 21:00:47.181 EDT [1976338] LOG:  database system is shut down

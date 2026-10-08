@@ -14,11 +14,24 @@ test.afterEach(async ({ request }) => {
   modelId = null;
 });
 
-async function cardGeometry(page) {
-  return page.locator(".sc-node").evaluateAll(cards => cards.map(card => {
-    const rect = card.getBoundingClientRect();
-    return { id: card.dataset.nodeId, x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom };
-  }));
+async function cardGeometry(page, expectedCount) {
+  let geometry;
+  // Wait only for measurable input; overlap and repeated-Fit assertions stay immediate.
+  await expect.poll(async () => {
+    geometry = await page.locator(".sc-node").evaluateAll((cards, count) => {
+      if (cards.length !== count) return null;
+      const sample = [];
+      for (const card of cards) {
+        const rect = card.getBoundingClientRect();
+        if (!card.isConnected || rect.width <= 0 || rect.height <= 0
+            || ![rect.x, rect.y, rect.right, rect.bottom, rect.width, rect.height].every(Number.isFinite)) return null;
+        sample.push({ id: card.dataset.nodeId, x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom });
+      }
+      return sample;
+    }, expectedCount);
+    return geometry !== null;
+  }, { message: `Wait for ${expectedCount} connected, measurable canvas cards` }).toBe(true);
+  return geometry;
 }
 
 function expectNoOverlaps(cards) {
@@ -54,14 +67,16 @@ test("Fit repairs saved overlap, keeps target clickable, and persists layout", a
   const beforeRepair = await response.json();
 
   await page.goto(`/schemoo?model=${modelId}`);
+  await expect(page.locator("#workbench")).toHaveJSProperty("inert", false);
   await expect(page.locator(`[data-node-id="${aliasId}"]`)).toHaveCount(1);
+  await expect(page.locator(`[data-node-id="${aliasId}"]`)).toBeVisible();
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  const fitted = await cardGeometry(page);
+  const fitted = await cardGeometry(page, 13);
   expectNoOverlaps(fitted);
   const stage = page.locator(".sc-stage");
   const view = await stage.getAttribute("style");
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  expect(await cardGeometry(page)).toEqual(fitted);
+  expect(await cardGeometry(page, 13)).toEqual(fitted);
   await expect(stage).toHaveAttribute("style", view);
 
   await expect(page.locator("#draft-status")).toContainText("Unsaved changes");
@@ -74,8 +89,10 @@ test("Fit repairs saved overlap, keeps target clickable, and persists layout", a
   expect(alias).toBeTruthy();
   expect([alias.x, alias.y]).not.toEqual([target.x, target.y]);
   await page.reload();
+  await expect(page.locator("#workbench")).toHaveJSProperty("inert", false);
+  await expect(page.locator(`[data-node-id="${aliasId}"]`)).toBeVisible();
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  expectNoOverlaps(await cardGeometry(page));
+  expectNoOverlaps(await cardGeometry(page, 13));
   await expect(page.locator("#draft-status")).toContainText("Saved");
 
   // Probe the exact column hit targets after persistence without changing the saved model.
@@ -89,13 +106,16 @@ test("Fit repairs saved overlap, keeps target clickable, and persists layout", a
 
 test("new alias and calculated source land clear of existing cards and save", async ({ page, request }) => {
   await page.goto(`/schemoo?model=${modelId}`);
+  await expect(page.locator("#workbench")).toHaveJSProperty("inert", false);
   await expect(page.locator(".sc-node")).toHaveCount(12);
+  await expect(page.locator('[data-node-id="certification_dim"]')).toBeVisible();
   await page.locator('[data-node-id="certification_dim"] .sc-node-header').click();
   await page.getByRole("button", { name: "Create alias", exact: true }).click();
   await page.getByRole("textbox", { name: "Alias name for certification_dim", exact: true }).fill("QA placement alias");
   await page.getByRole("button", { name: "Add alias to model", exact: true }).click();
+  await expect(page.locator('.sc-node[aria-label="QA placement alias model source"]')).toBeVisible();
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  expectNoOverlaps(await cardGeometry(page));
+  expectNoOverlaps(await cardGeometry(page, 13));
 
   await page.locator('[data-node-id="pay_band_class_dim"] .sc-node-header').click();
   await page.getByRole("button", { name: "Add calculated source", exact: true }).click();
@@ -107,10 +127,10 @@ test("new alias and calculated source land clear of existing cards and save", as
   await dialog.getByRole("button", { name: "Apply to model", exact: true }).click();
   await expect(page.locator(".sc-derived")).toHaveCount(1);
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  expectNoOverlaps(await cardGeometry(page));
-  const fitted = await cardGeometry(page);
+  expectNoOverlaps(await cardGeometry(page, 14));
+  const fitted = await cardGeometry(page, 14);
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  expect(await cardGeometry(page)).toEqual(fitted);
+  expect(await cardGeometry(page, 14)).toEqual(fitted);
   await expect(page.locator(".sc-derived-edge")).toHaveCount(1);
   await page.getByRole("button", { name: "Save model", exact: true }).click();
   await expect(page.locator("#draft-status")).toContainText("Saved");

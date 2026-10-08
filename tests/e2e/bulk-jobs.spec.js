@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 
-test('bulk jobs commit explicit batches, show elapsed time and retain their records', async ({ request }) => {
+test('bulk jobs commit explicit batches, show elapsed time and retain their records', { tag: '@request-only' }, async ({ request }) => {
   const { workspaces } = await (await request.get('/api/v1/schemii/workspaces')).json();
   const workspace = workspaces.find(item => item.database === 'schemii_test' && item.namespace === 'bookstore');
   expect(workspace).toBeTruthy();
@@ -48,7 +48,7 @@ test('bulk jobs commit explicit batches, show elapsed time and retain their reco
   }
 });
 
-test('stopping a bulk job rolls back its active batch and resume skips committed batches', async ({ request }) => {
+test('stopping a bulk job rolls back its active batch and resume skips committed batches', { tag: '@request-only' }, async ({ request }) => {
   const { workspaces } = await (await request.get('/api/v1/schemii/workspaces')).json();
   const workspace = workspaces.find(item => item.database === 'schemii_test' && item.namespace === 'bookstore');
   const settings = await (await request.get('/api/v1/schemii/console/settings')).json();

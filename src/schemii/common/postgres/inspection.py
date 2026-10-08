@@ -556,6 +556,7 @@ def build_developer_database_document(application: FastAPI) -> dict[str, Any]:
                     registry=query_registry,
                 )
             },
+            registry=registry,
         )
         for call in calls:
             called = resolved.get(call["objectId"])

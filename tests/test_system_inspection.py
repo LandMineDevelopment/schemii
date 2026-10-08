@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import json
 import ast
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from schemii.common.api import inspection as route_inspection
 from schemii.common.connections.models import PostgresConnectionCreate
 from schemii.common.connections.service import ConnectionService
 from schemii.common.connections.store import InMemoryConnectionRepository
 from schemii.common.metadata import MetadataRepositories
 from schemii.common.postgres import PsycopgPostgresGateway
-from schemii.common.postgres import inspection as database_inspection
 from schemii.common import system_inspection
 from schemii.common.system_inspection import build_developer_system_document
 from schemii.main import ApplicationServices, create_app
@@ -21,6 +20,64 @@ from schemii.schemii.designs.store import InMemoryDesignRepository
 from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
 
 pytest_plugins = ["inspection_fixtures"]
+
+
+class _IterationOwner:
+    def run(self):
+        for provider in self.providers:
+            provider.run()
+            provider.other()
+        provider.run()
+        return [provider.run() for provider in self.providers]
+
+
+class _FirstIterationProvider:
+    def run(self):
+        raise AssertionError("Source analysis must not execute a provider")
+
+    def other(self):
+        raise AssertionError("Source analysis must not execute a provider")
+
+
+class _SecondIterationProvider(_FirstIterationProvider):
+    def run(self):
+        raise AssertionError("Source analysis must not execute a provider")
+
+
+def test_runtime_iterations_are_derived_once_and_keep_exact_receiver_and_line_scope(monkeypatch):
+    from schemii.common.source_inspection import SourceRegistry
+
+    registry = SourceRegistry()
+    index = system_inspection.RuntimeBindingIndex(SimpleNamespace(), registry)
+    index.field_types[(_IterationOwner, "providers")] = (
+        _FirstIterationProvider, _SecondIterationProvider,
+    )
+    tree = registry.source_tree(_IterationOwner.run)
+    calls = sorted(
+        (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+        key=lambda node: node.lineno,
+    )
+    original_walk = ast.walk
+    traversals = []
+
+    def walk(subject_tree):
+        traversals.append(subject_tree)
+        return original_walk(subject_tree)
+
+    monkeypatch.setattr(ast, "walk", walk)
+    for call in (calls[0], calls[-1]):
+        resolved = index.resolve_all(call.func, callable_subject=_IterationOwner.run)
+        assert tuple(item.subject for item in resolved) == (
+            _FirstIterationProvider.run, _SecondIterationProvider.run,
+        )
+        assert all(item.resolution == "runtime-iteration" for item in resolved)
+    # Inherited methods stay deduplicated; the same variable outside its source
+    # loop does not acquire receiver evidence from a different line.
+    assert tuple(item.subject for item in index.resolve_all(
+        calls[1].func, callable_subject=_IterationOwner.run,
+    )) == (_FirstIterationProvider.other,)
+    assert index.resolve_all(calls[2].func, callable_subject=_IterationOwner.run)[0].subject is None
+    assert traversals == [tree]
 
 
 def test_runtime_binding_resolves_nested_installed_services_without_name_special_cases():
@@ -273,42 +330,32 @@ def test_developer_system_inspection_is_opt_in_and_hidden_from_openapi(
     response = enabled.get("/_developer/system")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+    assert response.json() == inspection_http_documents["documents"]["system"]
     assert "/_developer/system" not in enabled.get("/openapi.json").json()["paths"]
 
 
 def test_developer_documents_are_derived_once_for_each_application_run(
-    monkeypatch: pytest.MonkeyPatch,
+    inspection_baseline, inspection_rebuilt_baseline,
 ) -> None:
-    counters = {"routes": 0, "database": 0, "system": 0}
-
-    def track(module: object, name: str, key: str) -> None:
-        original = getattr(module, name)
-
-        def tracked(application: object) -> dict[str, object]:
-            counters[key] += 1
-            return original(application)
-
-        monkeypatch.setattr(module, name, tracked)
-
-    track(route_inspection, "build_developer_route_document", "routes")
-    track(database_inspection, "build_developer_database_document", "database")
-    track(system_inspection, "build_developer_system_document", "system")
-
-    first = TestClient(create_app(developer_inspection=True), base_url="http://localhost")
-    assert counters == {"routes": 1, "database": 1, "system": 1}
-    for path in ("/_developer/routes", "/_developer/database", "/_developer/system"):
-        assert first.get(path).json()["analysis"]["generation"] == "application-startup"
-        assert first.get(path).status_code == 200
-    assert counters == {"routes": 1, "database": 1, "system": 1}
-
-    second = TestClient(create_app(developer_inspection=True), base_url="http://localhost")
-    assert counters == {"routes": 2, "database": 2, "system": 2}
-    # Reuse these required fresh builds to retain installed-graph determinism,
-    # in addition to the small-graph rebuild check and frozen baseline digests.
-    assert first.get("/_developer/inspection").json() == (
-        second.get("/_developer/inspection").json()
-    )
-    assert counters == {"routes": 2, "database": 2, "system": 2}
+    first, second = inspection_baseline.run, inspection_rebuilt_baseline
+    for expected_count, run in enumerate((first, second), start=1):
+        expected = {
+            "routes": expected_count,
+            "database": expected_count,
+            "system": expected_count,
+        }
+        assert run.construction_derivations == expected
+        for responses in run.responses.values():
+            for response in responses:
+                assert response.status_code == 200
+                assert response.derivations == expected
+        assert run.snapshot["generation"] == "application-startup"
+    for name in ("routes", "database", "system"):
+        responses = first.responses[f"/_developer/{name}"]
+        assert len(responses) == 2
+        assert responses[0].payload["analysis"]["generation"] == "application-startup"
+    # Complete canonical documents from distinct real installed apps must agree.
+    assert first.snapshot == second.snapshot
 
 
 def test_system_inspection_preserves_application_route_registration_order(

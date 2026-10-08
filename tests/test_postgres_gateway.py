@@ -124,6 +124,68 @@ def resolved_connection(*, password: str | None = None) -> ResolvedPostgresConne
     )
 
 
+def test_incremental_console_caps_before_adapting_following_rows_and_drains(monkeypatch):
+    from types import SimpleNamespace
+    import threading
+    from psycopg import pq
+    from schemii.common.postgres.console import gateway, incremental
+    from schemii.common.postgres.errors import PostgresConsoleLimitError
+    from tests.test_raw_console import PgResult
+
+    responses = iter([PgResult(pq.ExecStatus.SINGLE_TUPLE, [(str(n).encode(),)]) for n in range(20)]
+                     + [PgResult(pq.ExecStatus.TUPLES_OK), None])
+    sent, loaded, cancelled = [], [], []
+    pg = SimpleNamespace(transaction_status=pq.TransactionStatus.ACTIVE,
+                         send_query_params=lambda statement, params: sent.append(statement),
+                         set_single_row_mode=lambda: None)
+    class Loader:
+        def set_pgresult(self, response, set_loaders): self.response = response
+        def load_row(self, index, factory):
+            loaded.append(True)
+            return tuple(value.decode() for value in self.response.rows[index])
+    def wait(action):
+        if action != "fetch": return None
+        result = next(responses)
+        if result is None: pg.transaction_status = pq.TransactionStatus.INTRANS
+        return result
+    connection = SimpleNamespace(lock=threading.RLock(), info=SimpleNamespace(encoding="utf-8"),
+        pgconn=pg, _start_query=lambda: "start", wait=wait,
+        cancel_safe=lambda **kwargs: cancelled.append(True), close=lambda: None)
+    monkeypatch.setattr(incremental.generators, "send", lambda pg: "send")
+    monkeypatch.setattr(incremental.generators, "fetch", lambda pg: "fetch")
+    monkeypatch.setattr(incremental, "Transformer", lambda _: Loader())
+    with pytest.raises(PostgresConsoleLimitError):
+        gateway.execute_console_statements(connection, ["UPDATE marker RETURNING value", "SELECT 1"], maximum_result_bytes=10)
+    assert sent == [b"UPDATE marker RETURNING value"]
+    assert len(loaded) == 3
+    assert cancelled == [True]
+    assert pg.transaction_status == pq.TransactionStatus.INTRANS
+
+
+def test_incremental_console_empty_result_keeps_final_metadata(monkeypatch):
+    from types import SimpleNamespace
+    import threading
+    from psycopg import pq
+    from schemii.common.postgres.console import gateway, incremental
+    from tests.test_raw_console import PgResult
+
+    responses = iter([PgResult(pq.ExecStatus.TUPLES_OK, command=b"SELECT 0"), None])
+    sent = []
+    connection = SimpleNamespace(lock=threading.RLock(), info=SimpleNamespace(encoding="utf-8"),
+        pgconn=SimpleNamespace(transaction_status=pq.TransactionStatus.INTRANS,
+            send_query_params=lambda statement, params: sent.append(statement), set_single_row_mode=lambda: None),
+        _start_query=lambda: "start", wait=lambda action: next(responses) if action == "fetch" else None)
+    monkeypatch.setattr(incremental.generators, "send", lambda pg: "send")
+    monkeypatch.setattr(incremental.generators, "fetch", lambda pg: "fetch")
+    monkeypatch.setattr(incremental, "Transformer", lambda _: None)
+    monkeypatch.setattr(gateway, "_console_type_names", lambda connection, oids: {25: "text"})
+    result, = gateway.execute_console_statements(connection, ["SELECT value WHERE false"])
+    assert result.command == "SELECT"
+    assert result.rows == ()
+    assert [(column.name, column.data_type) for column in result.columns] == [("value", "text")]
+    assert sent == [b"SELECT value WHERE false"]
+
+
 def metadata_responses() -> dict[str, list[dict[str, Any]]]:
     return {
         "schemii_catalog_metadata": [

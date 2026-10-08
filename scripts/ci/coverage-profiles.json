@@ -1,0 +1,260 @@
+{
+  "schema": 1,
+  "profile": "schemer-result-cache",
+  "files": [
+    "tests/e2e/account-brand-navigation.spec.js",
+    "tests/e2e/accounts.spec.js",
+    "tests/e2e/quick-start.spec.js",
+    "tests/e2e/schemer-ai-live.spec.js",
+    "tests/e2e/schemer-dashboards.spec.js",
+    "tests/e2e/schemoo-column-comparisons.spec.js",
+    "tests/e2e/schemoo-repetition-live.spec.js",
+    "tests/e2e/shared-report-live.spec.js"
+  ],
+  "python": {
+    "files": {
+      "tests/test_frontend.py": [
+        "008dbaa16662f0d674fa907903251ecab6c8d6105bace2a727e1ebd71dd5d1db",
+        "00c4efe6828d5fc943307ad5cea09ef2549a3281fa0a5bb2f5594eafdbd51ed9",
+        "1ed4cc005ce9af3d0741b8992e2a594cc0ca79b6e9ce5bd6b4b78dc77df7a9fe",
+        "297aaea6c071f596773a3f29c94c0712dd3ff10aaa0f795744e106d518e2a53d",
+        "3fda851feb2339c5e1b39b834582bb4503088ff61dffa8dee8bfdc1d826960a3",
+        "55695a51f4e7e507b3d6cd69ac3db3c9651ffee5f478a3e2d4008e9e74d0e420",
+        "6c4ce7976e5f01484652b527dd8bc5097ffc342c512efb669d468b51d6e7b5c3",
+        "7188ec034506314c11f3a104574bc39c37ec5bce09007ce7d6753778b00034ae",
+        "76dc8ac326393e273e44cb7fadf17bffce95c216d04cfc147122fba666e64938",
+        "81980c6b45f385af811032e390fb6410364dcfbc938040ddb947d2a73a209df0",
+        "8bfbf893d6bc4ebf5b8c8158f764324e511e5bc04190f88ca72659e232f8a73a",
+        "98eb96db5ab671bdad45e79cc0416618d2915f81f87f85a7653ac10c5f5dd424",
+        "994d3021267118de84b8fc66d04480f90367a2f1c527d43c36f28580b20d6922",
+        "9a9e59355a65c1c77c78e0845d357875fffde6fb6fa7c71745862ead9b1e6c7d",
+        "9dc09c28157569b243b6705a563c8862fb6e952379e222c4af1977f4cecab3e6",
+        "a33ab23571ec7864be2bd353d20d108ceaf93d3ada8d36971211ccf556c1e88f",
+        "aae38b4f587c799b8920e38d68321c3f80f42a926bae83752fdc49d3b715942f",
+        "aef3840f46b90b89784665a15d7b45de823f89ca0a9c996c082988c6031b162f",
+        "b0b2b05c6098abae05cff5e5dc60d0f7602529b93677104acc0f7d14c98b4593",
+        "b4619a28e77eaaf33ae309568eb1ec2b32ed75e4eaa41b36e90c16c3f17a6e71",
+        "b71ba512ecc6ce6db45e97aa34fab2f167f5d43273391595b6c307f59554f771",
+        "d238fd9eea4fd9acc20ceeb9cbe58ae63b0d05f5a48f25a3dd22e816920a93ed",
+        "d24899e544ff116ebb57de5920003da764694904c1114295ec96f74fbca67052",
+        "dc8b46cfe77a9bd8743e64cb1a056530e9c4263340c0f8bf9bf1db327217a133",
+        "e213bcd21552bc038baedac333119841be1ee07a7aa929815aceecf50d572da8",
+        "e8d3055d3f4342110b730283e5cdab3030828dc51dc5ea0b976aebb36f245c43",
+        "ea8ffe68f6f7817344cdf7011b9b9c9e390ec271923ba5dc7d3fc805baa2cc12",
+        "eeada2a2954400192c17ab39ea2c01ee72b7cc1a66232b72a01ff9ad5effced8",
+        "f626136e6e8ebc681d0c2f36064ed2b427d78220531abdabd61099f4468f2b84"
+      ]
+    },
+    "allowed_skips": []
+  },
+  "browser": {
+    "desktop-chromium": {
+      "shards": [
+        [
+          "tests/e2e/account-brand-navigation.spec.js",
+          "tests/e2e/schemer-dashboards.spec.js"
+        ],
+        [
+          "tests/e2e/schemer-ai-live.spec.js",
+          "tests/e2e/schemoo-column-comparisons.spec.js",
+          "tests/e2e/shared-report-live.spec.js"
+        ],
+        [
+          "tests/e2e/accounts.spec.js",
+          "tests/e2e/quick-start.spec.js",
+          "tests/e2e/schemoo-repetition-live.spec.js"
+        ]
+      ],
+      "files": {
+        "tests/e2e/account-brand-navigation.spec.js": [
+          "d2cec72190ea9b435921dfd6803828434cfb5a19e34e3a2ab1a79b549a17b3fd"
+        ],
+        "tests/e2e/accounts.spec.js": [
+          "288d5102ed6fe01ca0f3f536050d220df12d0b9e379b478ee23b3d93fd5409e1",
+          "2b70909b417aa1e535ce49c035e31cc63c3835bfd5a1b2287bef94beb743461b",
+          "314c6257857d89b5df90530cfb1a78645f28e3b585f93baf3776f383d2d809fa",
+          "436e15fa7f5214961448fdec39d0ed41aa4944ed3fc4f60556715ce89a61545c",
+          "4526b6874e6206c73f2f2637ae53e420d85063a431104d6d86bc0a057f28126d",
+          "4601839d999a9b3e1e6774eaf2afb0b6c4aef9a9095d1a96d1c87a231ebe450f",
+          "69477fdff396a4e9b492b360122589274a027bd87b999858a8bc0211756dcd29",
+          "8c1b9576ae2844595c2d7e4cc6ee48f732527bf864e1f29ab5ad7c9a36df4506",
+          "8fdd521fb8b803617642d0e4c6f741a02f08a0c8d9bb96bee60190b023d9334a",
+          "98b07a7b50d2403668abd770821ae346d398b465faabb586432bb4bbdffc7976",
+          "ac453fbfd2a87d1b750246f3f103294413d0fe405de9c652c6c14238c83eff77",
+          "c2081810743263f02cedfa6497e3575ec4fbae26fa0ad6abfa5bee02f58a0062",
+          "d465886dd5fea1812759df2fd23904e0f57318220cc4c37d7b4e3a502e888b9a",
+          "ec5df7c460c4da84dc91c7b67d2874d7591932650be36ddd851100670e047acc",
+          "f769fb929064da816f7be0dab959b819cd8bfaea31648a1c3fb9d554990cd7d7",
+          "fe6ac339d2d93fbdf0e6f761a05e0051f8a72cedc71681179238dfbad0e8cb67"
+        ],
+        "tests/e2e/quick-start.spec.js": [
+          "2376d28543a4c477d5f11f8a03bc19f568c142bc99c0fdcb003b25c21101c1f8",
+          "2bc7a83b4f1d5cb6a425580499bcb9fdaa39b47a4d5709ac1dde108b36bb7fb8",
+          "395b8019196066259af065e02164a1be8dc5d257e124ee5401573923f1ef6cb2",
+          "52ba131fa9df9d2e9050d231edb3c74df9cfbe966776e766191280abeef64746",
+          "6fc47e5b6ff19ffd587e9fdf69c74634f86f6ab1737cf4759e1fd75685dff419",
+          "70fe42d7480287ba36cade23d51933a87f263fb2077e25935efc55dbdcf7184a",
+          "87ac33e7fd73b78fbee69bf8a7c16aa44b368750b7f27b24655c25956762f79d",
+          "8df3a3eab1a825e3f12afefa19997d58dd9fafd8633a0181f1aa5abe5ab10773",
+          "a1a13c9c7591d3b66847339e64bdcedf3f1425dfc325e2962b5d4023db66537d",
+          "a261d2ed85da5ff5501f07dc2352f8b6f417f00bebe80ee09c6aea6f7b0693b6",
+          "a72169cf463d693614b8c8548d8c79055df16f130e9db16399bc6240a2899cbf",
+          "cc720b6dd0b77071ff52dd069557b49fc42a27a257d5344655df77ace42787ed",
+          "e319f165dc31e90fc0e77f7f30d270cb9ed771d057a367c2ee8763ef7ea79927",
+          "e4a20594fbc41e8f54a1624531b385d177592088d31ce9bd948cd8e748fc01fb",
+          "eab6b51981e338d96502915dbc4ecccc0396d175eb8c7d4c4211a3d7be5da795"
+        ],
+        "tests/e2e/schemer-ai-live.spec.js": [
+          "0ac30156fd22b0bfc0b3df87550460b09cf5a395d095ff83444fd3038560e64e"
+        ],
+        "tests/e2e/schemer-dashboards.spec.js": [
+          "0b069b074d0c128fa76bfdcd76b725472b08e88b0e7140566ccf3ba026bc51bf",
+          "1ee7a43259a203b10d6e85e339d518aad67e0f0b73e8ba29336b570d0fcc21c2",
+          "258cfb30c4ef2b25f386f90c2d0e3fe9b6808c74e27773d753604331b30e2a37",
+          "342190c0adef15ee1920c765b46d1c06c42bb5fc96f24c947db67aaf5eee9f22",
+          "3e86ae12eebb59e419325389be629619d344314acd31c90136b83928695e311e",
+          "473b1d55948ec20e3cad905ace88b90e3e81ddc26b1aae754ceb0066e5d8c44b",
+          "485847e267606fdd4b5aec2ac666df505c24e2d879c0cff1715679a6e15b87cc",
+          "6688af5015727649a2aa5f87e5caef4b7c17b4c7523f1431d41de86d019b5cf8",
+          "6dc67412df33d60ecc3a12e4857489821a9a366d0222b2603314e8c9225b4a19",
+          "7251b21769eabb728f8d7fff52f41d21326b4eafde0ba0eda0b811f5fbf48815",
+          "7bfecc419b37da6e9f2eaa175b0bb33639ac2b1f40f6f9e14db7d34034a6f233",
+          "8675b5337f5ac04aed0858fc4b2285c2a4fd5f11004a070d36aa4040f47cfc6e",
+          "89f06a3e0f129a8a697f058cdfd8ae369c864ea96acfc010f69f0ecaa96d6198",
+          "8eb4670e3b1d798d98430064a7a62ac69ddc686417317f1cb23e8815e843cfb2",
+          "99c6658d81dd2c8c48f7bcaf94fd770c8bb7e2ea2225daf90d82cd4de726721e",
+          "a12b99d0abdd7f119e2bfba3809d555a5afbb719474882b2380b77391e64bcf4",
+          "a27e15620619846e8e797374ac8b5aa8fff408de666e807cf97ee03d47011954",
+          "acf11e066651c14c63fba654e7e2c18114744b5a996eee1e3e9dc66f43677f8f",
+          "b687c70447f72ef3a3fea99da1496d0502146d4cf221202f244a6a59db246c4a",
+          "b87c43dcb7c881a8ae6608f3634eb22e66d5a675ac51cf208fe8d408c496c89c",
+          "bf8c97db96c22e86bb6d06747ea3885e0302d49b8b5d19a26a18333fdafd005d",
+          "c5c2022ca13601c28149af84d3dce99c94f7460e735fa802d608bcb190f05a44",
+          "cb1b8b95b7c2f09588c122303d9d9151e9d6b7fc8b7f879baba06c55fa4639bd",
+          "cdc330601a6916e41e1cbd601777ddf43e14598a27cbd9867ba93a926a6f265f",
+          "d2bc943bb8edab89c7d42be3de7a535785cace9d0ddd5afdb9656fa3f936d9f6",
+          "e2316131219bbdcff16761ba444ef1fe376f3a35283a9d0659b1ab54739513e4",
+          "f6a46d4de450f0957e29a205c5e472043f0b46dcc91b5a5477c73dae7e52606c",
+          "fb414c8de54ebe3d32ba11e067f11053b7d3444618f0eda0b16ae04bd09b305d"
+        ],
+        "tests/e2e/schemoo-column-comparisons.spec.js": [
+          "720d500938ff588085c0e1b464230e2cbdea4bdc3ba421165e861185dce1f784",
+          "91844af9ed6c386214e0e4a0271902ba68ee616c6e1a2fb69922c9d0dde7d7b6"
+        ],
+        "tests/e2e/schemoo-repetition-live.spec.js": [
+          "bbe6f0d7f2a33cf0aed58cf8122468960c0413bbc786ededdecc939af6b9ae3d"
+        ],
+        "tests/e2e/shared-report-live.spec.js": [
+          "4a4fda16fcef42d88b0337be96ad5696273aab4710f652c1a5dfe19103747744"
+        ]
+      },
+      "allowed_skips": [
+        "0ac30156fd22b0bfc0b3df87550460b09cf5a395d095ff83444fd3038560e64e"
+      ]
+    },
+    "android-chromium": {
+      "shards": [
+        [
+          "tests/e2e/accounts.spec.js",
+          "tests/e2e/schemer-dashboards.spec.js"
+        ],
+        [
+          "tests/e2e/account-brand-navigation.spec.js",
+          "tests/e2e/quick-start.spec.js",
+          "tests/e2e/schemoo-repetition-live.spec.js"
+        ],
+        [
+          "tests/e2e/schemer-ai-live.spec.js",
+          "tests/e2e/schemoo-column-comparisons.spec.js",
+          "tests/e2e/shared-report-live.spec.js"
+        ]
+      ],
+      "files": {
+        "tests/e2e/account-brand-navigation.spec.js": [
+          "b3a68dec0a24f5e4f5634456418c0048ea53a0664995ea1a28496370d621eb72"
+        ],
+        "tests/e2e/accounts.spec.js": [
+          "01601461aedaca8a7f906e2bf4ea01883b0cd0cb7949dbf150988aa3ff034268",
+          "144a891bd8182b8d9597a5ae4cd5ff6baa56401b203de415308f09778463213e",
+          "1dcef9201959c03e4ffd4bece0e34adc4d1bf36628e3e7be56b42a2bfddc0ea3",
+          "2b78f85e421cb280b618eebf6262045f11fd1c656811143f4d049fac5db93067",
+          "572ce6c40f93d35197d58e003d215bfd200121e5de9fe57a61301f29348b60d9",
+          "580a364ab27c4a9accc841c525fd26107a7a4f9bd71958d6072c5c7741ec4df2",
+          "99478c23d67152775f69c4bfa5fca3f8827450b79197c6456be7e725a5ee3498",
+          "a031192697f7dd1bee7ad994968e480b067228c2c1496141f0a130b9fbade36c",
+          "b2cc4372e34328b054b9c9abce43ebaf6cec63114e6b4f1f4684ac6de442b515",
+          "bd52e5c3e446368bcbeaf6e1e167d5f8743486b351e89d4a9392e19706afed7b",
+          "d29a80a281cc8c94df418d085b7154cc73c740d75eae285994a03bce53ca6d74",
+          "ddf791be58ae24da11aae2f3ccb632fdce0f26d355fa463bfb7d12156140f391",
+          "decd1e62183aca4854faf9a6f2056870d50f0415ddf2720db24b6db71802907c",
+          "e97861a6a9f8cded8c4a7894729ad3a7f5d6a81f1011e852d89be48f09cd6dce",
+          "ec276b164f47715de42388227943f14c8a36f2c0b5b2ba46891880334d9732e6",
+          "ff7b169152e932a596d5d777b89eb84a6fbfab1f8ee8b5c9354265e3c90c09c5"
+        ],
+        "tests/e2e/quick-start.spec.js": [
+          "06e42736f119834497352dcb783cbec448003a6e81a3fd349fc4cfe3d4d97bf9",
+          "0ca3b6e4be3e761888d588e2f7e02a1566339248fadced14509d0eb4619b4944",
+          "12232fe2082ffc1057b6efcb004fc8d6f8c700b46b6c777578562d4003876b9b",
+          "29613a3000b9b3243b06224b46b6f31b1a932d55834535198e33ec273331138e",
+          "5604eaedd92a47659068a7dfc7718b0423a27991bcc5da99b1666122478443be",
+          "58125dde3f78278972024b3b370c90f6baad4d992b624d22ee00db4277b21a0a",
+          "68eb722674597a0cd7ac8f46dd02b01a572c434b4b77cfe394ca380286450f13",
+          "74b4e84f5dfad0ae33fe2cd850247f1526cb085c2043dd54c172e209c87882c4",
+          "87d93eeb2235de387eeafa577a1de0c9de56595235ae28e455420f40401f8037",
+          "8c9b60d3deb7312261501ae9b6b9527128ee0a15412c062203254d608e20974a",
+          "c4cfbb5d10d4dcf33ddc04afb4b434517612eeb407cb2202c5d0302d60f77aff",
+          "cdf6772f0776a7f7db433226c1bc3b3db56ce88824d06b3b1618e619536e40b3",
+          "d973391fd2c69e6bf8808702f9c866d739fd5ce16b80109cd83253a19620670a",
+          "f912f04e8064a52313e19862fc238bad0fca072822c35f40f50fc5b5cfe6874a",
+          "fe84bb5bf38f624bbf6785dbffe365e0b24ecc9a3588bf92713d8b0ad10bf330"
+        ],
+        "tests/e2e/schemer-ai-live.spec.js": [
+          "89b26a05a9a7383ee263c2126228e1239c9006f92917e35c0b043eabd845da88"
+        ],
+        "tests/e2e/schemer-dashboards.spec.js": [
+          "0df6d2d2af13b94401e37cb2c75729bc2abf31dbd200e314ef8c25ec55bb7410",
+          "1083e8b4941f41fa476e3a96726bc10cbeb28c0d1724abde9d27cadc19f66602",
+          "1185c1e033902e7a19ff2d67a85db5f9a1be4c515a75033918098536749cd19d",
+          "12f1066c8380889358361be81398b821baa17a4a3f34bf64dd0f36f4115baa5f",
+          "15f7a3356ba910a45acafcf6d8f0f480e5477bf897b90aeb7623871fcee9c8a0",
+          "24145013e284a17d902e55c785c419e6ba9242673985f7c91297068853ce23a1",
+          "2ebc828c1b179c2a5af0b96500c94199760381b4389e03511f1cce497523ab08",
+          "3824fea03a90d3c6670724b1991eaefdc102a13af959e43ce0cd40957ca8c72a",
+          "43bac84041cc35ae104d8329163a436a9d062395ec5e3e538d34df4537a300e6",
+          "4abc8fdb92010927ad4a2b332321008f445fb3f9efb922beb8a29dc5c60dbec4",
+          "4e2990587ada667518dd8e7b32aad28601f2fd21d874ecfe4a29baa57bef298b",
+          "50d1730b341e51bcc8415a643c638ba7e2ba3350d04638cd1719ec7e857355a6",
+          "5f5a701a2188b779146769f7cf2b1d485682b6aee681ffd21f7d521138cca194",
+          "798b7e7484b4cb94081ee4f220b31c96553f39d185d997bbdf3619f1332b792f",
+          "9245cae0e1041d6cdfd7e09f14c61e0870845b4e90d0a238b0414e1b345bfba8",
+          "9498931030ef3b9f220b5feef8a3c0be5cd6852067620c14429572b24a118e34",
+          "975a1b8ff41be6b3a3e1902ec85184324691220a4d30966aab97cda75635a103",
+          "9bfd7934a3d43c09b87135b3ed9baf8c216a75f7831b3e6ce586832ff7f5ad21",
+          "9c81fcc0f17d1947a9370479d69324d347c0744d32d1f0e0a7292a478e5001a7",
+          "a0b28631839ec9fa5f9e902ca6924154ea474174327107ec195119c9687d2ff3",
+          "b71904bf642199961bfdbd6055da426834f7e301b09227de891be4fe1fc49e35",
+          "bce2f8d7b917a29486b924e7439a71362db4e1081cbf6a6a78d0245759c7de67",
+          "be859ee4bcaac838fa953c3c0adff00aff68638f033ccb63a61bc172b619fdb5",
+          "c15cd02d4c2bdd6f17d30b3525f570da8e0e84bfe71f3c40142a5fa4064a4442",
+          "d0af9d99edb855cb47e5e96b5b17d37b929c46e25fa0d875e60e6997c3578742",
+          "e91f4d9e8f1016c4cf5b7cc4974f8325b4081bd03b207be36c9ad2f6705d2a95",
+          "f702e529ed6b9f3d7103daa755bba68664ee203f4e15b7044b27db1978778154",
+          "fd3c284e31c653a6b310d76d5efbaba8a047818d017be5bd4c62069663aa1beb"
+        ],
+        "tests/e2e/schemoo-column-comparisons.spec.js": [
+          "6c57d4ac3df008cfcbcb1d9cbea907a513baf82db8e8a998610cbc6c99fd516b",
+          "dfe1b718c86a1f02b2b1aca807605566c3ca235f3e09d60fe89135f5a0501fef"
+        ],
+        "tests/e2e/schemoo-repetition-live.spec.js": [
+          "0f01be3ea7989b71b11e0389d127e9b74e01bb382418492e96e8b56dc8fb18a3"
+        ],
+        "tests/e2e/shared-report-live.spec.js": [
+          "37551153d2bd4e8dbcf4823f57e80962af0e0b37b63590d6e1f619a93a5e00ca"
+        ]
+      },
+      "allowed_skips": [
+        "89b26a05a9a7383ee263c2126228e1239c9006f92917e35c0b043eabd845da88"
+      ]
+    }
+  }
+}

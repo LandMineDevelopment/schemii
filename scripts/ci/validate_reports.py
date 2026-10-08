@@ -12,8 +12,10 @@ from urllib.parse import unquote, urlsplit
 
 if __package__:
     from .classify_changes import load_classification
+    from .test_selection import NATIVE_MARKDOWN, NATIVE_SKILL
 else:
     from classify_changes import load_classification
+    from test_selection import NATIVE_MARKDOWN, NATIVE_SKILL
 
 
 class HTMLLinks(HTMLParser):
@@ -152,7 +154,24 @@ def validate_file(root: Path, relative: str) -> int:
     ):
         raise ValueError("Report is not an owned regular file")
     text = path.read_text(encoding="utf-8")
-    if not text.strip() or "\0" in text or not re.match(r"\A\s*#\s+\S", text):
+    if not text.strip() or "\0" in text:
+        raise ValueError("Report needs a Markdown title and nonempty UTF-8 content")
+    if relative == NATIVE_SKILL:
+        # The one reviewed skill uses its bounded canonical metadata as a title.
+        # Accept plain single-line fields only; never interpret arbitrary YAML.
+        metadata = re.fullmatch(
+            r"---\nname: stock-t3-agents\ndescription: ([A-Za-z][^\r\n]{0,1023})\n---\n([\s\S]+)",
+            text,
+        )
+        if (
+            metadata is None
+            or metadata[1].strip().lower() in {"null", "true", "false"}
+            or re.search(r":\s|\s#|[\x00-\x1f\x7f]", metadata[1])
+            or not metadata[2].strip()
+        ):
+            raise ValueError("Invalid native skill metadata or body")
+        text = metadata[2]
+    elif not re.match(r"\A\s*#\s+\S", text):
         raise ValueError("Report needs a Markdown title and nonempty UTF-8 content")
     links, own_anchors = markdown_links(text)
     for link in links:
@@ -196,7 +215,11 @@ def validate_file(root: Path, relative: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--classification", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--classification", type=Path)
+    inputs.add_argument(
+        "--native-documents", nargs="+", choices=sorted(NATIVE_MARKDOWN)
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     started = time.monotonic()
@@ -208,10 +231,17 @@ def main() -> int:
         "execution_ms": 0,
     }
     try:
-        classification = load_classification(args.classification)
-        if not classification["valid"]:
-            raise ValueError("Invalid Git comparison")
-        for path in classification["markdown"]:
+        if args.classification:
+            classification = load_classification(args.classification)
+            if not classification["valid"]:
+                raise ValueError("Invalid Git comparison")
+            paths = classification["markdown"]
+        else:
+            # Local content checks never mint an immutable hosted descriptor.
+            paths = args.native_documents
+            if len(paths) != len(set(paths)):
+                raise ValueError("Duplicate native documentation")
+        for path in paths:
             result["links"] += validate_file(Path.cwd(), path)
             result["files"] += 1
         result["outcome"] = "success"

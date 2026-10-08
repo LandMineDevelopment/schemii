@@ -37,6 +37,12 @@ async function fixture(page, { legacy = false, failSecondAi = false } = {}) {
 }
 
 test('admin navigation separates sections and opens diagnostics', async ({ page }) => {
+  // Keep authenticated account/resource bootstrap real; provider state is unrelated to navigation.
+  for (const path of ['**/api/v1/admin/ai/zen', '**/api/v1/admin/ai/shared-codex']) {
+    await page.route(path, route => route.request().method() === 'GET'
+      ? route.fulfill({ json: { connected: false, grants: [], roleGrants: [], connections: [] } })
+      : route.continue());
+  }
   await page.goto('/admin');
   await expect(page.getByRole('heading', { name: 'Access & connections' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Users', exact: true })).toBeVisible();

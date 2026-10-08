@@ -1,0 +1,169 @@
+{
+  "platform": "Linux-7.2.5-3-omarchy-x86_64-with-glibc2.44",
+  "cpu_count": 16,
+  "page_bytes": 65536,
+  "cell_bytes": 262144,
+  "measurements": [
+    {
+      "mode": "incremental",
+      "path": "select",
+      "rows": 1,
+      "width": 2097152,
+      "outcome": "limit",
+      "observed": 2097154,
+      "server_version": 180006,
+      "psycopg": "3.3.4",
+      "libpq": 180000,
+      "peak_rss_bytes": 100016128,
+      "timeline": [
+        {
+          "phase": "before_connect",
+          "seconds": 1.6880221664905548e-06,
+          "rss_bytes": 86310912
+        },
+        {
+          "phase": "before_query",
+          "seconds": 0.006227483972907066,
+          "rss_bytes": 89698304
+        },
+        {
+          "phase": "after_query",
+          "seconds": 0.023470731917768717,
+          "rss_bytes": 92012544
+        },
+        {
+          "phase": "after_rollback_and_fresh_read",
+          "seconds": 0.02385134086944163,
+          "rss_bytes": 92012544
+        },
+        {
+          "phase": "after_close",
+          "seconds": 0.02404942805878818,
+          "rss_bytes": 89911296
+        }
+      ],
+      "largest_fixture_cell_bytes": 2097152,
+      "connection_closed": true,
+      "rss_samples": [
+        {
+          "seconds": 0.0007197421509772539,
+          "rss_bytes": 421888
+        },
+        {
+          "seconds": 0.020973089151084423,
+          "rss_bytes": 11493376
+        },
+        {
+          "seconds": 0.041231204057112336,
+          "rss_bytes": 14385152
+        },
+        {
+          "seconds": 0.06150404806248844,
+          "rss_bytes": 17502208
+        },
+        {
+          "seconds": 0.08177741197869182,
+          "rss_bytes": 19640320
+        },
+        {
+          "seconds": 0.1020060540176928,
+          "rss_bytes": 21934080
+        },
+        {
+          "seconds": 0.12223316309973598,
+          "rss_bytes": 31617024
+        },
+        {
+          "seconds": 0.14244466414675117,
+          "rss_bytes": 35713024
+        },
+        {
+          "seconds": 0.16264776210300624,
+          "rss_bytes": 38354944
+        },
+        {
+          "seconds": 0.18283208296634257,
+          "rss_bytes": 45133824
+        },
+        {
+          "seconds": 0.20302672404795885,
+          "rss_bytes": 47673344
+        },
+        {
+          "seconds": 0.2232168880291283,
+          "rss_bytes": 50352128
+        },
+        {
+          "seconds": 0.24338700412772596,
+          "rss_bytes": 53399552
+        },
+        {
+          "seconds": 0.26357580604963005,
+          "rss_bytes": 54312960
+        },
+        {
+          "seconds": 0.2837506791111082,
+          "rss_bytes": 55468032
+        },
+        {
+          "seconds": 0.30387869803234935,
+          "rss_bytes": 57057280
+        },
+        {
+          "seconds": 0.3240245671477169,
+          "rss_bytes": 59670528
+        },
+        {
+          "seconds": 0.34418811299838126,
+          "rss_bytes": 68882432
+        },
+        {
+          "seconds": 0.3643971001729369,
+          "rss_bytes": 70234112
+        },
+        {
+          "seconds": 0.384594890056178,
+          "rss_bytes": 74350592
+        },
+        {
+          "seconds": 0.4048040199559182,
+          "rss_bytes": 76410880
+        },
+        {
+          "seconds": 0.42505214316770434,
+          "rss_bytes": 83943424
+        },
+        {
+          "seconds": 0.44526198715902865,
+          "rss_bytes": 85204992
+        },
+        {
+          "seconds": 0.4654685540590435,
+          "rss_bytes": 89899008
+        },
+        {
+          "seconds": 0.4856989891268313,
+          "rss_bytes": 89911296
+        },
+        {
+          "seconds": 0.5059397630393505,
+          "rss_bytes": 89919488
+        },
+        {
+          "seconds": 0.5261774889659137,
+          "rss_bytes": 89919488
+        },
+        {
+          "seconds": 0.5464279211591929,
+          "rss_bytes": 89919488
+        }
+      ],
+      "observed_peak_rss_bytes": 100016128,
+      "source_columns": 1,
+      "largest_fixture_row_payload_bytes": 2097152,
+      "column_oid": 25,
+      "fresh_read_passed": true,
+      "rollback_checked": true
+    }
+  ]
+}

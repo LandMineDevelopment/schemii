@@ -1,4 +1,5 @@
 """Regression checks for raw COPY ownership and release on interrupted downloads."""
+from builtins import ExceptionGroup
 from collections import OrderedDict
 import threading
 
@@ -32,6 +33,9 @@ class CopySource:
             self.closed_streams += 1
 
     def cancel(self):
+        pass
+
+    def begin_operation(self):
         pass
 
 
@@ -163,6 +167,7 @@ def test_cancelled_upload_waits_for_write_before_closing_protocol(monkeypatch):
             cleanups.append(("close", finished.is_set()))
 
     session["raw"].connection = SimpleNamespace(cursor=Cursor)
+    session["raw"].cursor = Cursor
     monkeypatch.setattr(raw_session, "owned", lambda *args: session)
     monkeypatch.setattr(raw_session, "service", lambda request: manager)
 

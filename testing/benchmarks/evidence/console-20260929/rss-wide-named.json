@@ -1,0 +1,445 @@
+{
+  "platform": "Linux-7.2.5-3-omarchy-x86_64-with-glibc2.44",
+  "cpu_count": 16,
+  "page_bytes": 65536,
+  "cell_bytes": 262144,
+  "measurements": [
+    {
+      "mode": "named",
+      "path": "select",
+      "rows": 1000,
+      "width": 8192,
+      "outcome": "page",
+      "observed": 7,
+      "server_version": 180006,
+      "psycopg": "3.3.4",
+      "libpq": 180000,
+      "peak_rss_bytes": 91394048,
+      "timeline": [
+        {
+          "phase": "before_connect",
+          "seconds": 1.9830185920000076e-06,
+          "rss_bytes": 86310912
+        },
+        {
+          "phase": "before_query",
+          "seconds": 0.00630716304294765,
+          "rss_bytes": 89673728
+        },
+        {
+          "phase": "after_named_page",
+          "seconds": 0.009122652001678944,
+          "rss_bytes": 91529216
+        }
+      ],
+      "largest_fixture_cell_bytes": 8192,
+      "connection_closed": true,
+      "rss_samples": [
+        {
+          "seconds": 0.00030783703550696373,
+          "rss_bytes": 221184
+        },
+        {
+          "seconds": 0.02054427587427199,
+          "rss_bytes": 13496320
+        },
+        {
+          "seconds": 0.04073320608586073,
+          "rss_bytes": 18853888
+        },
+        {
+          "seconds": 0.06091002398170531,
+          "rss_bytes": 22368256
+        },
+        {
+          "seconds": 0.08109892392531037,
+          "rss_bytes": 32116736
+        },
+        {
+          "seconds": 0.10134445503354073,
+          "rss_bytes": 36302848
+        },
+        {
+          "seconds": 0.12154302792623639,
+          "rss_bytes": 40697856
+        },
+        {
+          "seconds": 0.14174085203558207,
+          "rss_bytes": 45301760
+        },
+        {
+          "seconds": 0.16192476102150977,
+          "rss_bytes": 48152576
+        },
+        {
+          "seconds": 0.18215643800795078,
+          "rss_bytes": 50479104
+        },
+        {
+          "seconds": 0.2023535359185189,
+          "rss_bytes": 53469184
+        },
+        {
+          "seconds": 0.222531212028116,
+          "rss_bytes": 54288384
+        },
+        {
+          "seconds": 0.2427146239206195,
+          "rss_bytes": 55095296
+        },
+        {
+          "seconds": 0.2628969100769609,
+          "rss_bytes": 56291328
+        },
+        {
+          "seconds": 0.2831215679179877,
+          "rss_bytes": 57999360
+        },
+        {
+          "seconds": 0.30331315798684955,
+          "rss_bytes": 66588672
+        },
+        {
+          "seconds": 0.32348859403282404,
+          "rss_bytes": 69206016
+        },
+        {
+          "seconds": 0.34368250891566277,
+          "rss_bytes": 71671808
+        },
+        {
+          "seconds": 0.3638969589956105,
+          "rss_bytes": 74366976
+        },
+        {
+          "seconds": 0.3841030120383948,
+          "rss_bytes": 76632064
+        },
+        {
+          "seconds": 0.4043018980883062,
+          "rss_bytes": 83935232
+        },
+        {
+          "seconds": 0.42454780195839703,
+          "rss_bytes": 85164032
+        },
+        {
+          "seconds": 0.4447490549646318,
+          "rss_bytes": 91533312
+        },
+        {
+          "seconds": 0.4649483219254762,
+          "rss_bytes": 91533312
+        },
+        {
+          "seconds": 0.48522016289643943,
+          "rss_bytes": 91541504
+        },
+        {
+          "seconds": 0.5054991298820823,
+          "rss_bytes": 91541504
+        },
+        {
+          "seconds": 0.5257489660289139,
+          "rss_bytes": 91541504
+        }
+      ],
+      "observed_peak_rss_bytes": 91541504,
+      "source_columns": 1,
+      "largest_fixture_row_payload_bytes": 8192,
+      "column_oid": 25,
+      "fresh_read_passed": true,
+      "rollback_checked": false
+    },
+    {
+      "mode": "named",
+      "path": "select",
+      "rows": 10000,
+      "width": 8192,
+      "outcome": "page",
+      "observed": 7,
+      "server_version": 180006,
+      "psycopg": "3.3.4",
+      "libpq": 180000,
+      "peak_rss_bytes": 91418624,
+      "timeline": [
+        {
+          "phase": "before_connect",
+          "seconds": 2.2070016711950302e-06,
+          "rss_bytes": 86351872
+        },
+        {
+          "phase": "before_query",
+          "seconds": 0.005965356016531587,
+          "rss_bytes": 89640960
+        },
+        {
+          "phase": "after_named_page",
+          "seconds": 0.009267959045246243,
+          "rss_bytes": 91537408
+        }
+      ],
+      "largest_fixture_cell_bytes": 8192,
+      "connection_closed": true,
+      "rss_samples": [
+        {
+          "seconds": 0.0003721979446709156,
+          "rss_bytes": 241664
+        },
+        {
+          "seconds": 0.02052374999038875,
+          "rss_bytes": 13418496
+        },
+        {
+          "seconds": 0.0407503480091691,
+          "rss_bytes": 18882560
+        },
+        {
+          "seconds": 0.06097964500077069,
+          "rss_bytes": 22863872
+        },
+        {
+          "seconds": 0.08121738396584988,
+          "rss_bytes": 32944128
+        },
+        {
+          "seconds": 0.10145765403285623,
+          "rss_bytes": 37281792
+        },
+        {
+          "seconds": 0.121687734965235,
+          "rss_bytes": 44220416
+        },
+        {
+          "seconds": 0.14194923592731357,
+          "rss_bytes": 47149056
+        },
+        {
+          "seconds": 0.162195750977844,
+          "rss_bytes": 49659904
+        },
+        {
+          "seconds": 0.18246433790773153,
+          "rss_bytes": 52826112
+        },
+        {
+          "seconds": 0.20263648685067892,
+          "rss_bytes": 54329344
+        },
+        {
+          "seconds": 0.22283725789748132,
+          "rss_bytes": 55193600
+        },
+        {
+          "seconds": 0.24304210697300732,
+          "rss_bytes": 56528896
+        },
+        {
+          "seconds": 0.2632670879829675,
+          "rss_bytes": 59080704
+        },
+        {
+          "seconds": 0.2834488928783685,
+          "rss_bytes": 67149824
+        },
+        {
+          "seconds": 0.30360839795321226,
+          "rss_bytes": 69554176
+        },
+        {
+          "seconds": 0.32378701004199684,
+          "rss_bytes": 73555968
+        },
+        {
+          "seconds": 0.34396427194587886,
+          "rss_bytes": 74698752
+        },
+        {
+          "seconds": 0.36411353200674057,
+          "rss_bytes": 79765504
+        },
+        {
+          "seconds": 0.3843270589131862,
+          "rss_bytes": 85090304
+        },
+        {
+          "seconds": 0.4045096898917109,
+          "rss_bytes": 91541504
+        },
+        {
+          "seconds": 0.42469077883288264,
+          "rss_bytes": 91541504
+        },
+        {
+          "seconds": 0.4448978449217975,
+          "rss_bytes": 91549696
+        },
+        {
+          "seconds": 0.4651181858498603,
+          "rss_bytes": 91549696
+        },
+        {
+          "seconds": 0.4853119340259582,
+          "rss_bytes": 91549696
+        }
+      ],
+      "observed_peak_rss_bytes": 91549696,
+      "source_columns": 1,
+      "largest_fixture_row_payload_bytes": 8192,
+      "column_oid": 25,
+      "fresh_read_passed": true,
+      "rollback_checked": false
+    },
+    {
+      "mode": "named",
+      "path": "select",
+      "rows": 30000,
+      "width": 8192,
+      "outcome": "page",
+      "observed": 7,
+      "server_version": 180006,
+      "psycopg": "3.3.4",
+      "libpq": 180000,
+      "peak_rss_bytes": 91389952,
+      "timeline": [
+        {
+          "phase": "before_connect",
+          "seconds": 1.9881408661603928e-06,
+          "rss_bytes": 86405120
+        },
+        {
+          "phase": "before_query",
+          "seconds": 0.0057003130204975605,
+          "rss_bytes": 89677824
+        },
+        {
+          "phase": "after_named_page",
+          "seconds": 0.009589519118890166,
+          "rss_bytes": 91566080
+        }
+      ],
+      "largest_fixture_cell_bytes": 8192,
+      "connection_closed": true,
+      "rss_samples": [
+        {
+          "seconds": 0.0002570620272308588,
+          "rss_bytes": 241664
+        },
+        {
+          "seconds": 0.02038198197260499,
+          "rss_bytes": 13524992
+        },
+        {
+          "seconds": 0.04050801298581064,
+          "rss_bytes": 18919424
+        },
+        {
+          "seconds": 0.06065460108220577,
+          "rss_bytes": 22888448
+        },
+        {
+          "seconds": 0.0808552480302751,
+          "rss_bytes": 33034240
+        },
+        {
+          "seconds": 0.101020178059116,
+          "rss_bytes": 37351424
+        },
+        {
+          "seconds": 0.12125748698599637,
+          "rss_bytes": 44318720
+        },
+        {
+          "seconds": 0.14142815792001784,
+          "rss_bytes": 47157248
+        },
+        {
+          "seconds": 0.161607920890674,
+          "rss_bytes": 49086464
+        },
+        {
+          "seconds": 0.18179888906888664,
+          "rss_bytes": 52350976
+        },
+        {
+          "seconds": 0.20199477393180132,
+          "rss_bytes": 54300672
+        },
+        {
+          "seconds": 0.22218819987028837,
+          "rss_bytes": 54730752
+        },
+        {
+          "seconds": 0.24238546704873443,
+          "rss_bytes": 55685120
+        },
+        {
+          "seconds": 0.2626311890780926,
+          "rss_bytes": 56696832
+        },
+        {
+          "seconds": 0.2828326649032533,
+          "rss_bytes": 59154432
+        },
+        {
+          "seconds": 0.3030245299451053,
+          "rss_bytes": 66850816
+        },
+        {
+          "seconds": 0.3232422429136932,
+          "rss_bytes": 69349376
+        },
+        {
+          "seconds": 0.3434002250432968,
+          "rss_bytes": 71864320
+        },
+        {
+          "seconds": 0.3635677769780159,
+          "rss_bytes": 74465280
+        },
+        {
+          "seconds": 0.3837402139324695,
+          "rss_bytes": 76709888
+        },
+        {
+          "seconds": 0.4038967490196228,
+          "rss_bytes": 80068608
+        },
+        {
+          "seconds": 0.4241198350209743,
+          "rss_bytes": 85008384
+        },
+        {
+          "seconds": 0.44431323488242924,
+          "rss_bytes": 91455488
+        },
+        {
+          "seconds": 0.46449643396772444,
+          "rss_bytes": 91566080
+        },
+        {
+          "seconds": 0.48472486389800906,
+          "rss_bytes": 91574272
+        },
+        {
+          "seconds": 0.5049423968885094,
+          "rss_bytes": 91574272
+        },
+        {
+          "seconds": 0.5252011849079281,
+          "rss_bytes": 91574272
+        },
+        {
+          "seconds": 0.5454910919070244,
+          "rss_bytes": 85491712
+        }
+      ],
+      "observed_peak_rss_bytes": 91574272,
+      "source_columns": 1,
+      "largest_fixture_row_payload_bytes": 8192,
+      "column_oid": 25,
+      "fresh_read_passed": true,
+      "rollback_checked": false
+    }
+  ]
+}

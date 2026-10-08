@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import AsyncIterator
@@ -78,6 +78,9 @@ from schemii.schemer.metadata.migrations import MIGRATION_PACKAGE as SCHEMER_MET
 from schemii.schemer.dashboard_store import InMemoryDashboardRepository, PostgresDashboardRepository
 from schemii.schemer.dashboard_routes import router as dashboard_router
 from schemii.common.query_executions.routes import router as query_executions_router
+
+
+CHAT_MAINTENANCE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -398,15 +401,18 @@ def create_app(
         await asyncio.to_thread(application.state.ai_service.recover_interrupted)
         await asyncio.to_thread(application.state.schemoo_ai.store.prune, True)
         await asyncio.to_thread(application.state.schemer_ai.store.prune, True)
+        chat_maintenance_stop = asyncio.Event()
         async def maintain_chats():
-            while True:
-                await asyncio.sleep(60)
+            while not chat_maintenance_stop.is_set():
                 try:
-                    await asyncio.to_thread(application.state.schemoo_ai.maintain)
-                    await asyncio.to_thread(application.state.schemer_ai.maintain)
-                except Exception:
-                    logging.getLogger(__name__).exception("Product chat maintenance failed")
-        chat_maintenance=asyncio.create_task(maintain_chats())
+                    await asyncio.wait_for(chat_maintenance_stop.wait(), timeout=CHAT_MAINTENANCE_SECONDS)
+                except asyncio.TimeoutError:
+                    try:
+                        await asyncio.to_thread(application.state.schemoo_ai.maintain)
+                        await asyncio.to_thread(application.state.schemer_ai.maintain)
+                    except Exception:
+                        logging.getLogger(__name__).exception("Product chat maintenance failed")
+        chat_maintenance=asyncio.create_task(maintain_chats(), name="product-chat-maintenance")
         active_services.migrations.set_execution_waker(migration_worker.notify)
         await migration_worker.start()
         credential_worker = CredentialExpiryWorker(
@@ -420,24 +426,50 @@ def create_app(
         )
         if catalog_worker is not None:
             await catalog_worker.start()
+        raw_maintenance_stop = asyncio.Event()
+        raw_maintenance = asyncio.create_task(
+            application.state.raw_console.maintain(raw_maintenance_stop),
+            name="raw-console-maintenance",
+        )
         try:
             yield
         finally:
-            chat_maintenance.cancel()
-            try:
-                await chat_maintenance
-            except asyncio.CancelledError:
-                pass
-            if catalog_worker is not None:
-                await catalog_worker.stop()
-            await credential_worker.stop()
-            assert active_services.console is not None
-            await asyncio.to_thread(application.state.bulk_jobs.close)
-            await asyncio.to_thread(application.state.raw_console.close)
-            active_services.console.close()
-            active_services.migrations.set_execution_waker(None)
-            await migration_worker.stop()
-            await asyncio.to_thread(active_services.metadata.close)
+            raw_maintenance_stop.set()
+            chat_maintenance_stop.set()
+
+            async def join_maintenance(task):
+                await task
+
+            async def close_owned_resources():
+                # Callbacks run in reverse order, including after a stop fails.
+                # Metadata admission stays open until every consumer is joined
+                # or reports its own failure; native leases still own release.
+                async with AsyncExitStack() as cleanup:
+                    cleanup.push_async_callback(asyncio.to_thread, active_services.metadata.close)
+                    cleanup.push_async_callback(migration_worker.stop)
+                    cleanup.callback(active_services.migrations.set_execution_waker, None)
+                    assert active_services.console is not None
+                    cleanup.callback(active_services.console.close)
+                    cleanup.push_async_callback(asyncio.to_thread, application.state.raw_console.close)
+                    cleanup.push_async_callback(asyncio.to_thread, application.state.bulk_jobs.close)
+                    cleanup.push_async_callback(credential_worker.stop)
+                    if catalog_worker is not None:
+                        cleanup.push_async_callback(catalog_worker.stop)
+                    cleanup.push_async_callback(join_maintenance, chat_maintenance)
+                    cleanup.push_async_callback(join_maintenance, raw_maintenance)
+
+            closing = asyncio.create_task(close_owned_resources(), name="schemii-shutdown")
+            interrupted = False
+            while not closing.done():
+                try:
+                    # Cancelling to_thread doesn't stop its actual native work.
+                    # Keep ownership and join cleanup even after repeated cancel.
+                    await asyncio.shield(closing)
+                except asyncio.CancelledError:
+                    interrupted = True
+            closing.result()
+            if interrupted:
+                raise asyncio.CancelledError
 
     application = FastAPI(
         title="Schemii",

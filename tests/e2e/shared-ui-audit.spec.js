@@ -72,6 +72,9 @@ test('conditional schema rows follow the selected form state', async ({ page }) 
   await page.route('**/api/v1/connections?product=schemii', route => route.fulfill({ json: { connections: connectionsFixture } }));
   await page.setViewportSize({ width: 320, height: 740 });
   await page.goto('/');
+  // Bootstrap clears design dialogs before rendering this empty-workspace state.
+  // Wait before directly opening any of the four form-layout fixtures below.
+  await expect(page.locator('#catalog-state').getByText('Open a schema workspace', { exact: true })).toBeVisible();
   const viewDialog = page.locator('#design-view-dialog');
   await viewDialog.evaluate(dialog => dialog.showModal());
   const populateRow = viewDialog.locator('#design-view-population-row');
@@ -82,14 +85,27 @@ test('conditional schema rows follow the selected form state', async ({ page }) 
   await expect(populateRow).toHaveJSProperty('hidden', false);
   await viewDialog.locator('#design-view-kind').selectOption('view');
   await expect(populateRow).toBeHidden();
-  for (const width of [320, 390, 1440]) {
-    await page.setViewportSize({ width, height: width === 1440 ? 900 : 740 });
+  // Keep the editor intact while crossing the breakpoint in both directions.
+  // A short desktop viewport must still fit the textarea's own minimum size.
+  for (const [width, height] of [
+    [320, 740], [390, 740], [1440, 900],
+    [1440, 740], [390, 740], [320, 740],
+  ]) {
+    await page.setViewportSize({ width, height });
     const query = await viewDialog.locator('.design-view-query').evaluate(element => {
       const textarea = element.querySelector('textarea').getBoundingClientRect();
       const helper = element.querySelector('small').getBoundingClientRect();
-      return { textareaBottom: textarea.bottom, helperTop: helper.top };
+      return {
+        textareaBottom: textarea.bottom,
+        helperTop: helper.top,
+        helperBottom: helper.bottom,
+        fieldsBottom: element.parentElement.getBoundingClientRect().bottom,
+        previewTop: element.parentElement.nextElementSibling.getBoundingClientRect().top,
+      };
     });
     expect(query.helperTop).toBeGreaterThanOrEqual(query.textareaBottom);
+    expect(query.helperBottom).toBeLessThanOrEqual(query.fieldsBottom);
+    if (width <= 680) expect(query.previewTop).toBeGreaterThanOrEqual(query.fieldsBottom);
     await expectInsideVisualViewport(viewDialog.getByRole('button', { name: 'Create view' }));
   }
   await page.setViewportSize({ width: 320, height: 740 });
@@ -99,12 +115,20 @@ test('conditional schema rows follow the selected form state', async ({ page }) 
     style.setProperty('--ui-type-control', '15px');
     style.setProperty('--ui-type-helper', '14px');
   });
-  const enlargedQuery = await viewDialog.locator('.design-view-query').evaluate(element => ({
-    textareaBottom: element.querySelector('textarea').getBoundingClientRect().bottom,
-    helperTop: element.querySelector('small').getBoundingClientRect().top,
-  }));
-  expect(enlargedQuery.helperTop).toBeGreaterThanOrEqual(enlargedQuery.textareaBottom);
-  await expectInsideVisualViewport(viewDialog.getByRole('button', { name: 'Create view' }));
+  for (const width of [320, 390, 1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 740 });
+    const enlargedQuery = await viewDialog.locator('.design-view-query').evaluate(element => ({
+      textareaBottom: element.querySelector('textarea').getBoundingClientRect().bottom,
+      helperTop: element.querySelector('small').getBoundingClientRect().top,
+      helperBottom: element.querySelector('small').getBoundingClientRect().bottom,
+      fieldsBottom: element.parentElement.getBoundingClientRect().bottom,
+      previewTop: element.parentElement.nextElementSibling.getBoundingClientRect().top,
+    }));
+    expect(enlargedQuery.helperTop).toBeGreaterThanOrEqual(enlargedQuery.textareaBottom);
+    expect(enlargedQuery.helperBottom).toBeLessThanOrEqual(enlargedQuery.fieldsBottom);
+    if (width <= 680) expect(enlargedQuery.previewTop).toBeGreaterThanOrEqual(enlargedQuery.fieldsBottom);
+    await expectInsideVisualViewport(viewDialog.getByRole('button', { name: 'Create view' }));
+  }
   const editorSurfaces = await page.evaluate(() => {
     const view = getComputedStyle(document.querySelector('#design-view-definition'));
     const routine = getComputedStyle(document.querySelector('.design-routine-source textarea'));
@@ -113,6 +137,27 @@ test('conditional schema rows follow the selected form state', async ({ page }) 
   expect(editorSurfaces.viewBackground).toBe(editorSurfaces.routineBackground);
   expect(editorSurfaces.fontSize).toBeGreaterThanOrEqual(11);
   await viewDialog.locator('[data-close-dialog]').first().click();
+
+  for (const id of ['design-type-dialog', 'design-routine-dialog', 'design-trigger-dialog']) {
+    const routineDialog = page.locator(`#${id}`);
+    await routineDialog.evaluate(dialog => dialog.showModal());
+    for (const width of [320, 390, 1440]) {
+      await page.setViewportSize({ width, height: 740 });
+      const source = await routineDialog.locator('.design-routine-source').evaluate(element => ({
+        textareaBottom: element.querySelector('textarea').getBoundingClientRect().bottom,
+        helperTop: element.querySelector('small').getBoundingClientRect().top,
+        helperBottom: element.querySelector('small').getBoundingClientRect().bottom,
+        sourceBottom: element.getBoundingClientRect().bottom,
+        previewTop: element.nextElementSibling.getBoundingClientRect().top,
+      }));
+      expect(source.helperTop).toBeGreaterThanOrEqual(source.textareaBottom);
+      expect(source.helperBottom).toBeLessThanOrEqual(source.sourceBottom);
+      if (width <= 680) expect(source.previewTop).toBeGreaterThanOrEqual(source.sourceBottom);
+      await expectInsideVisualViewport(routineDialog.locator('.ui-dialog__actions button[type="submit"]'));
+    }
+    await routineDialog.locator('[data-close-dialog]').first().click();
+  }
+  await page.setViewportSize({ width: 320, height: 740 });
 
   await page.getByRole('button', { name: 'PostgreSQL connections', exact: true }).first().click();
   const connections = page.locator('#connections-dialog');

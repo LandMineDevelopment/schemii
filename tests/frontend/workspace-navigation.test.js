@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   extractLinkedSqlDraft,
   readWorkspaceNavigation,
+  createWorkspaceNavigationHistory,
+  createWorkspaceNavigationController,
   readWorkspacePreferences,
   updateWorkspacePreferences,
   workspaceNavigationHref,
@@ -147,4 +149,123 @@ test("corrupt or unavailable browser storage never blocks startup", () => {
     getItem: () => null,
     setItem() { throw new Error("full"); },
   }, WORKSPACE, { inspector: "expanded" }), false);
+});
+
+
+test("cancelled workspace Back returns to its original entry without another guard or rewriting history", () => {
+  const entries = [{ href: "/?workspace=first", state: { unrelated: "kept" } }];
+  let position = 0;
+  const movements = [];
+  const history = {
+    get state() { return entries[position].state; },
+    replaceState(state, _, href) { entries[position] = { state, href: href ?? entries[position].href }; },
+    pushState(state, _, href) { entries.splice(++position, entries.length, { state, href }); },
+    go(distance) { movements.push(distance); position += distance; },
+  };
+  const navigation = createWorkspaceNavigationHistory(history);
+  navigation.write("push", "/?workspace=second");
+  position--;
+  const traversal = navigation.beginTraversal(history.state);
+  navigation.cancelTraversal(traversal, "/?workspace=second");
+  assert.deepEqual(movements, [1]);
+  assert.equal(entries[0].href, "/?workspace=first");
+  assert.equal(entries[0].state.unrelated, "kept");
+  assert.equal(navigation.beginTraversal(history.state), null, "compensating popstate must not ask again");
+  position--;
+  const secondAttempt = navigation.beginTraversal(history.state);
+  assert.equal(secondAttempt.targetIndex, 0);
+  assert.equal(secondAttempt.originIndex, 1);
+});
+
+test("workspace history cancellation safely repairs unknown entries and ignores superseded traversals", () => {
+  const writes = [];
+  const history = { state: null, replaceState: (...args) => writes.push(args), go() { assert.fail("unknown entry must not guess a history distance"); } };
+  const navigation = createWorkspaceNavigationHistory(history);
+  const old = navigation.beginTraversal({ schemiiNavigationIndex: 2 });
+  const latest = navigation.beginTraversal(null);
+  navigation.cancelTraversal(old, "/stale");
+  assert.equal(writes.length, 1);
+  navigation.cancelTraversal(latest, "/current");
+  assert.equal(writes.at(-1)[2], "/current");
+});
+
+
+for (const direction of ["Back", "Forward"]) {
+  test(`rapid ${direction} while a discard decision is pending keeps the committed workspace origin`, () => {
+    const entries = [{ href: "/A", state: null }];
+    let position = 0;
+    const history = {
+      get state() { return entries[position].state; },
+      replaceState(state, _, href) { entries[position] = { state, href: href ?? entries[position].href }; },
+      pushState(state, _, href) { entries.splice(++position, entries.length, { state, href }); },
+      go(distance) { position += distance; },
+    };
+    const navigation = createWorkspaceNavigationHistory(history);
+    navigation.write("push", "/B");
+    navigation.write("push", "/C");
+    position--;
+    const original = navigation.beginTraversal(history.state);
+    position += direction === "Back" ? -1 : 1;
+    const newer = navigation.beginTraversal(history.state);
+    navigation.cancelTraversal(newer, "/C");
+    if (direction === "Back") assert.equal(navigation.beginTraversal(history.state), null);
+    navigation.cancelTraversal(original, "/C");
+    assert.equal(entries[position].href, "/C");
+    assert.deepEqual(entries.map(entry => entry.href), ["/A", "/B", "/C"]);
+    position--;
+    const next = navigation.beginTraversal(history.state);
+    assert.equal(next.originIndex, 2);
+    assert.equal(next.targetIndex, 1);
+    navigation.commitTraversal(next);
+    position--;
+    const acceptedOrigin = navigation.beginTraversal(history.state);
+    assert.equal(acceptedOrigin.originIndex, 1);
+  });
+}
+
+
+test("manual workspace opening supersedes a pending URL restore before its next history push", () => {
+  const navigation = createWorkspaceNavigationController();
+  const initial = navigation.begin({ restore: true });
+  assert.equal(navigation.restoring, true);
+  const manual = navigation.begin();
+  assert.equal(initial.isCurrent(), false);
+  assert.equal(initial.signal.aborted, true);
+  assert.equal(manual.isCurrent(), true);
+  assert.equal(navigation.restoring, false, "manual history must not inherit the pending restore's suppression");
+  initial.finish();
+  assert.equal(manual.isCurrent(), true);
+  assert.equal(navigation.restoring, false);
+  manual.finish();
+});
+
+test("a superseded restoration cannot finish or suppress a newer restoration owner", () => {
+  const navigation = createWorkspaceNavigationController();
+  const initial = navigation.begin({ restore: true });
+  const manual = navigation.begin();
+  const back = navigation.begin({ restore: true });
+  initial.finish();
+  manual.finish();
+  assert.equal(back.isCurrent(), true);
+  assert.equal(navigation.restoring, true);
+  back.finish();
+  assert.equal(navigation.restoring, false);
+});
+
+
+test("late startup API completion cannot reclaim an in-flight manual workspace owner", async () => {
+  const navigation = createWorkspaceNavigationController();
+  const startup = navigation.begin({ restore: true });
+  let releaseRuntime;
+  const runtime = new Promise(resolve => { releaseRuntime = resolve; });
+  const startupFinished = runtime.then(() => startup.finish());
+  const manual = navigation.begin();
+  assert.equal(navigation.restoring, false);
+  releaseRuntime();
+  await startupFinished;
+  assert.equal(startup.isCurrent(), false);
+  assert.equal(manual.isCurrent(), true);
+  assert.equal(manual.signal.aborted, false);
+  assert.equal(navigation.restoring, false);
+  manual.finish();
 });

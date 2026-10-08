@@ -26,6 +26,11 @@ test("query preview maximizes and restores without losing its contents", async (
   await page.goto(`/schemoo?model=${modelId}`);
   await expect(page.locator(".sc-node")).toHaveCount(12);
   await page.getByRole("button", { name: "Show query preview", exact: true }).click();
+  // The imported model is cyclic; capture its completed compiler diagnostic.
+  const diagnostic = "Enabled relationships contain cycles or ambiguous paths. Disable cycle edges or create separate aliases.";
+  await expect(page.locator("#plan-status")).toHaveText(diagnostic);
+  await expect(page.locator("#sql")).toHaveText(diagnostic);
+  await expect(page.locator("#run")).toBeDisabled();
   const sql = await page.locator("#sql").textContent();
   const split = await page.locator("#query-dock").boundingBox();
   await page.getByRole("button", { name: "Maximize query preview", exact: true }).click();
@@ -41,6 +46,9 @@ test("query preview maximizes and restores without losing its contents", async (
   await page.getByRole("button", { name: "Restore split view", exact: true }).click();
   await expect(page.locator("#model-shell")).toBeVisible();
   await expect(page.locator("#results")).toBeVisible();
+  await expect(page.locator("#sql")).toHaveText(sql);
+  const restored = await page.locator("#query-dock").boundingBox();
+  expect(Math.abs(restored.height - split.height)).toBeLessThan(2);
   await page.locator("#result-status").click({ button: "right" });
   await expect(page.locator("#model-shell")).toBeHidden();
   await page.getByRole("button", { name: "Close query preview", exact: true }).click();
