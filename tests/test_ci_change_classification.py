@@ -262,6 +262,12 @@ def test_existing_front_matter_skill_is_validated_with_exact_native_pr_ownership
     assert original.startswith("---\n")
     write(root, skill, original)
     write(root, "testing/agents/README.md", "# Native assignment protocol\n")
+    # The real skill's links must resolve in the synthetic baseline as well.
+    write(
+        root,
+        "docs/github-issue-operations.md",
+        (ROOT / "docs/github-issue-operations.md").read_text(),
+    )
     base = commit(root)
     if change == "modify":
         write(root, skill, original + "\nPreserve explicit task ownership.\n")
