@@ -1,19 +1,37 @@
 """The optional experiment must not mutate the running application or its data."""
-import os
 from pathlib import Path
 import subprocess
 
 import pytest
+
+from test_startup import _mock_launcher_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("build_status,run_status", [(0, 0), (1, 0), (0, 7)])
 def test_prototype_launcher_isolated_and_propagates_failure(tmp_path, build_status, run_status):
-    docker = tmp_path / "docker"
+    command_log = tmp_path / "commands"
+    lock_log = tmp_path / "locks"
+    environment = _mock_launcher_environment(
+        tmp_path,
+        [tmp_path / "primary"],
+        command_log,
+        tls_directory=tmp_path / "tls",
+        lock_file=tmp_path / "lock",
+        qa_state_directory=tmp_path / "qa-state",
+    )
+    environment.update({
+        "BUILD_STATUS": str(build_status),
+        "RUN_STATUS": str(run_status),
+        "LOCK_LOG": str(lock_log),
+        "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
+    })
+    docker = tmp_path / "mock-bin/docker"
     docker.write_text(
         '#!/bin/sh\n'
         'printf "%s\\n" "$*" >> "$COMMAND_LOG"\n'
+        'readlink -- /proc/$$/fd/3 /proc/$$/fd/4 >> "$LOCK_LOG"\n'
         'case "$*" in\n'
         '  *"build ai-prototype") exit "$BUILD_STATUS";;\n'
         '  *"run --rm --no-deps -T ai-prototype") exit "$RUN_STATUS";;\n'
@@ -21,20 +39,10 @@ def test_prototype_launcher_isolated_and_propagates_failure(tmp_path, build_stat
         encoding="utf-8",
     )
     docker.chmod(0o755)
-    command_log = tmp_path / "commands"
     result = subprocess.run(
         [str(ROOT / "start.sh"), "--test-ai-prototype"],
         cwd=ROOT,
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}:{os.environ['PATH']}",
-            "COMMAND_LOG": str(command_log),
-            "BUILD_STATUS": str(build_status),
-            "RUN_STATUS": str(run_status),
-            "SCHEMII_LAUNCH_LOCK_FILE": str(tmp_path / "lock"),
-            "SCHEMII_SECRET_DIRECTORY": str(tmp_path / "secrets"),
-            "SCHEMII_TLS_DIRECTORY": str(tmp_path / "tls"),
-        },
+        env=environment,
         capture_output=True, text=True, timeout=10, check=False,
     )
     assert result.returncode == (1 if build_status else run_status)
@@ -43,6 +51,10 @@ def test_prototype_launcher_isolated_and_propagates_failure(tmp_path, build_stat
     assert ("run --rm --no-deps -T ai-prototype" in commands) == (build_status == 0)
     assert "up --detach" not in commands
     assert "rm --stop" not in commands
+    assert set(lock_log.read_text().splitlines()) == {
+        str(tmp_path / "shared-git/qa-deployment.lock"),
+        str(tmp_path / "shared-git/qa-startup.lock"),
+    }
     assert not (tmp_path / "secrets").exists()
     assert not (tmp_path / "tls").exists()
 
