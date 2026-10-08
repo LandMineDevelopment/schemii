@@ -206,6 +206,38 @@ class ConsoleService:
         if callable(register_reclaimer):
             register_reclaimer(self._reclaim_read_session)
 
+    def observation_snapshot(self) -> dict:
+        """Nonblocking owner snapshots; domains are not a global transaction."""
+        counts = {}
+        if self._transient_results_lock.acquire(blocking=False):
+            try:
+                counts.update(readRegistryStatus="available", readSessionHandles=len(self._active_read_sessions),
+                              resultPageTokens=len(self._result_cursors), transientResults=len(self._transient_results))
+                cursors = []
+                for active in self._active_read_sessions.values():
+                    snapshot = getattr(active.postgres, "observation_snapshot", None)
+                    cursor = snapshot() if callable(snapshot) else {"status": "unavailable"}
+                    cursors.append(cursor)
+                if all(cursor["status"] == "available" for cursor in cursors):
+                    counts["nativeCursors"] = sum(cursor["nativeCursors"] for cursor in cursors)
+                    counts["nativeCursorStatus"] = "available"
+                else:
+                    counts["nativeCursorStatus"] = "unavailable_or_busy"
+            finally:
+                self._transient_results_lock.release()
+        else:
+            counts["readRegistryStatus"] = "busy"
+        for name, lock, registry in (("activeTargetHandles", self._active_targets_lock, self._active_targets),
+                                    ("manualTransactionHandles", self._active_transactions_lock, self._active_transactions)):
+            if lock.acquire(blocking=False):
+                try:
+                    counts[name] = len(registry)
+                finally:
+                    lock.release()
+            else:
+                counts[f"{name}Status"] = "busy"
+        return counts
+
     def set_connection_access(self, connection_access: ProductConnectionAccess) -> None:
         """Set the product-scoped access used by console requests and sessions."""
 

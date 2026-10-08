@@ -424,6 +424,18 @@ class PsycopgConsoleReadSession:
         else:
             self._database_connection.cancel()
 
+    def observation_snapshot(self) -> dict:
+        """Never wait behind source I/O just to collect a cursor gauge."""
+        if not self._lock.acquire(blocking=False):
+            return {"status": "busy"}
+        try:
+            return {"status": "available", "nativeCursors": sum(
+                cursor is not None and not cursor.closed
+                for reader in self._readers.values()
+                for cursor in (reader.cursor, reader.export_cursor))}
+        finally:
+            self._lock.release()
+
     def close(self) -> None:
         with self._lock:
             if self._closed:

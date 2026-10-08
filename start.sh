@@ -24,6 +24,7 @@ SCHEMII_RECOVERY_DIRECTORY=
 SCHEMII_TESTING_SPACE=all
 SCHEMII_QA_STATE_DIRECTORY="${SCHEMII_QA_STATE_DIRECTORY-${ROOT_DIR}/.schemii/testing}"
 SCHEMII_LOG_SERVICE=
+SCHEMII_RUNTIME_RECEIPT="${SCHEMII_RUNTIME_RECEIPT-}"
 SCHEMII_PI_PROTOTYPE_URL=http://ai-prototype-runtime:4097
 
 usage() {
@@ -241,6 +242,12 @@ command -v docker >/dev/null 2>&1 || fail "Docker is not installed or is not on 
 docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is unavailable"
 command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required to create the local HTTPS certificate"
 command -v flock >/dev/null 2>&1 || fail "flock is required to serialize local application lifecycle changes"
+if [[ -n "$SCHEMII_RUNTIME_RECEIPT" ]] &&
+   [[ "$SCHEMII_LAUNCH_ACTION" == start || "$SCHEMII_LAUNCH_ACTION" == prepare-testing ]]; then
+  [[ "$SCHEMII_RUNTIME_RECEIPT" == /* ]] || fail "SCHEMII_RUNTIME_RECEIPT must be an absolute private path"
+  [[ ! -e "$SCHEMII_RUNTIME_RECEIPT" && ! -L "$SCHEMII_RUNTIME_RECEIPT" ]] || fail "the runtime receipt already exists; use a new task-owned path"
+  command -v node >/dev/null 2>&1 || fail "Node is required for the optional runtime observation receipt"
+fi
 
 SCHEMII_TEST_TLS_CERTIFICATE="${SCHEMII_TLS_DIRECTORY}/localhost.crt"
 SCHEMII_TEST_TLS_PRIVATE_KEY="${SCHEMII_TLS_DIRECTORY}/localhost.key"
@@ -645,6 +652,23 @@ if [[ "$SCHEMII_RESET_MIGRATION_DEMO" == "1" ]]; then
   [[ "$demo_workspace_id" =~ ^ws_[0-9a-f]{32}$ ]] || fail "demo metadata fixture did not report a workspace ID"
   printf 'Demo workspace: https://localhost:%s/?workspace=%s\n' "$SCHEMII_TEST_APP_PORT" "$demo_workspace_id"
   printf 'Remote demo workspace: https://omarchy.taile4f57f.ts.net/?workspace=%s\n' "$demo_workspace_id"
+fi
+# Export only selected nonsecret ownership fields after successful health checks.
+# This optional action stays inside the launcher's existing deployment lease.
+if [[ -n "$SCHEMII_RUNTIME_RECEIPT" ]] &&
+   [[ "$SCHEMII_LAUNCH_ACTION" == start || "$SCHEMII_LAUNCH_ACTION" == prepare-testing ]]; then
+  runtime_revision="$(git -C "$ROOT_DIR" rev-parse HEAD)" || fail "could not identify the observed source revision"
+  if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]]; then runtime_revision+="+dirty"; fi
+  runtime_container_ids="$(docker ps --quiet --filter label=com.docker.compose.project=schemii-test --filter status=running)" || fail "could not identify runtime containers"
+  [[ -n "$runtime_container_ids" ]] || fail "runtime containers were not found"
+  if ! {
+    while IFS= read -r runtime_container_id; do
+      [[ "$runtime_container_id" =~ ^[0-9a-f]+$ ]] || exit 1
+      docker inspect --format '{"id":{{json .Id}},"image":{{json .Image}},"pid":{{.State.Pid}},"running":{{.State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"memoryBytes":{{.HostConfig.Memory}},"nanoCpus":{{.HostConfig.NanoCpus}}}' "$runtime_container_id" || exit 1
+    done <<< "$runtime_container_ids"
+  } | node "$ROOT_DIR/testing/load/runtime.mjs" export "$SCHEMII_RUNTIME_RECEIPT" "$runtime_revision"; then
+    fail "the healthy deployment's runtime ownership receipt could not be exported"
+  fi
 fi
 printf 'Schemii is ready at https://localhost:%s/\n' "$SCHEMII_TEST_APP_PORT"
 printf 'API map: https://localhost:%s/api-map\n' "$SCHEMII_TEST_APP_PORT"

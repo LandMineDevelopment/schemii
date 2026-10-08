@@ -1,4 +1,8 @@
 """Account/session and administrator role management endpoints."""
+from dataclasses import asdict
+from datetime import datetime, timezone
+import os
+
 from typing import Literal
 from uuid import uuid4
 
@@ -253,3 +257,25 @@ def delete_role(role_id:str,request:Request,actor=Depends(admin)):
     with auth(request).store.transaction(write=True) as state:
         if state['roles'].pop(role_id,None) is None: raise HTTPException(404,'Role not found')
         state['audit'].append((actor,'role.delete',role_id))
+
+
+@router.get("/admin/runtime-observation")
+def runtime_observation(request: Request, actor: str = Depends(admin)) -> dict:
+    """Read aggregate process-local ownership; never query user data or database activity."""
+    services = request.app.state.services
+    sources = {}
+    for name, owner in (("source", services.postgres), ("console", services.console),
+                        ("raw", getattr(request.app.state, "raw_console", None))):
+        snapshot = getattr(owner, "observation_snapshot", None)
+        sources[name] = ({"status": "available", "counts": snapshot()} if callable(snapshot)
+                         else {"status": "unavailable", "reason": "adapter_has_no_snapshot"})
+    metadata = getattr(services.metadata.connection_factory, "admission_snapshot", None)
+    sources["metadata"] = ({"status": "available", "counts": asdict(metadata())}
+                           if callable(metadata) else
+                           {"status": "unavailable", "reason": "memory_or_adapter_has_no_admission"})
+    return {"version": 1, "at": datetime.now(timezone.utc).isoformat(), "processPid": os.getpid(),
+            "scope": "process_aggregate", "coherence": "each_owning_registry",
+            "sources": sources,
+            "databaseVisibility": {"status": "not_sampled", "reason": "no_source_activity_query"},
+            "runOwnedBackends": {"status": "unavailable", "reason": "no_run_backend_attribution"},
+            "activeJobs": {"status": "unavailable", "reason": "no_job_owner_snapshot"}}
