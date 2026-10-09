@@ -62,7 +62,8 @@ def setup():
     def catalog(services, owner, connection_id, namespace, fresh=False):
         profile = services.connections.get(owner, connection_id)
         fresh_calls.append(fresh)
-        return {**deepcopy(CATALOG), "connectionId": connection_id, "database": profile.database}
+        return {**deepcopy(CATALOG), "connectionId": connection_id,
+                "connectionRevision": profile.revision, "database": profile.database}
     console = Console()
     services = replace(services, model_catalogs=SimpleNamespace(get=catalog), console=console)
     client = TestClient(create_app(services=services), base_url="http://localhost")

@@ -243,14 +243,6 @@ def test_catalog_projection_failure_stays_bounded_and_is_reported_per_tile(plann
 @pytest.fixture
 def dashboard(setup):
     client, model, console, fresh_calls = setup
-    # Match the live catalog contract; the shared report fixture predates the
-    # request-local profile-revision fence and supplied only display metadata.
-    services = client.app.state.services
-    original_catalog = services.model_catalogs.get
-    def catalog(scoped, owner, connection_id, namespace, **kwargs):
-        return {**original_catalog(scoped, owner, connection_id, namespace, **kwargs),
-                "connectionRevision": scoped.connections.get(owner, connection_id).revision}
-    services.model_catalogs.get = catalog
     response = client.post("/api/v1/schemer/dashboards", json={
         "name": "People dashboard", "modelId": model["modelId"], "modelRevision": 1,
         "tiles": [{"id": "people", "title": "People", "kind": "bar",
