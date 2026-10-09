@@ -93,6 +93,8 @@ class ConnectionMutationGuardRegistrar(Protocol):
 class ConnectionRepository(Protocol):
     def list(self, owner_id: str) -> list[PostgresConnectionProfile]: ...
 
+    def list_for_owners(self, owner_ids: tuple[str, ...]) -> list[PostgresConnectionProfile]: ...
+
     def get(self, owner_id: str, connection_id: str) -> PostgresConnectionProfile: ...
 
     def create(
@@ -136,6 +138,14 @@ class InMemoryConnectionRepository:
             records = self._records.get(owner_id, {})
             profiles = [record.profile.model_copy(deep=True) for record in records.values()]
         return sorted(profiles, key=lambda profile: (profile.name.casefold(), profile.id))
+
+    def list_for_owners(self, owner_ids: tuple[str, ...]) -> list[PostgresConnectionProfile]:
+        """Read selected owners' metadata together, without resolving passwords."""
+        with self._lock:
+            profiles = [record.profile.model_copy(deep=True)
+                        for owner_id in dict.fromkeys(owner_ids)
+                        for record in self._records.get(owner_id, {}).values()]
+        return sorted(profiles, key=lambda profile: (profile.owner_id or '', profile.name.casefold(), profile.id))
 
     def get(self, owner_id: str, connection_id: str) -> PostgresConnectionProfile:
         with self._lock:

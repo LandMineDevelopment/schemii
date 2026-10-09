@@ -83,6 +83,27 @@ class PostgresConnectionRepository:
                     raise ConnectionNotFoundError("PostgreSQL connection was not found")
                 return self._profile(row)
 
+    def list_for_owners(self, owner_ids: tuple[str, ...]) -> list[PostgresConnectionProfile]:
+        """Read selected owners' metadata in one transaction, never credentials."""
+        if not owner_ids:
+            return []
+        with self._transaction() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT connection.*,
+                           (credential.connection_id IS NOT NULL) AS credential_stored
+                    FROM metadata.postgres_connections AS connection
+                    LEFT JOIN metadata.postgres_connection_credentials AS credential
+                      ON credential.owner_id = connection.owner_id
+                     AND credential.connection_id = connection.id
+                    WHERE connection.owner_id = ANY(%s)
+                    ORDER BY connection.owner_id, lower(connection.name), connection.id
+                    """,
+                    (list(dict.fromkeys(owner_ids)),),
+                )
+                return [self._profile(row) for row in cursor.fetchall()]
+
     def create(
         self,
         owner_id: str,

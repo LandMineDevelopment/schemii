@@ -147,6 +147,52 @@ def test_connections_are_owner_scoped_and_profiles_are_redacted() -> None:
         raise AssertionError("another owner accessed the connection")
 
 
+def test_bulk_connection_metadata_is_owner_fenced_detached_and_credential_free() -> None:
+    repository = InMemoryConnectionRepository()
+    personal = repository.create("person-a", request("personal secret"))
+    shared = repository.create(SCHEMII_CONNECTION_OWNER_ID, request("managed secret"))
+    repository.create("person-b", request("peer secret"))
+    selected = repository.list_for_owners(("person-a", SCHEMII_CONNECTION_OWNER_ID, "person-a", "absent"))
+    assert {(item.owner_id, item.id) for item in selected} == {
+        ("person-a", personal.id), (SCHEMII_CONNECTION_OWNER_ID, shared.id),
+    }
+    assert len(selected) == 2
+    assert not any("password" in item.model_dump() for item in selected)
+    selected[0].name = "Changed detached metadata"
+    assert repository.get("person-a", personal.id).name == personal.name
+    assert repository.get(SCHEMII_CONNECTION_OWNER_ID, shared.id).name == shared.name
+    assert repository.list_for_owners(()) == []
+
+
+def test_postgres_bulk_metadata_uses_one_parameterized_owner_selection() -> None:
+    connection = RecordingConnection()
+    cursor = connection.cursor_instance
+    parameters = []
+    execute = cursor.execute
+
+    def record(statement, values=None):
+        parameters.append(values)
+        execute(statement, values)
+
+    cursor.execute = record
+    cursor.fetchall = lambda: [cursor.fetchone()]
+    profiles = postgres_repository(connection).list_for_owners(("owner", "peer", "owner"))
+    assert len(profiles) == 1 and profiles[0].owner_id == "owner"
+    assert parameters == [(["owner", "peer"],)]
+    assert len(cursor.statements) == 1
+    assert "WHERE connection.owner_id = ANY(%s)" in cursor.statements[0]
+    assert "ciphertext" not in cursor.statements[0] and "nonce" not in cursor.statements[0]
+    assert connection.commits == 1 and connection.closed
+
+
+def test_postgres_empty_bulk_metadata_does_not_open_a_connection() -> None:
+    def forbidden_factory():
+        raise AssertionError("empty metadata selection must not open PostgreSQL")
+
+    repository = PostgresConnectionRepository(forbidden_factory, CredentialCipher(bytes(range(32))))
+    assert repository.list_for_owners(()) == []
+
+
 def test_schemii_owned_profiles_are_explicit_and_separate_from_personal_profiles() -> None:
     repository = InMemoryConnectionRepository()
     shared = repository.create(SCHEMII_CONNECTION_OWNER_ID, request("shared secret"))
