@@ -57,6 +57,12 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   const scheduleDetails = () => { if (!detailScheduled) { detailScheduled = true; requestAnimationFrame(() => { detailScheduled = false; renderDetails(); }); } };
   function pane(which) { dialog.classList.toggle('show-details', which === 'details'); chartTitle.setAttribute('aria-expanded', which === 'chart'); detailTitle.setAttribute('aria-expanded', which === 'details'); }
   chartTitle.onclick = () => pane('chart'); detailTitle.onclick = () => pane('details');
+  function releaseDrill() {
+    unsubscribeDrill?.(); unsubscribeDrill = null;
+    if (detailCache?.hasMore) void detailCache.close();
+    detailCache = null;
+    detailBody.replaceChildren(); detailFooter.replaceChildren(); chips.replaceChildren();
+  }
   function footer(host, stream) {
     host.replaceChildren(); if (!stream) return;
     const data = stream.snapshot();
@@ -71,7 +77,8 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     if (!dialog.isConnected) return;
     const position = scrollPosition(chartBody), result = cache.snapshot();
     renderVisualization(chartBody, tile, result, { modelId, onDrill: !canDrill || tile.kind === 'detail' ? null : selected => {
-      unsubscribeDrill?.(); detailCache = createDrillCache(selected); unsubscribeDrill = detailCache.subscribe(scheduleDetails);
+      const next = createDrillCache(selected);
+      if (next !== detailCache) { releaseDrill(); detailCache = next; unsubscribeDrill = detailCache.subscribe(scheduleDetails); }
       chips.replaceChildren(...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
       detailPane.hidden = false; pane('details'); renderDetails(); void detailCache.loadMore();
     } });
@@ -89,11 +96,11 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   if (canViewSql) chartActions.append(icon('sql', 'Show tile SQL', () => { if (cache.plan) openSql(cache.plan, `${tile.title} · SQL`); }));
   chartActions.append( icon('refresh', 'Refresh tile', () => { dialog.close(); onRefresh(); }), icon('close', 'Close expanded tile', () => dialog.close()));
   if (canViewSql) detailActions.append(icon('sql', 'Show detail SQL', () => { if (detailCache?.plan) openSql(detailCache.plan, 'Detail rows · SQL'); }));
-  detailActions.append( icon('close', 'Close detail rows', () => { detailPane.hidden = true; pane('chart'); }));
+  detailActions.append( icon('close', 'Close detail rows', () => { releaseDrill(); detailPane.hidden = true; pane('chart'); }));
   chartPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [chartTitle, chartStatus]), chartActions]), chartBody, chartFooter);
   detailPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [detailTitle, chips, detailStatus]), detailActions]), detailBody, detailFooter);
   dialog.append(chartPane, detailPane);
   const unsubscribe = cache.subscribe(scheduleMain);
-  dialog.onclose = () => { unsubscribe(); unsubscribeDrill?.(); dialog.remove(); };
+  dialog.onclose = () => { unsubscribe(); releaseDrill(); dialog.remove(); };
   document.body.append(dialog); pane('chart'); dialog.showModal(); renderMain(); void cache.loadMore();
 }
