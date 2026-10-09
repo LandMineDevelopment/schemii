@@ -26,8 +26,9 @@ def size(value): return len(json.dumps(value, ensure_ascii=False, default=str).e
 
 
 class Conversations:
-    def __init__(self, store, runtime, services, adapter):
+    def __init__(self, store, runtime, services, adapter, *, auth=None):
         self.store, self.runtime, self.services, self.adapter = store, runtime, services, adapter
+        self.auth = auth
         self.policy = services.admin_config.ai
         self.lock = RLock()
         self.active = {}
@@ -42,6 +43,17 @@ class Conversations:
     @property
     def product(self):
         return self.store.product
+
+    def _require_product_access(self, owner):
+        # The store's product is server-owned. Check current authority for each
+        # new operation, independently of provider credentials and tool modes.
+        # Cleanup paths deliberately do not use this gate.
+        if self.auth is None or not self.auth.enabled:
+            return
+        capability = {"schemoo": "schemoo:access", "schemer": "schemer:access"}.get(self.product)
+        if (capability is None or not self.auth.user(owner)
+                or capability not in self.auth.capabilities(owner)):
+            raise ApiProblem(403, "ai_access_revoked", "Account or product access changed. Reload before retrying.")
 
     def _scope(self, owner, subject, scope):
         if hasattr(self.adapter, "authorize"):
@@ -108,6 +120,7 @@ class Conversations:
 
     def create(self, owner, body, scope=None):
         # Ownership checked before any conversation gets stored.
+        self._require_product_access(owner)
         subject = body.get(self.subject_key, "")
         scoped = self._scope(owner, subject, scope)
         self.adapter.context(scoped or self.services,owner,subject)
@@ -214,6 +227,7 @@ class Conversations:
                     limit_event=LimitEventNotice(f"{self.product}_ai", f"ai.{name}", limit, observed))
 
     def _require_available(self, owner, chat, scope=None):
+        self._require_product_access(owner)
         if not self.policy.enabled or self.runtime is None:
             raise ApiProblem(503,"ai_unavailable","The AI sidecar is unavailable or disabled.")
         try:
@@ -313,12 +327,13 @@ class Conversations:
         with self.lock:
             state = self.active.get((owner,chat_id),{})
             if state.get("turnId") != turn_id: return False
-            if hasattr(self.adapter, "authorize"):
-                try:
+            try:
+                self._require_product_access(owner)
+                if hasattr(self.adapter, "authorize"):
                     chat = self.store.get(owner,chat_id)
                     self._scope(owner,chat[self.subject_key],state.get("scope"))
-                except Exception:
-                    return False
+            except Exception:
+                return False
             return True
 
     def _execute(self, owner, chat_id, turn_id, actions, approved=False):
@@ -566,9 +581,10 @@ class Conversations:
             self._limit(owner,"ai_tool_round_limit","ai.maximum_tool_rounds",self.policy.maximum_tool_rounds,"The assistant reached its tool-round limit. Narrow the request and continue.")
         except Exception as error:
             record_ai_limit(self.services.metadata.limit_events, error, self.policy, owner, f"{self.product}_ai")
+            message = str(error)[:2000]
             with self.lock:
                 if self._authorized(owner,chat_id,turn_id):
-                    self.store.update(owner,chat_id,lambda v:v.update(status="failed",pending=None,error=str(error)[:2000]))
+                    self.store.update(owner,chat_id,lambda v:v.update(status="failed",pending=None,error=message))
         finally:
             self._close_turn(owner,chat_id,turn_id)
 

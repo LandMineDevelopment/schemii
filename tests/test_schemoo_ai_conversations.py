@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import io
 import json
 from itertools import count
 from threading import Event, Thread
@@ -476,3 +477,203 @@ def test_cancellation_remains_responsive_during_running_tool():
         if controller.ident is not None:
             controller.join(5)
     assert not worker.is_alive() and not controller.is_alive()
+
+
+class CurrentAuthorityTurn:
+    """Actual product stores and Pi transport, with only inference replaced."""
+
+    def __init__(self, provider, boundary, revocation):
+        from schemii.main import create_services
+        from schemii.common.auth.service import AuthService
+        from schemii.common.ai.credential_store import MemoryAiCredentialStore
+        from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
+        from schemii.common.ai.pi import PiRuntime
+        from schemii.common.connections.models import PostgresConnectionCreate
+        from schemii.schemoo import ai_tools
+        from schemii.schemoo.models import ModelCreate
+
+        self.boundary, self.revocation = boundary, revocation
+        self.services = create_services()
+        assert self.services.metadata.connection_factory is None
+        self.auth = AuthService(enabled=True, setup_token="test-only-bootstrap")
+        assert self.auth.store.factory is None
+        with self.auth.store.transaction(write=True) as state:
+            state["users"]["alice"] = dict(id="alice", username="alice", display_name="Alice",
+                is_admin=False, disabled=False, password_hash="unused-test-only")
+            state["roles"]["owned_role"] = dict(id="owned_role", name="Owned role",
+                capabilities=["schemoo:access"], user_ids=["alice"], connections=[], dashboards=[])
+        self.services.connections.set_authority(self.auth)
+        connection = self.services.connections.create("alice", PostgresConnectionCreate(
+            name="Owned source", host="localhost", database="warehouse", username="fixture"))
+        self.model = self.services.models.create("alice", ModelCreate(
+            name="Owned model", connection_id=connection.id, database="warehouse", namespace="public"))
+        self.revoked, self.writes, self.requests, self.client_calls = False, [], [], []
+        original = self.services.models.update_explore
+
+        def update(owner, model_id, body):
+            after_revocation = self.revoked
+            value = original(owner, model_id, body)
+            self.writes.append({"afterRevocation": after_revocation, "revision": value.explore_revision})
+            if boundary == "between_actions" and len(self.writes) == 1:
+                self.revoke()
+            return value
+
+        self.services.models.update_explore = update
+        self.credentials = MemoryAiCredentialStore()
+        self.credentials.begin_login("alice", "codex-prototype", "openai-codex")
+        assert self.credentials.save("alice", "codex-prototype", "openai-codex",
+                                     {"type": "oauth", "refresh": "synthetic-never-live"}, 1)
+        self.instance = MemoryInstanceAiProviderStore()
+        self.instance.set_key("synthetic-never-live")
+        self.instance.upsert_grant("alice", "schemoo", "alice", connection.id)
+        self.connection_id = connection.id
+
+        def client_call(path, body=None):
+            self.client_calls.append(path)
+            return {"models": [
+                {"providerId": "openai-codex", "id": "model", "name": "Model"},
+                {"providerId": "opencode", "id": "free", "name": "Free"}]}
+
+        client = SimpleNamespace(url="http://fake-provider.invalid", _secret="test-only-transport", call=client_call)
+        self.entered, self.release = Event(), Event()
+        actions = [{"operation": "update_explore", "args": {"expectedRevision": 1, "explore": {"limit": 23}}}]
+        if boundary == "between_actions":
+            actions.append({"operation": "update_explore", "args": {"expectedRevision": 2, "explore": {"limit": 24}}})
+
+        def opener(request, timeout):
+            body = json.loads(request.data)
+            self.requests.append({"afterRevocation": self.revoked, "context": body["context"]})
+            if len(self.requests) == 1:
+                if boundary in {"inference_pending", "cancel", "cancel_revoked"}:
+                    self.entered.set()
+                    assert self.release.wait(3), "owned fake provider was not released"
+                tool = {"id": "owned-call", "name": "schemoo_actions", "arguments": {"actions": actions}}
+                event = {"type": "result", "text": "", "toolCalls": [tool],
+                         "assistantMessage": {"role": "assistant", "content": [{"type": "toolCall", **tool}]}}
+            else:
+                event = {"type": "result", "text": "Owned action completed", "toolCalls": []}
+            return io.BytesIO(json.dumps(event).encode() + b"\n")
+
+        self.runtime = PiRuntime(client, self.credentials,
+            SimpleNamespace(snapshot=lambda: {"models": [{"id": "free"}]}),
+            opener=opener, instance_store=self.instance, auth=self.auth)
+        self.service = Conversations(ConversationStore(None, self.services.admin_config.ai, "schemoo"),
+                                     self.runtime, self.services, ai_tools, auth=self.auth)
+        provider_id, model_id = ("openai-codex", "model") if provider == "personal" else ("opencode", "free")
+        self.chat = self.service.create("alice", {"modelId": self.model.id, "providerId": provider_id,
+            "aiModelId": model_id, "modes": {"update_explore": "automatic"}})
+        self.turn = self.service.send("alice", self.chat["id"], {
+            "text": "Save the chosen exploration", "expectedRevision": self.chat["revision"],
+            "acknowledgeProviderDataPolicy": True})
+
+    def revoke(self):
+        if self.revocation == "disconnect":
+            self.credentials.delete("alice", "codex-prototype")
+        else:
+            with self.auth.store.transaction(write=True) as state:
+                if self.revocation == "disable":
+                    state["users"]["alice"]["disabled"] = True
+                else:
+                    state["roles"]["owned_role"]["user_ids"] = []
+        self.revoked = True
+
+    def run(self):
+        worker, errors = None, []
+
+        def run_turn():
+            try:
+                self.service.run("alice", self.chat["id"], self.turn["turnId"])
+            except BaseException as error:
+                errors.append(error)
+
+        try:
+            if self.boundary == "queued":
+                self.revoke()
+            if self.boundary in {"inference_pending", "cancel", "cancel_revoked"}:
+                worker = Thread(target=run_turn)
+                worker.start()
+                assert self.entered.wait(2), "fake inference did not start"
+                if self.boundary == "cancel_revoked":
+                    self.revoke()
+                if self.boundary in {"cancel", "cancel_revoked"}:
+                    self.service.cancel("alice", self.chat["id"])
+                else:
+                    self.revoke()
+                self.release.set()
+                worker.join(3)
+                assert not worker.is_alive(), "owned worker did not stop"
+            else:
+                run_turn()
+            assert not errors, errors
+            saved = self.service.store.get("alice", self.chat["id"])
+            assert not self.service.active and not self.runtime._identities
+            assert not self.service._query_cancellation._scopes
+            return saved
+        finally:
+            self.release.set()
+            if worker:
+                worker.join(3)
+                assert not worker.is_alive(), "owned worker remained after cleanup"
+            self.credentials.delete("alice", "codex-prototype")
+            self.instance.clear_key()
+            self.instance.delete_grant("alice", "schemoo", "alice", self.connection_id)
+
+
+@pytest.fixture
+def current_authority_turn(monkeypatch):
+    # All credentials and metadata belong to the fixture. No host provider calls.
+    for key, value in {"SCHEMII_STORAGE_MODE": "memory", "SCHEMII_METADATA_DSN": "",
+                       "SCHEMII_AUTH_ENABLED": "0", "SCHEMII_PI_PROTOTYPE_URL": "",
+                       "SCHEMII_SETUP_TOKEN_FILE": ""}.items():
+        monkeypatch.setenv(key, value)
+    return CurrentAuthorityTurn
+
+
+@pytest.mark.parametrize("provider", ["personal", "shared"])
+@pytest.mark.parametrize("revocation", ["role_removal", "disable"])
+@pytest.mark.parametrize("boundary", ["queued", "inference_pending", "between_actions"])
+def test_current_authority_stops_new_actions_and_provider_disclosure(
+        current_authority_turn, provider, revocation, boundary):
+    fixture = current_authority_turn(provider, boundary, revocation)
+    saved = fixture.run()
+    assert all(not write["afterRevocation"] for write in fixture.writes)
+    assert all(not request["afterRevocation"] for request in fixture.requests)
+    assert not any(message["role"] == "assistant" for message in saved["messages"])
+    assert saved["status"] == "failed" and saved["pending"] is None
+    if boundary == "between_actions":
+        # Already-admitted mutations and their receipts remain truthful.
+        assert fixture.writes == [{"afterRevocation": False, "revision": 2}]
+        assert [receipt["status"] for receipt in saved["activity"]] == ["succeeded"]
+        assert fixture.services.models.get("alice", fixture.model.id).explore_revision == 2
+    else:
+        assert fixture.writes == [] and saved["activity"] == []
+        assert len(fixture.requests) == (0 if boundary == "queued" else 1)
+
+
+@pytest.mark.parametrize("provider", ["personal", "shared"])
+def test_current_authority_valid_turn_keeps_real_mutation_and_tool_result(current_authority_turn, provider):
+    fixture = current_authority_turn(provider, "valid", "none")
+    saved = fixture.run()
+    assert fixture.writes == [{"afterRevocation": False, "revision": 2}]
+    assert saved["status"] == "idle" and saved["messages"][-1]["role"] == "assistant"
+    assert len(fixture.requests) == 2
+    assert any(message["role"] == "toolResult" for message in fixture.requests[-1]["context"]["messages"])
+
+
+@pytest.mark.parametrize("provider", ["personal", "shared"])
+@pytest.mark.parametrize("revocation", ["none", "role_removal", "disable"])
+def test_current_authority_cancel_and_delete_keep_owner_cleanup(current_authority_turn, provider, revocation):
+    fixture = current_authority_turn(provider, "cancel" if revocation == "none" else "cancel_revoked", revocation)
+    saved = fixture.run()
+    assert fixture.writes == [] and len(fixture.requests) == 1
+    assert saved["status"] == "idle" and not any(m["role"] == "assistant" for m in saved["messages"])
+    assert fixture.client_calls.count("/turns/cancel") >= 1
+    fixture.service.delete("alice", fixture.chat["id"])
+    assert fixture.service.store.list("alice") == []
+
+
+def test_current_authority_preserves_personal_credential_disconnect_fence(current_authority_turn):
+    fixture = current_authority_turn("personal", "inference_pending", "disconnect")
+    saved = fixture.run()
+    assert fixture.writes == [] and len(fixture.requests) == 1
+    assert saved["status"] == "failed" and not any(m["role"] == "assistant" for m in saved["messages"])
