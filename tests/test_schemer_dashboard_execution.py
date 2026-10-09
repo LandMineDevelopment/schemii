@@ -1,11 +1,243 @@
 """Saved dashboard execution authority, SQL transparency and page boundaries."""
 import json
+from collections import Counter
+from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.postgres.console import ConsoleResultColumn
 from test_schemer_routes import setup
+
+
+@pytest.fixture
+def planning_source(request, monkeypatch):
+    """Real managed/shared planning adapters over counted, row-free transport."""
+    from schemii.main import create_services
+    from schemii.common.connections.models import PostgresConnectionCreate, SCHEMII_CONNECTION_OWNER_ID
+    from schemii.common.postgres.models import PostgresColumn
+    from schemii.schemer.dashboard_models import DashboardCreate
+    from schemii.schemoo.models import ModelCreate
+    from test_schemer_routes import Console, DEFINITION
+
+    mode = request.param
+    services = create_services()
+    profile = services.connections.create_schemii_owned(PostgresConnectionCreate(
+        name="Counted source", host="localhost", database="warehouse", username="reader",
+        password="synthetic-counting-fixture"))
+    author_profile = services.connections.create("author", PostgresConnectionCreate(
+        name="Author source", host="localhost", database="warehouse", username="author"))
+    owner = "viewer" if mode == "managed" else "author"
+    model = services.models.create(owner, ModelCreate(
+        name="People", connection_id=profile.id if mode == "managed" else author_profile.id,
+        database="warehouse", namespace="public", definition=DEFINITION),
+        connection_owner_id=SCHEMII_CONNECTION_OWNER_ID if mode == "managed" else owner)
+    tile = {"id": "people", "title": "People", "kind": "detail",
+            "detailFields": [{"table": "people", "column": "name"}], "limit": 3}
+    dashboard = services.dashboards.create(owner, DashboardCreate(
+        name="People", model_id=model.id, model_revision=1, tiles=[tile]))
+    grant = {"role_id": "reader-role", "owner_id": owner, "dashboard_id": dashboard.id,
+             "connection_owner_id": SCHEMII_CONNECTION_OWNER_ID, "connection_id": profile.id,
+             "can_export": True, "can_drill": True}
+    db_grant = {"role_id": "reader-role", "owner_id": SCHEMII_CONNECTION_OWNER_ID,
+                "connection_id": profile.id, "allow_authoring": True}
+    state = {"enabled": True, "granted": True,
+             "product": True,
+             "readable": {("people", "id"), ("people", "name")}}
+    user = lambda: {"id": "viewer", "disabled": False} if state["enabled"] else None
+    auth = SimpleNamespace(enabled=True, resolve=lambda token: user(), user=lambda actor: user(),
+        capabilities=lambda actor: (["schemer:access", "schemer:author"] if mode == "managed"
+                                     else ["schemer:access"]) if state["product"] else [],
+        connection_access=lambda *args: deepcopy(db_grant) if state["granted"] else None,
+        connection_grants=lambda actor: [deepcopy(db_grant)] if state["granted"] else [],
+        dashboard_grants=lambda actor: [deepcopy(grant)] if state["granted"] else [], audit=lambda *args: None)
+    services.connections.set_authority(auth)
+    counts = Counter()
+    original_get = services.models.get
+    def model_get(*args):
+        counts["model"] += 1
+        return original_get(*args)
+    monkeypatch.setattr(services.models, "get", model_get)
+    columns = [PostgresColumn(name=name, ordinal=index + 1, data_type=kind, nullable=False)
+               for index, (name, kind) in enumerate([("id", "uuid"), ("name", "text")])]
+    live = SimpleNamespace(fingerprint="source-one", relationships=[], tables=[
+        SimpleNamespace(name="people", columns=columns, primary_key=None, unique_constraints=[])])
+    def introspect(*args):
+        counts["introspect"] += 1
+        return live
+    def readable(*args):
+        counts["readable"] += 1
+        return set(state["readable"])
+    console = Console()
+    console.runs = []
+    def run(owner, identifier, **kwargs):
+        console.runs.append((owner, identifier))
+        console.receipt.results = [SimpleNamespace(id=f"result-{i}")
+                                   for i in range(len(console.target["statements"]))]
+    console.run = run
+    original_reserve = console.reserve_read_target
+    def reserve(*args, **kwargs):
+        kwargs.pop("connection_access", None)
+        return original_reserve(*args, **kwargs)
+    console.reserve_read_target = reserve
+    services = replace(services, postgres=SimpleNamespace(introspect=introspect, readable_columns=readable),
+                       console=console)
+    route_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(services=services, auth=auth)),
+                                    cookies={"schemii_session": "test-viewer-session"})
+    return SimpleNamespace(mode=mode, services=services, request=route_request, counts=counts,
+                           state=state, model=model, dashboard=dashboard, tile=tile, owner=owner,
+                           profile=profile, grant=grant, db_grant=db_grant, console=console)
+
+
+async def plan_dashboard(source, count, *, invalid=()):
+    from schemii.schemer import routes
+    from schemii.schemer.dashboard_models import DashboardUpdate
+    dashboard = source.services.dashboards.update(source.owner, source.dashboard.id, DashboardUpdate(
+        expected_revision=source.dashboard.revision, name="People", model_id=source.model.id,
+        model_revision=source.model.revision,
+        tiles=[{**deepcopy(source.tile), "id": f"tile-{index}",
+                **({"detailFields": [{"table": "people", "column": "id"}]} if index in invalid else {})}
+               for index in range(count)]))
+    source.dashboard = dashboard
+    response = await routes.stream_dashboard(dashboard.id,
+        routes.DashboardExecutionRequest(expected_revision=dashboard.revision), source.request,
+        Principal(user_id="viewer", authentication_source="local_prototype"))
+    return [json.loads(item) async for item in response.body_iterator]
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+@pytest.mark.parametrize("count", [1, 5, 20])
+def test_dashboard_planning_source_acquisition_is_bounded(planning_source, count):
+    import asyncio
+    source = planning_source
+    events = asyncio.run(plan_dashboard(source, count))
+    assert len(events[0]["tiles"]) == count and events[0]["tileErrors"] == []
+    assert events[-1] == {"type": "end"}
+    assert source.console.runs == [("viewer", source.console.receipt.id)]
+    assert len(source.console.closed) == count
+    assert source.counts["introspect"] == 1, dict(source.counts)
+    assert source.counts["readable"] == (2 if source.mode == "shared" else 1), dict(source.counts)
+    assert source.counts["model"] <= (3 if source.mode == "shared" else 2), dict(source.counts)
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+def test_request_projection_preserves_single_tile_sql_and_results(planning_source):
+    import asyncio
+    from schemii.schemer.access import prepare_dashboard
+    from schemii.schemer.tile_queries import tile_plan
+    source = planning_source
+    dashboard, scoped, _ = prepare_dashboard(source.request, "viewer", source.dashboard.id)
+    _, expected = tile_plan(scoped, "viewer", dashboard, "people", fresh=True)
+    source.counts.clear()
+    events = asyncio.run(plan_dashboard(source, 5))
+    assert [tile["plan"] for tile in events[0]["tiles"]] == [expected] * 5
+    for index in range(5):
+        batches = [event["rows"] for event in events if event["type"] == "rows" and event["tileId"] == f"tile-{index}"]
+        assert batches == [[["A"], ["B"]], [["C"], ["D"]]]
+    assert source.counts["introspect"] == 1
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+@pytest.mark.parametrize("count,invalid", [(0, ()), (5, (0,)), (5, tuple(range(5)))])
+def test_request_projection_preserves_empty_and_invalid_tiles(planning_source, count, invalid):
+    import asyncio
+    source = planning_source
+    events = asyncio.run(plan_dashboard(source, count, invalid=invalid))
+    start = events[0]
+    assert [tile["tileId"] for tile in start["tiles"]] == [f"tile-{i}" for i in range(count) if i not in invalid]
+    assert start["tileErrors"] == [{"tileId": f"tile-{i}", "code": "field_not_exposed",
+        "message": "These preview fields or report filters are not exposed by this model: people.id. "
+                   "Expose them in the model or remove them from the preview."} for i in invalid]
+    assert source.counts["introspect"] == (1 if count else 0)
+    assert len(source.console.runs) == (1 if count > len(invalid) else 0)
+    assert events[-1] == {"type": "end"}
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+def test_request_projection_refreshes_column_privileges_between_requests(planning_source):
+    import asyncio
+    source = planning_source
+    first = asyncio.run(plan_dashboard(source, 5))
+    assert len(first[0]["tiles"]) == 5
+    source.state["readable"] = {("people", "id")}
+    second = asyncio.run(plan_dashboard(source, 5))
+    assert second[0]["tiles"] == []
+    assert [error["code"] for error in second[0]["tileErrors"]] == ["model_source_drift"] * 5
+    assert source.counts["introspect"] == 2
+    assert source.counts["readable"] == (4 if source.mode == "shared" else 2)
+    assert len(source.console.runs) == 1
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+@pytest.mark.parametrize("change", ["session", "product", "grant", "model", "profile"])
+def test_current_authority_and_revisions_are_checked_after_compilation(planning_source, monkeypatch, change):
+    import asyncio
+    from schemii.common.api.errors import ApiProblem
+    from schemii.common.connections.models import PostgresConnectionUpdate, SCHEMII_CONNECTION_OWNER_ID
+    from schemii.schemer import routes
+    from schemii.schemoo.models import ModelUpdate
+    source = planning_source
+    original = routes.tile_plan
+    def compile_tile(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if args[3] == "tile-0":
+            if change == "session":
+                source.state["enabled"] = False
+            elif change == "product":
+                source.state["product"] = False
+            elif change == "grant":
+                source.state["granted"] = False
+            elif change == "model":
+                source.services.models.update(source.owner, source.model.id, ModelUpdate(
+                    expected_revision=source.model.revision, name="Changed", definition=source.model.definition))
+            else:
+                source.services.connections.update(SCHEMII_CONNECTION_OWNER_ID, source.profile.id,
+                    PostgresConnectionUpdate(expected_revision=source.profile.revision,
+                                             password="synthetic-rotated-fixture"))
+        return result
+    monkeypatch.setattr(routes, "tile_plan", compile_tile)
+    with pytest.raises(ApiProblem) as denied:
+        asyncio.run(plan_dashboard(source, 5))
+    assert denied.value.status_code == (404 if change == "grant" and source.mode == "managed"
+                                       else 403 if change in {"session", "product", "grant"} else 409)
+    assert source.console.runs == [] and not hasattr(source.console, "target")
+    assert source.counts["introspect"] == 1
+
+
+@pytest.mark.parametrize("planning_source", ["shared"], indirect=True)
+def test_shared_request_rechecks_same_role_before_execution(planning_source, monkeypatch):
+    import asyncio
+    from schemii.common.api.errors import ApiProblem
+    from schemii.schemer import routes
+    source = planning_source
+    original = routes.tile_plan
+    def compile_tile(*args, **kwargs):
+        result = original(*args, **kwargs)
+        source.db_grant["role_id"] = "other-role"
+        return result
+    monkeypatch.setattr(routes, "tile_plan", compile_tile)
+    with pytest.raises(ApiProblem) as denied:
+        asyncio.run(plan_dashboard(source, 5))
+    assert denied.value.status_code == 403 and denied.value.code == "report_access_revoked"
+    assert source.console.runs == [] and not hasattr(source.console, "target")
+
+
+@pytest.mark.parametrize("planning_source", ["managed", "shared"], indirect=True)
+def test_catalog_projection_failure_stays_bounded_and_is_reported_per_tile(planning_source):
+    import asyncio
+    from schemii.common.api.errors import ApiProblem
+    source = planning_source
+    def unavailable(*args):
+        source.counts["introspect"] += 1
+        raise ApiProblem(422, "source_unavailable", "The source catalog is unavailable.")
+    source.services.postgres.introspect = unavailable
+    events = asyncio.run(plan_dashboard(source, 5))
+    assert events[0]["tiles"] == []
+    assert events[0]["tileErrors"] == [{"tileId": f"tile-{i}", "code": "source_unavailable",
+        "message": "The source catalog is unavailable."} for i in range(5)]
+    assert source.counts["introspect"] == 1
+    assert source.console.runs == [] and not hasattr(source.console, "target")
 
 
 @pytest.fixture

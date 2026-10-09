@@ -24,6 +24,53 @@ def _key(field):
     return field.table, field.column
 
 
+class DashboardPlanning:
+    """One lazy model/catalog projection, owned only by a dashboard request.
+
+    Managed privileges stay uncached across requests. Execution and delivery
+    retain their independent current-authority checks through report services.
+    """
+
+    def __init__(self, services, owner, dashboard):
+        self.services, self.owner, self.dashboard = services, owner, dashboard
+        self.model = self.catalog = self.catalog_error = None
+
+    def load_model(self):
+        if self.model is None:
+            self.model = load_model(self.services, self.owner, self.dashboard.model_id,
+                                    self.dashboard.model_revision)
+        return self.model
+
+    def model_catalog(self):
+        if self.catalog_error is not None:
+            raise self.catalog_error
+        if self.catalog is None:
+            try:
+                self.catalog = model_catalog(self.services, self.owner, self.load_model(), fresh=True)
+            except ApiProblem as error:
+                # A shared projection failure belongs to each affected tile;
+                # keep the bounded partial-error behavior without reacquisition.
+                if error.status_code == 422:
+                    self.catalog_error = error
+                raise
+        return self.catalog
+
+    def check_current(self):
+        if self.model is None:
+            return
+        current = load_model(self.services, self.owner, self.dashboard.model_id,
+                             self.dashboard.model_revision)
+        identity = lambda model: (model.connection_id, model.connection_owner_id,
+                                  model.database, model.namespace)
+        if identity(current) != identity(self.model):
+            raise ApiProblem(409, "model_source_changed", "The model's source changed. Reload the report.")
+        if self.catalog is not None:
+            profile = self.services.connections.get(self.owner, current.connection_id)
+            if (profile.revision != self.catalog["connectionRevision"]
+                    or profile.database != self.catalog["database"]):
+                raise ApiProblem(409, "report_connection_changed", "The report connection changed. Reload the report.")
+
+
 def tile_report_query(dashboard, tile, selections=None):
     fields = tile.detail_fields if tile.kind == "detail" else [*tile.dimensions, *tile.measures]
     return ReportQuery(model_id=dashboard.model_id, expected_revision=dashboard.model_revision,
@@ -80,7 +127,8 @@ def _ordered(plan, sql, page_size, text_order_fields=()):
             "outputLabels": output_labels}
 
 
-def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection=None, fresh=False):
+def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection=None, fresh=False,
+              planning=None):
     """Return (saved model, unbounded SQL plan) for one retained execution.
 
     selection is {dimensions: [{table, column, value}], measureIndex: int}.
@@ -90,7 +138,11 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     if tile is None:
         raise ApiProblem(404, "tile_not_found", "This dashboard tile no longer exists.")
     query = tile_report_query(dashboard, tile, selections)
-    model = load_model(services, owner, query.model_id, query.expected_revision)
+    if planning is not None and (planning.services is not services or planning.owner != owner
+                                 or planning.dashboard is not dashboard):
+        raise ValueError("Dashboard planning must belong to this request")
+    model = planning.load_model() if planning is not None else load_model(
+        services, owner, query.model_id, query.expected_revision)
     query.explore.root = model.definition.root
     optional_selections = getattr(tile, "selections", {})
     required = {scope.id for scope in model.definition.scopes if scope.kind == "required"}
@@ -103,7 +155,7 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
            for scope_id in unauthorized):
         _problem("This optional model filter is not available on the dashboard.")
     query.explore.selections = {**query.explore.selections, **optional_selections}
-    catalog = model_catalog(services, owner, model, fresh=fresh)
+    catalog = planning.model_catalog() if planning is not None else model_catalog(services, owner, model, fresh=fresh)
     original = plan_query(catalog, model.definition, query.explore, model.catalog_fingerprint, _bounded=False)
     time_analysis = getattr(tile, "time_analysis", None)
     time_kind = validate_time_analysis(tile, catalog, model.definition)
