@@ -51,6 +51,13 @@ Full database acceptance requires an explicitly provisioned disposable external
 PostgreSQL database, `SCHEMII_TEST_METADATA_DSN` and
 `SCHEMII_TEST_METADATA_PASSWORD`. The integration suite creates and removes owned
 schemas; never point it at user data or the launcher's private metadata database.
+The assembled metadata saturation/recovery case also requires
+`SCHEMII_TEST_SOURCE_DSN` and `SCHEMII_TEST_SOURCE_PASSWORD` for a separately
+provisioned disposable source PostgreSQL endpoint. Its role needs `CREATE DATABASE`
+so the case can create and remove its UUID-owned source database. A different
+database on the metadata host/port is insufficient: the application deliberately
+blocks that entire endpoint as a query target. These request-composition checks
+do not establish served HTTPS, lifespan, native UI or deployment capacity acceptance.
 Browser acceptance requires an owned test account through private
 `SCHEMII_E2E_CREDENTIALS_FILE` or explicit environment credentials, or explicit
 `SCHEMII_E2E_BOOTSTRAP=1` consent on a fresh disposable stack. It runs the selected

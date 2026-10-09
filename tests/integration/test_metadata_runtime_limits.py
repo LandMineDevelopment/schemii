@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import asdict, replace
 import hashlib
 import json
+import os
 from threading import Event, Lock
 from time import monotonic, sleep, time
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict
+from psycopg.rows import dict_row
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import schemii.main as application_module
+from schemii.common.admin_config import AdminConfig
+from schemii.common.api.runtime import RuntimeConfig
+from schemii.common.connections.models import PostgresConnectionCreate
+from schemii.common.connections.policy import ConnectionTargetForbiddenError
 from schemii.common.api.errors import ApiProblem, install_api_error_handlers
 from schemii.common.auth.routes import AccountCreate
 from schemii.common.auth.service import AuthService, COOKIE
@@ -41,6 +51,7 @@ from schemii.schemer.metadata.migrations import (
 )
 from schemii.schemii.ai.repository import PostgresAiRepository
 from schemii.schemii.bulk_jobs.repository import JobRepository
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
 
 
 MIGRATION_PACKAGES = (
@@ -258,6 +269,368 @@ def test_real_auth_saturation_keeps_session_and_authoritative_revocation(
             connection.execute("DELETE FROM metadata.users WHERE id=%s", (user["id"],))
         factory.close()
     assert_backends_closed(postgres_metadata, factory._application_name)
+
+
+@pytest.fixture
+def assembled_source_database(postgres_metadata):
+    """Own a separate disposable source DB; never relax control-plane policy.
+
+    A second explicitly disposable external server is necessary: the assembled
+    target policy forbids every DB on the metadata host/port. Its integration
+    login must have CREATEDB. Missing inputs/privilege fail this prerequisite.
+    """
+    del postgres_metadata  # Keep the opt-in metadata prerequisite ahead of this one.
+    dsn = os.environ.get("SCHEMII_TEST_SOURCE_DSN")
+    password = os.environ.get("SCHEMII_TEST_SOURCE_PASSWORD")
+    assert dsn and password, (
+        "assembled recovery requires SCHEMII_TEST_SOURCE_DSN and "
+        "SCHEMII_TEST_SOURCE_PASSWORD for a separate disposable server with CREATEDB"
+    )
+    parameters = conninfo_to_dict(dsn)
+    database = "metadata_recovery_" + uuid4().hex
+    created = False
+
+    def administration_connection():
+        return psycopg.connect(
+            dsn,
+            password=password,
+            autocommit=True,
+            connect_timeout=2,
+            application_name="assembled_source_admin_" + uuid4().hex,
+            options="-c statement_timeout=5000 -c lock_timeout=1000",
+        )
+
+    try:
+        with administration_connection() as connection:
+            connection.execute(
+                sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(
+                    sql.Identifier(database)
+                )
+            )
+            created = True
+        yield PostgresConnectionCreate(
+            name="Owned assembled recovery source",
+            host=parameters.get("host") or parameters.get("hostaddr") or "localhost",
+            port=int(parameters.get("port") or 5432),
+            database=database,
+            username=parameters["user"],
+            ssl_mode="prefer",
+            connect_timeout=2,
+            password=password,
+        )
+    finally:
+        if created:
+            # No FORCE/termination: retained owned backends must be closed by
+            # their resource owner. A leak remains visible as a cleanup failure.
+            with administration_connection() as connection:
+                connection.execute(
+                    sql.SQL("DROP DATABASE {}").format(sql.Identifier(database))
+                )
+
+
+def test_assembled_auth_cancel_and_source_query_recover_after_metadata_saturation(
+    postgres_metadata, assembled_source_database, monkeypatch, record_property
+):
+    """Real request composition, not mounted HTTPS/UI or capacity acceptance."""
+    environment = dict(
+        postgres_metadata.environment, SCHEMII_METADATA_MAXIMUM_CONNECTIONS="1"
+    )
+    monkeypatch.setenv("SCHEMII_AUTH_ENABLED", "1")
+    monkeypatch.setenv("SCHEMII_SETUP_TOKEN", "unused-integration-setup-token")
+    monkeypatch.delenv("SCHEMII_SETUP_TOKEN_FILE", raising=False)
+    from schemii.common.ai.prototype import PiClient
+
+    monkeypatch.setattr(PiClient, "from_env", lambda: None)
+    runtime = RuntimeConfig.from_env(
+        {
+            "SCHEMII_DEPLOYMENT_MODE": "authenticated",
+            "SCHEMII_AUTH_ENABLED": "1",
+            "SCHEMII_TARGET_EGRESS_MODE": "internal-only",
+            "SCHEMII_ALLOWED_TARGET_HOSTS": assembled_source_database.host,
+        }
+    )
+    admin = AdminConfig()
+    admin = replace(
+        admin,
+        ai=replace(admin.ai, enabled=False, credential_expiration_enabled=False),
+        postgres_timeouts=replace(admin.postgres_timeouts, catalog_statement_seconds=8),
+    )
+    role_id = "role_assembled_" + uuid4().hex
+    usernames = ["it_assembled_" + uuid4().hex for _ in range(2)]
+
+    def clean_accounts():
+        # Look up the predeclared usernames even if creation fails before its
+        # return. No other accounts, roles, profiles or execution rows are owned.
+        with postgres_metadata.connection_factory() as connection:
+            owners = [
+                row["user_id"]
+                for row in connection.execute(
+                    "SELECT user_id FROM metadata.auth_accounts WHERE username=ANY(%s)",
+                    (usernames,),
+                ).fetchall()
+            ]
+            connection.execute(
+                "DELETE FROM metadata.auth_roles WHERE id=%s", (role_id,)
+            )
+            connection.execute(
+                "DELETE FROM metadata.auth_audit WHERE actor_id=ANY(%s) OR target_id=ANY(%s)",
+                (owners, owners),
+            )
+            connection.execute(
+                "DELETE FROM schemii.workspaces WHERE owner_id=ANY(%s)", (owners,)
+            )
+            connection.execute(
+                "DELETE FROM metadata.auth_accounts WHERE user_id=ANY(%s)", (owners,)
+            )
+            connection.execute(
+                "DELETE FROM metadata.auth_login_attempts WHERE username=ANY(%s)",
+                (usernames,),
+            )
+            connection.execute("DELETE FROM metadata.users WHERE id=ANY(%s)", (owners,))
+
+    with ExitStack() as cleanup:
+
+        def compose_metadata(**policy):
+            metadata = create_metadata_repositories(environment, **policy)
+            # Register ownership before the rest of service construction can fail.
+            cleanup.callback(metadata.close)
+            return metadata
+
+        monkeypatch.setattr(
+            application_module, "create_metadata_repositories", compose_metadata
+        )
+        services = application_module.create_services(runtime, admin)
+        cleanup.callback(clean_accounts)
+        normal = services.metadata.connection_factory
+        assert isinstance(normal, MetadataConnectionFactory)
+        normal._application_name = "assembled_metadata_" + uuid4().hex
+        console = services.console
+        assert console is not None
+        cleanup.callback(console.close)
+        app = application_module.create_app(services, runtime_config=runtime)
+        cleanup.callback(app.state.bulk_jobs.close)
+        cleanup.callback(app.state.raw_console.close)
+        auth = app.state.auth
+        assert auth.store.factory is normal
+        assert services.metadata.connections._connection_factory is normal
+        assert console._repository._connection_factory is normal
+        readiness = services.metadata.readiness_probe._connection_factory
+        assert readiness is not normal
+        readiness._application_name = "assembled_readiness_" + uuid4().hex
+        users = [
+            auth.create_user(
+                AccountCreate(
+                    username=name,
+                    display_name="Owned assembled account",
+                    password="integration-assembled-password",
+                )
+            )
+            for name in usernames
+        ]
+        with auth.store.transaction(write=True) as state:
+            state["roles"][role_id] = dict(
+                id=role_id,
+                name=role_id,
+                capabilities=["schemii:access"],
+                user_ids=[user["id"] for user in users],
+                connections=[],
+                dashboards=[],
+            )
+        tokens = [uuid4().hex for _ in users]
+        with postgres_metadata.connection_factory() as connection:
+            for user, token in zip(users, tokens, strict=True):
+                connection.execute(
+                    "INSERT INTO metadata.auth_sessions VALUES (%s,%s,%s)",
+                    (
+                        hashlib.sha256(token.encode()).hexdigest(),
+                        user["id"],
+                        time() + 3600,
+                    ),
+                )
+        # Do not enter TestClient's lifespan: maintenance/recovery scheduling has
+        # separate oracles. Pressure here belongs solely to these requests.
+        clients = []
+        for token in tokens:
+            client = TestClient(
+                app,
+                base_url="https://localhost:8001",
+                headers={"Origin": "https://localhost:8001"},
+            )
+            cleanup.callback(client.close)
+            client.cookies.set(COOKIE, token)
+            clients.append(client)
+        client, peer = clients
+        owner = users[0]["id"]
+        assert client.get("/api/v1/auth/me").json()["user"]["id"] == owner
+        metadata_parameters = conninfo_to_dict(environment["SCHEMII_METADATA_DSN"])
+        with pytest.raises(ConnectionTargetForbiddenError) as forbidden:
+            services.metadata.target_policy.validate(
+                assembled_source_database.model_copy(
+                    update={
+                        "host": metadata_parameters.get("host")
+                        or metadata_parameters.get("hostaddr")
+                        or "localhost",
+                        "port": int(metadata_parameters.get("port") or 5432),
+                    }
+                )
+            )
+        assert forbidden.value.code == "metadata_control_plane_target_forbidden"
+        profile_response = client.post(
+            "/api/v1/connections",
+            json=assembled_source_database.model_dump(mode="json", exclude={"password"})
+            | {"password": assembled_source_database.password.get_secret_value()},
+        )
+        assert profile_response.status_code == 201
+        profile = profile_response.json()
+        workspace = services.workspaces.create(
+            owner,
+            WorkspaceCreateRecord(
+                name="Owned recovery workspace",
+                connection_id=profile["id"],
+                database=profile["database"],
+                namespace="public",
+            ),
+            expected_connection_revision=profile["revision"],
+        )
+        execution_path = f"/api/v1/schemii/workspaces/{workspace.id}/console/executions"
+
+        def execute(statement):
+            response = client.post(
+                execution_path,
+                json={
+                    "consoleId": "con_" + uuid4().hex,
+                    "expectedWorkspaceRevision": workspace.revision,
+                    "expectedSettingsRevision": console.settings(owner).revision,
+                    "mode": "managed_read",
+                    "statements": [statement],
+                },
+            )
+            assert response.status_code == 201
+            path = "/api/v1/common/query-executions/" + response.json()["id"]
+            receipt_response = client.get(path)
+            assert receipt_response.status_code == 200
+            receipt = receipt_response.json()
+            assert receipt["status"] == "succeeded"
+            return path, path + "/results/" + receipt["results"][0]["id"]
+
+        path, result_path = execute("SELECT 1::bigint FROM pg_sleep(30)")
+        with psycopg.connect(
+            host=assembled_source_database.host,
+            port=assembled_source_database.port,
+            dbname=assembled_source_database.database,
+            user=assembled_source_database.username,
+            password=assembled_source_database.password.get_secret_value(),
+            sslmode=assembled_source_database.ssl_mode.value,
+            connect_timeout=2,
+            autocommit=True,
+            row_factory=dict_row,
+            application_name="assembled_source_monitor_" + uuid4().hex,
+            options="-c statement_timeout=2000 -c lock_timeout=1000",
+        ) as monitor:
+            backend = monitor.execute(
+                "SELECT pid, backend_start FROM pg_stat_activity WHERE datname=%s AND application_name='schemii'",
+                (assembled_source_database.database,),
+            ).fetchall()
+            assert len(backend) == 1
+            identity = backend[0]
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                page = executor.submit(client.get, result_path)
+                try:
+                    deadline = monotonic() + 3
+                    while True:
+                        waiting = monitor.execute(
+                            "SELECT wait_event FROM pg_stat_activity WHERE pid=%s AND backend_start=%s",
+                            (identity["pid"], identity["backend_start"]),
+                        ).fetchone()
+                        if waiting and waiting["wait_event"] == "PgSleep":
+                            break
+                        assert monotonic() < deadline, (
+                            "owned source fetch never entered pg_sleep"
+                        )
+                        sleep(0.01)
+                    assert peer.delete(path).status_code == 404
+                    assert not page.done(), (
+                        "cross-owner cancellation stopped the source"
+                    )
+                    with normal() as blocker:
+                        blocker.execute("SELECT 1")
+                        for method, url in (
+                            (client.get, "/api/v1/auth/me"),
+                            (client.delete, path),
+                        ):
+                            started = monotonic()
+                            saturated = method(url)
+                            elapsed = monotonic() - started
+                            assert elapsed < 1
+                            assert saturated.status_code == 503
+                            assert (
+                                saturated.json()["error"]["code"]
+                                == "metadata_capacity_exceeded"
+                            )
+                            assert saturated.json()["error"]["retryable"] is True
+                            assert "set-cookie" not in saturated.headers
+                            assert client.cookies.get(COOKIE) == tokens[0]
+                            record_property(
+                                "saturated_" + url.rsplit("/", 1)[-1] + "_seconds",
+                                elapsed,
+                            )
+                        ready_started = monotonic()
+                        ready = client.get("/api/v1/readiness")
+                        assert (
+                            ready.status_code == 200 and ready.json()["ready"] is True
+                        )
+                        assert monotonic() - ready_started < 2
+                        assert normal.admission_snapshot().active == 1
+                        assert not page.done(), (
+                            "retryable metadata rejection cancelled the source"
+                        )
+                    assert normal.admission_snapshot().active == 0
+                    started = monotonic()
+                    cancelled = client.delete(path)
+                    assert cancelled.status_code == 200
+                    stopped = page.result(timeout=3)
+                    assert (
+                        stopped.json()["error"]["code"] == "postgres_console_cancelled"
+                    )
+                    assert monotonic() - started < 3
+                    record_property("accepted_cancel_seconds", monotonic() - started)
+                finally:
+                    # Even an assertion failure signals only this retained
+                    # execution. The SQL ceiling also bounds an unsuccessful stop.
+                    console.cancel(owner, workspace.id, path.rsplit("/", 1)[-1])
+                    page.result(timeout=10)
+            deadline = monotonic() + 3
+            while monitor.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity WHERE pid=%s AND backend_start=%s",
+                (identity["pid"], identity["backend_start"]),
+            ).fetchone()["n"]:
+                assert monotonic() < deadline, (
+                    "owned source backend remained after cancellation"
+                )
+                sleep(0.01)
+        assert normal.admission_snapshot().active == 0
+        assert_backends_closed(postgres_metadata, normal._application_name)
+        recovered_path, recovered_result = execute("SELECT 42::bigint AS recovered")
+        result = client.get(recovered_result)
+        assert result.status_code == 200 and result.json()["rows"] == [[42]]
+        assert client.delete(recovered_result).status_code == 204
+        with auth.store.transaction(write=True) as state:
+            state["roles"][role_id]["capabilities"] = []
+        assert client.get("/api/v1/auth/me").json()["capabilities"] == []
+        assert client.post(execution_path, json={}).status_code == 403
+        assert client.delete(recovered_path).status_code == 403
+        auth.logout(tokens[0])
+        assert client.get("/api/v1/auth/me").status_code == 401
+        assert peer.get("/api/v1/auth/me").status_code == 200
+        assert normal.admission_snapshot().active == 0
+        assert all(
+            lane["permits"] == lane["connections"] == 0
+            for lane in services.postgres.observation_snapshot().values()
+        )
+        record_property("owned_source_database", assembled_source_database.database)
+        record_property("owned_source_backend", str(identity))
+    assert_backends_closed(postgres_metadata, normal._application_name)
+    assert_backends_closed(postgres_metadata, readiness._application_name)
 
 
 def test_composition_keeps_migration_and_readiness_budgets_separate(
