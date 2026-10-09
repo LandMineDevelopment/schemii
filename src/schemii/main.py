@@ -570,11 +570,11 @@ def create_app(
     application.state.ai_runtime = ai_runtime
     application.state.schemoo_ai = Conversations(
         ConversationStore(active_services.metadata.connection_factory,active_services.admin_config.ai,"schemoo"),
-        ai_runtime,active_services,ai_tools,
+        ai_runtime,active_services,ai_tools,auth=application.state.auth,
     )
     application.state.schemer_ai = Conversations(
         ConversationStore(active_services.metadata.connection_factory,active_services.admin_config.ai,"schemer","dashboardId"),
-        ai_runtime,active_services,schemer_ai_tools,
+        ai_runtime,active_services,schemer_ai_tools,auth=application.state.auth,
     )
     application.include_router(schemoo_ai_router)
     application.include_router(schemer_ai_router)
