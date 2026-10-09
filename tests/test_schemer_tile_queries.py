@@ -112,6 +112,27 @@ def test_dashboard_exposed_optional_scope_only_filters_when_viewer_activates_it(
     assert '"org_id" = 1' in active["sql"]
 
 
+def test_request_projection_keeps_each_tiles_optional_inputs_independent(context, monkeypatch):
+    from copy import deepcopy
+    from schemii.schemoo.models import ModelScope, ScopeSelection
+    dashboard, tile, model = context
+    model.definition.scopes = [ModelScope.model_validate({"id": "organization", "label": "Organization",
+        "kind": "conditional", "requirement": "optional", "alternatives": [{"id": "choice", "inputs": [
+            {"id": "org", "label": "Organization", "type": "integer"}], "conditions": [
+            {"table": "people", "column": "org_id", "operator": "eq", "parameterId": "org"}]}]})]
+    dashboard.optional_filters = ["organization"]
+    tile.selections = {"organization": ScopeSelection(active=True, values={"org": 1})}
+    other = deepcopy(tile)
+    other.id, other.selections = "other", {}
+    dashboard.tiles.append(other)
+    planning = queries.DashboardPlanning(None, None, dashboard)
+    _, active = queries.tile_plan(None, None, dashboard, tile.id, planning=planning)
+    _, inactive = queries.tile_plan(None, None, dashboard, other.id, planning=planning)
+    assert '"org_id" = 1' in active["sql"]
+    assert '"org_id" = 1' not in inactive["sql"]
+    assert dashboard.selections == {} and other.selections == {}
+
+
 def test_new_detail_branch_preserves_required_exists(context):
     dashboard, tile, model = context
     from schemii.schemoo.models import ModelScope
