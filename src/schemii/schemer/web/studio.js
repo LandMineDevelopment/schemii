@@ -12,7 +12,7 @@ import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderParameterValues } from '#model/filter-controls.js';
 import { newTile, dashboardUpdate, TILE_TYPES } from './dashboard-state.js';
 import { appliedFilterSummary } from './filter-summary.js';
-import { ResultCache, DashboardResultGroup, CacheBudget, readResultStream } from './result-cache.js';
+import { ResultCache, DashboardResultGroup, CacheBudget, DrillCacheRegistry, readResultStream } from './result-cache.js';
 import { renderVisualization } from './visualizations.js';
 import { openTileEditor } from './tile-editor.js';
 import { openExpanded, openSql } from './result-viewer.js';
@@ -117,7 +117,7 @@ function getStream(tile, selection = null) {
     };
     return cache;
   };
-  if (!group) { group = { main: create(null), drills: new Map() }; streams.set(tile.id, group); }
+  if (!group) { group = { main: create(null), drills: new DrillCacheRegistry() }; streams.set(tile.id, group); }
   if (!selection) return group.main;
   const key = JSON.stringify(selection);
   if (!group.drills.has(key)) group.drills.set(key, create(selection));

@@ -20,8 +20,26 @@ export async function readResultStream(url, body, onFrame, signal, fetcher = fet
 /** Shared across main results and drills; accounts conservatively for parsed JS values. */
 export class CacheBudget {
   constructor({ bytes = 64 * 1024 * 1024, rows = 50000 } = {}) { this.limit = bytes; this.rowLimit = rows; this.bytes = 0; this.rows = 0; }
+  get available() { return this.bytes < this.limit && this.rows < this.rowLimit; }
   take(row) { const bytes = JSON.stringify(row).length * 2 + row.length * 32 + 64; if (this.bytes + bytes > this.limit || this.rows >= this.rowLimit) return 0; this.bytes += bytes; this.rows++; return bytes; }
   release(bytes, rows) { this.bytes = Math.max(0, this.bytes - bytes); this.rows = Math.max(0, this.rows - rows); }
+}
+
+/** Bound retained selections even when their empty/error results consume no rows. */
+export class DrillCacheRegistry extends Map {
+  get(key) {
+    const cache = super.get(key);
+    if (cache) { super.delete(key); super.set(key, cache); }
+    return cache;
+  }
+  set(key, cache) {
+    super.set(key, cache);
+    while (this.size > 16) {
+      const oldest = this.keys().next().value, evicted = super.get(oldest);
+      super.delete(oldest); evicted.dispose();
+    }
+    return this;
+  }
 }
 
 /** One eager stream; navigation only reads its bounded browser cache. */
@@ -50,6 +68,10 @@ export class ResultCache {
   loadMore() {
     if (this.pending) return this.pending;
     if (this.closed || !this.hasMore) return Promise.resolve(this.snapshot());
+    if (!this.budget.available) {
+      this.limitReached = true; this.reason = 'browser_budget'; this.hasMore = false; this.notify();
+      return Promise.resolve(this.snapshot());
+    }
     this.loading = true; this.startedAt = Date.now(); this.notify();
     this.pending = this.run(); return this.pending;
   }
