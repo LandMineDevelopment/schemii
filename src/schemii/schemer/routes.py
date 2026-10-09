@@ -31,7 +31,7 @@ from pydantic import Field
 from schemii.schemoo.models import Contract, ScopeSelection
 from schemii.common.api.errors import ApiProblem
 from .dashboard_routes import dashboard_errors
-from .tile_queries import tile_plan
+from .tile_queries import DashboardPlanning, tile_plan
 from .access import prepare_dashboard, owned_report_services
 
 
@@ -105,16 +105,18 @@ async def stream_dashboard(dashboard_id: str, body: DashboardExecutionRequest, r
             raise ApiProblem(422, "dashboard_tile_execution_limit",
                              f"A dashboard can run at most {maximum} tiles together.")
         tiles, errors, model = [], [], None
-        for index, tile in enumerate(dashboard.tiles):
+        planning = DashboardPlanning(services, principal.user_id, dashboard)
+        for tile in dashboard.tiles:
             try:
                 model, plan = await asyncio.to_thread(tile_plan, services, principal.user_id,
-                                                      dashboard, tile.id, fresh=index == 0)
+                                                      dashboard, tile.id, planning=planning)
             except ApiProblem as error:
                 if error.status_code != 422:
                     raise
                 errors.append({"tileId": tile.id, "message": error.message, "code": error.code})
                 continue
             tiles.append({"tileId": tile.id, "plan": plan})
+        await asyncio.to_thread(planning.check_current)
         return response(services, principal.user_id, model, tiles, errors)
 
 
