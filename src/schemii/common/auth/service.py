@@ -93,13 +93,21 @@ class AuthService:
             return not self.store.query("SELECT 1 FROM metadata.auth_accounts LIMIT 1")
         with self.store.transaction() as state: return not state['users']
 
+    def read_snapshot(self):
+        """Read current account authority once for a bounded inventory request.
+
+        The detached transaction state is never retained between requests.
+        Individual authorization paths and inventory use the same policy below.
+        """
+        with self.store.transaction() as state:
+            return _AuthReadSnapshot(self.enabled, state)
+
     def user(self, user_id):
         if self.store.factory:
             rows=self.store.query("SELECT a.user_id AS id,a.username,a.is_admin,a.disabled,u.display_name FROM metadata.auth_accounts a JOIN metadata.users u ON u.id=a.user_id WHERE a.user_id=%s AND NOT a.disabled",(user_id,))
             return public_user(rows[0]) if rows else None
         with self.store.transaction() as state:
-            user = state['users'].get(user_id)
-            return public_user(user) if user and not user['disabled'] else None
+            return _AuthReadSnapshot(self.enabled, state).user(user_id)
 
     def is_admin(self, user_id):
         if not self.enabled: return True
@@ -111,9 +119,7 @@ class AuthService:
             rows=self.store.query('SELECT r.capabilities FROM metadata.auth_roles r JOIN metadata.auth_user_roles ur ON ur.role_id=r.id JOIN metadata.auth_accounts a ON a.user_id=ur.user_id WHERE ur.user_id=%s AND NOT a.disabled',(user_id,))
             return sorted({c for row in rows for c in row['capabilities']})
         with self.store.transaction() as state:
-            user = state['users'].get(user_id)
-            if not user or user['disabled']: return []
-            return sorted({c for r in state['roles'].values() if user_id in r['user_ids'] for c in r['capabilities']})
+            return _AuthReadSnapshot(self.enabled, state).capabilities(user_id)
 
     def connection_access(self, user_id, connection_id, product):
         """Resolve one managed profile whose grant and product rights belong to the same role.
@@ -137,14 +143,7 @@ class AuthService:
             )
         else:
             with self.store.transaction() as state:
-                user = state['users'].get(user_id)
-                rows = [dict(role_id=role['id'], owner_id=grant['owner_id'], connection_id=grant['connection_id'])
-                        for role in state['roles'].values() if user and not user['disabled']
-                        and user_id in role['user_ids'] and capability in role['capabilities']
-                        and (product != 'schemer' or SCHEMER_AUTHOR in role['capabilities'])
-                        for grant in role['connections']
-                        if grant['connection_id'] == connection_id and grant['owner_id'] == SCHEMII_CONNECTION_OWNER_ID
-                        and grant['allow_authoring']]
+                return _AuthReadSnapshot(self.enabled, state).connection_access(user_id, connection_id, product)
         owners = {row['owner_id'] for row in rows}
         if len(owners) > 1: raise HTTPException(409, 'Conflicting database identities are assigned by roles')
         return sorted(rows, key=lambda row: row['role_id'])[0] if rows else None
@@ -155,11 +154,7 @@ class AuthService:
             owner_field = 'owner_id' if key == 'connections' else 'connection_owner_id'
             return self.store.query('SELECT g.* FROM metadata.'+table+' g JOIN metadata.auth_user_roles ur ON ur.role_id=g.role_id JOIN metadata.auth_accounts a ON a.user_id=ur.user_id WHERE ur.user_id=%s AND NOT a.disabled AND g.'+owner_field+'=%s',(user_id,SCHEMII_CONNECTION_OWNER_ID))
         with self.store.transaction() as state:
-            user = state['users'].get(user_id)
-            if not user or user['disabled']: return []
-            owner_field = 'owner_id' if key == 'connections' else 'connection_owner_id'
-            return [{**g,'role_id':r['id']} for r in state['roles'].values() if user_id in r['user_ids']
-                    for g in r[key] if g[owner_field] == SCHEMII_CONNECTION_OWNER_ID]
+            return _AuthReadSnapshot(self.enabled, state)._grants(user_id, key)
 
     def connection_grants(self, user_id): return self._grants(user_id, 'connections')
     def dashboard_grants(self, user_id): return self._grants(user_id, 'dashboards')
@@ -294,3 +289,58 @@ class AuthService:
         else:
             with self.store.transaction(write=True) as state:
                 state['audit'].append((actor,action,target))
+
+
+class _AuthReadSnapshot:
+    """Detached current authority, using the individual memory-read policy."""
+
+    def __init__(self, enabled, state):
+        self.enabled = enabled
+        self.users = state['users']
+        self.roles = state['roles']
+        self.active_user_ids = tuple(user_id for user_id, user in self.users.items() if not user['disabled'])
+        self._user_roles = {}
+        for role in self.roles.values():
+            for user_id in role['user_ids']:
+                self._user_roles.setdefault(user_id, []).append(role)
+
+    def user(self, user_id):
+        user = self.users.get(user_id)
+        return public_user(user) if user and not user['disabled'] else None
+
+    def capabilities(self, user_id):
+        if not self.enabled:
+            return sorted((*PRODUCT_CAPABILITIES, SCHEMER_AUTHOR, PROVISION_CAPABILITY))
+        if not self.user(user_id):
+            return []
+        return sorted({capability for role in self._user_roles.get(user_id, ())
+                       for capability in role['capabilities']})
+
+    def connection_access(self, user_id, connection_id, product):
+        capability = f'{product}:access'
+        if capability not in PRODUCT_CAPABILITIES:
+            raise ValueError('Unknown product')
+        if not self.user(user_id):
+            return None
+        rows = [dict(role_id=role['id'], owner_id=grant['owner_id'], connection_id=grant['connection_id'])
+                for role in self._user_roles.get(user_id, ()) if capability in role['capabilities']
+                and (product != 'schemer' or SCHEMER_AUTHOR in role['capabilities'])
+                for grant in role['connections'] if grant['connection_id'] == connection_id
+                and grant['owner_id'] == SCHEMII_CONNECTION_OWNER_ID and grant['allow_authoring']]
+        owners = {row['owner_id'] for row in rows}
+        if len(owners) > 1:
+            raise HTTPException(409, 'Conflicting database identities are assigned by roles')
+        return sorted(rows, key=lambda row: row['role_id'])[0] if rows else None
+
+    def _grants(self, user_id, key):
+        if not self.user(user_id):
+            return []
+        owner_field = 'owner_id' if key == 'connections' else 'connection_owner_id'
+        return [{**grant, 'role_id': role['id']} for role in self._user_roles.get(user_id, ())
+                for grant in role[key] if grant[owner_field] == SCHEMII_CONNECTION_OWNER_ID]
+
+    def connection_grants(self, user_id):
+        return self._grants(user_id, 'connections')
+
+    def dashboard_grants(self, user_id):
+        return self._grants(user_id, 'dashboards')

@@ -119,6 +119,10 @@ class ConnectionService:
     def list(self, owner_id: str) -> list[PostgresConnectionProfile]:
         return self._repository.list(owner_id)
 
+    def metadata_snapshot(self, owner_ids: tuple[str, ...]) -> ConnectionMetadataSnapshot:
+        """Read only explicitly selected owners for one inventory request."""
+        return ConnectionMetadataSnapshot(self._repository.list_for_owners(owner_ids))
+
     def list_schemii_owned(self) -> list[PostgresConnectionProfile]:
         """Inventory the application-owned pool, never a person's private profiles."""
         return self._repository.list(SCHEMII_CONNECTION_OWNER_ID)
@@ -257,8 +261,8 @@ class ProductConnectionAccess:
         self._connections = connections
         self.product = product
 
-    def _authority(self, actor_id: str) -> Any | None:
-        auth = self._connections._auth
+    def _authority(self, actor_id: str, authority: Any = None) -> Any | None:
+        auth = self._connections._auth if authority is None else authority
         if auth is None or not auth.enabled:
             return None
         capabilities = set(auth.capabilities(actor_id))
@@ -290,9 +294,18 @@ class ProductConnectionAccess:
 
     def list(self, actor_id: str) -> list[PostgresConnectionProfile]:
         auth = self._authority(actor_id)
+        return self._listed_profiles(actor_id, auth, self._connections)
+
+    def list_from_snapshot(
+        self, actor_id: str, authority: Any, metadata: ConnectionMetadataSnapshot,
+    ) -> list[PostgresConnectionProfile]:
+        """Use the same product visibility policy with fresh detached metadata."""
+        return self._listed_profiles(actor_id, self._authority(actor_id, authority), metadata)
+
+    def _listed_profiles(self, actor_id: str, auth: Any, metadata: Any) -> list[PostgresConnectionProfile]:
         profiles = {
             profile.id: profile.model_copy(update={"owner_id": actor_id})
-            for profile in self._connections.list(actor_id)
+            for profile in metadata.list(actor_id)
             if profile.ownership == "user"
         }
         if auth is not None:
@@ -304,7 +317,7 @@ class ProductConnectionAccess:
                     continue
                 owner_id = grant["owner_id"]
                 try:
-                    profile = self._connections.get(owner_id, connection_id)
+                    profile = metadata.get(owner_id, connection_id)
                 except ConnectionNotFoundError:
                     continue
                 if profile.ownership != "schemii":
@@ -324,3 +337,21 @@ class ProductConnectionAccess:
         owner_id = self._owner(actor_id, connection_id)
         with self._connections.use(owner_id, connection_id) as resolved:
             yield resolved.model_copy(update={"owner_id": owner_id})
+
+
+class ConnectionMetadataSnapshot:
+    """Request-local owner-fenced profiles, without credential or mutation APIs."""
+
+    def __init__(self, profiles: list[PostgresConnectionProfile]) -> None:
+        self._owners: dict[str, dict[str, PostgresConnectionProfile]] = {}
+        for profile in profiles:
+            self._owners.setdefault(profile.owner_id or '', {})[profile.id] = profile
+
+    def list(self, owner_id: str) -> list[PostgresConnectionProfile]:
+        return list(self._owners.get(owner_id, {}).values())
+
+    def get(self, owner_id: str, connection_id: str) -> PostgresConnectionProfile:
+        try:
+            return self._owners[owner_id][connection_id]
+        except KeyError as error:
+            raise ConnectionNotFoundError('PostgreSQL connection was not found') from error

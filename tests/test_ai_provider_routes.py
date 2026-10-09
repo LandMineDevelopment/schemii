@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -7,35 +6,37 @@ from fastapi.testclient import TestClient
 from schemii.common.ai.instance_provider_store import MemoryInstanceAiProviderStore
 from schemii.common.ai.credential_store import MemoryAiCredentialStore
 from schemii.common.ai.routes import admin_router, router, shared_codex_router
-from schemii.common.connections.models import SCHEMII_CONNECTION_OWNER_ID
+from schemii.common.connections.models import PostgresConnectionCreate, SCHEMII_CONNECTION_OWNER_ID
 from schemii.common.api.errors import install_api_error_handlers
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.common.auth.service import AuthService
+from schemii.common.connections.service import ConnectionService
+from schemii.common.connections.store import InMemoryConnectionRepository
 
 
-class Auth:
-    enabled = True
-
+class Auth(AuthService):
     def __init__(self):
-        self.store = self
+        super().__init__(enabled=True, setup_token="unused")
         self.events = []
         self.admin_id = "admin"
-        self.roles = {}
+        self.store.state["users"] = {
+            user: dict(id=user, username=user, display_name=user, is_admin=user == "admin",
+                       disabled=False, password_hash="unused") for user in ("admin", "alice")}
+        self.roles = self.store.state["roles"]
+        self.roles["alice-app"] = dict(id="alice-app", name="Alice app", user_ids=["alice"],
+                                        capabilities=["schemii:access"], connections=[], dashboards=[])
 
     def is_admin(self, user_id):
         return user_id == self.admin_id
 
-    def user(self, user_id):
-        return {"id": user_id} if user_id in {"admin", "alice"} else None
-
-    def capabilities(self, user_id):
-        return ["schemii:access"] if user_id == "alice" else []
-
     def audit(self, *event):
         self.events.append(event)
 
-    @contextmanager
-    def transaction(self):
-        yield {"users": {"alice": {"disabled": False}}, "roles": self.roles}
+
+def _connections(auth):
+    connections = ConnectionService(InMemoryConnectionRepository(), ())
+    connections.set_authority(auth)
+    return connections
 
 
 def test_zen_key_is_admin_managed_and_never_returned_to_client():
@@ -47,7 +48,7 @@ def test_zen_key_is_admin_managed_and_never_returned_to_client():
     app.state.auth = Auth()
     app.state.services = SimpleNamespace(
         metadata=SimpleNamespace(ai_instance_providers=store),
-        connections=SimpleNamespace(for_product=lambda product: SimpleNamespace(list=lambda user: [])))
+        connections=_connections(app.state.auth))
     app.dependency_overrides[get_current_principal] = lambda: Principal(
         user_id="admin", authentication_source="local_prototype")
     client = TestClient(app)
@@ -110,7 +111,7 @@ def test_shared_codex_admin_controls_connection_model_reasoning_and_exact_grant(
     app.state.auth = Auth()
     app.state.services = SimpleNamespace(
         metadata=SimpleNamespace(ai_instance_providers=instance, ai_credentials=credentials),
-        connections=SimpleNamespace(for_product=lambda product: SimpleNamespace(list=lambda user: [])))
+        connections=_connections(app.state.auth))
     app.state.ai_service = SimpleNamespace(runtime=SimpleNamespace(
         _supported_models=lambda: [{"providerId": "openai-codex", "id": "gpt-6-luna",
                                     "name": "GPT-6 Luna", "reasoningLevels": ["default", "high"]}],
@@ -168,9 +169,11 @@ def test_role_ai_grants_require_same_role_scope_and_verified_model():
     app.state.auth = auth
     app.state.services = SimpleNamespace(
         metadata=SimpleNamespace(ai_instance_providers=instance),
-        connections=SimpleNamespace(
-            get=lambda owner, connection: SimpleNamespace(ownership="schemii"),
-            for_product=lambda product: SimpleNamespace(list=lambda user: [])))
+        connections=_connections(auth))
+    profile = app.state.services.connections.create_schemii_owned(PostgresConnectionCreate(
+        name="Reports", host="localhost", database="reports", username="reader", password="unused"))
+    role["connections"][0]["connection_id"] = profile.id
+    source = profile.id
     verified = [{"id": "gpt-6-luna", "reasoningLevels": ["default", "high"]}]
     app.state.ai_service = SimpleNamespace(runtime=SimpleNamespace(
         instance_codex_catalog=lambda: {"verifiedModels": verified},

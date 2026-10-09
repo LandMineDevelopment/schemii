@@ -133,18 +133,21 @@ def _zen_store(request):
     return _instance_store(request)
 
 
-def _visible_connections(request, user_id, product):
-    auth = request.app.state.auth
+def _visible_connections(request, user_id, product, *, authority=None, metadata=None):
+    auth = request.app.state.auth if authority is None else authority
     services = request.app.state.services
     if not auth.user(user_id) or f"{product}:access" not in auth.capabilities(user_id):
         return []
     profiles = []
     if product != "schemer" or "schemer:author" in auth.capabilities(user_id):
-        profiles.extend(services.connections.for_product(product).list(user_id))
+        access = services.connections.for_product(product)
+        profiles.extend(access.list(user_id) if metadata is None else
+                        access.list_from_snapshot(user_id, auth, metadata))
     if product == "schemer":
         for grant in auth.dashboard_grants(user_id):
             try:
-                profile = services.connections.get(grant["connection_owner_id"], grant["connection_id"])
+                connections = services.connections if metadata is None else metadata
+                profile = connections.get(grant["connection_owner_id"], grant["connection_id"])
             except ConnectionNotFoundError:
                 continue
             profiles.append(profile)
@@ -157,16 +160,17 @@ def _visible_connections(request, user_id, product):
 
 def _admin_instance_state(request, provider_id):
     store = _instance_store(request)
-    with request.app.state.auth.store.transaction() as state:
-        users = [user_id for user_id, user in state["users"].items() if not user["disabled"]]
+    authority = request.app.state.auth.read_snapshot()
+    metadata = request.app.state.services.connections.metadata_snapshot(
+        (*authority.active_user_ids, SCHEMII_CONNECTION_OWNER_ID))
     connections = {}
-    for user_id in users:
+    for user_id in authority.active_user_ids:
         for product in ("schemii", "schemoo", "schemer"):
-            for profile in _visible_connections(request, user_id, product):
+            for profile in _visible_connections(request, user_id, product, authority=authority, metadata=metadata):
                 key = (profile["userId"], profile["product"], profile["connectionOwnerId"], profile["connectionId"])
                 connections[key] = profile
     return {**store.status(provider_id), "grants": store.list_grants(provider_id),
-            "roleGrants": _role_grants_state(request, provider_id),
+            "roleGrants": _role_grants_state(request, provider_id, authority=authority, metadata=metadata),
             "connections": list(connections.values())}
 
 
@@ -181,12 +185,14 @@ def _validate_instance_grant(body, request):
         raise ApiProblem(422, "ai_grant_database_invalid", "The user cannot access this database in the selected app.")
 
 
-def _validate_role_grant(body, request):
+def _validate_role_grant(body, request, *, authority=None, metadata=None):
     if body.roleId == PROVISIONER_ROLE_ID or body.roleId.startswith("role_personal_"):
         raise ApiProblem(422, "ai_role_scope_invalid", "Choose a managed role for role AI access.")
-    auth = request.app.state.auth
-    with auth.store.transaction() as state:
-        role = state["roles"].get(body.roleId)
+    if authority is None:
+        with request.app.state.auth.store.transaction() as state:
+            role = state["roles"].get(body.roleId)
+    else:
+        role = authority.roles.get(body.roleId)
     if role is None or not role_has_instance_scope(role, body.product,
             body.connectionOwnerId, body.connectionId):
         raise ApiProblem(422, "ai_role_scope_invalid",
@@ -195,20 +201,27 @@ def _validate_role_grant(body, request):
         if body.connectionOwnerId != SCHEMII_CONNECTION_OWNER_ID:
             raise ApiProblem(422, "ai_role_scope_invalid", "Role AI grants require a managed database.")
         try:
-            profile = request.app.state.services.connections.get(body.connectionOwnerId, body.connectionId)
+            connections = request.app.state.services.connections if metadata is None else metadata
+            profile = connections.get(body.connectionOwnerId, body.connectionId)
         except ConnectionNotFoundError:
             raise ApiProblem(422, "ai_role_scope_invalid", "The managed database is unavailable.") from None
         if profile.ownership != "schemii":
             raise ApiProblem(422, "ai_role_scope_invalid", "Role AI grants require a managed database.")
 
 
-def _role_grants_state(request, provider_id):
+def _role_grants_state(request, provider_id, *, authority=None, metadata=None):
     grants = _instance_store(request).list_role_grants(provider_id)
+    if not grants:
+        return grants
+    if authority is None:
+        authority = request.app.state.auth.read_snapshot()
+    if metadata is None:
+        metadata = request.app.state.services.connections.metadata_snapshot((SCHEMII_CONNECTION_OWNER_ID,))
     for grant in grants:
         body = RoleGrant(**{key: grant[key] for key in
                             ("roleId", "product", "connectionOwnerId", "connectionId")})
         try:
-            _validate_role_grant(body, request)
+            _validate_role_grant(body, request, authority=authority, metadata=metadata)
         except ApiProblem as problem:
             grant.update(active=False, issue=problem.message)
         else:
