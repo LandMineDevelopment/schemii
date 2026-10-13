@@ -145,6 +145,11 @@ def source_dependencies(catalog, definition):
     def domain(value):
         if not value:
             return
+        # Enabling a searchable domain creates a typed but unbound draft. It
+        # contributes no physical source until a table or model role is chosen.
+        # Keep that authoring state intact; bound references still validate below.
+        if value.get("nodeId") is None and not value.get("table"):
+            return
         table = domain_table(value, nodes.values())
         physical(table, value.get("column"))
         if value.get("labelColumn"):

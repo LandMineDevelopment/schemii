@@ -540,3 +540,80 @@ def test_legacy_contract_without_scope_is_readable_and_migrates_on_save(setup):
     migrated = api.put(url, json={"expectedRevision": 2, "name": "Selected", "definition": legacy})
     assert migrated.status_code == 200, migrated.text
     assert migrated.json()["definition"]["sourceContract"]["scope"] == "model"
+
+
+def _incomplete_domain_scope(domain):
+    return {"id": "source_picker", "kind": "conditional", "alternatives": [{"id": "choice", "inputs": [
+        {"id": "picked", "type": "source", "domain": domain}], "conditions": [
+        {"table": "people", "column": "id", "parameterId": "picked", "domain": domain}]}]}
+
+
+@pytest.mark.parametrize("domain", [
+    {}, {"table": "", "column": "", "labelColumn": ""},
+    {"table": "people", "column": ""}, {"nodeId": "people", "column": "", "labelColumn": "name"},
+])
+def test_name_only_save_preserves_persisted_incomplete_domain_draft(setup, domain):
+    from schemii.schemoo.models import ModelDefinition, ModelUpdate
+    api, model, _, _ = setup
+    # Seed a typed saved draft through the repository, representing documents
+    # accepted before source contracts became server-derived. PUT only renames it.
+    definition = ModelDefinition.model_validate({**model["definition"], "exposedFields": [
+        {"table": "people", "column": "id"}], "scopes": [_incomplete_domain_scope(domain)]})
+    saved = api.app.state.services.models.update(model["ownerId"], model["id"], ModelUpdate(
+        expected_revision=model["revision"], name=model["name"], definition=definition))
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    before = api.get(url).json()
+    response = api.put(url, json={"expectedRevision": saved.revision, "name": "Renamed draft", "definition": before["definition"]})
+    assert response.status_code == 200, response.text
+    renamed = response.json()
+    assert renamed["revision"] == saved.revision + 1 and renamed["name"] == "Renamed draft"
+    assert renamed["definition"]["scopes"] == before["definition"]["scopes"]
+    assert renamed["definition"]["sourceContract"]["scope"] == "model"
+    assert [table["name"] for table in renamed["definition"]["sourceContract"]["tables"]] == ["people"]
+    assert api.get(url).json() == renamed
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH"])
+def test_incomplete_domain_can_bind_through_put_or_patch_and_adds_server_dependencies(setup, method):
+    api, model, catalog, _ = setup
+    catalog["tables"].append({"name": "lookup", "columns": [
+        {"name": "id", "dataType": "uuid"}, {"name": "label", "dataType": "text"}, {"name": "unused", "dataType": "text"}]})
+    definition = {**model["definition"], "exposedFields": [{"table": "people", "column": "id"}],
+                  "scopes": [_incomplete_domain_scope({})]}
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    incomplete = api.put(url, json={"expectedRevision": model["revision"], "name": "In progress", "definition": definition})
+    assert incomplete.status_code == 200, incomplete.text
+    saved = incomplete.json()
+    assert [table["name"] for table in saved["definition"]["sourceContract"]["tables"]] == ["people"]
+    scope = _incomplete_domain_scope({"table": "lookup", "column": "id", "labelColumn": "label"})
+    if method == "PUT":
+        bound_definition = {**saved["definition"], "scopes": [scope]}
+        # A forged empty contract cannot omit the newly bound physical lookup.
+        bound_definition["sourceContract"] = {"scope": "model", "tables": [], "relationships": []}
+        response = api.put(url, json={"expectedRevision": saved["revision"], "name": "Bound", "definition": bound_definition})
+    else:
+        response = api.patch(url, json={"expectedRevision": saved["revision"], "scopes": {"upsert": [scope]}})
+    assert response.status_code == 200, response.text
+    bound = response.json()
+    tables = {table["name"]: table for table in bound["definition"]["sourceContract"]["tables"]}
+    assert set(tables) == {"people", "lookup"}
+    assert [column["name"] for column in tables["lookup"]["columns"]] == ["id", "label"]
+    assert bound["definition"]["exposedFields"] == saved["definition"]["exposedFields"]
+    # Domain references are dependencies even when absent from nodes/outputs.
+    catalog["tables"][1]["columns"][1]["dataType"] = "uuid"
+    drift = api.post(url + "/plan", json={"expectedRevision": bound["revision"], "explore": {"root": "people", "fields": [{"table": "people", "column": "id"}]}})
+    assert drift.status_code == 422 and drift.json()["error"]["code"] == "model_source_drift"
+    assert any(issue["table"] == "lookup" and issue.get("column") == "label" for issue in drift.json()["error"]["details"]["issues"])
+
+
+@pytest.mark.parametrize("domain", [
+    {"table": "missing", "column": ""}, {"nodeId": "missing", "column": ""},
+    {"table": "people", "column": "missing"}, {"table": "people", "column": "", "labelColumn": "missing"},
+])
+def test_incomplete_domain_saves_still_reject_nonempty_unknown_references(setup, domain):
+    api, model, _, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    definition = {**model["definition"], "scopes": [_incomplete_domain_scope(domain)]}
+    rejected = api.put(url, json={"expectedRevision": model["revision"], "name": "Must not persist", "definition": definition})
+    assert rejected.status_code == 422, rejected.text
+    assert api.get(url).json() == model

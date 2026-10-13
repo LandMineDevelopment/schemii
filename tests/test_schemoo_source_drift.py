@@ -116,3 +116,24 @@ def test_scoped_hidden_key_and_logical_join_drift_block_but_unselected_columns_d
     assert source_drift(current, rules)[0]["kind"] == "changed_column"
     current = deepcopy(source); current["tables"][0]["columns"] = []
     assert any(issue["kind"] == "removed_column" and issue["severity"] == "breaking" for issue in source_drift(current, rules))
+
+
+def test_incomplete_domain_drafts_do_not_invent_source_dependencies():
+    import pytest
+    from schemii.schemoo.catalog import source_dependencies
+    source = catalog()
+    rules = definition(source, [{"table": "child", "column": "id"}])
+    rules["edges"] = []
+    rules["scopes"] = [{"id": "picker", "alternatives": [{"conditions": [
+        {"table": "child", "column": "id", "domain": {"table": "", "column": "", "labelColumn": ""}}],
+        "inputs": [{"domain": {"table": "", "column": "", "labelColumn": ""}}]}]}]
+    assert source_dependencies(source, rules) == ({"parent": {"id"}, "child": {"id"}}, set())
+    domain = rules["scopes"][0]["alternatives"][0]["inputs"][0]["domain"]
+    domain.update(table="child", column="parent_id")
+    assert source_dependencies(source, rules)[0]["child"] == {"id", "parent_id"}
+    domain.update(column="missing")
+    with pytest.raises(ValueError, match="child.missing is unavailable"):
+        source_dependencies(source, rules)
+    domain.update(table="inaccessible", column="")
+    with pytest.raises(ValueError, match="Source inaccessible is unavailable"):
+        source_dependencies(source, rules)
