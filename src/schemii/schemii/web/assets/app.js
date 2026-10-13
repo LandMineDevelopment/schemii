@@ -907,6 +907,9 @@ const updateFitAvailability = bindCanvasFitControl({
 });
 
 let desiredViewAnalysisContexts = new Map();
+let desiredViewAnalysisSignature = null;
+let desiredViewAnalysisWorkspaceId = null;
+let desiredViewAnalysisGeneration = 0;
 let updateObjectViewAnalysis = () => {};
 
 function desiredViewAnalysisContext(view = currentCatalogView()) {
@@ -932,18 +935,26 @@ const viewAnalysis = createViewAnalysisCollection({
 
 function syncViewAnalysisSelection({ force = false, notify = false } = {}) {
   const workspaceId = state.activeWorkspace?.id;
-  const signature = viewAnalysisContextSignature(state.design?.content);
+  const desired = isDesignWorkspace() && state.design && state.catalog?.source === "design";
+  const signature = desired ? viewAnalysisContextSignature(state.design.content) : null;
+  // Compare the complete context once. Compact generations keep per-view keys
+  // linear in view count and distinguish edits, workspace switches and undo.
+  if (workspaceId !== desiredViewAnalysisWorkspaceId || signature !== desiredViewAnalysisSignature) {
+    desiredViewAnalysisGeneration += 1;
+    desiredViewAnalysisWorkspaceId = workspaceId;
+    desiredViewAnalysisSignature = signature;
+  }
   desiredViewAnalysisContexts = new Map(
-    isDesignWorkspace() && state.design && state.catalog?.source === "design"
+    desired
       ? allViews(state.catalog).map(view => [view.designId, {
-        key: `${workspaceId}:${view.designId}:${signature}`,
+        key: `${workspaceId}:${desiredViewAnalysisGeneration}:${view.designId}`,
         workspaceId,
         view,
       }])
       : [],
   );
   viewAnalysis.sync([...desiredViewAnalysisContexts.values()]);
-  return viewAnalysis.ensure(desiredViewAnalysisContext(), { force, notify });
+  return viewAnalysis.select(desiredViewAnalysisContext(), { force, notify });
 }
 
 function workspaceCanvasPositions(metadata = {}) {
@@ -3218,7 +3229,7 @@ function renderObjectsBrowser() {
       openDialog(elements.functionsDialog);
     }
   }, {
-    getViewAnalysis: view => viewAnalysis.snapshot(desiredViewAnalysisContext(view)),
+    getViewAnalysis: view => viewAnalysis.summary(desiredViewAnalysisContext(view)),
     onAnalyzeView: view => { void viewAnalysis.ensure(desiredViewAnalysisContext(view)); },
     onRetryViewAnalysis: view => {
       void viewAnalysis.ensure(desiredViewAnalysisContext(view), { force: true, notify: true });

@@ -204,6 +204,55 @@ test("analysis errors stay unknown until an explicit retry succeeds", async () =
   assert.equal(desiredViewColumnSummary(collection.snapshot(context)), "1 column");
 });
 
+test("rich analyses have an aggregate bound while lightweight counts survive eviction", async () => {
+  let calls = 0;
+  const collection = createViewAnalysisCollection({
+    maximumEntries: 3,
+    load: context => {
+      calls += 1;
+      return { outputs: [{ name: context.key }], querySteps: [{ definition: "x".repeat(16_384) }] };
+    },
+  });
+  const contexts = Array.from({ length: 300 }, (_, index) => ({ key: `view:${index}` }));
+  collection.sync(contexts);
+  await collection.select(contexts[0]);
+  for (const context of contexts.slice(1)) await collection.ensure(context);
+  assert.equal(contexts.filter(context => collection.snapshot(context).analysis).length, 3);
+  assert.equal(collection.snapshot(contexts[0]).analysis.outputs[0].name, contexts[0].key);
+  assert.equal(collection.snapshot(contexts[1]).analysis, null);
+  for (const context of contexts) {
+    const summary = collection.summary(context);
+    assert.equal(summary.analysis, undefined);
+    assert.equal(desiredViewColumnSummary(summary), "1 column");
+  }
+  assert.equal(calls, 300);
+
+  await collection.select(contexts[1]);
+  assert.equal(calls, 301, "selecting an evicted view reloads its full inspector graph");
+  assert.equal(collection.snapshot(contexts[1]).analysis.outputs[0].name, contexts[1].key);
+  assert.equal(contexts.filter(context => collection.snapshot(context).analysis).length, 3);
+  collection.clear();
+  assert.equal(contexts.some(context => collection.snapshot(context).analysis), false);
+});
+
+test("failed analyses also stay within the aggregate rich-state cache bound", async () => {
+  let calls = 0;
+  const collection = createViewAnalysisCollection({
+    maximumEntries: 2,
+    load: () => { calls += 1; throw new Error("Analysis unavailable"); },
+  });
+  const contexts = Array.from({ length: 20 }, (_, index) => ({ key: `view:${index}` }));
+  collection.sync(contexts);
+  for (const context of contexts) await collection.ensure(context);
+  assert.equal(contexts.filter(context => collection.snapshot(context).error).length, 2);
+  assert.equal(calls, 20);
+  for (const context of contexts) {
+    assert.equal(collection.summary(context).status, "error");
+    assert.equal(desiredViewColumnSummary(collection.summary(context)), "Column count unavailable");
+  }
+  collection.clear();
+});
+
 test("column summaries distinguish unknown shape from an analyzed empty result", () => {
   assert.equal(desiredViewColumnSummary(null), "Columns not analyzed");
   assert.equal(desiredViewColumnSummary({ status: "loading" }), "Analyzing columns…");

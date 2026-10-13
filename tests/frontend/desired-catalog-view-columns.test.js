@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 
@@ -114,7 +115,7 @@ function appHarness(load, design = fixture()) {
   let harness;
   function render() {
     const result = renderObjects(container, state.catalog, elements.objectsSearch.value, () => {}, {
-      getViewAnalysis: view => harness.viewAnalysis.snapshot(harness.desiredViewAnalysisContext(view)),
+      getViewAnalysis: view => harness.viewAnalysis.summary(harness.desiredViewAnalysisContext(view)),
       onAnalyzeView: view => { void harness.viewAnalysis.ensure(harness.desiredViewAnalysisContext(view)); },
       onRetryViewAnalysis: view => {
         void harness.viewAnalysis.ensure(harness.desiredViewAnalysisContext(view), { force: true, notify: true });
@@ -318,6 +319,110 @@ test("unchanged design refresh reuses analysis; a fresh page reload derives the 
   assert.equal(reloaded.calls.length, 2);
   harness.viewAnalysis.clear();
   reloaded.viewAnalysis.clear();
+});
+
+test("compact generations invalidate exact source changes and never reuse an earlier generation after undo", async () => {
+  const harness = appHarness(() => ({ outputs: [{ name: "id" }] }));
+  const view = () => allViews(harness.state.catalog).find(item => item.designId === "view_totals");
+  const key = () => harness.desiredViewAnalysisContext(view()).key;
+  const initial = key();
+  harness.state.design = structuredClone(harness.state.design);
+  harness.state.design.revision += 1;
+  harness.commit();
+  assert.equal(key(), initial);
+  harness.state.design.content.tables[0].columns[0].nullable = false;
+  harness.commit();
+  assert.equal(key(), initial, "layout/revision and unrelated nullability do not change projected shape");
+  harness.state.design.content.tables[0].columns[0].dataType = "bigint";
+  harness.commit();
+  const changed = key();
+  assert.notEqual(changed, initial);
+  harness.state.design.content.tables[0].columns[0].dataType = "integer";
+  harness.commit();
+  assert.notEqual(key(), initial, "undo cannot let an ancient async result enter the new generation");
+  assert.notEqual(key(), changed);
+  await flush();
+  harness.viewAnalysis.clear();
+});
+
+test("a full browser page keeps counts without reloading evicted inspector analyses", async () => {
+  const design = fixture();
+  design.content.tables = [];
+  design.content.views = Array.from({ length: 300 }, (_, index) => ({
+    id: `view_${index}`, name: `v${String(index).padStart(4, "0")}`, kind: "view", definition: "SELECT 1 AS id",
+  }));
+  const harness = appHarness(() => ({ outputs: [{ name: "id" }], querySteps: [{ expression: "result" }] }), design);
+  harness.render();
+  await flush();
+  assert.equal(harness.calls.length, 250);
+  const views = allViews(harness.state.catalog);
+  const retained = () => views.filter(view => harness.viewAnalysis.snapshot(harness.desiredViewAnalysisContext(view)).analysis);
+  assert.equal(retained().length, 48);
+  harness.render();
+  await flush();
+  assert.equal(harness.calls.length, 250);
+  assert.equal(summary(harness, views[0].designId), "1 column");
+
+  harness.state.selectedViewId = views[0].designId;
+  harness.commit();
+  await flush();
+  assert.equal(harness.calls.length, 251);
+  assert.equal(storyOutputs(harness).length, 1);
+  assert.equal(retained().length, 48);
+  harness.render();
+  await flush();
+  assert.equal(harness.calls.length, 251);
+  harness.viewAnalysis.clear();
+});
+
+test("large supported designs retain compact context keys and linear idle heap", () => {
+  // A fresh V8 process gives the original reviewer control's before/after GC
+  // boundary. Execute the actual app key construction and collection sync;
+  // measure the original 300-view case and the API's 5,000-view limit.
+  const control = `
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import { designToCatalog } from "./src/schemii/schemii/web/assets/design.js";
+import { viewAnalysisContextSignature } from "./src/schemii/schemii/web/assets/design-change.js";
+import { createViewAnalysisCollection } from "./src/schemii/schemii/web/assets/view-analysis.js";
+const app = readFileSync("./src/schemii/schemii/web/assets/app.js", "utf8");
+const block = app.slice(app.indexOf("let desiredViewAnalysisContexts ="), app.indexOf("function workspaceCanvasPositions("));
+const catalog = readFileSync("./src/schemii/schemii/web/assets/catalog.js", "utf8");
+const allViewsBlock = catalog.slice(catalog.indexOf("export function allViews("), catalog.indexOf("function viewListEmpty(")).replace("export ", "");
+for (const count of [300, 5000]) {
+  const views = Array.from({ length: count }, (_, index) => ({
+    id: "view_" + index, name: "view_" + index, kind: "view", definition: "SELECT 1 AS id /* " + "x".repeat(1000) + " */",
+  }));
+  const content = { tables: [], relationships: [], functions: [], views };
+  const state = { activeWorkspace: { id: "workspace", name: "memory control" }, design: { content }, activeLayer: "tables" };
+  state.catalog = designToCatalog(state.activeWorkspace, state.design);
+  let calls = 0;
+  const runtime = runInNewContext(allViewsBlock + block + "\\n({ syncViewAnalysisSelection, viewAnalysis, contexts: () => [...desiredViewAnalysisContexts.values()] })", {
+    state, createViewAnalysisCollection, viewAnalysisContextSignature,
+    isDesignWorkspace: () => true, currentCatalogView: () => null,
+    api: { analyzeDesignView: () => { calls += 1; throw new Error("Idle contexts must not analyze"); } },
+    elements: { objectsDialog: { open: false } },
+  });
+  const signatureBytes = Buffer.byteLength(viewAnalysisContextSignature(content));
+  global.gc(); const before = process.memoryUsage().heapUsed;
+  runtime.syncViewAnalysisSelection();
+  global.gc(); const heapDeltaBytes = process.memoryUsage().heapUsed - before;
+  const contexts = runtime.contexts();
+  const keyBytes = contexts.reduce((sum, context) => sum + Buffer.byteLength(context.key), 0);
+  console.log(JSON.stringify({ views: count, signatureBytes, heapDeltaBytes, keyBytes, pendingRequests: calls }));
+  assert.equal(calls, 0);
+  assert.equal(contexts.length, count);
+  assert.ok(keyBytes < count * 96, "Keys must contain compact identity/generation, not per-view design JSON");
+  assert.ok(heapDeltaBytes < 24 * 1024 * 1024, "Idle retained heap must stay linear at the supported design bound");
+  runtime.viewAnalysis.clear();
+}
+`;
+  const result = spawnSync(process.execPath, ["--expose-gc", "--input-type=module", "-e", control], {
+    cwd: new URL("../../", import.meta.url), encoding: "utf8",
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  for (const line of result.stdout.trim().split("\n")) console.log(`view-context memory control ${line}`);
 });
 
 test("the object browser analyzes only matching visible views and preserves live catalog counts", () => {
