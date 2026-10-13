@@ -39,10 +39,20 @@ comment, test run or worker dispatch. Fresh delivery IDs alone do not justify wo
 
 On startup or reconciliation, inspect open issues, linked PRs, active workers,
 retained local receipts and unfinished worktrees before assigning anything.
-Resume existing ownership where valid, preserving user changes and live peers.
-Do not dispatch duplicate work for an issue already owned by another task.
+GitHub assignees, suggested or named owners, and historical task assignments are
+obsolete and nonbinding. Preserve prior branches, PRs, worktrees, edits and evidence
+as inputs; establish fresh explicit assignments under the active coordinator
+without waiting for historical owners. Verify current assignments and live worker
+state before resuming ownership or dispatching. Prevent duplicate dispatch against
+verified current assignments, while preserving user changes and live peers.
 
 ## Select and assign
+
+The active primary coordinator owns every open and newly reported issue within
+the user's authorized backlog end to end, including implementing remaining bugs
+and features and maintaining tracker status, priorities, dependencies and rollups.
+Use subagents as needed through fresh narrow assignments with task worktrees or
+explicitly exclusive shared paths, focused verification and independent review.
 
 Every implementation uses a canonical existing issue or a genuine new,
 nonduplicate issue. Search open and closed issues and related PRs before creating

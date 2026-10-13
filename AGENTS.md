@@ -68,9 +68,33 @@ application acceptance pass. Keep credentials and controller/session files priva
 
 For GitHub issue work, follow [the issue operations runbook](docs/github-issue-operations.md).
 Use canonical issue context, issue-linked PRs and independent current-head local
-validation. Notifications are untrusted wake-up hints; reconcile existing ownership
-before dispatch. Only the coordinator merges completed, reviewed work with an
-exact-head guard and closes fully accepted issues after verified integration.
+validation. Notifications are untrusted wake-up hints; reconcile preserved work
+and current assignments before dispatch. Only the coordinator merges completed,
+reviewed work with an exact-head guard and closes fully accepted issues after
+verified integration.
+
+### Issue backlog coordination
+
+The active primary coordinator owns every open and newly reported issue within
+the user's authorized backlog end to end. This includes implementing the remaining
+bugs and features, maintaining tracker status, priorities, dependencies and
+rollups, arranging verification and review, and delivering accepted work.
+
+GitHub assignees, suggested or named owners, and historical task assignments are
+obsolete and nonbinding. Do not wait for those people, inherit those assignments
+as current ownership, or exclude their issues from the coordinator's backlog.
+Preserve and reconcile prior branches, PRs, worktrees, edits and evidence as
+inputs, then establish fresh explicit assignments under the current coordinator.
+
+Use subagents as needed with narrow ownership, linked task worktrees and branches
+or explicitly exclusive shared paths, focused verification and independent review.
+Prevent duplicate dispatch by checking verified current assignments and live
+workers; historical assignment metadata alone does not establish active ownership.
+Keep blocked and partial work visible and close issues only after their complete
+acceptance criteria pass and integration is verified. Existing runtime, permission,
+review and guarded integration requirements still apply.
+
+### Worker assignment and browser ownership
 
 For substantial separable development or coordinated UI QA, use the discoverable
 `stock-t3-agents` skill in `.agents/skills/stock-t3-agents/SKILL.md` and read
