@@ -20,6 +20,7 @@ const elements = {
   settingsButton: document.querySelector("#ai-assistant-settings"),
   status: document.querySelector("#ai-assistant-status"),
   model: document.querySelector("#ai-assistant-model"),
+  currentModel: document.querySelector("#ai-assistant-current-model"),
   reasoning: document.querySelector("#ai-assistant-reasoning"),
   settingsReasoning: document.querySelector("#ai-settings-reasoning"),
   permissions: document.querySelector("#ai-assistant-permissions"),
@@ -126,6 +127,8 @@ function updateContextControls() {
   elements.permissionsCopy.textContent = permissionSummary(chat?.capabilities || settings?.defaultCapabilities, settings?.permissionActions || []);
   const working = chat?.status === "working";
   elements.model.disabled = working;
+  elements.currentModel.textContent = elements.model.selectedOptions[0]?.textContent || "No model configured";
+  elements.currentModel.hidden = !working;
   populateScopedReasoningOptions(elements.reasoning, runtime, selectedModel(), chat?.reasoningEffort || settings?.defaultReasoningEffort || "default", working);
   elements.newButton.disabled = !models.length || working;
   elements.settingsButton.disabled = false;

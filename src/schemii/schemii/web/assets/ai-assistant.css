@@ -12,6 +12,7 @@
 }
 .ai-assistant__notice[hidden] { display: none; }
 .ai-assistant__notice[data-tone="error"] { color: #efabb1; background: #29171c; border-color: #6f3943; }
+.ai-assistant__current-model { display: none; }
 
 .ai-assistant__body {
   grid-area: body;
@@ -160,6 +161,7 @@
 @media (max-width: 640px) {
   .ai-assistant__context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ai-assistant__context > label:has(#ai-assistant-model) { grid-column: 1 / -1; }
+  .ai-assistant__context .ai-assistant__current-model:not([hidden]) { display: block; color: #cfc7e9; font-size: 12px; font-weight: 400; line-height: 1.4; text-transform: none; letter-spacing: normal; overflow-wrap: anywhere; }
   .ai-assistant__context select,
   .ai-assistant__context .ai-model-picker > input { height: 44px; font-size: 12px; }
   .ai-assistant__context .ai-model-picker > input { padding-right: 45px !important; }

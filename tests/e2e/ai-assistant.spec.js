@@ -85,104 +85,132 @@ test("header and settings model pickers refresh availability without changing co
   expect(writes).toHaveLength(0);
 });
 
-test("mobile assistant context reveals full model, reasoning and permissions while keeping the composer clear", async ({ page, request }) => {
-  const activeWorkspace = await workspace(request);
-  const modelName = "GPT-6 Luna · Shared ChatGPT workspace model for schema design and migration review";
-  const modelLabel = `${modelName} · Shared ChatGPT`;
-  const actions = Array.from({ length: 84 }, (_, index) => ({ id: `fixture.action${index}`, label: `Action ${index + 1}`, group: "Fixture actions" }));
-  const capabilities = { actionModes: Object.fromEntries(actions.map(({ id }, index) => [id, index < 8 ? "ask" : "disabled"])) };
-  const chat = { id: "chat_mobile_context_fixture", workspaceId: activeWorkspace.id, providerId: "instance-codex", modelId: "fixture-luna", title: "Mobile context", status: "idle", capabilities, reasoningEffort: "default", revision: 1 };
-  const settings = { defaultProviderId: chat.providerId, defaultModelId: chat.modelId, defaultCapabilities: capabilities, defaultReasoningEffort: "default", permissionActions: actions, revision: 1 };
-  const writes = [];
-  await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{
-    id: chat.providerId, name: "Shared ChatGPT", available: true, authenticated: true, adminManaged: true,
-    models: [{ id: chat.modelId, name: modelName, status: "active", reasoningLevels: ["default"] }],
-  }] } }));
-  await page.route("**/api/v1/schemii/ai/**", route => {
-    const path = new URL(route.request().url()).pathname;
-    if (route.request().method() !== "GET") writes.push(path);
-    const json = path.endsWith("/settings") ? settings
-      : path.endsWith("/chats") ? { chats: [chat] }
-      : path.endsWith("/messages") ? { messages: [] }
-      : path.endsWith("/proposals") ? { proposals: [] }
-      : path.endsWith("/operations") ? { operations: [] }
-      : path.endsWith("/activity") ? { events: [], nextSequence: 0 }
-      : path.endsWith("/transient-responses") ? { responses: [] }
-      : path.endsWith("/stream") ? null : chat;
-    return route.fulfill({ json });
-  });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`/?workspace=${activeWorkspace.id}`);
-  await page.getByRole("button", { name: "AI schema assistant" }).click();
-  const assistant = page.getByRole("complementary", { name: "Schemii AI" });
-  const model = assistant.getByRole("combobox", { name: "AI model", exact: true });
-  const modelDisclosure = assistant.getByRole("button", { name: "Show ai model options" });
-  const reasoning = assistant.getByRole("combobox", { name: "AI reasoning level" });
-  const permissions = assistant.getByRole("button", { name: "Permissions 8 of 84 actions" });
-  const input = assistant.getByRole("textbox", { name: "Ask about this workspace" });
-  await expect(model).toHaveValue(modelLabel);
-  await expect(reasoning).toHaveValue("default");
-  await expect(reasoning).toBeDisabled();
-  await expect(reasoning.locator("option:checked")).toHaveText("Model default");
-  await expect(permissions).toBeVisible();
-  await input.fill("Retain this unsent question");
+for (const status of ["idle", "working"]) {
+  test(`mobile assistant context reveals full model, reasoning and permissions while keeping the composer clear (${status})`, async ({ page, request }) => {
+    const activeWorkspace = await workspace(request);
+    const modelName = "GPT-6 Luna · Shared ChatGPT workspace model for schema design and migration review";
+    const modelLabel = `${modelName} · Shared ChatGPT`;
+    const actions = Array.from({ length: 84 }, (_, index) => ({ id: `fixture.action${index}`, label: `Action ${index + 1}`, group: "Fixture actions" }));
+    const capabilities = { actionModes: Object.fromEntries(actions.map(({ id }, index) => [id, index < 8 ? "ask" : "disabled"])) };
+    const chat = { id: "chat_mobile_context_fixture", workspaceId: activeWorkspace.id, providerId: "instance-codex", modelId: "fixture-luna", title: "Mobile context", status, capabilities, reasoningEffort: "default", revision: 1 };
+    const settings = { defaultProviderId: chat.providerId, defaultModelId: chat.modelId, defaultCapabilities: capabilities, defaultReasoningEffort: "default", permissionActions: actions, revision: 1 };
+    const writes = [];
+    await page.route("**/api/v1/ai/status*", route => route.fulfill({ json: { healthy: true, providers: [{
+      id: chat.providerId, name: "Shared ChatGPT", available: true, authenticated: true, adminManaged: true,
+      models: [{ id: chat.modelId, name: modelName, status: "active", reasoningLevels: ["default"] }],
+    }] } }));
+    await page.route("**/api/v1/schemii/ai/**", route => {
+      const path = new URL(route.request().url()).pathname;
+      if (route.request().method() !== "GET") writes.push(path);
+      const json = path.endsWith("/settings") ? settings
+        : path.endsWith("/chats") ? { chats: [chat] }
+        : path.endsWith("/messages") ? { messages: [] }
+        : path.endsWith("/proposals") ? { proposals: [] }
+        : path.endsWith("/operations") ? { operations: [] }
+        : path.endsWith("/activity") ? { events: [], nextSequence: 0 }
+        : path.endsWith("/transient-responses") ? { responses: [] }
+        : path.endsWith("/stream") ? null : chat;
+      return route.fulfill({ json });
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`/?workspace=${activeWorkspace.id}`);
+    await page.getByRole("button", { name: "AI schema assistant" }).click();
+    const assistant = page.getByRole("complementary", { name: "Schemii AI" });
+    const model = assistant.getByRole("combobox", { name: "AI model", exact: true });
+    const modelDisclosure = assistant.getByRole("button", { name: "Show ai model options" });
+    const reasoning = assistant.getByRole("combobox", { name: "AI reasoning level" });
+    const permissions = assistant.getByRole("button", { name: "Permissions 8 of 84 actions" });
+    const input = assistant.getByRole("textbox", { name: "Ask about this workspace" });
+    await expect(model).toHaveValue(modelLabel);
+    await expect(assistant.locator("#ai-assistant-status")).toHaveText(status === "working" ? "Working" : "Ready");
+    await expect(reasoning).toHaveValue("default");
+    await expect(reasoning).toBeDisabled();
+    await expect(reasoning.locator("option:checked")).toHaveText("Model default");
+    await expect(permissions).toBeVisible();
+    await input.fill("Retain this unsent question");
 
-  // Measure the full text, rather than treating DOM presence as readability.
-  const fitsText = locator => locator.evaluate(node => {
-    const bounds = node.getBoundingClientRect();
-    const range = document.createRange(); range.selectNodeContents(node);
-    return [...range.getClientRects()].every(rect => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.bottom <= bounds.bottom + 1);
-  });
-  expect(await fitsText(permissions.locator("strong"))).toBe(true);
-  expect(await reasoning.evaluate(select => {
-    const style = getComputedStyle(select);
-    const canvas = document.createElement("canvas").getContext("2d"); canvas.font = style.font;
-    return canvas.measureText(select.selectedOptions[0].textContent).width + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) + 24 <= select.clientWidth;
-  })).toBe(true);
-  for (const control of [model, modelDisclosure, reasoning, permissions]) {
-    const bounds = await control.boundingBox();
-    expect(bounds.height).toBeGreaterThanOrEqual(44);
-    expect(bounds.width).toBeGreaterThanOrEqual(44);
-  }
-  const [modelBounds, reasoningBounds, permissionsBounds] = await Promise.all([model.boundingBox(), reasoning.boundingBox(), permissions.boundingBox()]);
-  expect(modelBounds.y + modelBounds.height).toBeLessThanOrEqual(reasoningBounds.y);
-  expect(reasoningBounds.x + reasoningBounds.width).toBeLessThanOrEqual(permissionsBounds.x);
-  await modelDisclosure.click();
-  const selectedModel = page.getByRole("option", { name: modelLabel, exact: true });
-  await expect(selectedModel).toBeVisible();
-  expect(await fitsText(selectedModel.locator("strong"))).toBe(true);
-  await model.press("Escape");
-  await permissions.click();
-  const dialog = page.getByRole("dialog", { name: "Model & permissions" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator("select[data-permission-action]")).toHaveCount(84);
-  await expect(dialog.locator('select[data-permission-action][name="fixture.action0"]')).toHaveValue("ask");
-  await expect(dialog.locator('select[data-permission-action][name="fixture.action8"]')).toHaveValue("disabled");
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(dialog).toBeHidden();
-  await expect(input).toHaveValue("Retain this unsent question");
-  expect(writes).toHaveLength(0);
-
-  for (const viewport of [{ width: 390, height: 844 }, { width: 1280, height: 900 }]) {
-    await page.setViewportSize(viewport);
-    const [context, body, composer, prompt] = await Promise.all([
-      assistant.locator(".ai-assistant__context").boundingBox(), assistant.locator("main").boundingBox(),
-      assistant.locator("form").boundingBox(), input.boundingBox(),
-    ]);
-    expect(context.y + context.height).toBeLessThanOrEqual(body.y);
-    expect(body.height).toBeGreaterThan(100);
-    expect(body.y + body.height).toBeLessThanOrEqual(composer.y);
-    expect(prompt.y + prompt.height).toBeLessThanOrEqual(viewport.height);
-    expect(await assistant.evaluate(panel => panel.scrollWidth <= panel.clientWidth)).toBe(true);
-    if (viewport.width > 640) {
-      const [modelRect, reasoningRect, permissionRect] = await Promise.all([model.boundingBox(), reasoning.boundingBox(), permissions.boundingBox()]);
-      expect(modelRect.y).toBe(reasoningRect.y);
-      expect(modelRect.height).toBe(36);
-      expect(reasoningRect.x + reasoningRect.width).toBeLessThanOrEqual(permissionRect.x);
-      expect(context.height).toBeLessThan(110);
+    // Measure the full text, rather than treating DOM presence as readability.
+    const fitsText = locator => locator.evaluate(node => {
+      const bounds = node.getBoundingClientRect();
+      const range = document.createRange(); range.selectNodeContents(node);
+      return [...range.getClientRects()].every(rect => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.bottom <= bounds.bottom + 1);
+    });
+    expect(await fitsText(permissions.locator("strong"))).toBe(true);
+    expect(await reasoning.evaluate(select => {
+      const style = getComputedStyle(select);
+      const canvas = document.createElement("canvas").getContext("2d"); canvas.font = style.font;
+      return canvas.measureText(select.selectedOptions[0].textContent).width + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) + 24 <= select.clientWidth;
+    })).toBe(true);
+    for (const control of [model, modelDisclosure, reasoning, permissions]) {
+      const bounds = await control.boundingBox();
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
     }
-  }
-});
+    const [modelBounds, reasoningBounds, permissionsBounds] = await Promise.all([model.boundingBox(), reasoning.boundingBox(), permissions.boundingBox()]);
+    expect(modelBounds.y + modelBounds.height).toBeLessThanOrEqual(reasoningBounds.y);
+    expect(reasoningBounds.x + reasoningBounds.width).toBeLessThanOrEqual(permissionsBounds.x);
+    const currentModel = assistant.locator("#ai-assistant-current-model");
+    if (status === "working") {
+      await expect(model).toBeDisabled();
+      await expect(modelDisclosure).toBeDisabled();
+      await expect(assistant.locator("#ai-assistant-model")).toBeDisabled();
+      await expect(currentModel).toBeVisible();
+      await expect(currentModel).toHaveText(modelLabel);
+      expect(await fitsText(currentModel)).toBe(true);
+    } else {
+      await expect(currentModel).toBeHidden();
+      await expect(model).toBeEnabled();
+      await modelDisclosure.click();
+      const selectedModel = page.getByRole("option", { name: modelLabel, exact: true });
+      await expect(selectedModel).toBeVisible();
+      expect(await fitsText(selectedModel.locator("strong"))).toBe(true);
+      await model.press("Escape");
+    }
+    await permissions.click();
+    const dialog = page.getByRole("dialog", { name: "Model & permissions" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator("select[data-permission-action]")).toHaveCount(84);
+    await expect(dialog.locator('select[data-permission-action][name="fixture.action0"]')).toHaveValue("ask");
+    await expect(dialog.locator('select[data-permission-action][name="fixture.action8"]')).toHaveValue("disabled");
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(input).toHaveValue("Retain this unsent question");
+    expect(writes).toHaveLength(0);
+
+    for (const viewport of [{ width: 390, height: 844 }, { width: 1280, height: 900 }]) {
+      await page.setViewportSize(viewport);
+      const [context, body, composer, prompt] = await Promise.all([
+        assistant.locator(".ai-assistant__context").boundingBox(), assistant.locator("main").boundingBox(),
+        assistant.locator("form").boundingBox(), input.boundingBox(),
+      ]);
+      expect(context.y + context.height).toBeLessThanOrEqual(body.y);
+      expect(body.height).toBeGreaterThan(100);
+      expect(body.y + body.height).toBeLessThanOrEqual(composer.y);
+      expect(prompt.y + prompt.height).toBeLessThanOrEqual(viewport.height);
+      expect(await assistant.evaluate(panel => panel.scrollWidth <= panel.clientWidth)).toBe(true);
+      if (viewport.width > 640) {
+        await expect(currentModel).toBeHidden();
+        const [modelRect, reasoningRect, permissionRect] = await Promise.all([model.boundingBox(), reasoning.boundingBox(), permissions.boundingBox()]);
+        expect(modelRect.y).toBe(reasoningRect.y);
+        expect(modelRect.height).toBe(36);
+        expect(reasoningRect.x + reasoningRect.width).toBeLessThanOrEqual(permissionRect.x);
+        expect(context.height).toBeLessThan(110);
+      }
+    }
+    if (status === "working") {
+      await assistant.getByRole("button", { name: "Close assistant" }).click();
+      await expect(assistant).toBeHidden();
+      chat.status = "idle";
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.getByRole("button", { name: "AI schema assistant" }).click();
+      await expect(model).toBeEnabled();
+      await expect(modelDisclosure).toBeEnabled();
+      await expect(currentModel).toBeHidden();
+      await expect(input).toHaveValue("Retain this unsent question");
+      expect(writes).toHaveLength(0);
+    }
+  });
+}
 
 test("assistant keeps proposals and outcomes with the turn that created them", async ({ page, request }) => {
   // Install before navigation so native and controlled timer handles never mix.

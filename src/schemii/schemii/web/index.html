@@ -616,7 +616,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <button class="ui-icon-button compact" id="ai-assistant-close" data-ui-icon="close" aria-label="Close assistant"></button>
       </header>
       <section class="ai-assistant__context" aria-label="Assistant context">
-        <label><span>Model</span><select id="ai-assistant-model" aria-label="AI model"></select></label>
+        <label><span>Model</span><select id="ai-assistant-model" aria-label="AI model"></select><small class="ai-assistant__current-model" id="ai-assistant-current-model" hidden></small></label>
         <label><span>Reasoning</span><select id="ai-assistant-reasoning" aria-label="AI reasoning level"></select></label>
         <button class="ai-permissions-summary" id="ai-assistant-permissions" type="button"><span>Permissions</span><strong id="ai-assistant-permissions-copy">Explain only</strong></button>
         <p id="ai-assistant-disclosure">The assistant sees the saved workspace design. Every proposed change still requires your review.</p>
