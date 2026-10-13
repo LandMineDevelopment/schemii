@@ -102,8 +102,9 @@ def test_invalid_requests_rejected(catalog, changes):
 
 def test_parallel_roles_require_explicit_path(catalog):
     catalog["relationships"].append({**catalog["relationships"][0], "id": "other_org_fk"})
+    assert compile_preview(catalog, request(relationships=["org_fk", "other_org_fk"]))["usedRelationships"] == []
     with pytest.raises(ValueError, match="ambiguous"):
-        compile_preview(catalog, request(relationships=["org_fk", "other_org_fk"]))
+        compile_preview(catalog, request(relationships=["org_fk", "other_org_fk"], fields=[{"table": "org", "column": "name"}]))
 
 
 def test_null_operator_and_scalar_summary(catalog):

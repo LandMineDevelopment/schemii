@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 from sqlglot import parse_one
 
-from schemii.schemoo.prototype import compile_preview
+from schemii.schemoo.prototype import analyze_model, compile_preview
 
 
 def fixture():
@@ -59,6 +59,18 @@ def test_multiple_measures_report_each_relevant_branch_in_stable_order():
     for item in plan["repetitionDiagnostics"]:
         assert [edge["id"] for edge in item["relationships"]] == ["items", "notes"]
     assert compile_preview(catalog, query)["repetitionDiagnostics"] == plan["repetitionDiagnostics"]
+
+
+def test_unused_parallel_branch_preserves_repetition_values_and_diagnostics():
+    catalog, query = fixture()
+    expected = compile_preview(catalog, query)
+    catalog["relationships"].append({**catalog["relationships"][1], "id": "other_notes"})
+    query["relationships"].append("other_notes")
+    plan = compile_preview(catalog, query)
+    assert plan["sql"] == expected["sql"]
+    assert plan["repetitionDiagnostics"] == expected["repetitionDiagnostics"]
+    assert plan["usedRelationships"] == ["items"]
+    assert analyze_model(catalog, query)["cycleEdges"] == ["notes", "other_notes"]
 
 
 def test_sibling_path_starts_from_measure_source_and_keeps_alias_labels():

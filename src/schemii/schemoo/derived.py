@@ -5,7 +5,6 @@ before connecting the result to a model object. Definitions contain references,
 never arbitrary SQL fragments. Older owner-rooted summaries retain their grain.
 """
 
-from collections import deque
 from datetime import date
 import math
 from uuid import UUID
@@ -169,22 +168,6 @@ def attach(model):
         if edge_id in model.edges:
             raise ValueError("Relationship IDs cannot collide with derived-source associations.")
         source = definition["source"]
-        routes, queue = {source: None}, deque([source])
-        while queue:
-            previous = queue.popleft()
-            for node, _ in model.graph[previous]:
-                if node not in routes and node not in model.derived:
-                    routes[node] = previous
-                    queue.append(node)
-        for output in definition["outputs"]:
-            contributor = output.get("nodeId", source)
-            allowed = {source}
-            if contributor in routes:
-                while contributor != source:
-                    allowed.add(contributor)
-                    contributor = routes[contributor]
-            if any(condition["table"] not in allowed for condition in output.get("conditions", [])):
-                raise ValueError("Calculated-field conditions must use sources on the owner's path to that output; a condition cannot add a separate relationship branch.")
         groups = definition["groupBy"]
         connection = definition.get("connection")
         target = connection["target"] if connection else source
@@ -195,6 +178,15 @@ def attach(model):
                                 "derived": True, "enabled": True}
         model.graph[key].append((target, edge_id))
         model.graph[target].append((key, edge_id))
+    # Finish the graph before validating dependencies: the model's cached blocks
+    # must describe every relationship, including these leaf associations.
+    for definition in model.derived.values():
+        source = definition["source"]
+        for output in definition["outputs"]:
+            contributor = output.get("nodeId", source)
+            allowed = model.possible_path_nodes(source, contributor)
+            if any(condition["table"] not in allowed for condition in output.get("conditions", [])):
+                raise ValueError("Calculated-field conditions must use sources on the owner's path to that output; a condition cannot add a separate relationship branch.")
 
 
 def expression(output, value, operand, identifier, literal):

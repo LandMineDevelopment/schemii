@@ -101,7 +101,7 @@ export const helpTopics = Object.freeze({
   cycles: {
     title: "Connections and cycles",
     intro: "Connections come from the warehouse’s foreign keys. Red connections belong to a cycle: there is more than one route around part of the model, or a table connects back to itself.",
-    sections: [["Why execution stops", "This prototype needs an unambiguous connection tree. It does not guess which route the model author intended, even if a particular preview uses only part of the model."], ["Resolve a cycle", "Disable a connection that should not participate, or create a role alias and redirect the appropriate connection to it. Disabled connections remain visible but are not used."], ["Canvas colors", "Red marks cycle connections. Purple marks connections used by the current valid preview plan. Dashed connections are disabled."]],
+    sections: [["When execution stops", "Each source used by a preview, active filter, or calculated output needs one unambiguous route from its starting object. Cycles on those routes stop execution; unused cycles can stay enabled. A self-connection needs a separate role alias to select the related record."], ["Resolve a cycle", "Disable a connection that should not participate, or create a role alias and redirect the appropriate connection to it. Disabled connections remain visible but are not used."], ["Canvas colors", "Red marks cycle connections. Purple marks connections used by the current valid preview plan. Dashed connections are disabled."]],
     note: "Changing a model connection does not change or remove the warehouse foreign key. Use Staffing example for a ready-to-test acyclic model.",
   },
   fields: {
