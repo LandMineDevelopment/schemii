@@ -78,7 +78,7 @@ import { createRelationDataSource } from "./relation-data-source.js";
 import { quoteSqlIdentifier } from "./sql-identifier.js";
 import { appendDataGridPage, installAutoPageLoader } from "#common/data-grid.js";
 import { installProductNavigation } from "#common/product-navigation.js";
-import { createViewAnalysisController } from "./view-analysis.js";
+import { createViewAnalysisCollection } from "./view-analysis.js";
 import {
   catalogTableId,
   catalogViewId,
@@ -906,34 +906,55 @@ const updateFitAvailability = bindCanvasFitControl({
   onFit: scheduleCanvasViewPersistence,
 });
 
-function selectedViewAnalysisContext(view = currentCatalogView()) {
+let desiredViewAnalysisContexts = new Map();
+let desiredViewAnalysisSignature = null;
+let desiredViewAnalysisWorkspaceId = null;
+let desiredViewAnalysisGeneration = 0;
+let updateObjectViewAnalysis = () => {};
+
+function desiredViewAnalysisContext(view = currentCatalogView()) {
   if (!isDesignWorkspace() || !state.activeWorkspace || !state.design || !view?.designId) return null;
-  return {
-    key: [
-      state.activeWorkspace.id,
-      view.designId,
-      viewAnalysisContextSignature(state.design.content),
-    ].join(":"),
-    workspaceId: state.activeWorkspace.id,
-    view,
-  };
+  return desiredViewAnalysisContexts.get(view.designId) || null;
 }
 
-const viewAnalysis = createViewAnalysisController({
-  keyOf: context => context.key,
+const viewAnalysis = createViewAnalysisCollection({
   load: (context, { signal }) => api.analyzeDesignView(context.workspaceId, {
     viewId: context.view.designId,
     name: context.view.name,
     definition: context.view.queryDefinition,
   }, { signal }),
-  onChange: () => {
-    if (state.activeLayer === "views") renderSelectedViewDetail();
+  onChange: (value, context) => {
+    if (state.activeLayer === "views" && desiredViewAnalysisContext()?.key === value.key) renderSelectedViewDetail();
+    if (elements.objectsDialog.open) {
+      // Search includes metadata, so changed counts may change the matching set.
+      if (elements.objectsSearch.value) renderObjectsBrowser();
+      else updateObjectViewAnalysis(context.view.designId, value);
+    }
   },
 });
 
 function syncViewAnalysisSelection({ force = false, notify = false } = {}) {
-  const context = selectedViewAnalysisContext();
-  return viewAnalysis.select(context, { force, notify });
+  const workspaceId = state.activeWorkspace?.id;
+  const desired = isDesignWorkspace() && state.design && state.catalog?.source === "design";
+  const signature = desired ? viewAnalysisContextSignature(state.design.content) : null;
+  // Compare the complete context once. Compact generations keep per-view keys
+  // linear in view count and distinguish edits, workspace switches and undo.
+  if (workspaceId !== desiredViewAnalysisWorkspaceId || signature !== desiredViewAnalysisSignature) {
+    desiredViewAnalysisGeneration += 1;
+    desiredViewAnalysisWorkspaceId = workspaceId;
+    desiredViewAnalysisSignature = signature;
+  }
+  desiredViewAnalysisContexts = new Map(
+    desired
+      ? allViews(state.catalog).map(view => [view.designId, {
+        key: `${workspaceId}:${desiredViewAnalysisGeneration}:${view.designId}`,
+        workspaceId,
+        view,
+      }])
+      : [],
+  );
+  viewAnalysis.sync([...desiredViewAnalysisContexts.values()]);
+  return viewAnalysis.select(desiredViewAnalysisContext(), { force, notify });
 }
 
 function workspaceCanvasPositions(metadata = {}) {
@@ -2987,6 +3008,7 @@ function renderCatalogSurfaces() {
   if (elements.objectsDialog.open) renderObjectsBrowser();
   else {
     replace(elements.objectsList);
+    updateObjectViewAnalysis = () => {};
     elements.objectsCount.textContent = state.catalog ? "Open to browse live objects" : "No catalog loaded";
   }
   renderSqlTarget();
@@ -3048,8 +3070,8 @@ function renderSelectedViewDetail() {
     renderDesignViewStory(elements.viewDetail, { view: null });
     return;
   }
-  const context = selectedViewAnalysisContext(view);
-  const analysisState = viewAnalysis.snapshot();
+  const context = desiredViewAnalysisContext(view);
+  const analysisState = viewAnalysis.snapshot(context);
   const selectedState = context && analysisState.key === context.key
     ? analysisState
     : { status: "idle", analysis: null, error: null };
@@ -3175,6 +3197,7 @@ function renderObjectsBrowser() {
     || state.historySubmitting
     || tableEditor.hasDraft;
   if (!desired) {
+    updateObjectViewAnalysis = () => {};
     const result = renderRelationBrowser(elements.objectsList, {
       response: state.liveRelations,
       loading: state.liveRelationsLoading,
@@ -3205,7 +3228,14 @@ function renderObjectsBrowser() {
       renderFunctionsBrowser();
       openDialog(elements.functionsDialog);
     }
+  }, {
+    getViewAnalysis: view => viewAnalysis.summary(desiredViewAnalysisContext(view)),
+    onAnalyzeView: view => { void viewAnalysis.ensure(desiredViewAnalysisContext(view)); },
+    onRetryViewAnalysis: view => {
+      void viewAnalysis.ensure(desiredViewAnalysisContext(view), { force: true, notify: true });
+    },
   });
+  updateObjectViewAnalysis = result.updateViewAnalysis;
   elements.objectsCount.textContent = state.catalog ? `${result.shown} shown · ${result.matching} matching` : "No catalog loaded";
 }
 
