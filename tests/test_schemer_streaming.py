@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import pytest
 from types import SimpleNamespace as NS
 
@@ -44,6 +45,71 @@ def collect(services, model, **kwargs):
         return [event async for event in streaming.events(services, "owner", model,
                 [{"tileId": "tile", "plan": {"sql": "select 1", "outputLabels": ["Full name"]}}], **kwargs)]
     return asyncio.run(run())
+
+
+def test_request_start_time_precedes_admission_and_survives_completion(monkeypatch):
+    started = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(streaming, "datetime", NS(now=lambda zone: started))
+    console, services, model = setup([[["changed-after-request-start"]]])
+    reservations = []
+    original_reserve = console.reserve_read_target
+
+    def reserve(*args, **kwargs):
+        reservations.append(True)
+        return original_reserve(*args, **kwargs)
+
+    console.reserve_read_target = reserve
+
+    async def run():
+        source = streaming.events(services, "owner", model,
+            [{"tileId": "tile", "plan": {"sql": "select 1"}}])
+        first = await anext(source)
+        assert first["type"] == "start"
+        assert first["snapshotAt"] == started.isoformat()
+        assert reservations == []  # This is a request time, not DB snapshot acquisition.
+        return [first, *[event async for event in source]]
+
+    events = asyncio.run(run())
+    assert next(event for event in events if event["type"] == "complete")["snapshotAt"] == started.isoformat()
+    assert next(event for event in events if event["type"] == "rows")["rows"] == [["changed-after-request-start"]]
+    assert reservations == [True]
+    assert console.closed == ["result"]
+
+
+def test_fresh_drill_and_full_export_read_changed_source_per_request(monkeypatch):
+    times = iter(datetime(2026, 10, 13, 12, minute, tzinfo=timezone.utc) for minute in range(3))
+    monkeypatch.setattr(streaming, "datetime", NS(now=lambda zone: next(times)))
+    console, services, model = setup([])
+    source_rows = [["original"]]
+    reservations = []
+
+    def reserve(*args, **kwargs):
+        reservations.append(kwargs["console_id"])
+        console.pages = [[row[:] for row in source_rows]]
+        return console.execution
+
+    console.reserve_read_target = reserve
+    report = collect(services, model)
+    source_rows.append(["arrived-after-report"])
+    drill = collect(services, model)
+    assert next(event for event in report if event["type"] == "rows")["rows"] == [["original"]]
+    assert next(event for event in drill if event["type"] == "rows")["rows"] == source_rows
+    assert report[0]["snapshotAt"] == "2026-10-13T12:00:00+00:00"
+    assert drill[0]["snapshotAt"] == "2026-10-13T12:01:00+00:00"
+
+    source_rows.append(["arrived-before-full-export"])
+    response = streaming.response(services, "owner", model,
+        [{"tileId": "tile", "plan": {"sql": "select 1"}}], export=True)
+
+    async def download():
+        return b"".join([chunk async for chunk in response.body_iterator])
+
+    exported = asyncio.run(download()).decode()
+    assert "arrived-before-full-export" in exported
+    assert "arrived-before-full-export" not in str(drill)
+    assert response.headers["X-Schemer-Snapshot"] == "fresh"
+    assert len(set(reservations)) == 3
+    assert console.closed == ["result", "result", "result"]
 
 
 def test_stream_eagerly_drains_and_closes_before_completion():

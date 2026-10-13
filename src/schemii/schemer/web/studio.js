@@ -92,7 +92,7 @@ async function closeTileStreams(id) {
   const group = streams.get(id); streams.delete(id);
   if (group) await Promise.all([group.main, ...group.drills.values()].map(cache => cache.dispose()));
 }
-function getStream(tile, selection = null) {
+function getStream(tile, selection = null, { refresh = false } = {}) {
   let group = streams.get(tile.id);
   const create = selected => {
     const origin = dashboard;
@@ -120,6 +120,7 @@ function getStream(tile, selection = null) {
   if (!group) { group = { main: create(null), drills: new DrillCacheRegistry() }; streams.set(tile.id, group); }
   if (!selection) return group.main;
   const key = JSON.stringify(selection);
+  if (refresh) { const previous = group.drills.get(key); group.drills.delete(key); previous?.dispose(); }
   if (!group.drills.has(key)) group.drills.set(key, create(selection));
   return group.drills.get(key);
 }
@@ -268,7 +269,7 @@ async function runAll() {
 }
 function expand(tile) {
   if (!readyToRun()) return;
-  openExpanded({ tile, modelId: dashboard.modelId, canExport: permissions.export, canDrill: permissions.drill, canViewSql: permissions.edit, cache: getStream(tile), createDrillCache: selection => getStream(tile, selection), onRefresh: () => void runTile(tile) });
+  openExpanded({ tile, modelId: dashboard.modelId, canExport: permissions.export, canDrill: permissions.drill, canViewSql: permissions.edit, cache: getStream(tile), createDrillCache: (selection, options) => getStream(tile, selection, options), onRefresh: () => void runTile(tile) });
 }
 
 async function showTileSql(tile) {
