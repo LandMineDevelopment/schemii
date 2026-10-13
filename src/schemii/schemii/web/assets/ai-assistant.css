@@ -158,6 +158,16 @@
 
 
 @media (max-width: 640px) {
+  .ai-assistant__context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ai-assistant__context > label:has(#ai-assistant-model) { grid-column: 1 / -1; }
+  .ai-assistant__context select,
+  .ai-assistant__context .ai-model-picker > input { height: 44px; font-size: 12px; }
+  .ai-assistant__context .ai-model-picker > input { padding-right: 45px !important; }
+  .ai-assistant__context .ui-searchable-select__toggle { width: 44px; height: 44px; top: 0; right: 0; border: 1px solid #343e4c; border-left-color: #29333f; }
+  .ai-assistant__context .ai-permissions-summary { height: auto; min-height: 44px; padding: 7px 9px; }
+  .ai-assistant__context .ai-permissions-summary strong { font-size: 12px; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+  .ai-assistant__model-options .ui-searchable-select__option { min-height: 44px; }
+  .ai-assistant__model-options .ui-searchable-select__option strong { font-size: 12px; line-height: 1.4; white-space: normal; overflow-wrap: anywhere; }
   .ai-assistant__body { padding: 13px; }
   .ai-settings-body { padding: 14px; }
   .ai-history-item { grid-template-columns: minmax(0, 1fr) auto auto; }

@@ -90,8 +90,11 @@ let pendingProposal = null;
 let pendingProposalBatch = null;
 let proposalArmTimer = null;
 let proposalReviewOpenedAt = 0;
-const modelPickers = [elements.model, elements.settingsModel].filter(Boolean).map(select =>
-  enhanceModelPicker(select, { refresh: () => refreshProviderStatus({ refresh: true }) }));
+const modelPickers = [elements.model, elements.settingsModel].filter(Boolean).map(select => {
+  const picker = enhanceModelPicker(select, { refresh: () => refreshProviderStatus({ refresh: true }) });
+  if (select === elements.model) document.getElementById(picker.input.getAttribute("aria-controls")).classList.add("ai-assistant__model-options");
+  return picker;
+});
 
 function workspaceId() {
   return new URL(location.href).searchParams.get("workspace");
