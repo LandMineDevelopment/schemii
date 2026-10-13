@@ -18,14 +18,14 @@ import { createQueryPlanView, parseQueryPlan } from "#common/query-plan.js";
 import { confirmAction } from "#common/confirmation.js";
 import { formatElapsed } from "#common/elapsed-time.js";
 import { readExecution } from "/assets/common/query-execution.js";
-import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions } from "./model-library.js";
+import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions, openSourceSelection } from "./model-library.js";
 import { createPreviewLibrary } from "./preview-library.js";
 import { installProductNavigation } from "#common/product-navigation.js";
 import { nodeColumns } from "./model-columns.js";
 import { openDerivedSource } from "./derived-dialog.js";
 import { repetitionDiagnostics, repetitionNotice, summarySeed } from "./repetition.js";
 import { conditionSummary } from "./derived-conditions.js";
-import { reconcileSourceCatalog, acceptSourceIssue } from "./source-reconciliation.js";
+import { reconcileSourceCatalog, acceptSourceIssue, addSourceSelection } from "./source-reconciliation.js";
 import { createModelAssistant } from "#common/model-assistant.js";
 
 const $ = id => document.getElementById(id), API = "/api/v1/schemoo";
@@ -83,11 +83,21 @@ function sourceIssueNotice(issue) {
 }
 function sourceAdditionText() {
   const parts=[];
-  if(sourceAdditions.tables.length)parts.push(`${sourceAdditions.tables.length} new table${sourceAdditions.tables.length===1?"":"s"}`);
-  if(sourceAdditions.columns.length)parts.push(`${sourceAdditions.columns.length} new column${sourceAdditions.columns.length===1?"":"s"}`);
-  if(sourceAdditions.relationships.length)parts.push(`${sourceAdditions.relationships.length} new connection${sourceAdditions.relationships.length===1?"":"s"} (disabled)`);
+  if(sourceAdditions.tables.length)parts.push(`${sourceAdditions.tables.length} available source${sourceAdditions.tables.length===1?"":"s"}`);
+  if(sourceAdditions.columns.length)parts.push(`${sourceAdditions.columns.length} available field${sourceAdditions.columns.length===1?"":"s"}`);
+  if(sourceAdditions.relationships.length)parts.push(`${sourceAdditions.relationships.length} available connection${sourceAdditions.relationships.length===1?"":"s"} (add explicitly)`);
   return parts.join(" · ");
 }
+const addSources = element("button", {type:"button",className:"ui-button",text:"Add sources and fields"});
+$("graph-status").after(addSources);
+addSources.onclick = async () => {
+  if(!catalog || saveBlocked())return;
+  const currentDraft=draft,currentCatalog=catalog;
+  await openSourceSelection(currentCatalog,selection=>{
+    if(draft!==currentDraft || catalog!==currentCatalog || saveBlocked())throw new Error("The model changed. Close this dialog and review its sources again.");
+    sourceAdditions=addSourceSelection(draft,catalog,selection);refreshForms();changed({structure:true});
+  });
+};
 function currentSourceIssues(){return diagnostics.issues || diagnostics.sourceIssues || [];}
 function renderObjectSourceIssues(){
   $("object-source-issues")?.remove();
@@ -725,7 +735,7 @@ async function loadModel(id) {
   refreshForms();canvas.render();initialLayout=splitDraft(draft).layout;changed();$("workbench").inert=false;
   void previewLibrary.load(model.id);
   void assistant.modelChanged();
-  if (model.catalogFingerprint !== catalog.fingerprint && !sourceAdditionText()) showError("The source schema changed. Your model is preserved. Review the labeled source changes before saving. Reload never replaces your model with a fresh import.");
+  if (model.definition.sourceContract?.scope !== "model" && model.catalogFingerprint !== catalog.fingerprint && !sourceAdditionText()) showError("The source schema changed. Your model is preserved. Review the labeled source changes before saving. Reload never replaces your model with a fresh import.");
   return true;
 }
 

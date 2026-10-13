@@ -46,6 +46,7 @@ class SourceTableContract(Contract):
     name: Identifier
     columns: list[SourceColumnContract] = Field(default_factory=list, max_length=1000)
     primaryKey: list[Identifier] = Field(default_factory=list, max_length=32)
+    uniqueKeys: list[Annotated[list[Identifier], Field(max_length=32)]] | None = Field(default=None, max_length=1000)
 
 
 class SourceRelationshipContract(Contract):
@@ -58,6 +59,9 @@ class SourceRelationshipContract(Contract):
 
 
 class SourceContract(Contract):
+    # Documents written before scoped contracts tracked the complete catalog.
+    # New writes explicitly identify model dependencies; never infer scope from size.
+    scope: Literal["catalog", "model"] = "catalog"
     tables: list[SourceTableContract] = Field(default_factory=list, max_length=100)
     relationships: list[SourceRelationshipContract] = Field(default_factory=list, max_length=200)
 

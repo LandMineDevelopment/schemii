@@ -66,3 +66,53 @@ def test_referenced_column_removal_is_reported_once_with_review_context():
     assert matching[0]["kind"] == "removed_column"
     assert matching[0]["severity"] == "breaking"
     assert matching[0]["acknowledge"] is False
+
+
+def test_scoped_contract_retains_hidden_keys_foreign_keys_alias_filters_and_domains():
+    from schemii.schemoo.catalog import source_dependencies
+    source = catalog()
+    source["tables"].append({"name": "lookup", "primaryKey": ["code"], "uniqueKeys": [["label"]], "columns": [
+        {"name": "code", "dataType": "uuid", "nullable": False}, {"name": "label", "dataType": "text", "nullable": False}]})
+    rules = definition(source, [{"table": "child", "column": "unused"}])
+    rules["nodes"].append({"id": "role", "table": "child", "label": "Role"})
+    rules["scopes"] = [{"id": "filter", "alternatives": [{"conditions": [{"table": "role", "column": "unused", "compareColumn": "parent_id"}],
+        "inputs": [{"domain": {"table": "lookup", "column": "code", "labelColumn": "label"}}]}]}]
+    selected, relationships = source_dependencies(source, rules)
+    assert selected == {"parent": {"id"}, "child": {"id", "parent_id", "unused"}, "lookup": {"code", "label"}}
+    assert relationships == {"fk"}
+    contract = catalog_contract(source, rules)
+    assert contract["scope"] == "model" and len(contract["tables"]) == 3
+    assert contract["tables"][2]["uniqueKeys"] == [["label"]]
+    rules["sourceContract"] = contract
+    current = deepcopy(source); current["tables"][1]["columns"][1]["nullable"] = False
+    assert any(issue["kind"] == "changed_column" and issue["column"] == "parent_id" for issue in source_drift(current, rules))
+    current = deepcopy(source); current["tables"][2]["columns"][1]["dataType"] = "uuid"
+    assert any(issue["table"] == "lookup" and issue["kind"] == "changed_column" for issue in source_drift(current, rules))
+    current = deepcopy(source); current["tables"][2]["uniqueKeys"] = []
+    assert any(issue["kind"] == "changed_unique_key" for issue in source_drift(current, rules))
+    current = deepcopy(source); current["tables"][2]["uniqueKeys"].append(["code", "label"])
+    assert source_drift(current, rules) == []
+
+
+def test_scoped_derived_dependencies_include_operands_groups_connections_conditions_and_domain_labels():
+    from schemii.schemoo.catalog import source_dependencies
+    source = catalog(); rules = definition(source, [{"table": "summary", "column": "total"}])
+    rules["nodes"].append({"id": "summary", "table": "child", "derivation": {"source": "child", "kind": "aggregate", "groupBy": ["parent_id"],
+        "connection": {"target": "parent", "columns": [{"source": "parent_id", "target": "id"}]},
+        "outputs": [{"id": "total", "nodeId": "child", "column": "unused", "operand": "id", "conditions": [{"table": "child", "column": "id", "compareColumn": "parent_id"},
+            {"table": "child", "column": "unused", "domain": {"nodeId": "child", "column": "unused", "labelColumn": "parent_id"}}]}]}})
+    selected, _ = source_dependencies(source, rules)
+    assert selected["child"] == {"id", "parent_id", "unused"}
+    assert "total" not in selected["child"]
+
+
+def test_scoped_hidden_key_and_logical_join_drift_block_but_unselected_columns_do_not():
+    source = catalog(); rules = definition(source, [{"table": "child", "column": "id"}])
+    rules["edges"] = [{"id": "logical", "kind": "logical", "source": "child", "target": "parent", "sourceColumn": "parent_id", "targetColumn": "id"}]
+    rules["sourceContract"] = catalog_contract(source, rules)
+    current = deepcopy(source); current["tables"][1]["columns"][2]["dataType"] = "integer"
+    assert source_drift(current, rules) == []
+    current["tables"][1]["columns"][1]["dataType"] = "text"
+    assert source_drift(current, rules)[0]["kind"] == "changed_column"
+    current = deepcopy(source); current["tables"][0]["columns"] = []
+    assert any(issue["kind"] == "removed_column" and issue["severity"] == "breaking" for issue in source_drift(current, rules))

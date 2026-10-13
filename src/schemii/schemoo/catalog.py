@@ -5,6 +5,7 @@ from copy import deepcopy
 import hashlib
 from threading import RLock
 from time import monotonic
+from .domain import domain_table
 
 
 class ModelCatalogs:
@@ -106,18 +107,157 @@ def initial_positions(services, owner, catalog):
     return catalog
 
 
-def catalog_contract(catalog):
-    """Bounded schema-only baseline used to classify later source drift."""
+def source_dependencies(catalog, definition):
+    """Resolve authored fields and implicit join/grain inputs to physical columns.
+
+    Client contract entries are never an input to dependency discovery. Aliases
+    share one physical baseline, and calculated output IDs are not source columns.
+    """
+    tables = {table["name"]: table for table in catalog.get("tables", [])}
+    available_columns = {name: {column["name"] for column in table.get("columns", [])} for name, table in tables.items()}
+    nodes = {node["id"]: node for node in definition.get("nodes", [])}
+    relationships = {relationship["id"]: relationship for relationship in catalog.get("relationships", [])}
+    selected, used_relationships = {}, set()
+
+    def table_columns(table):
+        if table not in tables or not tables[table].get("columns"):
+            raise ValueError(f"Source {table or '(unbound)'} is unavailable or has no readable columns. Reload sources and choose an accessible source.")
+        return selected.setdefault(table, set())
+
+    def physical(table, column):
+        columns = table_columns(table)
+        if column and column not in available_columns[table]:
+            raise ValueError(f"Source column {table}.{column} is unavailable. Reload sources and review your selection.")
+        if column:
+            columns.add(column)
+
+    def reference(node_id, column):
+        node = nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Model source {node_id or '(unbound)'} is unavailable. Choose a source in this model.")
+        if node.get("derivation"):
+            available = set(node["derivation"].get("groupBy", [])) | {output["id"] for output in node["derivation"].get("outputs", [])}
+            if column not in available:
+                raise ValueError(f"Calculated field {node_id}.{column} is unavailable.")
+        else:
+            physical(node["table"], column)
+
+    def domain(value):
+        if not value:
+            return
+        table = domain_table(value, nodes.values())
+        physical(table, value.get("column"))
+        if value.get("labelColumn"):
+            physical(table, value["labelColumn"])
+
+    def condition(value):
+        # Draft saves may retain incomplete bindings for author repair.
+        if value.get("table") and value.get("column"):
+            reference(value["table"], value["column"])
+        if value.get("compareColumn") and value.get("table"):
+            reference(value["table"], value["compareColumn"])
+        domain(value.get("domain"))
+
+    for node in nodes.values():
+        if not node.get("derivation"):
+            table_columns(node["table"])
+            if definition.get("exposedFields") is None:
+                selected[node["table"]].update(column["name"] for column in tables[node["table"]]["columns"])
+    for field in definition.get("exposedFields") or []:
+        reference(field["table"], field["column"])
+    for edge in definition.get("edges", []):
+        if edge.get("kind") == "logical":
+            for side in ("source", "target"):
+                reference(edge[side], edge[f"{side}Column"])
+        else:
+            relationship = relationships.get(edge["relationshipId"])
+            if not relationship:
+                raise ValueError(f"Foreign key {edge['relationshipId']} is unavailable. Reload sources and review your selection.")
+            for side in ("source", "target"):
+                node = nodes.get(edge[side])
+                if node is None or node.get("derivation") or node["table"] != relationship[f"{side}Table"]:
+                    raise ValueError("Foreign-key connections must bind matching physical sources in this model.")
+                physical(node["table"], relationship[f"{side}Column"])
+            used_relationships.add(relationship["id"])
+    for scope in definition.get("scopes", []):
+        for alternative in scope.get("alternatives", []):
+            for item in alternative.get("conditions", []):
+                condition(item)
+            for parameter in alternative.get("inputs", []):
+                domain(parameter.get("domain"))
+    for node in nodes.values():
+        derivation = node.get("derivation")
+        if not derivation:
+            continue
+        source = derivation["source"]
+        for column in derivation.get("groupBy", []):
+            reference(source, column)
+        connection = derivation.get("connection") or {}
+        for pair in connection.get("columns", []):
+            reference(source, pair["source"])
+            reference(connection["target"], pair["target"])
+        for output in derivation.get("outputs", []):
+            contributor = output.get("nodeId", source)
+            reference(contributor, output["column"])
+            if output.get("operand"):
+                reference(contributor, output["operand"])
+            for item in output.get("conditions", []):
+                condition(item)
+    # Grain and identity assumptions need their columns even when hidden.
+    for name in list(selected):
+        for column in [*tables[name].get("primaryKey", []),
+                       *(column for key in tables[name].get("uniqueKeys", []) for column in key)]:
+            physical(name, column)
+    return selected, used_relationships
+
+
+def catalog_contract(catalog, definition=None):
+    """Schema-only baseline, scoped server-side for new model writes."""
+    selected, relationships = source_dependencies(catalog, definition) if definition is not None else (None, None)
     return {
+        "scope": "model" if selected is not None else "catalog",
         "tables": [{"name": table["name"], "primaryKey": list(table.get("primaryKey", [])),
+                    **({"uniqueKeys": deepcopy(table.get("uniqueKeys", []))} if selected is not None else {}),
                     "columns": [{"name": column["name"], "dataType": column.get("dataType", ""),
                                  "nullable": column.get("nullable", True)}
-                                for column in table.get("columns", [])]}
-                   for table in catalog.get("tables", [])],
+                                for column in table.get("columns", [])
+                                if selected is None or column["name"] in selected[table["name"]]]}
+                   for table in catalog.get("tables", []) if selected is None or table["name"] in selected],
         "relationships": [{key: relationship.get(key, "") for key in
                            ("id", "name", "sourceTable", "sourceColumn", "targetTable", "targetColumn")}
-                          for relationship in catalog.get("relationships", [])],
+                          for relationship in catalog.get("relationships", [])
+                          if relationships is None or relationship["id"] in relationships],
     }
+
+
+def model_source_contract(catalog, definition, previous=None):
+    """Derive membership from the model; preserve unacknowledged saved assumptions.
+
+    An acknowledgement is accepted only when it exactly matches live metadata.
+    Omitting or fabricating client entries cannot omit a required dependency or
+    replace the server's prior baseline. New dependencies use live metadata.
+    """
+    current = catalog_contract(catalog, definition)
+    prior = (previous or {}).get("sourceContract") or {}
+    proposed = definition.get("sourceContract") or {}
+    prior_tables = {table["name"]: table for table in prior.get("tables", [])}
+    proposed_tables = {table["name"]: table for table in proposed.get("tables", [])}
+    for table in current["tables"]:
+        saved, submitted = prior_tables.get(table["name"], {}), proposed_tables.get(table["name"], {})
+        for key in ("primaryKey", "uniqueKeys"):
+            if saved.get(key) is not None and submitted.get(key) != table[key]:
+                table[key] = deepcopy(saved[key])
+        old_columns = {column["name"]: column for column in saved.get("columns", [])}
+        submitted_columns = {column["name"]: column for column in submitted.get("columns", [])}
+        table["columns"] = [deepcopy(old_columns[column["name"]])
+                            if column["name"] in old_columns and submitted_columns.get(column["name"]) != column
+                            else column for column in table["columns"]]
+    old_relationships = {relationship["id"]: relationship for relationship in prior.get("relationships", [])}
+    submitted_relationships = {relationship["id"]: relationship for relationship in proposed.get("relationships", [])}
+    current["relationships"] = [deepcopy(old_relationships[relationship["id"]])
+                                if relationship["id"] in old_relationships and submitted_relationships.get(relationship["id"]) != relationship
+                                else relationship for relationship in current["relationships"]]
+    return current
 
 
 def source_drift(catalog, definition):
@@ -125,6 +265,7 @@ def source_drift(catalog, definition):
     contract = definition.get("sourceContract")
     if not contract:
         return []
+    scoped = contract.get("scope") == "model"
     live_tables = {table["name"]: table for table in catalog.get("tables", [])}
     nodes_by_table = {}
     for node in definition.get("nodes", []):
@@ -164,31 +305,35 @@ def source_drift(catalog, definition):
         if not live:
             continue  # source_issues reports modeled missing tables with repair context
         node_ids = nodes_by_table.get(expected["name"], [])
-        if list(expected.get("primaryKey", [])) != list(live.get("primaryKey", [])) and node_ids:
+        if list(expected.get("primaryKey", [])) != list(live.get("primaryKey", [])) and (node_ids or scoped):
             issues.append({"kind": "changed_primary_key", "severity": "breaking", "table": expected["name"],
                            "nodeIds": node_ids, "expected": expected.get("primaryKey", []), "current": live.get("primaryKey", []),
                            "acknowledge": True,
                            "message": f"Primary key changed on {expected['name']}: {expected.get('primaryKey', []) or 'none'} → {live.get('primaryKey', []) or 'none'}. Review joins and summary grain before accepting it."})
+        if scoped and expected.get("uniqueKeys") is not None and any(key not in live.get("uniqueKeys", []) for key in expected["uniqueKeys"]):
+            issues.append({"kind": "changed_unique_key", "severity": "breaking", "table": expected["name"],
+                           "nodeIds": node_ids, "acknowledge": True,
+                           "message": f"Unique keys changed on {expected['name']}. Review summary grain before accepting them."})
         live_columns = {column["name"]: column for column in live.get("columns", [])}
         for column in expected.get("columns", []):
             current = live_columns.get(column["name"])
             if not current:
                 # Unrestricted exposure follows the live catalog, so a removed
                 # column only blocks when an explicit rule/output still uses it.
-                affected = [node_id for node_id in node_ids if (node_id, column["name"]) in referenced]
-                issues.append({"kind": "removed_column", "severity": "breaking" if affected else "warning",
+                affected = [node_id for node_id in node_ids if scoped or (node_id, column["name"]) in referenced]
+                issues.append({"kind": "removed_column", "severity": "breaking" if scoped or affected else "warning",
                                "table": expected["name"], "column": column["name"], "nodeIds": affected or node_ids,
-                               "acknowledge": not affected,
+                               "acknowledge": not (scoped or affected),
                                "message": f"Source column {expected['name']}.{column['name']} was removed." +
-                               (" Repair model fields, filters, or calculations that use it." if affected else " It was not exposed by this model.")})
+                               (" Repair model fields, keys, filters, or calculations that use it." if scoped or affected else " It was not exposed by this model.")})
                 continue
-            affected = [node_id for node_id in node_ids if unrestricted or (node_id, column["name"]) in referenced]
+            affected = [node_id for node_id in node_ids if scoped or unrestricted or (node_id, column["name"]) in referenced]
             changes = []
             if column.get("dataType", "") != current.get("dataType", ""):
                 changes.append(f"type {column.get('dataType') or 'unknown'} → {current.get('dataType') or 'unknown'}")
             if column.get("nullable", True) != current.get("nullable", True):
                 changes.append(f"nullable {column.get('nullable', True)} → {current.get('nullable', True)}")
-            if changes and affected:
+            if changes and (scoped or affected):
                 issues.append({"kind": "changed_column", "severity": "breaking", "table": expected["name"],
                                "column": column["name"], "nodeIds": affected, "acknowledge": True,
                                "message": f"Referenced column {expected['name']}.{column['name']} changed ({'; '.join(changes)}). Review filters and calculations before accepting it."})

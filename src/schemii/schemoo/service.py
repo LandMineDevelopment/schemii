@@ -3,7 +3,7 @@
 from schemii.common.api.errors import ApiProblem
 from pydantic import ValidationError
 from sqlglot import exp, parse_one
-from .catalog import source_issues
+from .catalog import source_issues, model_source_contract
 from .models import ModelDefinition, ModelUpdate, ExploreState
 from .store import ModelConflictError
 from .prototype import analyze_model, compile_preview, validate_definition
@@ -81,6 +81,11 @@ def patch_model_definition(services, owner, model_id, body):
     # requests rather than acknowledging a no-op as a successful edit.
     validation = definition.model_copy(update={"exposedFields": [*(definition.exposedFields or []), *body.expose]})
     validate_model_definition(catalog, validation)
+    try:
+        definition = ModelDefinition.model_validate({**document(definition), "sourceContract": model_source_contract(
+            catalog, document(definition), document(current.definition))})
+    except (ValidationError, ValueError) as error:
+        raise ApiProblem(422, "invalid_model_definition", "Selected sources or their required dependencies are unavailable or exceed the source-contract limits.") from error
     return services.models.update(owner, model_id, ModelUpdate(
         expected_revision=body.expected_revision, name=body.name if body.name is not None else current.name,
         definition=definition, catalog_fingerprint=current.catalog_fingerprint))
@@ -120,7 +125,7 @@ def plan_query(catalog, definition, explore, fingerprint="", *, _bounded=True,
     except ValueError as error:
         raise ApiProblem(422, "invalid_model_query", str(error),
                          details={**diagnostics, **getattr(error, "details", {})}) from error
-    if fingerprint and fingerprint != catalog["fingerprint"]:
+    if fingerprint and fingerprint != catalog["fingerprint"] and (rules.get("sourceContract") or {}).get("scope") != "model":
         result["warnings"].append("The source schema changed since this model was saved. Referenced objects were revalidated; the model was not replaced.")
     result["warnings"].extend(issue["message"] for issue in issues)
     return {**diagnostics, **result, "sourceIssues": issues, "catalogFingerprint": catalog["fingerprint"]}
