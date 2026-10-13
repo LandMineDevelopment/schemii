@@ -11,6 +11,7 @@ from collections import deque
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from functools import cached_property
 import math
 import re
 from uuid import UUID
@@ -218,27 +219,82 @@ class _Model:
                 raise ValueError("Contains date requires a PostgreSQL daterange source column.")
         return node
 
+    @cached_property
+    def relationship_blocks(self):
+        """Biconnected edge blocks, including distinct parallel edges and loops.
+
+        The block/object graph is a forest. Its unique routes distinguish an
+        unused cycle hanging from an articulation from a cycle on a needed path.
+        """
+        discovered, low, stack, blocks, loops = {}, {}, [], [], set()
+
+        def visit(node, parent_edge=None):
+            discovered[node] = low[node] = len(discovered)
+            for neighbor, key in self.graph[node]:
+                if key == parent_edge:
+                    continue
+                if neighbor == node:
+                    if key not in loops:
+                        blocks.append({key})
+                        loops.add(key)
+                elif neighbor not in discovered:
+                    stack.append(key)
+                    visit(neighbor, key)
+                    low[node] = min(low[node], low[neighbor])
+                    if low[neighbor] >= discovered[node]:
+                        block = set()
+                        while True:
+                            edge = stack.pop()
+                            block.add(edge)
+                            if edge == key:
+                                break
+                        blocks.append(block)
+                elif discovered[neighbor] < discovered[node]:
+                    stack.append(key)
+                    low[node] = min(low[node], discovered[neighbor])
+
+        for node in self.nodes:
+            if node not in discovered:
+                visit(node)
+        return blocks
+
     def cycles(self):
-        # TODO(schemoo-graph): Replace the per-edge BFS below with one Tarjan
-        # bridge-finding DFS (tracking parent edge IDs so parallel FKs and self
-        # loops remain correct). Keep model-wide cycle edges available for red
-        # canvas diagnostics, but only let cycles in a compiled query's
-        # participating subgraph block that preview.
-        # An undirected edge belongs to a cycle exactly when its endpoints are
-        # still connected after removing that edge. Handles aliases/self/parallel.
-        cycles = []
-        for key, edge in self.edges.items():
-            if not edge.get("enabled", True):
-                continue
-            visited, queue = {edge["source"]}, deque([edge["source"]])
-            while queue:
-                for neighbor, candidate in self.graph[queue.popleft()]:
-                    if candidate != key and neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-            if edge["target"] in visited:
-                cycles.append(key)
-        return cycles
+        cyclic = set()
+        for block in self.relationship_blocks:
+            key = next(iter(block))
+            if len(block) > 1 or self.edges[key]["source"] == self.edges[key]["target"]:
+                cyclic.update(block)
+        return [key for key in self.edges if key in cyclic]
+
+    def possible_path_nodes(self, source, target):
+        """All objects on simple source/target routes, for authored dependencies.
+
+        Cyclic blocks on that route can have several valid authored paths. Blocks
+        hanging off the route cannot contribute conditions, even when cyclic.
+        Execution separately requires a unique route for each participating source.
+        """
+        graph: dict[str | int, list[str | int]] = {node: [] for node in self.nodes}
+        members = []
+        for index, block in enumerate(self.relationship_blocks):
+            nodes = {self.edges[key][side] for key in block for side in ("source", "target")}
+            members.append(nodes)
+            graph[index] = list(nodes)
+            for node in nodes:
+                graph[node].append(index)
+        parents, queue = {source: None}, deque([source])
+        while queue:
+            previous = queue.popleft()
+            for node in graph[previous]:
+                if node not in parents:
+                    parents[node] = previous
+                    queue.append(node)
+        result = {source}
+        if target in parents:
+            node = target
+            while node != source:
+                result.update(members[node] if isinstance(node, int) else {node})
+                node = parents[node]
+        return result
 
 
 def analyze_model(catalog: dict, request: dict) -> dict:
@@ -258,8 +314,6 @@ def validate_definition(catalog: dict, definition: dict) -> dict:
     if root not in model.nodes or root in model.derived:
         raise ValueError("Choose a known physical model object as the starting object.")
     cycles = model.cycles()
-    if cycles:
-        raise ModelValidationError("Enabled relationships contain cycles or ambiguous paths. Disable cycle edges or create separate aliases.", cycleEdges=cycles)
     for field in definition.get("exposedFields") or []:
         model.validate(field)
     for scope in definition.get("scopes", []):
@@ -403,11 +457,21 @@ def _path_nodes(
             "Choose a connected starting object or enable the intended relationships.",
             **details,
         )
-    result = {root}
+    result, used_edges = {root}, set()
     for node in nodes:
         while node != root:
             result.add(node)
-            node = parents[node][0]
+            node, key = parents[node]
+            used_edges.add(key)
+    cycles = model.cycles()
+    ambiguous = [key for key in cycles if key in used_edges]
+    if ambiguous:
+        raise ModelValidationError(
+            "Participating relationships contain cycles or ambiguous paths. "
+            "Disable cycle edges or create separate aliases for the intended route.",
+            cycleEdges=cycles,
+            ambiguousRelationships=ambiguous,
+        )
     return result
 
 
@@ -421,12 +485,6 @@ def _validate_preview_request(
 ) -> _ValidatedPreview:
     """Validate request shape and resolve authored scope alternatives."""
     model = _Model(catalog, request)
-    cycle_edges = model.cycles()
-    if cycle_edges:
-        raise ModelValidationError(
-            "Enabled relationships contain cycles or ambiguous paths. Disable cycle edges or create separate aliases.",
-            cycleEdges=cycle_edges,
-        )
     root = request.get("root")
     if not isinstance(root, str) or root not in model.nodes:
         raise ValueError("Choose a known root table.")
@@ -767,6 +825,7 @@ class _PreviewCompiler:
                 if other not in routes:
                     routes[other] = (previous, edge)
                     queue.append(other)
+        _path_nodes(base_model, routes, owner, {output.get("nodeId", owner) for output in outputs})
         contributor_paths = []
         for output in outputs:
             contributor = output.get("nodeId", owner)
