@@ -4,7 +4,14 @@ Release: [demo-v0.1.0](https://github.com/LandMineDevelopment/schemii/releases/t
 
 ## Start it
 
-On this machine, run this from any directory:
+From the main project folder, run the committed shell script:
+
+```bash
+./start-demo.sh
+```
+
+It uses the same frozen release as the machine shortcut, which works from any
+directory:
 
 ```bash
 schemii-demo

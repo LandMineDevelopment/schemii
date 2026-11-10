@@ -20,7 +20,7 @@ The launcher may use Docker on the host as an implementation detail. Application
 ## Published interview demo
 
 - The published demo snapshot is `demo-v0.1.0`: <https://github.com/LandMineDevelopment/schemii/releases/tag/demo-v0.1.0>.
-- When asked to run the published Schemii demo on this machine, run `schemii-demo` from any directory. Use `schemii-demo --version` to report its tag and exact commit.
+- When asked to run the published Schemii demo on this machine, run `./start-demo.sh` from the main project folder or `schemii-demo` from any directory. Both use the same frozen release. Pass `--version` to report its tag and exact commit.
 - The command uses the frozen checkout at `/home/kasey/.local/share/schemii/releases/demo-v0.1.0` and delegates stack operations to that version's `start.sh --demo`. It refuses a changed or mismatched checkout.
 - Wait for its authenticated database/catalog/row checks through both HTTPS origins. Share the workspace links and private credentials-file path it prints; do not publish credential values or `.schemii/` data.
 - Demo login is `demo-admin`. Its retained credentials and workspace are shared with the primary checkout and survive repeat launches. Never reset accounts or demo data just to start it.

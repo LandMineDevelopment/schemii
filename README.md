@@ -41,7 +41,13 @@ For a Tailscale-connected device, use the configured private preview at <https:/
 
 The named demo snapshot is
 [`demo-v0.1.0`](https://github.com/LandMineDevelopment/schemii/releases/tag/demo-v0.1.0).
-On this machine, any agent can start that version from any directory:
+From the main project folder, start that version with the shell script:
+
+```bash
+./start-demo.sh
+```
+
+On this machine, the equivalent command from any directory is:
 
 ```bash
 schemii-demo
