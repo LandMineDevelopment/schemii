@@ -133,6 +133,23 @@ def test_private_ignored_runtime_state_does_not_prevent_launch(release):
     assert private.read_text() == "private test-owned state\n"
 
 
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_concealed_tracked_edits_cannot_launch(release, flag):
+    root = release[0]
+    git(root, "update-index", flag, "start.sh")
+    path = root / "start.sh"
+    changed = path.read_text() + "# concealed source change\n"
+    path.write_text(changed)
+    assert git(root, "status", "--porcelain") == ""
+
+    result = run(release)
+
+    assert result.returncode == 1
+    assert "index flags that can hide source changes" in result.stderr
+    assert not launched(release)
+    assert path.read_text() == changed
+
+
 def test_version_reports_exact_commit_and_release_without_launching(release):
     result = run(release, "--version")
 

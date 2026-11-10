@@ -27,6 +27,7 @@ schemii-demo --version
 The output includes the tag, exact Git commit and release URL. Keep this checkout
 clean; edit the development worktree when changing the application. New published
 demo versions should get new tags and directories rather than moving this tag.
+Git index flags that could conceal source edits also stop the launch.
 
 ## Login and data
 

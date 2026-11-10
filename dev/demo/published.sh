@@ -35,6 +35,13 @@ release_head="$(git -C "$ROOT_DIR" rev-parse --verify "refs/tags/${VERSION}^{com
   || fail "The ${VERSION} tag is missing. Fetch the published release tag before running schemii-demo."
 [[ "$head" == "$release_head" ]] \
   || fail "This checkout is not ${VERSION}. Use the frozen release checkout; no source was changed."
+index_entries="$(git -C "$ROOT_DIR" ls-files -v)" \
+  || fail 'The published demo source index cannot be verified.'
+while IFS= read -r entry; do
+  case "$entry" in
+    [a-zS]\ *) fail 'The published demo has index flags that can hide source changes. Preserve the checkout and reinstall the release.' ;;
+  esac
+done <<< "$index_entries"
 changes="$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)" \
   || fail 'The published demo source cannot be checked. Reinstall the published release.'
 [[ -z "$changes" ]] \
