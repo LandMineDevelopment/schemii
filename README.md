@@ -404,6 +404,27 @@ workflow remains under `.github/workflows/`.
 ./start.sh
 ```
 
+For a ready-to-present demo, run:
+
+```bash
+./start.sh --demo
+```
+
+This starts the complete HTTPS stack, prepares a dedicated `demo-admin` account
+with access to all three products, and creates its saved **Schemii interview demo**
+connection and imported **Bookstore demo** workspace. It verifies administrator login,
+database connectivity, catalog access, and real bookstore rows through both the
+local and Tailscale HTTPS origins before reporting ready. The output includes
+direct workspace links and the path to a private credentials file.
+
+Repeat the same command to resume the demo. Credentials are retained in the
+primary checkout's `.schemii/demo/` directory across linked worktrees. Existing
+demo designs and database rows are preserved. Changed, disabled, or conflicting
+demo accounts and retargeted connections stop preparation with an error rather
+than overwriting them. Use `SCHEMII_DEMO_STATE_DIRECTORY` only when intentionally
+selecting a different private state directory. This mode does not enable or
+configure an external AI provider; those connections remain account-managed.
+
 Open <https://localhost:8001/> and create a connection with:
 
 | Field | Value |
