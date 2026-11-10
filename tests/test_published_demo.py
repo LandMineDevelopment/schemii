@@ -29,8 +29,8 @@ def install_files(root: Path) -> Path:
     start = root / "start.sh"
     start.write_text(
         "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$@\" >> \"$LAUNCH_RECORD\"\n"
-        "exit \"${LAUNCH_STATUS:-0}\"\n",
+        'printf \'%s\\n\' "$@" >> "$LAUNCH_RECORD"\n'
+        'exit "${LAUNCH_STATUS:-0}"\n',
         encoding="utf-8",
     )
     start.chmod(0o755)
@@ -89,7 +89,9 @@ def test_launcher_failure_is_preserved_without_retry(release):
     assert Path(release[2]["LAUNCH_RECORD"]).read_text() == "--demo\n"
 
 
-@pytest.mark.parametrize("changed", ["missing-tag", "different-commit", "different-tag"])
+@pytest.mark.parametrize(
+    "changed", ["missing-tag", "different-commit", "different-tag"]
+)
 def test_other_versions_cannot_launch(release, changed):
     root = release[0]
     if changed == "missing-tag":
@@ -160,7 +162,9 @@ def test_version_reports_exact_commit_and_release_without_launching(release):
     assert not launched(release)
 
 
-def test_help_explains_canonical_launch_and_private_credentials_without_launching(release):
+def test_help_explains_canonical_launch_and_private_credentials_without_launching(
+    release,
+):
     result = run(release, "--help")
 
     assert result.returncode == 0
