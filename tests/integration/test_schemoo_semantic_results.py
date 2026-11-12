@@ -481,7 +481,14 @@ def test_calculated_summary_model_input_is_applied_after_grouping(execute,behavi
     prefix, sql = calculated_sql(plan)
     assert sorted(execute(prefix+sql)) == expected
     assert plan["parameterValues"] == {"count":{"minimum":1}}
-    assert "GROUP BY" in sql and ("summary_filter" in sql or "EXISTS" in sql)
+    # The result oracle above distinguishes post-group qualification (count 2)
+    # from filtering raw inputs. Both a wrapper and an outer WHERE are valid.
+    from sqlglot import exp, parse_one
+    statement = parse_one(sql, read="postgres")
+    assert any(select.args.get("group") for select in statement.find_all(exp.Select))
+    count_filter = next(column for column in statement.find_all(exp.Column) if column.name == "n" and isinstance(column.parent, exp.Coalesce) and column.find_ancestor(exp.Where))
+    assert count_filter.find_ancestor(exp.Where)
+    assert not count_filter.find_ancestor(exp.Select).args.get("group")
 
 
 def test_calculated_postgres_type_promotions_match_validated_field_metadata(execute):
@@ -497,3 +504,28 @@ def test_calculated_postgres_type_promotions_match_validated_field_metadata(exec
     labels = ["N","Sum","Big","Average","Date","List"]
     actual = execute(prefix+"SELECT "+", ".join(f'pg_typeof(q."Types.{label}")::text' for label in labels)+f" FROM ({sql}) AS q LIMIT 1")[0]
     assert actual == [model_field_details(catalog,query,"types",name)["dataType"] for name in ids] == ["bigint","bigint","numeric","numeric","date","text"]
+
+
+def test_calculated_precision_zoned_timestamp_uses_the_requested_calendar_day(execute):
+    from datetime import date
+    from sqlglot import parse_one
+    from schemii.schemer.dashboard_models import TimeAnalysis
+    from schemii.schemer.time_analysis import bucket_expression, source_type
+    from schemii.schemoo.models import ModelDefinition
+    catalog = {"tables":[{"name":"events","primaryKey":["id"],"columns":[
+        {"name":"id","dataType":"integer"},{"name":"at","dataType":"timestamp(6) with time zone"}]}],"relationships":[]}
+    query = {"root":"events","nodes":[{"id":"events","table":"events","label":"Events"},
+        {"id":"summary","table":"events","label":"Summary","derivation":{"kind":"aggregate","source":"events","groupBy":["id"],"outputs":[
+            {"id":"earliest","label":"Earliest","operation":"min","column":"at"}]}}],
+        "fields":[{"table":"events","column":"id"},{"table":"summary","column":"earliest"}]}
+    definition = ModelDefinition.model_validate({key:value for key,value in query.items() if key!="fields"})
+    kind = source_type(catalog,definition,"summary","earliest")
+    analysis = TimeAnalysis(table="summary",column="earliest",granularity="day",timezone="America/New_York")
+    statement = parse_one(compile_preview(catalog,query)["sql"].replace('"public"."events"','"events"'),read="postgres")
+    output = statement.expressions[1]
+    output.set("this",bucket_expression(output.this,analysis,kind))
+    sql = """WITH events(id,at) AS (VALUES
+        (1,CAST('2024-01-01 02:30:00+00' AS timestamp(6) with time zone)),
+        (2,CAST('2024-01-01 06:30:00+00' AS timestamp(6) with time zone)))
+    """ + statement.sql(dialect="postgres")
+    assert sorted(execute(sql)) == [[1,date(2023,12,31)],[2,date(2024,1,1)]]

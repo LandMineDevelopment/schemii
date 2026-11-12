@@ -7,6 +7,7 @@ never arbitrary SQL fragments. Older owner-rooted summaries retain their grain.
 
 from datetime import date
 import math
+import re
 from uuid import UUID
 
 from .models import Derivation
@@ -30,7 +31,7 @@ def unique_keys(model, source):
 
 
 def type_family(details):
-    value = details.get("dataType", details.get("data_type", "")).lower().split("(")[0].strip()
+    value = normalized_type(details.get("dataType", details.get("data_type", "")))
     if value in NUMERIC_TYPES:
         return "numeric"
     if value in {"text", "varchar", "character varying", "char", "character"}:
@@ -47,7 +48,7 @@ def validate_conditions(model, output, owner, kind):
             model.validate(condition)
             continue
         details = field_details(model, node, column)
-        data_type = details.get("dataType", details.get("data_type", "")).lower().split("(")[0].strip()
+        data_type = normalized_type(details.get("dataType", details.get("data_type", "")))
         if condition.get("valueSource") == "today":
             if data_type and data_type != "date" and not data_type.startswith("timestamp"):
                 raise ValueError("Today conditions require a date or timestamp source column.")
@@ -91,12 +92,12 @@ def validate_conditions(model, output, owner, kind):
                 raise ValueError(f"The condition on {model.nodes[node]['label']}.{column} requires a valid {data_type} value.") from None
 
 
-TYPE_ALIASES = {"int2":"smallint", "int4":"integer", "int":"integer", "int8":"bigint", "decimal":"numeric", "float4":"real", "float8":"double precision"}
+TYPE_ALIASES = {"int2":"smallint", "int4":"integer", "int":"integer", "int8":"bigint", "decimal":"numeric", "float4":"real", "float8":"double precision", "timestamptz":"timestamp with time zone", "timetz":"time with time zone"}
 NUMERIC_ORDER = ["smallint", "integer", "bigint", "numeric", "real", "double precision"]
 
 
 def normalized_type(value):
-    value = value.lower().split("(")[0].strip()
+    value = " ".join(re.sub(r"\([^)]*\)", "", value.lower()).split())
     return TYPE_ALIASES.get(value, value)
 
 

@@ -134,3 +134,44 @@ def test_calculated_source_types_share_validated_order_independent_model_metadat
     definition.nodes[0].derivation.outputs[0].column = "missing"
     with pytest.raises(ValueError,match=r"row.total.*summary.missing"):
         source_type(catalog,definition,"row","total")
+
+
+@pytest.mark.parametrize("data_type,kind,zoned",[
+    ("timestamp(6) with time zone","timestamp with time zone",True),
+    ("timestamp with time zone","timestamp with time zone",True),
+    ("timestamp(6) without time zone","timestamp without time zone",False),
+    ("timestamp(6)","timestamp",False),
+])
+def test_calculated_timestamp_precision_preserves_calendar_zone_conversion(data_type,kind,zoned):
+    from sqlglot import exp
+    from schemii.schemoo.models import ModelDefinition
+    from schemii.schemer.time_analysis import source_type, bucket_expression
+    catalog = {"tables":[{"name":"events","primaryKey":["id"],"columns":[
+        {"name":"id","dataType":"integer"},{"name":"at","dataType":data_type}]}],"relationships":[]}
+    definition = ModelDefinition.model_validate({"root":"events","nodes":[{"id":"events","table":"events","label":"Events"},
+        {"id":"summary","table":"events","label":"Summary","derivation":{"kind":"aggregate","source":"events","groupBy":["id"],"outputs":[
+            {"id":"earliest","label":"Earliest","operation":"min","column":"at"}]}}]})
+    calculated = source_type(catalog,definition,"summary","earliest")
+    assert calculated == kind
+    analysis = TimeAnalysis(table="summary",column="earliest",granularity="day",timezone="America/New_York")
+    # The 02:30 UTC instant belongs to the preceding New York calendar day;
+    # conversion must precede DATE_TRUNC instead of truncating a naive value.
+    sql = bucket_expression(exp.column("earliest"),analysis,calculated).sql(dialect="postgres")
+    assert ("AT TIME ZONE 'America/New_York'" in sql) is zoned
+    assert parse_one(sql,read="postgres").find(exp.TimestampTrunc) is not None
+
+
+def test_calculated_zoned_timestamp_calendar_plan_keeps_local_day_boundary(context):
+    from schemii.schemoo.models import ModelNode
+    dashboard, tile, model = timed(context,granularity="day",timezone="America/New_York")
+    catalog = queries.model_catalog(None,None,model)
+    catalog["tables"][0]["primaryKey"] = ["id"]
+    next(column for column in catalog["tables"][0]["columns"] if column["name"]=="created_at")["dataType"] = "timestamp(6) with time zone"
+    model.definition.nodes.append(ModelNode.model_validate({"id":"summary","table":"people","label":"Summary","derivation":{
+        "kind":"aggregate","source":"people","groupBy":["id"],"outputs":[{"id":"earliest","label":"Earliest","operation":"min","column":"created_at"}]}}))
+    tile.dimensions = [field("summary","earliest")]
+    tile.time_analysis = TimeAnalysis(table="summary",column="earliest",granularity="day",timezone="America/New_York")
+    dashboard.tiles = [tile]
+    _, plan = queries.tile_plan(None,None,dashboard,tile.id)
+    assert '"earliest" AT TIME ZONE \'America/New_York\'' in plan["sql"]
+    assert "DATE_TRUNC('DAY'" in plan["sql"]

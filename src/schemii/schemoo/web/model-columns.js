@@ -1,7 +1,7 @@
 import { catalogTable } from "./logical-relationships.js";
 const numeric = ["smallint", "integer", "bigint", "numeric", "real", "double precision"];
-const aliases = {int2:"smallint",int4:"integer",int:"integer",int8:"bigint",decimal:"numeric",float4:"real",float8:"double precision"};
-const type = value => { const name=(value || "").toLowerCase().split("(")[0].trim();return aliases[name] || name; };
+const aliases = {int2:"smallint",int4:"integer",int:"integer",int8:"bigint",decimal:"numeric",float4:"real",float8:"double precision",timestamptz:"timestamp with time zone",timetz:"time with time zone"};
+const type = value => { const name=(value || "").toLowerCase().replace(/\([^)]*\)/g, "").trim().replace(/\s+/g, " ");return aliases[name] || name; };
 const arithmetic = new Set(["add","subtract","multiply","divide"]);
 export function calculationAnchor(draft, id, path = new Set()) {
   if(path.has(id)) return null;
@@ -25,30 +25,32 @@ function outputType(operation,left,right) {
 export function nodeColumns(draft, catalog, node) {
   if(!node) return [];
   const memo=new Map(), path=[];
+  const describe=(id,name)=>[id,name].every(value=>/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) ? `${id}.${name}` : JSON.stringify([id,name]);
+  const dependencyPath=(tail=[])=>[...path.map(reference=>reference.label),...tail].join(" → ");
   function resolve(id,name) {
     const key=JSON.stringify([id,name]);
     if(memo.has(key)) return memo.get(key);
-    const label=`${id}.${name}`;
-    if(path.includes(label)) throw Error(`Calculated dependency cycle: ${[...path,label].join(" → ")}`);
+    const label=describe(id,name);
+    if(path.some(reference=>reference.key===key)) throw Error(`Calculated dependency cycle: ${dependencyPath([label])}`);
     const owner=draft.nodes.find(value=>value.id===id);
-    if(!owner) throw Error(`Missing calculated source: ${[...path,label].join(" → ")}`);
+    if(!owner) throw Error(`Missing calculated source: ${dependencyPath([label])}`);
     if(!owner.derivation) {
       const column=catalogTable(owner,catalog)?.columns.find(value=>value.name===name);
-      if(!column) throw Error(`Missing calculated field: ${[...path,label].join(" → ")}`);
+      if(!column) throw Error(`Missing calculated field: ${dependencyPath([label])}`);
       return column;
     }
-    path.push(label);
+    path.push({key,label});
     const definition=owner.derivation, output=definition.outputs.find(value=>value.id===name);
     let result;
     if(!output && (definition.groupBy || []).includes(name)) result={...resolve(definition.source,name),name};
-    else if(!output) throw Error(`Missing calculated field: ${path.join(" → ")}`);
+    else if(!output) throw Error(`Missing calculated field: ${dependencyPath()}`);
     else {
       const left=type(resolve(output.nodeId || definition.source,output.column).dataType);
       const right=output.operand ? type(resolve(output.operandNodeId || definition.source,output.operand).dataType):"";
       for(const condition of output.conditions || []) {resolve(condition.table,condition.column);if(condition.compareColumn) resolve(condition.table,condition.compareColumn);}
-      if((arithmetic.has(output.operation) || ["sum","avg"].includes(output.operation)) && (!numeric.includes(left) || (arithmetic.has(output.operation)&&!numeric.includes(right)))) throw Error(`Numeric inputs required: ${path.join(" → ")}`);
+      if((arithmetic.has(output.operation) || ["sum","avg"].includes(output.operation)) && (!numeric.includes(left) || (arithmetic.has(output.operation)&&!numeric.includes(right)))) throw Error(`Numeric inputs required: ${dependencyPath()}`);
       const refs=[output.nodeId || definition.source,...(output.operand?[output.operandNodeId || definition.source]:[]),...(output.conditions || []).map(value=>value.table)];
-      if(definition.kind==="row" && refs.some(id=>calculationAnchor(draft,id)!==calculationAnchor(draft,definition.source))) throw Error(`Inputs must share the owning record or mapped summary grain: ${path.join(" → ")}`);
+      if(definition.kind==="row" && refs.some(id=>calculationAnchor(draft,id)!==calculationAnchor(draft,definition.source))) throw Error(`Inputs must share the owning record or mapped summary grain: ${dependencyPath()}`);
       result={name,label:output.label,dataType:outputType(output.operation,left,right),nullable:true,grain:calculationAnchor(draft,id)};
     }
     path.pop();memo.set(key,result);return result;

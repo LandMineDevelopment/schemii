@@ -24,7 +24,12 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
   let source = existing?.derivation.source || initial?.derivation.source || owner?.id || physical[0]?.id;
   if (!source) return;
   const definition = structuredClone(existing?.derivation || initial?.derivation || { kind: "row", source, groupBy: [], outputs: [] });
-  let target = definition.connection?.target || calculationAnchor(draft,owner?.id || source) || source;
+  // An existing implicit summary belongs to its saved source stage, even when
+  // that source is another summary mapped to a different physical anchor.
+  const implicitSource=existing?.derivation.kind==="aggregate" && !existing.derivation.connection ? existing.derivation.source : null;
+  let target = definition.connection?.target || implicitSource || calculationAnchor(draft,owner?.id || source) || source;
+  const connectionTargets=()=>implicitSource===source && !physical.some(node=>node.id===source)
+    ? [...physical,candidates.find(node=>node.id===source)].filter(Boolean) : physical;
   if (definition.kind === "aggregate" && !definition.connection) definition.connection = {target, columns: definition.groupBy.map(column => ({source:column,target:column}))};
   const editingDraft=()=>({...draft,nodes:[...candidates,{id:nodeId,table:candidates.find(node=>node.id===source)?.table,derivation:definition}]});
   const columns = id => nodeColumns(editingDraft(),catalog,editingDraft().nodes.find(node=>node.id===id));
@@ -39,6 +44,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
   const button = (text, fn) => { const b = element("button", { type: "button", className: "ui-button", text }); b.onclick = fn; return b; };
   const newOutput = () => ({ id: uid("field"), label: "", operation: definition.kind === "row" ? "add" : "list", column: "", nodeId: source, distinct: false, delimiter: ", " });
   const suggestConnection = () => {
+    if(!physical.some(node=>node.id===target) && target!==implicitSource) target=calculationAnchor(draft,source) || source;
     const mapping = suggestSummaryConnection(draft,catalog,source,target);
     definition.groupBy = mapping.map(pair=>pair.source);
     definition.connection = {target,columns:mapping};
@@ -53,7 +59,10 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
       render();
     })), helpHeading(definition.kind === "aggregate" ? "1. Source and grouping" : "Source", "summarySetup"), labeled(definition.kind === "aggregate" ? "Summarize records from" : "Calculate using", modelSelect(definition.kind === "aggregate" ? "Summarize records from" : "Calculate using", candidates.map(n => [n.id,n.label]), source, id => {
       source = id; definition.source = id; definition.groupBy = []; definition.outputs = [newOutput()];
-      if (definition.kind === "aggregate") suggestConnection();
+      if (definition.kind === "aggregate") {
+        if(target===implicitSource && source!==implicitSource) target=calculationAnchor(draft,source) || source;
+        suggestConnection();
+      }
       render();
     })));
     body.append(note(definition.kind === "row" ? "Calculated directly in SELECT. No extra table, join, or stored data. Missing inputs and division by zero produce NULL." : "Choose the records to summarize, then the columns that define each group. This summary is calculated before connecting it to the report. No database object is created."));
@@ -124,7 +133,7 @@ export function openDerivedSource({ draft, catalog, owner, existing, initial, on
     body.append(button("Add calculated field", () => { definition.outputs.push(newOutput()); render(); }));
     if (definition.kind === "aggregate") {
       const connection = element("section", {className:"derived-output"}, [helpHeading("3. Model connection", "summarySetup"),
-        labeled("Connect summary to",modelSelect("Connect summary to",physical.map(n=>[n.id,n.label]),target,id=>{
+        labeled("Connect summary to",modelSelect("Connect summary to",connectionTargets().map(n=>[n.id,n.label]),target,id=>{
           target=id; definition.connection.target=id;
           const suggested=suggestSummaryConnection(draft,catalog,source,target);
           definition.connection.columns=definition.groupBy.map(key=>suggested.find(pair=>pair.source===key) || {source:key,target:""});render();

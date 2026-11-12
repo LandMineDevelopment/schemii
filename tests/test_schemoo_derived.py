@@ -659,3 +659,35 @@ def test_calculated_operand_source_contract_tracks_its_actual_qualified_leaf():
     changed = deepcopy(CATALOG)
     changed["tables"][0]["columns"] = [column for column in changed["tables"][0]["columns"] if column["name"]!="salary"]
     assert any(issue.get("severity")=="breaking" for issue in source_issues(changed,{**definition,"sourceContract":contract}))
+
+
+@pytest.mark.parametrize("data_type,expected",[
+    ("timestamp(6) with time zone","timestamp with time zone"),
+    ("timestamp(6) without time zone","timestamp without time zone"),
+    ("timestamp(6)","timestamp"),("timestamptz","timestamp with time zone"),
+    ("time(3) with time zone","time with time zone"),("time(3) without time zone","time without time zone"),
+    ("time(3)","time"),("timetz","time with time zone"),("numeric(12, 2)","numeric"),
+])
+@pytest.mark.parametrize("operation",["min","max"])
+def test_calculated_extrema_preserve_temporal_type_suffixes(data_type,expected,operation):
+    from schemii.schemoo.prototype import model_field_details
+    catalog = deepcopy(CATALOG)
+    catalog["tables"][0]["columns"][1]["dataType"] = data_type
+    query = request()
+    query["nodes"][-1]["derivation"]["outputs"] = [{"id":"typed","label":"Typed","operation":operation,"column":"salary"}]
+    assert model_field_details(catalog,query,"derived","typed")["dataType"] == expected
+
+
+def test_distinct_dotted_field_tuples_remain_valid_in_backend_metadata_and_sql():
+    from schemii.schemoo.prototype import model_field_details
+    catalog = deepcopy(CATALOG)
+    for column in catalog["tables"][0]["columns"]:
+        column["dataType"] = "integer"
+    query = request("row")
+    query["nodes"][-1] = {"id":"a.b","table":"people","label":"Outer","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"c","label":"C","operation":"add","nodeId":"a","column":"b.c","operand":"allowance"}]}}
+    query["nodes"].append({"id":"a","table":"people","label":"Inner","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"b.c","label":"B.C","operation":"add","column":"salary","operand":"allowance"}]}})
+    query["fields"] = [{"table":"people","column":"id"},{"table":"a.b","column":"c"}]
+    assert model_field_details(catalog,query,"a.b","c")["dataType"] == "integer"
+    assert sorted(execute(compile_preview(catalog,query)["sql"])) == [(1,140),(2,100),(3,40)]
