@@ -145,17 +145,46 @@ class Conversations:
         return self.store.create(owner,value)
 
     def snapshot(self, owner, chat_id, scope=None):
-        value=self._get(owner,chat_id,scope)
+        try:
+            value=self._get(owner,chat_id,scope)
+        except Exception:
+            # A denied read must not leave displayed-derived output available
+            # for a later replacement grant. Ordinary row conversations retain
+            # their existing lifecycle.
+            with self.lock:
+                self._discard_displayed(owner, chat_id)
+            raise
         value.setdefault("reasoningEffort", "default")
         value["modes"]=self.modes(value["modes"])
         with self.lock:
             self._prune_transient()
             state=self.active.get((owner,chat_id))
             value["stream"]=state.get("stream","") if state else ""
+            if state and state.get("displayedId"):
+                try:
+                    payload = self._displayed_payload(owner, chat_id)
+                    if payload["id"] != state["displayedId"]:
+                        raise ValueError("Displayed turn changed")
+                    self._validate_displayed_authority(owner, value, payload, scope)
+                    value["stream"] = payload.get("stream", "")
+                except Exception:
+                    self.transient.pop((owner, chat_id, "displayed"), None)
+                    value["stream"] = ""
+                    value["error"] = "The displayed attachment or access expired. Attach a current displayed result again; no query was rerun."
             cached_progress=self.transient.get((owner,chat_id,"progress"))
             value["progress"] = deepcopy(state.get("progress")) if state else (
                 json.loads(cached_progress[1]) if cached_progress else None)
             for message in value["messages"]:
+                key = (owner, chat_id, "displayed_answer:" + message["id"])
+                displayed = self.transient.get(key)
+                if displayed:
+                    try:
+                        answer = json.loads(displayed[1])
+                        self._validate_displayed_authority(owner, value, answer["authority"], scope)
+                        message["text"] = answer["text"]
+                    except Exception:
+                        self.transient.pop(key, None)
+                    continue
                 cached=self.transient.get((owner,chat_id,message["id"]))
                 if cached: message["text"]=cached[1]
         if hasattr(self.adapter, "available_actions"):
@@ -163,9 +192,11 @@ class Conversations:
             value["permissions"] = self.adapter.permissions(self.services, owner, value[self.subject_key], scope)
         return value
 
-    def _start_progress(self, owner, chat_id, turn_id, scope=None):
+    def _start_progress(self, owner, chat_id, turn_id, scope=None, *, displayed_id=None):
         self.active[owner,chat_id]={"turnId":turn_id,"scope":scope,"stream":"", "progress":{
             "turnId":turn_id,"startedAt":now(),"state":"working","stages":[]}}
+        if displayed_id:
+            self.active[owner,chat_id]["displayedId"] = displayed_id
         self.transient.pop((owner,chat_id,"progress"),None)
 
     def _progress(self, owner, chat_id, turn_id, stage_id, label):
@@ -270,10 +301,17 @@ class Conversations:
                 raise ApiProblem(409, "ai_displayed_result_expired", "The displayed attachment expired or was discarded. Attach the result again; no query will be rerun.")
             return json.loads(cached[1])
 
-    def _validate_displayed(self, owner, chat, payload, scope):
-        self._require_available(owner, chat, scope)
+    def _discard_displayed(self, owner, chat_id):
+        for key in list(self.transient):
+            if key[:2] == (owner, chat_id) and (key[2] == "displayed" or key[2].startswith("displayed_answer:")):
+                self.transient.pop(key, None)
+
+    def _validate_displayed_authority(self, owner, chat, payload, scope):
+        """Metadata-only read gate, using this request's identity, never a saved request."""
+        self._require_product_access(owner)
         action = self.adapter.DISPLAYED_ACTION
-        if self.modes(chat["modes"])[action] == "disabled":
+        mode = self.modes(chat["modes"])[action]
+        if not self.policy.enabled or mode == "disabled" or mode != payload["mode"]:
             raise ApiProblem(403, "ai_displayed_result_disabled", "Enable Explain displayed result in Assistant settings before sharing rows.")
         selected = [chat["providerId"], chat["aiModelId"], chat.get("reasoningEffort", "default")]
         if payload["provider"] != selected:
@@ -281,6 +319,26 @@ class Conversations:
         binding = self.adapter.displayed_binding(self.services, owner, chat[self.subject_key], scope, payload["packet"])
         if binding != payload["binding"]:
             raise ApiProblem(409, "ai_displayed_binding_changed", "Report access or its source changed. Reload and attach a current displayed result.")
+
+    def _validate_displayed(self, owner, chat, payload, scope):
+        self._require_available(owner, chat, scope)
+        self._validate_displayed_authority(owner, chat, payload, scope)
+
+    def _displayed_authority(self, payload):
+        packet = payload["packet"]
+        return {"binding": payload["binding"], "provider": payload["provider"], "mode": payload["mode"],
+            "packet": {**{key: packet[key] for key in ("dashboardId", "dashboardRevision", "modelId", "modelRevision", "tileId", "pane")},
+                "selections": packet.get("dashboardSelections", packet["selections"])}}
+
+    def _displayed_answer(self, value, owner, payload, answer, created):
+        # Text and its exact non-row authority provenance are one TTL/eviction
+        # unit. Losing either can never uncover an answer through another cache.
+        message = {"id": uid("msg"), "role": "assistant", "createdAt": now(), "transient": True,
+            "text": "This displayed-result explanation was temporary. Attach the displayed result again to explain it; no source query is rerun automatically."}
+        value["messages"].append(message)
+        self.transient[owner, value["id"], "displayed_answer:" + message["id"]] = (created,
+            json.dumps({"text": answer, "authority": self._displayed_authority(payload)}, ensure_ascii=False))
+        self._prune_transient()
 
     def _send_displayed(self, owner, chat_id, body, scope):
         if not hasattr(self.adapter, "capture_displayed"):
@@ -294,6 +352,7 @@ class Conversations:
             raise ApiProblem(409, "ai_provider_disclosure", "Confirm sharing the displayed sample with the currently selected provider.")
         packet, binding = self.adapter.capture_displayed(self.services, owner, chat[self.subject_key], scope, body["displayedResult"])
         payload = {"id": uid("evidence"), "packet": packet, "binding": binding, "question": body["text"],
+            "mode": self.modes(chat["modes"])[self.adapter.DISPLAYED_ACTION],
             "provider": [chat["providerId"], chat["aiModelId"], chat.get("reasoningEffort", "default")]}
         self._validate_displayed(owner, chat, payload, scope)
         serialized = json.dumps(payload, ensure_ascii=False)
@@ -319,7 +378,7 @@ class Conversations:
             value = self.store.update(owner, chat_id, change, body["expectedRevision"])
             self.transient[owner, chat_id, "displayed"] = (time.monotonic(), serialized)
             self._prune_transient()
-            if value["status"] == "working": self._start_progress(owner, chat_id, value["turnId"], scope)
+            if value["status"] == "working": self._start_progress(owner, chat_id, value["turnId"], scope, displayed_id=payload["id"])
         return value
 
     def _approve_displayed(self, owner, chat_id, body, scope):
@@ -337,19 +396,23 @@ class Conversations:
             def change(value):
                 value.update(status="working" if body["approved"] else "idle", pending=None, turnId=uid("turn"), error=None)
             value = self.store.update(owner, chat_id, change, body["expectedRevision"])
-            if body["approved"]: self._start_progress(owner, chat_id, value["turnId"], scope)
+            if body["approved"]: self._start_progress(owner, chat_id, value["turnId"], scope, displayed_id=payload["id"])
             else: self.transient.pop((owner, chat_id, "displayed"), None)
             return value, [], not body["approved"]
 
     def _run_displayed(self, owner, chat_id, turn_id):
-        if self.active.get((owner, chat_id), {}).get("turnId") != turn_id:
-            return  # Ask is waiting before the first disclosure, or was cancelled.
-        attachment_id = None
+        with self.lock:
+            state = self.active.get((owner, chat_id), {})
+            if state.get("turnId") != turn_id:
+                return  # Ask is waiting before the first disclosure, or was cancelled.
+            attachment_id, scope = state["displayedId"], state.get("scope")
         try:
-            scope = self.active[owner, chat_id].get("scope")
             chat = self._get(owner, chat_id, scope)
-            payload = self._displayed_payload(owner, chat_id)
-            attachment_id = payload["id"]
+            with self.lock:
+                payload = self._displayed_payload(owner, chat_id)
+                if payload["id"] != attachment_id:
+                    raise ApiProblem(409, "ai_displayed_changed", "The displayed attachment changed.")
+                created = self.transient[owner, chat_id, "displayed"][0]
             self._validate_displayed(owner, chat, payload, scope)
             def authorized():
                 if not self._authorized(owner, chat_id, turn_id): return False
@@ -357,7 +420,9 @@ class Conversations:
                     current = self.store.get(owner, chat_id)
                     # Reacquire the bounded cache as well as current metadata:
                     # eviction/expiry must never cause an implicit source read.
-                    self._validate_displayed(owner, current, self._displayed_payload(owner, chat_id), scope)
+                    current_payload = self._displayed_payload(owner, chat_id)
+                    if current_payload["id"] != attachment_id: return False
+                    self._validate_displayed(owner, current, current_payload, scope)
                     return True
                 except Exception:
                     return False
@@ -369,8 +434,10 @@ class Conversations:
             def on_text(text):
                 with self.lock:
                     if authorized():
-                        state = self.active[owner, chat_id]
-                        state["stream"] = (state["stream"] + text).encode()[:min(self.policy.response_bytes, self.policy.transient_response_memory_bytes)].decode(errors="ignore")
+                        current_payload = self._displayed_payload(owner, chat_id)
+                        current_payload["stream"] = (current_payload.get("stream", "") + text).encode()[:self.policy.response_bytes].decode(errors="ignore")
+                        self.transient[owner, chat_id, "displayed"] = (created, json.dumps(current_payload, ensure_ascii=False))
+                        self._prune_transient()
             self._progress(owner, chat_id, turn_id, "provider", "Explaining the attached displayed sample")
             if not authorized(): raise ApiProblem(409, "ai_displayed_changed", "Displayed evidence or access changed.")
             zen_scope = (lambda: self._zen_scope(owner, chat[self.subject_key], scope)) if chat["providerId"] in {"opencode", "instance-codex"} else None
@@ -384,8 +451,7 @@ class Conversations:
             with self.lock:
                 if not authorized(): return
                 def finish(value):
-                    self._message(value, "assistant", answer, True, owner)
-                    value["messages"][-1]["text"] = "This displayed-result explanation was temporary. Attach the displayed result again to explain it; no source query is rerun automatically."
+                    self._displayed_answer(value, owner, payload, answer, created)
                     value.update(status="idle", pending=None, error=None)
                 self.store.update(owner, chat_id, finish)
         except Exception as error:

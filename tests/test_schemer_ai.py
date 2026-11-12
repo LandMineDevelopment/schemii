@@ -564,3 +564,270 @@ def test_displayed_waiting_review_retains_the_existing_approval_deadline(report)
             "approved": True, "expectedRevision": current["revision"]}, report.request)
     assert error.value.code == "ai_approval_expired"
     assert service.runtime.calls == [] and report.calls == []
+
+
+def _replace_displayed_authority(report, service, chat, change):
+    """Keep the account able to read where possible; change the exact data grant."""
+    request = NS(app=report.request.app, cookies=dict(report.request.cookies))
+    auth = report.request.app.state.auth
+    if change == "grant_identity":
+        dashboards, connections = auth.dashboard_grants, auth.connection_grants
+        auth.dashboard_grants = lambda owner: [{**item, "role_id": "replacement"} for item in dashboards(owner)]
+        auth.connection_grants = lambda owner: [{**item, "role_id": "replacement"} for item in connections(owner)]
+    elif change == "source":
+        report.services.connections.get(SCHEMII_CONNECTION_OWNER_ID, "pg_" + "b" * 32).revision += 1
+    elif change == "model":
+        current = report.services.models.get("author", report.model.id)
+        report.services.models._records["author", report.model.id] = current.model_copy(update={"revision": current.revision + 1})
+    elif change in {"dashboard", "tile", "tile_filters"}:
+        current = report.services.dashboards._records["author", report.dashboard.id]
+        if change == "tile_filters":
+            tile = current.tiles[0].model_copy(update={"selections": {}})
+            # A source adapter replacing tile content cannot preserve old answer
+            # authority merely by retaining its parent revision number.
+            tile = tile.model_copy(update={"title": "replacement tile metadata"})
+            report.services.dashboards._records["author", report.dashboard.id] = current.model_copy(update={"tiles": [tile]})
+            return request
+        report.services.dashboards._records["author", report.dashboard.id] = current.model_copy(
+            update={"revision": current.revision + 1} if change == "dashboard" else {"tiles": []})
+    elif change == "session":
+        request.cookies["schemii_session"] = "replacement-session"
+    elif change == "product":
+        auth.capabilities = lambda actor: []
+    elif change == "permissions":
+        previous = auth.dashboard_grants
+        auth.dashboard_grants = lambda owner: [{**item, "can_export": True} for item in previous(owner)]
+    elif change == "provider":
+        service.store.update("viewer", chat["id"], lambda value: value.update(providerId="replacement-provider"))
+    else:
+        service.store.update("viewer", chat["id"], lambda value: value["modes"].update({ai_tools.DISPLAYED_ACTION: "ask"}))
+    return request
+
+
+@pytest.mark.parametrize("stage", ["active", "completed"])
+@pytest.mark.parametrize("change", ["grant_identity", "source", "dashboard", "model", "tile", "tile_filters", "session", "product", "permissions", "provider", "mode"])
+def test_displayed_snapshot_revalidates_each_stream_and_answer_with_current_request_metadata(report, monkeypatch, stage, change):
+    import json
+    service, chat, packet = _displayed(report)
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *a, **kw: pytest.fail("Snapshot must not acquire catalog"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *a, **kw: pytest.fail("Snapshot must not plan or run"))
+    stream_marker = "private-buffered-stream-232"
+    observed = []
+    def inspect():
+        request = _replace_displayed_authority(report, service, chat, change)
+        # Fetch uses the fresh request. A replacement session must not silently
+        # borrow the still-valid request retained by the provider worker.
+        try:
+            snapshot = service.snapshot("viewer", chat["id"], request)
+        except ApiProblem:
+            snapshot = {}
+        assert DISPLAYED_SECRET not in json.dumps(snapshot)
+        assert stream_marker not in json.dumps(snapshot)
+    if stage == "active":
+        def during(kwargs):
+            kwargs["on_text"](stream_marker)
+            assert service.snapshot("viewer", chat["id"], report.request)["stream"] == stream_marker
+            assert service.active["viewer", chat["id"]]["stream"] == ""
+            inspect()
+            assert not kwargs["is_authorized"]()
+            observed.append(True)
+        service.runtime.before_reply = during
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    if stage == "completed": inspect()
+    else: assert observed == [True]  # Provider exceptions are deliberately sanitized.
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_denied_snapshot_purges_old_answer_before_same_grant_returns(report):
+    service, chat, packet = _displayed(report)
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    report.state["grant"] = False
+    with pytest.raises(ApiProblem): service.snapshot("viewer", chat["id"], report.request)
+    report.state["grant"] = True
+    snapshot = service.snapshot("viewer", chat["id"], report.request)
+    assert DISPLAYED_SECRET not in str(snapshot)
+    assert "Attach the displayed result again" in snapshot["messages"][-1]["text"]
+
+
+def test_displayed_answers_keep_independent_authority_and_original_ttl_across_new_turns(report, monkeypatch):
+    import schemii.common.ai.conversations as conversations
+    from schemii.common.ai.pi import PiReply
+    clock = [1000.0]
+    monkeypatch.setattr(conversations.time, "monotonic", lambda: clock[0])
+    service, chat, packet = _displayed(report)
+    first = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], first["turnId"])
+    first_id = service.store.get("viewer", chat["id"])["messages"][-1]["id"]
+    clock[0] += service.policy.transient_response_ttl_seconds - 1
+    current = service.store.get("viewer", chat["id"])
+    service.runtime.reply = PiReply("second answer marker", ())
+    second = _attach(report, service, current, packet)
+    service.run("viewer", chat["id"], second["turnId"])
+    before = service.snapshot("viewer", chat["id"], report.request)
+    assert DISPLAYED_SECRET in next(m for m in before["messages"] if m["id"] == first_id)["text"]
+    assert before["messages"][-1]["text"] == "second answer marker"
+    clock[0] += 2
+    after = service.snapshot("viewer", chat["id"], report.request)
+    assert DISPLAYED_SECRET not in str(after)
+    assert after["messages"][-1]["text"] == "second answer marker"
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_old_grant_answer_is_withheld_without_hiding_new_grant_answer(report):
+    from schemii.common.ai.pi import PiReply
+    service, chat, packet = _displayed(report)
+    first = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], first["turnId"])
+    _replace_displayed_authority(report, service, chat, "grant_identity")
+    current = service.store.get("viewer", chat["id"])
+    service.runtime.reply = PiReply("replacement-grant-answer", ())
+    second = _attach(report, service, current, packet)
+    service.run("viewer", chat["id"], second["turnId"])
+    snapshot = service.snapshot("viewer", chat["id"], report.request)
+    assert DISPLAYED_SECRET not in str(snapshot)
+    assert snapshot["messages"][-1]["text"] == "replacement-grant-answer"
+    assert report.calls == []
+
+
+@pytest.mark.parametrize("stage", ["active", "completed"])
+@pytest.mark.parametrize("discard", ["expiry", "eviction"])
+def test_displayed_snapshot_fails_closed_when_text_and_provenance_expire_or_are_evicted(report, stage, discard):
+    import time
+    service, chat, packet = _displayed(report)
+    observed = []
+    def inspect():
+        if discard == "expiry":
+            for key, (_, data) in list(service.transient.items()):
+                service.transient[key] = (time.monotonic() - service.policy.transient_response_ttl_seconds - 1, data)
+        else:
+            service.transient["other", "other", "response"] = (time.monotonic(), "x" * (service.policy.transient_response_memory_bytes + 1))
+        snapshot = service.snapshot("viewer", chat["id"], report.request)
+        assert DISPLAYED_SECRET not in str(snapshot) and snapshot["stream"] == ""
+        assert sum(len(value[1].encode()) for value in service.transient.values()) <= service.policy.transient_response_memory_bytes
+    if stage == "active":
+        def during(kwargs):
+            kwargs["on_text"](DISPLAYED_SECRET)
+            inspect()
+            assert not kwargs["is_authorized"]()
+            observed.append(True)
+        service.runtime.before_reply = during
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    if stage == "completed": inspect()
+    else: assert observed == [True]
+    assert report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_stream_text_and_binding_share_the_existing_memory_budget(report):
+    from dataclasses import replace
+    import time
+    service, chat, packet = _displayed(report)
+    turn = _attach(report, service, chat, packet)
+    service.policy = replace(service.policy, transient_response_memory_bytes=1024 * 1024)
+    used = sum(len(value[1].encode()) for value in service.transient.values())
+    service.transient["other", "other", "response"] = (time.monotonic(), "x" * (service.policy.transient_response_memory_bytes - used - 1024))
+    observed = []
+    def during(kwargs):
+        kwargs["on_text"](DISPLAYED_SECRET * 100)
+        assert not kwargs["is_authorized"]()
+        assert service.snapshot("viewer", chat["id"], report.request)["stream"] == ""
+        assert sum(len(value[1].encode()) for value in service.transient.values()) <= service.policy.transient_response_memory_bytes
+        observed.append(True)
+    service.runtime.before_reply = during
+    service.run("viewer", chat["id"], turn["turnId"])
+    assert observed == [True]
+    _assert_private(service, chat["id"])
+
+
+@pytest.mark.parametrize("pane", ["main", "drill"])
+def test_displayed_effective_population_preserves_tile_overrides_predicates_and_comparison_columns(report, monkeypatch, pane):
+    import json
+    from schemii.schemoo.models import ScopeSelection, ReportFilter
+    service, chat, packet = _displayed(report)
+    current = report.services.dashboards._records["author", report.dashboard.id]
+    tile = current.tiles[0].model_copy(update={
+        "selections": {"region": ScopeSelection(alternativeId="region_one", values={"region_value": "tile region"}, active=True)},
+        "report_filters": [ReportFilter(conditions=[{"table": "sales", "column": "region", "operator": "eq", "compareColumn": "other_region"}])]})
+    report.services.dashboards._records["author", report.dashboard.id] = current.model_copy(update={"tiles": [tile]})
+    packet["selections"] = {"region": {"alternativeId": "region_one", "values": {"region_value": "dashboard region"}, "active": True}}
+    if pane == "drill":
+        previous = report.request.app.state.auth.dashboard_grants
+        report.request.app.state.auth.dashboard_grants = lambda owner: [{**item, "can_drill": True} for item in previous(owner)]
+        packet.update(pane="drill", drillSelection={"dimensions": [{"table": "sales", "column": "region", "value": "chosen"}], "measureIndex": 0})
+    monkeypatch.setattr(ai_tools, "model_catalog", lambda *a, **kw: pytest.fail("No catalog"))
+    monkeypatch.setattr(ai_tools, "tile_plan", lambda *a, **kw: pytest.fail("No plan/query"))
+    turn = _attach(report, service, chat, packet)
+    packet["selections"]["region"]["values"]["region_value"] = "later UI mutation"
+    service.run("viewer", chat["id"], turn["turnId"])
+    evidence = json.loads(service.runtime.calls[0][1][0]["content"])["displayedEvidence"]
+    assert evidence["dashboardSelections"]["region"]["values"]["region_value"] == "dashboard region"
+    assert evidence["tileSelections"]["region"]["values"]["region_value"] == "tile region"
+    assert evidence["selections"]["region"]["values"]["region_value"] == "tile region"
+    assert evidence["reportFilters"][0]["conditions"][0]["compareColumn"] == "other_region"
+    assert evidence["pane"] == pane and report.calls == []
+    _assert_private(service, chat["id"])
+
+
+@pytest.mark.parametrize("field", ["tileSelections", "reportFilters"])
+def test_displayed_rejects_client_saved_tile_metadata_that_disagrees_with_exact_revision(report, field):
+    service, chat, packet = _displayed(report)
+    packet[field] = ({"region": {"active": True}} if field == "tileSelections" else [{"mode": "rows", "conditions": [{"table": "sales", "column": "region", "operator": "eq", "value": "invented predicate"}]}])
+    with pytest.raises(ApiProblem) as error: _attach(report, service, chat, packet)
+    assert error.value.code == "ai_displayed_result_stale"
+    assert service.runtime.calls == [] and report.calls == []
+
+
+def test_displayed_canonical_tile_filter_metadata_is_bounded_before_provider_disclosure(report):
+    from schemii.schemoo.models import ScopeSelection
+    service, chat, packet = _displayed(report)
+    current = report.services.dashboards._records["author", report.dashboard.id]
+    tile = current.tiles[0].model_copy(update={"selections": {"region": ScopeSelection(
+        alternativeId="region_one", values={"region_value": [DISPLAYED_SECRET * 100] * 500}, active=True)}})
+    report.services.dashboards._records["author", report.dashboard.id] = current.model_copy(update={"tiles": [tile]})
+    with pytest.raises(ApiProblem) as error: _attach(report, service, chat, packet)
+    assert error.value.code == "ai_result_metadata_too_large"
+    assert DISPLAYED_SECRET not in str(error.value)
+    assert service.runtime.calls == [] and report.calls == []
+    _assert_private(service, chat["id"])
+
+
+def test_displayed_answer_snapshot_checks_only_metadata_and_delete_releases_its_provenance(report, monkeypatch):
+    service, chat, packet = _displayed(report)
+    turn = _attach(report, service, chat, packet)
+    service.run("viewer", chat["id"], turn["turnId"])
+    monkeypatch.setattr(service.runtime, "require_available_model", lambda *args: pytest.fail("Snapshot must not contact provider catalog"))
+    monkeypatch.setattr(report.services.connections, "use", lambda *args: pytest.fail("Snapshot must not connect to source"))
+    assert DISPLAYED_SECRET in service.snapshot("viewer", chat["id"], report.request)["messages"][-1]["text"]
+    service.delete("viewer", chat["id"], report.request)
+    assert not any(key[:2] == ("viewer", chat["id"]) for key in service.transient)
+    assert report.calls == []
+
+
+def test_displayed_replacement_during_worker_metadata_read_keeps_the_new_attachment(report, monkeypatch):
+    service, chat, packet = _displayed(report)
+    first = _attach(report, service, chat, packet)
+    original = service._get
+    replacement = {}
+    def replace(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not replacement:
+            replacement["started"] = True
+            service.cancel("viewer", chat["id"], report.request)
+            current = service.store.get("viewer", chat["id"])
+            replacement["turn"] = _attach(report, service, current, packet)
+            replacement["id"] = service._displayed_payload("viewer", chat["id"])["id"]
+        return result
+    monkeypatch.setattr(service, "_get", replace)
+    service.run("viewer", chat["id"], first["turnId"])
+    assert service.runtime.calls == []
+    assert service._displayed_payload("viewer", chat["id"])["id"] == replacement["id"]
+    assert service.active["viewer", chat["id"]]["turnId"] == replacement["turn"]["turnId"]
+    monkeypatch.setattr(service, "_get", original)
+    service.run("viewer", chat["id"], replacement["turn"]["turnId"])
+    assert len(service.runtime.calls) == 1 and report.calls == []
+    _assert_private(service, chat["id"])

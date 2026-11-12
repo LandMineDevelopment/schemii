@@ -1,6 +1,7 @@
 """Dashboard-scoped assistant actions; current grants remain the authority."""
 from __future__ import annotations
 
+from copy import deepcopy
 from functools import reduce
 import hashlib
 import json
@@ -13,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 
 from schemii.common.ai.tool_schema import provider_schema
 from schemii.common.api.errors import ApiProblem
-from schemii.schemoo.models import Contract, ScopeSelection
+from schemii.schemoo.models import Contract, ScopeSelection, ReportFilter
 from schemii.schemoo.service import load_model, model_catalog, domain_query
 from schemii.schemoo.routes import ParameterValuesRequest
 from .access import available_dashboards, prepare_dashboard
@@ -136,6 +137,8 @@ class DisplayedResult(BaseModel):
     metric: Literal["values", "change", "percent", "running"] = "values"
     barGroupIndex: int = Field(default=0, ge=0, le=63)
     selections: dict[str, ScopeSelection] = Field(default_factory=dict, max_length=20)
+    tileSelections: dict[str, ScopeSelection] | None = Field(default=None, max_length=20)
+    reportFilters: list[ReportFilter] | None = Field(default=None, max_length=32)
     drillSelection: DrillSelection | None = None
     columns: list[DisplayedColumn] = Field(max_length=128)
     rows: list[list[JsonValue]] = Field(max_length=10000)
@@ -161,7 +164,7 @@ def validate_displayed_result(value):
         raise ApiProblem(422, "ai_displayed_result_invalid", "The displayed attachment is invalid. Attach the result again.") from None
 
 
-def displayed_binding(services, owner, dashboard_id, request, packet):
+def _displayed_metadata(services, owner, dashboard_id, request, packet):
     """Current metadata only: no catalog, query planning, connection or cursor."""
     auth = getattr(request.app.state, "auth", None)
     token = getattr(request, "cookies", {}).get("schemii_session")
@@ -180,28 +183,46 @@ def displayed_binding(services, owner, dashboard_id, request, packet):
         raise ApiProblem(409, "ai_displayed_result_stale", "The dashboard, model or tile changed. Attach a current displayed result.")
     if packet["pane"] == "drill" and not bundle.permissions["drill"]:
         raise ApiProblem(403, "ai_displayed_drill_forbidden", "Your report access no longer permits detail rows.")
+    tile_selections = {key: _json(value) for key, value in tile.selections.items()}
+    report_filters = [_json(value) for value in tile.report_filters]
+    if (packet.get("tileSelections") is not None and packet["tileSelections"] != tile_selections
+            or packet.get("reportFilters") is not None and packet["reportFilters"] != report_filters):
+        raise ApiProblem(409, "ai_displayed_result_stale", "The saved tile filters changed. Attach a current displayed result.")
+    selections = packet.get("dashboardSelections", packet["selections"])
     if not bundle.permissions["edit"]:
-        for scope_id in set(packet["selections"]) - set(dashboard.optional_filters):
+        for scope_id in set(selections) - set(dashboard.optional_filters):
             saved = dashboard.selections.get(scope_id)
-            if saved is None or packet["selections"][scope_id] != _json(saved):
+            if saved is None or selections[scope_id] != _json(saved):
                 raise ApiProblem(403, "ai_displayed_filter_forbidden", "The displayed filter context is no longer available.")
     profile = bundle.services.connections.get(owner, model.connection_id)
     access = getattr(bundle.services, "report_access", None)
-    identity = {"owner": owner, "dashboard": dashboard.id, "dashboardRevision": dashboard.revision,
+    identity = {"owner": owner, "product": "schemer", "dashboard": dashboard.id, "dashboardRevision": dashboard.revision,
+        "tile": _json(tile),
         "model": model.id, "modelRevision": model.revision,
         "modelSource": [model.connection_owner_id, model.connection_id, model.database, model.namespace],
         "source": [getattr(profile, name, None) for name in
             ("owner_id", "id", "revision", "host", "port", "database", "username", "ownership")],
         "grant": getattr(access, "grant", None), "permissions": bundle.permissions,
         "session": hashlib.sha256(str(token).encode()).hexdigest()}
-    return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest(), tile_selections, report_filters
+
+
+def displayed_binding(services, owner, dashboard_id, request, packet):
+    return _displayed_metadata(services, owner, dashboard_id, request, packet)[0]
 
 
 def capture_displayed(services, owner, dashboard_id, request, value):
     from schemii.common.ai.results import bounded_page
 
     packet = validate_displayed_result(value).model_dump(mode="json", by_alias=True)
-    binding = displayed_binding(services, owner, dashboard_id, request, packet)
+    binding, tile_selections, report_filters = _displayed_metadata(services, owner, dashboard_id, request, packet)
+    # Saved tile metadata is authoritative at these exact revisions. Preserve the
+    # viewer's frozen dashboard selections separately, then mirror tile_plan's
+    # override order without loading a catalog or compiling/executing a query.
+    packet["dashboardSelections"] = deepcopy(packet["selections"])
+    packet["tileSelections"] = tile_selections
+    packet["selections"] = {**packet["selections"], **tile_selections}
+    packet["reportFilters"] = report_filters
     packet = bounded_page(services, packet)
     packet["sampling"]["notice"] = "Client-supplied, unverified displayed evidence; sampled rows are not database totals."
     return packet, binding
