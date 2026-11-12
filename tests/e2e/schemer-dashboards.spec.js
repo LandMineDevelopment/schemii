@@ -892,6 +892,10 @@ async function displayedAssistant(page) {
   const state = { attachments: [], providerCalls: 0 };
   let chat = { id: 'chat_displayed_fixture', dashboardId, revision: 1, status: 'idle',
     providerId: 'openai', aiModelId: 'fixture-model', title: 'Displayed explanation', modes: { explain_displayed_result: 'ask' }, messages: [], activity: [] };
+  state.withhold = () => { chat = { ...chat, revision: chat.revision + 1, stream: '', messages: [
+    { id: 'displayed-answer', role: 'assistant', transient: true,
+      text: 'This displayed-result explanation was temporary. Attach the displayed result again to explain it; no source query is rerun automatically.' },
+  ] }; };
   await page.route('**/api/v1/ai/status*', route => route.fulfill({ json: { healthy: true, providers: [
     { id: 'openai', name: 'OpenAI', authenticated: true, available: true, models: [{ id: 'fixture-model', name: 'Fixture model', status: 'active' }] },
   ] } }));
@@ -966,4 +970,49 @@ test('explain displayed detail rows captures the selected drill snapshot and nev
     snapshotAt: '2026-09-20T12:00:00Z', cachedRows: 3, displayedRows: 3 });
   expect(requests).toHaveLength(sourceRequests); expect(ai.providerCalls).toBe(0);
   expect(errors).toEqual([]);
+});
+
+for (const pane of ['main', 'drill']) {
+  test(`displayed ${pane} attachment freezes dashboard and saved tile filter provenance`, async ({ page }) => {
+    const { fixture, requests, errors } = await mock(page, { optionalFilter: true });
+    fixture.dashboard.optionalFilters = ['region'];
+    fixture.dashboard.selections.region = { alternativeId: 'choose', active: true, values: { region: 'dashboard region' } };
+    fixture.dashboard.tiles[0].selections = { region: { alternativeId: 'choose', active: true, values: { region: 'tile region' } } };
+    fixture.catalog.tables[0].columns.push({ name: 'threshold', dataType: 'integer' });
+    fixture.dashboard.tiles[0].reportFilters = [{ mode: 'rows', conditions: [{ table: 'person', column: 'id', operator: 'gt', compareColumn: 'threshold' }] }];
+    const ai = await displayedAssistant(page);
+    await page.goto('/schemer');
+    const tile = page.locator('.analytics-tile'); await expect(tile).toContainText('2 groups');
+    if (pane === 'drill') {
+      await tile.getByRole('heading', { name: 'Positions by org' }).click();
+      const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
+      await expanded.getByRole('button', { name: 'HQ: 3. View records', exact: true }).click();
+      await expect(expanded.locator('.drill-body')).toContainText('Casey');
+      await expanded.getByRole('button', { name: 'Explain displayed detail rows', exact: true }).click();
+    } else await tile.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+    const before = requests.length;
+    await expect.poll(() => ai.attachments.length).toBe(1);
+    expect(ai.attachments[0].displayedResult).toMatchObject({ pane,
+      selections: { region: { values: { region: 'dashboard region' } } },
+      tileSelections: { region: { values: { region: 'tile region' } } },
+      reportFilters: [{ conditions: [{ column: 'id', compareColumn: 'threshold' }] }],
+    });
+    expect(requests).toHaveLength(before); expect(ai.providerCalls).toBe(0); expect(errors).toEqual([]);
+  });
+}
+
+test('reopening a withheld displayed explanation replaces old derived text with safe reattachment recovery', async ({ page }) => {
+  const { requests, errors } = await mock(page);
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile')).toContainText('2 groups');
+  await page.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve batch', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('not database totals');
+  const before = requests.length; ai.withhold();
+  await page.getByRole('button', { name: 'Conversation history', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Conversation history', exact: true }).getByRole('button', { name: 'Displayed explanation', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('Attach the displayed result again');
+  await expect(page.locator('.model-ai-messages')).not.toContainText('bounded sample, not database totals');
+  expect(requests).toHaveLength(before); expect(ai.providerCalls).toBe(1); expect(errors).toEqual([]);
 });

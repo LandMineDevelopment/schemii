@@ -114,7 +114,8 @@ function getStream(tile, selection = null, { refresh = false } = {}) {
     } });
     cache.displayContext = JSON.parse(JSON.stringify({ dashboardId: origin.id, dashboardRevision: origin.revision,
       modelId: origin.modelId, modelRevision: origin.modelRevision, tileId: tile.id,
-      selections: origin.selections, pane: selected ? 'drill' : 'main', drillSelection: selected }));
+      selections: origin.selections, tileSelections: tile.selections || {}, reportFilters: tile.reportFilters || [],
+      pane: selected ? 'drill' : 'main', drillSelection: selected }));
     if (permissions.export) cache.download = () => {
       if (dashboard?.id !== origin.id) { message('Reopen this dashboard before downloading its results.'); return; }
       const form = document.createElement('form'); form.method = 'POST'; form.action = `${API}/${origin.id}/tiles/${encodeURIComponent(tile.id)}/export`; form.target = '_blank';

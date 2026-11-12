@@ -135,6 +135,7 @@ function viewerFixture({ budget = new CacheBudget(), result = 'pending' } = {}) 
   let dialog = open();
   const button = label => find(dialog, node => node.attributes['aria-label'] === label)[0];
   return { main, dashboardGroup, dashboard, streams, calls, frames, gates, budget, forms,
+    createCache: (tile, selected = null) => getStream(tile, selected),
     select: value => find(dialog, node => node.className === 'expanded-chart-body')[0].onDrill(selection(value)),
     button, escape: () => dialog.escape(), reopen: () => { dialog = open(); },
     flush: () => { while (scheduled.length) scheduled.shift()(); },
@@ -308,11 +309,18 @@ test('displayed attachment deep-freezes rows and execution filters without retai
   } });
   await cache.loadMore();
   const context = { dashboardId: 'dashboard', dashboardRevision: 1, tileId: 'tile', modelId: 'model', modelRevision: 1,
-    pane: 'main', drillSelection: null, selections: { region: { active: true, values: { name: 'applied' } } } };
+    pane: 'main', drillSelection: null, selections: { region: { active: true, values: { name: 'applied' } } },
+    tileSelections: { region: { active: true, values: { name: 'tile override' } } },
+    reportFilters: [{ mode: 'rows', conditions: [{ table: 'source', column: 'left', operator: 'eq', compareColumn: 'right' }] }] };
   const frozen = freezeDisplayedResult(cache.snapshot(), context);
   cache.rows[0][0].nested[0] = 'later'; context.selections.region.values.name = 'unapplied'; cache.dispose();
   assert.deepEqual(frozen.rows, [[{ nested: ['original'] }]]);
   assert.equal(frozen.selections.region.values.name, 'applied');
+  context.tileSelections.region.values.name = 'later tile draft';
+  context.reportFilters[0].conditions[0].compareColumn = 'later_column';
+  assert.equal(frozen.tileSelections.region.values.name, 'tile override');
+  assert.equal(frozen.reportFilters[0].conditions[0].compareColumn, 'right');
+  assert.equal(Object.isFrozen(frozen.reportFilters[0].conditions[0]), true);
   assert.equal(frozen.snapshotAt, startFrame.snapshotAt);
   assert.equal(Object.isFrozen(frozen.rows[0][0].nested), true);
   assert.equal('plan' in frozen, false); assert.equal('controller' in frozen, false);
@@ -331,6 +339,27 @@ test('displayed attachment independently bounds rows and bytes and labels all tr
   assert.equal(bytes.rows.length, 0); assert.equal(bytes.clientSampleTruncated, true);
   assert.ok(new TextEncoder().encode(JSON.stringify(bytes)).length <= 450);
   assert.throws(() => freezeDisplayedResult({ ...result, columns: [{ name: 'x'.repeat(1000) }] }, {}, { maxBytes: 100 }), /metadata exceeds/);
+  assert.throws(() => freezeDisplayedResult(result, { reportFilters: [{ conditions: [{ value: 'x'.repeat(1000) }] }] }, { maxBytes: 450 }), /metadata exceeds/);
+});
+
+test('studio captures saved tile overrides and predicates for main and drill caches before later UI mutation', async () => {
+  const f = viewerFixture({ result: 'empty' });
+  try {
+    f.dashboard.selections = { region: { active: true, values: { value: 'dashboard region' } } };
+    const tile = { id: 'population', kind: 'aggregate', limit: 20,
+      selections: { region: { active: true, values: { value: 'tile region' } } },
+      reportFilters: [{ mode: 'rows', conditions: [{ table: 'source', column: 'left', operator: 'eq', compareColumn: 'right' }] }] };
+    const main = f.createCache(tile), drill = f.createCache(tile, { dimensions: [{ column: 'region', value: 'chosen' }] });
+    tile.selections.region.values.value = 'edited tile'; tile.reportFilters[0].conditions[0].compareColumn = 'edited_column';
+    f.dashboard.selections.region.values.value = 'unapplied UI region';
+    for (const cache of [main, drill]) {
+      assert.equal(cache.displayContext.selections.region.values.value, 'dashboard region');
+      assert.equal(cache.displayContext.tileSelections.region.values.value, 'tile region');
+      assert.equal(cache.displayContext.reportFilters[0].conditions[0].compareColumn, 'right');
+    }
+    assert.equal(main.displayContext.pane, 'main'); assert.equal(drill.displayContext.pane, 'drill');
+    assert.equal(drill.displayContext.drillSelection.dimensions[0].value, 'chosen');
+  } finally { await f.finish(); }
 });
 
 test('displayed visualization captures the selected time metric and independent chart mark truncation', async () => {
