@@ -1,3 +1,4 @@
+import { visibleMeasures, chooseConstituent } from "./measures.js";
 import { renderPivot } from './pivot.js';
 import { element } from '#common/dom.js';
 import { createResultGrid } from './scroll-results.js';
@@ -36,12 +37,19 @@ export function displayedVisualization(host, tile, result) {
     columns: indices.map(index => result.columns[index]), rows: preview.rows.map(row => indices.map(index => row[index])) };
 }
 export function renderVisualization(host, tile, result, { onDrill, compact = false, modelId } = {}) {
-  if (tile.kind === 'pivot') { renderPivot(host, tile, result, { onDrill, compact }); return; }
+  const originalTile=tile, calculated=result?.plan?.calculatedMeasures || [];
+  const select=(selection)=>{
+    const item=calculated.find(item=>item.id===visibleMeasures(originalTile)[selection.measureIndex]?.column && visibleMeasures(originalTile)[selection.measureIndex]?.kind==='calculated');
+    if(item) chooseConstituent(item,operand=>onDrill?.({...selection,constituent:operand}),element);
+    else onDrill?.(selection);
+  };
+  if (tile.kind === 'pivot') { renderPivot(host,{...tile,measures:visibleMeasures(tile)},result,{onDrill:onDrill?select:null,compact}); return; }
   const fullResult = result;
-  const options = [['values', 'Period values'], ...(tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none' ? [['change', 'Absolute change'], ['percent', 'Percentage change']] : []), ...(tile.timeAnalysis?.runningTotal ? [['running', 'Running totals']] : [])];
+  const options = [['values', 'Period values'], ...(tile.measures.length && tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none' ? [['change', 'Absolute change'], ['percent', 'Percentage change']] : []), ...(tile.measures.length && tile.timeAnalysis?.runningTotal ? [['running', 'Running totals']] : [])];
   const metric = options.some(([value]) => value === host.dataset.timeMetric) ? host.dataset.timeMetric : 'values';
   host.dataset.timeMetric = metric;
-  const selectedSeries = timeSeries(tile, metric);
+  const selectedSeries = [...timeSeries(tile,metric),...(metric==='values'?calculated.filter(item=>item.index!=null).map(item=>({column:item.index,drill:visibleMeasures(tile).findIndex(output=>output.kind==='calculated'&&output.column===item.id)})):[])];
+  tile={...tile,outputMeasureNames:Object.fromEntries(calculated.filter(item=>item.index!=null).map(item=>[item.index,item.displayLabel || item.label]))};
   const series = tile.kind === 'donut' ? selectedSeries.slice(0, 1) : selectedSeries;
   result = chartPreview({ ...tile, measures: series }, result);
   const redraw = focusLabel => {
@@ -53,22 +61,38 @@ export function renderVisualization(host, tile, result, { onDrill, compact = fal
   host.replaceChildren();
   const repetition = repetitionNotice(result?.plan, { modelId });
   if (repetition) host.append(repetition);
+  if(calculated.length && (result?.loading || result?.limitReached || result?.visualTruncated)) host.append(element('p',{className:'chart-partial-notice',text:'Calculated values use the complete query population, including groups outside this preview. Chart geometry and cached-row exports show received groups only.'}));
   if (result.visualTruncated) host.append(element('p', { className: 'chart-partial-notice', text: `Chart shows the first ${result.rows.length} of ${result.cachedRows} cached groups. Export cached rows or download full results to see more.` }));
   if (!['detail', 'aggregate', 'kpi'].includes(tile.kind) && (result?.loading || result?.limitReached || result?.error || result?.visualTruncated)) host.append(element('p', { className: 'chart-partial-notice', text: tile.kind === 'donut' ? 'Partial result · percentages reflect displayed groups only.' : 'Partial result · showing received groups.' }));
   if (!result?.rows.length) { host.append(element('p', { className: 'empty-state', text: result?.loading ? 'Waiting for the first rows…' : result?.error ? 'The query did not complete.' : 'No matching rows for these slicers and filters.' })); return; }
-  const drill = (row, index) => onDrill && index !== null ? () => onDrill(markSelection(tile, row, index)) : null;
+  const drill = (row, index) => onDrill && index !== null ? () => select(markSelection(tile, row, index)) : null;
   if (tile.kind === 'detail' || tile.kind === 'aggregate') {
     const grid = createResultGrid(result, (tr, rowIndex) => {
       if (onDrill && tile.kind === 'aggregate') [...tr.querySelectorAll('td')].forEach((td, columnIndex) => {
-        if (columnIndex >= tile.dimensions.length && columnIndex < tile.dimensions.length + tile.measures.length) actionable(td, `View records for ${td.textContent}`, drill(result.rows[rowIndex], columnIndex - tile.dimensions.length));
+        const baseIndex=columnIndex-tile.dimensions.length;
+        const calculation=calculated.find(item=>item.index===columnIndex);
+        const index=calculation?visibleMeasures(originalTile).findIndex(item=>item.kind==='calculated'&&item.column===calculation.id):baseIndex>=0&&baseIndex<originalTile.measures.length?baseIndex:null;
+        if(index!==null) actionable(td, `View records for ${td.textContent}`, drill(result.rows[rowIndex],index));
       });
     });
     if (tile.timeAnalysis) host.append(element('p', { className: 'hint', text: 'Select a period’s base measure to see its contributing records. Comparison and running-total columns combine periods and do not drill through.' }));
     host.append(grid); return;
   }
   if (tile.kind === 'kpi') {
-    const value = element('div', { className: 'kpi-value' }, [element('strong', { text: format(result.rows[0][0]) }), element('span', { text: result.columns[0].name })]);
-    actionable(value, 'View contributing records', drill(result.rows[0], 0)); host.append(value); return;
+    const value = element('div', { className: 'kpi-value' }, [element('strong', { text: format(result.rows[0][0])+(calculated.some(item=>item.index===0&&item.unit==='percent')?'%':'') }), element('span', { text: result.columns[0].name })]);
+    actionable(value, 'View contributing records', drill(result.rows[0], 0)); host.append(value);
+    const comparison=result.plan?.kpiComparison;
+    if(comparison) {
+      const [baseline,absolute,percent,status]=comparison.indices.map(index=>result.rows[0][index]);
+      const meaning={higher:'higher is better',lower:'lower is better',equal:'exactly at baseline is better'}[comparison.favorable];
+      host.append(element('section',{className:'kpi-comparison',attrs:{'aria-label':'KPI target and variance'}},[
+        element('p',{text:`${comparison.label}: ${baseline===null?'NULL':String(baseline)+(comparison.baselineUnit==='percent'?'%':'')}`}),
+        element('p',{text:`Absolute variance: ${absolute===null?'NULL':String(absolute)+(comparison.absoluteUnit==='percentage_points'?' percentage points':'')}`}),
+        element('p',{text:`Percentage variance: ${percent===null?'NULL':String(percent)+'%'}`}),
+        element('strong',{text:`${status==='favorable'?'✓ ':status==='unfavorable'?'! ':''}${status || 'unavailable'} · ${meaning}`}),
+      ]));
+    }
+    return;
   }
   if (tile.timeAnalysis && options.length > 1) {
     const select = element('select', { attrs: { 'aria-label': 'Displayed time measure' } });

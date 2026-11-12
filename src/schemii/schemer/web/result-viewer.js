@@ -76,7 +76,7 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     reusedDrill = next.started;
     if (next !== detailCache) { releaseDrill(); detailCache = next; unsubscribeDrill = detailCache.subscribe(scheduleDetails); }
     detailSelection = selected;
-    chips.replaceChildren(...(selected.pivot ? [element('span', { text: `Pivot ${selected.pivot.kind.replaceAll('_', ' ')} · complete qualifying scope` })] : []), ...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
+    chips.replaceChildren(...(selected.constituent ? [element('span',{text:`Calculation constituent · ${selected.constituent.scope.replaceAll('_',' ')}`})] : []),...(selected.pivot ? [element('span', { text: `Pivot ${selected.pivot.kind.replaceAll('_', ' ')} · complete qualifying scope` })] : []), ...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
     detailPane.hidden = false; pane('details'); renderDetails(); void detailCache.loadMore();
   }
   function footer(host, stream) {
@@ -84,10 +84,10 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
     const data = stream.snapshot();
     host.append(element('span', { className: 'hint', text: `${data.rows.length} cached · ${data.loading ? 'receiving rows' : data.error ? 'interrupted' : data.limitReached ? 'Preview limit reached' : 'end of result'}` }));
     if (canExport) {
-      const scope = tile.kind === 'pivot' && stream !== cache ? detailSelection : null;
+      const scope = stream !== cache && (tile.kind==='pivot' || detailSelection?.constituent) ? detailSelection : null;
       const serialized = scope ? JSON.stringify(scope) : '';
       const cached = icon('download', tile.kind === 'pivot' && stream === cache ? 'Export cached pivot groups with scope as CSV' : 'Export cached rows as CSV', () => {
-        const scoped = scope ? { ...data, columns: [...data.columns, ...['Pivot scope', 'Row grouping depth', 'Column grouping depth', 'Pivot selection'].map(name => ({ name }))],
+        const scoped = scope?.constituent ? {...data,columns:[...data.columns,...['Calculated measure','Constituent population','Calculation selection'].map(name=>({name}))],rows:data.rows.map(row=>[...row,data.plan?.calculationScope?.label || 'Calculation',data.plan?.calculationScope?.population || scope.constituent.scope,JSON.stringify(data.plan?.calculationScope || scope)])} : scope ? { ...data, columns: [...data.columns, ...['Pivot scope', 'Row grouping depth', 'Column grouping depth', 'Pivot selection'].map(name => ({ name }))],
           rows: data.rows.map(row => [...row, scope.pivot.kind, scope.pivot.rowDepth, scope.pivot.columnDepth, serialized]) } : data;
         downloadContent(csvContent(scoped), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8');
       });

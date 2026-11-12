@@ -63,3 +63,11 @@ test('identical measure columns from different model nodes remain distinguishabl
   assert.equal(barMeasureName(two, 2), 'Count · Personnel · Id');
   assert.equal(barMeasureName(two, 3), 'Count · Customers · Id');
 });
+
+test('calculated columns beyond complete time blocks use their stable named mapping',()=>{
+  const current={...tile,outputMeasureNames:{9:'Weighted ratio of sums'}};
+  assert.equal(barMeasureName(current,9),'Weighted ratio of sums');
+  const grouped=barGroups(current,{rows:[[1,'2024-09-01',4,0,0,0,0,0,0,2.5]]},[{column:9,drill:1}]);
+  assert.equal(grouped.series[0].label,'Sep 2024');
+  assert.equal(grouped.series[0].column,9);assert.equal(grouped.groups[0].bars[0].row[9],2.5);
+});

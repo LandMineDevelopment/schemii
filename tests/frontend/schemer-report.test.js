@@ -1,3 +1,4 @@
+import { measureEditor, calculationErrors } from "../../src/schemii/schemer/web/measures.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -107,7 +108,7 @@ function editorFixture({ tile = reportTile(), sourceModel = model, schema = cata
     modelSelect: (label, choices, selected, change) => element('select', { text: label, choices, selected, change }),
     disposeSelects() {}, timeDimensions: () => [], fieldLabel: (_draft, _catalog, field) => field.column,
     aggregateChoices, fieldChoices: (...args) => pivot ? fieldChoices(...args) : [], fieldKey: field => JSON.stringify([field.table, field.column]),
-    TILE_TYPES, tileErrors: (tile, source, schema) => pivot ? tileErrors(tile, source, schema) : reportControlErrors(tile, source, schema), reportOutputs, reportOutputKey, numericFilterValue, tileDimensions, pivotDefaults, tileAggregateChoices,
+    measureEditor, TILE_TYPES, tileErrors: (tile, source, schema) => pivot ? tileErrors(tile, source, schema) : [...reportControlErrors(tile, source, schema),...calculationErrors(tile,reportOutputs(tile,source,schema))], reportOutputs, reportOutputKey, numericFilterValue, tileDimensions, pivotDefaults, tileAggregateChoices,
     tile, model: sourceModel, catalog: schema, onSave: async tile => saves.push(structuredClone(tile)),
   });
   vm.runInContext(tileEditorSource.replace(/^import .*;\n/gm, '').replace('export function openTileEditor', 'function openTileEditor'), context);
@@ -261,4 +262,27 @@ test('actual pivot editor retains an incompatible saved summary aggregation unti
   f.node('Measure 1 aggregation').change('min'); await f.node('Apply & run').onclick();
   assert.equal(f.saves[0].measures[0].aggregate, 'min');
   assert.equal(config.tile.measures[0].aggregate, 'avg');
+});
+
+test('actual tile editor saves a named calculated measure through typed operand controls',async()=>{
+  const original=reportTile();const f=editorFixture({tile:original});
+  f.node('Add calculated measure').onclick();
+  const name=f.node('Calculation 1 name');name.value='Salary ratio';name.oninput();
+  f.node('Calculation Left / numerator').change(reportOutputKey({table:'person',column:'salary',aggregate:'sum',kind:'value'}));
+  const value=f.node('Right / denominator exact numeric value');value.value='0.100000000000000000001';value.oninput();
+  await f.node('Apply & run').onclick();
+  assert.equal(f.saves.length,1);
+  assert.equal(f.saves[0].calculations[0].label,'Salary ratio');
+  assert.deepEqual(f.saves[0].calculations[0].left.output,{table:'person',column:'salary',aggregate:'sum',kind:'value'});
+  assert.equal(f.saves[0].calculations[0].right.constant,'0.100000000000000000001');
+  assert.equal(original.calculations,undefined);
+});
+test('KPI editor retains exact baseline input and explicit favorable direction',async()=>{
+  const original={...reportTile(),kind:'kpi',dimensions:[]};const f=editorFixture({tile:original});
+  const toggle=f.node('Compare KPI to target or baseline');toggle.checked=true;toggle.onchange();
+  const input=f.node('KPI baseline exact numeric value');input.value='9007199254740993.00001';input.oninput();
+  f.node('KPI favorable direction').change('lower');
+  await f.node('Apply & run').onclick();
+  assert.equal(f.saves.length,1);assert.equal(f.saves[0].kpiComparison.baseline.constant,'9007199254740993.00001');
+  assert.equal(f.saves[0].kpiComparison.favorable,'lower');assert.equal(original.kpiComparison,undefined);
 });

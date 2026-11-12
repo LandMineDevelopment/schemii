@@ -45,11 +45,11 @@ export function modelUpgradeIssues(draft, model, catalog) {
   for (const tile of draft.tiles) {
     const add = (message, extra = {}) => issues.push({ tileId: tile.id, message, ...extra });
     for (const message of tileErrors(tile, model, catalog)) add(message);
-    for (const [key, label] of [['dimensions', 'Dimension'], ['rowDimensions', 'Pivot row dimension'], ['columnDimensions', 'Pivot column dimension'], ['measures', 'Measure'], ['detailFields', 'Detail column']]) {
+    for (const [key, label] of [['dimensions', 'Dimension'], ['rowDimensions', 'Pivot row dimension'], ['columnDimensions', 'Pivot column dimension'], ['measures', 'Measure'], ['hiddenMeasures','Hidden measure input'], ['detailFields', 'Detail column']]) {
       for (const field of tile[key] || []) {
         const problem = fieldProblem(field);
         if (problem) add(`${label}: ${problem}`);
-        else if (key === 'measures') {
+        else if (key === 'measures' || key === 'hiddenMeasures') {
           const node = nodes.get(field.table);
           const type = nodeColumns(definition, catalog, node).find(column => column.name === field.column)?.dataType || '';
           const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])(?:\b|\()/i.test(type);

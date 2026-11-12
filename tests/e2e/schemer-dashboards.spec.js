@@ -10,9 +10,15 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false, pivot = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false, pivot = false, calculated = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
+  if(calculated) {
+    const tile=fixture.dashboard.tiles[0];
+    Object.assign(tile,{kind:calculated==='kpi'?'kpi':'bar',title:'Calculated share',dimensions:calculated==='kpi'?[]:[field('org')],measures:[],hiddenMeasures:[field('id','count')],
+      calculations:[{id:'share',label:'Share',operation:'percent_of',left:{output:field('id','count'),scope:'group'},right:{output:field('id','count'),scope:'source_population'},visible:true}],
+      ...(calculated==='kpi'?{kpiComparison:{label:'Target',baseline:{constant:'50'},favorable:'higher'}}:{})});
+  }
   if (jsonCells) {
     fixture.dashboard.tiles[0].kind = 'detail';
     fixture.dashboard.tiles[0].dimensions = [];
@@ -42,7 +48,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   }
   function framesFor(tiles, selection) {
     const snapshotAt = '2026-09-20T12:00:00Z';
-    const planFor = tile => ({ sql: selection ? "SELECT id, name FROM personnel WHERE org = 'HQ' AND id IS NOT NULL;" : 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, repetitionDiagnostics, rowLimit: tile.limit });
+    const planFor = tile => ({ sql: selection ? "SELECT id, name FROM personnel WHERE org = 'HQ' AND id IS NOT NULL;" : 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, repetitionDiagnostics, rowLimit: tile.limit,...(calculated?{calculatedMeasures:[{id:'share',label:'Share',index:calculated==='kpi'?0:1,unit:'percent',scale:100,constituents:[{output:{...field('id','count'),kind:'value'},scope:'group'},{output:{...field('id','count'),kind:'value'},scope:'source_population'}]}],...(calculated==='kpi'?{kpiComparison:{label:'Target',favorable:'higher',indices:[1,2,3,4],percentScale:100}}:{})}:{}) });
     const frames = [{ type: 'start', snapshotAt, tiles: tiles.map(tile => ({ tileId: tile.id, plan: planFor(tile) })), tileErrors: [], limits: { rows: 10000, bytes: 8388608, totalBytes: 33554432 } }];
     for (const tile of tiles) {
       const data = dataFor(tile, selection);
@@ -58,6 +64,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     return frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
   }
   function dataFor(tile, drill) {
+    if(calculated&&!drill) return calculated==='kpi'?{columns:['Share','Target','Absolute variance','Variance (%)','KPI assessment'].map(name=>({name})),rows:[[40,50,-10,-20,'unfavorable']]}:{columns:[{name:'Organization'},{name:'Share'}],rows:[['HQ',40],['Field',60]]};
     if (pivot && !drill) {
       const rows = pivot === 'capacity' ? [[null, null, null, null, null, null, 0, 0, 'column_capacity', 5, false, 180, 'capacity']]
         : [[null, null, null, null, 39.1666666667, 4, 0, 0, 'data', 2, true, 180, 'grand_total'],
@@ -1239,3 +1246,25 @@ for (const state of ['interrupted', 'empty']) {
     expect(errors).toEqual([]);
   });
 }
+
+
+test('calculated measure offers separate constituent populations in the mounted report',async({page})=>{
+  const {requests,errors}=await mock(page,{calculated:true});
+  await page.goto('/schemer');
+  const tile=page.locator('.analytics-tile');await expect(tile).toContainText('Calculated share');
+  await tile.locator('.bar-value-row').first().click();
+  const chooser=page.getByRole('dialog',{name:'Choose calculation contributing records'});
+  await expect(chooser).toContainText('separate input populations');
+  await chooser.getByRole('button',{name:/Source-filtered report population/}).click();
+  await expect(page.locator('.drill-body')).toContainText('Alex');
+  expect(requests.findLast(request=>request.body?.selection).body.selection.constituent.scope).toBe('source_population');
+  await expect(page.locator('.filter-chips')).toContainText('source population');
+  expect(errors).toEqual([]);
+});
+
+test('KPI comparison presents target variance and direction as accessible text',async({page})=>{
+  const {errors}=await mock(page,{calculated:'kpi'});await page.goto('/schemer');
+  const comparison=page.getByRole('region',{name:'KPI target and variance'});
+  await expect(comparison).toContainText('Target: 50');await expect(comparison).toContainText('Percentage variance: -20%');
+  await expect(comparison).toContainText('unfavorable · higher is better');expect(errors).toEqual([]);
+});
