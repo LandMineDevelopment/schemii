@@ -1,4 +1,5 @@
 import { createDraftAnalysisLifecycle } from "./draft-analysis.js";
+import { materializedAuthoringGuidance } from "./compatibility.js";
 
 export function createDesignEditorControllers({ api, state, elements, helpers }) {
   const {
@@ -176,7 +177,10 @@ export function createDesignEditorControllers({ api, state, elements, helpers })
   }
 
   function updateDesignViewPopulation() {
-    elements.designViewPopulationRow.hidden = elements.designViewKind.value !== "materialized_view";
+    const materialized = elements.designViewKind.value === "materialized_view";
+    elements.designViewPopulationRow.hidden = !materialized;
+    elements.designViewMaintenanceGuidance.hidden = !materialized;
+    elements.designViewMaintenanceGuidance.textContent = materializedAuthoringGuidance(Boolean(editorIds.view));
     renderDesignViewPreview();
   }
 

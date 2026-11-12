@@ -53,6 +53,8 @@
         </nav>
       </header>
 
+      <section class="workspace-compatibility" id="workspace-compatibility" aria-label="PostgreSQL import compatibility" hidden></section>
+
       <main class="main-layout" id="main-layout">
         <nav class="layer-switch" aria-label="Workspace layer">
           <button class="active" type="button" data-layer="tables" data-ui-icon-leading="tables" aria-pressed="true" title="Tables">
@@ -359,6 +361,7 @@
               <label class="design-field"><span>Storage</span><select id="design-view-kind"><option value="view">Ordinary view</option><option value="materialized_view">Materialized view</option></select></label>
             </div>
             <label class="check-row design-view-population" id="design-view-population-row" hidden><input id="design-view-populate" type="checkbox" checked /><span>Populate stored results when created</span></label>
+            <p class="materialized-authoring-guidance" id="design-view-maintenance-guidance" role="note" hidden></p>
             <label class="design-field design-view-query"><span>SELECT query body</span><textarea id="design-view-definition" required spellcheck="false" placeholder="SELECT&#10;    customer_id,&#10;    sum(total) AS lifetime_value&#10;FROM orders&#10;GROUP BY customer_id"></textarea><small>Do not enter CREATE VIEW; the design owns the name and storage choice above.</small></label>
           </section>
           <section class="design-view-preview" aria-labelledby="design-view-preview-title">

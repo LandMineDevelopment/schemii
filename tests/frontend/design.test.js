@@ -998,6 +998,42 @@ test("key editing and deletion preserve referenced target keys", () => {
   assert.equal(deleteDesignKey(withoutRelationship, parent.id, parent.keys[0].id).content.tables[0].keys.length, 0);
 });
 
+import { createDesignEditorControllers } from "../../src/schemii/schemii/web/assets/design-editors.js";
+test("view controller exposes maintenance guidance before opening and never persists refresh as population", async t => {
+  const node = () => ({ value: "", checked: false, hidden: false, open: false, reset() {}, append() {}, focus() {}, close() { this.open = false; } });
+  const elements = new Proxy({}, { get: (target, key) => target[key] ||= node() });
+  const state = { activeWorkspace: { id: "workspace" }, design: { content: { tables: [], views: [{ id: "existing", name: "totals", kind: "materialized_view", populateOnCreate: false, definition: "SELECT 1 AS total" }] } } };
+  const original = structuredClone(state.design); const opened = [];
+  const helpers = new Proxy({ isDesignWorkspace: () => true, quoteSqlIdentifier: value => value, element: node,
+    openDialog: dialog => { opened.push({ hidden: elements.designViewMaintenanceGuidance.hidden, text: elements.designViewMaintenanceGuidance.textContent }); dialog.open = true; },
+  }, { get: (target, key) => target[key] || (() => {}) });
+  const controller = createDesignEditorControllers({ api: {}, state, elements, helpers }); t.after(() => controller.discardDrafts());
+  await controller.openDesignViewEditor("existing");
+  assert.equal(opened[0].hidden, false); assert.match(opened[0].text, /blocked by dependencies, ownership, indexes or privileges/);
+  assert.equal(elements.designViewPopulate.checked, false); assert.match(opened[0].text, /does not refresh an existing cache/);
+  controller.discardDrafts(); await controller.openDesignViewEditor(); assert.equal(opened[1].hidden, true);
+  elements.designViewKind.value = "materialized_view"; controller.updateDesignViewPopulation();
+  assert.equal(elements.designViewMaintenanceGuidance.hidden, false); assert.match(elements.designViewMaintenanceGuidance.textContent, /one-time materialized-view refresh/);
+  assert.deepEqual(state.design, original);
+});
+
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+test("migration snapshot reload preserves editor drafts and pending layout and reports read failures", async () => {
+  const source = readFileSync(new URL("../../src/schemii/schemii/web/assets/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function reloadMigrationWorkspace() {");
+  const body = source.slice(start, source.indexOf("\n}\n", start) + 2);
+  const state = { activeWorkspace: { id: "original" }, catalogError: null }, editors = { hasDraft: true }, tableEditor = { hasDraft: false }; let flushed = false, reads = 0;
+  const reload = runInNewContext(`(${body})`, { Error, state, tableEditor, designEditors: editors, flushLayoutBeforeTransition: async () => flushed, loadActiveWorkspace: async () => { reads += 1; } });
+  await assert.rejects(reload, /open editor draft/); assert.equal(reads, 0); editors.hasDraft = false;
+  tableEditor.hasDraft = true; await assert.rejects(reload, /open editor draft/); assert.equal(reads, 0); tableEditor.hasDraft = false;
+  await assert.rejects(reload, /pending layout save/); assert.equal(reads, 0); flushed = true; await reload(); assert.equal(reads, 1);
+  state.catalogError = new Error("snapshot unavailable"); await assert.rejects(reload, /snapshot unavailable/);
+  const navigation = runInNewContext(`(${body})`, { Error, state, tableEditor, designEditors: editors, flushLayoutBeforeTransition: async () => { state.activeWorkspace = { id: "other" }; return true; }, loadActiveWorkspace: async () => { reads += 1; } });
+  const before = reads; await navigation(); assert.equal(reads, before); assert.equal(state.activeWorkspace.id, "other");
+
+});
+
 test("ordinary named NOT NULL metadata survives editor-value rebuilds by stable column ID", () => {
   const table = createDesignTable("source", [{ name: "value", dataType: "integer", nullable: false, primary: false }], () => uuids[0]);
   table.columns[0].notNullConstraintName = 'exact "NN"';
