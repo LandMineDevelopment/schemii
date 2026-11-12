@@ -18,7 +18,12 @@ from .models import (
     PostgresConnectionUpdate,
 )
 from .policy import ConnectionTargetForbiddenError
-from .service import ConnectionInUseError, ConnectionService, ProductConnectionAccess
+from .service import (
+    ConnectionInUseError,
+    ConnectionService,
+    ProductConnectionAccess,
+    ProductConnectionAccessDeniedError,
+)
 from .store import (
     ConnectionConflictError,
     ConnectionLimitError,
@@ -105,9 +110,16 @@ def list_connections(
 ) -> ConnectionListResponse:
     """List the current owner's non-secret PostgreSQL connection profiles."""
 
-    return ConnectionListResponse(
-        connections=_product_service(request, product).list(principal.user_id)
-    )
+    try:
+        return ConnectionListResponse(
+            connections=_product_service(request, product).list(principal.user_id)
+        )
+    except ProductConnectionAccessDeniedError as error:
+        raise ApiProblem(
+            403,
+            "product_access_denied",
+            f"Your role does not permit connection authoring for {product}.",
+        ) from error
 
 
 @router.post("", response_model=PostgresConnectionProfile, status_code=status.HTTP_201_CREATED)
