@@ -156,7 +156,35 @@ observation/attach source certification is still required before qualified smoke
 The controller runs in one dedicated process group and uses incremental Node only.
 It attaches through the owning launcher, sends bounded heartbeats, and keeps helper
 processes in the same group. The holder must verify committed source fingerprints
-before attachment. Expiry stops/joins the exact group before fixture disposal and
+before attachment. Source inventory version2 hashes every `.mjs`/`.py` below
+`testing/load` plus the closed companion inventory `testing/harness/store.mjs`,
+`testing/harness/deployment.mjs`, `testing/harness/leases.mjs` and
+`testing/load/fixture-spec.json`. The current shared harness imports terminate in
+those three modules and Node builtins. Held consumers must select incremental
+Node before attachment; the separate k6 recipe is not executed on this path.
+External installed packages and generated private run inputs retain their separate
+runtime/ownership qualification; this pin does not certify them or unrelated
+product/documentation files.
+
+The version2 digest is SHA256 of `schemii-constrained-load-consumer-source\0v2\0`
+followed by each lexically sorted canonical repository-relative path, a NUL byte,
+and the raw SHA256 digest of that file's content. The manifest reports its version,
+paths, sizes and content hashes. Inputs must be tracked, readable bounded local
+regular files with no symlink components; all companion inputs and the load tree
+must be unchanged against HEAD. The reviewed digest catches both dirty changes
+and clean committed replacements before prepare. Recording a changed source as
+the later run baseline does not authorize it. The old subtree-only pin is invalid;
+the delivered pin stays empty until the coordinator independently reviews and
+sets the expanded digest.
+
+Maintenance rule: when a consumer adds a repository-local import or fixed data
+input outside the selected load source tree, add its transitive closure to
+`CONSUMER_SOURCE_COMPANIONS`, review the inventory version and new manifest, and
+clear/review the pin. Do not replace that review with a prepare-time baseline or
+silently broaden the pin to unrelated application/docs. This is a small declared
+closure, not a JavaScript parser or general source-certification framework.
+
+Expiry stops/joins the exact group before fixture disposal and
 retained-stack restoration. No workload may continue against the restored stack.
 Offline load cleanup requires matching run/nonce, saved consumer PID/start/argv
 identity, a joined attachment, and the holder's completed cleanup/restoration
