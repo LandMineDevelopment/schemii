@@ -1,4 +1,5 @@
 import { catalogTable } from "./logical-relationships.js";
+import { nodeColumns } from "./model-columns.js";
 import { conditionSources } from "./derived-conditions.js";
 import { columnComparisonIssue } from "./column-comparisons.js";
 
@@ -10,7 +11,7 @@ export function boundFilterSources(scope) {
 /** Exact authored bindings only; aliases and calculated outputs are not interchangeable. */
 export function columnFilterBindings(draft, nodeId, column) {
   const node = draft.nodes.find(candidate => candidate.id === nodeId);
-  if (!node || node.derivation) return [];
+  if (!node) return [];
   return (draft.scopes || []).flatMap(scope => (scope.alternatives || []).flatMap(alternative => {
     const conditionIndexes = (alternative.conditions || []).flatMap((condition, index) => condition.table === nodeId && condition.column === column ? [index] : []);
     return conditionIndexes.length ? [{scope, alternative, conditionIndexes, conditions: conditionIndexes.map(index => alternative.conditions[index])}] : [];
@@ -90,7 +91,7 @@ export function modelFilterIssues(scope, draft, catalog) {
         if (!columns.some(column => column.name === c.domain.column) || (c.domain.labelColumn && !columns.some(column => column.name === c.domain.labelColumn))) add(`${key}:value`, "Choose a valid fixed-value domain source and display label.");
       }
       const node = draft.nodes.find(n => n.id === c.table);
-      if (!catalogTable(node,catalog)?.columns.some(column => column.name === c.column)) add(`${key}:field`, "Choose a valid source column for this condition.");
+      if (!nodeColumns(draft,catalog,node).some(column => column.name === c.column && !column.issue)) add(`${key}:field`, "Choose a valid source column for this condition.");
       if (c.parameterId && !(option.inputs || []).some(p => p.id === c.parameterId)) add(`${key}:value-source`, "Choose a value source; the referenced input was removed.");
     }
   }

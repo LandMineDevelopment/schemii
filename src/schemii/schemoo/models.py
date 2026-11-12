@@ -165,6 +165,7 @@ class DerivedOutput(Contract):
     nodeId: Identifier | None = None
     column: Identifier
     operand: Identifier | None = None
+    operandNodeId: Identifier | None = None
     distinct: bool = False
     delimiter: str = Field(default=", ", max_length=20)
     conditions: list[DerivedCondition] = Field(default_factory=list, max_length=16)

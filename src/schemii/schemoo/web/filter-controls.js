@@ -3,6 +3,7 @@ import { element } from "#common/dom.js";
 import { createIconButton } from "/assets/common/ui.js";
 import { helpButton, helpHeading } from "./help.js";
 import { modelSelect, domainSelect, disposeSelects } from "./select.js";
+import { nodeColumns } from "./model-columns.js";
 import { exposedFields } from "./model-state.js";
 import { columnComparisonOperators, comparisonColumns } from "./column-comparisons.js";
 import { describeFilterCondition } from "./model-filter-links.js";
@@ -54,8 +55,8 @@ function section(title, children = [], open = true) {
   return node;
 }
 function fields(draft, catalog) {
-  return draft.nodes.filter(node => !node.derivation).flatMap(node => (catalogTable(node, catalog)?.columns || []).map(column => ({
-    table: node.id, column: column.name, label: `${node.label || node.table} · ${column.name}`,
+  return draft.nodes.flatMap(node => nodeColumns(draft,catalog,node).map(column => ({
+    table: node.id, column: column.name, label: `${node.label || node.table} · ${column.label || column.name}${column.issue ? " (needs repair)" : ""}`,
   })));
 }
 function newCondition(draft, catalog) {
@@ -102,7 +103,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
       refresh();
     });
     if (!fixedField) field.querySelector("input").placeholder = preselected ? `Choose a column from ${preselected.label}` : "Search source or column";
-    const sourceType = catalogTable(draft.nodes.find(n => n.id === condition.table), catalog)?.columns.find(c => c.name === condition.column)?.dataType;
+    const sourceType = nodeColumns(draft,catalog,draft.nodes.find(n => n.id === condition.table)).find(c => c.name === condition.column)?.dataType;
     const operatorChoices = operators.filter(([value]) => value !== "range_contains_date" || (!allowToday && sourceType === "daterange") || condition.operator === value);
     const op = select(`${prefix} condition ${index + 1} operator`, operatorChoices, condition.operator, value => {
       if (isList(value) !== isList(condition.operator)) {
@@ -126,7 +127,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
     if (!singleCondition) row.append(action("close", `Remove ${prefix} condition ${index + 1}`, () => { conditions.splice(index, 1); refresh(); }));
     if (!["is_null", "not_null"].includes(condition.operator)) {
       const source = draft.nodes.find(n => n.id === condition.table);
-      const dataType = catalogTable(source, catalog)?.columns.find(c => c.name === condition.column)?.dataType || "";
+      const dataType = nodeColumns(draft,catalog,source).find(c => c.name === condition.column)?.dataType || "";
       const canCompareColumn = columnComparisonOperators.has(condition.operator);
       const canUseToday = allowToday && /^(date|timestamp)/.test(dataType) && canCompareColumn;
       // Tagged selector values keep user-authored parameter IDs distinct from operand modes.
@@ -167,7 +168,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
           : literalControl(label, condition.value, value => { condition.value = value; onChange(); }, multiple, "Enter a fixed value");
         if (condition.operator === "range_contains_date") literalInput.type = "date";
         const literal = labeled(multiple ? "Fixed values" : "Fixed value", validationKey(literalInput, `${validationPrefix}:${index}:value`)); literal.classList.add("mf-wide"); row.append(literal);
-        if (onLoadDomain && condition.operator !== "range_contains_date") {
+        if (onLoadDomain && !source?.derivation && condition.operator !== "range_contains_date") {
           const toggle = element("input", { attrs: { type: "checkbox", "aria-label": `${prefix} condition ${index + 1} choose fixed value from domain` } });
           toggle.checked = !!condition.domain;
           toggle.onchange = () => {
