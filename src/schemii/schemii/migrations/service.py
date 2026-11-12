@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -16,6 +17,9 @@ from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.importer import ImportedDesign
 from schemii.schemii.designs.history import design_change_summary
 from schemii.schemii.designs.models import (
+    DesignDeploymentReviewRequest,
+    DesignDeploymentCopyRequest,
+    DesignDeploymentPreview,
     DesignBaselineResetPreview,
     DesignBaselineResetRequest,
     DesignHistoryBaseline,
@@ -28,6 +32,7 @@ from schemii.schemii.designs.models import (
 )
 from schemii.schemii.designs.store import (
     DesignConflictError,
+    DesignCopyGuard,
     DesignHistoryBoundaryError,
     DesignMutationBlockedError,
     DesignRepository,
@@ -339,6 +344,211 @@ class MigrationService:
             code = "baseline_changed" if error.details.get("reason") == "baseline_changed" else "invalid_design"
             raise MigrationServiceError(409, code, str(error), details=error.details) from error
         return self._history_mutation(owner_id, workspace_id)
+
+    def _deployment_review(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        request: DesignDeploymentReviewRequest,
+        connection: Any,
+        live_catalog: PostgresCatalog,
+    ):
+        from schemii.schemii.designs.deployment import build_preview
+
+        source_workspace = self._workspace(owner_id, workspace_id)
+        target_workspace = self._workspace(owner_id, request.target_workspace_id)
+        if (
+            source_workspace.connection_id is not None
+            or source_workspace.id == target_workspace.id
+        ):
+            raise MigrationServiceError(
+                409,
+                "detached_design_required",
+                "Choose a detached source design and a different PostgreSQL target workspace",
+            )
+        if not target_workspace.connection_id or not target_workspace.namespace:
+            raise MigrationServiceError(
+                409,
+                "database_design_required",
+                "Open the exact PostgreSQL connection and namespace first",
+            )
+        if (connection.id, connection.database, connection.owner_id or owner_id) != (
+            target_workspace.connection_id,
+            target_workspace.database,
+            target_workspace.connection_owner_id or owner_id,
+        ):
+            raise MigrationServiceError(
+                409,
+                "workspace_target_changed",
+                "The workspace PostgreSQL identity changed",
+            )
+        baseline, baseline_content = self._design_baseline(
+            owner_id, target_workspace.id
+        )
+        record = self._repository.current_baseline(owner_id, target_workspace.id)
+        if baseline.kind != "postgresql" or record is None:
+            raise MigrationServiceError(
+                409,
+                "migration_baseline_missing",
+                "The target synchronization baseline is missing",
+            )
+        self._validate_baseline_target(
+            record.connection_id,
+            record.database,
+            record.namespace,
+            target_workspace.connection_id,
+            target_workspace.database,
+            target_workspace.namespace,
+        )
+        if (record.connection_owner_id or owner_id) != (
+            target_workspace.connection_owner_id or owner_id
+        ):
+            raise MigrationServiceError(
+                409,
+                "workspace_target_changed",
+                "The target identity differs from its synchronization baseline",
+            )
+        source = self._design(owner_id, workspace_id)
+        target = self._design(owner_id, target_workspace.id)
+        try:
+            preview, content = build_preview(
+                source,
+                target,
+                source_workspace,
+                target_workspace,
+                connection,
+                baseline,
+                baseline_content,
+                live_catalog.fingerprint,
+                live_catalog.fingerprint != record.catalog.fingerprint,
+                request.resolutions,
+            )
+        except DesignValidationError as error:
+            raise MigrationServiceError(
+                422, "invalid_design_copy", str(error), details=error.details
+            ) from error
+        return (
+            preview,
+            content,
+            source_workspace,
+            target_workspace,
+            source,
+            target,
+            baseline,
+        )
+
+
+    def review_design_deployment(
+        self, owner_id: str, workspace_id: str, request: DesignDeploymentReviewRequest
+    ) -> DesignDeploymentPreview:
+        target = self._workspace(owner_id, request.target_workspace_id)
+        if target.connection_id is None:
+            raise MigrationServiceError(
+                409, "database_design_required", "Choose a PostgreSQL target workspace"
+            )
+        try:
+            with self._connections.use(owner_id, target.connection_id) as connection:
+                # Check current read authority, namespace existence, and connection
+                # availability. Copy is metadata only; DDL remains a fresh review.
+                catalog = self._postgres.introspect(connection, target.namespace)
+                return self._deployment_review(
+                    owner_id, workspace_id, request, connection, catalog
+                )[0]
+        except ConnectionNotFoundError as error:
+            raise MigrationServiceError(
+                404, "connection_not_found", str(error)
+            ) from error
+        except PostgresGatewayError as error:
+            raise MigrationServiceError(502, error.code, str(error)) from error
+
+
+    def copy_design_deployment(
+        self, owner_id: str, workspace_id: str, request: DesignDeploymentCopyRequest
+    ) -> DesignHistoryMutation:
+        target_workspace = self._workspace(owner_id, request.target_workspace_id)
+        if target_workspace.connection_id is None:
+            raise MigrationServiceError(
+                409, "database_design_required", "Choose a PostgreSQL target workspace"
+            )
+        try:
+            with self._connections.use(
+                owner_id, target_workspace.connection_id
+            ) as connection:
+                catalog = self._postgres.introspect(
+                    connection, target_workspace.namespace
+                )
+                preview, content, source_ws, target_ws, source, target, baseline = (
+                    self._deployment_review(
+                        owner_id, workspace_id, request, connection, catalog
+                    )
+                )
+                if not preview.ready or preview.review_digest != request.review_digest:
+                    raise MigrationServiceError(
+                        409,
+                        "design_copy_review_changed",
+                        "The source, target, connection, baseline, or collision choices changed. Review the copy again.",
+                    )
+
+                def revalidate() -> None:
+                    current = self._deployment_review(
+                        owner_id, workspace_id, request, connection, catalog
+                    )[0]
+                    if current.review_digest != request.review_digest:
+                        raise DesignValidationError(
+                            "The copy review changed",
+                            details={"reason": "copy_review_changed"},
+                        )
+
+                copy_context = getattr(self._repository, "design_copy_guard", None)
+                # In-memory adapters hold the actual workspace claim guards and
+                # shared design/baseline transaction. Durable adapters perform
+                # the same checks under SQL row locks inside replace().
+                with (
+                    copy_context(owner_id, source.workspace_id, target.workspace_id)
+                    if callable(copy_context)
+                    else nullcontext()
+                ):
+                    revalidate()
+                    self._designs.replace(
+                        owner_id,
+                        target.workspace_id,
+                        SchemiiDesignReplace(
+                            expected_design_revision=target.revision, content=content
+                        ),
+                        expected_baseline_id=baseline.id,
+                        copy_guard=DesignCopyGuard(
+                            source=source,
+                            source_workspace_revision=source_ws.revision,
+                            target_workspace_revision=target_ws.revision,
+                            target_fingerprint=target.fingerprint,
+                            connection_id=connection.id,
+                            connection_revision=connection.revision,
+                            connection_owner_id=connection.owner_id or owner_id,
+                            database=connection.database,
+                            namespace=target_ws.namespace,
+                            revalidate=revalidate,
+                        ),
+                    )
+        except ConnectionNotFoundError as error:
+            raise MigrationServiceError(
+                404, "connection_not_found", str(error)
+            ) from error
+        except PostgresGatewayError as error:
+            raise MigrationServiceError(502, error.code, str(error)) from error
+        except (WorkspaceNotFoundError, DesignWorkspaceNotFoundError) as error:
+            raise MigrationServiceError(
+                404, "workspace_not_found", str(error)
+            ) from error
+        except (
+            DesignConflictError,
+            DesignValidationError,
+            DesignMutationBlockedError,
+        ) as error:
+            raise MigrationServiceError(
+                409, "design_copy_conflict", str(error)
+            ) from error
+        return self._history_mutation(owner_id, target_workspace.id)
+
 
     def create_plan(
         self,

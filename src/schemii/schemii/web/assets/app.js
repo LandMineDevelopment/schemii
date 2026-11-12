@@ -97,6 +97,7 @@ import {
   createLatestRequestController,
   createWorkspaceOperationController,
 } from "./request-coordinator.js";
+import { createDesignDeploymentController, detachedDesignEligible } from "./design-deployment.js";
 import { createMigrationReviewController } from "./migration-review.js";
 import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
@@ -649,6 +650,21 @@ const migrationReview = createMigrationReviewController({
   confirm: askConfirmation,
   notify: showToast,
   notifyError: errorToast,
+});
+const designDeployment = createDesignDeploymentController({
+  api,
+  elements: {
+    dialog: byId("design-deployment-dialog"), connection: byId("deployment-connection"),
+    namespace: byId("deployment-namespace"), body: byId("deployment-review-body"),
+    status: byId("deployment-status"), review: byId("review-deployment-button"), copy: byId("copy-deployment-button"),
+  },
+  getContext: () => ({ workspace: state.activeWorkspace, design: state.design }),
+  openTarget: async workspace => {
+    const index = state.workspaces.findIndex(item => item.id === workspace.id);
+    if (index < 0) state.workspaces.push(workspace); else state.workspaces[index] = workspace;
+    if (await openWorkspace(workspace)) await migrationReview.open();
+  },
+  notify: showToast,
 });
 const relationDataSource = createRelationDataSource({
   api,
@@ -1273,6 +1289,9 @@ function updateHeader() {
   updateDesignControls();
   tableEditor.updateActions();
   elements.downloadCatalogButton.textContent = designWorkspace ? "Download desired design JSON" : "Download live catalog JSON";
+  byId("deploy-design-button").hidden = !detachedDesignEligible(state.activeWorkspace, state.design);
+  byId("deploy-design-button").disabled = !detachedDesignEligible(state.activeWorkspace, state.design)
+    || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft;
   elements.exportDesignSqlButton.disabled = !designWorkspace || !state.design || state.catalogLoading;
   elements.reviewMigrationButton.disabled = !migrationReview.available()
     || state.catalogLoading
@@ -2438,6 +2457,7 @@ function confirmDeleteWorkspace(workspace) {
 }
 
 function clearActiveWorkspace({ historyMode = "replace" } = {}) {
+  designDeployment.close();
   designEditors.discardDrafts();
   const workspaceId = state.activeWorkspace?.id;
   persistCanvasView();
@@ -2512,6 +2532,7 @@ async function openWorkspace(workspace, { historyMode = "push", navigationReques
     if (!await flushLayoutBeforeTransition() || !request.isCurrent()) return false;
     if (!await designEditors.requestDiscardDrafts() || !request.isCurrent()) return false;
     persistCanvasView();
+    designDeployment.close();
     workspaceOperations.invalidate();
     viewAnalysis.clear();
     resetLayoutSaveState();
@@ -5033,6 +5054,10 @@ function bindEvents() {
     state.relationPreview = null;
     state.relationPreviewError = null;
     state.relationPreviewPagingError = null;
+  });
+  byId("deploy-design-button").addEventListener("click", async () => {
+    elements.objectsDialog.close();
+    await designDeployment.open();
   });
   elements.reviewMigrationButton.addEventListener("click", async () => {
     elements.objectsDialog.close();
