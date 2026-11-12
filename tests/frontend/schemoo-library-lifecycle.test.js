@@ -42,7 +42,7 @@ test("creating an alias adds candidates only for that occurrence, not existing a
   const app = readFileSync(new URL("prototype.js", web), "utf8");
   const action = app.slice(app.indexOf("function addAlias("), app.indexOf("function addTable("));
   runInNewContext(`${action}\naddAlias('a', 'New A');`, {
-    draft, catalog: source, inheritAliasExposure, ensureAliasConnections,
+    draft, catalog: source, inheritAliasExposure, ensureAliasConnections, sourceIdentity,
     crypto: { randomUUID: () => "11223344556677889900" }, canvas: { placeNode() {} },
     selected: null, refreshForms() {}, changed() {}, inspectSelection() {}, $: () => ({}),
   });

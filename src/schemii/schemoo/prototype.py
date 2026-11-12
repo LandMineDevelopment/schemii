@@ -166,9 +166,14 @@ class _Model:
                 endpoints = {}
                 for side in ("source", "target"):
                     candidates = [node for node in self.nodes if self.keys[node] == source_identity(catalog, relationship, side) and node not in self.derived]
-                    if len(candidates) != 1:
+                    namespace, table = source_identity(catalog, relationship, side)
+                    canonical = table if namespace == catalog.get("namespace", "public") else json.dumps([namespace, table], ensure_ascii=False, separators=(",", ":"))
+                    if canonical in candidates:
+                        endpoints[side] = canonical
+                    elif len(candidates) == 1:
+                        endpoints[side] = candidates[0]
+                    else:
                         raise ValueError("Choose explicit relationship source and target occurrences when aliases share a physical source.")
-                    endpoints[side] = candidates[0]
                 raw_edges.append({"id": key, "relationshipId": key, **endpoints, "enabled": True})
         self.edges = {}
         self.graph = {key: [] for key in self.nodes}

@@ -426,7 +426,7 @@ function renderTableColumns() {
     host.append(row);
   }
 }
-function addAlias(table, label, source = draft.nodes.find(n => n.table === table)) {
+function addAlias(table, label, source = draft.nodes.find(n => n.id === table && n.table === table && sourceIdentity(n,catalog) === sourceIdentity({table},catalog))) {
   const copy = { id: `alias_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`, table, label, ...(source?.namespace?{namespace:source.namespace}:{}) };
   canvas?.placeNode(copy, source);
   draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog,new Set([copy.id])); selected={node:copy.id}; refreshForms(); changed();
