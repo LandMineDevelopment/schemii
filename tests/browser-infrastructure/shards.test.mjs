@@ -259,7 +259,7 @@ test('cache profile actual whole-file discovery equals the frozen both-device th
       assert.deepEqual(ids, files.flatMap(file => policy.browser[project].files[file]).sort());
       actual.push(...ids);
     }
-    assert.equal(actual.length, 65);
+    assert.equal(actual.length, 95);
     assert.equal(new Set(actual).size, actual.length);
     assert.deepEqual(actual.sort(), Object.values(policy.browser[project].files).flat().sort());
     assert.equal(policy.browser[project].allowed_skips.length, 1);
