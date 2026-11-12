@@ -158,9 +158,9 @@ export function createNumberPresentation(tile,result={},viewerLocale) {
     else if(style!=='currency') options.maximumFractionDigits=3;
     return {ref,meta,setting,displayShift,numeric,style,whole,unit,options};
   }
-  function present(raw,index,override={}) {
+  function render(raw,index,override={},derivedAxis=false) {
     const {ref,setting,displayShift,numeric,style,whole,unit,options}=resolve(index,override);
-    const eligible=numeric || typeof raw==='number';
+    const eligible=derivedAxis || numeric || typeof raw==='number';
     const floatValue=typeof raw==='number' && /^(real|double precision|float[48])$/i.test(result.columns?.[index]?.dataType || '')?String(raw):raw;
     const decimal=eligible?exactDecimal(floatValue):null;
     const rule=override.suppressRules?null:(compiled.get(setting) || []).find(item=>matches(item.rule,raw,decimal,item.lower,item.upper))?.rule;
@@ -174,7 +174,10 @@ export function createNumberPresentation(tile,result={},viewerLocale) {
         if(digits.length>512 || Math.abs(adjusted)>308) {
           text=scientific();warning='Extreme value shown in bounded scientific notation; raw CSV retains the full value.';
         } else {
-          const formatter=intl(locale,options);text=formatter.format(canonical(scaled));
+          let formatter=intl(locale,options);text=formatter.format(canonical(scaled));
+          // Generated coordinates may use scientific notation to keep the axis
+          // readable. Source values and their labels keep the exact raw path.
+          if(derivedAxis && text.length>26) {formatter=intl(locale,{...options,notation:'scientific'});text=formatter.format(canonical(scaled));}
           const places=formatter.resolvedOptions().maximumFractionDigits;
           const absolute={...display,coefficient:display.coefficient<0n?-display.coefficient:display.coefficient};
           if(decimal.coefficient!==0n && compareDecimals(absolute,{coefficient:5n,exponent:-places-1})<0) {text='≈ '+text;warning='Nonzero raw value rounds to zero at this precision.';}
@@ -188,6 +191,15 @@ export function createNumberPresentation(tile,result={},viewerLocale) {
     const description=[style==='currency'?(setting?.currency || 'USD'):style==='percent'?'%':'',unit,setting?.precision!=null?`${setting.precision} decimals`:''].filter(Boolean).join(' · ');
     return {description,text:text+(indicator?' · '+indicator:''),tone:rule?.tone || 'neutral',indicator,warning,title:`Raw: ${excerpt(raw)}${warning?' · '+warning:''}`,ref};
   }
+  const present=(raw,index,override={})=>render(raw,index,override);
+  // Only finite numbers produced by chart geometry enter here. Converting that
+  // approximation to text must never relax validation of untrusted raw numbers.
+  present.axis=(value,index)=>{
+    if(typeof value!=='number' || !Number.isFinite(value)) return {text:'Axis unavailable',warning:'A finite generated axis tick is required.',title:'Axis unavailable',tone:'neutral',indicator:'',description:'',ref:null};
+    const display=render(String(value),index,{suppressRules:true},true);
+    const warning='Approximate axis tick computed from chart geometry; point labels and RAW CSV retain source values.';
+    return {...display,warning,title:`Approximate axis tick: ${value} · ${warning}`};
+  };
   // The explanation/capture consumer receives the same resolved semantics,
   // without retaining formatted values or copying any raw row arrays.
   present.describe=(index,override={})=>{
