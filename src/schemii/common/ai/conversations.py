@@ -66,7 +66,7 @@ class Conversations:
             return self.adapter.bootstrap_scope(self.services, owner, source_connection_id)
         return self.adapter.zen_scope(self.services, owner, subject, scope)
 
-    def _get(self, owner, chat_id, scope=None):
+    def _get(self, owner, chat_id, scope=None) -> dict:
         value = self.store.get(owner, chat_id)
         self._scope(owner, value[self.subject_key], scope)
         return value

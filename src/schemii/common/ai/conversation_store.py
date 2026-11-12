@@ -53,7 +53,7 @@ class ConversationStore:
                 return [row["document"] for row in cursor.fetchall()]
             return [{k:val for k,val in v.items() if k not in {"messages","activity","pending"}} for v in self._all(cursor,owner) if subject is None or v[self.subject_key] == subject]
 
-    def _get(self, cursor, owner, chat_id):
+    def _get(self, cursor, owner, chat_id) -> dict:
         if cursor is None: value = deepcopy(self.memory.get((owner,chat_id)))
         else:
             cursor.execute("SELECT document FROM metadata.ai_conversations WHERE owner_id=%s AND product=%s AND id=%s", (owner,self.product,chat_id))
@@ -61,7 +61,7 @@ class ConversationStore:
         if value is None: raise ApiProblem(404,"ai_chat_not_found","This conversation is unavailable or has expired.")
         return value
 
-    def get(self, owner, chat_id):
+    def get(self, owner, chat_id) -> dict:
         with self.session(owner) as cursor: return self._get(cursor,owner,chat_id)
 
     def _save(self, cursor, owner, value):

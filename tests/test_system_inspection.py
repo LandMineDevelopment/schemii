@@ -94,6 +94,38 @@ def test_runtime_binding_resolves_nested_installed_services_without_name_special
     assert index.resolve(unknown.func, callable_subject=record_activity).subject is None
 
 
+@pytest.mark.parametrize(("context", "expression"), [
+    ("approval", "self._get(owner, chat_id, scope).get('pending')"),
+    ("_run", "self.store.get(owner, chat_id).get('turnDisplayedResult')"),
+    ("store", "self._get(cursor, owner, chat_id).get('id')"),
+])
+def test_chat_dictionary_return_contracts_resolve_without_reading_conversations(
+    monkeypatch, context, expression,
+):
+    from schemii.common.ai.conversation_store import ConversationStore
+    from schemii.common.ai.conversations import Conversations
+    from schemii.common.source_inspection import SourceRegistry
+
+    application = create_app()
+
+    def unexpected_io(*args, **kwargs):
+        raise AssertionError("Source inspection must not open a conversation session")
+
+    monkeypatch.setattr(ConversationStore, "session", unexpected_io)
+    index = system_inspection.RuntimeBindingIndex(
+        application.state.services, SourceRegistry(),
+        application_state=application.state._state,
+    )
+    subject = (
+        ConversationStore.get if context == "store" else getattr(Conversations, context)
+    )
+    call = ast.parse(expression).body[0].value
+    resolved = index.resolve(call.func, callable_subject=subject)
+
+    assert resolved.subject is dict.get
+    assert resolved.resolution == "return-contract"
+
+
 def test_runtime_binding_uses_exact_application_state_receiver_for_scoped_services(monkeypatch):
     from schemii.common.auth.managed_connections import (
         list_schemii_connections,
