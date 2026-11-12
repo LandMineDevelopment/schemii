@@ -59,8 +59,10 @@ ASSETS = (
     "dev/pressure/compose.yaml",
     "dev/ingress/nginx.conf",
     "dev/schemii.toml",
+    "testing/load/runtime.mjs",
 )
 INSPECT = '{"id":{{json .Id}},"created":{{json .Created}},"name":{{json .Name}},"image":{{json .Image}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"oomKilled":{{json .State.OOMKilled}},"startedAt":{{json .State.StartedAt}},"finishedAt":{{json .State.FinishedAt}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"labels":{{json .Config.Labels}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"memory":{{json .HostConfig.Memory}},"nanoCpus":{{json .HostConfig.NanoCpus}},"pids":{{json .HostConfig.PidsLimit}}}'
+OS_INSPECT = '{"id":{{json .Id}},"pid":{{json .State.Pid}},"running":{{json .State.Running}},"startedAt":{{json .State.StartedAt}}}'
 # No environment, command arguments, database rows or runtime error messages.
 PACKAGE_SCRIPT = """import hashlib,importlib.util,json
 from pathlib import Path
@@ -239,7 +241,7 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def private_read(path: Path) -> dict:
+def private_read(path: Path, *, with_digest: bool = False) -> dict | tuple[dict, str]:
     before = path.lstat()
     check(
         stat.S_ISREG(before.st_mode)
@@ -264,7 +266,7 @@ def private_read(path: Path) -> dict:
     check(len(raw) <= 262144, "journal_size")
     result = json.loads(raw)
     check(type(result) is dict, "journal_schema")
-    return result
+    return (result, hashlib.sha256(raw).hexdigest()) if with_digest else result
 
 
 def private_write(path: Path, value: dict) -> None:
@@ -1488,6 +1490,174 @@ class Fixture:
         self.up(["ingress"])
         restored_readiness()
 
+    def os_records(self) -> list[dict]:
+        self.inventory()
+        records = []
+        for service in ("schemii", "ingress", "metadata", "source"):
+            owned = self.state["containers"][service]
+            check(owned["state"] == "running", "os_owned_service_not_running")
+            data = json.loads(
+                self.docker(
+                    ["container", "inspect", "--format", OS_INSPECT, owned["id"]]
+                )
+            )
+            check(
+                set(data) == {"id", "pid", "running", "startedAt"}
+                and data["id"] == owned["id"]
+                and type(data["pid"]) is int
+                and data["pid"] > 1
+                and data["running"] is True
+                and data["startedAt"] == owned["startedAt"],
+                "os_owned_pid_unconfirmed",
+            )
+            current = self.inspect(owned["id"])
+            check(
+                fixed_identity(current) == fixed_identity(owned)
+                and current["state"] == "running"
+                and current["startedAt"] == data["startedAt"],
+                "os_owned_identity_changed",
+            )
+            records.append(
+                {
+                    "id": owned["id"],
+                    "image": owned["image"],
+                    "pid": data["pid"],
+                    "running": True,
+                    "project": self.state["project"],
+                    "service": service,
+                    "memoryBytes": owned["memory"],
+                    "nanoCpus": owned["nanoCpus"],
+                    "pids": owned["pids"],
+                    "startedAt": data["startedAt"],
+                }
+            )
+        return records
+
+    def export_os_runtime(self) -> str:
+        path = self.directory / "os-runtime.json"
+        check(
+            not path.exists()
+            and not path.is_symlink()
+            and "osExport" not in self.state,
+            "new_os_export_required",
+        )
+        revision = command(["git", "-C", str(self.root), "rev-parse", "HEAD"]).strip()
+        check(re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "os_source_revision")
+        check(
+            not command(
+                [
+                    "git",
+                    "-C",
+                    str(self.root),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=normal",
+                ]
+            ).strip(),
+            "os_clean_source_required",
+        )
+        records = self.os_records()
+        intent = {
+            "version": 1,
+            "status": "pending",
+            "nonce": self.state["nonce"],
+            "revision": revision,
+            "profile": self.profile.receipt(),
+            "records": records,
+            "output": "os-runtime.json",
+        }
+        self.save("os-export-intent", osExport=intent)
+        result = self.runtime(
+            [
+                "node",
+                str(self.root / "testing/load/runtime.mjs"),
+                "export-fixture",
+                str(self.directory),
+            ],
+            environment=self.environment,
+            timeout=15,
+            limit=4096,
+        )
+        check(json.loads(result) == {"status": "exported"}, "os_export_unconfirmed")
+        # Independently re-inspect the exact four IDs/PIDs after host capture.
+        check(self.os_records() == records, "os_owned_pid_changed_during_export")
+        exported, exported_digest = private_read(path, with_digest=True)
+        fixture = exported.get("fixture", {})
+        check(
+            exported.get("version") == 1
+            and exported.get("origin") == LOCAL
+            and exported.get("revision") == revision
+            and fixture.get("run") == self.state["run"]
+            and fixture.get("nonce") == self.state["nonce"]
+            and bound_profile(fixture.get("profile")) is self.profile,
+            "os_receipt_provenance",
+        )
+        check(
+            type(exported.get("bootId")) is str
+            and re.fullmatch(r"[0-9a-f-]{36}", exported["bootId"]) is not None
+            and fixture.get("owner") == self.state["owner"]
+            and fixture.get("sourceAssetsSha256")
+            == hashlib.sha256(
+                json.dumps(
+                    self.state["assets"], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            and exported.get("topology", {}).get("apiProcesses") == 1,
+            "os_receipt_source_identity",
+        )
+        containers = exported.get("containers", [])
+        check(type(containers) is list and len(containers) == 4, "os_receipt_inventory")
+        actual = {item["service"]: item for item in containers}
+        check(
+            set(actual) == {item["service"] for item in records}, "os_receipt_services"
+        )
+        for record in records:
+            item = actual[record["service"]]
+            check(
+                item.get("id") == record["id"]
+                and item.get("image") == record["image"]
+                and item.get("rootProcess", {}).get("pid") == record["pid"],
+                "os_receipt_container_changed",
+            )
+            identity = item.get("rootProcess", {})
+            cgroup = item.get("cgroup", {})
+            check(
+                type(identity.get("birthTick")) is str
+                and identity["birthTick"].isdecimal()
+                and type(cgroup.get("path")) is str
+                and cgroup["path"].startswith("/")
+                and cgroup["path"] != "/"
+                and all(
+                    type(cgroup.get(key)) is int and cgroup[key] > 0
+                    for key in ("device", "inode")
+                ),
+                "os_receipt_process_unknown",
+            )
+        app = actual["schemii"]
+        api, init = app.get("apiProcess", {}), app.get("initProcess", {})
+        observed_process = self.state["runtimeReceipt"]["application"]["observation"][
+            "process"
+        ]
+        check(
+            type(api.get("pid")) is int
+            and api["pid"] > 1
+            and api.get("namespacePid") == observed_process["pid"]
+            and api.get("birthTick") == observed_process["startTicks"]
+            and init.get("pid") == app["rootProcess"]["pid"]
+            and init.get("birthTick") == app["rootProcess"]["birthTick"]
+            and init.get("namespacePid") == 1
+            and api["pid"] != init["pid"],
+            "os_receipt_api_init_unknown",
+        )
+        intent["status"] = "complete"
+        self.save(
+            "os-runtime-observed",
+            osExport=intent,
+            osRuntimeReceiptFile=str(path),
+            osRuntimeReceiptSha256=exported_digest,
+        )
+        return str(path)
+
     def capture_runtime(self, api: dict) -> dict:
         """Bind fixed launch allocation to actual owners and authenticated API process."""
         observed = self.observation()
@@ -1550,6 +1720,7 @@ class Fixture:
         }
         self.save("effective-profile-observed", runtimeReceipt=receipt)
         private_write(self.directory / "runtime.json", receipt)
+        self.export_os_runtime()
         return receipt
 
     def database_settings(self) -> dict:
@@ -1584,6 +1755,19 @@ class Fixture:
 
     def authority(self, status: str) -> dict:
         hold = self.state["hold"]
+        if status == "held":
+            path = self.directory / "os-runtime.json"
+            check(
+                self.state.get("osExport", {}).get("status") == "complete"
+                and self.state.get("osRuntimeReceiptFile") == str(path)
+                and hold["nonce"] == self.state["nonce"],
+                "os_authority_receipt_required",
+            )
+            _, current_digest = private_read(path, with_digest=True)
+            check(
+                current_digest == self.state.get("osRuntimeReceiptSha256"),
+                "os_authority_receipt_changed",
+            )
         value = {
             "version": 1,
             "kind": "launcher_owned_disposable_pressure",
@@ -1592,6 +1776,8 @@ class Fixture:
             "nonce": hold["nonce"],
             "profile": self.state["profile"],
             "runtimeReceipt": self.state.get("runtimeReceipt"),
+            "osRuntimeReceiptFile": self.state.get("osRuntimeReceiptFile"),
+            "osRuntimeReceiptSha256": self.state.get("osRuntimeReceiptSha256"),
             "directory": str(self.directory),
             "owner": self.state["owner"],
             "heartbeatAt": now(),
@@ -1732,7 +1918,7 @@ class Fixture:
             self.save(
                 "held",
                 hold={
-                    "nonce": secrets.token_hex(32),
+                    "nonce": self.state["nonce"],
                     "expiresAt": datetime.fromtimestamp(
                         time.time() + seconds, timezone.utc
                     ).isoformat(),
@@ -2035,6 +2221,7 @@ def begin(
     directory.mkdir(mode=0o700)
     fixture.state.update(
         version=1,
+        nonce=secrets.token_hex(32),
         root=str(root),
         primary=str(primary),
         directory=str(directory),

@@ -89,10 +89,76 @@ class Runtime:
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
         if argv[0] == "git":
+            if "rev-parse" in argv:
+                return "a" * 40
+            if "status" in argv:
+                return ""
             if "ls-files" in argv:
                 return "testing/load/source_monitor.py\n"
             assert "diff" in argv and "--quiet" in argv
             return ""
+        if argv[0] == "node":
+            assert argv[1:] == [
+                str(self.root / "testing/load/runtime.mjs"),
+                "export-fixture",
+                kwargs["environment"]["PRESSURE_DIRECTORY"],
+            ]
+            directory = Path(argv[-1])
+            journal = c.private_read(directory / "journal.json")
+            assert (
+                journal["stage"] == "os-export-intent"
+                and journal["osExport"]["status"] == "pending"
+            )
+            records = journal["osExport"]["records"]
+            observed = journal["runtimeReceipt"]["application"]["observation"][
+                "process"
+            ]
+            containers = [
+                {
+                    "service": record["service"],
+                    "id": record["id"],
+                    "image": record["image"],
+                    "rootProcess": {"pid": record["pid"], "birthTick": "123"},
+                    "cgroup": {
+                        "path": "/owned/" + record["id"],
+                        "device": 1,
+                        "inode": record["pid"],
+                    },
+                }
+                for record in records
+            ]
+            app = next(item for item in containers if item["service"] == "schemii")
+            app.update(
+                apiProcess={
+                    "pid": 201,
+                    "birthTick": observed["startTicks"],
+                    "namespacePid": observed["pid"],
+                },
+                initProcess={**app["rootProcess"], "namespacePid": 1},
+            )
+            c.private_write(
+                directory / "os-runtime.json",
+                {
+                    "version": 1,
+                    "origin": c.LOCAL,
+                    "revision": "a" * 40,
+                    "bootId": "12345678-1234-1234-1234-123456789abc",
+                    "topology": {"apiProcesses": 1},
+                    "fixture": {
+                        "run": journal["run"],
+                        "nonce": journal["nonce"],
+                        "profile": journal["profile"],
+                        "owner": journal["owner"],
+                        "sourceAssetsSha256": hashlib.sha256(
+                            json.dumps(
+                                journal["assets"], sort_keys=True, separators=(",", ":")
+                            ).encode()
+                        ).hexdigest(),
+                    },
+                    "containers": containers,
+                },
+            )
+            return '{"status":"exported"}'
         if argv[0] != "docker":
             assert argv[1:] == ["-c", "import psycopg,httpx"]
             return ""
@@ -128,6 +194,22 @@ class Runtime:
                 if record["labels"]["com.docker.compose.project"] == project
             )
         if args[:2] == ["container", "inspect"]:
+            if args[3] == c.OS_INSPECT:
+                record = self.records[args[-1]]
+                assert record["labels"].get(
+                    c.RUN_LABEL
+                )  # Never inspect a retained/foreign PID.
+                pid = {"schemii": 101, "ingress": 102, "metadata": 103, "source": 104}[
+                    record["labels"]["com.docker.compose.service"]
+                ]
+                return json.dumps(
+                    {
+                        "id": record["id"],
+                        "pid": pid,
+                        "running": record["state"] == "running",
+                        "startedAt": record["startedAt"],
+                    }
+                )
             assert args[2:4] == ["--format", c.INSPECT]
             return json.dumps(self.records[args[-1]])
         if args[:2] == ["container", "exec"]:
@@ -252,7 +334,7 @@ def setup(tmp_path, monkeypatch):
         destination.write_bytes((source / name).read_bytes())
     (root / "src/schemii").mkdir(parents=True)
     (root / "src/schemii/owned.py").write_text("VALUE = 42\n")
-    (root / "testing/load").mkdir(parents=True)
+    (root / "testing/load").mkdir(parents=True, exist_ok=True)
     (root / "testing/load/source_monitor.py").write_text("# fake committed witness\n")
     (primary / ".venv/bin").mkdir(parents=True)
     (primary / ".venv/bin/python").touch()
@@ -935,8 +1017,19 @@ def test_observer_copy_is_exact_owned_fixed_path_bounded_and_never_extracts(setu
 def held_fixture(setup):
     owned = fixture(setup)
     owned.up(["metadata", "source", "schemii"])
+    owned.up(["observer-init"])
+    owned.up(["ingress"])
+    owned.observation = lambda: fake_observer(owned)
+    c.private_write(
+        owned.directory / "preparation.json",
+        {
+            "profile": owned.profile.receipt(),
+            "databaseSettings": owned.database_settings(),
+        },
+    )
+    owned.capture_runtime(runtime_api(owned))
     owned.state["hold"] = {
-        "nonce": "b" * 64,
+        "nonce": owned.state["nonce"],
         "expiresAt": "2099-01-01T00:00:00Z",
         "attachment": None,
         "requests": 0,
@@ -1295,7 +1388,7 @@ def test_authority_runtime_receipt_binds_profile_to_actual_limits_and_owner_budg
     )
     assert c.private_read(owned.directory / "runtime.json") == receipt
     owned.state["hold"] = {
-        "nonce": "a" * 64,
+        "nonce": owned.state["nonce"],
         "expiresAt": "2099-01-01T00:00:00Z",
         "attachment": None,
     }
@@ -1434,3 +1527,134 @@ def test_profile_binding_rejects_json_scalar_lookalikes(field, value):
     profile[field] = value
     with pytest.raises(c.Refused, match="profile_receipt_changed"):
         c.bound_profile(profile)
+
+
+def test_python_and_node_os_export_pin_the_same_two_immutable_profile_contracts():
+    import re
+
+    source = (
+        Path(__file__).resolve().parents[1] / "testing/load/runtime.mjs"
+    ).read_text()
+    encoded = re.search(r"const fixtureProfileDigests = (\{[^;]+\});", source)[1]
+    expected = {
+        profile.name: hashlib.sha256(
+            json.dumps(
+                profile.receipt(), sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        for profile in c.PROFILES
+    }
+    assert json.loads(encoded) == expected
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing-api",
+        "wrong-init",
+        "wrong-source",
+        "unknown-boot",
+        "uncertain-command",
+        "pid-reused",
+    ],
+)
+def test_missing_or_changed_os_proof_never_publishes_authority_or_replays_export(
+    setup, monkeypatch, defect
+):
+    owned = profile_fixture(setup, c.LOAD_PROFILE)
+    prepare_fake_runtime_receipt(owned, monkeypatch)
+    original = owned.runtime
+    node_calls = []
+    changed = False
+
+    def runtime(argv, **kwargs):
+        nonlocal changed
+        result = original(argv, **kwargs)
+        if argv[0] == "node":
+            node_calls.append(argv)
+            if defect == "uncertain-command":
+                raise c.Refused("command_failed")
+            if defect == "pid-reused":
+                changed = True
+            receipt_path = owned.directory / "os-runtime.json"
+            receipt = c.private_read(receipt_path)
+            if defect == "missing-api":
+                receipt["containers"][0].pop("apiProcess")
+            elif defect == "wrong-init":
+                receipt["containers"][0]["initProcess"]["birthTick"] = "wrong"
+            elif defect == "wrong-source":
+                receipt["fixture"]["sourceAssetsSha256"] = "0" * 64
+            elif defect == "unknown-boot":
+                receipt["bootId"] = None
+            c.private_write(receipt_path, receipt)
+        elif (
+            changed
+            and argv[:3] == ["docker", "container", "inspect"]
+            and argv[4] == c.OS_INSPECT
+        ):
+            value = json.loads(result)
+            value["pid"] += 1
+            result = json.dumps(value)
+        return result
+
+    owned.runtime = runtime
+    with pytest.raises(c.Refused):
+        owned.capture_runtime(runtime_api(owned))
+    assert len(node_calls) == 1
+    assert owned.state["osExport"]["status"] == "pending"
+    assert "osRuntimeReceiptFile" not in owned.state
+    assert not (owned.directory / "authority.json").exists()
+    with pytest.raises(c.Refused, match="new_os_export_required"):
+        owned.export_os_runtime()
+    assert len(node_calls) == 1
+
+
+def test_os_pid_inspection_refuses_unknown_owner_before_reading_any_retained_or_foreign_pid(
+    setup,
+):
+    owned = profile_fixture(setup, c.LOAD_PROFILE)
+    owned.up(["metadata", "source"])
+    owned.up(["observer-init"])
+    owned.up(["schemii", "ingress"])
+    setup[2].records[owned.state["containers"]["source"]["id"]]["labels"][
+        c.RUN_LABEL
+    ] = "foreign"
+    calls = len(setup[2].calls)
+    with pytest.raises(c.Refused, match="disposable_container_owner"):
+        owned.os_records()
+    assert all(c.OS_INSPECT not in call for call in setup[2].calls[calls:])
+
+
+def test_node_process_roles_match_the_actual_fixed_compose_wrapper_command():
+    import ast
+    import csv
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "dev/pressure/compose.yaml").read_text()
+    command = next(
+        csv.reader(
+            [re.search(r"command: \[(uvicorn, pressure_app[^\]]+)\]", compose)[1]],
+            skipinitialspace=True,
+        )
+    )
+    helper = (root / "testing/load/runtime.mjs").read_text()
+    expected = ast.literal_eval(
+        re.search(r"const fixtureArgs = (\[[^\]]+\]);", helper)[1]
+    )
+    assert command == ["uvicorn", *expected]
+
+
+def test_held_authority_refuses_missing_or_changed_os_receipt(setup):
+    owned = held_fixture(setup)
+    owned.state["osExport"]["status"] = "pending"
+    with pytest.raises(c.Refused, match="os_authority_receipt_required"):
+        owned.authority("held")
+    owned.state["osExport"]["status"] = "complete"
+    path = owned.directory / "os-runtime.json"
+    receipt = c.private_read(path)
+    receipt["bootId"] = "changed"
+    c.private_write(path, receipt)
+    with pytest.raises(c.Refused, match="os_authority_receipt_changed"):
+        owned.authority("held")
+    assert not (owned.directory / "authority.json").exists()

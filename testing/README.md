@@ -447,12 +447,33 @@ to the reviewed stock source/configuration; the receipt does not label them as
 live retained-permit measurements. `stockCapacityEligible` and
 `capacityAcceptance` stay false; sampler overhead is still unmeasured.
 
-This startup configuration receipt is distinct from the load observer's OS
-PID/birth/cgroup receipt. The current normal-launch exporter only accepts the
-retained `schemii-test` topology; it cannot supply that witness for the disposable
-project. A reviewed launcher-owned disposable OS export remains required before
-a qualified load smoke/campaign. Do not relabel configuration as OS evidence or
-start the retained stack to manufacture a substitute receipt.
+The startup configuration receipt is distinct from the load observer's OS
+PID/birth/cgroup receipt. Before publishing a held authority, the launcher now
+captures a separate private `os-runtime.json` for exactly its four running owned
+services (`schemii`, `ingress`, `metadata`, `source`). The stopped one-shot
+`observer-init` is not a running sidecar; Docker's init process inside the app
+container is separately recorded as `initProcess`, alongside the actual
+`apiProcess`, each with host PID, birth and namespace PID. Both remain counted by
+the observer's cgroup resource totals.
+
+The internal fixture export reuses the reviewed shared host identity helpers.
+It accepts only the private validated journal, exact fixed profile/source and
+current launcher parent with inherited exclusive canonical descriptors. Only the
+launcher inspects host PIDs, after exact container ownership validation; it
+re-inspects those IDs/PIDs after export. Boot/PID/cgroup reuse, source/profile
+drift, ambiguous/unclassified app members, missing observation or uncertain
+export fail qualification and never publish a held authority. Output is private,
+bounded and exclusive; a failed export is not replayed. The existing normal
+builder retains its `schemii-test` service restrictions. Do not invoke the
+internal exporter as a substitute launcher or relabel startup configuration as OS
+evidence. All actual OS export and collector qualification remain unrun.
+
+Authority fields `osRuntimeReceiptFile` and `osRuntimeReceiptSha256` identify that
+separate receipt. Its fixture provenance binds run/nonce/profile/source/owner;
+the current shared `processRole` classifies only the fixed single-worker wrapper
+and exact Docker-init argv. The load consumer must match exported init/API
+identities while counting both processes and must independently qualify source,
+generator and live metrics. No capacity gate is relaxed by the export.
 
 ### Bounded attachment for the #135 fixture consumer
 
