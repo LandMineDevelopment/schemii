@@ -1,5 +1,6 @@
 import { element, errorPanel, formatTimestamp, replace } from "#common/dom.js";
 import { createIconButton } from "./ui.js";
+import { renderCompatibilityEvidence } from "./compatibility.js";
 
 const RUNNING_EXECUTION_STATUSES = new Set(["reserved", "applying"]);
 const RECOVERABLE_EXECUTION_STATUSES = new Set(["uncertain", "reconciliation_required"]);
@@ -41,6 +42,7 @@ export function migrationCanApply({
   busy,
   allowDestructive,
   confirmExternalChanges,
+  confirmMaterializedMaintenance = false,
   unreviewedConversions = false,
 }) {
   return Boolean(
@@ -53,7 +55,9 @@ export function migrationCanApply({
       && !busy
       && !unreviewedConversions
       && (!plan.destructive || allowDestructive)
-      && (!plan.requiresExternalChangeAcknowledgement || confirmExternalChanges),
+      && plan.compatibility?.operationSafe !== false
+      && (!plan.requiresExternalChangeAcknowledgement || confirmExternalChanges)
+      && (!plan.requiresMaterializedMaintenanceAcknowledgement || confirmMaterializedMaintenance),
   );
 }
 
@@ -64,6 +68,8 @@ export function clearAppliedMigrationReview(state) {
   state.conversionDrafts?.clear();
   state.allowDestructive = false;
   state.confirmExternalChanges = false;
+  state.confirmMaterializedMaintenance = false;
+  state.refreshMaterializedViewIds?.clear();
   state.resolutions.clear();
 }
 
@@ -350,6 +356,62 @@ function conflictValue(label, value) {
   return details;
 }
 
+function maintenanceDetails(item) {
+  return [
+    element('p', { text: `Population: ${item.populatedBefore ? 'populated' : 'not populated'} now → ${item.populatedAfter ? 'populated' : 'not populated'} after Apply.` }),
+    element('p', { text: `Lock: ${item.lock}. Ordinary transactional maintenance can block access until the transaction ends.` }),
+    element('p', { text: `Cached data: ${item.cachedDataConsequence}` }),
+    element('p', { text: `Preserved indexes: ${item.preservedIndexes.length ? item.preservedIndexes.join(', ') : 'none reported'}.` }),
+    ...item.blockingReasons.map(text => element('p', { className: 'migration-conversion-error', text })),
+  ];
+}
+
+function renderMaterializedMaintenance(plan, state, refresh) {
+  const candidates = plan.materializedRefreshCandidates || [], selected = plan.materializedMaintenance || [];
+  if (!candidates.length && !selected.length) return null;
+  const section = reviewSection('Materialized-view maintenance', null, [
+    element('p', { className: 'migration-section-copy', text: 'Refreshing unchanged SQL is a one-time request for this review, not a desired-schema edit or recurring job. The server checks ownership, dependencies, privileges, output compatibility and index preservation. Select up to 100 existing views to request a fresh immutable plan; PostgreSQL is unchanged until Apply.' }),
+  ]);
+  if (candidates.length) {
+    const search = element('input', { type: 'search', className: 'migration-maintenance-search', attrs: { 'aria-label': 'Find materialized views to refresh', placeholder: 'Find an existing materialized view' } });
+    search.value = state.materializedSearch;
+    const list = element('div', { className: 'migration-maintenance-list' });
+    const more = element('button', { type: 'button', className: 'ui-button compact', text: 'Show more materialized views' });
+    let count = 40;
+    function draw() {
+      replace(list);
+      const needle = search.value.trim().toLocaleLowerCase();
+      const matches = candidates.filter(item => `${item.name} ${item.blockingReasons.join(' ')}`.toLocaleLowerCase().includes(needle));
+      for (const candidate of matches.slice(0, count)) {
+        const checked = state.refreshMaterializedViewIds.has(candidate.viewId);
+        const input = element('input', { type: 'checkbox', attrs: { 'aria-label': `Refresh ${candidate.name} once` } });
+        input.checked = checked;
+        input.disabled = state.loading || state.submitting || !candidate.eligible && !checked || !checked && state.refreshMaterializedViewIds.size >= 100;
+        input.addEventListener('change', () => {
+          if (input.checked) state.refreshMaterializedViewIds.add(candidate.viewId);
+          else state.refreshMaterializedViewIds.delete(candidate.viewId);
+          state.confirmMaterializedMaintenance = false;
+          void refresh();
+        });
+        list.append(element('article', { className: 'migration-maintenance-card' }, [
+          element('label', {}, [input, element('strong', { text: `Refresh ${candidate.name} once${candidate.eligible ? '' : ' · unavailable'}` })]),
+          ...maintenanceDetails(candidate),
+        ]));
+      }
+      if (!matches.length) list.append(element('p', { text: 'No matching materialized views.' }));
+      more.hidden = matches.length <= count;
+    }
+    search.addEventListener('input', () => { state.materializedSearch = search.value; count = 40; draw(); });
+    more.addEventListener('click', () => { count += 40; draw(); });
+    section.append(search, list, more); draw();
+  }
+  for (const action of selected) section.append(element('article', { className: 'migration-maintenance-card', attrs: { 'aria-label': `Reviewed ${action.operation} ${action.name}` } }, [
+    element('strong', { text: `${sentence(action.operation)} ${action.name} · ${action.eligible ? 'eligible in this plan' : 'blocked'}` }),
+    ...maintenanceDetails(action),
+  ]));
+  return section;
+}
+
 function renderConflicts(plan, state, updateActions) {
   if (!plan.conflicts.length) return null;
   const conflicts = plan.conflicts.map(conflict => {
@@ -436,6 +498,13 @@ export function createMigrationReviewController({
     submitting: false,
     allowDestructive: false,
     confirmExternalChanges: false,
+    confirmMaterializedMaintenance: false,
+    refreshMaterializedViewIds: new Set(),
+    materializedSearch: '',
+    contextStamp: null,
+    reloading: null,
+    reloadRequired: false,
+    executionsChecked: false,
     resolutions: new Map(),
     rebuildTableIds: null,
     columnTypeConversions: new Map(),
@@ -493,9 +562,24 @@ export function createMigrationReviewController({
     const value = getContext();
     return migrationWorkspaceEligible(value?.workspace, value?.design) ? value : null;
   };
+  const targetStamp = value => JSON.stringify([value?.workspace.id, value?.workspace.connectionId, value?.workspace.database, value?.workspace.namespace, value?.connectionRevision]);
+  const contextStamp = value => JSON.stringify([targetStamp(value), value?.workspace.revision, value?.design.revision, value?.design.fingerprint]);
+
+  function syncContext() {
+    if (!state.contextStamp || state.reloading === state.version || !elements.dialog.open || state.contextStamp === contextStamp(context())) return true;
+    invalidate();
+    clearAppliedMigrationReview(state);
+    state.loading = false; state.submitting = false; state.execution = null; state.executionsChecked = false;
+    state.reloadRequired = false;
+    state.error = new Error('The workspace, source or saved design changed. One-time maintenance choices and confirmations were cleared. Reopen the review before applying.');
+    state.contextStamp = null;
+    render();
+    return false;
+  }
 
   function invalidate() {
     state.version += 1;
+    state.reloading = null;
     state.controller?.abort();
     state.controller = null;
     clearTimeout(state.pollTimer);
@@ -503,7 +587,7 @@ export function createMigrationReviewController({
   }
 
   function current(version, workspaceId) {
-    return version === state.version && context()?.workspace.id === workspaceId;
+    return version === state.version && syncContext() && context()?.workspace.id === workspaceId;
   }
 
   function beginRequest() {
@@ -519,6 +603,7 @@ export function createMigrationReviewController({
   function updateActions() {
     const plan = state.plan;
     const busy = state.loading || state.submitting || migrationExecutionNeedsPolling(state.execution);
+    elements.body.inert = busy || migrationExecutionNeedsReconciliation(state.execution);
     elements.refresh.disabled = busy || migrationExecutionNeedsReconciliation(state.execution);
     elements.resolve.hidden = !plan?.conflicts?.length;
     elements.resolve.disabled = busy || !migrationConflictsResolved(plan, state.resolutions);
@@ -533,6 +618,7 @@ export function createMigrationReviewController({
       busy,
       allowDestructive: state.allowDestructive,
       confirmExternalChanges: state.confirmExternalChanges,
+      confirmMaterializedMaintenance: state.confirmMaterializedMaintenance,
       unreviewedConversions: hasUnreviewedConversions(state.columnTypeConversions, state.conversionDrafts),
     });
     elements.apply.textContent = migrationExecutionNeedsPolling(state.execution) ? "Applying…" : "Apply migration";
@@ -595,12 +681,30 @@ export function createMigrationReviewController({
         ]),
       ]));
     }
+    if (plan.requiresMaterializedMaintenanceAcknowledgement) {
+      const input = element('input', { type: 'checkbox', attrs: { 'aria-label': 'Acknowledge materialized-view maintenance for this plan' } });
+      input.checked = state.confirmMaterializedMaintenance; input.disabled = state.loading || state.submitting;
+      input.addEventListener('change', () => { state.confirmMaterializedMaintenance = input.checked; updateActions(); });
+      rows.push(element('label', { className: 'migration-confirmation danger' }, [input, element('span', {}, [
+        element('strong', { text: 'Acknowledge materialized-view maintenance for this plan' }),
+        element('small', { text: 'I reviewed the population, preserved indexes, dependency and privilege checks, lock and cached-data consequences. This confirmation is separate from destructive and external-change acknowledgements and expires with this plan.' }),
+      ])]));
+    }
     return rows.length ? reviewSection("Required confirmations", null, rows, "confirmations") : null;
   }
 
   function render() {
     replace(elements.body);
     setStatus(state.error ? errorPanel(state.error, { retryLabel: "Try again", onRetry: retry }) : null);
+    if (state.error && state.refreshMaterializedViewIds.size && !state.execution) {
+      const clear = element('button', { type: 'button', className: 'ui-button compact', text: 'Clear maintenance choices and review again' });
+      clear.addEventListener('click', () => {
+        state.refreshMaterializedViewIds.clear();
+        state.confirmMaterializedMaintenance = false;
+        void refresh();
+      });
+      elements.status.append(clear);
+    }
     if (state.loading && !state.plan && !state.execution) {
       elements.body.append(element("div", { className: "migration-loading" }, [
         element("span", { text: "…" }),
@@ -621,7 +725,8 @@ export function createMigrationReviewController({
       const columnOrder = renderColumnOrderRebuilds(plan, state, refresh);
       const conversions = renderColumnTypeConversions(plan, state, refresh, updateActions);
       const confirmations = renderConfirmations(plan);
-      for (const section of [conversions, blockers, external, conflicts, columnOrder, renderSteps(plan), warnings, confirmations]) {
+      const maintenance = renderMaterializedMaintenance(plan, state, refresh);
+      for (const section of [renderCompatibilityEvidence(plan.compatibility), maintenance, conversions, blockers, external, conflicts, columnOrder, renderSteps(plan), warnings, confirmations]) {
         if (section) elements.body.append(section);
       }
     }
@@ -638,10 +743,17 @@ export function createMigrationReviewController({
         // successful execution. Clear it before the workspace reload so even
         // a refresh failure cannot leave an applied plan actionable.
         clearAppliedMigrationReview(state);
-        await reloadWorkspace();
+        const target = targetStamp(context());
+        state.reloadRequired = true;
+        state.reloading = version;
+        try { await reloadWorkspace(); } finally { if (state.reloading === version) state.reloading = null; }
+        if (version !== state.version || target !== targetStamp(context())) { syncContext(); return; }
+        state.contextStamp = contextStamp(context());
+        state.reloadRequired = false;
         if (!current(version, workspaceId)) return;
         notify("Migration committed and the workspace baseline was refreshed.");
       } else {
+        clearAppliedMigrationReview(state);
         notify("Migration rolled back. A fresh review is ready to retry.");
       }
       await refresh({ preserveExecution: true });
@@ -675,29 +787,69 @@ export function createMigrationReviewController({
   }
 
   function retry() {
+    if (state.reloadRequired) { void reloadReview(); return; }
     if (migrationExecutionNeedsPolling(state.execution)) {
       state.error = null;
       render();
       schedulePoll(state.version, context().workspace.id, state.execution.id);
       return;
     }
-    if (!state.plan && !state.execution) {
+    if (migrationExecutionNeedsReconciliation(state.execution)) {
+      void reconcile();
+      return;
+    }
+    if (!state.plan && !state.execution && !state.executionsChecked) {
       void open();
       return;
     }
     void refresh();
   }
 
+  async function reloadReview() {
+    if (!context() || state.loading || state.submitting || migrationExecutionNeedsPolling(state.execution) || migrationExecutionNeedsReconciliation(state.execution)) return;
+    invalidate();
+    const version = state.version;
+    const target = targetStamp(context());
+    clearAppliedMigrationReview(state);
+    state.loading = true;
+    state.error = null;
+    state.reloading = version;
+    render();
+    try {
+      await reloadWorkspace();
+      if (state.reloading === version) state.reloading = null;
+      if (version !== state.version || target !== targetStamp(context())) { syncContext(); return; }
+      state.contextStamp = contextStamp(context());
+      state.reloadRequired = false;
+      state.loading = false;
+      await open();
+    } catch (error) {
+      if (state.reloading === version) state.reloading = null;
+      if (version !== state.version || target !== targetStamp(context())) { syncContext(); return; }
+      state.error = error;
+      state.loading = false;
+      render();
+    }
+  }
+
   async function refresh({ preserveExecution = false } = {}) {
+    if (!syncContext()) return;
+    if (state.submitting || migrationExecutionNeedsPolling(state.execution) || migrationExecutionNeedsReconciliation(state.execution)) return;
+    if (state.reloadRequired) { await reloadReview(); return; }
+    if (!state.executionsChecked) { await open(); return; }
     const value = context();
     if (!value) return;
     const execution = preserveExecution ? state.execution : null;
     invalidate();
     const version = state.version;
     const workspaceId = value.workspace.id;
+    state.contextStamp = contextStamp(value);
     state.loading = true;
     state.error = null;
     state.execution = execution;
+    state.plan = null;
+    state.confirmExternalChanges = false;
+    state.confirmMaterializedMaintenance = false;
     state.resolutions.clear();
     render();
     try {
@@ -710,6 +862,7 @@ export function createMigrationReviewController({
         rebuildTableIds: state.rebuildTableIds === null
           ? null
           : [...state.rebuildTableIds],
+        refreshMaterializedViewIds: [...state.refreshMaterializedViewIds],
       }, { signal: beginRequest() });
       if (!current(version, workspaceId)) return;
       state.plan = plan;
@@ -723,6 +876,11 @@ export function createMigrationReviewController({
       state.confirmExternalChanges = false;
     } catch (error) {
       if (!current(version, workspaceId) || error?.code === "request_cancelled") return;
+      if (error?.status === 409 || ["catalog_changed", "workspace_changed", "design_changed"].includes(error?.code)) {
+        clearAppliedMigrationReview(state);
+        state.executionsChecked = false;
+        state.reloadRequired = ['workspace_changed', 'design_changed'].includes(error?.code);
+      }
       state.error = error;
     } finally {
       if (current(version, workspaceId)) {
@@ -743,6 +901,10 @@ export function createMigrationReviewController({
     state.submitting = false;
     state.allowDestructive = false;
     state.confirmExternalChanges = false;
+    state.confirmMaterializedMaintenance = false;
+    state.refreshMaterializedViewIds.clear(); state.materializedSearch = '';
+    state.executionsChecked = false; state.contextStamp = contextStamp(value);
+    state.reloadRequired = false;
     state.resolutions.clear();
     state.rebuildTableIds = null;
     state.columnTypeConversions.clear();
@@ -759,6 +921,7 @@ export function createMigrationReviewController({
         signal: beginRequest(),
       });
       if (!current(version, workspaceId)) return true;
+      state.executionsChecked = true;
       const active = executions.find(execution => (
         migrationExecutionNeedsPolling(execution)
           || migrationExecutionNeedsReconciliation(execution)
@@ -783,6 +946,7 @@ export function createMigrationReviewController({
   }
 
   async function resolve() {
+    if (!syncContext()) return;
     const value = context();
     const plan = state.plan;
     if (!value || !migrationConflictsResolved(plan, state.resolutions) || state.submitting) return;
@@ -803,7 +967,14 @@ export function createMigrationReviewController({
         })),
       }, { signal: beginRequest() });
       if (!current(version, workspaceId)) return;
-      await reloadWorkspace();
+      clearAppliedMigrationReview(state);
+      const target = targetStamp(context());
+      state.reloadRequired = true;
+      state.reloading = version;
+      try { await reloadWorkspace(); } finally { if (state.reloading === version) state.reloading = null; }
+      if (version !== state.version || target !== targetStamp(context())) { syncContext(); return; }
+      state.contextStamp = contextStamp(context());
+      state.reloadRequired = false;
       if (!current(version, workspaceId)) return;
       state.allowDestructive = false;
       state.confirmExternalChanges = false;
@@ -819,15 +990,16 @@ export function createMigrationReviewController({
     }
   }
 
-  async function execute() {
+  async function execute(expectedPlan) {
     const value = context();
     const plan = state.plan;
-    if (!value || !migrationCanApply({
+    if (!syncContext() || !value || plan !== expectedPlan || !migrationCanApply({
       plan,
       execution: state.execution,
       busy: state.loading || state.submitting,
       allowDestructive: state.allowDestructive,
       confirmExternalChanges: state.confirmExternalChanges,
+      confirmMaterializedMaintenance: state.confirmMaterializedMaintenance,
       unreviewedConversions: hasUnreviewedConversions(state.columnTypeConversions, state.conversionDrafts),
     })) return;
     invalidate();
@@ -842,6 +1014,7 @@ export function createMigrationReviewController({
         reviewDigest: plan.reviewDigest,
         confirmDestructive: plan.destructive && state.allowDestructive,
         confirmExternalChanges: plan.requiresExternalChangeAcknowledgement && state.confirmExternalChanges,
+        confirmMaterializedMaintenance: Boolean(plan.requiresMaterializedMaintenanceAcknowledgement && state.confirmMaterializedMaintenance),
       }, { signal: beginRequest() });
       if (!current(version, workspaceId)) return;
       state.execution = execution;
@@ -853,6 +1026,12 @@ export function createMigrationReviewController({
       if (!current(version, workspaceId) || error?.code === "request_cancelled") return;
       state.error = error;
       state.submitting = false;
+      // The request may have reserved an execution before its response was lost.
+      // Inspect server-owned executions before offering another plan or Apply.
+      clearAppliedMigrationReview(state);
+      state.execution = null;
+      state.executionsChecked = false;
+      state.reloadRequired = ['workspace_changed', 'design_changed'].includes(error?.code);
       render();
     }
   }
@@ -863,6 +1042,7 @@ export function createMigrationReviewController({
     const risks = [
       plan.destructive ? "destructive changes" : null,
       plan.requiresExternalChangeAcknowledgement ? "preserved external changes" : null,
+      plan.requiresMaterializedMaintenanceAcknowledgement ? 'materialized-view maintenance' : null,
       plan.columnOrderRebuilds?.some(rebuild => rebuild.selected)
         ? "physical column reconstruction"
         : null,
@@ -871,11 +1051,12 @@ export function createMigrationReviewController({
       title: "Apply migration",
       message: `Apply ${plan.steps.length} reviewed ${plan.steps.length === 1 ? "change" : "changes"} to PostgreSQL${risks.length ? `, including ${risks.join(" and ")}` : ""}? The server will run the exact displayed SQL in one managed transaction.`,
       label: "Apply migration",
-      callback: execute,
+      callback: () => execute(plan),
     });
   }
 
   async function reconcile() {
+    if (!syncContext()) return;
     const value = context();
     const execution = state.execution;
     if (!value || !migrationExecutionNeedsReconciliation(execution) || state.submitting) return;
@@ -914,9 +1095,11 @@ export function createMigrationReviewController({
     close: () => {
       closeRebuildHelp({ restoreFocus: false });
       invalidate();
+      clearAppliedMigrationReview(state);
     },
     refresh,
     render,
+    syncContext,
     available: () => Boolean(context()),
   };
 }

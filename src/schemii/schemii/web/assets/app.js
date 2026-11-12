@@ -99,6 +99,7 @@ import {
 } from "./request-coordinator.js";
 import { createDesignDeploymentController, detachedDesignEligible } from "./design-deployment.js";
 import { createMigrationReviewController } from "./migration-review.js";
+import { renderWorkspaceCompatibility } from "./compatibility.js";
 import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
 import { createDesignEditorControllers } from "./design-editors.js";
@@ -401,6 +402,8 @@ const elements = {
   migrationDialog: byId("migration-dialog"),
   migrationRebuildHelp: byId("migration-rebuild-help"),
   migrationReviewBody: byId("migration-review-body"),
+  workspaceCompatibility: byId("workspace-compatibility"),
+  designViewMaintenanceGuidance: byId("design-view-maintenance-guidance"),
   migrationStatus: byId("migration-status"),
   refreshMigrationButton: byId("refresh-migration-button"),
   resolveMigrationButton: byId("resolve-migration-button"),
@@ -645,8 +648,8 @@ const migrationReview = createMigrationReviewController({
     resolve: elements.resolveMigrationButton,
     apply: elements.applyMigrationButton,
   },
-  getContext: () => ({ workspace: state.activeWorkspace, design: state.design }),
-  reloadWorkspace: () => loadActiveWorkspace({ clearConflictOnSuccess: true }),
+  getContext: () => ({ workspace: state.activeWorkspace, design: state.design, connectionRevision: connectionById(state.activeWorkspace?.connectionId)?.revision }),
+  reloadWorkspace: reloadMigrationWorkspace,
   confirm: askConfirmation,
   notify: showToast,
   notifyError: errorToast,
@@ -1255,6 +1258,7 @@ async function restoreWorkspaceNavigation(navigation, {
 }
 
 function updateHeader() {
+  migrationReview.syncContext();
   updateFitAvailability();
   const designWorkspace = isDesignWorkspace();
   elements.workspaceTitle.textContent = state.activeWorkspace ? workspaceLabel(state.activeWorkspace) : "No workspace open";
@@ -1306,6 +1310,11 @@ function updateHeader() {
     ? "Select a designed table to inspect its columns, constraints, indexes, and relationships."
     : "Select a live table to inspect columns, constraints, indexes, triggers, and relationships.";
   elements.canvas.setAttribute("aria-label", designWorkspace ? "Desired schema table diagram canvas" : "Live table diagram canvas");
+  renderWorkspaceCompatibility(elements.workspaceCompatibility, {
+    workspace: state.activeWorkspace, design: state.design, loading: state.catalogLoading,
+    reviewDisabled: elements.reviewMigrationButton.disabled, exportDisabled: elements.exportDesignSqlButton.disabled,
+    onReview: () => elements.reviewMigrationButton.click(), onExport: () => elements.exportDesignSqlButton.click(),
+  });
   renderSqlTarget();
 }
 
@@ -2563,6 +2572,16 @@ async function openWorkspace(workspace, { historyMode = "push", navigationReques
 
 async function loadActiveWorkspace(options = {}) {
   return loadActiveDesign(options);
+}
+
+async function reloadMigrationWorkspace() {
+  const workspaceId = state.activeWorkspace?.id;
+  if (designEditors.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
+  if (!await flushLayoutBeforeTransition()) throw new Error('Resolve the pending layout save before reloading the migration workspace.');
+  if (state.activeWorkspace?.id !== workspaceId) return;
+  if (designEditors.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
+  await loadActiveWorkspace({ clearConflictOnSuccess: true });
+  if (state.catalogError) throw state.catalogError;
 }
 
 async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
