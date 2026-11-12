@@ -1,18 +1,20 @@
-import { findOrganizationConnection } from "./helpers/database-fixtures.js";
+import { ownedSchemooSource } from "./helpers/schemoo-source-fixtures.js";
 import { expect, test } from "@playwright/test";
 import { chooseModelOption } from "./helpers/schemoo-select.js";
 
-let modelId;
+let modelId, fixture;
 test.beforeEach(async ({ request }) => {
-  const { connections } = await (await request.get("/api/v1/connections")).json();
-  const connection = findOrganizationConnection(connections);
-  expect(connection, "Organization connection is required for the filter navigation fixture").toBeTruthy();
-  const catalog = await (await request.get(`/api/v1/schemoo/catalog?connection_id=${connection.id}&namespace=public`)).json();
+  fixture = await ownedSchemooSource(request);
+  await fixture.sql(`CREATE TABLE "${fixture.namespace}".personnel_dim (id integer PRIMARY KEY, name text);
+    CREATE TABLE "${fixture.namespace}".personnel_certification_fact (
+      id integer PRIMARY KEY, personnel_id integer REFERENCES "${fixture.namespace}".personnel_dim(id),
+      certification_id integer, effective_date date)`);
+  const catalog = await fixture.catalog();
   const source = "personnel_certification_fact";
   const relationship = catalog.relationships.find(item => item.sourceTable === source && item.targetTable === "personnel_dim");
   expect(relationship).toBeTruthy();
   const response = await request.post("/api/v1/schemoo/models", { data: {
-    name: `E2E filter navigation ${Date.now()}`, connectionId: connection.id, namespace: "public",
+    name: fixture.name("filter navigation"), connectionId: fixture.connection.id, namespace: fixture.namespace,
     definition: {
       root: "personnel_dim", exposedFields: null,
       nodes: [
@@ -34,14 +36,12 @@ test.beforeEach(async ({ request }) => {
     explore: { root: "personnel_dim", fields: [{ table: "personnel_dim", column: "name", aggregate: "none" }], limit: 100 },
   } });
   expect(response.ok(), await response.text()).toBeTruthy();
-  modelId = (await response.json()).id;
+  const model = await response.json(); fixture.trackModel(model); modelId = model.id;
 });
 
-test.afterEach(async ({ request }) => {
-  if (!modelId) return;
-  const response = await request.get(`/api/v1/schemoo/models/${modelId}`);
-  if (response.ok()) await request.delete(`/api/v1/schemoo/models/${modelId}?expected_revision=${(await response.json()).revision}`);
-  modelId = null;
+test.afterEach(async () => {
+  try { if (fixture) await fixture.cleanup(); }
+  finally { fixture = null; modelId = null; }
 });
 
 async function inspectNode(page, id) {
@@ -80,7 +80,7 @@ test("Filters is a dedicated authoring panel and keeps dialog cancel, save and r
   await page.getByRole("button", { name: "Model filters", exact: true }).click();
   await expect(page.locator("#model-filters")).toContainText("Named personnel");
   await expect(page.locator("#plan-status")).not.toContainText(/Loading|Checking/);
-  await page.screenshot({ path: `artifacts/schemoo-filter-panel-${testInfo.project.name}.png`, animations: "disabled" });
+  await testInfo.attach(`schemoo-filter-panel-${testInfo.project.name}`, { body: await page.screenshot({ animations: "disabled" }), contentType: "image/png" });
   await page.getByRole("button", { name: "Explore model", exact: true }).click();
   await expect(page.locator("#show-filters")).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator("#explore-pane")).toBeVisible();
@@ -101,7 +101,7 @@ test("table and summary expose applicable filters and scoped canvas highlighting
   await expect(page.getByRole("dialog", { name: "Edit model filter", exact: true })).toBeVisible();
   await expect(page.locator('[data-node-id="personnel_certification_fact"]')).toHaveClass(/sc-filter-bound/);
   await expect(page.locator('[data-node-id="personnel_dim"]')).not.toHaveClass(/sc-filter-bound/);
-  await page.screenshot({ path: `artifacts/schemoo-filter-context-${testInfo.project.name}.png`, animations: "disabled" });
+  await testInfo.attach(`schemoo-filter-context-${testInfo.project.name}`, { body: await page.screenshot({ animations: "disabled" }), contentType: "image/png" });
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.locator("#filters-pane")).toBeVisible();
   await expect(page.locator(".sc-filter-bound")).toHaveCount(0);
@@ -113,7 +113,7 @@ test("table and summary expose applicable filters and scoped canvas highlighting
   await expect(page.locator(".sc-filter-bound")).toHaveCount(0);
 });
 
-test("warning indicator distinguishes a broken binding from a missing preview parameter value", async ({ page, request }) => {
+test("warning indicator distinguishes a broken binding from a missing preview parameter value", async ({ page, request }, testInfo) => {
   let model = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
   const scope = model.definition.scopes[0];
   scope.kind = "required";
@@ -126,11 +126,21 @@ test("warning indicator distinguishes a broken binding from a missing preview pa
   await expect(page.locator("#plan-status")).toContainText("requires As of date");
   await expect(page.locator("#show-filters")).not.toHaveClass(/has-warning/);
   model = await response.json();
-  model.definition.scopes[0].alternatives[0].conditions[0].column = "removed_column";
-  response = await request.put(`/api/v1/schemoo/models/${modelId}`, { data: { expectedRevision: model.revision, name: model.name, definition: model.definition } });
-  expect(response.ok(), await response.text()).toBeTruthy();
+  const invalidDefinition = structuredClone(model.definition);
+  invalidDefinition.scopes[0].alternatives[0].conditions[0].column = "removed_column";
+  response = await request.put(`/api/v1/schemoo/models/${modelId}`, { data: { expectedRevision: model.revision, name: model.name, definition: invalidDefinition } });
+  expect(response.status(), await response.text()).toBe(422);
+  expect((await response.json()).error.code).toBe("invalid_model_source");
+  const retained = await (await request.get(`/api/v1/schemoo/models/${modelId}`)).json();
+  expect(retained.revision).toBe(model.revision);
+  expect(retained.definition).toEqual(model.definition);
+  // A real source change can invalidate an already saved binding. Never alter
+  // shared fixture tables or manufacture invalid saved metadata to simulate it.
+  await fixture.sql(`ALTER TABLE "${fixture.namespace}".personnel_certification_fact DROP COLUMN effective_date`);
   await page.reload();
+  await expect(page.locator("#graph-status")).toContainText("1 source change needs review");
   await expect(page.locator("#show-filters")).toHaveClass(/has-warning/);
   await page.getByRole("button", { name: "Model filters", exact: true }).click();
-  await expect(page.locator("#model-filters")).toContainText(/valid source column|removed_column|attention/i);
+  await expect(page.locator("#model-filters")).toContainText(/valid source column|effective_date|attention/i);
+  await testInfo.attach(`schemoo-filter-warning-${testInfo.project.name}`, { body: await page.screenshot({ animations: "disabled" }), contentType: "image/png" });
 });
