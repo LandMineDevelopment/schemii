@@ -10,7 +10,7 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
   if (jsonCells) {
@@ -48,7 +48,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
         if (streamError) break;
       }
       frames.push(streamError ? { type: 'error', tileId: tile.id, message: 'Source connection interrupted', code: 'query_failed' }
-        : { type: 'complete', tileId: tile.id, rowCount: rows.length, limitReached: capped, reason: capped ? 'row_limit' : null, snapshotAt });
+        : { type: 'complete', tileId: tile.id, rowCount: rows.length, limitReached: capped, reason: capped ? dashboardCapacity ? 'dashboard_row_limit' : 'row_limit' : null, snapshotAt });
     }
     frames.push({ type: 'end' });
     return frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
@@ -845,4 +845,45 @@ test('missing physical model sources give a reachable Schemoo repair path withou
   await expect(review.getByRole('link', { name: 'Review or repair the source model in Schemoo' })).toHaveAttribute('href', `/schemoo?model=${modelId}`);
   await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
   expect(writes).toHaveLength(0); expect(fixture.dashboard.modelRevision).toBe(1); expect(errors).toEqual([]);
+});
+test('dashboard capacity is explicit in the card and expanded cached result', async ({ page }) => {
+  await mock(page, { capped: true, dashboardCapacity: true });
+  await page.goto('/schemer');
+  const card = page.locator('.analytics-tile').first();
+  await expect(card.locator('.tile-status')).toContainText('dashboard preview capacity reached');
+  await expect(card.locator('.stream-progress')).toHaveText('Dashboard preview capacity reached · download full results');
+  await card.click();
+  await expect(page.locator('dialog[open] .stream-progress').first()).toHaveText('Dashboard preview capacity reached · download full results');
+});
+
+test('later KPI renders while an earlier detail stream remains pending', async ({ page }) => {
+  const { fixture, errors } = await mock(page, { chartTypes: true });
+  fixture.dashboard.tiles = ['detail', 'kpi'].map(kind => fixture.dashboard.tiles.find(tile => tile.kind === kind));
+  await page.addInitScript(({ dashboardId }) => {
+    const original = window.fetch;
+    window.fetch = (input, options) => {
+      if (!String(input).endsWith(`/api/v1/schemer/dashboards/${dashboardId}/executions/stream`)) return original(input, options);
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({ start(controller) {
+        const emit = frame => controller.enqueue(encoder.encode(JSON.stringify(frame) + '\n'));
+        emit({ type: 'start', snapshotAt: '2026-11-11T12:00:00Z', tiles: ['detail', 'kpi'].map(tileId => ({ tileId, plan: {} })), tileErrors: [] });
+        emit({ type: 'rows', tileId: 'kpi', columns: [{ name: 'COUNT id', dataType: 'bigint' }], rows: [[42]] });
+        emit({ type: 'complete', tileId: 'kpi', rowCount: 1, limitReached: false });
+        window.__issue13Release = () => {
+          emit({ type: 'rows', tileId: 'detail', columns: [{ name: 'id' }, { name: 'name' }], rows: [[1, 'Arrived later']] });
+          emit({ type: 'complete', tileId: 'detail', rowCount: 1, limitReached: false });
+          emit({ type: 'end' }); controller.close();
+        };
+        options?.signal?.addEventListener('abort', () => controller.error(new DOMException('Stopped', 'AbortError')), { once: true });
+      } });
+      return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson' } }));
+    };
+  }, { dashboardId });
+  await page.goto('/schemer');
+  await expect(page.locator('[data-tile-id="kpi"] .tile-body')).toContainText('42');
+  await expect(page.locator('[data-tile-id="kpi"] .tile-status')).toContainText('complete');
+  await expect(page.locator('[data-tile-id="detail"] .tile-status')).toContainText(/loading|Fetching/i);
+  await page.evaluate(() => window.__issue13Release());
+  await expect(page.locator('[data-tile-id="detail"] .tile-body')).toContainText('Arrived later');
+  expect(errors).toEqual([]);
 });
