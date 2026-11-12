@@ -45,17 +45,36 @@ services:
     environment:
       POSTGRES_USER: pressure_admin
       POSTGRES_DB: pressure_source
-      POSTGRES_PASSWORD_FILE: /run/secrets/admin_password
+      POSTGRES_PASSWORD_FILE: /run/secrets/source_admin_password
     volumes:
       - source:/var/lib/postgresql/data
-      - ${PRESSURE_DIRECTORY}/admin_password:/run/secrets/admin_password:ro
+      - ${PRESSURE_DIRECTORY}/source_admin_password:/run/secrets/source_admin_password:ro
       - ${PRESSURE_DIRECTORY}/database.key:/run/secrets/database_key:ro
       - ${PRESSURE_DIRECTORY}/database.crt:/run/secrets/database_cert:ro
+  observer-init:
+    image: ${PRESSURE_APPLICATION_IMAGE}
+    labels: *labels
+    logging: *logging
+    user: "0:0"
+    network_mode: none
+    entrypoint: [python, -c]
+    command: ["import os; os.chmod('/qualification-state',0o700); os.chown('/qualification-state',10001,10001)"]
+    volumes: ["observer:/qualification-state"]
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 16
+    restart: "no"
   schemii:
     image: ${PRESSURE_APPLICATION_IMAGE}
     labels: *labels
     logging: *logging
+    command: [uvicorn, pressure_app:observed_application, --factory, --app-dir, /qualification, --host, 0.0.0.0, --port, "8000", --no-access-log]
     environment:
+      PRESSURE_OBSERVER_RUN: ${PRESSURE_RUN}
       SCHEMII_DEPLOYMENT_MODE: authenticated
       SCHEMII_AUTH_ENABLED: "1"
       SCHEMII_SETUP_TOKEN_FILE: /run/secrets/setup_token
@@ -73,6 +92,8 @@ services:
       SCHEMII_ALLOWED_TARGET_HOSTS: source
       SCHEMII_CONFIG_FILE: /etc/schemii/schemii.toml
     volumes:
+      - observer:/qualification-state
+      - ${PRESSURE_ROOT}/dev/pressure/app.py:/qualification/pressure_app.py:ro
       - ${PRESSURE_ROOT}/dev/schemii.toml:/etc/schemii/schemii.toml:ro
       - ${PRESSURE_DIRECTORY}/setup_token:/run/secrets/setup_token:ro
       - ${PRESSURE_DIRECTORY}/app_password:/run/secrets/app_password:ro
@@ -116,6 +137,9 @@ services:
       timeout: 2s
       retries: 30
 volumes:
+  observer:
+    name: ${PRESSURE_PROJECT}-observer
+    labels: *labels
   metadata:
     name: ${PRESSURE_PROJECT}-metadata
     labels: *labels

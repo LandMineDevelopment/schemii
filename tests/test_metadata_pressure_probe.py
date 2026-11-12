@@ -53,8 +53,8 @@ def test_lifespan_protocol_accepts_only_fixed_controller_confirmation(
     monkeypatch, capsys
 ):
     monkeypatch.setattr(p.sys, "stdin", io.StringIO('{"confirmed":true}\n'))
-    p.operation("stop-owned-app")
-    assert json.loads(capsys.readouterr().out) == {"operation": "stop-owned-app"}
+    p.operation("start-owned-app")
+    assert json.loads(capsys.readouterr().out) == {"operation": "start-owned-app"}
     monkeypatch.setattr(p.sys, "stdin", io.StringIO('{"confirmed":false}\n'))
     with pytest.raises(Refused, match="lifecycle_not_confirmed"):
         p.operation("start-owned-app")
@@ -250,3 +250,147 @@ def test_available_source_reply_cannot_adopt_another_server_ledger(
     monkeypatch.setattr(p, "command", lambda *args, **kwargs: '{"status":"available"}')
     with pytest.raises(Refused, match="source_monitor_server_binding"):
         probe.source_sample()
+
+
+def test_stop_confirmation_without_stock_lifespan_evidence_is_rejected(monkeypatch):
+    monkeypatch.setattr(p.sys, "stdin", io.StringIO('{"confirmed":true}\n'))
+    with pytest.raises(Refused, match="stock_lifespan_evidence_missing"):
+        p.operation("stop-owned-app")
+
+
+def test_fixture_wrapper_preserves_stock_messages_and_observes_real_owner_counts(
+    tmp_path,
+):
+    import asyncio
+    from dataclasses import make_dataclass
+    from dev.pressure.app import ObservedApplication
+
+    Snapshot = make_dataclass(
+        "Snapshot",
+        [
+            (name, object)
+            for name in (
+                "maximum",
+                "active",
+                "peak_active",
+                "admitted",
+                "rejected",
+                "connection_failures",
+                "connection_seconds",
+                "closed",
+            )
+        ],
+    )
+
+    class Owner:
+        def __init__(self, maximum):
+            self.maximum, self.closed = maximum, False
+
+        def admission_snapshot(self):
+            return Snapshot(
+                self.maximum,
+                0 if self.closed else self.maximum,
+                self.maximum,
+                2,
+                0,
+                0,
+                0.0,
+                self.closed,
+            )
+
+    normal, ready = Owner(2), Owner(1)
+
+    class Application:
+        state = SimpleNamespace(
+            services=SimpleNamespace(
+                metadata=SimpleNamespace(
+                    connection_factory=normal,
+                    readiness_probe=SimpleNamespace(_connection_factory=ready),
+                )
+            )
+        )
+
+        async def __call__(self, scope, receive, send):
+            assert await receive() == {"type": "lifespan.startup"}
+            await send({"type": "lifespan.startup.complete"})
+            assert await receive() == {"type": "lifespan.shutdown"}
+            normal.closed = ready.closed = True
+            await send({"type": "lifespan.shutdown.complete"})
+
+    tmp_path.chmod(0o700)
+    wrapper = ObservedApplication(Application(), "pressure_" + "a" * 32, tmp_path)
+    events = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+    sent, running = [], []
+
+    async def receive():
+        return next(events)
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "lifespan.startup.complete":
+            running.append(wrapper.snapshot())
+
+    asyncio.run(wrapper({"type": "lifespan"}, receive, send))
+    result = json.loads((tmp_path / "observation.json").read_text())
+    assert sent == [
+        {"type": "lifespan.startup.complete"},
+        {"type": "lifespan.shutdown.complete"},
+    ]
+    assert running[0]["normal"]["counts"]["active"] == 2
+    assert (
+        result["stage"] == "shutdown-complete"
+        and result["normal"]["counts"]["closed"] is True
+    )
+    assert (
+        result["normal"]["counts"]["active"]
+        == result["readiness"]["counts"]["active"]
+        == 0
+    )
+    assert result["instrumentation"]["stockCapacityEligible"] is False
+    assert wrapper.thread is not None and not wrapper.thread.is_alive()
+
+
+def test_owner_observation_failure_stays_unknown_and_never_synthesizes_counts():
+    from dev.pressure.app import owner_snapshot
+
+    assert owner_snapshot(None) == {
+        "status": "unknown",
+        "reason": "owner_snapshot_failed",
+    }
+
+
+def test_peak_requires_actual_owner_sample_inside_pressure_window_same_process():
+    from datetime import datetime, timezone, timedelta
+
+    at = datetime.now(timezone.utc)
+    event = {
+        "at": at.isoformat(),
+        "stage": "running",
+        "normal": {
+            "status": "observed",
+            "counts": {"active": 2, "peak_active": 2, "maximum": 2, "closed": False},
+        },
+    }
+    sample = {
+        "observation": {
+            "process": {"pid": 7},
+            "at": (at + timedelta(seconds=1)).isoformat(),
+            "ownerHistory": [event],
+            "normal": {"counts": {"active": 0}},
+        }
+    }
+    assert (
+        p.observed_peak(
+            sample, process_pid=7, started_at=(at - timedelta(seconds=1)).isoformat()
+        )
+        == event
+    )
+    with pytest.raises(Refused, match="saturated_owner_process_changed"):
+        p.observed_peak(sample, process_pid=8, started_at=at.isoformat())
+    with pytest.raises(RuntimeError, match="saturated_owner_count_not_observed"):
+        p.observed_peak(
+            sample, process_pid=7, started_at=(at + timedelta(seconds=1)).isoformat()
+        )
+    event["normal"]["counts"]["active"] = 0
+    with pytest.raises(RuntimeError, match="saturated_owner_count_not_observed"):
+        p.observed_peak(sample, process_pid=7, started_at=at.isoformat())

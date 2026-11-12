@@ -21,6 +21,7 @@ def container(service, project, run=None, image=None):
         "source": (268435456, 500000000, 64),
         "schemii": (536870912, 1000000000, 128),
         "ingress": (67108864, 250000000, 32),
+        "observer-init": (67108864, 250000000, 16),
     }
     memory, cpu, pids = limits[service]
     return {
@@ -29,8 +30,19 @@ def container(service, project, run=None, image=None):
         "name": f"/{project}-{service}-1",
         "image": image
         or "sha256:"
-        + ("a" if service == "schemii" else "b" if service == "ingress" else "c") * 64,
-        "state": "running",
+        + (
+            "a"
+            if service in {"schemii", "observer-init"}
+            else "b"
+            if service == "ingress"
+            else "c"
+        )
+        * 64,
+        "state": "exited" if service == "observer-init" else "running",
+        "exitCode": 0,
+        "oomKilled": False,
+        "startedAt": "2026-11-12T00:00:00Z",
+        "finishedAt": "2026-11-12T00:00:01Z",
         "health": "healthy",
         "labels": {
             "com.docker.compose.project": project,
@@ -158,6 +170,8 @@ class Runtime:
             )
             self.writes.append(args)
             record["state"] = "exited" if args[1] == "stop" else "running"
+            if record["labels"].get(c.RUN_LABEL):
+                record["finishedAt"] = c.now()
             if self.fail == "uncertain-state":
                 raise c.Refused("fake_cli_error")
             return record["id"]
@@ -175,12 +189,17 @@ class Runtime:
         )
         self.writes.append(args)
         if "up" in args:
-            services = args[args.index("60") + 1 :]
+            services = args[args.index("60") + 1 :] if "60" in args else args[-1:]
             for service in services:
                 record = container(service, project, run)
                 self.records[record["id"]] = record
             for kind, names in (
-                ("volume", ("metadata", "source")),
+                (
+                    "volume",
+                    ("metadata", "source", "observer")
+                    if any(x in services for x in ("observer-init", "schemii"))
+                    else ("metadata", "source"),
+                ),
                 ("network", ("database", "ingress", "loopback")),
             ):
                 for name in names:
@@ -460,7 +479,7 @@ def shell_fixture(tmp_path):
     )
     (binary / "python3").write_text(
         header
-        + 'assert "--qualify-metadata-pressure" in sys.argv or "--recover-metadata-pressure" in sys.argv\n'
+        + 'assert any(x in sys.argv for x in ("--qualify-metadata-pressure", "--recover-metadata-pressure", "--metadata-pressure-attach"))\n'
     )
     for name in ("git", "docker", "python3"):
         (binary / name).chmod(0o755)
@@ -734,3 +753,392 @@ def test_old_or_modified_source_witness_never_admits_fixture_creation(setup):
         c.begin(root, primary, None, runtime)
     assert runtime.writes == []
     assert not (primary / ".schemii").exists()
+
+
+def observed_sample(owned, native, *, stage="running", closed=False):
+    value = {
+        "version": 1,
+        "run": owned.state["run"],
+        "at": c.now(),
+        "startupComplete": True,
+        "observationFailed": False,
+        "stage": stage,
+        "process": {
+            "pid": 7,
+            "uid": 10001,
+            "startTicks": "321",
+            "incarnation": "a" * 32,
+            "startedAt": native["startedAt"],
+        },
+    }
+    for name, maximum in (("normal", 2), ("readiness", 1)):
+        value[name] = {
+            "status": "observed",
+            "counts": {
+                "maximum": maximum,
+                "active": 0 if closed else maximum,
+                "peak_active": maximum,
+                "closed": closed,
+            },
+        }
+    return {
+        "containerId": native["id"],
+        "containerStartedAt": native["startedAt"],
+        "observation": value,
+    }
+
+
+@pytest.mark.parametrize(
+    "exit_code,oom",
+    [(137, False), (143, False), (1, False), (0, True), (None, False), (True, False)],
+)
+def test_native_forced_crash_or_unknown_stop_never_becomes_lifespan_pass(
+    setup, monkeypatch, exit_code, oom
+):
+    owned = fixture(setup)
+    owned.up(["schemii"])
+    native = owned.state["containers"]["schemii"]
+    setup[2].records[native["id"]].update(exitCode=exit_code, oomKilled=oom)
+    sample = observed_sample(owned, native)
+    calls = []
+
+    def observation(self, **kwargs):
+        calls.append(kwargs)
+        return sample
+
+    monkeypatch.setattr(c.Fixture, "observation", observation)
+    with pytest.raises(c.Refused, match="application_stop_not_graceful"):
+        owned.stop_application()
+    assert calls == [{}]
+    assert (
+        len([call for call in setup[2].writes if call[:2] == ["container", "stop"]])
+        == 1
+    )
+    assert owned.state["applicationStop"]["exitCode"] == exit_code
+    assert "applicationLifespan" not in owned.state
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["missing-complete", "active", "open-owner", "changed-process", "stale", "unknown"],
+)
+def test_exit_zero_and_closed_native_backends_require_stock_completion_accounting(
+    setup, monkeypatch, defect
+):
+    owned = fixture(setup)
+    owned.up(["schemii"])
+    native = owned.state["containers"]["schemii"]
+    before = observed_sample(owned, native)
+    after = observed_sample(owned, native, stage="shutdown-complete", closed=True)
+    if defect == "missing-complete":
+        after["observation"]["stage"] = "shutdown-requested"
+    elif defect == "active":
+        after["observation"]["normal"]["counts"]["active"] = 1
+    elif defect == "open-owner":
+        after["observation"]["readiness"]["counts"]["closed"] = False
+    elif defect == "changed-process":
+        after["observation"]["process"]["incarnation"] = "b" * 32
+    elif defect == "stale":
+        after["observation"]["at"] = "2026-01-01T00:00:00Z"
+    else:
+        after["observation"]["normal"] = {"status": "unknown"}
+
+    def observation(self, *, stopped=False):
+        value = after if stopped else before
+        c.validate_observation(
+            value["observation"], self.state["run"], native, fresh=not stopped
+        )
+        return value
+
+    monkeypatch.setattr(c.Fixture, "observation", observation)
+    with pytest.raises(c.Refused):
+        owned.stop_application()
+    assert "applicationStop" in owned.state and "applicationLifespan" not in owned.state
+
+
+def test_actual_stock_complete_and_closed_owner_receipt_can_confirm_graceful_exit(
+    setup, monkeypatch
+):
+    owned = fixture(setup)
+    owned.up(["schemii"])
+    native = owned.state["containers"]["schemii"]
+    before = observed_sample(owned, native)
+
+    def observation(self, *, stopped=False):
+        return (
+            observed_sample(self, native, stage="shutdown-complete", closed=True)
+            if stopped
+            else before
+        )
+
+    monkeypatch.setattr(c.Fixture, "observation", observation)
+    # Native finishedAt follows the final ASGI send, as Docker records in practice.
+    original = owned.exact_state
+
+    def stop(baseline, target):
+        result = original(baseline, target)
+        result["finishedAt"] = "2099-01-01T00:00:00Z"
+        return result
+
+    monkeypatch.setattr(owned, "exact_state", stop)
+    result = owned.stop_application()
+    assert result["status"] == "observed-stock-lifespan-drained"
+    assert result["observation"]["normal"]["counts"]["closed"] is True
+
+
+def test_observer_copy_is_exact_owned_fixed_path_bounded_and_never_extracts(setup):
+    import io
+    import tarfile
+
+    owned = fixture(setup)
+    owned.up(["schemii"])
+    native = owned.state["containers"]["schemii"]
+    data = json.dumps(observed_sample(owned, native)["observation"]).encode()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        member = tarfile.TarInfo("observation.json")
+        member.size, member.mode, member.uid = len(data), 0o600, 10001
+        archive.addfile(member, io.BytesIO(data))
+    original = owned.runtime
+    copies = []
+
+    def runtime(argv, **kwargs):
+        if argv[:3] == ["docker", "container", "cp"]:
+            assert argv[3:] == [
+                native["id"] + ":/qualification-state/observation.json",
+                "-",
+            ]
+            assert (
+                kwargs["binary"] is True
+                and kwargs["limit"] == 32768
+                and kwargs["timeout"] == 5
+            )
+            copies.append(argv)
+            return buffer.getvalue()
+        return original(argv, **kwargs)
+
+    owned.runtime = runtime
+    assert owned.observation()["containerId"] == native["id"]
+    assert len(copies) == 1
+
+
+def held_fixture(setup):
+    owned = fixture(setup)
+    owned.up(["metadata", "source", "schemii"])
+    owned.state["hold"] = {
+        "nonce": "b" * 64,
+        "expiresAt": "2099-01-01T00:00:00Z",
+        "attachment": None,
+        "requests": 0,
+    }
+    return owned
+
+
+def holder_request(owned, action, **extra):
+    request = {
+        "version": 1,
+        "run": owned.state["run"],
+        "nonce": owned.state["hold"]["nonce"],
+        "requestId": os.urandom(16).hex(),
+        "action": action,
+        **extra,
+    }
+    c.private_write(owned.directory / "request.json", request)
+    owned.hold_request()
+    return c.private_read(owned.directory / "response.json")
+
+
+def test_attach_heartbeat_and_detach_are_bounded_private_owner_operations(
+    setup, monkeypatch
+):
+    owned = held_fixture(setup)
+    identity = {"pid": 1234, "start": "556", "uid": os.getuid(), "argvSha256": "c" * 64}
+    monkeypatch.setattr(
+        c, "consumer_identity", lambda pid, root: identity if pid == 1234 else None
+    )
+    writes = len(setup[2].writes)
+    result = holder_request(owned, "attach", pid=1234)
+    assert result["status"] == "attached"
+    attachment = c.private_read(Path(result["attachmentFile"]))
+    assert stat.S_IMODE(Path(result["attachmentFile"]).stat().st_mode) == 0o600
+    assert attachment["consumer"] == identity
+    # Exclusive lifecycle ownership remains with holder; callbacks do not write runtime.
+    assert len(setup[2].writes) == writes
+    assert holder_request(owned, "attach", pid=1234)["status"] == "rejected"
+    assert holder_request(owned, "heartbeat", token="wrong")["status"] == "rejected"
+    assert (
+        holder_request(owned, "heartbeat", token=attachment["token"])["status"]
+        == "attached"
+    )
+    joined = []
+    monkeypatch.setattr(c, "join_consumer", joined.append)
+    assert (
+        holder_request(owned, "detach", token=attachment["token"])["status"]
+        == "detaching"
+    )
+    assert joined == []  # Ack is observable before group termination.
+    assert owned.state["hold"]["attachment"]["status"] == "detaching"
+    owned.finish_consumers()
+    assert joined == [identity] and owned.state["hold"]["attachment"] is None
+
+
+def test_unknown_consumer_identity_prevents_all_cleanup_and_ingress_restore(
+    setup, monkeypatch
+):
+    owned = held_fixture(setup)
+    owned.stop_retained()
+    owned.state["hold"]["attachment"] = {"consumer": {"pid": 1234, "start": "556"}}
+    writes = deepcopy(setup[2].writes)
+
+    def unknown(_identity):
+        raise c.Refused("consumer_join_identity_unknown")
+
+    monkeypatch.setattr(c, "join_consumer", unknown)
+    with pytest.raises(c.Refused, match="consumer_join_identity_unknown"):
+        owned.cleanup()
+    assert setup[2].writes == writes
+    assert not owned.state.get("restored")
+    assert c.private_read(owned.journal)["stage"] == "consumer-join-intent"
+
+
+def test_consumer_group_join_rejects_reused_leader_before_signalling(monkeypatch):
+    monkeypatch.setattr(c, "group_members", lambda pid: [{"pid": pid, "start": "new"}])
+    monkeypatch.setattr(c, "process_identity", lambda pid: {"pid": pid, "start": "new"})
+    signals = []
+    monkeypatch.setattr(c.os, "killpg", lambda *args: signals.append(args))
+    with pytest.raises(c.Refused, match="consumer_join_identity_unknown"):
+        c.join_consumer({"pid": 1234, "start": "old"})
+    assert signals == []
+
+
+def test_consumer_group_join_signals_only_exact_opted_in_group(monkeypatch):
+    identity = {"pid": 1234, "start": "556"}
+    states = iter([[identity], [identity], [], [], []])
+    monkeypatch.setattr(c, "group_members", lambda pid: next(states))
+    monkeypatch.setattr(c, "process_identity", lambda pid: identity)
+    signals = []
+    monkeypatch.setattr(c.os, "killpg", lambda *args: signals.append(args))
+    c.join_consumer(identity)
+    assert signals == [(1234, c.signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("seconds", [0, 59, 3601, -1, True])
+def test_hold_duration_refuses_before_any_runtime_write(setup, seconds):
+    owned = fixture(setup)
+    with pytest.raises(c.Refused, match="hold_duration_bound"):
+        owned.hold(seconds)
+    assert setup[2].writes == []
+
+
+def test_hold_expiry_joins_consumer_before_any_restore(setup, monkeypatch):
+    owned = held_fixture(setup)
+    c.private_write(
+        owned.directory / "principal.json",
+        {"username": "private", "userId": "own", "passwordFile": "own"},
+    )
+    monkeypatch.setattr(owned, "prepare_stack", lambda: None)
+    owned.state["endpoints"] = {"source": "172.30.0.3"}
+    monkeypatch.setattr(
+        owned,
+        "probe",
+        lambda phase: {"phase": "bootstrapped", "principal": {"username": "own"}},
+    )
+    clock = iter([0, 61])
+    monkeypatch.setattr(c.time, "monotonic", lambda: next(clock))
+    order = []
+    monkeypatch.setattr(owned, "finish_consumers", lambda: order.append("join"))
+    monkeypatch.setattr(owned, "cleanup", lambda: order.append("restore"))
+    owned.hold(60)
+    assert order == ["join", "restore"]
+    assert c.private_read(owned.directory / "authority.json")["status"] == "closing"
+
+
+def test_callback_dispatch_never_acquires_canonical_lease_or_checks_runtime(tmp_path):
+    import subprocess
+
+    root, common, calls, env = shell_fixture(tmp_path)
+    # Fake controller records dispatch only; Docker tripwire remains untouched.
+    result = subprocess.run(
+        [str(root / "start.sh"), "--metadata-pressure-attach", "/private/run", "1234"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    events = list(map(json.loads, calls.read_text().splitlines()))
+    assert [event[0] for event in events] == ["git", "git", "python3"]
+    assert events[-1][-3:] == ["--metadata-pressure-attach", "/private/run", "1234"]
+    assert (
+        not (common / "qa-deployment.lock").exists()
+        and not (common / "qa-startup.lock").exists()
+    )
+
+
+def test_missing_or_expired_holder_authority_refuses_before_ipc_or_runtime(setup):
+    owned = held_fixture(setup)
+    c.private_write(
+        owned.directory / "principal.json", {"username": "own", "userId": "own"}
+    )
+    owned.state["hold"]["expiresAt"] = "2000-01-01T00:00:00Z"
+    owned.save("held")
+    owned.authority("held")
+    writes = deepcopy(setup[2].writes)
+    with pytest.raises(c.Refused, match="holder_authority_expired"):
+        c.attachment_request(
+            owned.root, owned.primary, owned.directory, "attach", "1234"
+        )
+    assert not (owned.directory / "request.json").exists()
+    assert writes == setup[2].writes
+
+
+def test_old_consumer_source_is_denied_even_with_known_entrypoint_same_repository(
+    setup, monkeypatch
+):
+    root = setup[0]
+    script = root / "testing/load/controller.mjs"
+    script.write_text("// old controller may detach workload children\n")
+    identity = {"pid": 1234, "start": "556"}
+    monkeypatch.setattr(c, "process_identity", lambda pid: identity)
+    import io
+
+    original = Path.open
+    argv = ("node\0" + str(script) + "\0load-example123\0").encode()
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda path, *args, **kwargs: (
+            io.BytesIO(argv)
+            if str(path) == "/proc/1234/cmdline"
+            else original(path, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(c.os, "readlink", lambda path: "/usr/bin/node")
+    monkeypatch.setattr(
+        c,
+        "command",
+        lambda argv, **kwargs: "/fake/common" if "rev-parse" in argv else "",
+    )
+    with pytest.raises(c.Refused, match="reviewed_consumer_source_required"):
+        c.consumer_identity(1234, root)
+    fingerprint = hashlib.sha256()
+    for path in sorted((root / "testing/load").glob("*")):
+        fingerprint.update(
+            path.relative_to(root).as_posix().encode()
+            + b"\0"
+            + hashlib.sha256(path.read_bytes()).digest()
+        )
+    monkeypatch.setattr(c, "REQUIRED_CONSUMER_TREE_SHA256", fingerprint.hexdigest())
+    assert c.consumer_identity(1234, root) == identity
+    script.write_text("// changed child-spawn behavior after review\n")
+    with pytest.raises(c.Refused, match="reviewed_consumer_source_required"):
+        c.consumer_identity(1234, root)
+
+
+def test_initializer_waits_for_exact_one_shot_exit_without_service_running_wait(setup):
+    owned = fixture(setup)
+    owned.up(["observer-init"])
+    call = setup[2].writes[-1]
+    assert call[-4:] == ["up", "--detach", "--no-deps", "observer-init"]
+    assert "--wait" not in call
+    assert owned.state["containers"]["observer-init"]["state"] == "exited"
+    assert owned.state["containers"]["observer-init"]["exitCode"] == 0

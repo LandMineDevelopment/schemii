@@ -12,6 +12,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 from typing import Any
 from urllib.request import (
@@ -43,17 +45,21 @@ RUN_LABEL = "io.schemii.pressure.run"
 REQUIRED_SOURCE_WITNESS_SHA256 = (
     "0f4e218ee4c2ecfb2c56758d16e9219537b6fa1efa5e0ae3e917417d3e823075"
 )
-SERVICES = {"metadata", "source", "schemii", "ingress"}
+# Integration must pin the independently reviewed constrained #135 consumer tree.
+# Empty intentionally denies attachment; it cannot authorize older detached engines.
+REQUIRED_CONSUMER_TREE_SHA256 = ""
+SERVICES = {"metadata", "source", "observer-init", "schemii", "ingress"}
 ASSETS = (
     "start.sh",
     "dev/pressure/launcher.sh",
     "dev/pressure/controller.py",
     "dev/pressure/probe.py",
+    "dev/pressure/app.py",
     "dev/pressure/compose.yaml",
     "dev/ingress/nginx.conf",
     "dev/schemii.toml",
 )
-INSPECT = '{"id":{{json .Id}},"created":{{json .Created}},"name":{{json .Name}},"image":{{json .Image}},"state":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"labels":{{json .Config.Labels}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"memory":{{json .HostConfig.Memory}},"nanoCpus":{{json .HostConfig.NanoCpus}},"pids":{{json .HostConfig.PidsLimit}}}'
+INSPECT = '{"id":{{json .Id}},"created":{{json .Created}},"name":{{json .Name}},"image":{{json .Image}},"state":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"oomKilled":{{json .State.OOMKilled}},"startedAt":{{json .State.StartedAt}},"finishedAt":{{json .State.FinishedAt}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"labels":{{json .Config.Labels}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"memory":{{json .HostConfig.Memory}},"nanoCpus":{{json .HostConfig.NanoCpus}},"pids":{{json .HostConfig.PidsLimit}}}'
 # No environment, command arguments, database rows or runtime error messages.
 PACKAGE_SCRIPT = """import hashlib,importlib.util,json
 from pathlib import Path
@@ -148,7 +154,8 @@ def command(
     environment: dict | None = None,
     timeout: int = 30,
     limit: int = 1048576,
-) -> str:
+    binary: bool = False,
+) -> str | bytes:
     """Bound output/time and suppress all CLI errors, including secret-bearing ones."""
     process = subprocess.Popen(
         arguments,
@@ -181,7 +188,7 @@ def command(
             process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0,
             "command_failed",
         )
-        return result.decode()
+        return bytes(result) if binary else result.decode()
     finally:
         if process.poll() is None:
             with suppress(ProcessLookupError):
@@ -295,6 +302,333 @@ def valid_container(record: dict) -> None:
         bool(re.fullmatch(r"sha256:[0-9a-f]{64}", record.get("image", ""))),
         "image_identity",
     )
+
+
+def instant(value: str) -> datetime:
+    check(type(value) is str and len(value) <= 40, "observation_timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    check(parsed.tzinfo is not None, "observation_timestamp")
+    return parsed
+
+
+def validate_observation(value: dict, run: str, native: dict, *, fresh: bool) -> None:
+    check(
+        type(value) is dict
+        and value.get("version") == 1
+        and value.get("run") == run
+        and value.get("startupComplete") is True
+        and value.get("observationFailed") is False,
+        "observer_receipt_identity",
+    )
+    process = value.get("process", {})
+    check(
+        type(process.get("pid")) is int
+        and process["pid"] > 0
+        and process.get("uid") == 10001
+        and re.fullmatch(r"[0-9]+", process.get("startTicks", "")) is not None
+        and re.fullmatch(r"[0-9a-f]{32}", process.get("incarnation", "")) is not None,
+        "observer_process_identity",
+    )
+    at = instant(value["at"])
+    check(
+        instant(native["startedAt"]) <= instant(process["startedAt"]) <= at,
+        "observer_native_incarnation",
+    )
+    if fresh:
+        age = (datetime.now(timezone.utc) - at).total_seconds()
+        check(
+            value.get("stage") == "running" and 0 <= age <= 2,
+            "observer_fresh_running_sample",
+        )
+    for name in ("normal", "readiness"):
+        owner = value.get(name, {})
+        counts = owner.get("counts", {})
+        check(
+            owner.get("status") == "observed"
+            and type(counts.get("closed")) is bool
+            and all(
+                type(counts.get(key)) is int and counts[key] >= 0
+                for key in ("maximum", "active", "peak_active")
+            )
+            and 0 <= counts["active"] <= counts["peak_active"] <= counts["maximum"],
+            "observer_owner_unknown",
+        )
+    check(
+        value["normal"]["counts"]["maximum"] == 2
+        and value["readiness"]["counts"]["maximum"] == 1,
+        "observer_fixed_owner_limits",
+    )
+
+
+def validate_shutdown(before: dict, after: dict, native: dict) -> None:
+    check(
+        before["containerId"] == after["containerId"] == native["id"]
+        and before["containerStartedAt"]
+        == after["containerStartedAt"]
+        == native["startedAt"]
+        and before["observation"]["process"] == after["observation"]["process"],
+        "lifespan_incarnation_changed",
+    )
+    value = after["observation"]
+    check(
+        value["stage"] == "shutdown-complete"
+        and instant(before["observation"]["at"])
+        <= instant(value["at"])
+        <= instant(native["finishedAt"]),
+        "stock_lifespan_completion_missing",
+    )
+    check(
+        all(
+            value[name]["counts"]["closed"] is True
+            and value[name]["counts"]["active"] == 0
+            for name in ("normal", "readiness")
+        ),
+        "lifespan_accounting_not_closed",
+    )
+
+
+def process_identity(pid: int) -> dict:
+    check(type(pid) is int and pid > 1, "consumer_pid")
+    base = Path(f"/proc/{pid}")
+    check(base.stat().st_uid == os.getuid(), "consumer_uid")
+    raw = (base / "stat").read_text()
+    fields = raw.rsplit(") ", 1)[1].split()
+    check(
+        fields[0] != "Z" and int(fields[2]) == pid and int(fields[3]) == pid,
+        "consumer_dedicated_group",
+    )
+    with (base / "cmdline").open("rb") as stream:
+        argv = stream.read(4097)
+    check(0 < len(argv) <= 4096, "consumer_argv_bound")
+    return {
+        "pid": pid,
+        "start": fields[19],
+        "uid": os.getuid(),
+        "argvSha256": hashlib.sha256(argv).hexdigest(),
+    }
+
+
+def consumer_identity(pid: int, root: Path) -> dict:
+    identity = process_identity(pid)
+    base = Path(f"/proc/{pid}")
+    with (base / "cmdline").open("rb") as stream:
+        raw = stream.read(4097)
+    check(0 < len(raw) <= 4096, "consumer_argv_bound")
+    argv = raw.rstrip(b"\0").decode().split("\0")
+    check(
+        len(argv) == 3
+        and Path(os.readlink(base / "exe")).name == "node"
+        and re.fullmatch(r"load-[a-z0-9-]{6,80}", argv[2]) is not None,
+        "consumer_fixed_entrypoint",
+    )
+    script = Path(argv[1])
+    check(
+        script.is_absolute()
+        and script == script.resolve()
+        and script.parts[-3:] == ("testing", "load", "controller.mjs"),
+        "consumer_script",
+    )
+    checkout = script.parents[2]
+    expected = command(
+        [
+            "git",
+            "-C",
+            str(root),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ]
+    ).strip()
+    actual = command(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ]
+    ).strip()
+    check(expected == actual, "consumer_git_common")
+    command(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "ls-files",
+            "--error-unmatch",
+            "testing/load/controller.mjs",
+        ]
+    )
+    command(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            "testing/load/controller.mjs",
+        ]
+    )
+    sources = sorted(
+        path
+        for path in (checkout / "testing/load").rglob("*")
+        if path.suffix in {".mjs", ".py"} and path.is_file()
+    )
+    check(0 < len(sources) <= 128, "consumer_source_inventory")
+    fingerprint = hashlib.sha256()
+    for path in sources:
+        check(
+            not path.is_symlink() and path.stat().st_size <= 262144,
+            "consumer_source_leaf",
+        )
+        fingerprint.update(
+            path.relative_to(checkout).as_posix().encode()
+            + b"\0"
+            + bytes.fromhex(sha(path))
+        )
+    check(
+        REQUIRED_CONSUMER_TREE_SHA256
+        and fingerprint.hexdigest() == REQUIRED_CONSUMER_TREE_SHA256,
+        "reviewed_consumer_source_required",
+    )
+    command(
+        ["git", "-C", str(checkout), "diff", "--quiet", "HEAD", "--", "testing/load"]
+    )
+    return identity
+
+
+def group_members(pid: int) -> list[dict]:
+    members = []
+    for item in Path("/proc").iterdir():
+        if not item.name.isdigit():
+            continue
+        try:
+            fields = (item / "stat").read_text().rsplit(") ", 1)[1].split()
+            if int(fields[2]) == pid and fields[0] != "Z":
+                check(
+                    item.stat().st_uid == os.getuid() and int(fields[3]) == pid,
+                    "consumer_group_owner",
+                )
+                members.append({"pid": int(item.name), "start": fields[19]})
+        except FileNotFoundError:
+            continue
+    check(len(members) <= 128, "consumer_group_bound")
+    return members
+
+
+def join_consumer(identity: dict) -> None:
+    """Terminate only the still-exact opted-in session; never chase a reused group."""
+    pid = identity["pid"]
+    members = group_members(pid)
+    if not members:
+        return
+    check(process_identity(pid) == identity, "consumer_join_identity_unknown")
+    os.killpg(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 3
+    while group_members(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    members = group_members(pid)
+    if members:
+        # A dead/replaced leader prevents attributing newly observed group members.
+        check(process_identity(pid) == identity, "consumer_force_identity_unknown")
+        os.killpg(pid, signal.SIGKILL)
+        deadline = time.monotonic() + 2
+        while group_members(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    check(not group_members(pid), "consumer_group_not_joined")
+
+
+def attachment_request(
+    root: Path, primary: Path, directory: Path, action: str, argument: str
+) -> dict:
+    """Metadata IPC only: no Docker access or acquisition of the holder's leases."""
+    check(
+        directory.parent == primary / ".schemii/metadata-pressure"
+        and re.fullmatch(r"pressure_[0-9a-f]{32}", directory.name) is not None
+        and not directory.is_symlink()
+        and stat.S_IMODE(directory.stat().st_mode) == 0o700
+        and directory.stat().st_uid == os.getuid(),
+        "attachment_directory",
+    )
+    journal = private_read(directory / "journal.json")
+    check(
+        journal.get("directory") == str(directory)
+        and journal.get("root") == str(root)
+        and journal.get("primary") == str(primary)
+        and journal.get("run") == directory.name
+        and journal.get("assets") == {name: sha(root / name) for name in ASSETS},
+        "attachment_journal",
+    )
+    authority = private_read(directory / "authority.json")
+    check(
+        authority.get("kind") == "launcher_owned_disposable_pressure"
+        and authority.get("status") == "held"
+        and authority.get("run") == journal["run"]
+        and authority.get("nonce") == journal.get("hold", {}).get("nonce")
+        and instant(authority["expiresAt"]) > datetime.now(timezone.utc)
+        and 0
+        <= (
+            datetime.now(timezone.utc) - instant(authority["heartbeatAt"])
+        ).total_seconds()
+        <= 3,
+        "holder_authority_expired",
+    )
+    owner = journal["owner"]
+    fields = Path(f"/proc/{owner['pid']}/stat").read_text().rsplit(") ", 1)[1].split()
+    check(fields[19] == owner["start"] and fields[0] != "Z", "holder_owner_gone")
+    request = {
+        "version": 1,
+        "run": journal["run"],
+        "nonce": authority["nonce"],
+        "requestId": secrets.token_hex(16),
+        "action": action,
+    }
+    if action == "attach":
+        check(argument.isdecimal(), "consumer_pid")
+        request["pid"] = int(argument)
+        consumer_identity(request["pid"], root)
+    else:
+        check(Path(argument) == directory / "attachment.json", "attachment_fixed_path")
+        attachment = private_read(Path(argument))
+        check(
+            attachment.get("run") == journal["run"]
+            and attachment.get("nonce") == authority["nonce"]
+            and attachment.get("status") == "attached",
+            "attachment_file_identity",
+        )
+        request["token"] = attachment["token"]
+    lock_path = directory / "ipc.lock"
+    descriptor = os.open(
+        lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+    )
+    try:
+        info = os.fstat(descriptor)
+        check(
+            stat.S_ISREG(info.st_mode)
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_uid == os.getuid(),
+            "attachment_lock",
+        )
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        private_write(directory / "request.json", request)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            response = directory / "response.json"
+            if response.exists():
+                value = private_read(response)
+                if value.get("requestId") == request["requestId"]:
+                    check(
+                        value.get("status") in {"attached", "detaching"},
+                        "holder_request_rejected",
+                    )
+                    return value
+            time.sleep(0.05)
+        raise Refused("holder_response_unknown_no_replay")
+    finally:
+        os.close(descriptor)
 
 
 def ready_origins() -> None:
@@ -425,7 +759,7 @@ class Fixture:
             )
             expected = (
                 self.state["applicationImage"]
-                if service == "schemii"
+                if service in {"schemii", "observer-init"}
                 else self.state["images"][
                     "ingress" if service == "ingress" else "database"
                 ]
@@ -436,6 +770,7 @@ class Fixture:
                 "source": (268435456, 500000000, 64),
                 "schemii": (536870912, 1000000000, 128),
                 "ingress": (67108864, 250000000, 32),
+                "observer-init": (67108864, 250000000, 16),
             }
             check(
                 (record["memory"], record["nanoCpus"], record["pids"])
@@ -454,6 +789,7 @@ class Fixture:
                         in {
                             self.state["project"] + "-metadata",
                             self.state["project"] + "-source",
+                            self.state["project"] + "-observer",
                         },
                         "disposable_volume_mount",
                     )
@@ -485,6 +821,7 @@ class Fixture:
             str(self.directory / name)
             for name in (
                 "admin_password",
+                "source_admin_password",
                 "app_password",
                 "encryption_key",
                 "setup_token",
@@ -494,6 +831,7 @@ class Fixture:
                 "ingress.crt",
             )
         } | {
+            str(self.root / "dev/pressure/app.py"),
             str(self.root / "dev/schemii.toml"),
             str(self.root / "dev/ingress/nginx.conf"),
         }
@@ -542,7 +880,7 @@ class Fixture:
         }
         resources = dict(self.state.get("resources", {}))
         for kind, suffixes in (
-            ("volume", ("metadata", "source")),
+            ("volume", ("metadata", "source", "observer")),
             ("network", ("database", "ingress", "loopback")),
         ):
             names = self.docker(
@@ -609,6 +947,11 @@ class Fixture:
 
     def up(self, services: list[str]) -> None:
         check(set(services) <= SERVICES, "service_selection")
+        initializer = services == ["observer-init"]
+        check(
+            "observer-init" not in services or initializer,
+            "initializer_service_selection",
+        )
         self.intent("up:" + ",".join(services))
         try:
             self.docker(
@@ -617,37 +960,154 @@ class Fixture:
                     "up",
                     "--detach",
                     "--no-deps",
-                    "--wait",
-                    "--wait-timeout",
-                    "60",
+                    *([] if initializer else ["--wait", "--wait-timeout", "60"]),
                     *services,
                 ],
                 timeout=90,
             )
         finally:
             self.inventory()
+        if initializer:
+            baseline = self.state["containers"]["observer-init"]
+            deadline = time.monotonic() + 10
+            while baseline["state"] == "running":
+                check(time.monotonic() < deadline, "observer_initializer_timeout")
+                time.sleep(0.05)
+                current = self.inspect(baseline["id"])
+                check(
+                    fixed_identity(current) == fixed_identity(baseline),
+                    "observer_initializer_changed",
+                )
+                baseline = current
+            self.state["containers"]["observer-init"] = baseline
+            self.save("observer-initializer-observed")
 
-    def exact_state(self, baseline: dict, target: str) -> None:
+    def exact_state(self, baseline: dict, target: str) -> dict:
         current = self.inspect(baseline["id"])
         check(
             fixed_identity(current) == fixed_identity(baseline), "exact_lifecycle_owner"
         )
         self.intent(target + ":" + baseline["id"])
+        command_outcome = "completed"
         try:
-            self.docker(
+            output = self.docker(
                 ["container", "stop", "--time", "10", baseline["id"]]
                 if target == "exited"
                 else ["container", "start", baseline["id"]],
                 timeout=20,
             )
-        except Refused:
-            pass  # Resolve state after uncertain command; never replay it.
+            if output.strip() != baseline["id"]:
+                command_outcome = "unexpected-output"
+        except Exception:
+            command_outcome = "uncertain-command"
+        self.save(
+            "exact-command-observed",
+            lastLifecycleCommand={
+                "containerId": baseline["id"],
+                "target": target,
+                "commandOutcome": command_outcome,
+            },
+        )
+        # Resolve actual state even after a CLI exception; never replay a stop.
         current = self.inspect(baseline["id"])
         check(
             fixed_identity(current) == fixed_identity(baseline)
             and current["state"] == target,
             "lifecycle_state_unconfirmed",
         )
+
+        return current
+
+    def observation(self, *, stopped: bool = False) -> dict:
+        """Copy one fixed small private file from the exact journal-owned app only."""
+        self.inventory()
+        owned = self.state["containers"]["schemii"]
+        check(
+            owned["state"] == ("exited" if stopped else "running"),
+            "observer_native_state",
+        )
+        raw = self.runtime(
+            [
+                "docker",
+                "container",
+                "cp",
+                owned["id"] + ":/qualification-state/observation.json",
+                "-",
+            ],
+            environment=self.environment,
+            timeout=5,
+            limit=32768,
+            binary=True,
+        )
+        check(type(raw) is bytes and len(raw) <= 32768, "observer_archive_bound")
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            members = archive.getmembers()
+            check(len(members) == 1, "observer_archive_members")
+            member = members[0]
+            check(
+                member.name == "observation.json"
+                and member.isfile()
+                and member.size <= 16384
+                and member.uid == 10001
+                and member.mode == 0o600,
+                "observer_archive_owner",
+            )
+            value = json.loads(archive.extractfile(member).read(16385))
+        current = self.inspect(owned["id"])
+        check(
+            fixed_identity(current) == fixed_identity(owned)
+            and current["state"] == owned["state"]
+            and current.get("startedAt") == owned.get("startedAt"),
+            "observer_native_changed_during_copy",
+        )
+        validate_observation(value, self.state["run"], owned, fresh=not stopped)
+        return {
+            "containerId": owned["id"],
+            "containerStartedAt": owned["startedAt"],
+            "observation": value,
+        }
+
+    def stop_application(self) -> dict:
+        before = self.observation()
+        owned = self.state["containers"]["schemii"]
+        started = time.monotonic()
+        after = self.exact_state(owned, "exited")
+        native = {
+            key: after.get(key)
+            for key in (
+                "id",
+                "state",
+                "exitCode",
+                "oomKilled",
+                "startedAt",
+                "finishedAt",
+            )
+        }
+        native["elapsedSeconds"] = time.monotonic() - started
+        native["commandOutcome"] = self.state["lastLifecycleCommand"]["commandOutcome"]
+        native["classification"] = (
+            "clean-exit"
+            if after.get("exitCode") == 0 and after.get("oomKilled") is False
+            else "forced-crashed-or-unknown"
+        )
+        # Keep the original native outcome even when a following proof fails.
+        self.save("application-stop-observed", applicationStop=native)
+        check(
+            after.get("exitCode") == 0
+            and type(after.get("exitCode")) is int
+            and after.get("oomKilled") is False
+            and after.get("startedAt") == owned.get("startedAt"),
+            "application_stop_not_graceful",
+        )
+        observed = self.observation(stopped=True)
+        validate_shutdown(before, observed, after)
+        evidence = {
+            "status": "observed-stock-lifespan-drained",
+            "native": native,
+            **observed,
+        }
+        self.save("application-lifespan-confirmed", applicationLifespan=evidence)
+        return evidence
 
     def stop_retained(self) -> None:
         retained = self.state["retainedIngress"]
@@ -684,6 +1144,7 @@ class Fixture:
         deadline = time.monotonic() + 180
         result = None
         transitions = []
+        samples = 0
         try:
             self.save(
                 "probe-start-intent", probeOwner={"pid": process.pid, "phase": phase}
@@ -703,7 +1164,13 @@ class Fixture:
                 total += len(line)
                 check(len(line) <= 65536 and total <= 262144, "probe_output_bound")
                 message = json.loads(line)
-                if message.get("operation") in {"stop-owned-app", "start-owned-app"}:
+                if message == {"operation": "sample-owned-app"}:
+                    samples += 1
+                    check(phase == "qualify" and samples <= 8, "probe_sample_bound")
+                    reply = {"confirmed": True, "sample": self.observation()}
+                    process.stdin.write((json.dumps(reply) + "\n").encode())
+                    process.stdin.flush()
+                elif message.get("operation") in {"stop-owned-app", "start-owned-app"}:
                     check(phase == "qualify", "probe_phase_operation")
                     expected = (
                         "stop-owned-app" if not transitions else "start-owned-app"
@@ -714,9 +1181,13 @@ class Fixture:
                     )
                     self.inventory()
                     owned = self.state["containers"]["schemii"]
-                    self.exact_state(owned, "exited" if not transitions else "running")
+                    reply = {"confirmed": True}
+                    if not transitions:
+                        reply["lifespan"] = self.stop_application()
+                    else:
+                        self.exact_state(owned, "running")
                     transitions.append(expected)
-                    process.stdin.write(b'{"confirmed":true}\n')
+                    process.stdin.write((json.dumps(reply) + "\n").encode())
                     process.stdin.flush()
                 else:
                     check(
@@ -767,6 +1238,7 @@ class Fixture:
         self.intent("private-fixture-files")
         for name in (
             "admin_password",
+            "source_admin_password",
             "app_password",
             "monitor_password",
             "blocker_password",
@@ -817,38 +1289,47 @@ class Fixture:
             for suffix in (".key", ".crt"):
                 os.chmod(self.directory / (name + suffix), 0o640)
 
+    def prepare_stack(self) -> None:
+        self.secrets()
+        self.up(["metadata", "source"])
+        endpoints = {}
+        for name in ("metadata", "source"):
+            network = self.state["containers"][name]["networks"]
+            selected = network.get(self.state["project"] + "-database")
+            check(
+                type(selected) is dict
+                and bool(
+                    re.fullmatch(r"\d+\.\d+\.\d+\.\d+", selected.get("IPAddress", ""))
+                ),
+                "private_database_endpoint",
+            )
+            endpoints[name] = selected["IPAddress"]
+        self.save("databases-ready", endpoints=endpoints)
+        prepared = self.probe("prepare")
+        check(
+            prepared.get("phase") == "prepared"
+            and prepared.get("sourceBaseline", {}).get("ownedBackends") == 0
+            and prepared["sourceBaseline"]["releaseVerified"] is False,
+            "preparation_baseline_missing",
+        )
+        private_write(self.directory / "preparation.json", prepared)
+        self.up(["observer-init"])
+        initialized = self.state["containers"]["observer-init"]
+        check(
+            initialized["state"] == "exited"
+            and initialized.get("exitCode") == 0
+            and initialized.get("oomKilled") is False,
+            "observer_volume_initialization",
+        )
+        self.up(["schemii"])
+        self.stop_retained()
+        self.up(["ingress"])
+        restored_readiness()
+
     def run(self) -> dict:
         outcome = "failed"
         try:
-            self.secrets()
-            self.up(["metadata", "source"])
-            endpoints = {}
-            for name in ("metadata", "source"):
-                network = self.state["containers"][name]["networks"]
-                selected = network.get(self.state["project"] + "-database")
-                check(
-                    type(selected) is dict
-                    and bool(
-                        re.fullmatch(
-                            r"\d+\.\d+\.\d+\.\d+", selected.get("IPAddress", "")
-                        )
-                    ),
-                    "private_database_endpoint",
-                )
-                endpoints[name] = selected["IPAddress"]
-            self.save("databases-ready", endpoints=endpoints)
-            prepared = self.probe("prepare")
-            check(
-                prepared.get("phase") == "prepared"
-                and prepared.get("sourceBaseline", {}).get("ownedBackends") == 0
-                and prepared["sourceBaseline"]["releaseVerified"] is False,
-                "preparation_baseline_missing",
-            )
-            private_write(self.directory / "preparation.json", prepared)
-            self.up(["schemii"])
-            self.stop_retained()
-            self.up(["ingress"])
-            restored_readiness()
+            self.prepare_stack()
             result = self.probe("qualify")
             private_write(self.directory / "qualification.json", result)
             check(
@@ -862,7 +1343,202 @@ class Fixture:
             self.save("qualification-finished", qualification=outcome)
             self.cleanup()
 
+    def authority(self, status: str) -> dict:
+        hold = self.state["hold"]
+        value = {
+            "version": 1,
+            "kind": "launcher_owned_disposable_pressure",
+            "status": status,
+            "run": self.state["run"],
+            "nonce": hold["nonce"],
+            "directory": str(self.directory),
+            "owner": self.state["owner"],
+            "heartbeatAt": now(),
+            "expiresAt": hold["expiresAt"],
+            "canonicalOrigin": LOCAL,
+            "previewOrigin": PREVIEW,
+            "launcherPath": str(self.root / "start.sh"),
+            "sourceWitnessConfig": str(self.directory / "source-monitor-config.json"),
+            "credentialsFile": str(self.directory / "consumer-credentials.json"),
+            "principal": private_read(self.directory / "principal.json"),
+            "application": fixed_identity(self.state["containers"]["schemii"]),
+            "source": fixed_identity(self.state["containers"]["source"]),
+            "instrumentation": "fixture_only_stock_asgi_lifespan_and_owner_sampler",
+            "stockCapacityEligible": False,
+            "attachment": hold.get("attachment"),
+        }
+        private_write(self.directory / "authority.json", value)
+        return value
+
+    def hold_request(self) -> None:
+        request_path = self.directory / "request.json"
+        if not request_path.exists():
+            return
+        request = private_read(request_path)
+        hold = self.state["hold"]
+        if request.get("requestId") == hold.get("lastRequest"):
+            return
+        check(hold.get("requests", 0) < 1024, "holder_request_bound")
+        check(
+            request.get("version") == 1
+            and request.get("run") == self.state["run"]
+            and request.get("nonce") == hold["nonce"]
+            and re.fullmatch(r"[0-9a-f]{32}", request.get("requestId", "")) is not None,
+            "holder_request_identity",
+        )
+        action = request.get("action")
+        attachment = hold.get("attachment")
+        reply = {"version": 1, "requestId": request["requestId"], "status": "rejected"}
+        try:
+            if action == "attach":
+                check(attachment is None, "fixture_already_attached")
+                consumer = consumer_identity(request.get("pid"), self.root)
+                token = secrets.token_hex(32)
+                attachment = {
+                    "version": 1,
+                    "run": self.state["run"],
+                    "nonce": hold["nonce"],
+                    "token": token,
+                    "consumer": consumer,
+                    "sourceFingerprint": REQUIRED_CONSUMER_TREE_SHA256,
+                    "heartbeatAt": now(),
+                    "status": "attached",
+                }
+                private_write(self.directory / "attachment.json", attachment)
+                hold["attachment"] = attachment
+                reply.update(
+                    status="attached",
+                    attachmentFile=str(self.directory / "attachment.json"),
+                )
+            else:
+                check(
+                    action in {"heartbeat", "detach"}
+                    and type(attachment) is dict
+                    and secrets.compare_digest(
+                        request.get("token", ""), attachment["token"]
+                    ),
+                    "attachment_authority",
+                )
+                # Revalidate argv/PID incarnation on every continuing attachment.
+                check(
+                    consumer_identity(attachment["consumer"]["pid"], self.root)
+                    == attachment["consumer"],
+                    "consumer_identity_changed",
+                )
+                if action == "heartbeat":
+                    attachment["heartbeatAt"] = now()
+                    private_write(self.directory / "attachment.json", attachment)
+                    reply["status"] = "attached"
+                else:
+                    # A live controller may relinquish only after stopping API/source work;
+                    # join the dedicated entire group before releasing restoration authority.
+                    attachment["status"] = "detaching"
+                    hold["attachment"] = attachment
+                    attachment["detachAt"] = now()
+                    self.save("consumer-detach-intent")
+                    private_write(self.directory / "attachment.json", attachment)
+                    reply["status"] = "detaching"
+        except Exception:
+            reply["status"] = "rejected"
+        hold.update(
+            lastRequest=request["requestId"], requests=hold.get("requests", 0) + 1
+        )
+        self.save("holder-request-observed")
+        private_write(self.directory / "response.json", reply)
+
+    def finish_consumers(self) -> None:
+        attachment = self.state.get("hold", {}).get("attachment")
+        if attachment:
+            self.save("consumer-join-intent")
+            join_consumer(attachment["consumer"])
+            self.state["hold"]["attachment"] = None
+            attachment["status"] = "joined"
+            private_write(self.directory / "attachment.json", attachment)
+            self.save("consumer-joined")
+
+    def hold(self, seconds: int) -> None:
+        check(type(seconds) is int and 60 <= seconds <= 3600, "hold_duration_bound")
+        try:
+            self.prepare_stack()
+            result = self.probe("bootstrap")
+            check(result.get("phase") == "bootstrapped", "hold_bootstrap_missing")
+            credentials = {
+                "version": 1,
+                "run": self.state["run"],
+                "admin": result["principal"],
+                "sourceAdminRole": "pressure_admin",
+                "sourceAdminConnection": {
+                    "host": self.state["endpoints"]["source"],
+                    "port": 5432,
+                    "dbname": "pressure_source",
+                    "user": "pressure_admin",
+                    "sslmode": "require",
+                    "passwordFile": str(self.directory / "source_admin_password"),
+                },
+                "appSourceConnection": {
+                    "host": "source",
+                    "port": 5432,
+                    "database": "pressure_source",
+                    "username": "pressure_source",
+                    "sslMode": "require",
+                    "connectTimeout": 3,
+                    "passwordFile": str(self.directory / "source_password"),
+                },
+            }
+            private_write(self.directory / "consumer-credentials.json", credentials)
+            deadline = time.monotonic() + seconds
+            self.save(
+                "held",
+                hold={
+                    "nonce": secrets.token_hex(32),
+                    "expiresAt": datetime.fromtimestamp(
+                        time.time() + seconds, timezone.utc
+                    ).isoformat(),
+                    "attachment": None,
+                    "requests": 0,
+                },
+            )
+            self.authority("held")
+            print(
+                json.dumps(
+                    {
+                        "status": "held",
+                        "authorityFile": str(self.directory / "authority.json"),
+                    }
+                ),
+                flush=True,
+            )
+            while time.monotonic() < deadline:
+                self.hold_request()
+                attachment = self.state["hold"].get("attachment")
+                if attachment and attachment.get("status") == "detaching":
+                    # Let the requesting callback observe the ack and exit, then
+                    # join the whole opted-in group before future attachments.
+                    if (
+                        datetime.now(timezone.utc) - instant(attachment["detachAt"])
+                    ).total_seconds() >= 1:
+                        self.finish_consumers()
+                elif (
+                    attachment
+                    and (
+                        datetime.now(timezone.utc) - instant(attachment["heartbeatAt"])
+                    ).total_seconds()
+                    > 30
+                ):
+                    self.finish_consumers()
+                    raise Refused("consumer_heartbeat_expired")
+                self.authority("held")
+                time.sleep(0.2)
+        finally:
+            if "hold" in self.state:
+                self.authority("closing")
+                # Unknown/reused consumer identity blocks all restore/delete actions;
+                # the durable journal remains explicit, never quietly borrowed.
+                self.finish_consumers()
+            self.cleanup()
+
     def cleanup(self) -> None:
+        self.finish_consumers()
         cleaned = False
         try:
             # No bulk deletion against unknown or drifted project resources.
@@ -1187,9 +1863,18 @@ def main() -> int:
     parser.add_argument("--primary", type=Path, required=True)
     parser.add_argument("--common", type=Path, required=True)
     parser.add_argument(
-        "action", choices=("--qualify-metadata-pressure", "--recover-metadata-pressure")
+        "action",
+        choices=(
+            "--qualify-metadata-pressure",
+            "--recover-metadata-pressure",
+            "--hold-metadata-pressure",
+            "--metadata-pressure-attach",
+            "--metadata-pressure-heartbeat",
+            "--metadata-pressure-detach",
+        ),
     )
     parser.add_argument("directory", nargs="?", type=Path)
+    parser.add_argument("argument", nargs="?")
     # Action begins with --; the shell passes -- before it.
     args = parser.parse_args()
     fixture = None
@@ -1199,20 +1884,46 @@ def main() -> int:
             "controller_checkout_identity",
         )
         checkout_authority(args.root, args.primary, args.common)
+        if args.action.startswith("--metadata-pressure-"):
+            check(
+                args.directory is not None and args.argument is not None,
+                "attachment_arguments",
+            )
+            result = attachment_request(
+                args.root,
+                args.primary,
+                args.directory,
+                args.action.removeprefix("--metadata-pressure-"),
+                args.argument,
+            )
+            print(json.dumps(result), flush=True)
+            return 0
         verify_leases(args.common)
         if args.action == "--recover-metadata-pressure":
             check(args.directory is not None, "recovery_directory_required")
             fixture = recover(args.root, args.primary, args.directory)
             fixture.cleanup()
         else:
-            fixture = begin(args.root, args.primary, args.directory)
+            seconds = None
+            if args.action == "--hold-metadata-pressure":
+                check(
+                    args.directory is not None
+                    and args.argument is None
+                    and str(args.directory).isdecimal(),
+                    "hold_seconds_required",
+                )
+                seconds = int(str(args.directory))
+                check(60 <= seconds <= 3600, "hold_duration_bound")
+            fixture = begin(
+                args.root, args.primary, None if seconds is not None else args.directory
+            )
             print(
                 json.dumps(
                     {"journal": str(fixture.journal), "status": "intent-recorded"}
                 ),
                 flush=True,
             )
-            fixture.run()
+            fixture.hold(seconds) if seconds is not None else fixture.run()
         return 0
     except (Exception, KeyboardInterrupt):
         if fixture is not None and not (

@@ -590,7 +590,11 @@ resources, a source/config-matching healthy retained deployment, and canonical
 exclusive leases. Only fresh disposable metadata/source databases receive
 pressure; retained user metadata is never a target. Fake lifecycle controls prove
 ownership and recovery decisions, not a live served-pressure pass. The current
-recipe preserves unobservable saturated peak permits as unknown and withholds
-complete acceptance. Reuse unchanged native/real-PostgreSQL/assembled receipts
+recipe uses an explicit fixture-only ASGI owner sampler for saturated peak counts
+and original stock shutdown-completion accounting; missing/stale/forced outcomes
+remain incomplete. This instrumentation has unmeasured overhead and cannot prove
+uninstrumented stock capacity. The bounded held-consumer mode preserves exclusive
+leases and joins its exact consumer group before restoration. Authored controls
+do not establish a live peak/lifespan/restore pass. Reuse unchanged native/real-PostgreSQL/assembled receipts
 where their original source and scope still apply; run only the missing served
 qualification after independent review and explicit coordinator scheduling.

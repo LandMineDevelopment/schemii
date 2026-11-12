@@ -8,7 +8,7 @@ requests use the two canonical HTTPS origins, and observations stay private.
 from __future__ import annotations
 
 import argparse
-from datetime import timezone
+from datetime import datetime, timezone
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, suppress
@@ -31,6 +31,7 @@ from dev.pressure.controller import (  # noqa: E402
     check,
     command,
     checkout_authority,
+    instant,
     private_read,
     private_write,
     verify_leases,
@@ -58,14 +59,57 @@ def secret(directory: Path, name: str) -> str:
     return value
 
 
-def operation(name: str) -> None:
-    check(name in {"stop-owned-app", "start-owned-app"}, "fixed_lifecycle_operation")
-    print(json.dumps({"operation": name}), flush=True)
-    response = sys.stdin.readline(4097)
+def operation(name: str) -> dict:
     check(
-        len(response) <= 4096 and json.loads(response) == {"confirmed": True},
+        name in {"stop-owned-app", "start-owned-app", "sample-owned-app"},
+        "fixed_lifecycle_operation",
+    )
+    print(json.dumps({"operation": name}), flush=True)
+    response = sys.stdin.readline(32769)
+    check(len(response) <= 32768, "lifecycle_not_confirmed")
+    value = json.loads(response)
+    check(
+        type(value) is dict and value.get("confirmed") is True,
         "lifecycle_not_confirmed",
     )
+    if name == "stop-owned-app":
+        check(
+            value.get("lifespan", {}).get("status")
+            == "observed-stock-lifespan-drained",
+            "stock_lifespan_evidence_missing",
+        )
+    elif name == "sample-owned-app":
+        check(type(value.get("sample")) is dict, "owner_sample_missing")
+    else:
+        check(value == {"confirmed": True}, "lifecycle_not_confirmed")
+    return value
+
+
+def observed_peak(sample: dict, *, process_pid: int, started_at: str) -> dict:
+    observation = sample.get("observation", {})
+    check(
+        observation.get("process", {}).get("pid") == process_pid,
+        "saturated_owner_process_changed",
+    )
+    candidates = observation.get("ownerHistory", [])
+    check(type(candidates) is list and len(candidates) <= 16, "owner_history_bound")
+    for event in reversed(candidates):
+        normal = event.get("normal", {})
+        counts = normal.get("counts", {})
+        if (
+            normal.get("status") == "observed"
+            and event.get("stage") == "running"
+            and counts.get("active")
+            == counts.get("maximum")
+            == counts.get("peak_active")
+            == 2
+            and counts.get("closed") is False
+            and instant(started_at)
+            <= instant(event["at"])
+            <= instant(observation["at"])
+        ):
+            return event
+    raise RuntimeError("saturated_owner_count_not_observed")
 
 
 def wait_until(action, seconds: float = WAIT_SECONDS):
@@ -140,6 +184,8 @@ class Probe:
             kind in {"metadata", "source"} and role in roles, "fixed_database_authority"
         )
         user, password = roles[role]
+        if kind == "source" and role == "admin":
+            password = "source_admin_password"
         connection = psycopg.connect(
             host=self.manifest["endpoints"][kind],
             port=5432,
@@ -397,15 +443,26 @@ class Probe:
         )
         return path, path + "/results/" + execution["results"][0]["id"]
 
-    def qualify(self) -> dict:
-        with ExitStack() as cleanup:
-            admin = cleanup.enter_context(self.client())
-            account = {
-                "username": self.run,
-                "password": secret(self.directory, "account_password"),
-            }
+    def administrator(self, client) -> tuple[dict, dict]:
+        account = {
+            "username": self.run,
+            "password": secret(self.directory, "account_password"),
+        }
+        principal = self.directory / "principal.json"
+        if principal.exists():
+            stored = private_read(principal)
+            check(
+                stored.get("run") == self.run
+                and stored.get("username") == account["username"],
+                "fixture_principal_identity",
+            )
+            identity = self.expect(client.post("/api/v1/auth/login", json=account), 200)
+            check(
+                identity["user"]["id"] == stored["userId"], "fixture_principal_changed"
+            )
+        else:
             identity = self.expect(
-                admin.post(
+                client.post(
                     "/api/v1/auth/setup",
                     json={
                         **account,
@@ -417,6 +474,30 @@ class Probe:
                 200,
             )
             check(identity["is_admin"] is True, "fixture_bootstrap_admin")
+            private_write(
+                principal,
+                {
+                    "run": self.run,
+                    "username": account["username"],
+                    "userId": identity["user"]["id"],
+                    "passwordFile": str(self.directory / "account_password"),
+                },
+            )
+        return account, identity
+
+    def bootstrap(self) -> dict:
+        with self.client() as client:
+            self.administrator(client)
+        return {
+            "phase": "bootstrapped",
+            "run": self.run,
+            "principal": private_read(self.directory / "principal.json"),
+        }
+
+    def qualify(self) -> dict:
+        with ExitStack() as cleanup:
+            admin = cleanup.enter_context(self.client())
+            account, identity = self.administrator(admin)
             cookie = dict(admin.cookies)
             check(bool(cookie), "fixture_cookie_required")
             preview = cleanup.enter_context(self.client(PREVIEW))
@@ -502,6 +583,7 @@ class Probe:
                         with self.client() as requester:
                             return requester.post("/api/v1/auth/login", json=account)
 
+                    pressure_started_at = datetime.now(timezone.utc).isoformat()
                     waits = [executor.submit(login_waiter) for _ in range(2)]
                     native = wait_until(
                         lambda: (
@@ -510,6 +592,12 @@ class Probe:
                             and all(row["wait_event_type"] == "Lock" for row in rows)
                             else None
                         )
+                    )
+                    peak = operation("sample-owned-app")["sample"]
+                    event = observed_peak(
+                        peak,
+                        process_pid=initial["processPid"],
+                        started_at=pressure_started_at,
                     )
                     started = time.monotonic()
                     error = assert_retryable(
@@ -539,8 +627,9 @@ class Probe:
                             "cookieRetained": True,
                             "source": source,
                             "peakPermits": {
-                                "status": "unknown",
-                                "reason": "protected_observation_uses_same_normal_admission",
+                                "status": "observed",
+                                "sample": peak,
+                                "event": event,
                             },
                         }
                     )
@@ -586,7 +675,7 @@ class Probe:
                             else None
                         )
                     )
-                    operation("stop-owned-app")
+                    lifespan = operation("stop-owned-app")["lifespan"]
                     wait_until(lambda: self.metadata_closed(monitor, shutdown_native))
                     for pending in waits:
                         with suppress(Exception):
@@ -597,6 +686,7 @@ class Probe:
                             "status": "passed",
                             "observedBefore": shutdown_native,
                             "remainingNormalBackends": 0,
+                            "lifespan": lifespan,
                         }
                     )
                 operation("start-owned-app")
@@ -656,19 +746,17 @@ class Probe:
                     "source": final_source,
                 }
             )
-        # Peak normal permits cannot currently be sampled through a saturated,
-        # authenticated endpoint. Preserve this unknown instead of manufacturing
-        # complete issue acceptance from a passing process or inferred count.
+        # This qualifies an explicitly instrumented fixture, never stock capacity.
         return {
             "version": 1,
             "run": self.run,
             "phase": "qualify",
-            "acceptance": False,
+            "acceptance": True,
             "capacityAcceptance": False,
+            "instrumentation": "fixture_only_stock_asgi_lifespan_and_owner_sampler",
             "cases": self.observations,
             "databaseAuthorities": self.identities,
             "pending": [
-                "Independent exact peak-permit observation during saturation",
                 "Independent current-source qualification evidence review",
             ],
             "scope": "disposable-canonical-https-metadata-qualification",
@@ -678,7 +766,9 @@ class Probe:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True, type=Path)
-    parser.add_argument("--phase", choices=("prepare", "qualify"), required=True)
+    parser.add_argument(
+        "--phase", choices=("prepare", "qualify", "bootstrap"), required=True
+    )
     args = parser.parse_args()
     try:
         authorization = sys.stdin.readline(4097)
@@ -703,7 +793,11 @@ def main() -> int:
         )
         checkout_authority(ROOT, primary, common)
         verify_leases(common)
-        result = probe.prepare() if args.phase == "prepare" else probe.qualify()
+        result = {
+            "prepare": probe.prepare,
+            "qualify": probe.qualify,
+            "bootstrap": probe.bootstrap,
+        }[args.phase]()
         print(json.dumps({"result": result}, separators=(",", ":")), flush=True)
         return 0
     except Exception:

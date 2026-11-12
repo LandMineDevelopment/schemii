@@ -353,7 +353,7 @@ unreviewed helper into place to bypass the prerequisite.
 
 The launcher records its private journal first under
 `PRIMARY/.schemii/metadata-pressure/pressure_<32 hex>/journal.json`. It creates a
-new owner-labeled project with two fresh volumes, fresh private credentials, low
+new owner-labeled project with three fresh volumes (metadata, source, observer), fresh private credentials, low
 fixed resource/metadata limits, the exact reviewed application image, and a
 separate HTTPS ingress at `https://localhost:8001`. Tailscale continues to use
 `https://omarchy.taile4f57f.ts.net`; no Serve route is changed. Only this disposable
@@ -375,10 +375,63 @@ quarantined. If their exact owned ingress can safely be stopped, restoration is
 attempted while cleanup stays explicitly incomplete. Preserve the journal and
 all original failed evidence; do not prune containers or volumes to force recovery.
 
-This path is **not a throughput, capacity or manual UI pass**. Live execution is
-not established by its fake-command tests. Saturated normal admission prevents
-its authenticated runtime-observation endpoint from directly observing peak
-permits; that measurement remains **unknown**, and the recipe explicitly withholds
-complete acceptance even when its other cases pass. Post-drain permit counts and
-native/source close are observed separately. Independent final evidence review
-and the remaining peak-permit boundary are required before closing #134.
+The fixture overrides only the ASGI entrypoint with `dev/pressure/app.py`, which
+forwards the unchanged application and its original lifespan messages. A fixed
+100ms sampler calls the existing normal/readiness owner snapshots directly,
+without a metadata query, admission permit or public endpoint. Its bounded 16KiB
+private receipt, with at most sixteen owner-change samples, lives in the fresh observer volume, initialized by a one-shot,
+networkless service from the same image. Only the launcher copies that fixed path
+from the exact owned app container, with a 32KiB archive/time bound. The saturated
+case requires the actual normal owner active/peak/maximum counts of two, bound to
+the authenticated process PID and current container/process incarnation. A peak sample must fall inside the actual pressure window; an old cumulative peak alone is insufficient.
+
+A lifespan pass requires the original stock `shutdown.complete`, observed closed
+normal/readiness owners with active zero, matching run/process incarnation and
+native clean exit without OOM. Exit zero alone, a forced timeout, crash, stale or
+missing receipt, or unknown owner snapshot cannot pass. Captured PostgreSQL
+backend closure remains a separate requirement. Native exit/OOM, command outcome
+and stop classification are retained before evaluating lifecycle proof.
+
+This is an **instrumented qualification fixture**, never an uninstrumented stock
+throughput, capacity or manual UI pass. Sampler/receipt overhead is unmeasured and
+explicitly recorded. All actual peak/lifespan/cleanup/restoration evidence remains
+pending until coordinator-scheduled execution and independent review; fake tests
+establish only the ownership and discriminator controls.
+
+### Bounded attachment for the #135 fixture consumer
+
+`./start.sh --hold-metadata-pressure SECONDS` (60–3600) prepares the same unique
+fixture, bootstraps its private administrator, prints an `authorityFile` path and
+retains both canonical exclusive leases. The default short qualification still
+cleans up immediately. The held authority is a private version-1
+`launcher_owned_disposable_pressure` receipt, bound to run/nonce, holder PID/birth,
+fresh heartbeat, expiration, exact app/source identities and instrumentation.
+It supplies the owning `launcherPath`, canonical origins, principal password-file
+path, source-witness config and private consumer-credentials-file path. Source
+admin and metadata-admin passwords are distinct; consumers receive source-only
+administrative authority, never retained-stack credentials or metadata authority.
+
+Before any API/source mutation, the dedicated Node `testing/load/controller.mjs
+LOAD_ID` process invokes the owning launcher with
+`--metadata-pressure-attach RUN_DIRECTORY PID`. Its session/process-group leader
+must be its own PID, owned by the same UID/common Git repository, with a committed
+unchanged source tree matching the explicitly reviewed consumer fingerprint.
+That pin intentionally remains unavailable until the constrained consumer is
+integrated; older detached workload engines cannot attach. Successful attachment
+returns a private `attachmentFile`. Every ten seconds or less invoke
+`--metadata-pressure-heartbeat RUN_DIRECTORY ATTACHMENT_FILE`; thirty seconds
+without a heartbeat ends the attachment. Only one consumer is admitted at a time.
+These callbacks use private metadata IPC and never acquire a competing deployment
+lease or access the runtime themselves.
+
+After joining its API/source work, the consumer invokes
+`--metadata-pressure-detach RUN_DIRECTORY ATTACHMENT_FILE`, observes `detaching`,
+and exits its dedicated group promptly. After a one-second acknowledgment window,
+the holder joins the entire exact opted-in group, using bounded TERM/KILL if
+necessary, before another attachment or restoration. Hold expiry/cancellation
+also joins consumers first. PID/argv/birth drift or unknown surviving group
+identity refuses all deletion/restoration and leaves explicit recovery state.
+SIGKILL retains that journal; explicit launcher recovery enforces the same join
+and exact resource guards. An unknown callback response is not permission to
+replay a write or continue work. No fixture has been created by authoring these
+contracts.
