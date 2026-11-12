@@ -1067,10 +1067,11 @@ export function createMigrationReviewController({
     state.error = null;
     render();
     try {
-      state.execution = await api.reconcileMigrationExecution(execution.id, {
+      const reconciledExecution = await api.reconcileMigrationExecution(execution.id, {
         expectedExecutionRevision: execution.revision,
       }, { signal: beginRequest() });
       if (!current(version, workspaceId)) return;
+      state.execution = reconciledExecution;
       state.submitting = false;
       render();
       if (migrationExecutionNeedsPolling(state.execution)) schedulePoll(version, workspaceId, state.execution.id);

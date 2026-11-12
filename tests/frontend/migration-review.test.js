@@ -284,3 +284,55 @@ test("late successful-Apply reload cannot suppress a newer workspace revision gu
   h.source.workspace = { ...h.source.workspace, revision: 9 }; assert.equal(h.controller.syncContext(), false); assert.equal(h.elements.apply.disabled, true);
   late.resolve(); await pending; assert.equal(h.executions.length, 1); assert.equal(h.source.workspace.revision, 9); assert.equal(h.elements.apply.disabled, true);
 });
+
+for (const replacement of ["another workspace after close", "the same workspace after close", "a new saved revision in the same workspace"]) {
+  test(`late execution reconciliation cannot replace ${replacement}`, async t => {
+    const late = deferredReview(), reconciliations = [];
+    const h = reviewHarness({
+      listMigrationExecutions: async () => [{ id: "exec_original", status: "uncertain", revision: 1 }],
+      reconcileMigrationExecution: async (id, body) => {
+        reconciliations.push({ id, body });
+        return late.promise;
+      },
+    });
+    t.after(h.close);
+    await h.controller.open();
+    assert.equal(h.elements.apply.textContent, "Check transaction outcome");
+    await h.elements.apply.fire("click");
+    assert.deepEqual(reconciliations, [{ id: "exec_original", body: { expectedExecutionRevision: 1 } }]);
+
+    if (replacement === "a new saved revision in the same workspace") {
+      h.source.design = { ...h.source.design, revision: 8, fingerprint: "replacement_design" };
+      assert.equal(h.controller.syncContext(), false);
+    } else {
+      h.controller.close();
+      h.elements.dialog.open = false;
+      if (replacement === "another workspace after close") {
+        h.source.workspace = { ...h.source.workspace, id: "ws_replacement", connectionId: "pg_replacement" };
+      }
+    }
+    h.api.listMigrationExecutions = async () => [];
+    const createPlan = h.api.createMigrationPlan;
+    h.api.createMigrationPlan = async (...args) => ({ ...await createPlan(...args), designRevision: h.source.design.revision });
+    await h.controller.open();
+    await h.select();
+    await h.authorize();
+    const sequence = h.plans.length;
+    assert.equal(h.plans.at(-1).expectedDesignRevision, h.source.design.revision);
+    assert.equal(h.elements.apply.disabled, false);
+
+    late.resolve({ id: "exec_original", status: "uncertain", revision: 2 });
+    await settleReview();
+    assert.equal(h.elements.apply.textContent, "Apply migration");
+    assert.equal(h.elements.apply.disabled, false);
+    assert.equal(h.labelled("Acknowledge materialized-view maintenance for this plan").checked, true);
+    await h.elements.apply.fire("click");
+    assert.equal(reconciliations.length, 1);
+    assert.equal(h.confirms.length, 1);
+    assert.match(h.confirms[0].message, /materialized-view maintenance/);
+    assert.equal(h.executions.length, 0);
+    await h.confirms[0].callback();
+    assert.deepEqual(h.executions, [{ id: `plan_${sequence}`, body: { reviewDigest: `digest_${sequence}`, confirmDestructive: true, confirmExternalChanges: false, confirmMaterializedMaintenance: true } }]);
+    assert.equal(reconciliations.length, 1);
+  });
+}
