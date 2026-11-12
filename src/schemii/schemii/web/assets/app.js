@@ -2576,10 +2576,10 @@ async function loadActiveWorkspace(options = {}) {
 
 async function reloadMigrationWorkspace() {
   const workspaceId = state.activeWorkspace?.id;
-  if (designEditors.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
+  if (designEditors.hasDraft || tableEditor.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
   if (!await flushLayoutBeforeTransition()) throw new Error('Resolve the pending layout save before reloading the migration workspace.');
   if (state.activeWorkspace?.id !== workspaceId) return;
-  if (designEditors.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
+  if (designEditors.hasDraft || tableEditor.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
   await loadActiveWorkspace({ clearConflictOnSuccess: true });
   if (state.catalogError) throw state.catalogError;
 }

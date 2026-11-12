@@ -1021,11 +1021,12 @@ test("migration snapshot reload preserves editor drafts and pending layout and r
   const source = readFileSync(new URL("../../src/schemii/schemii/web/assets/app.js", import.meta.url), "utf8");
   const start = source.indexOf("async function reloadMigrationWorkspace() {");
   const body = source.slice(start, source.indexOf("\n}\n", start) + 2);
-  const state = { activeWorkspace: { id: "original" }, catalogError: null }, editors = { hasDraft: true }; let flushed = false, reads = 0;
-  const reload = runInNewContext(`(${body})`, { Error, state, designEditors: editors, flushLayoutBeforeTransition: async () => flushed, loadActiveWorkspace: async () => { reads += 1; } });
+  const state = { activeWorkspace: { id: "original" }, catalogError: null }, editors = { hasDraft: true }, tableEditor = { hasDraft: false }; let flushed = false, reads = 0;
+  const reload = runInNewContext(`(${body})`, { Error, state, tableEditor, designEditors: editors, flushLayoutBeforeTransition: async () => flushed, loadActiveWorkspace: async () => { reads += 1; } });
   await assert.rejects(reload, /open editor draft/); assert.equal(reads, 0); editors.hasDraft = false;
+  tableEditor.hasDraft = true; await assert.rejects(reload, /open editor draft/); assert.equal(reads, 0); tableEditor.hasDraft = false;
   await assert.rejects(reload, /pending layout save/); assert.equal(reads, 0); flushed = true; await reload(); assert.equal(reads, 1);
   state.catalogError = new Error("snapshot unavailable"); await assert.rejects(reload, /snapshot unavailable/);
-  const navigation = runInNewContext(`(${body})`, { Error, state, designEditors: editors, flushLayoutBeforeTransition: async () => { state.activeWorkspace = { id: "other" }; return true; }, loadActiveWorkspace: async () => { reads += 1; } });
+  const navigation = runInNewContext(`(${body})`, { Error, state, tableEditor, designEditors: editors, flushLayoutBeforeTransition: async () => { state.activeWorkspace = { id: "other" }; return true; }, loadActiveWorkspace: async () => { reads += 1; } });
   const before = reads; await navigation(); assert.equal(reads, before); assert.equal(state.activeWorkspace.id, "other");
 });
