@@ -943,3 +943,129 @@ def test_browser_artifact_symlink_is_rejected_without_changing_peer_directory(
     assert peer.stat().st_mode == before
     assert [path.name for path in peer.iterdir()] == ["evidence.txt"]
     assert (peer / "evidence.txt").read_text() == "retained peer evidence"
+
+
+def original_node_repository(root):
+    """A tiny real canonical npm execution, never the application's test suite."""
+    shutil.copytree(
+        runner.ROOT / "scripts",
+        root / "scripts",
+        ignore=shutil.ignore_patterns(
+            "__pycache__", "*.pyc", "*.test.js", "*.test.mjs"
+        ),
+    )
+    (root / ".gitignore").write_text(".schemii/\n__pycache__/\n")
+    (root / "package.json").write_text(
+        json.dumps(
+            {"type": "module", "scripts": {"test": "node scripts/ci/node-tests.mjs"}}
+        )
+    )
+    body = "import test from 'node:test';import assert from 'node:assert/strict';test('actual original invocation',()=>assert.equal(2+2,4));\n"
+    for name in (
+        "tests/frontend/api.test.js",
+        "testing/harness/origin.test.mjs",
+        "scripts/ci/origin.test.mjs",
+        "testing/load/origin.test.mjs",
+    ):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "tiny real runner source")
+    base = git(root, "rev-parse", "HEAD")
+    (root / "tests/frontend/api.test.js").write_text(
+        body + "test('second discovered actual case',()=>assert.equal(3+3,6));\n"
+    )
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "owned frontend test change")
+    return base
+
+
+def actual_original_run(root):
+    base = original_node_repository(root)
+    plan = runner.selected_plan(root, base)
+    assert plan["classification"]["profile"] == "frontend-tests"
+    code, path = runner.run_selected(root, plan, feedback=False, base=base)
+    receipt = json.loads(path.read_text())
+    assert code == 0 and receipt["acceptance"] is True
+    return path, receipt
+
+
+def test_original_execution_provenance_binds_actual_discovery_sources_and_child(
+    repository,
+):
+    path, receipt = actual_original_run(repository)
+    verified = runner.verify_original_run(repository, path, receipt)
+    assert receipt["execution_origin"] == "original-runner-v1"
+    origin = json.loads(Path(verified["path"]).read_text())["record"]
+    assert len(origin["artifacts"]["0"]["inventory"]["planned"]) == 5
+    assert len(origin["artifacts"]["0"]["inventory"]["observed"]) == 5
+    assert len(origin["executed_sources"]) == 4
+    assert origin["observations"][0]["command"] == ["npm", "test"]
+    assert origin["observations"][0]["cleanup"] == "observed-stopped"
+    assert origin["base_commit"] == receipt["classification"]["base"]
+    assert not (path.parent / "owner.key").exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "receipt",
+        "truncated",
+        "cancelled",
+        "source-inventory",
+        "arbitrary-copy",
+        "owner-record",
+    ],
+)
+def test_original_execution_import_rejects_changed_or_copied_claims(
+    repository, mutation
+):
+    path, receipt = actual_original_run(repository)
+    verified = runner.verify_original_run(repository, path, receipt)
+    if mutation in {"receipt", "cancelled"}:
+        receipt["status"] = "passed" if mutation == "receipt" else "cancelled"
+        receipt["run_id"] += 1
+        runner.write_json(path, receipt)
+    elif mutation in {"truncated", "source-inventory"}:
+        timing = path.parent / receipt["commands"][0]["timing_evidence"]
+        records = runner.load(timing)
+        if mutation == "truncated":
+            records = records[:2] + records[-1:]
+        else:
+            for record in records:
+                if record["kind"] == "attempt":
+                    record["source_id"] = "0" * 64
+        timing.write_text("".join(json.dumps(record) + "\n" for record in records))
+    elif mutation == "arbitrary-copy":
+        copied = repository / ".schemii/copied" / path.parent.name / "receipt.json"
+        copied.parent.mkdir(parents=True)
+        shutil.copyfile(path, copied)
+        copied.chmod(0o600)
+        path = copied
+    else:
+        owner = Path(verified["path"])
+        envelope = json.loads(owner.read_text())
+        envelope["record"]["artifacts"]["0"]["inventory"]["planned"] = ["a" * 64]
+        runner.write_json(owner, envelope)
+    with pytest.raises((ValueError, OSError)):
+        runner.verify_original_run(repository, path, receipt)
+
+
+def test_synthetic_control_and_historical_receipts_cannot_mint_original_provenance(
+    repository, monkeypatch
+):
+    controlled(monkeypatch)
+    _, path, receipt = execute(repository)
+    assert receipt["execution_origin"] == "unverified-control-or-incomplete"
+    with pytest.raises(ValueError, match="original-runner"):
+        runner.verify_original_run(repository, path, receipt)
+    directory = runner._origin_directory(repository)
+    assert not directory.exists()
+    receipt["execution_origin"] = "original-runner-v1"
+    runner.write_json(path, receipt)
+    with pytest.raises(OSError):
+        runner.verify_original_run(repository, path, receipt)
+    assert not directory.exists(), (
+        "Import must never create historical provenance or an owner key"
+    )

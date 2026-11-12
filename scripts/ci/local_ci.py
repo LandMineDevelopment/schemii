@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -55,6 +57,13 @@ SCOPE_ENV = (
     "SCHEMII_QA_LEASE_FD",
     "SCHEMII_QA_GATE_FD",
     "SCHEMII_QA_LEASE_MODE",
+)
+
+# Original execution observations never travel through a test-supplied receipt.
+# This is a cooperative local ownership boundary, not protection from an actor
+# who controls the runner, its process or the repository's private Git state.
+_INVOCATION_OBSERVATION: ContextVar[dict | None] = ContextVar(
+    "local_ci_invocation_observation", default=None
 )
 
 
@@ -297,6 +306,14 @@ def invoke(
             start_new_session=True,
             pass_fds=inherited,
         )
+        observation = _INVOCATION_OBSERVATION.get()
+        if observation is not None:
+            observation.update(
+                workspace=str(root.resolve()),
+                command=list(argv),
+                pid=child.pid,
+                started_at=datetime.now(timezone.utc).isoformat(),
+            )
         while child.poll() is None and not requested:
             time.sleep(0.02)
         return 128 + requested if requested else child.returncode
@@ -307,9 +324,281 @@ def invoke(
             if child is not None:
                 stop_group(child.pid)
                 child.wait()
+                observation = _INVOCATION_OBSERVATION.get()
+                if observation is not None:
+                    observation.update(
+                        exit_code=128 + requested if requested else child.returncode,
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        cleanup="observed-stopped",
+                    )
         finally:
             for signum, handler in handlers.items():
                 signal.signal(signum, handler)
+
+
+_ORIGINAL_INVOKE = invoke
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _private_bytes(path: Path, maximum: int = 64 * 1024 * 1024) -> bytes:
+    for parent in (path, *path.parents):
+        if parent.is_symlink():
+            raise ValueError("Original CI evidence cannot contain symlinks")
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > maximum:
+        raise ValueError("Original CI evidence must be bounded private regular files")
+    return path.read_bytes()
+
+
+def _origin_directory(root: Path) -> Path:
+    common = Path(
+        git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        .decode()
+        .strip()
+    )
+    return common / "local-ci-origins"
+
+
+def _origin_policy() -> dict[str, str]:
+    # Bind the real loaded owner/validators and actual discovery/reporting code.
+    names = (
+        "scripts/ci/local_ci.py",
+        "scripts/test-changes.py",
+        "scripts/ci/classify_changes.py",
+        "scripts/ci/test_selection.py",
+        "scripts/ci/summary.py",
+        "scripts/ci/node-tests.mjs",
+        "scripts/ci/node-reporter.mjs",
+        "scripts/ci/timing.mjs",
+        "scripts/ci/python-tests.py",
+        "scripts/ci/pytest_timing.py",
+        "scripts/ci/run-browser-shard.mjs",
+        "scripts/ci/browser-shards.mjs",
+        "scripts/ci/playwright-reporter.mjs",
+        "scripts/ci/coverage-profiles.json",
+    )
+    return {
+        name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+        for name in names
+        if (ROOT / name).is_file()
+    }
+
+
+def _execution_inventory(path: Path) -> dict:
+    records = load(path)
+    summary = summarize(records)
+    return {
+        "planned": sorted(
+            record["test_id"] for record in records if record["kind"] == "plan"
+        ),
+        "observed": [
+            {
+                field: record[field]
+                for field in (
+                    "test_id",
+                    "source_id",
+                    "source_line",
+                    "attempt",
+                    "outcome",
+                )
+            }
+            for record in records
+            if record["kind"] == "attempt"
+        ],
+        "summary": summary,
+    }
+
+
+def _origin_artifacts(receipt_path: Path, receipt: dict) -> dict:
+    artifacts = {}
+    for index, entry in enumerate(receipt["commands"]):
+        if not entry.get("timing_evidence"):
+            continue
+        relative = Path(entry["timing_evidence"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Unsafe original timing path")
+        path = receipt_path.parent / relative
+        if not path.exists():
+            continue
+        data = _private_bytes(path)
+        artifacts[str(index)] = {
+            "path": str(relative),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "inventory": _execution_inventory(path),
+        }
+    return artifacts
+
+
+def _executed_sources(root: Path, artifacts: dict) -> dict:
+    observed = {
+        item["source_id"]
+        for artifact in artifacts.values()
+        for item in artifact["inventory"]["observed"]
+    }
+    sources = {}
+    for name in set(
+        git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(
+            b"\0"
+        )
+    ) - {b""}:
+        name_hash = hashlib.sha256(name).hexdigest()
+        if name_hash not in observed:
+            continue
+        path = root / os.fsdecode(name)
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(
+                "Executed test source is not an actual regular source file"
+            )
+        sources[name_hash] = {
+            "path": os.fsdecode(name),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    if set(sources) != observed:
+        raise ValueError(
+            "Executed test/source identities do not belong to the original source inventory"
+        )
+    return sources
+
+
+def _seal_original_run(
+    root: Path, receipt_path: Path, receipt: dict, observations: list, policy: dict
+) -> None:
+    if source_identity(root) != receipt["source"]:
+        raise ValueError(
+            "Source changed before original execution provenance publication"
+        )
+    directory = _origin_directory(root)
+    private_directory(directory)
+    key_path = directory / "owner.key"
+    lock = os.open(
+        directory / "owner-key.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not key_path.exists():
+            fd = os.open(
+                key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+            )
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(secrets.token_bytes(32))
+                stream.flush()
+                os.fsync(stream.fileno())
+    finally:
+        os.close(lock)
+    key = _private_bytes(key_path, 32)
+    if len(key) != 32 or _origin_policy() != policy:
+        raise ValueError("Original CI owner policy or key changed")
+    artifacts = _origin_artifacts(receipt_path, receipt)
+    record = {
+        "schema": 1,
+        "workspace": str(root.resolve()),
+        "receipt": str(receipt_path.resolve()),
+        "receipt_sha256": hashlib.sha256(_private_bytes(receipt_path)).hexdigest(),
+        "source": receipt["source"],
+        "classification": receipt["classification"],
+        "base_commit": git(
+            root,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            receipt["base_ref"] + "^{commit}",
+        )
+        .decode()
+        .strip(),
+        "policy": policy,
+        "observations": observations,
+        "artifacts": artifacts,
+        "executed_sources": _executed_sources(root, artifacts),
+    }
+    envelope = {
+        "record": record,
+        "mac": hmac.new(key, _canonical_bytes(record), hashlib.sha256).hexdigest(),
+    }
+    destination = directory / (receipt_path.parent.name + ".json")
+    # Only original run completion publishes this immutable owner record. Import
+    # never creates it or the key, and unknown historical receipts stay unknown.
+    fd = os.open(
+        destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(_canonical_bytes(envelope))
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def verify_original_run(root: Path, receipt_path: Path, receipt: dict) -> dict:
+    """Read-only reconciliation against the original runner's independent record."""
+    directory = _origin_directory(root)
+    if (
+        receipt.get("execution_origin") != "original-runner-v1"
+        or json.loads(_private_bytes(receipt_path)) != receipt
+        or receipt.get("source") != source_identity(root)
+    ):
+        raise ValueError("Receipt has no verified original-runner execution provenance")
+    if receipt_path.name != "receipt.json" or not receipt_path.parent.name.startswith(
+        "run-"
+    ):
+        raise ValueError("Not an original local-CI receipt path")
+    origin_path = directory / (receipt_path.parent.name + ".json")
+    key = _private_bytes(directory / "owner.key", 32)
+    envelope = json.loads(_private_bytes(origin_path))
+    record = envelope["record"]
+    expected = hmac.new(key, _canonical_bytes(record), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(envelope["mac"], expected):
+        raise ValueError("Original CI execution provenance is invalid")
+    if (
+        record.get("schema") != 1
+        or record["receipt"] != str(receipt_path.resolve())
+        or receipt_path.resolve()
+        != Path(record["workspace"])
+        / ".schemii/local-ci"
+        / receipt_path.parent.name
+        / "receipt.json"
+        or record["receipt_sha256"]
+        != hashlib.sha256(_private_bytes(receipt_path)).hexdigest()
+        or record["source"] != receipt["source"]
+        or record["policy"] != _origin_policy()
+        or record["classification"] != receipt["classification"]
+        or record["base_commit"]
+        != git(
+            root,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            receipt["base_ref"] + "^{commit}",
+        )
+        .decode()
+        .strip()
+        or record["artifacts"] != _origin_artifacts(receipt_path, receipt)
+        or record["executed_sources"] != _executed_sources(root, record["artifacts"])
+    ):
+        raise ValueError(
+            "Original CI receipt, scope, policy or discovered/executed inventory changed"
+        )
+    executed = [entry for entry in receipt["commands"] if "executed_command" in entry]
+    if len(executed) != len(record["observations"]):
+        raise ValueError("Missing original command execution observation")
+    for entry, observed in zip(executed, record["observations"], strict=True):
+        if (
+            observed.get("command") != entry["executed_command"]
+            or observed.get("workspace") != record["workspace"]
+            or observed.get("exit_code") != entry.get("exit_code")
+            or observed.get("cleanup") != "observed-stopped"
+            or not isinstance(observed.get("pid"), int)
+            or observed["pid"] < 1
+            or not observed.get("started_at")
+            or not observed.get("finished_at")
+        ):
+            raise ValueError("Original command lifecycle does not match receipt")
+    return {
+        "path": str(origin_path),
+        "sha256": hashlib.sha256(_private_bytes(origin_path)).hexdigest(),
+        "policy": record["policy"],
+        "artifacts": record["artifacts"],
+    }
 
 
 @contextmanager
@@ -411,6 +700,13 @@ def evidence(
 def run_selected(
     root: Path, selected: dict, *, feedback: bool, base: str, full: bool = False
 ) -> tuple[int, Path]:
+    observations: list[dict] = []
+    policy = _origin_policy()
+    # Custom/mocked run_selected plans remain useful unit controls, but cannot
+    # mint original-execution credentials. The owner recomputes its own plan.
+    origin_eligible = invoke is _ORIGINAL_INVOKE and selected == selected_plan(
+        root, base, full
+    )
     directory = root / ".schemii/local-ci"
     private_directory(directory)
     run_id = time.time_ns() // 1_000_000
@@ -441,6 +737,9 @@ def run_selected(
         "commands": entries,
         "pending_layers": selected["layers"],
         "pending_commands": list(range(len(required))),
+        "execution_origin": "pending"
+        if origin_eligible
+        else "unverified-control-or-plan",
     }
     write_json(receipt_path, receipt)
     print(f"Local CI receipt: {receipt_path}", flush=True)
@@ -653,9 +952,13 @@ def run_selected(
             write_json(receipt_path, receipt)
             print("+ " + shlex.join(command), flush=True)
             command_started = time.perf_counter()
+            observed: dict = {}
+            observations.append(observed)
+            observation_token = _INVOCATION_OBSERVATION.set(observed)
             try:
                 code = invoke(root, command, child_env, lease)
             finally:
+                _INVOCATION_OBSERVATION.reset(observation_token)
                 entry["duration_ms"] = round(
                     (time.perf_counter() - command_started) * 1000, 3
                 )
@@ -742,7 +1045,28 @@ def run_selected(
             )
             receipt["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
             receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
+            receipt["execution_origin"] = (
+                "original-runner-v1"
+                if origin_eligible
+                and receipt["status"] in {"passed", "feedback-passed"}
+                else "unverified-control-or-incomplete"
+            )
             write_json(receipt_path, receipt)
+            if receipt["execution_origin"] == "original-runner-v1":
+                try:
+                    _seal_original_run(
+                        root, receipt_path, receipt, observations, policy
+                    )
+                except (OSError, ValueError, KeyError):
+                    receipt.update(
+                        status="incomplete",
+                        acceptance=False,
+                        execution_origin="publication-failed",
+                    )
+                    write_json(receipt_path, receipt)
+                    raise RuntimeError(
+                        "Original local CI provenance publication failed; preserved evidence is not acceptance"
+                    ) from None
             print(
                 f"Local CI: {receipt['status']}; acceptance={receipt['acceptance']}; receipt={receipt_path}",
                 flush=True,
