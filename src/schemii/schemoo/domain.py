@@ -88,7 +88,7 @@ def domain_table(domain, nodes):
     return domain_source(domain, nodes).get("table", "")
 
 
-def parameter_domain(catalog, definition, alternative, parameter):
+def parameter_domain(catalog, definition, alternative, parameter, *, scope_id=None):
     """Resolve the same qualified saved lookup for contracts and execution."""
     explicit = parameter.get("domain")
     if explicit:
@@ -103,6 +103,31 @@ def parameter_domain(catalog, definition, alternative, parameter):
     source = {key: node[key] for key in ("namespace", "table") if key in node}
     column = condition["column"]
     contract, relationship = definition.get("sourceContract") or {}, None
+    bindings = [item for item in contract.get("parameterDomains", [])
+                if item["alternativeId"] == alternative.get("id") and item["inputId"] == parameter.get("id")
+                and (scope_id is None or item["scopeId"] == scope_id)]
+    if len(bindings) > 1:
+        raise ValueError("The saved parameter lookup is ambiguous. Save this input with an explicit domain.")
+    if bindings:
+        binding = bindings[0]
+        result = {key: binding[key] for key in ("namespace", "table", "column", "labelColumn") if key in binding}
+        relationship_id = binding.get("relationshipId")
+        if relationship_id:
+            relationship = resolve_relationship(catalog, relationship_id)
+            if relationship is None:
+                raise ValueError("The parameter lookup foreign key was removed. Choose an explicit domain before saving.")
+            pairs = relationship_columns(relationship)
+            if len(pairs) != 1:
+                raise ValueError("Choose an explicit domain for a composite or ambiguous relationship.")
+            if (source_identity(catalog, relationship, "source") != source_identity(catalog, source)
+                    or pairs[0]["source"] != column):
+                raise ValueError("The parameter lookup foreign key changed its source. Choose an explicit domain before saving.")
+            result.update(namespace=source_identity(catalog, relationship, "target")[0],
+                          table=relationship["targetTable"], column=pairs[0]["target"], relationshipId=relationship["id"])
+            if (source_identity(catalog, result), result["column"]) != (source_identity(catalog, binding), binding["column"]):
+                columns = (physical_table(catalog, result) or {}).get("columns", [])
+                result["labelColumn"] = "name" if any(item["name"] == "name" for item in columns) else result["column"]
+        return result
     if parameter.get("type") != "source":
         def candidates(values):
             return [item for item in values if source_identity(catalog, item, "source") == source_identity(catalog, source)

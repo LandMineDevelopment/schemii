@@ -134,8 +134,23 @@ class _Model:
         self.column_details = {source_identity(catalog, table): {column["name"]: column for column in table["columns"]} for table in catalog["tables"]}
         self.table_details = {source_identity(catalog, table): table for table in catalog["tables"]}
         self.nodes, self.keys = {}, {}
-        default_nodes = [{"id": name if namespace == catalog.get("namespace", "public") else json.dumps([namespace, name], ensure_ascii=False, separators=(",", ":")),
-                          "table": name, "namespace": namespace, "label": (name if namespace == catalog.get("namespace", "public") else f"{namespace}.{name}")[:100]} for namespace, name in self.tables]
+        default_namespace = catalog.get("namespace", "public")
+        default_ids = {identity: identity[1] for identity in self.tables if identity[0] == default_namespace}
+        used_ids = set(default_ids.values())
+        foreign = sorted((json.dumps(identity, ensure_ascii=False, separators=(",", ":")), identity)
+                         for identity in self.tables if identity not in default_ids)
+        for encoded, identity in foreign:
+            base, suffix = encoded[:192], 2
+            key = base
+            while key in used_ids:
+                key, suffix = f"{base}_{suffix}", suffix + 1
+            default_ids[identity] = key
+            used_ids.add(key)
+        def label_part(value):
+            return value if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value) else '"' + value.replace('"', '""') + '"'
+        default_nodes = [{"id": default_ids[namespace, name], "table": name, "namespace": namespace,
+                          "label": (label_part(name) if namespace == default_namespace else f"{label_part(namespace)}.{label_part(name)}")[:100]}
+                         for namespace, name in self.tables]
         for node in _list(request.get("nodes", default_nodes), "Nodes", 100):
             key = _id(node.get("id"), "Node ID")
             if node.get("namespace") is not None and (not isinstance(node["namespace"], str) or not 1 <= len(node["namespace"]) <= 63):
@@ -168,6 +183,8 @@ class _Model:
                     candidates = [node for node in self.nodes if self.keys[node] == source_identity(catalog, relationship, side) and node not in self.derived]
                     namespace, table = source_identity(catalog, relationship, side)
                     canonical = table if namespace == catalog.get("namespace", "public") else json.dumps([namespace, table], ensure_ascii=False, separators=(",", ":"))
+                    if canonical not in candidates:
+                        canonical = default_ids.get((namespace, table))
                     if canonical in candidates:
                         endpoints[side] = canonical
                     elif len(candidates) == 1:
