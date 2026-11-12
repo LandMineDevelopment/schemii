@@ -117,3 +117,137 @@ def test_legacy_human_owned_role_grant_is_stored_but_not_executable():
     assert connections.for_product("schemii").list("friend") == []
     with pytest.raises(ConnectionNotFoundError):
         connections.for_product("schemii").get("friend", personal.id)
+
+
+def managed_export(product, postgres=None):
+    from tests.test_console import ConsolePostgresGateway, console_client
+    from schemii.common.postgres.console.models import ConsoleExecutionCreate
+    from schemii.schemii.workspaces.models import WorkspaceCreateRecord
+
+    api, _ = console_client(postgres or ConsolePostgresGateway())
+    services = api.app.state.services
+    profile = services.connections.create_schemii_owned(PostgresConnectionCreate(
+        name="Managed export", host="localhost", database="analytics",
+        username="reader", password="synthetic-test-password"))
+    auth = AuthService(enabled=True, setup_token="synthetic-test-token")
+    services.connections.set_authority(auth)
+    with auth.store.transaction(write=True) as state:
+        state["users"]["friend"] = _user("friend")
+        state["roles"]["readers"] = dict(id="readers", name="Readers",
+            capabilities=[f"{product}:access"], user_ids=["friend"], dashboards=[],
+            connections=[dict(owner_id=SCHEMII_CONNECTION_OWNER_ID,
+                connection_id=profile.id, allow_authoring=True)])
+    service = services.console
+    access = services.connections.for_product(product)
+    if product == "schemii":
+        workspace = services.workspaces.create("friend", WorkspaceCreateRecord(
+            name="Managed export", connection_id=profile.id,
+            connection_owner_id=SCHEMII_CONNECTION_OWNER_ID,
+            database="analytics", namespace="public"))
+        receipt = service.reserve("friend", workspace.id, ConsoleExecutionCreate(
+            console_id="con_" + "1" * 32, expected_workspace_revision=workspace.revision,
+            expected_settings_revision=1, mode="managed_read", statements=["SELECT 1"]))
+    else:
+        receipt = service.reserve_read_target("friend", connection_id=profile.id,
+            database="analytics", namespace="public", console_id="con_" + "1" * 32,
+            statements=["SELECT 1"], connection_access=access)
+    service.run("friend", receipt.id, connection_access=access)
+    receipt = service.get_owned("friend", receipt.id)
+    assert receipt.status == "succeeded"
+    return api, auth, service, access, profile, receipt, receipt.results[0].id
+
+
+@pytest.mark.parametrize(("product", "route"), [
+    ("schemii", "service"), ("schemoo", "service"),
+    ("schemii", "common"), ("schemoo", "common"), ("schemii", "legacy"),
+])
+def test_csv_export_rechecks_managed_connection_grant_before_reserving_a_lease(product, route):
+    from types import SimpleNamespace
+    from schemii.common.api.errors import ApiProblem
+    from schemii.common.query_executions.errors import ConsoleServiceError
+    from schemii.common.query_executions.routes import export_result
+    from schemii.schemii.console.routes import export_console_result_csv
+
+    api, auth, service, access, _, receipt, result_id = managed_export(product)
+    with auth.store.transaction(write=True) as state:
+        state["roles"]["readers"]["connections"] = []
+    with pytest.raises((ConsoleServiceError, ApiProblem)) as caught:
+        if route == "service":
+            service.export_csv("friend", receipt.workspace_id, receipt.id, result_id,
+                connection_access=access)
+        elif route == "legacy":
+            export_console_result_csv(receipt.workspace_id, receipt.id, result_id,
+                SimpleNamespace(app=api.app), SimpleNamespace(user_id="friend"))
+        else:
+            export_result(receipt.id, result_id,
+                SimpleNamespace(app=api.app), SimpleNamespace(user_id="friend"))
+    assert caught.value.code == "console_connection_revoked"
+    assert service._transient_results[result_id].active_exports == 0
+
+
+@pytest.mark.parametrize("product", ["schemii", "schemoo"])
+@pytest.mark.parametrize("change", ["grant", "capability", "revision"])
+def test_csv_export_stops_before_next_batch_after_authority_changes(product, change):
+    from schemii.common.connections.models import PostgresConnectionUpdate
+    from schemii.common.query_executions.errors import ConsoleServiceError
+
+    api, auth, service, access, profile, receipt, result_id = managed_export(product)
+    stream = service.export_csv("friend", receipt.workspace_id, receipt.id, result_id,
+        connection_access=access)
+    assert next(stream) == b"value\r\n"
+    if change == "revision":
+        api.app.state.services.connections.update_schemii_owned(profile.id,
+            PostgresConnectionUpdate(expected_revision=profile.revision, name="Revised profile"))
+    else:
+        with auth.store.transaction(write=True) as state:
+            state["roles"]["readers"]["connections" if change == "grant" else "capabilities"] = []
+    with pytest.raises(ConsoleServiceError) as caught:
+        next(stream)
+    assert caught.value.code == ("console_target_changed" if change == "revision" else "console_connection_revoked")
+    assert service._transient_results[result_id].active_exports == 0
+    stream.close()
+    assert service._transient_results[result_id].active_exports == 0
+
+
+@pytest.mark.parametrize("product", ["schemii", "schemoo"])
+def test_common_csv_export_retains_the_originating_product_authority(product):
+    import asyncio
+    from types import SimpleNamespace
+    from schemii.common.query_executions.routes import export_result
+
+    api, _, service, _, _, receipt, result_id = managed_export(product)
+    response = export_result(receipt.id, result_id,
+        SimpleNamespace(app=api.app), SimpleNamespace(user_id="friend"))
+
+    async def consume():
+        rows = [chunk async for chunk in response.body_iterator]
+        return b"".join(rows)
+
+    assert asyncio.run(consume()).startswith(b"value\r\n0\r\n1\r\n")
+    assert service._transient_results[result_id].active_exports == 0
+
+
+@pytest.mark.parametrize("product", ["schemii", "schemoo"])
+def test_csv_export_checks_revocation_after_database_fetch_before_emitting_rows(product):
+    from tests.test_console import RetainedReadGateway
+    from schemii.common.query_executions.errors import ConsoleServiceError
+
+    gateway = RetainedReadGateway()
+    _, auth, service, access, _, receipt, result_id = managed_export(product, gateway)
+    stream = service.export_csv("friend", receipt.workspace_id, receipt.id, result_id,
+        connection_access=access)
+    assert next(stream) == b"value\r\n"
+
+    def fetch(*args):
+        with auth.store.transaction(write=True) as state:
+            state["roles"]["readers"]["connections"] = []
+        return ((99,),)
+
+    gateway.sessions[0].export_page = fetch
+    with pytest.raises(ConsoleServiceError) as caught:
+        next(stream)
+    assert caught.value.code == "console_connection_revoked"
+    assert service._transient_results[result_id].active_exports == 0
+    assert not gateway.sessions[0].cancelled.is_set()
+    service.close_result("friend", receipt.workspace_id, receipt.id, result_id)
+    assert gateway.sessions[0].closed

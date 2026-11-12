@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 import csv
@@ -122,6 +122,81 @@ class _ActiveConsoleReadSession:
     connection_revision: int
     postgres: PostgresConsoleReadSession
     target: ResolvedPostgresConnection | None = None
+    fetch_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class _ConsoleCsvExport(Iterator[bytes]):
+    """Own a result lease even before its generator's first iteration."""
+
+    def __init__(self, iterator, release, cancel):
+        self._iterator = iterator
+        self._release = release
+        self._cancel = cancel
+        self._iteration_lock = threading.RLock()
+        self._signal_lock = threading.RLock()
+        self._closed = False
+        self._cancelled = False
+        self._fetching = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        with self._iteration_lock:
+            with self._signal_lock:
+                if self._closed or self._cancelled:
+                    self.close()
+                    raise StopIteration
+            try:
+                chunk = next(self._iterator)
+                with self._signal_lock:
+                    if self._cancelled:
+                        self.close()
+                        raise StopIteration
+                return chunk
+            except BaseException:
+                self.close()
+                raise
+
+    def cancel(self):
+        # Signalling must not wait for the lock held by a blocked next().
+        with self._signal_lock:
+            if self._closed or self._cancelled:
+                return
+            self._cancelled = True
+            if self._fetching:
+                self._cancel()
+
+    @contextmanager
+    def fetching(self, lock):
+        # Waiting for another reader must remain interruptible without sending
+        # cancellation to that reader's PostgreSQL operation.
+        while not lock.acquire(timeout=0.05):
+            with self._signal_lock:
+                if self._cancelled:
+                    yield False
+                    return
+        try:
+            with self._signal_lock:
+                accepted = not self._cancelled
+                self._fetching = accepted
+            yield accepted
+        finally:
+            with self._signal_lock:
+                self._fetching = False
+            lock.release()
+
+    def close(self):
+        self.cancel()
+        with self._iteration_lock:
+            with self._signal_lock:
+                if self._closed:
+                    return
+                self._closed = True
+            try:
+                self._iterator.close()
+            finally:
+                self._release()
 
 
 class ConsoleService:
@@ -1058,12 +1133,14 @@ class ConsoleService:
                     raise ConsoleServiceError(410, "console_result_gone", "This result page cursor has expired or was already used")
                 offset = value[1]
             result.active_exports += 1  # A lease also protects in-flight page fetches.
+            active = self._active_read_sessions.get(execution_id)
             if execution_id in self._active_read_sessions:
                 self._active_read_sessions.move_to_end(execution_id)
         try:
             with self._operation(execution_id, "fetching", result.query.statement_index) as state:
-                rows = result.query.rows[offset:offset + batch_size] if result.read_session is None else result.read_session.page(result.query.statement_index, offset, batch_size)
-                buffered = getattr(result.read_session, "has_buffered_rows", lambda _: False)(result.query.statement_index)
+                with active.fetch_lock if active is not None else nullcontext():
+                    rows = result.query.rows[offset:offset + batch_size] if result.read_session is None else result.read_session.page(result.query.statement_index, offset, batch_size)
+                    buffered = getattr(result.read_session, "has_buffered_rows", lambda _: False)(result.query.statement_index)
                 with self._active_targets_lock:
                     state["fetchedRows"] = state.get("fetchedRows", 0) + len(rows)
             next_offset = offset + len(rows)
@@ -1121,7 +1198,9 @@ class ConsoleService:
         workspace_id: str | None,
         execution_id: str,
         result_id: str,
-    ) -> Iterator[bytes]:
+        *,
+        connection_access=None,
+    ) -> _ConsoleCsvExport:
         """Stream a transient result without buffering it in metadata or a file."""
 
         try:
@@ -1132,6 +1211,8 @@ class ConsoleService:
             raise ConsoleServiceError(
                 404, "console_execution_not_found", "Console execution was not found"
             )
+        access = connection_access or self._connections
+        self.authorize_managed_result(owner_id, execution_id, access)
         now = self._clock()
         with self._transient_results_lock:
             self._purge_transient_results(now)
@@ -1149,17 +1230,20 @@ class ConsoleService:
                     "This result is no longer available; run the query again before exporting",
                 )
             result.active_exports += 1
+            active = self._active_read_sessions.get(execution_id)
 
         def stream() -> Iterator[bytes]:
             with self._operation(execution_id, "exporting", result.query.statement_index) as state:
                 offset = 0
                 try:
+                    self.authorize_managed_result(owner_id, execution_id, access)
                     buffer = io.StringIO(newline="")
                     writer = csv.writer(buffer)
                     writer.writerow([column.name for column in result.query.columns])
                     yield buffer.getvalue().encode("utf-8")
                     row_count = result.query.row_count
                     while row_count is None or offset < row_count:
+                        self.authorize_managed_result(owner_id, execution_id, access)
                         if result.read_session is None:
                             rows = result.query.rows[
                                 offset : offset + result.page_size
@@ -1168,13 +1252,19 @@ class ConsoleService:
                             export_page = getattr(
                                 result.read_session, "export_page", result.read_session.page
                             )
-                            rows = export_page(
-                                result.query.statement_index, offset, result.page_size
-                            )
+                            assert active is not None
+                            with export.fetching(active.fetch_lock) as accepted:
+                                if not accepted:
+                                    return
+                                rows = export_page(
+                                    result.query.statement_index, offset, result.page_size
+                                )
                             with self._active_targets_lock:
                                 state["fetchedRows"] = state.get("fetchedRows", 0) + len(rows)
                         if not rows:
                             break
+                        # A grant may be revoked while PostgreSQL fetches a batch.
+                        self.authorize_managed_result(owner_id, execution_id, access)
                         buffer = io.StringIO(newline="")
                         writer = csv.writer(buffer)
                         writer.writerows(rows)
@@ -1190,15 +1280,25 @@ class ConsoleService:
                             if item.execution_id == execution_id:
                                 item.pending_close = True
                     raise
-                finally:
+
+        def release():
+            with self._transient_results_lock:
+                result.active_exports -= 1
+                self._purge_transient_results(self._clock())
+
+        def cancel():
+            if result.read_session is not None:
+                cancel_read = getattr(result.read_session, "cancel", None)
+                if callable(cancel_read):
+                    cancel_read()
+                else:
                     with self._transient_results_lock:
-                        current = self._transient_results.get(result_id)
-                        if current is not None:
-                            current.active_exports = max(0, current.active_exports - 1)
-                        self._purge_transient_results(self._clock())
+                        active = self._active_read_sessions.get(execution_id)
+                    if active is not None and active.target is not None:
+                        self._postgres.cancel_console(active.target, active.postgres.backend_pid)
 
-
-        return stream()
+        export = _ConsoleCsvExport(stream(), release, cancel)
+        return export
 
     def _record_history(self, record: ConsoleExecutionRecord) -> None:
         if self._query_history_limit == 0 or record.execution.workspace_id is None:

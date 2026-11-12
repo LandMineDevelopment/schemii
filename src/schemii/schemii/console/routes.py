@@ -27,6 +27,7 @@ from .models import (
 from .service import ConsoleService, ConsoleServiceError
 from schemii.common.postgres.query_plans import build_explain_sql
 from schemii.common.postgres.console.execution import ConsoleStatementValidationError
+from schemii.common.query_executions.streaming import QueryExportStreamingResponse
 
 
 router = APIRouter(tags=["schemii-sql-console"])
@@ -328,7 +329,7 @@ def export_console_result_csv(
         )
     except ConsoleServiceError as error:
         raise _problem(error) from error
-    return StreamingResponse(
+    return QueryExportStreamingResponse(
         rows,
         media_type="text/csv; charset=utf-8",
         headers={
