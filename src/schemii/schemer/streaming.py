@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import io
 import json
 import os
+import re
+from decimal import Decimal, InvalidOperation
 import secrets
 
 from fastapi.responses import StreamingResponse
@@ -323,7 +325,7 @@ def response(services, owner, model, tiles, errors=(), *, export=False):
                         writer.writerow([column["name"] for column in event["columns"]])
                         header = True
                     for row in event["rows"]:
-                        writer.writerow([_csv_value(value) for value in row])
+                        writer.writerow([_csv_value(value, event["columns"][index].get("dataType", event["columns"][index].get("data_type", ""))) for index, value in enumerate(row)])
                     yield buffer.getvalue().encode("utf-8")
         finally:
             await source.aclose()
@@ -334,12 +336,24 @@ def response(services, owner, model, tiles, errors=(), *, export=False):
     return ReportStreamingResponse(body(), lifetime_seconds=EXPORT_SECONDS if export else STREAM_SECONDS, media_type="text/csv" if export else "application/x-ndjson", headers=headers)
 
 
-def _csv_value(value):
+def _numeric_csv_text(value, data_type):
+    if not isinstance(value, str) or not re.match(r"^(?:smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])(?:\(\d+(?:,\s*\d+)?\))?$", data_type or "", re.I):
+        return False
+    if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value):
+        return False
+    try:
+        number = Decimal(value)
+        return number.is_finite() and -16383 <= number.adjusted() <= 131071
+    except InvalidOperation:
+        return False
+
+
+def _csv_value(value, data_type=None):
     if value is None:
         return ""
     if isinstance(value, (dict, list)):
         value = json.dumps(value, ensure_ascii=False)
     # Prevent spreadsheet formula execution for textual source values.
-    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) and not _numeric_csv_text(value, data_type):
         return "'" + value
     return value

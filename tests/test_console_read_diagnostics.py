@@ -126,7 +126,7 @@ def test_mixed_read_progress_retains_outer_statement_index(monkeypatch):
     from schemii.common.query_executions.activity import report_progress
     from schemii.common.postgres.console import gateway
     monkeypatch.setattr(gateway, "execute_incremental",
-                        lambda connection, statement, consume: ((), "SHOW"))
+                        lambda connection, statement, consume, **kwargs: ((), "SHOW"))
 
     class Cursor:
         description = ()
@@ -215,3 +215,39 @@ def test_fixed_scalar_batching_respects_byte_allowance_and_untrusted_types(monke
             assert len(session._readers[0].pending) <= 1
     finally:
         session.close()
+
+
+def test_streaming_and_export_pages_preserve_exact_sql_scalars_and_json_array_types(monkeypatch):
+    from decimal import Decimal
+    from schemii.common.postgres.console import gateway
+    big = 9007199254740993
+    oids = [20, 20, 3802, 114, 1016, 1700, 16, 99999]
+    raw = (big, -big, big, {'n': big}, [big], Decimal('-12345678901234567890.123456789'), True, big)
+    class Cursor:
+        description = tuple(SimpleNamespace(name=f'column_{i}', type_code=oid) for i, oid in enumerate(oids))
+        def __init__(self): self.done = False
+        def execute(self, sql): pass
+        def fetchmany(self, size):
+            if self.done: return []
+            self.done = True; return [raw]
+        def close(self): pass
+    monkeypatch.setattr(gateway, '_console_type_names', lambda *args: {20:'bigint',3802:'jsonb',114:'json',1016:'bigint[]',1700:'numeric',16:'boolean'})
+    session = PsycopgConsoleReadSession(SimpleNamespace(cursor=lambda **kwargs: Cursor(), close=lambda:None), 1, ['SELECT values'], page_memory_bytes=4096)
+    expected=(str(big),str(-big),big,{'n':big},[big],str(raw[5]),True,big)
+    assert session.page(0,0,10) == (expected,)
+    assert session.export_page(0,0,10) == (expected,)
+    session.close()
+
+
+def test_typed_unsafe_scalar_cell_limit_is_checked_after_exact_text_conversion(monkeypatch):
+    from schemii.common.postgres.console import gateway
+    from schemii.common.postgres.errors import PostgresConsoleLimitError
+    class Cursor:
+        description=(SimpleNamespace(name='n',type_code=20),)
+        def execute(self, sql): pass
+        def fetchmany(self,size): return [(9007199254740993,)]
+        def close(self): pass
+    monkeypatch.setattr(gateway,'_console_type_names',lambda *args:{20:'bigint'})
+    session=PsycopgConsoleReadSession(SimpleNamespace(cursor=lambda **kwargs:Cursor(),close=lambda:None),1,['SELECT n'],maximum_cell_bytes=17,page_memory_bytes=4096)
+    with pytest.raises(PostgresConsoleLimitError): session.page(0,0,1)
+    session.close()

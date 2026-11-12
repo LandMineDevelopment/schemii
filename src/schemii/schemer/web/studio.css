@@ -148,3 +148,26 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
 .pivot-option { display:flex; align-items:center; gap:9px; min-height:36px; }
 @media(max-width:640px) { .pivot-table { font-size:12px; } .pivot-table th,.pivot-table td { min-width:100px; padding:6px 8px; height:44px; } .pivot-table .pivot-row-label,.pivot-table .pivot-corner { min-width:130px; max-width:180px; } .pivot-drill { min-height:32px; } .pivot-option { min-height:44px; } }
 .calculated-measures{display:grid;gap:1rem}.measure-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.8rem;border:1px solid var(--border);border-radius:10px;padding:1rem}.measure-operand{display:grid;gap:.5rem;min-width:0}.kpi-comparison{display:grid;gap:.4rem;font-size:.95rem}.kpi-comparison p{margin:0;overflow-wrap:anywhere}@media(max-width:650px){.measure-card{grid-template-columns:minmax(0,1fr)}}
+
+/* Formatting is decoration of the bounded visible window, never a row store. */
+[data-number-tone="positive"] { color:#91d7ae; }
+[data-number-tone="caution"] { color:#f1ce83; }
+[data-number-tone="negative"] { color:#f3a4ad; }
+.number-format-editor { display:grid; gap:16px; min-width:0; }
+.number-format-card,.number-rule { border:1px solid #3c4556; border-radius:8px; padding:12px; display:grid; gap:10px; min-width:0; }
+.number-rule { background:#161e2b; }
+.number-format-card input { width:100%; box-sizing:border-box; min-width:0; }
+.number-format-card .ui-button { min-height:40px; white-space:normal; }
+.bar-number { max-width:250px; overflow:hidden; text-overflow:ellipsis; }
+.chart-condition { fill:#e8cf8d; font-size:11px; }
+.chart-legend,.bar-series-legend { flex-wrap:wrap; overflow-wrap:anywhere; }
+.pivot-table td[data-number-tone],.data-grid td[data-number-tone] { max-width:320px; overflow:hidden; text-overflow:ellipsis; }
+.export-snapshot-note { white-space:normal; max-width:42rem; }
+@media(max-width:640px) { .number-format-card,.number-rule { padding:10px; } .number-format-card input,.number-format-card .ui-button { min-height:44px; } .bar-number { max-width:145px; } }
+.editor-tabs { overflow-x:auto; }
+.editor-tabs > button { flex:0 0 auto; }
+@media(max-width:600px) { .editor-tabs { flex-wrap:nowrap; padding-bottom:10px; } }
+.number-format-legend { margin:6px 0 12px; font-size:12px; max-width:100%; overflow-wrap:anywhere; }
+.number-format-legend summary { cursor:pointer; min-height:28px; }
+.number-format-legend[open] { max-height:220px; overflow:auto; padding:8px; border:1px solid var(--line); border-radius:6px; }
+.number-format-legend ol { padding-left:22px; }

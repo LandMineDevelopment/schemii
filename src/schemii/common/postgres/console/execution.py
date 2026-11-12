@@ -261,10 +261,15 @@ def validate_transaction_statements(
     return ConsoleTransactionScript(executable, terminal_action)
 
 
-def json_console_value(value: Any, *, maximum_bytes: int = MAX_CONSOLE_CELL_BYTES) -> Any:
+def json_console_value(value: Any, *, maximum_bytes: int = MAX_CONSOLE_CELL_BYTES, type_oid: int | None = None) -> Any:
     """Convert common psycopg values to stable JSON without losing precision."""
 
-    if value is None or type(value) in {bool, int, float, str}:
+    # Built-in SQL integer/numeric scalars use exact text outside JavaScript's
+    # integer range. JSON/JSONB, arrays and unknown loaders retain their types;
+    # nested conversion intentionally has no SQL scalar type metadata.
+    if type(value) is int and type_oid in {20, 21, 23, 1700} and abs(value) > 9007199254740991:
+        converted = str(value)
+    elif value is None or type(value) in {bool, int, float, str}:
         converted = value
     elif isinstance(value, Decimal):
         converted = str(value)

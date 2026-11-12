@@ -1,3 +1,4 @@
+import { formattingErrors, formattingOutputs } from './number-format.js';
 import { calculationErrors, visibleMeasures } from "./measures.js";
 import { timeAnalysisErrors } from './time-analysis.js';
 import { availableFields, aggregateChoices } from './report-state.js';
@@ -22,7 +23,7 @@ export function tileAggregateChoices(tile, draft, catalog, field) {
 }
 export const fieldKey = field => JSON.stringify([field.table, field.column]);
 export function newTile() {
-  return { id: crypto.randomUUID(), title: '', kind: 'bar', dimensions: [], rowDimensions: [], columnDimensions: [], pivotTotals: pivotDefaults(), measures: [], hiddenMeasures: [], calculations: [], kpiComparison: null, detailFields: [], reportFilters: [], sort: [], aggregateFilters: [], topN: null, limit: 100 };
+  return { id: crypto.randomUUID(), title: '', kind: 'bar', dimensions: [], rowDimensions: [], columnDimensions: [], pivotTotals: pivotDefaults(), measures: [], hiddenMeasures: [], calculations: [], kpiComparison: null, numberFormats: [], formatLocale: null, detailFields: [], reportFilters: [], sort: [], aggregateFilters: [], topN: null, limit: 100 };
 }
 export function tileErrors(tile, model, catalog) {
   const errors = [];
@@ -49,7 +50,7 @@ export function tileErrors(tile, model, catalog) {
     if (!Number.isInteger(totals.maximumColumns) || totals.maximumColumns < 1 || totals.maximumColumns > 24 || !Number.isInteger(totals.maximumRows) || totals.maximumRows < 1 || totals.maximumRows > 200) errors.push('Choose 1–24 column groups and 1–200 preview rows.');
     if (tile.timeAnalysis && ((tile.timeAnalysis.comparison || 'none') !== 'none' || tile.timeAnalysis.runningTotal)) errors.push('Pivot calendar grouping supports period values. Use a report or chart for comparisons and running totals.');
   }
-  return [...errors, ...timeAnalysisErrors({ ...tile, dimensions: tileDimensions(tile) }), ...reportControlErrors(tile, model, catalog), ...calculationErrors(tile,reportOutputs(tile,model,catalog))];
+  return [...errors, ...timeAnalysisErrors({ ...tile, dimensions: tileDimensions(tile) }), ...reportControlErrors(tile, model, catalog), ...calculationErrors(tile,reportOutputs(tile,model,catalog)), ...formattingErrors(tile,formattingOutputs(tile,reportOutputs(tile,model,catalog)))];
 }
 export const reportOutputKey = output => JSON.stringify([output.table, output.column, output.aggregate || 'none', output.kind || 'value']);
 // Compare decimal values without first rounding either token through Number.
