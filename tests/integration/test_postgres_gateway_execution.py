@@ -25,6 +25,30 @@ from schemii.common.postgres.models import PostgresCatalog
 from tests.integration.postgres_fixture import PostgresMetadataHarness
 
 
+# Versioned compatibility and maintenance source-server oracles.
+from contextlib import contextmanager
+from types import SimpleNamespace
+from schemii.common.postgres.errors import PostgresGatewayError
+from schemii.schemii.designs.importer import import_postgres_catalog
+from schemii.schemii.designs.models import DesignColumn, SchemiiDesignReplace
+from schemii.schemii.designs.store import InMemoryDesignRepository
+from schemii.schemii.migrations.models import (
+    MigrationExecutionCreate,
+    MigrationPlanCreate,
+)
+from schemii.schemii.migrations.planner import preservation_matches
+from schemii.schemii.migrations.repository import (
+    ExecutionWork,
+    InMemoryMigrationRepository,
+)
+from schemii.schemii.migrations.service import MigrationService, MigrationServiceError
+from schemii.schemii.workspaces.models import WorkspaceCreateRecord
+from schemii.schemii.workspaces.store import InMemoryWorkspaceRepository
+from tests.integration.test_design_deployment_postgres import (
+    owned_source as owned_source,
+)
+
+
 @dataclass(frozen=True)
 class GatewayTarget:
     connection: ResolvedPostgresConnection
@@ -506,3 +530,348 @@ def test_named_fixed_scalar_extremes_preserve_every_row_and_export_snapshot(gate
     finally:
         session.close()
     assert gateway._connection_capacity._total == 0
+
+
+def services(source, namespace):
+    profile = source.profile.model_copy(update={"owner_id": "owner"})
+
+    class Access:
+        @contextmanager
+        def use(self, owner, connection_id):
+            assert (owner, connection_id) == ("owner", profile.id)
+            yield profile
+
+    gateway = PsycopgPostgresGateway()
+    designs = InMemoryDesignRepository()
+    workspaces = InMemoryWorkspaceRepository(designs=designs)
+    repository = InMemoryMigrationRepository(designs)
+    service = MigrationService(
+        repository=repository,
+        connection_access=Access(),
+        postgres=gateway,
+        workspaces=workspaces,
+        designs=designs,
+    )
+    catalog = gateway.introspect(profile, namespace)
+    workspace = service.create_import_workspace(
+        "owner",
+        WorkspaceCreateRecord(
+            name="Owned compatibility",
+            connection_id=profile.id,
+            connection_owner_id="owner",
+            database=profile.database,
+            namespace=namespace,
+        ),
+        import_postgres_catalog(catalog),
+        profile.revision,
+        catalog,
+    )
+    return SimpleNamespace(
+        service=service,
+        gateway=gateway,
+        designs=designs,
+        repository=repository,
+        workspace=workspace,
+        profile=profile,
+    )
+
+
+def save(f, content):
+    current = f.designs.get("owner", f.workspace.id)
+    return f.designs.replace(
+        "owner",
+        f.workspace.id,
+        SchemiiDesignReplace(
+            expected_design_revision=current.revision, content=content
+        ),
+    )
+
+
+def review(f, refresh=(), allow_destructive=False):
+    current = f.designs.get("owner", f.workspace.id)
+    return f.service.create_plan(
+        "owner",
+        f.workspace.id,
+        MigrationPlanCreate(
+            expected_workspace_revision=f.workspace.revision,
+            expected_design_revision=current.revision,
+            allow_destructive=allow_destructive,
+            refresh_materialized_view_ids=list(refresh),
+        ),
+    )
+
+
+def apply(f, plan):
+    execution = f.service.create_execution(
+        "owner",
+        plan.id,
+        MigrationExecutionCreate(
+            review_digest=plan.review_digest,
+            confirm_destructive=plan.destructive,
+            confirm_external_changes=plan.requires_external_change_acknowledgement,
+            confirm_materialized_maintenance=plan.requires_materialized_maintenance_acknowledgement,
+        ),
+    )
+    work = f.service.execution_coordinator.claim_next("owned-pg-proof")
+    assert work is not None
+    return execution, f.service.execution_coordinator.process(work)
+
+
+def test_real_mixed_schema_proven_success_protected_unknown_and_opaque_drift_deny(
+    owned_source,
+):
+    source = owned_source
+    namespace = 'Mixed "schema"'
+    q = sql.Identifier(namespace)
+    with source.connect() as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(q))
+        connection.execute(
+            sql.SQL(
+                "CREATE TABLE {}.partitioned (id integer NOT NULL) PARTITION BY RANGE (id)"
+            ).format(q)
+        )
+        connection.execute(
+            sql.SQL(
+                "CREATE TABLE {}.part_a PARTITION OF {}.partitioned FOR VALUES FROM (0) TO (100)"
+            ).format(q, q)
+        )
+        connection.execute(
+            sql.SQL(
+                "CREATE TABLE {}.excluded (span int4range, EXCLUDE USING gist (span WITH &&))"
+            ).format(q)
+        )
+        connection.execute(
+            sql.SQL('CREATE TABLE {}.collated (label text COLLATE "C")').format(q)
+        )
+        connection.execute(sql.SQL("CREATE TABLE {}.ordinary (id integer)").format(q))
+        connection.execute(sql.SQL("INSERT INTO {}.ordinary VALUES (1)").format(q))
+    f = services(source, namespace)
+    original = f.gateway.introspect(f.profile, namespace)
+    assert original.fingerprint_version == 2 and original.safety.dependency_complete
+    desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+    table = next(item for item in desired.tables if item.name == "ordinary")
+    table.columns.append(
+        DesignColumn(id="column_" + "a" * 32, name="added", data_type="text")
+    )
+    save(f, desired)
+    plan = review(f)
+    assert (
+        plan.apply_capable
+        and plan.compatibility.operation_safe
+        and not plan.compatibility.editable_complete
+    )
+    _, result = apply(f, plan)
+    assert result.status == "succeeded" and result.sync_status == "succeeded"
+    current = f.gateway.introspect(f.profile, namespace)
+    assert preservation_matches(original, current, plan.compatibility)
+    assert f.repository.current_baseline("owner", f.workspace.id).complete is False
+    with pytest.raises(MigrationServiceError, match="incomplete"):
+        f.service.preview_baseline_reset("owner", f.workspace.id)
+    with source.connect() as connection:
+        assert connection.execute(
+            sql.SQL("SELECT id,added FROM {}.ordinary").format(q)
+        ).fetchall() == [(1, None)]
+    desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+    next(item for item in desired.tables if item.name == "partitioned").columns[
+        0
+    ].nullable = True
+    save(f, desired)
+    protected = review(f)
+    assert not protected.apply_capable and not protected.compatibility.operation_safe
+    with pytest.raises(MigrationServiceError):
+        apply(f, protected)
+    # A changed opaque partition bound/shape must still invalidate exact drift.
+    stale = current.fingerprint
+    with source.connect() as connection:
+        connection.execute(
+            sql.SQL(
+                "CREATE TABLE {}.part_b PARTITION OF {}.partitioned FOR VALUES FROM (100) TO (200)"
+            ).format(q, q)
+        )
+    with pytest.raises(PostgresMigrationStaleError):
+        f.gateway.execute_migration(
+            f.profile,
+            namespace,
+            stale,
+            ["SELECT 1;"],
+            on_started=lambda *_: None,
+            on_intended=lambda *_: None,
+        )
+    with source.connect() as connection:
+        connection.execute(
+            sql.SQL(
+                "CREATE FUNCTION {}.dynamic_reference() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$"
+            ).format(q)
+        )
+    desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+    next(item for item in desired.tables if item.name == "partitioned").columns[
+        0
+    ].nullable = False
+    next(item for item in desired.tables if item.name == "ordinary").columns[
+        -1
+    ].default_expression = "'new'::text"
+    save(f, desired)
+    unknown = review(f)
+    assert not unknown.apply_capable and unknown.compatibility.unknown_reasons
+    # Policies use a catalog dependency class outside the modeled relation graph.
+    # They must yield an explicit unknown boundary, never false completeness.
+    with source.connect() as connection:
+        connection.execute(sql.SQL("DROP FUNCTION {}.dynamic_reference()").format(q))
+        connection.execute(
+            sql.SQL(
+                "CREATE POLICY protected_policy ON {}.ordinary USING (id > 0)"
+            ).format(q)
+        )
+    policy_review = review(f)
+    assert not policy_review.apply_capable
+    assert any(
+        "outside the modeled dependency graph" in reason
+        for reason in policy_review.compatibility.unknown_reasons
+    )
+
+
+def test_real_materialized_refresh_replacement_acl_indexes_rollback_and_no_replay(
+    owned_source,
+):
+    source = owned_source
+    namespace = 'Cache "schema"'
+    q = sql.Identifier(namespace)
+    with source.connect() as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(q))
+        connection.execute(
+            sql.SQL("CREATE TABLE {}.source_data (value integer)").format(q)
+        )
+        connection.execute(sql.SQL("INSERT INTO {}.source_data VALUES (1)").format(q))
+        connection.execute(
+            sql.SQL(
+                "CREATE MATERIALIZED VIEW {}.saved AS SELECT value FROM {}.source_data WITH DATA"
+            ).format(q, q)
+        )
+        connection.execute(
+            sql.SQL("CREATE UNIQUE INDEX saved_idx ON {}.saved (value)").format(q)
+        )
+        connection.execute(
+            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                q, sql.Identifier(source.role)
+            )
+        )
+        connection.execute(
+            sql.SQL("GRANT SELECT ON {}.saved TO {} WITH GRANT OPTION").format(
+                q, sql.Identifier(source.role)
+            )
+        )
+    f = services(source, namespace)
+    design = f.designs.get("owner", f.workspace.id)
+    view_id = design.content.views[0].id
+    with source.connect() as connection:
+        connection.execute(sql.SQL("INSERT INTO {}.source_data VALUES (2)").format(q))
+    refresh = review(f, (view_id,), True)
+    assert (
+        refresh.apply_capable
+        and refresh.requires_materialized_maintenance_acknowledgement
+    )
+    execution, result = apply(f, refresh)
+    assert result.status == "succeeded" and result.sync_status == "succeeded"
+    with source.connect() as connection:
+        assert connection.execute(
+            sql.SQL("SELECT value FROM {}.saved ORDER BY value").format(q)
+        ).fetchall() == [(1,), (2,)]
+    # Sync-only recovery cannot run the already committed refresh a second time.
+    with source.connect() as connection:
+        connection.execute(sql.SQL("INSERT INTO {}.source_data VALUES (3)").format(q))
+    f.service.execution_coordinator.process(
+        ExecutionWork(
+            kind="sync", record=f.repository.get_execution("owner", execution.id)
+        )
+    )
+    with source.connect() as connection:
+        assert connection.execute(
+            sql.SQL("SELECT value FROM {}.saved ORDER BY value").format(q)
+        ).fetchall() == [(1,), (2,)]
+    assert review(f).steps == []
+    old = f.gateway.introspect(f.profile, namespace)
+    desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+    desired.views[0].definition = (
+        "SELECT value FROM "
+        + PsycopgPostgresGateway._qualified(namespace, "source_data")
+        + " WHERE value >= 2"
+    )
+    save(f, desired)
+    replacement = review(f, allow_destructive=True)
+    assert replacement.apply_capable
+    _, result = apply(f, replacement)
+    assert result.status == "succeeded"
+    updated = f.gateway.introspect(f.profile, namespace)
+    assert old.safety.preservation == updated.safety.preservation
+    with source.connect(
+        username=source.role, secret=source.role_password
+    ) as connection:
+        assert connection.execute(
+            sql.SQL("SELECT value FROM {}.saved ORDER BY value").format(q)
+        ).fetchall() == [(2,), (3,)]
+    # A valid same-type output may still violate the replayed unique index. The
+    # original object, privileges, indexes and cached rows must all roll back.
+    desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+    desired.views[0].definition = (
+        "SELECT 1 AS value FROM "
+        + PsycopgPostgresGateway._qualified(namespace, "source_data")
+    )
+    save(f, desired)
+    failure = review(f, allow_destructive=True)
+    assert failure.apply_capable
+    _, failed = apply(f, failure)
+    assert failed.status == "failed" and failed.commit_outcome == "rolled_back"
+    assert f.gateway.introspect(f.profile, namespace).fingerprint == updated.fingerprint
+    with source.connect() as connection:
+        assert connection.execute(
+            sql.SQL("SELECT value FROM {}.saved ORDER BY value").format(q)
+        ).fetchall() == [(2,), (3,)]
+    denied = source.profile.model_copy(
+        update={
+            "username": source.role,
+            "password": SecretStr(source.role_password),
+        }
+    )
+    denied_catalog = f.gateway.introspect(denied, namespace)
+    with pytest.raises(PostgresGatewayError):
+        f.gateway.execute_migration(
+            denied,
+            namespace,
+            denied_catalog.fingerprint,
+            [
+                f"REFRESH MATERIALIZED VIEW {PsycopgPostgresGateway._qualified(namespace, 'saved')};"
+            ],
+            on_started=lambda *_: None,
+            on_intended=lambda *_: None,
+        )
+    assert f.gateway.introspect(f.profile, namespace).fingerprint == updated.fingerprint
+
+    # Refreshing an unpopulated cache is explicit maintenance, independent from
+    # the retained create-time WITH NO DATA intent, and does not repeat later.
+    with source.connect() as connection:
+        connection.execute(
+            sql.SQL(
+                "CREATE MATERIALIZED VIEW {}.unpopulated AS SELECT value FROM {}.source_data WITH NO DATA"
+            ).format(q, q)
+        )
+        connection.execute(
+            sql.SQL(
+                "CREATE UNIQUE INDEX unpopulated_idx ON {}.unpopulated(value)"
+            ).format(q)
+        )
+    empty = services(source, namespace)
+    empty_design = empty.designs.get("owner", empty.workspace.id)
+    empty_view = next(
+        item for item in empty_design.content.views if item.name == "unpopulated"
+    )
+    assert empty_view.populate_on_create is False
+    planned = review(empty, (empty_view.id,), True)
+    assert planned.apply_capable
+    assert planned.materialized_maintenance[0].populated_before is False
+    _, finished = apply(empty, planned)
+    assert finished.status == "succeeded" and finished.sync_status == "succeeded"
+    with source.connect() as connection:
+        assert connection.execute(
+            sql.SQL("SELECT value FROM {}.unpopulated ORDER BY value").format(q)
+        ).fetchall() == [(1,), (2,), (3,)]
+    assert review(empty).steps == []

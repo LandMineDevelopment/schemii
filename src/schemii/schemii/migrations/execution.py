@@ -53,6 +53,8 @@ from .planner import (
     new_baseline_content,
     migration_compatibility,
     preservation_matches,
+    materialized_maintenance,
+    materialized_preservation_matches,
     physical_column_order_mismatches,
     preserve_column_display_order,
 )
@@ -120,6 +122,9 @@ class MigrationExecutionCoordinator:
     ) -> ExecutionReservation:
         """Persist an idempotent receipt without performing target I/O."""
 
+        if record.plan.requires_materialized_maintenance_acknowledgement and not request.confirm_materialized_maintenance:
+            raise MigrationServiceError(409,"materialized_maintenance_confirmation_required",
+                "Explicitly acknowledge the lock and replacement of cached materialized results")
         try:
             return self._repository.reserve_execution(
                 owner_id,
@@ -303,10 +308,56 @@ class MigrationExecutionCoordinator:
                 status=503,
             )
 
-        compatibility = migration_compatibility(record.authority.live_catalog, record.authority.live_content,
-            record.authority.merged_content, tuple(table.name for table in record.authority.merged_content.tables if table.id in record.authority.rebuild_table_ids))
-        if plan.compatibility is not None and (not compatibility.operation_safe or compatibility != plan.compatibility):
-            return self._fail_before_apply(execution_record, "compatibility_evidence_changed", "Operation safety no longer matches the reviewed catalog evidence")
+        verified_names = []
+        for operation in plan.materialized_maintenance:
+            view = next(
+                (
+                    item
+                    for item in record.authority.merged_content.views
+                    if item.id == operation.view_id
+                ),
+                None,
+            )
+            if view is None:
+                return self._fail_before_apply(
+                    execution_record,
+                    "materialized_maintenance_changed",
+                    "The reviewed materialized view is unavailable",
+                )
+            report, _ = materialized_maintenance(
+                record.authority.live_catalog, view, operation.operation
+            )
+            if not report.eligible or report != operation:
+                return self._fail_before_apply(
+                    execution_record,
+                    "materialized_maintenance_changed",
+                    "Materialized preservation or permission evidence changed",
+                )
+            verified_names.append(operation.name)
+        compatibility = migration_compatibility(
+            record.authority.live_catalog,
+            record.authority.live_content,
+            record.authority.merged_content,
+            tuple(
+                table.name
+                for table in record.authority.merged_content.tables
+                if table.id in record.authority.rebuild_table_ids
+            )
+            + tuple(
+                item.name
+                for item in plan.materialized_maintenance
+                if item.operation == "refresh"
+            ),
+            tuple(verified_names),
+        )
+        if not compatibility.operation_safe or (
+            plan.compatibility is not None and compatibility != plan.compatibility
+        ):
+            return self._fail_before_apply(
+                execution_record,
+                "compatibility_evidence_changed",
+                "Operation safety no longer matches the reviewed catalog evidence",
+            )
         intended: dict[str, Any] = {}
 
         def on_started(transaction_id: str, target_identity: dict[str, Any]) -> None:
@@ -339,9 +390,37 @@ class MigrationExecutionCoordinator:
                 record.authority.namespace,
                 candidate,
                 record.authority.merged_content,
+                catalog=catalog,
+            )
+            after_compatibility = migration_compatibility(
+                catalog,
+                record.authority.live_content,
+                record.authority.merged_content,
+                tuple(
+                    table.name
+                    for table in record.authority.merged_content.tables
+                    if table.id in record.authority.rebuild_table_ids
+                )
+                + tuple(
+                    item.name
+                    for item in plan.materialized_maintenance
+                    if item.operation == "refresh"
+                ),
+                tuple(verified_names),
             )
             if (
-                (not complete and (not compatibility.operation_safe or not preservation_matches(record.authority.live_catalog, catalog, compatibility)))
+                not after_compatibility.operation_safe
+                or not preservation_matches(
+                    record.authority.live_catalog,
+                    catalog,
+                    compatibility,
+                    tuple(verified_names),
+                )
+                or not materialized_preservation_matches(
+                    record.authority.live_catalog,
+                    catalog,
+                    plan.materialized_maintenance,
+                )
                 or remaining
                 or blockers
                 or physical_order_mismatches

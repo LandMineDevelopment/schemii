@@ -1321,7 +1321,7 @@ class PsycopgPostgresGateway:
             unknown = self._one(self._execute_rows(database_connection, SAFETY_UNKNOWNS_QUERY, (namespace,)))
             reasons = []
             for field, reason in (("routine_bodies", "Routine bodies and dynamic references are not fully tracked by pg_depend"),
-                                  ("opaque_dependencies", "Foreign or composite objects have unproven dependencies"),
+                                  ("opaque_dependencies", "Catalog objects outside the modeled dependency graph have unproven dependencies"),
                                   ("inaccessible", "Schema metadata is inaccessible to this role")):
                 if type(unknown.get(field)) is not bool:
                     raise PostgresCatalogValidationError()
