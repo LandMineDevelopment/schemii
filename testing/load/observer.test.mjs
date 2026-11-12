@@ -53,6 +53,17 @@ test('known internal counters match endpoint process and remain distinct from un
   assert(!('ownedBackends' in output)); assert(!('activeJobs' in output)); assert(!('ingressConnections' in output));
   assert.equal(output.qualification.generatorHeadroomVerified, false); assert.equal(output.qualification.capacityEligible, false);
 });
+test('one verified API plus container init retains all resource accounting; unknown or replaced init cannot qualify', async t => {
+  const f = await fixture(t), sampled = await sampleContainer(f.container, f), now = Date.now();
+  const init = { pid: 99, birthTick: '100', namespacePid: 1, role: 'container_init', rssBytes: 4096, threads: 1, fds: 1 };
+  const api = { ...sampled.processes[0], namespacePid: 2 }, app = { ...sampled, rssBytes: sampled.rssBytes + init.rssBytes,
+    initProcessVerified: true, apiProcessVerified: true, processes: [init, api] };
+  const snapshot = { ...internal(now), processPid: 2 }, output = combineObservation(receipt, { schemii: app }, snapshot, { now });
+  assert.equal(output.apiProcesses, 1); assert.equal(output.appRssBytes, 86016); assert.equal(output.containers.schemii.cpuUsageUsec, sampled.cpuUsageUsec);
+  assert.equal(combineObservation(receipt, { schemii: { ...app, initProcessVerified: false } }, snapshot, { now }).status, 'unavailable');
+  const bound = { ...f.container, initProcess: { pid: 99, birthTick: '100', namespacePid: 1 }, apiProcess: { pid: 100, birthTick: '999', namespacePid: 2 } };
+  assert.equal((await sampleContainer(bound, f)).status, 'unavailable');
+});
 test('busy cursor, wrong endpoint and stale internal observations never manufacture gauges', async t => {
   const f = await fixture(t), app = await sampleContainer(f.container, f), now = Date.now(), value = internal(now);
   delete value.sources.console.counts.nativeCursors;

@@ -78,10 +78,19 @@ export async function sampleContainer(container, { procRoot = '/proc', cgroupRoo
       }
     }
     if ((await processIdentity(identity.pid, procRoot)).birthTick !== identity.birthTick) throw new Error('process_replaced');
+    let initProcessVerified = false, apiProcessVerified = false;
+    if (container.initProcess || container.apiProcess) {
+      const matches = (process, expected) => expected && process.pid === expected.pid && process.birthTick === expected.birthTick && process.namespacePid === expected.namespacePid;
+      const init = processes.filter(process => process.role === 'container_init'), api = processes.filter(process => process.role === 'api');
+      initProcessVerified = init.length === 1 && matches(init[0], container.initProcess) && init[0].pid === identity.pid && init[0].namespacePid === 1;
+      apiProcessVerified = api.length === 1 && matches(api[0], container.apiProcess);
+      if (!initProcessVerified || !apiProcessVerified || processes.some(process => !['container_init', 'api'].includes(process.role))) throw new Error('fixture_process_binding_changed');
+    }
     return { status: 'available', memoryCurrentBytes: counter(memory), ...budgets,
       cpuUsageUsec: counter(cpuValues.usage_usec || ''), cpuObservedMonotonicMs: cpu.observedMonotonicMs,
       throttledUsec: counter(cpuValues.throttled_usec || ''),
-      rssBytes: processes.reduce((total, process) => total + process.rssBytes, 0), processes, exitedDuringSample: exited };
+      rssBytes: processes.reduce((total, process) => total + process.rssBytes, 0), processes, exitedDuringSample: exited,
+      ...(container.initProcess || container.apiProcess ? { initProcessVerified, apiProcessVerified } : {}) };
   } catch (error) {
     let reason = failure(error);
     if (['ENOENT', 'ESRCH'].includes(error.code)) {
@@ -145,6 +154,9 @@ export function combineObservation(receipt, containers, internal, { previous = n
     output.qualification.activeJobs = ownership.work.jobScope;
   }
   const apis = app.processes.filter(process => process.role === 'api');
+  if (app.processes.some(process => process.role === 'container_init') && (app.initProcessVerified !== true || app.apiProcessVerified !== true)) {
+    output.status = 'unavailable'; output.reason = 'fixture_process_binding_unqualified'; return output;
+  }
   if (previous?.apiProcesses === 1 && JSON.stringify(previous.containers.schemii.processes.filter(process => process.role === 'api').map(({ pid, birthTick }) => ({ pid, birthTick }))) !==
       JSON.stringify(apis.map(({ pid, birthTick }) => ({ pid, birthTick })))) {
     output.status = 'unavailable'; output.reason = 'api_process_identity_changed'; return output;
@@ -158,7 +170,7 @@ export function combineObservation(receipt, containers, internal, { previous = n
   }
   output.qualification.internalStatus = 'available';
   if (apis.length === 1 && apis[0].namespacePid === internal.processPid &&
-      app.processes.every(process => ['api', 'launcher_shell'].includes(process.role))) output.apiProcesses = 1;
+      app.processes.every(process => ['api', 'launcher_shell', 'container_init'].includes(process.role))) output.apiProcesses = 1;
   output.qualification.apiProcessScope = output.apiProcesses === 1 ? 'verified_cgroup_argv_and_endpoint_pid' : 'worker_count_unverified';
   const source = internal.sources?.source;
   if (source?.status === 'available') {
