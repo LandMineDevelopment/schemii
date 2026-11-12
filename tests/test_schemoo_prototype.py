@@ -102,8 +102,9 @@ def test_invalid_requests_rejected(catalog, changes):
 
 def test_parallel_roles_require_explicit_path(catalog):
     catalog["relationships"].append({**catalog["relationships"][0], "id": "other_org_fk"})
+    assert compile_preview(catalog, request(relationships=["org_fk", "other_org_fk"]))["usedRelationships"] == []
     with pytest.raises(ValueError, match="ambiguous"):
-        compile_preview(catalog, request(relationships=["org_fk", "other_org_fk"]))
+        compile_preview(catalog, request(relationships=["org_fk", "other_org_fk"], fields=[{"table": "org", "column": "name"}]))
 
 
 def test_null_operator_and_scalar_summary(catalog):
@@ -111,3 +112,95 @@ def test_null_operator_and_scalar_summary(catalog):
     assert 'WHERE t0."org_id" IS NULL' in result["sql"]
     assert "GROUP BY" not in result["sql"]
     assert result["grain"] == "One summary row"
+
+
+def _qualified_composite_catalog():
+    return {"namespace": "one", "tables": [
+        {"namespace": schema, "name": "shared.name", "primaryKey": ["tenant", "id"], "columns": [
+            {"name": name, "dataType": "integer" if name != "label" else "text", "nullable": False}
+            for name in ["tenant", "id", "label"]]} for schema in ["one", 'other"schema']],
+        "relationships": [{"id": "qualified_fk", "name": "two_pairs", "sourceNamespace": "one", "sourceTable": "shared.name",
+            "targetNamespace": 'other"schema', "targetTable": "shared.name", "columns": [
+                {"source": "tenant", "target": "tenant"}, {"source": "id", "target": "id"}]}]}
+
+
+def _qualified_composite_request():
+    return {"root": "old_stable_id", "nodes": [
+        {"id": "old_stable_id", "table": "shared.name", "label": "Left"},
+        {"id": "alias_right", "namespace": 'other"schema', "table": "shared.name", "label": "Right"}],
+        "edges": [{"id": "old_edge", "relationshipId": "qualified_fk", "source": "old_stable_id", "target": "alias_right"}],
+        "fields": [{"table": "old_stable_id", "column": "label"}, {"table": "alias_right", "column": "label"}]}
+
+
+def test_qualified_duplicate_names_keep_legacy_identity_and_join_every_pair_forward_reverse_exists():
+    from copy import deepcopy
+    catalog, query = _qualified_composite_catalog(), _qualified_composite_request()
+    before = deepcopy(query)
+    forward = compile_preview(catalog, query)
+    assert 'FROM "one"."shared.name"' in forward["sql"]
+    assert 'JOIN "other""schema"."shared.name"' in forward["sql"]
+    assert 't0."tenant" = t1."tenant" AND t0."id" = t1."id"' in forward["sql"]
+    assert query == before
+    reverse = compile_preview(catalog, {**query, "root": "alias_right"})
+    assert 'FROM "other""schema"."shared.name"' in reverse["sql"]
+    assert 't1."tenant" = t0."tenant" AND t1."id" = t0."id"' in reverse["sql"]
+    existence = compile_preview(catalog, {**query, "fields": [query["fields"][0]], "reportFilters": [
+        {"mode": "exists", "conditions": [{"table": "alias_right", "column": "label", "operator": "eq", "value": "second-pair sentinel"}]}]})
+    assert 'EXISTS (' in existence["sql"]
+    assert 't0."tenant" = e0_1."tenant" AND t0."id" = e0_1."id"' in existence["sql"]
+    assert existence["usedRelationships"] == ["old_edge"]
+
+
+def test_composite_logical_mapping_validates_every_pair_and_complete_uniqueness():
+    from copy import deepcopy
+    catalog, query = _qualified_composite_catalog(), _qualified_composite_request()
+    query["edges"] = [{"id": "logical", "kind": "logical", "source": "old_stable_id", "target": "alias_right",
+                       "columns": deepcopy(catalog["relationships"][0]["columns"])}]
+    query["fields"] = [{"table": "alias_right", "column": "label"}, {"table": "old_stable_id", "column": "id", "aggregate": "sum"}]
+    result = compile_preview(catalog, query)
+    assert result["repetitionDiagnostics"] == []  # Complete two-column target key prevents fanout.
+    query["edges"][0]["columns"] = [{"source": "tenant", "target": "tenant"}]
+    assert compile_preview(catalog, query)["repetitionDiagnostics"][0]["code"] == "measure_repetition"
+    query["edges"][0]["columns"].append({"source": "id", "target": "label"})
+    with pytest.raises(ValueError, match="comparable"):
+        compile_preview(catalog, query)
+
+
+@pytest.mark.parametrize("mapping", [
+    {"columns": []}, {"columns": [{"source": "id"}]},
+    {"columns": [{"source": "id", "target": "id"}, {"source": "id", "target": "tenant"}]},
+    {"sourceColumn": "id"}, {"sourceColumn": "tenant", "targetColumn": "tenant", "columns": [{"source": "id", "target": "id"}]},
+])
+def test_logical_mapping_json_rejects_incomplete_duplicate_and_conflicting_forms(mapping):
+    from schemii.schemoo.models import ModelEdge
+    with pytest.raises(ValueError):
+        ModelEdge.model_validate({"id": "logical", "kind": "logical", "source": "left", "target": "right", **mapping})
+
+
+def test_legacy_scalar_mapping_roundtrips_and_foreign_key_overrides_are_rejected():
+    from schemii.schemoo.models import ModelEdge, ModelNode
+    edge = {"id": "old", "kind": "logical", "source": "a", "target": "b", "sourceColumn": "id", "targetColumn": "id"}
+    assert ModelEdge.model_validate(edge).model_dump(exclude_none=True)["sourceColumn"] == "id"
+    with pytest.raises(ValueError):
+        ModelEdge.model_validate({**edge, "kind": "foreign_key", "relationshipId": "fk"})
+    for namespace in ["", 42, ["one"]]:
+        with pytest.raises(ValueError):
+            ModelNode.model_validate({"id": "node", "table": "shared.name", "namespace": namespace, "label": "Source"})
+    catalog, query = _qualified_composite_catalog(), _qualified_composite_request()
+    query["edges"][0]["columns"] = [{"source": "tenant", "target": "tenant"}]
+    assert 't0."tenant" = t1."tenant" AND t0."id" = t1."id"' in compile_preview(catalog, query)["sql"]
+
+
+def test_legacy_fk_hash_resolver_is_default_namespace_and_endpoint_bound():
+    from schemii.schemoo.domain import legacy_relationship_id, qualified_relationship_id
+    catalog, query = _qualified_composite_catalog(), _qualified_composite_request()
+    left = catalog["relationships"][0]
+    left.update(sourceNamespace="one", targetNamespace="one", id=qualified_relationship_id("one", "shared.name", "two_pairs"))
+    catalog["relationships"].append({**left, "id": qualified_relationship_id('other"schema', "shared.name", "two_pairs"),
+                                      "sourceNamespace": 'other"schema', "targetNamespace": 'other"schema'})
+    query["nodes"][1].pop("namespace")
+    query["edges"][0]["relationshipId"] = legacy_relationship_id(left)
+    assert compile_preview(catalog, query)["usedRelationships"] == ["old_edge"]
+    query["nodes"][0]["namespace"] = query["nodes"][1]["namespace"] = 'other"schema'
+    with pytest.raises(ValueError, match="known foreign key"):
+        compile_preview(catalog, query)

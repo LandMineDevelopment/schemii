@@ -1,9 +1,10 @@
 """Owner-scoped semantic modeling API, composed into the unified server."""
 
 from contextlib import contextmanager
+from typing import Annotated
 from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
-from pydantic import Field, StrictBool
+from pydantic import Field, StrictBool, ValidationError
 from schemii.common.api.errors import ApiProblem
 from schemii.common.api.postgres import postgres_api_problem
 from schemii.common.connections.store import ConnectionNotFoundError
@@ -11,13 +12,13 @@ from schemii.common.metadata.models import Principal, get_current_principal
 from schemii.common.metadata.limit_events import LimitEventNotice
 from schemii.common.postgres.errors import PostgresGatewayError
 from schemii.common.query_executions.errors import ConsoleServiceError
-from .catalog import initial_positions, catalog_contract
+from .catalog import initial_positions, model_source_contract
 from .models import (Contract, ModelCreate, ModelDuplicate, ModelUpdate, ModelPatch, LayoutUpdate, ExploreUpdate,
                      ModelDefinition, ExploreState, SchemooModel, ModelSummary, DomainValues,
                      PreviewCreate, PreviewUpdate, SavedPreview)
 from .store import (ModelInUseError, ModelNotFoundError, ModelConflictError, ModelStorageUnavailableError, ModelLimitError, ModelDocumentLimitError, PreviewNameConflictError)
 from .service import load_model, model_catalog, plan_query, execute_query, domain_query, domain_values_plan, document, patch_model_definition
-from .domain import domain_table
+from .domain import domain_source, definition_namespaces
 from .prototype import analyze_model
 
 router = APIRouter(prefix="/api/v1/schemoo", tags=["schemoo"])
@@ -111,14 +112,36 @@ def _validate_connections(catalog, definition):
         raise ApiProblem(422, "invalid_model_connection", str(error)) from error
 
 
+def _scoped_definition(catalog, definition, previous=None, *, creating=False):
+    rules = document(definition)
+    # Assistants may intentionally create an empty draft and fill it through
+    # later atomic edits. Its baseline is empty, never the complete catalog.
+    if creating and (rules["nodes"] or rules.get("root")) and not any(
+            node["id"] == rules.get("root") and not node.get("derivation") for node in rules["nodes"]):
+        raise ApiProblem(422, "invalid_model_source", "Choose an accessible starting source for this model.")
+    try:
+        # Validate physical bindings and calculations, while keeping draft-save
+        # semantics for incomplete filters and enabled cycles.
+        analyze_model(catalog, rules)
+        contract = model_source_contract(catalog, rules, document(previous) if previous is not None else None)
+        return ModelDefinition.model_validate({**rules, "sourceContract": contract})
+    except ValidationError as error:
+        raise ApiProblem(422, "model_source_limit", "Selected sources and their required keys, joins, and filter dependencies exceed the model's source-contract limits. Choose a smaller subset.") from error
+    except ValueError as error:
+        raise ApiProblem(422, "invalid_model_source", str(error)) from error
+
+
 @router.get("/catalog")
 def get_catalog(request: Request, connection_id: str = Query(pattern=r"^pg_[0-9a-f]{32}$"),
                 namespace: str = Query(min_length=1, max_length=63),
+                namespaces: list[Annotated[str, Field(min_length=1, max_length=63)]] | None = Query(default=None, max_length=16),
                 principal: Principal = Depends(get_current_principal)) -> dict:
     with api_errors():
         services = _services(request)
+        if len(set([namespace, *(namespaces or [])])) > 16:
+            raise ApiProblem(422, "model_source_limit", "Choose at most 16 source schemas for one model.")
         return initial_positions(services, principal.user_id, services.model_catalogs.get(
-            services, principal.user_id, connection_id, namespace, fresh=True))
+            services, principal.user_id, connection_id, namespace, fresh=True, **({"namespaces": namespaces} if namespaces else {})))
 
 
 @router.get("/models", response_model=ModelList)
@@ -131,15 +154,21 @@ def list_models(request: Request, principal: Principal = Depends(get_current_pri
 def create_model(body: CreateRequest, request: Request, principal: Principal = Depends(get_current_principal)):
     with api_errors():
         services = _services(request)
-        catalog = services.model_catalogs.get(services, principal.user_id, body.connection_id, body.namespace, fresh=True)
+        try:
+            namespaces = definition_namespaces(body.namespace, document(body.definition))
+        except ValueError as error:
+            raise ApiProblem(422, "model_source_limit", str(error)) from error
+        catalog = services.model_catalogs.get(services, principal.user_id, body.connection_id, body.namespace, fresh=True,
+                                             **({"namespaces": namespaces} if namespaces != [body.namespace] else {}))
         profile = services.connections.get(principal.user_id, body.connection_id)
-        definition = ModelDefinition.model_validate({**body.definition.model_dump(mode="json", by_alias=True),
-                                                     "sourceContract": catalog_contract(catalog)})
+        if body.catalog_fingerprint and body.catalog_fingerprint != catalog["fingerprint"]:
+            raise ApiProblem(409, "model_source_changed", "The source schema changed while you were choosing sources. Reload sources and review your selection before creating the model.")
+        if any(edge.kind == "logical" for edge in body.definition.edges):
+            _validate_connections(catalog, body.definition)
+        definition = _scoped_definition(catalog, body.definition, creating=True)
         record = ModelCreate.model_validate({**body.model_dump(), "definition": definition,
                                              "database": catalog["database"],
                                              "catalog_fingerprint": catalog["fingerprint"]})
-        if any(edge.kind == "logical" for edge in record.definition.edges):
-            _validate_connections(catalog, record.definition)
         return services.models.create(principal.user_id, record,
                                       connection_owner_id=getattr(profile, "owner_id", None) or principal.user_id)
 
@@ -167,13 +196,11 @@ def update_model(model_id: str, body: ModelUpdate, request: Request, principal: 
     with api_errors():
         services = _services(request)
         current = load_model(services, principal.user_id, model_id, body.expected_revision)
-        if body.definition.sourceContract is None:
-            catalog = model_catalog(services, principal.user_id, current, fresh=True)
-            definition = ModelDefinition.model_validate({**body.definition.model_dump(mode="json", by_alias=True),
-                                                         "sourceContract": catalog_contract(catalog)})
-            body = body.model_copy(update={"definition": definition})
+        catalog = model_catalog(services, principal.user_id, current, fresh=True, definition=body.definition)
         if any(edge.kind == "logical" for edge in body.definition.edges):
-            _validate_connections(model_catalog(services, principal.user_id, current, fresh=True), body.definition)
+            _validate_connections(catalog, body.definition)
+        body = body.model_copy(update={"definition": _scoped_definition(catalog, body.definition, current.definition),
+                                       "catalog_fingerprint": catalog["fingerprint"]})
         return services.models.update(principal.user_id, model_id, body)
 
 
@@ -296,11 +323,11 @@ def author_domain_values(model_id: str, body: AuthorDomainRequest, request: Requ
     with api_errors():
         services = _services(request)
         model = load_model(services, principal.user_id, model_id, body.expected_revision)
-        catalog = model_catalog(services, principal.user_id, model, fresh=True)
+        catalog = model_catalog(services, principal.user_id, model, fresh=True, definition=body.definition)
         domain = document(body.domain)
         try:
-            table = domain_table(domain, document(body.definition)["nodes"])
+            source = domain_source(domain, document(body.definition)["nodes"])
         except ValueError as error:
             raise ApiProblem(422, "parameter_unbound", str(error)) from error
-        plan = domain_values_plan(catalog, table, domain["column"], domain.get("labelColumn") or domain["column"], body.search)
+        plan = domain_values_plan(catalog, source.get("table", ""), domain["column"], domain.get("labelColumn") or domain["column"], body.search, namespace=source.get("namespace"))
         return execute_query(services, principal.user_id, model, body.console_id, plan, background_tasks)

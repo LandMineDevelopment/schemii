@@ -1,3 +1,4 @@
+import { catalogTable, sameSource, sourceLabel } from "./logical-relationships.js";
 import { element } from "#common/dom.js";
 import { createIconButton } from "/assets/common/ui.js";
 import { helpButton, helpHeading } from "./help.js";
@@ -53,7 +54,7 @@ function section(title, children = [], open = true) {
   return node;
 }
 function fields(draft, catalog) {
-  return draft.nodes.filter(node => !node.derivation).flatMap(node => (catalog.tables.find(t => t.name === node.table)?.columns || []).map(column => ({
+  return draft.nodes.filter(node => !node.derivation).flatMap(node => (catalogTable(node, catalog)?.columns || []).map(column => ({
     table: node.id, column: column.name, label: `${node.label || node.table} · ${column.name}`,
   })));
 }
@@ -63,17 +64,19 @@ function newCondition(draft, catalog) {
 }
 function domainControls(domain, { draft, catalog, prefix, refresh, inputId }) {
   const host = element("div", { className: "mf-wide" });
-  const sources = draft.nodes.filter(n => !n.derivation).map(n => ({ id: n.id, table: n.table, label: n.label || n.table }));
-  const choices = sources.flatMap(n => (catalog.tables.find(t => t.name === n.table)?.columns || []).map(c => [JSON.stringify([n.id,n.table,c.name]), `${n.label} · ${c.name}`]));
-  for (const t of catalog.tables.filter(t => !sources.some(n => n.id === t.name && n.table === t.name))) for (const c of t.columns) choices.push([JSON.stringify([null,t.name,c.name]), `${t.name} · ${c.name} (source table)`]);
-  const selectedNode = domain.nodeId ?? sources.find(n => n.id === domain.table && n.table === domain.table)?.id ?? null;
-  host.append(labeled("Domain value column", validationKey(select(`${prefix} domain value column`, choices, JSON.stringify([selectedNode,domain.table,domain.column]), value => {
-    const [nodeId, table, column] = JSON.parse(value);
-    domain.nodeId = nodeId; domain.table = table; domain.column = column; domain.labelColumn = ""; refresh();
-  }), `input:${inputId}:domain`), "parameters"));
-  const physical = domain.nodeId != null ? draft.nodes.find(n => n.id === domain.nodeId)?.table : domain.table;
-  const labelChoices = (catalog.tables.find(t => t.name === physical)?.columns || []).map(c => [c.name,c.name]);
-  host.append(labeled("Display label (optional)", validationKey(select(`${prefix} domain label column`, [["", "Show the value"], ...labelChoices], domain.labelColumn || "", value => { domain.labelColumn=value; refresh(); }), `input:${inputId}:domain-label`)));
+  const sources = draft.nodes.filter(n => !n.derivation);
+  const choices = sources.flatMap(n => (catalogTable(n,catalog)?.columns || []).map(c => [JSON.stringify([n.id,n.namespace || catalog.namespace || "public",n.table,c.name]), `${n.label} · ${c.name}`]));
+  for (const table of catalog.tables.filter(table=>!sources.some(node=>sameSource(node,table,catalog)))) for(const column of table.columns)
+    choices.push([JSON.stringify([null,table.namespace || catalog.namespace || "public",table.name,column.name]),`${sourceLabel(table,catalog)} · ${column.name} (source table)`]);
+  const selectedNode=domain.nodeId ?? sources.find(node=>sameSource(node,domain,catalog)&&node.id===node.table)?.id ?? null;
+  const selectedSource=selectedNode==null ? domain : sources.find(node=>node.id===selectedNode);
+  const namespace=selectedSource?.namespace || catalog.namespace || "public";
+  host.append(labeled("Domain value column",validationKey(select(`${prefix} domain value column`,choices,JSON.stringify([selectedNode,namespace,selectedSource?.table,domain.column]),value=>{
+    const [nodeId,namespace,table,column]=JSON.parse(value);
+    Object.assign(domain,{nodeId,namespace,table,column,labelColumn:""});refresh();
+  }),`input:${inputId}:domain`),"parameters"));
+  const labelChoices=(catalogTable(selectedSource,catalog)?.columns || []).map(column=>[column.name,column.name]);
+  host.append(labeled("Display label (optional)",validationKey(select(`${prefix} domain label column`,[["","Show the value"],...labelChoices],domain.labelColumn || "",value=>{domain.labelColumn=value;refresh();}),`input:${inputId}:domain-label`)));
   return host;
 }
 
@@ -99,7 +102,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
       refresh();
     });
     if (!fixedField) field.querySelector("input").placeholder = preselected ? `Choose a column from ${preselected.label}` : "Search source or column";
-    const sourceType = catalog.tables.find(t => t.name === draft.nodes.find(n => n.id === condition.table)?.table)?.columns.find(c => c.name === condition.column)?.dataType;
+    const sourceType = catalogTable(draft.nodes.find(n => n.id === condition.table), catalog)?.columns.find(c => c.name === condition.column)?.dataType;
     const operatorChoices = operators.filter(([value]) => value !== "range_contains_date" || (!allowToday && sourceType === "daterange") || condition.operator === value);
     const op = select(`${prefix} condition ${index + 1} operator`, operatorChoices, condition.operator, value => {
       if (isList(value) !== isList(condition.operator)) {
@@ -123,7 +126,7 @@ export function conditionsEditor(conditions, { draft, catalog, onChange, refresh
     if (!singleCondition) row.append(action("close", `Remove ${prefix} condition ${index + 1}`, () => { conditions.splice(index, 1); refresh(); }));
     if (!["is_null", "not_null"].includes(condition.operator)) {
       const source = draft.nodes.find(n => n.id === condition.table);
-      const dataType = catalog.tables.find(t => t.name === source?.table)?.columns.find(c => c.name === condition.column)?.dataType || "";
+      const dataType = catalogTable(source, catalog)?.columns.find(c => c.name === condition.column)?.dataType || "";
       const canCompareColumn = columnComparisonOperators.has(condition.operator);
       const canUseToday = allowToday && /^(date|timestamp)/.test(dataType) && canCompareColumn;
       // Tagged selector values keep user-authored parameter IDs distinct from operand modes.

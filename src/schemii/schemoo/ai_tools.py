@@ -114,8 +114,12 @@ or modify PostgreSQL tables. There are no raw SQL, schema-write, filesystem or
 shell tools. Query planning compiles saved model rules and exploration inputs;
 execution cannot replace those rules. Preserve exposed-field restrictions and
 repair source drift explicitly without inventing a replacement catalog contract.
-Model edges may use kind=logical with source/target node IDs and sourceColumn/
-targetColumn for an equality join without a database foreign key. Omit
+Model sources carry a physical namespace separately from their table; preserve
+stable node IDs and never parse dotted names as namespaces. Read each explicitly
+selected schema through the same connection. Model edges may use kind=logical
+with source/target node IDs and an ordered columns list of {source, target} pairs
+for a composite equality join without a database foreign key. Legacy scalar
+sourceColumn/targetColumn pairs remain readable; do not mix conflicting forms. Omit
 relationshipId for these edges. Inspect current catalog column types before
 proposing a connection: both columns must have comparable types without casts.
 Casting expressions and configurable join types are not supported. Unknown or
@@ -185,6 +189,7 @@ class ModelReference(Contract):
 class CatalogArguments(Contract):
     connection_id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
     namespace: str = Field(min_length=1, max_length=63)
+    namespaces: list[Annotated[str, Field(min_length=1, max_length=63)]] | None = Field(default=None, max_length=16)
 
 
 class DeleteArguments(ModelReference):
@@ -413,7 +418,7 @@ def execute_action(services, owner, current_model_id, action):
     if name in _BODIES:
         kwargs["body"] = _BODIES[name].model_validate(args.model_dump(exclude={"model_id", "preview_id"}))
     elif name == "catalog":
-        kwargs.update(connection_id=args.connection_id, namespace=args.namespace)
+        kwargs.update(connection_id=args.connection_id, namespace=args.namespace, namespaces=args.namespaces)
     elif name == "delete_model":
         kwargs["expected_revision"] = args.expected_revision
     elif name == "delete_preview":

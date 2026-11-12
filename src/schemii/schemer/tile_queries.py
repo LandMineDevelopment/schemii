@@ -9,6 +9,7 @@ reported explicitly rather than implying a drill row count equals a measure.
 from sqlglot import exp, parse_one
 
 from schemii.common.api.errors import ApiProblem
+from schemii.schemoo.domain import source_identity
 from schemii.schemoo.models import ExploreState
 from schemii.schemoo.service import document, load_model, model_catalog, plan_query
 from schemii.schemoo.prototype import _literal
@@ -81,7 +82,7 @@ def tile_report_query(dashboard, tile, selections=None):
 def _text_order_fields(catalog, definition, fields):
     """Only coerce known PostgreSQL types lacking ordinary ordering operators."""
     nodes = {node.id: node for node in definition.nodes}
-    tables = {table["name"]: table for table in catalog["tables"]}
+    tables = {source_identity(catalog, table): table for table in catalog["tables"]}
 
     def needs_text(table, column, aggregate="none"):
         if aggregate not in {"none", "min", "max"}:
@@ -92,7 +93,7 @@ def _text_order_fields(catalog, definition, fields):
             if output:
                 return output.operation in {"min", "max"} and needs_text(output.nodeId or node.derivation.source, output.column)
             return needs_text(node.derivation.source, column)
-        details = next((item for item in tables[node.table]["columns"] if item["name"] == column), {})
+        details = next((item for item in tables[source_identity(catalog, node.model_dump(exclude_none=True))]["columns"] if item["name"] == column), {})
         kind = details.get("dataType", details.get("data_type", "")).lower().strip()
         return kind.removesuffix("[]") in {"json", "xml", "point", "line", "lseg", "box", "path", "polygon", "circle"}
 

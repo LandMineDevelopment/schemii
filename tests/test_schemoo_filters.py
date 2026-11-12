@@ -2,9 +2,10 @@
 
 import pytest
 import sqlite3
+from itertools import combinations
 from sqlglot import parse_one
 
-from schemii.schemoo.prototype import ModelValidationError, analyze_model, compile_preview
+from schemii.schemoo.prototype import ModelValidationError, _Model, analyze_model, compile_preview, validate_definition
 
 
 @pytest.fixture
@@ -364,6 +365,9 @@ def test_alias_roles_share_physical_table_without_cycle(catalog):
     assert analyze_model(catalog, {"nodes": nodes, "edges": edges}) == {"cycleEdges": []}
     edges[-1]["target"] = "org"
     assert analyze_model(catalog, {"nodes": nodes, "edges": edges}) == {"cycleEdges": ["o", "o2"]}
+    assert compile_preview(catalog, query(nodes=nodes, edges=edges))["usedRelationships"] == []
+    with pytest.raises(ModelValidationError, match="ambiguous"):
+        compile_preview(catalog, query(nodes=nodes, edges=edges, fields=[{"table": "org", "column": "name"}]))
 
 
 @pytest.mark.parametrize("changes", [{"nodes": [None]}, {"scopes": [None]}, {"reportFilters": [{"mode": "exists", "conditions": []}]}, {"selections": []}, {"scopes": [{"id": "x", "kind": "required", "alternatives": []}]}])
@@ -383,14 +387,133 @@ def test_cycle_analysis_includes_self_loops_and_disconnected_cycles(catalog):
     catalog["relationships"].append({"id": "self", "sourceTable": "org", "sourceColumn": "id", "targetTable": "org", "targetColumn": "id"})
     request = query(relationships=["self"])
     assert analyze_model(catalog, request)["cycleEdges"] == ["self"]
-    with pytest.raises(ModelValidationError, match="cycles"):
-        compile_preview(catalog, request)
+    assert compile_preview(catalog, request)["usedRelationships"] == []
+    assert validate_definition(catalog, request)["cycleEdges"] == ["self"]
+    same_source = compile_preview(catalog, {**request, "root": "org", "fields": [{"table": "org", "column": "name"}]})
+    assert "JOIN" not in same_source["sql"]
+
+
+def test_self_relationship_roles_use_distinct_aliases(catalog):
+    catalog["relationships"].append({"id": "parent", "sourceTable": "org", "sourceColumn": "id", "targetTable": "org", "targetColumn": "id"})
+    request = {"root": "child", "nodes": [{"id": node, "table": "org"} for node in ("child", "parent")],
+               "edges": [{"id": "parent", "relationshipId": "parent", "source": "child", "target": "parent"}],
+               "fields": [{"table": "parent", "column": "name"}]}
+    assert analyze_model(catalog, request)["cycleEdges"] == []
+    assert compile_preview(catalog, request)["usedRelationships"] == ["parent"]
 
 
 def test_cycle_analysis_marks_entire_triangle_not_bridge(catalog):
     catalog["relationships"].append({"id": "third", "sourceTable": "people", "sourceColumn": "id", "targetTable": "org", "targetColumn": "id"})
     request = query(relationships=["person_fk", "org_fk", "third"])
     assert analyze_model(catalog, request)["cycleEdges"] == ["person_fk", "org_fk", "third"]
+    assert compile_preview(catalog, request)["usedRelationships"] == []
+    assert validate_definition(catalog, request)["cycleEdges"] == ["person_fk", "org_fk", "third"]
+    with pytest.raises(ModelValidationError, match="ambiguous") as error:
+        compile_preview(catalog, {**request, "fields": [{"table": "org", "column": "name"}]})
+    assert error.value.details["cycleEdges"] == ["person_fk", "org_fk", "third"]
+
+
+@pytest.fixture
+def hanging_cycle(catalog):
+    catalog["tables"][1]["columns"][0]["dataType"] = "text"
+    nodes = [{"id": name, "table": name} for name in ("people", "assignment", "org")]
+    nodes.append({"id": "other_assignment", "table": "assignment"})
+    edges = [{"id": "person_fk", "relationshipId": "person_fk", "source": "assignment", "target": "people"},
+             {"id": "org_fk", "relationshipId": "org_fk", "source": "assignment", "target": "org"},
+             {"id": "other_org", "relationshipId": "org_fk", "source": "other_assignment", "target": "org"},
+             {"id": "between_assignments", "kind": "logical", "source": "assignment", "sourceColumn": "person_id",
+              "target": "other_assignment", "targetColumn": "person_id"}]
+    return catalog, query(nodes=nodes, edges=edges)
+
+
+def test_hanging_cycle_does_not_block_unique_bridge_output(hanging_cycle):
+    catalog, request = hanging_cycle
+    result = compile_preview(catalog, {**request, "fields": [{"table": "assignment", "column": "start"}]})
+    assert result["usedRelationships"] == ["person_fk"]
+    assert result["outerNodes"] == ["people", "assignment"]
+    assert analyze_model(catalog, request)["cycleEdges"] == ["org_fk", "other_org", "between_assignments"]
+
+
+@pytest.mark.parametrize("mode", ["output", "rows", "exists", "not_exists", "required", "required_keep_unmatched"])
+def test_needed_cycle_rejects_alternate_routes_through_unselected_alias(hanging_cycle, mode):
+    catalog, request = hanging_cycle
+    condition = {"table": "org", "column": "id", "operator": "eq", "value": "42"}
+    if mode == "output":
+        request["fields"] = [{"table": "org", "column": "name"}]
+    elif mode.startswith("required"):
+        rule = scope()
+        if mode == "required_keep_unmatched":
+            rule["rowBehavior"] = "keep_unmatched"
+        request["scopes"] = [rule]
+    else:
+        request["reportFilters"] = [{"mode": mode, "conditions": [condition]}]
+    with pytest.raises(ModelValidationError, match="ambiguous") as error:
+        compile_preview(catalog, request)
+    assert error.value.details["ambiguousRelationships"] == ["org_fk"]
+
+
+def test_optional_scope_only_rejects_cycle_when_enabled(hanging_cycle):
+    catalog, request = hanging_cycle
+    request["scopes"] = [{**scope(), "requirement": "optional"}]
+    assert compile_preview(catalog, request)["activeScopes"] == []
+    with pytest.raises(ModelValidationError, match="ambiguous"):
+        compile_preview(catalog, {**request, "selections": {"scope": {"active": True}}})
+
+
+def test_conditional_scope_does_not_pull_unused_cycle_into_plan(hanging_cycle):
+    catalog, request = hanging_cycle
+    request["fields"] = [{"table": "assignment", "column": "start"}]
+    request["scopes"] = [scope("conditional", "assignment", "org_id"), {**scope("conditional"), "id": "unused"}]
+    result = compile_preview(catalog, request)
+    assert result["activeScopes"] == ["scope"]
+    assert result["usedRelationships"] == ["person_fk"]
+
+
+def test_drill_output_paths_validate_even_when_they_do_not_activate_scopes(hanging_cycle):
+    catalog, request = hanging_cycle
+    request["fields"] = [{"table": "org", "column": "name"}]
+    with pytest.raises(ModelValidationError, match="ambiguous"):
+        compile_preview(catalog, request, _participation_fields=[{"table": "people", "column": "name"}],
+                        _scope_outer_nodes=["people"])
+
+
+def test_disabling_alternate_cycle_edge_resolves_needed_route(hanging_cycle):
+    catalog, request = hanging_cycle
+    request["edges"][-1]["enabled"] = False
+    request["fields"] = [{"table": "org", "column": "name"}]
+    result = compile_preview(catalog, request)
+    assert result["usedRelationships"] == ["person_fk", "org_fk"]
+    assert analyze_model(catalog, request)["cycleEdges"] == []
+
+
+def test_alias_multigraph_routes_match_exhaustive_simple_path_oracle():
+    catalog = {"tables": [{"name": "records", "columns": [{"name": "id", "dataType": "text"}]}]}
+    roles = ["a", "b", "c", "d"]
+    candidates = [*combinations(roles, 2), ("a", "b"), ("a", "a")]
+    # Every four-object topology, including a parallel relationship and self-link.
+    # Enumerating simple paths is a separate oracle from the compiler's block analysis.
+    for mask in range(1 << len(candidates)):
+        edges = [{"id": f"e{index}", "kind": "logical", "source": source, "target": target,
+                  "sourceColumn": "id", "targetColumn": "id"}
+                 for index, (source, target) in enumerate(candidates) if mask & (1 << index)]
+        request = {"root": "a", "nodes": [{"id": role, "table": "records"} for role in roles], "edges": edges}
+        model = _Model(catalog, request)
+
+        def routes(source, target, visited):
+            if source == target:
+                return [visited]
+            return [route for neighbor, _ in model.graph[source] if neighbor not in visited
+                    for route in routes(neighbor, target, visited | {neighbor})]
+
+        for target in roles:
+            paths = routes("a", target, {"a"})
+            assert model.possible_path_nodes("a", target) == set().union({"a"}, *paths)
+            selected = {**request, "fields": [{"table": target, "column": "id"}]}
+            if len(paths) == 1:
+                compile_preview(catalog, selected)
+            else:
+                with pytest.raises(ModelValidationError, match="ambiguous" if paths else "cannot reach"):
+                    compile_preview(catalog, selected)
 
 
 def test_required_scope_activates_conditional_temporal_filter(catalog):

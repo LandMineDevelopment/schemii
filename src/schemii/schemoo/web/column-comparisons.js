@@ -1,3 +1,4 @@
+import { catalogTable } from "./logical-relationships.js";
 import { comparableTypes } from "./logical-relationships.js";
 
 export const columnComparisonOperators = new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
@@ -5,7 +6,7 @@ export const columnComparisonOperators = new Set(["eq", "ne", "gt", "gte", "lt",
 /** A comparison reads two fields of one row on the exact same model alias. */
 export function comparisonColumns(condition, draft, catalog) {
   const node = draft.nodes.find(node => node.id === condition.table && !node.derivation);
-  const columns = catalog.tables.find(table => table.name === node?.table)?.columns || [];
+  const columns = catalogTable(node,catalog)?.columns || [];
   const source = columns.find(column => column.name === condition.column);
   return columns.filter(column => comparableTypes(source?.dataType, column.dataType));
 }
