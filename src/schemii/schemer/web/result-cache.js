@@ -17,12 +17,59 @@ export async function readResultStream(url, body, onFrame, signal, fetcher = fet
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 
-/** Shared across main results and drills; accounts conservatively for parsed JS values. */
+const decodedRowBytes = row => JSON.stringify(row).length * 2 + row.length * 32 + 64;
+
+/** Shared decoded capacity, with protected initial shares for main tiles. */
 export class CacheBudget {
-  constructor({ bytes = 64 * 1024 * 1024, rows = 50000 } = {}) { this.limit = bytes; this.rowLimit = rows; this.bytes = 0; this.rows = 0; }
-  get available() { return this.bytes < this.limit && this.rows < this.rowLimit; }
-  take(row) { const bytes = JSON.stringify(row).length * 2 + row.length * 32 + 64; if (this.bytes + bytes > this.limit || this.rows >= this.rowLimit) return 0; this.bytes += bytes; this.rows++; return bytes; }
+  constructor({ bytes = 64 * 1024 * 1024, rows = 50000 } = {}) {
+    this.limit = bytes; this.rowLimit = rows; this.bytes = 0; this.rows = 0; this.reservations = new Set();
+  }
+  spare(kind) {
+    const limit = kind === 'bytes' ? this.limit : this.rowLimit;
+    return Math.max(0, limit - this[kind] - [...this.reservations].reduce((sum, view) => sum + view[kind], 0));
+  }
+  get available() { return this.spare('bytes') > 0 && this.spare('rows') > 0; }
+  take(row) { return this.consume(row); }
+  consume(row, view = null) {
+    const bytes = decodedRowBytes(row);
+    if (bytes > (view?.bytes || 0) + this.spare('bytes') || 1 > (view?.rows || 0) + this.spare('rows')) return 0;
+    if (view) { view.bytes = Math.max(0, view.bytes - bytes); view.rows = Math.max(0, view.rows - 1); view.usedBytes += bytes; view.usedRows++; }
+    this.bytes += bytes; this.rows++; return bytes;
+  }
   release(bytes, rows) { this.bytes = Math.max(0, this.bytes - bytes); this.rows = Math.max(0, this.rows - rows); }
+  register(ids) {
+    const views = new Map([...new Set(ids)].map(id => {
+      const root = this;
+      const view = {
+        bytes: 0, rows: 0, usedBytes: 0, usedRows: 0, active: true, reason: 'browser_dashboard_budget',
+        get available() { return this.active && this.bytes + root.spare('bytes') > 0 && this.rows + root.spare('rows') > 0; },
+        take(row) { return this.active ? root.consume(row, this) : 0; },
+        finish() { if (!this.active) return; this.active = false; this.bytes = 0; this.rows = 0; root.reservations.delete(this); },
+        release(bytes, rows) { this.finish(); root.release(bytes, rows); },
+      };
+      this.reservations.add(view); return [id, view];
+    }));
+    this.rebalance();
+    return views;
+  }
+  rebalance() {
+    for (const kind of ['bytes', 'rows']) {
+      const cap = kind === 'bytes' ? 24 * 1024 * 1024 : 10000;
+      const used = kind === 'bytes' ? 'usedBytes' : 'usedRows';
+      let views = [...this.reservations], remaining = Math.max(0, (kind === 'bytes' ? this.limit : this.rowLimit) - this[kind]);
+      for (const view of views) view[kind] = 0;
+      while (views.length && remaining) {
+        const portion = Math.floor(remaining / views.length), extra = remaining % views.length;
+        let distributed = 0;
+        views.forEach((view, index) => {
+          const amount = Math.min(portion + (index < extra ? 1 : 0), cap - view[used] - view[kind]);
+          view[kind] += amount; distributed += amount;
+        });
+        remaining -= distributed;
+        views = views.filter(view => view[used] + view[kind] < cap);
+      }
+    }
+  }
 }
 
 /** Bound retained selections even when their empty/error results consume no rows. */
@@ -56,20 +103,21 @@ export class ResultCache {
     if (frame.type === 'rows' && !this.limitReached) {
       this.columns = frame.columns.map((column, index) => ({ ...column, name: this.plan?.outputLabels?.[index] || column.name }));
       for (const row of frame.rows) {
-        const bytes = this.rows.length < 10000 && this.bytes < 24 * 1024 * 1024 ? this.budget.take(row) : 0;
-        if (!bytes) { this.limitReached = true; this.reason = 'browser_budget'; this.loading = false; this.hasMore = false; this.controller.abort(); break; }
+        const localLimit = this.rows.length >= 10000 || this.bytes + decodedRowBytes(row) > 24 * 1024 * 1024;
+        const bytes = localLimit ? 0 : this.budget.take(row);
+        if (!bytes) { this.limitReached = true; this.reason = localLimit ? 'browser_result_limit' : this.budget.reason || 'browser_budget'; this.loading = false; this.hasMore = false; this.budget.finish?.(); this.controller.abort(); break; }
         this.bytes += bytes; this.rows.push(row);
       }
     }
-    if (frame.type === 'complete') { this.complete = true; this.limitReached ||= frame.limitReached; this.reason ||= frame.reason; this.hasMore = false; this.loading = false; }
-    if (frame.type === 'error') { this.error = frame.message; this.hasMore = false; this.loading = false; }
+    if (frame.type === 'complete') { this.budget.finish?.(); this.complete = true; this.limitReached ||= frame.limitReached; this.reason ||= frame.reason; this.hasMore = false; this.loading = false; }
+    if (frame.type === 'error') { this.budget.finish?.(); this.error = frame.message; this.hasMore = false; this.loading = false; }
     this.elapsedMs = Date.now() - this.startedAt; this.notify();
   }
   loadMore() {
     if (this.pending) return this.pending;
     if (this.closed || !this.hasMore) return Promise.resolve(this.snapshot());
     if (!this.budget.available) {
-      this.limitReached = true; this.reason = 'browser_budget'; this.hasMore = false; this.notify();
+      this.limitReached = true; this.reason = this.budget.reason || 'browser_budget'; this.hasMore = false; this.budget.finish?.(); this.notify();
       return Promise.resolve(this.snapshot());
     }
     this.loading = true; this.startedAt = Date.now(); this.notify();
@@ -81,18 +129,19 @@ export class ResultCache {
       if (!this.closed && !this.complete && !this.error && !this.limitReached) throw new Error('The result stream did not complete.');
       if (this.error) throw new Error(this.error);
     } catch (error) { if (!this.closed && !this.limitReached) this.error = `${error.message} Cached rows remain available; refresh to run again.`; }
-    finally { this.loading = false; this.hasMore = false; this.elapsedMs = Date.now() - this.startedAt; this.notify(); }
+    finally { this.budget.finish?.(); this.loading = false; this.hasMore = false; this.elapsedMs = Date.now() - this.startedAt; this.notify(); }
     return this.snapshot();
   }
   async page(index) { await this.loadMore(); const offset = index * this.pageSize; return { ...this.snapshot(), rows: this.rows.slice(offset, offset + this.pageSize), pageOffset: offset }; }
   snapshot() { return { plan: this.plan, columns: this.columns, rows: this.rows, elapsedMs: this.elapsedMs, pageOffset: 0, hasMore: this.hasMore, loading: this.loading, limitReached: this.limitReached, reason: this.reason, snapshotAt: this.snapshotAt, warnings: this.plan?.warnings || [], cachedRows: this.rows.length, error: this.error }; }
-  async close() { if (this.closed) return; this.closed = true; if (this.loading) this.error = 'Query stopped. Cached rows remain available; refresh to run again.'; this.controller.abort(); this.loading = false; this.hasMore = false; this.notify(); }
+  async close() { if (this.closed) return; this.closed = true; if (this.loading) this.error = 'Query stopped. Cached rows remain available; refresh to run again.'; this.controller.abort(); this.budget.finish?.(); this.loading = false; this.hasMore = false; this.notify(); }
   dispose() { if (this.disposed) return; this.disposed = true; void this.close(); this.budget.release(this.bytes, this.rows.length); this.bytes = 0; this.rows.length = 0; this.listeners.clear(); }
 }
 
 /** Fans one eager dashboard stream into independently browsable tile caches. */
 export class DashboardResultGroup {
-  constructor({ start }) { this.start = start; this.listeners = new Map(); this.controller = new AbortController(); }
+  constructor({ start, budget = null, tileIds = [] }) { this.start = start; this.budget = budget; this.views = budget?.register(tileIds) || new Map(); this.listeners = new Map(); this.controller = new AbortController(); }
+  budgetFor(tileId) { return this.views.get(tileId) || this.budget; }
   tile(tileId, callback) {
     this.listeners.set(tileId, callback);
     this.pending ||= Promise.resolve().then(() => this.start(frame => this.accept(frame), this.controller.signal));
@@ -100,10 +149,13 @@ export class DashboardResultGroup {
   }
   accept(frame) {
     if (frame.type === 'start') {
+      const active = new Set(frame.tiles.map(tile => tile.tileId));
+      for (const [id, view] of this.views) if (!active.has(id)) view.finish();
+      this.budget?.rebalance();
       for (const tile of frame.tiles) this.listeners.get(tile.tileId)?.({ ...frame, plan: tile.plan });
       for (const error of frame.tileErrors || []) this.listeners.get(error.tileId)?.({ ...error, type: 'error' });
     } else if (frame.tileId) this.listeners.get(frame.tileId)?.(frame);
     else if (frame.type === 'error') for (const callback of this.listeners.values()) callback(frame);
   }
-  async close() { this.controller.abort(); }
+  async close() { this.controller.abort(); for (const view of this.views.values()) view.finish(); }
 }
