@@ -84,6 +84,23 @@ test('actual per-call budget refuses the next HTTP operation before send and rec
   now = 60000; accounting.sent('result_close'); accounting.finish({ status: 204, operation: 'result_close' });
   assert.equal(accounting.snapshot().operations.result_close.completed, 1);
 });
+test('author and viewer report streams persist a pre-send intent and exact saved-resource terminal without raw receipt reads', async () => {
+  const expected = oracleFor(['id'], [[1]]), id = 'cex_' + 'a'.repeat(32), model = { id: 'model_' + 'b'.repeat(32), revision: 2 };
+  for (const workload of ['report-1', 'shared-report']) {
+    const dashboard = { id: 'dashboard_' + 'c'.repeat(32), revision: 3, tiles: { 'shared-rows': expected } }, entries = [];
+    const account = { username: 'owner', model, dashboards: { 1: dashboard }, sharedDashboard: dashboard, oracles: { rows: expected } };
+    const client = { request: async options => {
+      assert.equal(entries[0].kind, 'stream'); const tileId = workload === 'shared-report' ? 'shared-rows' : 'tile-1';
+      for (const event of [{ type: 'start', tiles: [{ tileId }], tileErrors: [] }, { type: 'execution', executionId: id },
+        { type: 'rows', tileId, columns: [{ name: 'id' }], rows: [[1]] }, { type: 'complete', tileId, rowCount: 1, limitReached: false, reason: null }, { type: 'end' }]) options.oracle.push(Buffer.from(JSON.stringify(event) + '\n'));
+      options.oracle.finish(); return { status: 200 };
+    } };
+    await runJourney({ workload, account, client, onIntent: async value => { entries.push(value); return 1; },
+      onExecution: async (username, executionId, metadata) => entries.push({ username, executionId, ...metadata }), finishIntent: async (_sequence, value) => entries.push(value) });
+    const terminal = entries.find(value => value.terminal === 'drained'); assert.equal(terminal.kind, 'report-stream'); assert.equal(terminal.dashboardId, dashboard.id);
+    assert.equal(terminal.dashboardRevision, 3); assert.equal(entries.at(-1).status, 'closed');
+  }
+});
 test('real lifecycle/source smoke remains opt-in', { skip: process.env.SCHEMII_LOAD_ADAPTER_LIVE !== '1', timeout: 2400000 }, async () => {
   // Explicitly prepared held fixture + independently running observer required.
   // This oracle never starts a stack, provisions, fakes time or guesses secrets.

@@ -50,7 +50,8 @@ export async function observeCohortWork(receipt, workload, { source, state = nul
     if (event.type === 'execution') {
       if (!id(event.id, 'cex') || !accounts.has(event.username)) throw new Error('cohort_execution_owner_invalid');
       const current = state.pending[event.id];
-      if (!current && event.action === 'created') state.pending[event.id] = { id: event.id, username: event.username, kind: event.kind || 'query', dashboardId: event.dashboardId, status: 'unknown' };
+      if (!current && event.action === 'created') state.pending[event.id] = { id: event.id, username: event.username, kind: event.kind || 'query',
+        dashboardId: event.dashboardId, dashboardRevision: event.dashboardRevision, modelId: event.modelId, modelRevision: event.modelRevision, status: 'unknown' };
       else if (current && current.username !== event.username) throw new Error('cohort_execution_owner_changed');
       if (current && event.action === 'terminal') {
         if (!Number.isFinite(Date.parse(event.terminalAt)) || event.terminalAt > new Date(now + 5000).toISOString()) throw new Error('cohort_terminal_invalid');
@@ -104,10 +105,24 @@ export async function observeCohortWork(receipt, workload, { source, state = nul
       state.owners[username] = { userId: account.userId, at: new Date(now).toISOString() };
     }
     for (const entry of selected) {
-      if (entry.kind === 'shared-report') {
+      if (['report-stream', 'shared-report'].includes(entry.kind)) {
         // Raw receipt GET is forbidden for shared streams. The authenticated
         // exact terminal is a supported boundary; release still needs witness.
-        if (entry.streamTerminal === 'drained' && id(entry.dashboardId, 'dashboard')) { entry.status = 'succeeded'; entry.terminalAt = entry.streamTerminalAt; }
+        const account = accounts.get(entry.username), variants = [account, ...(account.variants || [])];
+        if (entry.dashboardId) {
+          const saved = [account.sharedDashboard, ...variants.flatMap(value => Object.values(value.dashboards || {}))].find(value => value?.id === entry.dashboardId);
+          if (!saved || saved.revision !== entry.dashboardRevision) throw new Error('cohort_report_binding_changed');
+          const current = await get(clients.get(entry.username), `/api/v1/schemer/dashboards/${entry.dashboardId}`);
+          if (current.id !== saved.id || current.revision !== saved.revision) throw new Error('cohort_report_unavailable');
+        } else {
+          const saved = variants.map(value => value.model).find(value => value?.id === entry.modelId);
+          if (!saved || saved.revision !== entry.modelRevision) throw new Error('cohort_report_binding_changed');
+          const current = await get(clients.get(entry.username), `/api/v1/schemoo/models/${entry.modelId}`);
+          if (current.id !== saved.id || current.revision !== saved.revision) throw new Error('cohort_report_unavailable');
+        }
+        if (entry.streamTerminal === 'drained' || ['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(entry.streamTerminal)) {
+          entry.status = entry.streamTerminal === 'drained' ? 'succeeded' : entry.streamTerminal; entry.terminalAt = entry.streamTerminalAt;
+        }
         else entry.status = 'unknown';
       } else {
         const current = await get(clients.get(entry.username), `/api/v1/common/query-executions/${entry.id}`);

@@ -107,9 +107,12 @@ test('shared stream terminal retires through the actual observer without forbidd
   const journal = await openJournal(path, { tag: runId, budget: { records: 128, bytes: 128 * 2048 + 65536, recordBytes: 2048, chunkRecords: 64 } });
   const r = { ...receipt(), kind: 'disposable', ready: true, executionJournal: path };
   r.accounts[0].identityVerifiedAt = new Date(now).toISOString();
-  await journal.append({ type: 'execution', action: 'created', id: executionId, username: account.username, kind: 'shared-report', dashboardId: 'dashboard_' + 'd'.repeat(32) });
+  r.accounts[0].sharedDashboard = { id: 'dashboard_' + 'd'.repeat(32), revision: 3 };
+  await journal.append({ type: 'execution', action: 'created', id: executionId, username: account.username, kind: 'report-stream', dashboardId: 'dashboard_' + 'd'.repeat(32), dashboardRevision: 3 });
   const requests = [], clientFactory = () => ({ close() {}, json: async (_method, path) => {
-    requests.push(path); assert.equal(path, '/api/v1/auth/me'); return { user: { id: account.userId, username: account.username } };
+    requests.push(path);
+    if (path === '/api/v1/auth/me') return { user: { id: account.userId, username: account.username } };
+    assert.equal(path, '/api/v1/schemer/dashboards/' + r.accounts[0].sharedDashboard.id); return r.accounts[0].sharedDashboard;
   } });
   const first = await observeCohortWork(r, 'shared-report', { source: { ...source(), at: new Date(now).toISOString() }, now, clientFactory });
   assert.equal(first.value.activeExecutions, null); assert.equal(first.value.coverage.complete, false);
@@ -128,7 +131,7 @@ test('shared stream terminal retires through the actual observer without forbidd
   assert.equal(combineObservation({ topology: {} }, { schemii: app }, internal(at), { previous, now: at, ownership: wrap(unproved, released, at) }).status, 'unavailable');
   const wrongAuthority = structuredClone(released); wrongAuthority.authority.endpoint.host = '192.0.2.11';
   assert.equal(combineObservation({ topology: {} }, { schemii: app }, internal(at), { previous, now: at, ownership: wrap(next, wrongAuthority, at) }).status, 'unavailable');
-  assert(requests.every(value => value === '/api/v1/auth/me')); await journal.close();
+  assert(!requests.some(value => value.includes('/common/'))); await journal.close();
 });
 test('unreturned execution and server-managed CSV intents stay unknown until terminal plus a later complete witness', async t => {
   const dir = await directory(t), path = join(dir, 'events'), now = Date.now();

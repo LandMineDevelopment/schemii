@@ -594,7 +594,14 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
       if (entry.closed) continue;
       const account = [...receipt.accounts, ...(receipt.recoveryAccount ? [receipt.recoveryAccount] : [])].find(value => value.username === entry.username), client = clients.get(account?.userId);
       if (!client) bad('unknown_execution_owner');
-      if (entry.kind === 'shared-report') { if (!entry.terminalAt) bad('unfinished_shared_execution'); sharedPending = true; continue; }
+      if (['report-stream', 'shared-report'].includes(entry.kind)) {
+        if (!entry.terminalAt) {
+          const cancelled = await client.json('DELETE', `/api/v1/common/query-executions/${entry.id}`);
+          if (cancelled.id !== entry.id || !['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(cancelled.status)) bad('unfinished_report_execution');
+          entry.terminalAt = new Date().toISOString(); entry.terminal = cancelled.status;
+        }
+        sharedPending = true; continue; // No raw receipt or invented result IDs.
+      }
       const inspected = await client.request({ path: `/api/v1/common/query-executions/${entry.id}` });
       if (inspected.status === 404 && inspected.data?.error?.code === 'console_execution_not_found') { entry.closed = true; continue; }
       if (inspected.status !== 200) bad('execution_cleanup_unavailable');

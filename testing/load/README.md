@@ -147,8 +147,12 @@ administrator recovery identity is disclosed outside registered/active workload
 counts; its fresh read/SELECT/close calls are reported as recovery instrumentation.
 It receives explicit product/source access and workspace binding. Administrator
 status alone never supplies product access. Source backends remain independently
-witnessed. Shared execution terminal evidence uses the fully drained authenticated
-dashboard stream, since raw receipt reads are intentionally forbidden to viewers.
+witnessed. Report execution terminal evidence uses the fully drained authenticated
+stream (or an exact terminal control acknowledgment), bound to its saved dashboard
+or model/revision. Raw execution reads are forbidden for report-scoped executions,
+including owner-private reports. A cancellation acknowledgment alone never proves
+source release; disconnected or still-pending operations remain unknown until the
+supported evidence exists.
 CSV responses currently expose no internal execution ID. Their durable operation
 intent stays unknown until complete CSV validation and a later complete source
 cohort release; the missing per-execution ID/acquisition boundary is disclosed and

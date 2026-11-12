@@ -122,11 +122,14 @@ export async function runJourney({ workload, account, client, signal, sequence =
   const shared = workload === 'shared-report';
   const request = shared ? { method: 'POST', path: `/api/v1/schemer/dashboards/${account.sharedDashboard.id}/executions/stream`,
     body: { expectedRevision: account.sharedDashboard.revision }, tiles: account.sharedDashboard.tiles } : streamRequest(workload, account);
+  const dashboard = shared ? account.sharedDashboard : workload.startsWith('report-') ? account.dashboards[Number(workload.slice(7))] : null;
+  const binding = dashboard ? { dashboardId: dashboard.id, dashboardRevision: dashboard.revision } : { modelId: account.model.id, modelRevision: account.model.revision };
+  const reportMetadata = { kind: 'report-stream', ...binding };
   const intent = await onIntent({ kind: 'stream', username: account.username, workload });
   let recording = Promise.resolve(), executionId;
   const oracle = workload === 'csv' ? new CSVOracle(account.oracles.csv) : new NDJSONOracle(request.tiles, { onExecution: id => {
     executionId = id; recording = recording.then(async () => {
-      await onExecution(account.username, id, shared ? { kind: 'shared-report', dashboardId: account.sharedDashboard.id } : {});
+      await onExecution(account.username, id, reportMetadata);
       await finishIntent(intent, { status: 'acquired', executionId: id });
     });
     void recording.catch(() => {});
@@ -134,13 +137,21 @@ export async function runJourney({ workload, account, client, signal, sequence =
   let cancellation;
   if (workload === 'cancel') {
     const push = oracle.push.bind(oracle);
-    oracle.push = chunk => { push(chunk); if (executionId && !cancellation) cancellation = recording.then(() => json(client, 'DELETE', `/api/v1/common/query-executions/${executionId}`, undefined, 200, 'control', signal)); };
+    oracle.push = chunk => {
+      push(chunk);
+      if (executionId && !cancellation) cancellation = recording.then(async () => {
+        const value = await json(client, 'DELETE', `/api/v1/common/query-executions/${executionId}`, undefined, 200, 'control', signal);
+        if (value.id !== executionId) fail('cancel_execution_changed');
+        if (['succeeded', 'failed', 'cancelled', 'partial_committed'].includes(value.status))
+          await onExecution(account.username, executionId, { ...reportMetadata, terminalAt: new Date().toISOString(), terminal: value.status });
+      });
+    };
   }
   try {
     const result = await client.request({ ...request, oracle, signal, operation: 'report_stream', slowMs: workload === 'slow-reader' ? 100 : 0,
       disconnectAfterBytes: workload === 'disconnect' ? 1024 : 0 });
     if (result.status !== 200) fail('report_http_failed');
-    if (executionId) await recording.then(() => onExecution(account.username, executionId, { ...(shared ? { kind: 'shared-report', dashboardId: account.sharedDashboard.id } : {}), terminalAt: new Date().toISOString(), terminal: 'drained' }));
+    if (executionId) await recording.then(() => onExecution(account.username, executionId, { ...reportMetadata, terminalAt: new Date().toISOString(), terminal: 'drained' }));
     await finishIntent(intent, { status: 'closed', ...(executionId ? { executionId } : { idExposure: 'server_managed_not_exposed' }) });
   } catch (error) {
     if (!(workload === 'disconnect' && error.code === 'intentional_disconnect') && !(workload === 'cancel' && cancellation && error.code === 'stream_error')) throw error;
