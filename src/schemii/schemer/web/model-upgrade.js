@@ -32,7 +32,7 @@ export function modelUpgradeIssues(draft, model, catalog) {
       if (!problem && selection.active && (tileId || !draft.optionalFilters.includes(scopeId))) problem = 'Only an offered optional filter may be activated.';
       const alternative = scope?.alternatives.find(item => item.id === selection.alternativeId) || (selection.alternativeId == null ? scope?.alternatives[0] : null);
       if (!problem && selection.alternativeId != null && !alternative) problem = 'The selected filter option was removed.';
-      if (!problem && Object.keys(selection.values || {}).some(id => !alternative?.inputs.some(input => input.id === id))) problem = 'A saved filter input was removed.';
+      if (!problem && Object.keys(selection.values || {}).some(id => !scope.alternatives.some(option => option.inputs.some(input => input.id === id)))) problem = 'A saved filter input was removed.';
       if (problem) issues.push({ tileId, scopeId, action: 'resetSelection', message: `${scope?.label || scopeId}: ${problem}` });
     }
   }

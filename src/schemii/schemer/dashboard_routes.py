@@ -67,7 +67,9 @@ def validate_dashboard(services, owner, body):
                 raise ValueError(f"Filter {scope_id} references an unavailable model alternative")
             if alternative is None and scope.alternatives:
                 alternative = scope.alternatives[0]
-            inputs = {item.id for item in alternative.inputs} if alternative else set()
+            # Switching options retains the other options' entered values.
+            # Reject removed inputs, not still-valid values from this scope.
+            inputs = {item.id for option in scope.alternatives for item in option.inputs}
             if any(key not in inputs for key in selection.values):
                 raise ValueError(f"Filter {scope_id} references an unavailable model input")
 

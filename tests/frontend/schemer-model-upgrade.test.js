@@ -29,6 +29,18 @@ test('upgrade draft snapshots every configuration part without pruning or mutati
   assert.deepEqual(dashboard, before);
 });
 
+for (const owner of ['dashboard', 'tile']) {
+  test(`upgrade preserves ${owner} input values from other valid options`, () => {
+    const { dashboard, model, catalog, tile } = data();
+    const id = owner === 'dashboard' ? 'optional' : 'conditional';
+    model.definition.scopes.find(scope => scope.id === id).alternatives.push({ id: 'other', inputs: [{ id: 'retained' }], conditions: [] });
+    (owner === 'dashboard' ? dashboard.selections : tile.selections)[id] = {
+      alternativeId: 'choose', values: { value: 'chosen', retained: 'other option' },
+    };
+    assert.deepEqual(modelUpgradeIssues(modelUpgradeDraft(dashboard, model), model, catalog), []);
+  });
+}
+
 test('upgrade reviews dimensions, measures, details and report comparison operands against current exposure', () => {
   const { dashboard, model, catalog, tile } = data();
   model.definition.exposedFields = [field('id')];
