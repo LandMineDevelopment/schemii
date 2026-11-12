@@ -385,14 +385,14 @@ function filesUnchanged(files) {
 const verificationImport = `
 import json,sys
 from pathlib import Path
-from scripts.ci.local_ci import selected_plan, source_identity, lane_for, evidence, verify_original_run, git
+from scripts.ci.local_ci import source_identity, lane_for, evidence, verify_original_run
 root,path,phase,base=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],sys.argv[4]
 r=json.loads(path.read_text()); identity=source_identity(root)
 if r.get('schema')!=1 or r.get('source')!=identity: raise ValueError('wrong or stale source')
 origin=verify_original_run(root,path,r)
 if phase not in ('focused','final'): raise ValueError('invalid verification phase')
-if git(root,'rev-parse','--verify','--end-of-options',r['base_ref']+'^{commit}').decode().strip()!=base: raise ValueError('receipt base differs from frozen acceptance scope')
-plan=selected_plan(root,r['base_ref'],r.get('mode')=='full')
+if r.get('base_commit')!=base: raise ValueError('receipt immutable selected base differs from frozen acceptance scope')
+plan=origin['plan']
 if not plan['classification']['valid'] or r.get('profile')!=plan['classification']['profile']: raise ValueError('wrong plan/profile')
 required=plan['feedback']['commands'] if phase=='focused' else plan['commands']
 entries=r.get('commands',[])

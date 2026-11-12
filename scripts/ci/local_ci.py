@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import secrets
@@ -122,14 +123,70 @@ def selected_plan(root: Path, base: str, full: bool = False) -> dict:
             profile="full", lane="source", reason="explicit-local-full"
         )
         prefix = [argv for argv in selected["commands"] if "--native-documents" in argv]
-        selected["commands"] = prefix + commands("full", base)
+        selected["commands"] = prefix + commands(
+            "full", selected["classification"]["base"]
+        )
         selected["layers"] = sorted(layers("full"))
         selected["feedback"] = {
             "commands": planner.feedback_commands(selected["commands"]),
             "pending_layers": ["browser", "postgres"],
             "acceptance": False,
         }
+    if selected["classification"]["valid"]:
+        # The requested ref is a display label after selection. Every command
+        # which consumes a comparison must use the selected immutable commit.
+        selected["commands"] = [
+            [*argv[:2], selected["classification"]["base"], *argv[3:]]
+            if len(argv) > 2 and argv[1] == "scripts/check_python_quality.py"
+            else argv
+            for argv in selected["commands"]
+        ]
+        if "feedback" in selected:
+            selected["feedback"]["commands"] = planner.feedback_commands(
+                selected["commands"]
+            )
     return selected
+
+
+def _original_plan(root: Path, receipt: dict) -> dict:
+    """Reconcile only the immutable scope selected before original execution."""
+    base = receipt.get("base_commit")
+    classification = receipt.get("classification")
+    if (
+        not isinstance(base, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", base)
+        or not isinstance(classification, dict)
+        or classification.get("base") != base
+        or receipt.get("mode") not in {"selected", "full", "feedback"}
+    ):
+        raise ValueError(
+            "Original CI receipt lacks a consistent immutable selected base"
+        )
+    try:
+        resolved = (
+            git(root, "rev-parse", "--verify", "--end-of-options", base + "^{commit}")
+            .decode()
+            .strip()
+        )
+    except subprocess.SubprocessError as error:
+        raise ValueError(
+            "Original CI immutable comparison commit is unavailable"
+        ) from error
+    if resolved != base:
+        raise ValueError("Original CI comparison must identify an immutable commit")
+    full = (
+        receipt["mode"] == "full"
+        or receipt["classification"].get("reason") == "explicit-local-full"
+    )
+    plan = selected_plan(root, base, full)
+    if (
+        not plan["classification"]["valid"]
+        or plan["classification"] != receipt["classification"]
+        or plan["commands"] != [entry["command"] for entry in receipt["commands"]]
+        or plan["classification"]["profile"] != receipt["profile"]
+    ):
+        raise ValueError("Original CI scope drifted from its immutable selected plan")
+    return plan
 
 
 def private_directory(path: Path) -> None:
@@ -470,6 +527,7 @@ def _seal_original_run(
         raise ValueError(
             "Source changed before original execution provenance publication"
         )
+    _original_plan(root, receipt)
     directory = _origin_directory(root)
     private_directory(directory)
     key_path = directory / "owner.key"
@@ -499,15 +557,7 @@ def _seal_original_run(
         "receipt_sha256": hashlib.sha256(_private_bytes(receipt_path)).hexdigest(),
         "source": receipt["source"],
         "classification": receipt["classification"],
-        "base_commit": git(
-            root,
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            receipt["base_ref"] + "^{commit}",
-        )
-        .decode()
-        .strip(),
+        "base_commit": receipt["base_commit"],
         "policy": policy,
         "observations": observations,
         "artifacts": artifacts,
@@ -549,6 +599,7 @@ def verify_original_run(root: Path, receipt_path: Path, receipt: dict) -> dict:
     expected = hmac.new(key, _canonical_bytes(record), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(envelope["mac"], expected):
         raise ValueError("Original CI execution provenance is invalid")
+    plan = _original_plan(root, receipt)
     if (
         record.get("schema") != 1
         or record["receipt"] != str(receipt_path.resolve())
@@ -562,16 +613,7 @@ def verify_original_run(root: Path, receipt_path: Path, receipt: dict) -> dict:
         or record["source"] != receipt["source"]
         or record["policy"] != _origin_policy()
         or record["classification"] != receipt["classification"]
-        or record["base_commit"]
-        != git(
-            root,
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            receipt["base_ref"] + "^{commit}",
-        )
-        .decode()
-        .strip()
+        or record["base_commit"] != receipt["base_commit"]
         or record["artifacts"] != _origin_artifacts(receipt_path, receipt)
         or record["executed_sources"] != _executed_sources(root, record["artifacts"])
     ):
@@ -598,6 +640,7 @@ def verify_original_run(root: Path, receipt_path: Path, receipt: dict) -> dict:
         "sha256": hashlib.sha256(_private_bytes(origin_path)).hexdigest(),
         "policy": record["policy"],
         "artifacts": record["artifacts"],
+        "plan": plan,
     }
 
 
@@ -728,6 +771,7 @@ def run_selected(
         "run_id": run_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "base_ref": base,
+        "base_commit": selected["classification"]["base"],
         "classification": selected["classification"],
         "mode": "feedback" if feedback else "full" if full else "selected",
         "profile": selected["classification"]["profile"],

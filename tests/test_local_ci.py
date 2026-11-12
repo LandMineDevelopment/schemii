@@ -483,7 +483,9 @@ raise SystemExit(code)
 def test_forced_full_reuses_existing_complete_planner_topology(repository, monkeypatch):
     monkeypatch.setattr(runner.planner, "plan", lambda root, base: selected(root))
     plan = runner.selected_plan(repository, "HEAD", full=True)
-    assert plan["commands"] == runner.commands("full", "HEAD")
+    assert plan["commands"] == runner.commands(
+        "full", git(repository, "rev-parse", "HEAD")
+    )
     assert plan["layers"] == sorted(runner.layers("full"))
     assert plan["source"] == runner.source_identity(repository)
     assert (
@@ -1003,7 +1005,11 @@ def test_original_execution_provenance_binds_actual_discovery_sources_and_child(
     assert len(origin["executed_sources"]) == 4
     assert origin["observations"][0]["command"] == ["npm", "test"]
     assert origin["observations"][0]["cleanup"] == "observed-stopped"
-    assert origin["base_commit"] == receipt["classification"]["base"]
+    assert (
+        origin["base_commit"]
+        == receipt["base_commit"]
+        == receipt["classification"]["base"]
+    )
     assert not (path.parent / "owner.key").exists()
 
 
@@ -1016,6 +1022,10 @@ def test_original_execution_provenance_binds_actual_discovery_sources_and_child(
         "source-inventory",
         "arbitrary-copy",
         "owner-record",
+        "base-commit",
+        "classification-base",
+        "comparison-plan",
+        "missing-base",
     ],
 )
 def test_original_execution_import_rejects_changed_or_copied_claims(
@@ -1037,6 +1047,23 @@ def test_original_execution_import_rejects_changed_or_copied_claims(
                 if record["kind"] == "attempt":
                     record["source_id"] = "0" * 64
         timing.write_text("".join(json.dumps(record) + "\n" for record in records))
+    elif mutation in {
+        "base-commit",
+        "classification-base",
+        "comparison-plan",
+        "missing-base",
+    }:
+        if mutation == "base-commit":
+            receipt["base_commit"] = git(repository, "rev-parse", "HEAD")
+        elif mutation == "classification-base":
+            receipt["classification"]["base"] = git(repository, "rev-parse", "HEAD")
+        elif mutation == "comparison-plan":
+            receipt["classification"]["comparison_base"] = git(
+                repository, "rev-parse", "HEAD"
+            )
+        else:
+            receipt.pop("base_commit")
+        runner.write_json(path, receipt)
     elif mutation == "arbitrary-copy":
         copied = repository / ".schemii/copied" / path.parent.name / "receipt.json"
         copied.parent.mkdir(parents=True)
@@ -1068,4 +1095,69 @@ def test_synthetic_control_and_historical_receipts_cannot_mint_original_provenan
         runner.verify_original_run(repository, path, receipt)
     assert not directory.exists(), (
         "Import must never create historical provenance or an owner key"
+    )
+
+
+def test_original_runner_freezes_named_comparison_ref_before_actual_execution(
+    repository,
+):
+    base_a = original_node_repository(repository)
+    base_b = git(repository, "rev-parse", "HEAD")
+    path = repository / "tests/frontend/api.test.js"
+    path.write_text(
+        path.read_text()
+        + "import {execFileSync} from 'node:child_process';\n"
+        + "test('move base during genuine canonical child',()=>execFileSync('git',['update-ref','refs/heads/moving-base','"
+        + base_b
+        + "','"
+        + base_a
+        + "']));\n"
+        + "test('seventh actually executed case',()=>assert.equal(7,7));\n"
+    )
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "current source with faithful in-run ref movement")
+    git(repository, "update-ref", "refs/heads/moving-base", base_a)
+    plan = runner.selected_plan(repository, "moving-base")
+    assert plan["classification"]["base"] == base_a
+    assert plan["commands"] == [["npm", "test"]]
+    code, receipt_path = runner.run_selected(
+        repository, plan, feedback=False, base="moving-base"
+    )
+    receipt = json.loads(receipt_path.read_text())
+    assert code == 0 and receipt["status"] == "passed"
+    assert git(repository, "rev-parse", "moving-base") == base_b
+    assert receipt["base_ref"] == "moving-base"
+    assert receipt["base_commit"] == receipt["classification"]["base"] == base_a
+    proof = runner.verify_original_run(repository, receipt_path, receipt)
+    origin = json.loads(Path(proof["path"]).read_text())["record"]
+    assert origin["base_commit"] == base_a
+    assert proof["plan"]["classification"] == receipt["classification"]
+    assert proof["artifacts"]["0"]["inventory"]["summary"]["collected"] == 7
+    assert proof["plan"]["classification"]["base"] != base_b
+
+
+def test_scope_reconciliation_rejects_inconsistent_claims_before_attestation(
+    repository,
+):
+    path, receipt = actual_original_run(repository)
+    original = path.read_bytes()
+    for value in (None, "HEAD", "g" * 40, "0" * 40):
+        altered = json.loads(original)
+        altered["base_commit"] = value
+        with pytest.raises((ValueError, subprocess.CalledProcessError)):
+            runner._original_plan(repository, altered)
+    altered = json.loads(original)
+    altered["classification"] = None
+    with pytest.raises(ValueError, match="consistent immutable"):
+        runner._original_plan(repository, altered)
+    altered = json.loads(original)
+    altered["mode"] = "unknown"
+    with pytest.raises(ValueError, match="consistent immutable"):
+        runner._original_plan(repository, altered)
+    altered = json.loads(original)
+    altered["classification"]["profile"] = "full"
+    with pytest.raises(ValueError, match="scope drifted"):
+        runner._original_plan(repository, altered)
+    assert path.read_bytes() == original, (
+        "Reconciliation never rewrites historical evidence"
     )

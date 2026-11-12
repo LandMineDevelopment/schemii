@@ -610,7 +610,7 @@ test('replacement original bytes and missing authentic historical attempt proven
 });
 
 
-test('QA importer accepts a real original runner with actual discovered cases in a disposable miniature source',async t=>{
+test('QA importer honors the immutable selected base when a named ref moves during actual execution',async t=>{
   const directory=await mkdtemp(join(tmpdir(),'schemii-actual-ci-origin-'));t.after(()=>rm(directory,{recursive:true,force:true}));
   const ownerRoot=new URL('../../',import.meta.url).pathname;
   const control=String.raw`
@@ -626,19 +626,26 @@ for name in ['tests/frontend/api.test.js','testing/harness/origin.test.mjs','scr
 def git(*args):return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
 git('init','-q');git('config','user.name','Origin selftest');git('config','user.email','selftest@example.invalid');git('add','.');git('commit','-qm','tiny original runner source');base=git('rev-parse','HEAD')
 (root/'tests/frontend/api.test.js').write_text(body+"test('second actually collected case',()=>assert.equal(3+3,6));\n")
-git('add','.');git('commit','-qm','owned frontend regression')
-p=subprocess.run([sys.executable,'scripts/ci/local_ci.py','--base',base],cwd=root,capture_output=True,text=True)
+git('add','.');git('commit','-qm','owned frontend regression');later=git('rev-parse','HEAD')
+path=root/'tests/frontend/api.test.js'
+path.write_text(path.read_text()+"import {execFileSync} from 'node:child_process';\n"+"test('move named base inside actual child',()=>execFileSync('git',['update-ref','refs/heads/qa-base','"+later+"','"+base+"']));\n"+"test('seventh actual case',()=>assert.equal(7,7));\n")
+git('add','.');git('commit','-qm','faithful named-ref movement control');git('update-ref','refs/heads/qa-base',base)
+p=subprocess.run([sys.executable,'scripts/ci/local_ci.py','--base','qa-base'],cwd=root,capture_output=True,text=True)
 if p.returncode: raise RuntimeError(p.stdout+p.stderr)
 receipt=next((root/'.schemii/local-ci').glob('run-*/receipt.json'))
-print(json.dumps({'path':str(receipt),'base':base}))
+print(json.dumps({'path':str(receipt),'base':base,'later':later}))
 `;
   const childEnvironment={...process.env};delete childEnvironment.NODE_TEST_CONTEXT;
   const created=JSON.parse(execFileSync('python3',['-c',control,ownerRoot,directory],{encoding:'utf8',stdio:'pipe',env:childEnvironment}));
   const run={acceptanceContract:2,verificationBase:created.base,deployment:{identity:sourceIdentity(directory)}};
-  const imported=importVerification(run,created.path,{root:directory,note:'Actual canonical runner tiny five-case provenance control, no application acceptance'});
-  assert.equal(imported.status,'passed');assert.equal(imported.commands[0].summary.collected,5);
+  const imported=importVerification(run,created.path,{root:directory,note:'Actual canonical runner seven-case moving-ref provenance control, no application acceptance'});
+  assert.equal(imported.status,'passed');assert.equal(imported.commands[0].summary.collected,7);
+  run.verificationBase=created.later;
+  assert.throws(()=>importVerification(run,created.path,{root:directory,note:'Later prepared base must not adopt original scope'}),/rejected/);
+  run.verificationBase=created.base;
   assert.match(imported.origin.path,/local-ci-origins/);
   const original=JSON.parse(await readFile(created.path));
+  assert.equal(original.base_commit,created.base);assert.equal(original.classification.base,created.base);
   const timing=join(new URL('.',`file://${created.path}`).pathname,original.commands[0].timing_evidence);
   await writeFile(timing,'invented truncated original');
   assert.throws(()=>importVerification(run,created.path,{root:directory,note:'Changed actual-origin negative control'}),/rejected/);
