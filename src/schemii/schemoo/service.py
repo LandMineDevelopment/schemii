@@ -159,7 +159,7 @@ def domain_query(catalog, model, body):
     if parameter is None:
         raise ApiProblem(422, "unknown_model_parameter", "This parameter is not part of the saved model. Save your model changes first.")
     try:
-        lookup = parameter_domain(catalog, definition, alternative, parameter)
+        lookup = parameter_domain(catalog, definition, alternative, parameter, scope_id=body.scope_id)
     except ValueError as error:
         raise ApiProblem(422, "parameter_unbound", str(error)) from error
     if not lookup:

@@ -132,7 +132,7 @@ def test_first_model_chat_adopts_created_model_and_keeps_history(setup):
     assert adopted["activity"][0]["operation"] == "create_model"
     created = api.get(f"/api/v1/schemoo/models/{adopted['modelId']}").json()
     assert created["definition"]["nodes"] == []
-    assert created["definition"]["sourceContract"] == {"scope": "model", "tables": [], "relationships": []}
+    assert created["definition"]["sourceContract"] == {"scope": "model", "tables": [], "relationships": [], "parameterDomains": []}
     filled = api.patch(f"/api/v1/schemoo/models/{adopted['modelId']}", json={
         "expectedRevision": created["revision"], "root": "people",
         "nodes": {"upsert": [{"id": "people", "table": "people", "label": "People"}]},
