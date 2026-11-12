@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 
-from schemii.common.postgres.models import PostgresCatalog, PostgresColumn
+from schemii.common.postgres.models import (
+    PostgresCatalog,
+    PostgresColumn,
+    PostgresObjectIdentity,
+    PostgresPreservation,
+    PostgresTable,
+    dependency_closure,
+)
 from schemii.common.postgres.query_analysis import QueryDefinitionError, parse_query_definition
 from schemii.common.postgres.schema_source import (
     SchemaSourceError,
@@ -58,12 +66,15 @@ def _issue(
     category: str,
     object_name: str,
     reason: str,
+    *,
+    identity: PostgresObjectIdentity | None = None,
 ) -> None:
     issues.append(
         WorkspaceImportIssue(
             category=category,
             object_name=object_name,
             reason=reason,
+            identity=identity,
         )
     )
 
@@ -115,6 +126,147 @@ def _layout(content: SchemiiDesignContent) -> SchemiiDesignLayoutContent:
     return SchemiiDesignLayoutContent(objects=objects)
 
 
+def _structured_issues(
+    catalog: PostgresCatalog, issues: list[WorkspaceImportIssue]
+) -> list[WorkspaceImportIssue]:
+    output = []
+    for issue in issues:
+        # Labels are presentation only: quoted identifiers can contain dots,
+        # parentheses, and overload signatures. Authority comes from the source.
+        identity = issue.identity
+        scope = (
+            dependency_closure(catalog.safety, {identity})
+            if identity is not None and catalog.safety is not None
+            else set()
+        )
+        output.append(
+            issue.model_copy(
+                update={
+                    "identity": identity,
+                    "feature_code": "unrepresented_" + issue.category,
+                    "protected_scope": sorted(
+                        scope,
+                        key=lambda item: (
+                            item.kind,
+                            item.namespace,
+                            item.name,
+                            item.signature,
+                        ),
+                    ),
+                    "dependency_complete": bool(
+                        identity is not None
+                        and catalog.fingerprint_version == 2
+                        and catalog.safety
+                        and catalog.safety.dependency_complete
+                    ),
+                    "unknown_reasons": (
+                        [
+                            "Source object identity is unavailable; display labels do not establish authority"
+                        ]
+                        if identity is None
+                        else []
+                    )
+                    + (
+                        list(catalog.safety.unknown_reasons)
+                        if catalog.safety
+                        else ["Historical catalog has no versioned dependency evidence"]
+                    ),
+                }
+            )
+        )
+    return output
+
+
+def _ordinary_not_null_names(
+    catalog: PostgresCatalog, table: PostgresTable
+) -> dict[str, str]:
+    """Import exact native names only when their entire supported contract is known."""
+    if (
+        catalog.fingerprint_version != 2
+        or catalog.safety is None
+        or catalog.safety.version != 2
+        or catalog.server_version_num < 180000
+        or table.is_partition
+        or table.partition_key is not None
+    ):
+        return {}
+    result = {}
+    for column in table.columns:
+        candidates = [
+            item
+            for item in table.not_null_constraints
+            if item.columns == (column.name,)
+        ]
+        if len(candidates) != 1 or column.nullable:
+            continue
+        constraint = candidates[0]
+        if (
+            constraint.validated
+            and constraint.is_local is True
+            and constraint.inheritance_count == 0
+            and constraint.no_inherit is False
+        ):
+            result[column.name] = constraint.name
+    return result
+
+
+def _proven_identity_sequence(
+    catalog: PostgresCatalog, descriptor: PostgresPreservation
+) -> bool:
+    """Exempt only exact internally owned IDENTITY machinery, never serial/standalone sequences."""
+    safety = catalog.safety
+    owner = descriptor.identity_sequence_owner
+    if (
+        safety is None
+        or safety.version != 2
+        or not safety.dependency_complete
+        or owner is None
+    ):
+        return False
+    if (
+        descriptor.relation_kind != "S"
+        or owner.table.kind != "relation"
+        or descriptor.owner != owner.table_owner
+    ):
+        return False
+    table = next(
+        (
+            item
+            for item in catalog.tables
+            if (item.namespace, item.name) == (owner.table.namespace, owner.table.name)
+        ),
+        None,
+    )
+    column = (
+        next(
+            (
+                item
+                for item in table.columns
+                if (item.name, item.ordinal) == (owner.column, owner.ordinal)
+            ),
+            None,
+        )
+        if table
+        else None
+    )
+    table_descriptor = next(
+        (item for item in safety.preservation if item.identity == owner.table), None
+    )
+    return bool(
+        column is not None
+        and column.identity is not None
+        and table_descriptor is not None
+        and table_descriptor.relation_kind in {"r", "p"}
+        and table_descriptor.owner == owner.table_owner
+        and any(
+            edge.source == descriptor.identity
+            and edge.target == owner.table
+            and edge.kind == owner.dependency_kind
+            for edge in safety.dependencies
+        )
+    )
+
+
 def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
     """Derive every representable design object without modifying PostgreSQL."""
 
@@ -124,12 +276,22 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
         try:
             types.append(
                 DesignType(
-                    id=_semantic_id(catalog, "type", source_type.kind, source_type.name),
+                    id=_semantic_id(
+                        catalog, "type", source_type.kind, source_type.name
+                    ),
                     definition=source_type.definition,
                 )
             )
         except ValueError as error:
-            _issue(issues, "type", source_type.name, str(error))
+            _issue(
+                issues,
+                "type",
+                source_type.name,
+                str(error),
+                identity=PostgresObjectIdentity(
+                    kind="type", namespace=source_type.namespace, name=source_type.name
+                ),
+            )
 
     tables: list[DesignTable] = []
     table_ids: dict[str, str] = {}
@@ -143,11 +305,17 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 "table",
                 object_name,
                 "Tables without columns are not represented by the desired-design model",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_table.namespace,
+                    name=source_table.name,
+                ),
             )
             continue
         table_id = _semantic_id(catalog, "table", source_table.name)
         table_ids[source_table.name] = table_id
         columns: list[DesignColumn] = []
+        not_null_names = _ordinary_not_null_names(catalog, source_table)
         for source_column in sorted(source_table.columns, key=lambda item: item.ordinal):
             column_id = _semantic_id(
                 catalog,
@@ -177,6 +345,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                         "column",
                         f"{object_name}.{source_column.name}",
                         str(error),
+                        identity=PostgresObjectIdentity(
+                            kind="relation",
+                            namespace=source_table.namespace,
+                            name=source_table.name,
+                        ),
                     )
                     generated_expression = None
             if (
@@ -188,6 +361,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "column",
                     f"{object_name}.{source_column.name}",
                     "Non-default column collation is not represented by the desired-design model",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
             columns.append(
                 DesignColumn(
@@ -195,6 +373,7 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     name=source_column.name,
                     data_type=source_column.data_type,
                     nullable=source_column.nullable,
+                    not_null_constraint_name=not_null_names.get(source_column.name),
                     default_expression=(
                         source_column.default_expression
                         if source_column.generated is None
@@ -240,6 +419,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "constraint",
                     f"{object_name}.{source_key.name}",
                     "Key deferrability is not represented by the desired-design model",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
             if not source_key.validated:
                 _issue(
@@ -247,6 +431,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "constraint",
                     f"{object_name}.{source_key.name}",
                     "Unvalidated key state is not represented by the desired-design model",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
 
         checks: list[DesignCheckConstraint] = []
@@ -266,6 +455,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "constraint",
                     f"{object_name}.{source_check.name}",
                     str(error) or "The check references an unavailable column",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
                 continue
             checks.append(
@@ -287,6 +481,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "constraint",
                     f"{object_name}.{source_check.name}",
                     "NOT VALID check state is not represented by the desired-design model",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
 
         indexes: list[DesignIndex] = []
@@ -320,6 +519,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "index",
                     f"{object_name}.{source_index.name}",
                     str(error) or "The index references an unavailable column",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
                 continue
             indexes.append(
@@ -347,6 +551,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "index",
                     f"{object_name}.{source_index.name}",
                     "Invalid PostgreSQL index state is not represented by the desired-design model",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
 
         if source_table.kind == "partitioned_table" or source_table.is_partition:
@@ -355,13 +564,25 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 "table",
                 object_name,
                 "Partitioning is not represented by the desired-design model",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_table.namespace,
+                    name=source_table.name,
+                ),
             )
         for constraint in source_table.not_null_constraints:
+            if not_null_names.get(constraint.columns[0]) == constraint.name:
+                continue
             _issue(
                 issues,
                 "constraint",
                 f"{object_name}.{constraint.name}",
-                "Named NOT NULL constraint identity is represented only as column nullability",
+                "NOT NULL constraint locality, inheritance, validation, or uniqueness is not fully represented by the desired-design model",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_table.namespace,
+                    name=source_table.name,
+                ),
             )
         for constraint in source_table.exclusion_constraints:
             _issue(
@@ -369,6 +590,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 "constraint",
                 f"{object_name}.{constraint.name}",
                 "Exclusion constraints are not represented by the desired-design model",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_table.namespace,
+                    name=source_table.name,
+                ),
             )
         tables.append(
             DesignTable(
@@ -400,6 +626,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 "relationship",
                 object_name,
                 "Foreign keys outside the imported namespace are not represented",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_relationship.source_namespace,
+                    name=source_relationship.source_table,
+                ),
             )
             continue
         try:
@@ -417,6 +648,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 "relationship",
                 object_name,
                 "The foreign key references a column omitted from the imported design",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_relationship.source_namespace,
+                    name=source_relationship.source_table,
+                ),
             )
             continue
         relationships.append(
@@ -444,6 +680,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 "relationship",
                 object_name,
                 f"MATCH {source_relationship.match_type} is not represented by the desired-design model",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_relationship.source_namespace,
+                    name=source_relationship.source_table,
+                ),
             )
         if not source_relationship.validated:
             _issue(
@@ -451,6 +692,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 "relationship",
                 object_name,
                 "NOT VALID foreign-key state is not represented by the desired-design model",
+                identity=PostgresObjectIdentity(
+                    kind="relation",
+                    namespace=source_relationship.source_namespace,
+                    name=source_relationship.source_table,
+                ),
             )
 
     functions: list[DesignFunction] = []
@@ -474,7 +720,7 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 )
             )
         except (SchemaSourceError, ValueError) as error:
-            _issue(issues, "routine", identity, str(error))
+            _issue(issues, "routine", identity, str(error), identity=PostgresObjectIdentity(kind="routine", namespace=source_function.namespace, name=source_function.name, signature=source_function.identity_arguments))
 
     views: list[DesignView] = []
     for source_view, kind in (
@@ -497,7 +743,7 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                 )
             )
         except (QueryDefinitionError, ValueError) as error:
-            _issue(issues, "view", source_view.name, str(error))
+            _issue(issues, "view", source_view.name, str(error), identity=PostgresObjectIdentity(kind="relation", namespace=source_view.namespace, name=source_view.name))
 
     triggers: list[DesignTrigger] = []
     for source_table in catalog.tables:
@@ -509,6 +755,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "trigger",
                     object_name,
                     "The trigger target was omitted from the imported design",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
                 continue
             try:
@@ -537,7 +788,7 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     )
                 )
             except (SchemaSourceError, ValueError) as error:
-                _issue(issues, "trigger", object_name, str(error))
+                _issue(issues, "trigger", object_name, str(error), identity=PostgresObjectIdentity(kind="relation", namespace=source_table.namespace, name=source_table.name))
                 continue
             if source_trigger.enabled != "origin":
                 _issue(
@@ -545,6 +796,11 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
                     "trigger",
                     object_name,
                     f"Trigger enabled mode {source_trigger.enabled!r} is not represented by the desired-design model",
+                    identity=PostgresObjectIdentity(
+                        kind="relation",
+                        namespace=source_table.namespace,
+                        name=source_table.name,
+                    ),
                 )
 
     content = SchemiiDesignContent(
@@ -568,7 +824,67 @@ def import_postgres_catalog(catalog: PostgresCatalog) -> ImportedDesign:
         "triggers": len(content.triggers),
         "types": len(content.types),
     }
+    if catalog.safety is not None:
+        for item in catalog.safety.preservation:
+            try:
+                properties = json.loads(item.properties)
+            except ValueError:
+                properties = None
+            if not isinstance(properties, dict) or properties.get("policies") or properties.get("row_security") or properties.get("force_row_security"):
+                _issue(
+                    issues,
+                    "row_security",
+                    f"{item.identity.namespace}.{item.identity.name}",
+                    "Row-security policies and properties are preserved as protected PostgreSQL metadata, not editable design definitions",
+                    identity=item.identity,
+                )
+            if item.partition_parents and item.relation_kind == "r" and not any(table.name == item.identity.name and table.is_partition for table in catalog.tables):
+                _issue(
+                    issues,
+                    "inheritance",
+                    f"{item.identity.namespace}.{item.identity.name}",
+                    "Table inheritance ancestry is preserved as protected PostgreSQL metadata, not an editable design contract",
+                    identity=item.identity,
+                )
+            if item.relation_kind == "m" and (item.reloptions or item.tablespace is not None or item.access_method not in {None,"heap"}
+                or item.owner != item.actor or any(grant.grantee != item.owner for grant in item.acl)):
+                _issue(
+                    issues,
+                    "materialized_view_preservation",
+                    f"{item.identity.namespace}.{item.identity.name}",
+                    "Materialized-view storage, ownership, or grants are not editable design definitions; reviewed maintenance must preserve and verify them",
+                    identity=item.identity,
+                )
+            if item.relation_kind == "m" and item.column_acl:
+                _issue(
+                    issues,
+                    "materialized_view_column_privileges",
+                    f"{item.identity.namespace}.{item.identity.name}",
+                    "Column privileges are preserved by refresh; definition replacement is blocked because column grants are not replayed",
+                    identity=item.identity,
+                )
+            if item.relation_kind == "m" and item.indexes:
+                _issue(
+                    issues,
+                    "materialized_view_indexes",
+                    f"{item.identity.namespace}.{item.identity.name}",
+                    "Materialized-view indexes are not editable design definitions; reviewed maintenance must replay and verify them",
+                    identity=item.identity,
+                )
+            if item.relation_kind in {"f", "S", "c"} and not _proven_identity_sequence(catalog, item):
+                _issue(
+                    issues,
+                    "opaque_relation",
+                    f"{item.identity.namespace}.{item.identity.name}",
+                    "Foreign tables, standalone sequence contracts, and composite types are preserved as protected PostgreSQL objects, not editable design definitions",
+                    identity=item.identity,
+                )
+    issues = _structured_issues(catalog, issues)
     summary = WorkspaceImportSummary(
+        safety_evidence_version=catalog.safety.version if catalog.safety else None,
+        migration_guidance=("Unsupported objects stay protected. Only changes outside their proven dependency closure can be reviewed."
+            if catalog.safety and catalog.safety.dependency_complete else
+            "Dependency safety is unproven. Changes involving unsupported PostgreSQL features remain blocked; export and ordinary SQL are available."),
         catalog_fingerprint=catalog.fingerprint,
         catalog_captured_at=catalog.captured_at,
         complete=not issues,

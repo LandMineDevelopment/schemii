@@ -9,6 +9,7 @@ from pydantic import Field, field_validator, model_validator
 
 from schemii.common.api.models import ApiModel
 from schemii.common.connections.models import DatabaseName
+from schemii.common.postgres.models import PostgresObjectIdentity
 
 
 NamespaceName = Annotated[str, Field(min_length=1, max_length=63)]
@@ -63,6 +64,11 @@ class WorkspaceImportIssue(ApiModel):
     category: Annotated[str, Field(min_length=1, max_length=64)]
     object_name: Annotated[str, Field(min_length=1, max_length=255)]
     reason: Annotated[str, Field(min_length=1, max_length=1024)]
+    feature_code: str = "legacy_unrepresented_object"
+    identity: PostgresObjectIdentity | None = None
+    protected_scope: list[PostgresObjectIdentity] = Field(default_factory=list)
+    dependency_complete: bool = False
+    unknown_reasons: list[str] = Field(default_factory=list)
 
 
 class WorkspaceImportSummary(ApiModel):
@@ -73,6 +79,8 @@ class WorkspaceImportSummary(ApiModel):
     complete: bool
     imported_objects: dict[str, Annotated[int, Field(strict=True, ge=0)]]
     issues: list[WorkspaceImportIssue] = Field(default_factory=list, max_length=20_000)
+    safety_evidence_version: int | None = None
+    migration_guidance: str = "Historical import coverage does not establish operation-specific preservation safety."
 
     @field_validator("catalog_captured_at")
     @classmethod

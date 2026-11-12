@@ -180,3 +180,19 @@ def test_mixed_resolution_bundle_reconciles_once_without_executing_sql(drift):
     resolved_types = [column.data_type for column in saved["resolved_content"].tables[0].columns]
     assert sorted(resolved_types) == ["character varying(40)", "character varying(80)"]
     assert {column.data_type for column in saved["live_content"].tables[0].columns} == {"character varying(40)"}
+
+
+def test_submitted_opaque_conflict_cannot_be_acknowledged_into_false_lossless_coverage(drift, monkeypatch):
+    from schemii.schemii.migrations.models import MigrationConflict, MigrationConflictResolution
+    from schemii.schemii.migrations import service as implementation
+    conflict=MigrationConflict(id='mcf_'+'f'*32,category='opaque',object_kind='schema',object_path='schema.coverage',
+        summary='Unproven protected boundary',allowed_resolutions=['pull_live'])
+    drift.repository.record.plan.conflicts.append(conflict)
+    request=drift.request.model_copy(update={'resolutions':[*drift.request.resolutions,
+        MigrationConflictResolution(conflict_id=conflict.id,resolution='pull_live')]})
+    monkeypatch.setattr(implementation,'reconcile_designs',lambda *_args,**_kwargs:SimpleNamespace(
+        conflicts=[conflict],merged=drift.repository.record.authority.live_content,live=drift.repository.record.authority.live_content))
+    with pytest.raises(MigrationServiceError) as error:
+        drift.service.resolve_drift(OWNER,PLAN,request)
+    assert error.value.code=='drift_resolution_incomplete'
+    assert not drift.repository.saved

@@ -1771,3 +1771,34 @@ def test_durable_composition_never_silently_uses_memory_migrations() -> None:
         match="Durable application services require an explicit durable migration repository",
     ):
         create_app(services)
+
+
+def test_frozen_historical_committed_catalog_recovery_syncs_without_target_calls_or_rehash():
+    import json
+    from tests.test_catalog_fingerprint_compatibility import LEGACY_JSON, LEGACY_DIGEST
+    from schemii.common.postgres.models import PostgresCatalog
+    frozen=PostgresCatalog.model_validate_json(LEGACY_JSON)
+    imported=import_postgres_catalog(frozen)
+    designs=_ConcurrentDesignRepository()
+    repository=InMemoryMigrationRepository(designs)
+    _store_plan(repository,catalog=frozen)
+    class NoTargetCalls:
+        def __getattr__(self,name):
+            raise AssertionError('Committed historical recovery must not inspect or replay target work: '+name)
+    service=MigrationService(repository=repository,connection_access=_Connections(),postgres=NoTargetCalls(),
+        workspaces=_WorkspaceRepository(),designs=designs,clock=lambda:NOW)
+    claimed=_reserve_and_claim(repository)
+    applying=repository.transition_execution(OWNER_ID,claimed.execution.id,expected_revision=claimed.execution.revision,
+        allowed_from={'reserved'},status='applying',lease_owner=claimed.lease_owner,lease_expires_at=NOW+timedelta(minutes=2),
+        transaction_id='42',target_identity=TARGET_IDENTITY,
+        intended_result={'catalog':json.loads(LEGACY_JSON),'content':imported.content.model_dump(mode='json'),
+            'catalogFingerprint':LEGACY_DIGEST,'designFingerprint':design_fingerprint(imported.content)})
+    committed=repository.transition_execution(OWNER_ID,applying.execution.id,expected_revision=applying.execution.revision,
+        allowed_from={'applying'},status='succeeded',lease_owner=applying.lease_owner,lease_expires_at=NOW+timedelta(minutes=2),
+        commit_outcome='committed',sync_status='pending')
+    result=service.execution_coordinator.process(ExecutionWork(kind='sync',record=committed))
+    assert result.status=='succeeded' and result.sync_status=='conflict'
+    baseline=repository.current_baseline(OWNER_ID,WORKSPACE_ID)
+    assert baseline.catalog.fingerprint==LEGACY_DIGEST and baseline.catalog.safety is None
+    assert baseline.complete==imported.summary.complete
+    assert designs.replace_calls==0

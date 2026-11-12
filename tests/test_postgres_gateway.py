@@ -75,6 +75,12 @@ class FakeConnection:
         return FakeCursor(self)
 
     def rows_for(self, query: str) -> list[dict[str, Any]]:
+        # Existing transport fixtures have no newly collected dependency proof.
+        # Model that absence explicitly; never give these doubles safety authority.
+        if "schemii_catalog_safety_objects" in query or "schemii_catalog_safety_dependencies" in query:
+            return []
+        if "schemii_catalog_safety_unknowns" in query:
+            return [{"routine_bodies": True, "opaque_dependencies": False, "inaccessible": False}]
         for marker, rows in self.responses.items():
             if marker in query:
                 return rows
@@ -637,9 +643,11 @@ def test_introspection_maps_all_domains_in_one_read_only_snapshot() -> None:
         "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
     ]
     for query, parameters in connection.executed:
-        if "schemii_catalog_" in query and "metadata" not in query:
+        if "schemii_catalog_safety_unknowns" in query:
+            assert parameters == ("public",)
+        elif "schemii_catalog_" in query and "metadata" not in query:
             assert parameters[-2] == "public"
-    assert sum(name is not None for name in connection.cursor_names) == 8
+    assert sum(name is not None for name in connection.cursor_names) == 10
     assert connection.rollbacks == 1
     assert connection.closed is True
 

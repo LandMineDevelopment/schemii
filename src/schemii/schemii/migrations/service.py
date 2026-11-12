@@ -60,6 +60,8 @@ from .models import (
     MigrationDriftResolutionRequest,
     MigrationExecution,
     MigrationExecutionCreate,
+    MigrationMaterializedMaintenance,
+    MigrationStep,
     MigrationPlan,
     MigrationPlanCreate,
     MigrationReconciliationRequest,
@@ -72,6 +74,9 @@ from .planner import (
     compile_migration_steps,
     content_fingerprint,
     new_baseline_content,
+    migration_compatibility,
+    materialized_maintenance,
+    view_definitions_equivalent,
     random_plan_id,
     reconcile_designs,
     tables_requiring_empty_for_required_columns,
@@ -801,8 +806,57 @@ class MigrationService:
             rebuild_table_ids=eligible_rebuild_ids,
             populated_rebuild_table_ids=populated_rebuild_ids,
             column_type_conversions=conversions,
+            catalog=catalog,
         )
         compiler_blockers.extend(conversion_blockers)
+        maintenance: list[MigrationMaterializedMaintenance] = []
+        existing_views = {view.id: view for view in reconciliation.live.views}
+        verified_names = []
+        for view in merged.views:
+            previous = existing_views.get(view.id)
+            if previous is not None and view.kind == previous.kind == "materialized_view" and view.name == previous.name and not view_definitions_equivalent(workspace.namespace,previous.definition,view.definition,catalog):
+                report,_ = materialized_maintenance(catalog,view,"replace")
+                maintenance.append(report)
+                if report.eligible: verified_names.append(view.name)
+        refresh_candidates = []
+        for view in merged.views:
+            previous=existing_views.get(view.id)
+            if previous is None or previous.kind != "materialized_view": continue
+            candidate,_=materialized_maintenance(catalog,view,"refresh")
+            if view.kind != "materialized_view" or view.name != previous.name or not view_definitions_equivalent(workspace.namespace,previous.definition,view.definition,catalog):
+                candidate.eligible=False
+                candidate.blocking_reasons.append("Refresh requires the unchanged existing definition; review replacement separately")
+            refresh_candidates.append(candidate)
+        selected_refreshes = set(request.refresh_materialized_view_ids)
+        for view in sorted(merged.views,key=lambda item:item.name):
+            if view.id not in selected_refreshes: continue
+            selected_refreshes.remove(view.id)
+            previous = existing_views.get(view.id)
+            report,_ = materialized_maintenance(catalog,view,"refresh")
+            if previous is None or previous.kind != "materialized_view" or view.kind != "materialized_view" or previous.name != view.name or not view_definitions_equivalent(workspace.namespace,previous.definition,view.definition,catalog):
+                report.eligible=False
+                report.blocking_reasons.append("Refresh requires one unchanged existing materialized-view definition; review replacement separately")
+            maintenance.append(report)
+            if report.eligible:
+                verified_names.append(view.name)
+                target='"'+workspace.namespace.replace('"','""')+'"."'+view.name.replace('"','""')+'"'
+                steps.append(MigrationStep(index=len(steps)+1,object_kind="materialized_view",object_path=f"views.{view.name}",
+                    operation="refresh",sql=f"REFRESH MATERIALIZED VIEW {target};",destructive=True,requires_lock=True,data_movement=True))
+            else:
+                compiler_blockers.extend(MigrationWarning(code="materialized_refresh_unsupported",message=reason,
+                    object_path=f"views.{view.name}") for reason in report.blocking_reasons)
+        if selected_refreshes:
+            raise MigrationServiceError(409,"materialized_refresh_changed","A selected materialized view no longer exists in this review")
+        compatibility = migration_compatibility(catalog, reconciliation.live, merged,
+            tuple(table.name for table in merged.tables if table.id in eligible_rebuild_ids) +
+                tuple(item.name for item in maintenance if item.operation=="refresh" and item.eligible), tuple(verified_names))
+        if compatibility.operation_safe:
+            # Only the independent operation proof can replace the schema-wide
+            # coverage blocker. Submitted conflict acknowledgements cannot.
+            reconciliation.conflicts[:] = [item for item in reconciliation.conflicts
+                if not (item.category == "opaque" and item.object_path == "schema.coverage")]
+        compiler_blockers.extend(MigrationWarning(code="unsafe_compatibility_boundary", message=reason, object_path="schema.compatibility")
+            for reason in compatibility.blocking_reasons)
         warnings = list(reconciliation.warnings)
         if reconciliation.external_changes:
             warnings.insert(
@@ -875,6 +929,9 @@ class MigrationService:
             "columnOrderRebuilds": [
                 item.model_dump(mode="json", by_alias=True) for item in order_rebuilds
             ],
+            "materializedMaintenance": [item.model_dump(mode="json",by_alias=True) for item in maintenance],
+            "materializedRefreshCandidates": [item.model_dump(mode="json",by_alias=True) for item in refresh_candidates],
+            "compatibility": compatibility.model_dump(mode="json", by_alias=True),
             "steps": [step.model_dump(mode="json", by_alias=True) for step in steps],
             "externalChanges": [
                 item.model_dump(mode="json", by_alias=True)
@@ -911,6 +968,10 @@ class MigrationService:
             review_digest=review_digest,
             drift_status=drift_status,
             complete=complete,
+            compatibility=compatibility,
+            materialized_maintenance=maintenance,
+            materialized_refresh_candidates=refresh_candidates,
+            requires_materialized_maintenance_acknowledgement=bool(maintenance),
             apply_capable=apply_capable,
             destructive=destructive,
             column_type_conversions=conversion_reviews,
@@ -1050,7 +1111,9 @@ class MigrationService:
             current_catalog,
             resolutions=submitted,
         )
-        unresolved = [item for item in reconciliation.conflicts if item.id not in submitted]
+        # A submitted choice is not proof that a regenerated opaque/structural
+        # conflict has disappeared. The merger removes only resolved conflicts.
+        unresolved = reconciliation.conflicts
         if unresolved or reconciliation.merged is None:
             raise MigrationServiceError(
                 409,

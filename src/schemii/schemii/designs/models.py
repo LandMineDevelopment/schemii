@@ -125,6 +125,9 @@ class DesignColumn(ApiModel):
     name: DesignIdentifier
     data_type: Annotated[str, Field(min_length=1, max_length=512)]
     nullable: bool = True
+    not_null_constraint_name: DesignIdentifier | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     default_expression: DesignExpression | None = None
     identity: Literal["always", "by_default"] | None = None
     generated_expression: DesignExpression | None = None

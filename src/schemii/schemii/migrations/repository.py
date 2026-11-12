@@ -21,6 +21,7 @@ from typing import (
 
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.history_retention import prune_postgres_history
+from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
     SchemiiDesignContent,
     SchemiiDesignReplace,
@@ -926,6 +927,7 @@ class InMemoryMigrationRepository:
                 ),
                 operation_kind="checkpoint",
             )
+            coverage = import_postgres_catalog(record.authority.live_catalog)
             baseline = self.create_baseline(
                 owner_id=record.owner_id,
                 workspace_id=record.plan.workspace_id,
@@ -937,8 +939,8 @@ class InMemoryMigrationRepository:
                 design_revision=design.revision,
                 content=live_content,
                 catalog=record.authority.live_catalog,
-                complete=True,
-                issues=[],
+                complete=coverage.summary.complete,
+                issues=[item.model_dump(mode="json", by_alias=True) for item in coverage.summary.issues],
                 source="drift_reconciliation",
                 expected_predecessor_id=record.baseline_id,
             )
@@ -1831,6 +1833,7 @@ class PostgresMigrationRepository:
                     """,
                     (next_design_revision, self._json_dump(retained), record.owner_id, record.plan.workspace_id),
                 )
+                coverage = import_postgres_catalog(record.authority.live_catalog)
                 baseline = self._insert_baseline(
                     cursor,
                     owner_id=record.owner_id,
@@ -1843,8 +1846,8 @@ class PostgresMigrationRepository:
                     design_revision=next_design_revision,
                     content=live_content,
                     catalog=record.authority.live_catalog,
-                    complete=True,
-                    issues=[],
+                    complete=coverage.summary.complete,
+                    issues=[item.model_dump(mode="json", by_alias=True) for item in coverage.summary.issues],
                     source="drift_reconciliation",
                     expected_predecessor_id=record.baseline_id,
                 )
