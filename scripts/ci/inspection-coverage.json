@@ -40,6 +40,9 @@
         "22ee2b14010bde642b47cbaa3b6a604beb4b0e428d0a3222e5846d92e8f53e21",
         "285bc9bebc3ace60ad1013107fd7d617587fef6884eecda4a2667448c484c22e",
         "37a24649f159c5b6dbbb19ad604b873092ab26230bf78910eccc4fc7a32a9357",
+        "3da023b510e7c7a0fd243ce9e165ed93c1f20c918b6a8086e7c2db81474734cd",
+        "441e9087491ade11f8368e8da99a227ce1dfb6b5d8e644c287a777ff4f275ea1",
+        "4b1b5de1900828997c976c24fd7b4a44216b0d9200930ebb3e1913f651379eb3",
         "4b9f308226c8864eea5f11c7f7967b3358fb89e404d07a9dc6bcca4ecc840e97",
         "5d6906a85830f15bd8901c6b497353232240eecee58592c0f2c1077fcb0ce254",
         "5fede60c2c28e0c9bd65cf37f42637a1f0851f17f61d5eb294da2dad44b9a6ff",
@@ -161,12 +164,12 @@
     }
   },
   "frozen_sha256": {
-    "tests/test_database_inspection.py": "dafe61f181ca24a446eb9bc624d45ce98f0d88548b3eae858a46ca9e62aebdb2",
+    "tests/test_database_inspection.py": "b212a0f790aa1183e5f45bcfe7de6550f2c072d3ffd0c46b963196303f377031",
     "tests/test_developer_inspection.py": "4e0da64eda5c195a9c91b5ac0353119311421f25d45c11111f48ea254a9308e6",
-    "tests/test_route_inspection.py": "68c5d8a907291d6bda9b51ab0c789f90ca854c4e8995a0522c3d9d19960aba22",
-    "tests/test_system_inspection.py": "5af2d220755677db25268ae98bbe7d5faa5d5bda67b0172e91ead3cf53b6103e",
+    "tests/test_route_inspection.py": "41c2e91c30175f1f7bff435ddf4cb8dba7c1f2a20afde0e693fe7543affaffb4",
+    "tests/test_system_inspection.py": "d64da9c9699536914041bbbfe4cef9bce72ed5336a999773eb5fd0880b65992f",
     "tests/test_application_structure.py": "46aeb00238b49d89918fe750dc86befc35020bdb902e5006040861eb78085085",
-    "tests/test_frontend.py": "a90fef6420a059549659a09ceaa22349b15d4cef512aa5c7a92332fee7c9b916",
+    "tests/test_frontend.py": "04b0699e098cdf368c33f0656063c08a3fe35ac2d712dc6ee61678c83536228f",
     "tests/test_runtime_hardening.py": "1b80a308b34d902a0e21812c1eedc8c108fbcb805c2fbb0d04f3c6811023e6ca",
     "tests/e2e/shared-ui-audit.spec.js": "ced5e3da1d843ac53748296cbf5a882b7d8873f9a426fa30018092d394d162bd",
     "tests/e2e/ai-diagnostic-permissions.spec.js": "196b0bd870b76b70111b5a808fae71e369ac9b1b45efad2392d8ea25f467420a"

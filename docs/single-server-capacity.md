@@ -24,8 +24,8 @@ documented in [testing/load](../testing/load/README.md).
    Do not add processes or tune pools as an unmeasured fix.
 4. Capture failed-baseline and fixed regressions for idle expiry, wide driver
    results, metadata admission and cancellation/revocation/disconnect. The current
-   adapter's 513 ID-only source is deliberately small; it cannot validate wide-row
-   memory or the real 1,800s idle contract by itself.
+   disposable adapter supplies full-width rows and an actual 1,800s idle recipe;
+   both remain live-unqualified. The retained 513 ID-only source cannot substitute.
 5. Establish an independent observer with exact ownership and live resource gauges.
    Missing metrics, lost control/observation, data/isolation failure, accumulating
    backends/cursors or >=85% app memory stop the campaign. Protect user resources,
@@ -42,7 +42,8 @@ journeys disclose their arrival rate and count every actual call separately.
 | ramp | 100, 300, 600, 1,000, 3,000, 6,000, 12,000 | 2m warmup + >=5m hold each | First sustainable/capacity knee |
 | confirm | Selected near-knee stage ×3 | 2m warmup + >=5m hold each | Repeatability, confidence and resource stability |
 | spike | Baseline, 2× selected rate capped at 12,000, 0.1× recovery | 2m, 30s, 1m | Bounded overload and healthy recovery |
-| soak | Selected sustainable rate | 2m warmup + 60m hold | Stable RSS, connections, sessions and jobs |
+| soak | Selected sustainable rate | 2m warmup + explicit 30–60m hold (default 60m) | Stable RSS, connections, sessions and jobs |
+| lifecycle | One owned SQL journey per selected active identity | Actual >=1,800s idle plus recovery | Real retained-session expiry; separate from steady load |
 
 Extend low-volume holds when p99 has too few samples. Report counts rather than
 claim precision from a tiny smoke; require at least 10,000 successful samples when
@@ -50,7 +51,8 @@ confirming p99 near the knee. Report three repetitions separately and compare
 hardware, configuration, source, mix, account cardinality and generator delivery.
 Stop at the first failed ramp stage; measure controlled overload separately.
 
-Generate a plan and use the guarded workflow. For example, after the gates pass:
+Generate a plan and use the guarded workflow. For example, after the gates pass,
+the retained-account report path remains:
 
 ```bash
 ./test.sh load plan --recipe ramp --workload report-5 --active 2 \
@@ -66,7 +68,8 @@ Generate a plan and use the guarded workflow. For example, after the gates pass:
 ```
 
 Repeat plan/prepare with `--recipe confirm --rate KNEE`, `--recipe spike --rate
-KNEE`, or `--recipe soak --rate SUSTAINABLE`. Select workloads explicitly rather
+KNEE`, or `--recipe soak --soak-seconds 1800 --rate SUSTAINABLE`. The bounded soak
+option accepts 1,800–3,600 measured seconds; its default remains 3,600. Select workloads explicitly rather
 than turn an aggregate cheap-read success into query/dashboard user sizing.
 
 ## Workload and identity matrix
@@ -78,24 +81,36 @@ than turn an aggregate cheap-read success into query/dashboard user sizing.
 | Private 1/5/20-tile report | All 513 known order IDs per tile, exact completion/end | Incremental Node |
 | CSV | Exact headers/row multiset, valid complete CSV | Incremental Node |
 | Slow reader/disconnect/cancel | Incremental body, counted control calls, independent backend release | Foundation; real control acceptance pending |
-| SQL SELECT/page/close | Ordered >page-size values, cursor progression, final close | Dedicated console fixture/client pending |
-| Wide results and real idle expiry | Driver-sized byte/row oracle and observed 1,800s lifecycle | Pending; no ID-only substitute |
-| Shared report/viewer grants | Private/raw result denial, authorized shared stream and revocation | Owned grant adapter pending |
-| Login/cardinality churn | Separate login cost and session cleanup at 10/100/1,000 registered users | Owned account provisioner pending |
-| Revisioned metadata writes | Optimistic revisions, conflicts, persistence and exact cleanup | Owned fixture lane pending |
+| SQL SELECT/page/close | Ordered >page-size values, cursor progression, final close | Authored owned Console adapter; deterministic controls pass, live pending |
+| Wide results and real idle expiry | Four 8,192-character cells/row and real 1,800s wait | Authored exact-value and lifecycle recipes; no live result |
+| Shared report/viewer grants | Private model denial, explicit shared stream authority and release | Authored managed viewer grant/stream adapter; revocation/live acceptance pending |
+| Login/cardinality churn | Separate login/read/logout and exact disposable account cleanup | Authored 10/100/1,000 registered independent of active count; live pending |
+| Revisioned metadata writes | Optimistic workspace label revision and persistence | Authored exact owned write/cleanup adapter; live conflicts pending |
 | COPY/migration | Exact disposable writer schema and rollback/cleanup | Separate explicit writer campaign |
 
-The first adapter selects existing retained accounts and does not expand their
-permissions or profile limit. Test registered users (10/100/1,000) independently
+The retained adapter selects existing accounts. The disposable adapter requires
+an already held launcher `representative-load-v1` fixture and creates its own
+nonadministrator accounts, read-only source schemas, profiles and explicit roles.
+It preserves retained accounts and never raises profile limits. Test registered users (10/100/1,000) independently
 from active authenticated identities (1/10/50/100+). Reuse sessions for steady
 traffic; login churn has its own lane. Compare many readers on one saved-profile
 revision with distinct profiles; distinguish owner-private and Schemii-managed
 profiles and respect the per-owner 100-profile cap.
 
-After named lanes pass, ratify a realistic mix with explicit weights and actual
-calls per active user/minute. Exclude paid AI; a local stub cannot measure provider
+After named lanes pass, ratify the authored default weighted mix (40% cheap read,
+10% catalog, 10% compile, 20% SQL paging, 10% five-tile report, 5% shared report,
+5% metadata writes), or select explicit validated weights. Report actual HTTP calls
+per active user/minute separately from journey arrivals. Exclude paid AI; a local stub cannot measure provider
 capacity. Preserve snapshot and tile-fairness semantics; do not hide failures with
 retries, skips or explicit cleanup inside a lane that is meant to prove auto expiry.
+The disposable holder's maximum 3,600-second life must include preparation and
+recovery. The explicit 1,800-second measured soak plus 120-second warmup can fit
+when sufficient hold time remains; a short remaining lifetime refuses dispatch.
+The default full-hour soak cannot fit this holder and remains refused. The fixture's startup-effective
+configuration receipt also cannot replace the host PID/cgroup observer receipt.
+Collector export/attach certification, tiny qualified smoke and all campaigns
+remain pending. Fixture-only instrumentation overhead is unknown and every report
+keeps `capacityEligible: false`.
 
 ## Proposed budgets and decision rules
 
@@ -136,23 +151,26 @@ publish a capacity estimate while a correctness/isolation/leak/OOM gate is unres
 
 ## Observer source map and current gaps
 
-Source inspection for this foundation used `49ed0a3`; the metadata admission
-snapshot was also inspected on `audit/metadata-bounds` at `13ec07c`. Those source
-checks did not collect runtime metrics. The current load adapter consumes a private
-observer file; it does not implement the observer or turn unavailable fields into
-zero. A refreshed timestamp must describe newly sampled values.
+Historical source inspection used `49ed0a3` and `audit/metadata-bounds` at
+`13ec07c`; it did not collect runtime metrics. The current adapter consumes a private
+observer file. Integrated PR160 supplies launcher-owned process/cgroup receipts and
+an authenticated, administrator-only, no-store aggregate application snapshot.
+The opt-in witness in [the load guide](../testing/load/README.md#opt-in-run-witness-and-active-recovery)
+adds bounded run-owned source/job evidence. Neither turns unavailable fields into
+zero. A refreshed timestamp must describe newly sampled values; no live capacity
+qualification is established by these deterministic boundaries.
 
 | Observer field | Concrete read-only source | Ownership / remaining boundary |
 | --- | --- | --- |
 | appRssBytes | Host `/proc/PID/status` `VmRSS` for a verified API PID; cgroup v2 `memory.current` separately describes the whole app cgroup | Record PID birth identity and scope; process RSS and cgroup memory usage are distinct |
 | appMemoryLimitBytes | Resolve the verified API process's `/proc/PID/cgroup`, read that cgroup's `memory.max` and effective finite ancestors | `compose.test.yaml` is a default, not proof of a live limit; `max` must remain unmeasured |
 | appCpuPercent | Delta of verified cgroup v2 `cpu.stat` `usage_usec` over monotonic time; read `cpu.max` for effective quota | Specify whether percent is one-core or quota-normalized; do not mix denominators |
-| apiProcesses, threads, fds | Read-only host `/proc` process identities, `status` Threads and accessible `fd` entries, restricted to the verified app cgroup | A launcher-owned identity/export seam is still needed; names alone do not establish deployment ownership |
-| retainedSessions, openCursors | Live `ConsoleService` retained/read/transaction and driver cursor registries under their existing locks | No aggregate read-only API/export exists; PostgreSQL `pg_cursors` is session-local and cannot prove every app cursor closed |
-| ordinaryPermits, retainedPermits | Live gateway `_connection_capacity` acquire/release state; monitor/control have separate capacity objects | No public locked snapshot exists in the inspected gateway; DB connections are not equivalent to permits while connecting or closing |
-| ownedBackends | Dedicated read-only source observer querying `pg_stat_activity` with the fixture's database roles, app name, database and captured PID/backend-start identity | Account/role filtering alone is insufficient for a shared-profile run; source visibility and exact run identity must be proven |
-| activeJobs | GET `/api/v1/schemii/workspaces/{owned-workspace}/bulk-jobs` plus exact receipt-owned job IDs/status; Console execution GET/activity for exact execution IDs | This fixture adapter creates no bulk jobs. A workspace-wide total is not a run-owned count; internal active worker state is not fully exposed |
-| metadataActive, metadataRejected | `MetadataConnectionFactory.admission_snapshot()` fields active/rejected in the reviewed metadata-bounds implementation | Internal factory seam only, with no live process export; creating another factory produces unrelated counters |
+| apiProcesses, threads, fds | Verified launcher/cgroup `/proc` identities, supported Uvicorn argv, endpoint namespace PID, Threads and readable FDs | Shells are distinguished from workers; unknown sidecars, unreadable argv and replacement cannot qualify one API process. Raw argv is not retained |
+| retainedSessions, openCursors | Administrator `/api/v1/admin/runtime-observation` snapshots live Console and driver registries without waiting for busy locks | Deployment aggregate only; PostgreSQL `pg_cursors` is session-local and application handles cannot prove source release |
+| ordinaryPermits, retainedPermits | The same authenticated snapshot reads reviewed gateway acquire/release state; monitoring/control remain separate | DB connections are not equivalent to permits while connecting or closing; aggregate is not run attribution |
+| ownedBackends | Opt-in `testing/load/source_monitor.py`, explicit provisioned run-exclusive role, empty baseline, captured PID/backend-start/database/role/application | Exact same-role read-only authority; idle is live, stale/replaced/denied evidence fails closed. Borrowed/shared roles and ended `/activity` cannot qualify release |
+| activeJobs | `testing/load/ownership.mjs` reads only receipt-owned IDs via owner execution and `/console/bulk-jobs/{id}` APIs | Immutable no-job adapters have a limited authenticated zero; missing/foreign/uncertain records stay unavailable, never a workspace-wide total |
+| metadataActive, metadataRejected | Authenticated aggregate export of `MetadataConnectionFactory.admission_snapshot()` active/rejected | Actual process factory, not a newly constructed unrelated factory; wait durations remain unavailable |
 | sourceConnections / lock waits | The source observer's bounded aggregate `pg_stat_activity` / `pg_locks`; existing owned execution `/activity` exposes database/wait/blocker state | `/activity` sets monitoringAvailable false for ended **or** visibility-restricted sessions and is not a source-release proof |
 | ingressConnections | Verified ingress network namespace socket observation | `dev/ingress/nginx.conf` exposes timing logs, no connection-count or stub-status endpoint |
 | eventLoopLagMs / executor pressure | A bounded instrument in the running API event loop / executor | No runtime sampler/export exists in the inspected source |
@@ -165,10 +183,16 @@ handler timing is not a streaming body-drain measurement. Private `metadata.limi
 can explain rejection/eviction classes to an authorized observer; it is neither a
 live permit gauge nor a product-readable metrics route.
 
-The smallest remaining observer work is a launcher-owned read-only deployment
-identity/cgroup exporter plus a live, locked, numeric-only application snapshot for
-retained/cursor/admission state and an explicit source observer. Preserve normal
+The bounded foundation records generator PID/start, RSS, FDs, threads, namespace
+network counters, Node CPU/scheduling measurements and external CPU ticks with
+host `CLK_TCK` when available. Network capacity, competing traffic and CPU/memory
+headroom remain unknown. Active
+recovery now requires a fresh authenticated read, exact SELECT terminal, captured
+backend and independently observed release. Workload/cardinality provisioners and
+weighted mix are authored with deterministic controls. Live qualification,
+live held-fixture host observation/attachment qualification, independent cleanup/review and
+the actual campaign remain pending. The hard report guard remains
+`capacityEligible: false`. Preserve normal
 end-user grants, exclude SQL/row/credential/owner labels from public metrics, and
-keep observer connections in separately disclosed budgets. No Docker/socket access,
-additional server, inferred zero counters or missing-source fallback qualifies as
-capacity evidence.
+disclose observer budgets. Docker/socket access, inferred zero counters and
+missing-source fallback cannot qualify capacity evidence.

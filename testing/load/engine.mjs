@@ -8,6 +8,10 @@ import { ordinaryRequest, streamRequest } from './fixtures.mjs';
 import { observeChild, stopChild } from './children.mjs';
 import { publicObservation, K6_VERSION } from './plan.mjs';
 import { privateJSON, writeJSON } from '../harness/store.mjs';
+import { processIdentity, sampleGenerator, generatorHeadroom, clockTickFrequency, writePrivateJSON, readPrivateJSON } from './runtime.mjs';
+import { sourceEvidence, fresh, readOwnershipConfig, ownershipPaths, ownedRecovery, observeOwnedWork, sampleSource, observeOwnership } from './ownership.mjs';
+import { mixedWorkload } from './plan.mjs';
+import { runJourney } from './adapters.mjs';
 
 export async function birthTick(pid) {
   try {
@@ -20,17 +24,27 @@ export async function requireStopped(owner) {
   if (!owner || !Number.isSafeInteger(owner.pid) || typeof owner.birthTick !== 'string') throw new Error('unknown_process_owner');
   if (await birthTick(owner.pid) === owner.birthTick) throw new Error('owned_process_still_live');
 }
-export async function observation(file) {
+export async function observation(file, expectedRunId = null, expectedRuntimeReceiptSha256 = null) {
   if (!file) return null;
-  return publicObservation(await privateJSON(file));
+  const value = await privateJSON(file);
+  if (expectedRuntimeReceiptSha256 && value.runtimeReceiptSha256 !== expectedRuntimeReceiptSha256) throw new Error('fixture_observer_runtime_changed');
+  // Preserve numeric-only external smoke observations, which remain unqualified
+  // for owned release. An explicit failure or owned witness must fail closed.
+  if ((value.status && value.status !== 'available') || (value.ownership && value.status !== 'available')) throw new Error('observer_unavailable');
+  if (expectedRunId && value.ownership?.runId !== expectedRunId) throw new Error('owned_run_observation_mismatch');
+  if (value.ownership) {
+    sourceEvidence(value.ownership.source, value.ownership.runId);
+    if (!fresh(value.ownership.work) || value.ownership.work.runId !== value.ownership.runId || value.ownership.work.status !== 'available') throw new Error('owned_work_observation_unavailable');
+  } else if ('ownedBackends' in value || 'activeJobs' in value) throw new Error('unattributed_resource_observation');
+  return publicObservation(value);
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Scheduling is based on absolute arrival deadlines, independent of response
 // completion. A late/full generator drops work rather than queueing it silently.
 export async function openLoop({ rate, seconds, maxConcurrent, task, signal,
-  clock = () => performance.now(), sleep = pause }) {
-  const accounting = new Accounting(), active = new Set(), started = clock();
+  clock = () => performance.now(), sleep = pause, onOffer = () => {}, maximumCallsPerMinute = Infinity }) {
+  const accounting = new Accounting({ maximumCallsPerMinute }), active = new Set(), started = clock();
   const offered = Math.floor(rate * seconds / 60), interval = 60000 / rate;
   for (let index = 0; index < offered; index++) {
     const due = started + index * interval;
@@ -38,8 +52,9 @@ export async function openLoop({ rate, seconds, maxConcurrent, task, signal,
     if (clock() < due) await sleep(due - clock());
     if (signal?.aborted) break;
     const lag = Math.max(0, clock() - due);
-    if (active.size >= maxConcurrent || lag > Math.max(100, interval)) { accounting.offered(false, lag); continue; }
+    if (active.size >= maxConcurrent || lag > Math.max(100, interval)) { accounting.offered(false, lag); onOffer(index, false); continue; }
     accounting.offered(true, lag);
+    onOffer(index, true);
     const promise = Promise.resolve().then(() => task(index, accounting)).then(
       () => accounting.journey(true), () => accounting.journey(false)).finally(() => active.delete(promise));
     active.add(promise);
@@ -50,6 +65,35 @@ export async function openLoop({ rate, seconds, maxConcurrent, task, signal,
   result.arrivals.notOfferedAfterStop = offered - result.arrivals.offered;
   result.scheduledArrivals = offered;
   return result;
+}
+
+export async function runOwnedStage({ spec, stage, receipt, origin, signal, onExecution, onIntent, finishIntent, saveReceipt,
+  captureSource, onFatal = () => {}, Client = HTTPClient, journey = runJourney, schedule = openLoop }) {
+  const accounts = receipt.accounts.slice(0, spec.activeIdentities);
+  if (accounts.length !== spec.activeIdentities || receipt.kind !== 'disposable') throw new Error('disposable_population_not_ready');
+  const clients = accounts.map(account => new Client({ origin, cookie: account.cookie, timeoutMs: spec.requestDeadlineMs, maxBytes: spec.maxBodyBytes }));
+  const lanes = {}, used = new Set(), choose = index => spec.workload === 'mix' ? mixedWorkload(spec.mix, index) : spec.workload;
+  try {
+    const summary = await schedule({ rate: stage.callsPerMinute, seconds: stage.seconds, maxConcurrent: spec.maxConcurrent, signal, maximumCallsPerMinute: spec.constraints.maxCallsPerMinute,
+      onOffer: (index, started) => { const lane = choose(index); lanes[lane] ||= { offered: 0, started: 0, dropped: 0, completed: 0, failed: 0 }; lanes[lane].offered++; lanes[lane][started ? 'started' : 'dropped']++; },
+      task: async (index, accounting) => {
+        const slot = (index + Math.floor(index / accounts.length)) % accounts.length, base = accounts[slot], lane = choose(index), client = clients[slot];
+        used.add(slot);
+        const variant = base.variants?.[Math.floor(index / accounts.length) % base.variants.length];
+        const account = variant ? { ...base, ...variant, control: base.control ||= {} } : base;
+        client.accounting = accounting;
+        try {
+          await journey({ workload: lane, account, client, signal, sequence: index, origin, Client, onExecution,
+            onIntent, finishIntent, captureSource, save: saveReceipt });
+          lanes[lane].completed++;
+        } catch (error) { lanes[lane].failed++; onFatal(error); throw error; }
+      } });
+    summary.journeys = lanes;
+    summary.mix = spec.workload === 'mix' ? spec.mix : [];
+    summary.offeredUnit = spec.rateUnit;
+    summary.configuredActiveIdentities = spec.activeIdentities; summary.actualIdentitiesUsed = used.size;
+    return summary;
+  } finally { for (const client of clients) client.close(); }
 }
 
 export async function runStreams({ spec, stage, receipt, origin, signal, onExecution = async () => {}, onFatal = () => {} }) {
@@ -163,13 +207,25 @@ export async function verifyK6(binary) {
 }
 
 export async function executePlan({ spec, receipt, dir, origin, binary, observerFile, allowUnobserved,
-  signal, abort, onStage = async () => {}, onGenerator = async () => {}, onExecution = async () => {} }) {
+  signal, abort, expectedRuntimeReceiptSha256 = null, onStage = async () => {}, onGenerator = async () => {}, onExecution = async () => {},
+  onIntent, finishIntent, saveReceipt,
+  runStage = options => options.receipt.kind === 'disposable' ? runOwnedStage(options) : options.spec.engine === 'k6' ? runK6(options) : runStreams(options),
+  generatorSampler = sampleGenerator, tickFrequencyReader = clockTickFrequency, sleep = pause,
+  recover = ownedRecovery, observeRun = observeOwnership }) {
   const results = [], before = await observation(observerFile);
-  if (!before && !allowUnobserved) throw new Error('observer_required');
+  if (expectedRuntimeReceiptSha256) await observation(observerFile, null, expectedRuntimeReceiptSha256);
   let monitorError = null, timer;
+  let ownershipConfig = null;
+  const paths = ownershipPaths(dir);
+  try { ownershipConfig = await readOwnershipConfig(paths.config); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (ownershipConfig && (ownershipConfig.runId !== receipt.tag || ownershipConfig.workload !== spec.workload ||
+      ownershipConfig.fixtureReceipt !== join(dir, 'fixtures-private.json'))) throw new Error('ownership_run_mismatch');
+  if (ownershipConfig) await observation(observerFile, ownershipConfig.runId, expectedRuntimeReceiptSha256);
+  if (!before && !allowUnobserved) throw new Error('observer_required');
   if (observerFile) timer = setInterval(async () => {
     try {
-      const observed = await observation(observerFile);
+      const observed = await observation(observerFile, ownershipConfig?.runId, expectedRuntimeReceiptSha256);
       if (observed.appRssBytes / observed.appMemoryLimitBytes >= spec.stopRssRatio) throw new Error('memory_stop_threshold');
     } catch (error) { monitorError = error.message; abort(); }
   }, 2000);
@@ -177,21 +233,78 @@ export async function executePlan({ spec, receipt, dir, origin, binary, observer
     for (const stage of spec.stages) {
       if (signal.aborted) break;
       const startedAt = new Date().toISOString();
-      const options = { spec, stage, receipt, dir, origin, binary, signal, onGenerator, onExecution, onFatal: abort };
-      const summary = await (spec.engine === 'k6' ? runK6(options) : runStreams(options));
+      const ticksPerSecond = await tickFrequencyReader();
+      const generatorOwner = spec.engine === 'incremental-node' ? await processIdentity(process.pid) : null;
+      let generatorBefore = generatorOwner ? await generatorSampler(generatorOwner, { ticksPerSecond }) : null, generatorAfter = generatorBefore;
+      let sampleCount = generatorBefore?.status === 'available' ? 1 : 0, peakRssBytes = generatorBefore?.rssBytes || 0;
+      let currentGenerator = generatorOwner, resourceFailure = null, samplerBusy = false;
+      if (generatorBefore && generatorBefore.status !== 'available') { resourceFailure = 'generator_observation_unavailable'; abort(); }
+      const generatorFile = join(dir, 'generator-private.json');
+      const sample = async () => {
+        if (!currentGenerator || samplerBusy) return;
+        const sampledOwner = currentGenerator;
+        samplerBusy = true;
+        try {
+          const value = await generatorSampler(sampledOwner, { ticksPerSecond });
+          if (currentGenerator !== sampledOwner) return; // A joined generator ended during this sample.
+          await writePrivateJSON(generatorFile, { ...value, runId: receipt.tag });
+          if (value.status !== 'available') { resourceFailure = 'generator_observation_unavailable'; abort(); }
+          else { generatorBefore ||= value; generatorAfter = value; sampleCount++; peakRssBytes = Math.max(peakRssBytes, value.rssBytes); }
+        } catch { resourceFailure = 'generator_observation_unavailable'; abort(); }
+        finally { samplerBusy = false; }
+      };
+      const resources = setInterval(() => { void sample(); }, 1000);
+      const options = { spec, stage, receipt, dir, origin, binary, signal,
+        onGenerator: async owner => {
+          await onGenerator(owner);
+          if (owner.exited) currentGenerator = null;
+          else if (owner.pid && owner.birthTick) { currentGenerator = owner; await sample(); }
+        }, onExecution, onIntent, finishIntent, saveReceipt,
+        captureSource: async () => {
+          if (!ownershipConfig) throw new Error('independent_source_capture_required');
+          const sample = await sampleSource(ownershipConfig.sourceConfig, ownershipConfig.sourceOutput);
+          if (!sample.live.length) throw new Error('retained_source_capture_missing');
+          return sample;
+        }, onFatal: abort };
+      let summary;
+      try { await sample(); summary = await runStage(options); }
+      finally { clearInterval(resources); while (samplerBusy) await pause(1); }
+      if (generatorOwner) { generatorAfter = await generatorSampler(generatorOwner, { ticksPerSecond }); sampleCount++; peakRssBytes = Math.max(peakRssBytes, generatorAfter.rssBytes || 0); }
+      summary.generatorObservation = generatorHeadroom(generatorBefore, generatorAfter, summary);
+      summary.generatorObservation.sampleCount = sampleCount;
+      summary.generatorObservation.peakSampledRssBytes = peakRssBytes;
       const intentional = ['disconnect', 'cancel'].includes(spec.workload);
       const failures = intentional ? (summary.arrivals.failed ? ['unexpected_control_failure'] : []) : assertHealthy(summary, spec.budgets);
       failures.push(...(summary.accountingFailures || []));
       if (summary.arrivals.dropped || summary.arrivals.notOfferedAfterStop) failures.push('generator_underdelivery');
       if (summary.thresholdsPassed === false) failures.push('k6_thresholds');
+      if (resourceFailure) failures.push(resourceFailure);
       const result = { ...stage, startedAt, endedAt: new Date().toISOString(), summary, failures };
       results.push(result); await onStage(results);
       // Capacity knees are a stopping point, not a reason to retry stages.
       if (failures.length || monitorError) break;
     }
-    await pause(spec.recoverySeconds * 1000);
-    const after = await observation(observerFile);
-    const recovery = verifyRecovery(before, after);
+    await sleep(spec.recoverySeconds * 1000);
+    let probe = null, ownedWork = null;
+    if (ownershipConfig?.recovery) {
+      try {
+        const recoveryConfig = { ...ownershipConfig.recovery, runId: receipt.tag };
+        if (receipt.kind === 'disposable') {
+          const actor = [...receipt.accounts, ...(receipt.recoveryAccount ? [receipt.recoveryAccount] : [])].find(value => value.username === recoveryConfig.username);
+          if (actor?.workspace?.id !== recoveryConfig.workspaceId || actor.workspace.ownerId !== actor.userId) throw new Error('recovery_workspace_binding_changed');
+          // Owned label journeys have already validated and journaled each
+          // increment. Use that exact current revision, preserving the target.
+          recoveryConfig.workspaceRevision = actor.workspace.revision;
+        }
+        probe = await recover({ receipt, config: recoveryConfig, origin,
+          journal: paths.recoveryJournal, onExecution,
+          monitor: () => sampleSource(ownershipConfig.sourceConfig, ownershipConfig.sourceOutput) });
+        ownedWork = receipt.kind === 'disposable' ? (await observeRun(paths.config, { origin })).work :
+          await observeOwnedWork(await readPrivateJSON(ownershipConfig.fixtureReceipt), spec.workload, { origin });
+      } catch { probe = { verified: false }; }
+    }
+    const after = await observation(observerFile, ownershipConfig?.runId, expectedRuntimeReceiptSha256);
+    const recovery = verifyRecovery(before, after, { requireOwnedProbe: true, probe, ownedWork });
     const failures = [...new Set(results.flatMap(result => result.failures))];
     if (monitorError) failures.push(monitorError);
     if (signal.aborted) failures.push('run_stopped');

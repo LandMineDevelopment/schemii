@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 import { balanceFiles, balanceParallelFiles, coverageProfile, manifestPattern, parallelFiles, PARALLEL_FILES, PROJECTS } from './browser-shards.mjs';
 import { invocation, parseOptions, run, scopedInventory } from './run-browser-shard.mjs';
 
@@ -60,6 +63,39 @@ test('new files receive a profile-specific median estimate and remain scheduled'
     assert.deepEqual(three.shards.flatMap(shard => shard.files).sort(), [file('a'), file('new'), file('newer')]);
     assert.deepEqual(three.shards.map(shard => shard.estimatedMs), [plan.fallbackMs, plan.fallbackMs, plan.fallbackMs]);
   }
+});
+
+test('changed, missing and new spec sources use explicit device-median estimates in both routing modes', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'schemii-shard-costs-'));
+  try {
+    mkdirSync(resolve(directory, 'tests/e2e'), { recursive: true });
+    const source = 'original spec';
+    const costs = Object.fromEntries(['a', 'b', 'changed', 'missing'].map((name, index) => [file(name), {
+      'desktop-chromium': [100, 300, 900, 500][index],
+      'android-chromium': [1000, 3000, 9000, 5000][index],
+      sourceSha256: createHash('sha256').update(source).digest('hex'), sourceBytes: Buffer.byteLength(source),
+    }]));
+    for (const name of ['a', 'b', 'changed']) writeFileSync(resolve(directory, file(name)), source);
+    // Same-size edits must invalidate the hash as well as size-changing edits.
+    writeFileSync(resolve(directory, file('changed')), 'different src');
+    const files = ['a', 'b', 'changed', 'missing', 'new', 'other'].map(file);
+    for (const project of PROJECTS) for (const balance of [balanceFiles, balanceParallelFiles]) {
+      const plan = balance(files, project, costs, 6, directory);
+      const median = project === PROJECTS[0] ? 500 : 5000;
+      assert.equal(plan.fallbackMs, median);
+      assert.deepEqual(plan.unknownFiles, ['changed', 'missing', 'new', 'other'].map(file));
+      assert.deepEqual(plan.shards.flatMap(shard => shard.files).sort(), [...files].sort());
+      assert.deepEqual(plan.shards.map(shard => shard.estimatedMs).sort((a, b) => a - b),
+        [costs[file('a')][project], costs[file('b')][project], median, median, median, median]);
+      assert.deepEqual(plan, balance(files.toReversed(), project, costs, 6, directory));
+    }
+    // Source metadata never turns a symlink replacement into a measured file.
+    rmSync(resolve(directory, file('a')));
+    symlinkSync(resolve(directory, file('b')), resolve(directory, file('a')));
+    assert.ok(balanceFiles(files, PROJECTS[0], costs, 6, directory).unknownFiles.includes(file('a')));
+    costs[file('b')].sourceBytes = -1;
+    assert.throws(() => balanceFiles(files, PROJECTS[0], costs, 6, directory), /Invalid observed file source/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('plans reject unsupported counts, duplicate files and insufficient nonempty shards', () => {

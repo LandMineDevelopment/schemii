@@ -68,8 +68,31 @@ def test_grouped_tiles_round_trip_plan_stream_export_and_drill(multidimensional,
     assert response.status_code == 200, response.text
     assert '"contributors"."field_1" IS NULL' in response.json()["sql"]
     assert '"contributors"."field_2" = ' in response.json()["sql"]
-    assert "GROUP BY" not in response.json()["sql"]
     drill_sql = response.json()["sql"]
+    drill = parse_one(drill_sql, read="postgres")
+    contributors, = [node for node in drill.find_all(exp.Subquery)
+                     if node.alias == "contributors"]
+    # Detail rows retain their raw grain; aggregation belongs to parent eligibility.
+    assert contributors.this.find(exp.Group) is None
+    assert contributors.this.find(exp.AggFunc) is None
+    detail = contributors.find_ancestor(exp.Select)
+    assert detail.args.get("group") is None and detail.args.get("distinct") is None
+    assert [(output.this.table, output.this.name) for output in detail.expressions] == [
+        ("contributors", "field_1"), ("contributors", "field_2")]
+    qualifying_parent, = [node for node in drill.find_all(exp.Subquery)
+                         if node.alias == "qualifying_parent"]
+    assert qualifying_parent.this == parse_one(plan["sql"], read="postgres")
+    assert list(drill.find_all(exp.Group)) == list(qualifying_parent.find_all(exp.Group))
+    membership = qualifying_parent.find_ancestor(exp.Exists)
+    assert membership in list(detail.args["where"].this.flatten())
+    parent_checks = list(membership.this.args["where"].find_all(exp.NullSafeEQ))
+    assert len(parent_checks) == 2
+    assert all(isinstance(check.expression, (exp.Null, exp.Literal, exp.ByteString))
+               for check in parent_checks)
+    assert {(check.this.table, check.this.name): check.expression.this for check in parent_checks} == {
+        ("qualifying_parent", "output_1"): None,
+        ("qualifying_parent", "output_2"): selected[0]["value"],
+    }
     console.page = lambda *args: SimpleNamespace(
         columns=[ConsoleResultColumn(name="name", data_type="text"),
                  ConsoleResultColumn(name="id", data_type="uuid")],
@@ -92,9 +115,27 @@ def test_charts_still_require_dimensions_and_unique_fields(kind):
         DashboardTile.model_validate(tile)
     with pytest.raises(ValidationError, match="Duplicate tile fields"):
         DashboardTile.model_validate({**tile, "dimensions": [DIMENSIONS[0]] * 2})
-    with pytest.raises(ValidationError, match="at most 64 output fields"):
-        DashboardTile.model_validate({**tile, "dimensions": [
-            {"table": "people", "column": f"dimension_{index}"} for index in range(64)]})
+    dimensions = [{"table": "people", "column": f"dimension_{index}"} for index in range(64)]
+    boundary = DashboardTile.model_validate({**tile, "dimensions": dimensions[:63]})
+    assert len(boundary.dimensions) + len(boundary.measures) == 64
+    with pytest.raises(ValidationError, match="at most 64 dimensions, base inputs and calculations"):
+        DashboardTile.model_validate({**tile, "dimensions": dimensions})
+
+
+@pytest.mark.parametrize("kind", ["bar", "line", "donut"])
+@pytest.mark.parametrize("extra", [
+    {"hiddenMeasures": [{**MEASURE, "aggregate": "count_distinct"}]},
+    {"calculations": [{"id": "doubled", "label": "Doubled", "operation": "multiply",
+                       "left": {"output": MEASURE}, "right": {"constant": 2}, "visible": False}]},
+], ids=["hidden-base-input", "hidden-calculation"])
+def test_chart_field_bound_includes_hidden_inputs_and_calculations(kind, extra):
+    dimensions = [{"table": "people", "column": f"dimension_{index}"} for index in range(63)]
+    tile = {"id": "chart", "title": "Chart", "kind": kind, "measures": [MEASURE], **extra}
+    boundary = DashboardTile.model_validate({**tile, "dimensions": dimensions[:62]})
+    assert (len(boundary.dimensions) + len(boundary.measures)
+            + len(boundary.hidden_measures) + len(boundary.calculations)) == 64
+    with pytest.raises(ValidationError, match="at most 64 dimensions, base inputs and calculations"):
+        DashboardTile.model_validate({**tile, "dimensions": dimensions})
 
 
 def test_multidimensional_support_retains_kpi_detail_and_donut_rules():

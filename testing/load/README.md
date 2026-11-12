@@ -7,11 +7,59 @@ queued behind native UI acceptance and lifecycle fixes. See the
 [measurement plan](../../docs/single-server-capacity.md).
 
 Use the supported entry point `./test.sh load`. The ordinary `./test.sh` UI
-prepare/run/claim workflow remains separate. A load preparation reserves the exact
-retained accounts using the same cross-worktree account guard and holds the same
-deployment lease as manual QA. It calls only `./start.sh` to assemble the application
-and verifies both canonical HTTPS and Tailscale HTTPS. No launcher runs during unit
-tests or `load plan`. Do not edit source or rebuild while either harness owns a lease.
+prepare/run/claim workflow remains separate. Retained-account preparation reserves
+the exact accounts and deployment lease used by manual QA, calls only `./start.sh`
+and verifies both HTTPS origins. Disposable preparation attaches to an already
+held launcher fixture through its constrained consumer contract below; it never
+starts a second stack. No launcher runs during unit tests or `load plan`. Do not
+edit source or rebuild while either harness owns a lease.
+
+## Private fixture execution receipts
+
+Disposable report and CSV journeys declare a run-owned operation nonce after
+their private intent is durable, before sending the authenticated request. CSV
+uses a saved dashboard tile, sharing the one-tile dashboard with `report-1`.
+This demand counts against the existing 100-dashboard owner limit before any
+provisioning; retained-mode model export remains a distinct path. The fixture
+wrapper correlates the nonce through
+ASGI tasks and `asyncio.to_thread`, then records the actual base Console reserve
+return synchronously. It returns the identical receipt and preserves application
+errors and cleanup order, including a reserve that finishes after cancellation.
+The nonce grants no application access. Production routes and permissions are
+unchanged; report receipts are never read through the forbidden common GET.
+
+The attached consumer uses `start.sh --metadata-pressure-executions` with its
+existing fixed attachment file and bounded allowlisted stdin record. Only the
+holder may write the fixed read-only declaration input and export the exact
+owned container's fixed private `execution-observation.json`. Existing source,
+lease, run, attachment and process-incarnation guards apply. No arbitrary paths,
+SQL, rows, credentials or whole execution objects are exported. Existing metadata
+observation retains its separate 16 KiB bound.
+
+The channel holds at most 128 unacknowledged operations in 128 KiB. Acknowledgment
+follows durable recording of the exact captured IDs and status in the private
+journey journal. Late unacknowledged captures also enter a bounded private cleanup
+journal. Nonce history is bounded at 4,096, and the existing holder IPC request
+budget remains 1,024; exhaustion stops observation rather than silently evicting
+work. Missing, unmatched, unreadable, pruned, restarted or lost observation stays
+unknown and blocks qualification. Legacy retained-mode CSV capture remains
+explicitly unqualified.
+
+Receipt status comes only from exact-owner `get_owned` reads. Request completion
+is recorded separately: `succeeded` does not prove a native cursor or permit was
+released, nor that CSV/NDJSON values were correct. Independent captured source
+identity/release evidence and full protocol oracles remain mandatory. A CSV too
+fast for the independent source witness leaves a qualification gap; receipt
+capture does not manufacture that witness.
+
+This instrumentation adds synchronous capture-file writes, private launcher IPC,
+and up to 16 ordinary metadata reads per 100 ms sampler sweep. Its private scalar
+counters report metadata reads, capture writes and elapsed sampling/capture time.
+These are observer costs, separate from offered application HTTP calls. They do
+not measure the complete instrumentation CPU, scheduler, IPC or database impact;
+`overheadMeasured` and `stockCapacityEligible` remain false. No capacity claim is
+supported until the coordinator qualifies the real assembled fixture and its
+independent witnesses.
 
 ## Tools and recipes
 
@@ -49,7 +97,7 @@ database reset or grant broadening.
 For exact row tests, replace `cheap-read` in the plan with `report-1`, `report-5`,
 `report-20`, `csv`, `slow-reader`, `disconnect` or `cancel`. These use the incremental
 Node client. `catalog` and `compile` are separate k6 lanes. All source/report lanes
-currently require explicitly named retained **report_author** accounts. Preparation
+in the retained mode require explicitly named **report_author** accounts. Preparation
 adds one uniquely named model and three dashboards per account, then checks that
 the other account cannot read the private model. Every write has a persisted intent
 and response receipt; interrupted creates reconcile only their exact absent-before
@@ -62,10 +110,182 @@ oracle expectations. Exact columns are derived from the real saved-model plan
 CSV is parsed incrementally, including split UTF-8, quoted
 newlines, escaped quotes and a required final record terminator.
 
-Registered account count comes from the private fixture registry; active identities
-are the selected authenticated accounts. This first adapter neither provisions
-1,000 users nor silently raises profile caps. Its saved profiles are distinct;
-shared-profile/viewer grant fixtures are still required before shared-user sizing.
+Registered count in retained mode comes from its private registry; active identities
+are the explicitly selected accounts. Disposable mode provisions its own population
+and profiles. Neither mode changes the per-owner profile limit or resets retained data.
+
+## Disposable populations and composite journeys
+
+The new adapters require an explicitly held **representative-load-v1** fixture from
+the owning launcher's `./start.sh --hold-load-fixture SECONDS` workflow. The older
+`pressure-v1` fixture is rejected. The fixed representative profile declares one
+API process, app 2 CPU/2 GiB, metadata 1 CPU/1 GiB, source 2 CPU/2 GiB, ingress
+0.5 CPU/128 MiB, normal/readiness metadata admission 16/2, ordinary source 20/4
+and retained source 19/3. The holder records effective allocations and database
+settings; the consumer compares these with the immutable profile before attaching.
+Retained 19/3 is configuration evidence, not a live permit measurement.
+Instrumentation is fixture-only and its overhead remains unmeasured. Both stock
+capacity eligibility and campaign capacity eligibility stay false.
+
+Only the coordinator may create/hold a live fixture after its independent review.
+The held authority, credentials and source witness remain private. Preparation
+accepts no borrowed credential file or retained-account list in disposable mode:
+
+```bash
+./test.sh load plan --recipe smoke --workload mix --fixture-mode disposable \
+  --registered 10 --active 2 --profile-mode managed-shared \
+  --output /private/load-plan.json
+./test.sh load prepare --plan /private/load-plan.json \
+  --fixture-authority /private/owned-fixture/authority.json \
+  --observer-file /private/load-observation.json
+```
+
+Preparation returns a run directory. Before `run`, the coordinator starts the
+independent collector using a verified launcher **host PID/cgroup runtime receipt**,
+the fixture administrator credentials, and that run's generated
+`ownership-private.json`. The generated private manifest's `observer` object supplies
+the exact paths/account: authority's `osRuntimeReceiptFile`, the run's converted
+`observer-credentials-private.json`, ownership config and declared output. Use those
+with `node testing/load/observer.mjs --runtime-receipt FILE --credentials-file FILE
+--account NAME --ownership-config FILE --output FILE`. The holder's `startup-effective-configuration` receipt
+is a separate contract and cannot substitute for the host observation receipt.
+The fixture OS export and init/API process consumer are authored; live host
+observation/attach source certification is still required before qualified smoke;
+`--allow-unobserved` can only support explicitly unqualified smoke protocol work.
+
+The controller runs in one dedicated process group and uses incremental Node only.
+It attaches through the owning launcher, sends bounded heartbeats, and keeps helper
+processes in the same group. The holder must verify committed source fingerprints
+before attachment. Source inventory version2 hashes every `.mjs`/`.py` below
+`testing/load` plus the closed companion inventory `testing/harness/store.mjs`,
+`testing/harness/deployment.mjs`, `testing/harness/leases.mjs` and
+`testing/load/fixture-spec.json`. The current shared harness imports terminate in
+those three modules and Node builtins. Held consumers must select incremental
+Node before attachment; the separate k6 recipe is not executed on this path.
+External installed packages and generated private run inputs retain their separate
+runtime/ownership qualification; this pin does not certify them or unrelated
+product/documentation files.
+
+The version2 digest is SHA256 of `schemii-constrained-load-consumer-source\0v2\0`
+followed by each lexically sorted canonical repository-relative path, a NUL byte,
+and the raw SHA256 digest of that file's content. The manifest reports its version,
+paths, sizes and content hashes. Inputs must be tracked, readable bounded local
+regular files with no symlink components; all companion inputs and the load tree
+must be unchanged against HEAD. The reviewed digest catches both dirty changes
+and clean committed replacements before prepare. Recording a changed source as
+the later run baseline does not authorize it. The old subtree-only pin is invalid;
+the delivered pin stays empty until the coordinator independently reviews and
+sets the expanded digest.
+
+Maintenance rule: when a consumer adds a repository-local import or fixed data
+input outside the selected load source tree, add its transitive closure to
+`CONSUMER_SOURCE_COMPANIONS`, review the inventory version and new manifest, and
+clear/review the pin. Do not replace that review with a prepare-time baseline or
+silently broaden the pin to unrelated application/docs. This is a small declared
+closure, not a JavaScript parser or general source-certification framework.
+
+Expiry stops/joins the exact group before fixture disposal and
+retained-stack restoration. No workload may continue against the restored stack.
+Offline load cleanup requires matching run/nonce, saved consumer PID/start/argv
+identity, a joined attachment, and the holder's completed cleanup/restoration
+journal; it sends no HTTP requests. Unknown group or mutation identity blocks cleanup.
+
+`--registered 10|100|1000` and `--active 1|10|50|100` are independent dimensions
+(other bounded values through 1,000 are accepted). Only active users receive steady
+authenticated sessions. Inactive registrations are not fabricated as active traffic.
+The provisioner creates nonadministrator accounts with unique secret-bound intents,
+checks cross-owner denial, and preserves all retained peers. Profile modes are
+`private-single`, `private-multiple` (use `--profiles N`), `managed-shared`, and
+`managed-distinct`. Private profiles are capped at 100 **per owner**; distinct
+managed profiles use one explicit managed owner and are capped at 100 including
+its existing profiles. Variant journeys actually use the selected profile. No limit
+is raised to support the population.
+
+The immutable plan publishes `fixtureTopology` before provisioning. It creates
+only the saved report variants selected by the workload/mix, and models only for
+lanes that use them. SQL-only plans can use 100 private profiles without creating
+unrequested models or dashboards. One report variant can use 100 profiles; a mix
+requiring all three report variants supports at most 33 per owner (99 dashboards).
+An impossible combination is rejected with guidance to reduce profiles or report
+variants. Regenerate plans after a harness upgrade rather than editing their JSON.
+
+The source helper uses the held fixture's separately declared source administrator,
+v2 endpoint/server/fixture proof and same disposable database. It creates one owned
+schema per active identity: 513 ordered IDs with an exact owner nonce, plus optional
+129 wide rows containing four 8,192-character cells. Ordinary users receive schema
+USAGE and table SELECT only. Before every mutation it records an intent; nonce,
+schema owner, physical OID, exact relation set and actual server identity govern
+resume and cleanup. Foreign objects, uncertain commits, unknown dependencies or
+unprovable outcomes are retained and blocked. It never uses `CASCADE`, creates a
+database/role, borrows an administrator, or writes ordinary source traffic. Estimated
+dataset payload is preflighted against 1 GiB; an oversized wide population is refused.
+
+| Adapter | Executed contract |
+| --- | --- |
+| `sql-page` | One exact owned SELECT, successful execution, ordered full values across cursors, explicit result close; synchronous retained-backend capture before paging |
+| `wide-rows` | Same lifecycle with full wide-cell values and nonce checked; no browser-sized stand-in |
+| `idle-expiry` | `--recipe lifecycle`, one partial page per active identity, real 1,800-second wait, expired continuation and independent source release; tests cannot shorten elapsed time |
+| `shared-report` | Explicit managed source and saved-dashboard viewer grants, complete shared stream, private model denial, no raw execution receipt access |
+| `login-churn` | Separate login/read/logout journey, isolated cookie and durable session intent |
+| `metadata-write` | Owned workspace label PATCH with expected revision, exact increment and persisted readback; no source mutation |
+| `mix` | Deterministic weighted journey arrivals; each actual HTTP operation and each lane reconciled separately |
+
+Pure viewers keep only Schemer capabilities. A separate explicitly granted fixture
+administrator recovery identity is disclosed outside registered/active workload
+counts; its fresh read/SELECT/close calls are reported as recovery instrumentation.
+It receives explicit product/source access and workspace binding. Administrator
+status alone never supplies product access. Source backends remain independently
+witnessed. Report execution terminal evidence uses the fully drained authenticated
+stream (or an exact terminal control acknowledgment), bound to its saved dashboard
+or model/revision. Raw execution reads are forbidden for report-scoped executions,
+including owner-private reports. A cancellation acknowledgment alone never proves
+source release; disconnected or still-pending operations remain unknown until the
+supported evidence exists.
+CSV responses currently expose no internal execution ID. Their durable operation
+intent stays unknown until complete CSV validation and a later complete source
+cohort release; the missing per-execution ID/acquisition boundary is disclosed and
+does not qualify CSV capacity or exact execution-ID coverage.
+
+Cleanup compares full resource detail with recorded creation state, including
+independent model revisions. Only durable, acknowledged metadata label mutations
+advance that state. It uses the recorded revision for DELETE, with the receiver's
+`expectedRevision` spelling for private/managed profiles, workspaces and dashboards.
+Model cleanup also requires the reviewed optional atomic guards from
+[PR250](https://github.com/LandMineDevelopment/schemii/pull/250): recorded layout and
+explore revisions and absence of saved previews. Qualify only the final reviewed
+image containing both API250 and this caller; older receivers do not supply that
+atomic protection. Drift, unknown updates, saved previews or lost visibility retain
+the changed resource and write an actionable `cleanupState` quarantine in the private
+receipt. They never authorize adopting the latest revision or reporting clean.
+
+The default mix weights are 40% cheap read, 10% catalog, 10% compile, 20% SQL paging,
+10% five-tile report, 5% shared report and 5% metadata label writes. A private
+`--mix-file` may specify unique allowed lanes with positive integer weights totaling
+100. COPY/migrations, login churn and real idle expiry remain separate named lanes;
+they cannot be smuggled into an ordinary mix. COPY/migration writer provisioning is
+not implemented by this read-only-source fixture and remains a separate campaign.
+
+Population, resource and event journals stay private. The plan declares finite
+record/byte/snapshot budgets before preparation. Appends are fsynced in bounded
+checksummed chunks; a failed/exhausted append poisons the writer before its mutation
+can run. Crash tails are retained, and unknown creates are never replayed merely
+because a name is absent. Cleanup keeps every created execution ID. Observation
+rotates fairly across at most 80 pending executions and 16 additional owners per
+batch, with explicit coverage/staleness/backlog. A terminal ID retires from active
+observation only after a fresh complete same-authority cohort witness proves source
+release; cleanup history is never pruned. Unobserved work is unknown, never zero.
+
+The holder allows 60–3,600 seconds. Preparation time and recovery consume that
+budget; a dispatch without enough remaining time is refused. Soak plans expose
+`--recipe soak --soak-seconds 1800` for a supported 30-minute measured stage plus
+the unchanged 120-second warmup. The bounded option accepts 1,800–3,600 seconds;
+its 3,600-second default preserves the older one-hour recipe, which cannot fit
+this holder and is refused. No longer holder or manually edited plan is needed
+for a 30-minute candidate. No tiny smoke or full campaign has been run
+for these adapters. The opt-in `SCHEMII_LOAD_ADAPTER_LIVE=1` test consumes an already
+prepared two-identity run (`SCHEMII_LOAD_PREPARED_RUN`); it starts no stack, checks
+exact terminal/recovery and always requests owned cleanup. Real idle execution
+still takes at least 1,800 seconds.
 
 ## HTTP totals and limits
 
@@ -74,7 +294,8 @@ rate is actual HTTP calls per minute; redirects and implicit authentication are
 disabled. Authentication, provisioning, isolation probes and cleanup occur outside
 the measured stage. They are not included in offered stage rates. Stream/CSV stages
 also schedule one call per arrival. **Cancel** rates describe journey arrivals:
-each started journey can add a separately counted cancel call. Reports expose
+each started journey can add a separately counted cancel call. SQL, login, metadata
+and mixed rates also describe journey arrivals. Reports expose
 scheduled/offered/started/completed/failed/dropped arrivals and actual
 sent/admitted/completed/rejected/failed/incomplete HTTP totals. Admitted HTTP means
 responses that were not classified as capacity rejection; it does not prove source
@@ -85,6 +306,8 @@ present them as successful throughput. Unexpected failures stop arrivals.
 
 Default limits are 256 concurrent generator operations, 30s request deadlines,
 32 MiB drained body, 1 MiB event/CSV-record, 12,000 arrivals/min and 3,600s per stage.
+Disposable Node stages also stop before exceeding 12,000 actual HTTP calls in a
+rolling minute; composite rates never silently become unbounded call rates.
 Late/full Node generators drop arrivals rather than hide demand in a queue. k6
 reports `dropped_iterations`, actual `http_reqs` and custom per-outcome counts;
 accounting mismatch, drops, correctness failures and thresholds invalidate the
@@ -96,15 +319,17 @@ the exact spawned generator/controller process group before reservations release
 
 Run recipes are explicit: `smoke` (6s), `ramp` (each of 100/300/600/1,000/3,000/6,000/
 12,000 calls/min, 2m warmup and 5m measured hold), `confirm` (three near-knee repeats),
-`spike` (bounded 2× burst), and `soak` (2m warmup plus 60m measured hold). Recipes
+`spike` (bounded 2× burst), and `soak` (2m warmup plus explicitly selected 30–60m
+measured hold, default 60m). Recipes
 are immutable within the versioned envelope and stop at the first failed stage.
 Full stress is never a default PR check.
 
 ## Independent observation and recovery
 
 The optional launcher receipt and read-only collector provide real OS and
-application ownership samples. They do not establish run-specific backend/job
-attribution or generator headroom, so capacity remains ineligible. When preparing
+application aggregate samples. The opt-in run witness below adds independent
+source attribution and receipt-owned work inspection. Generator headroom and live
+qualification remain incomplete, so capacity remains ineligible. When preparing
 a fresh deployment, set an absolute **new** task-owned receipt path before the
 supported launcher runs. `SCHEMII_RUNTIME_RECEIPT` adds no container access to the
 application or collector: only `./start.sh` reads selected container identities
@@ -203,18 +428,19 @@ is introduced. Controlled SIGTERM/SIGKILL tests prove the collector's process an
 receipt behavior with synthetic authentication; live application authentication
 cleanup remains a campaign acceptance check.
 
-The existing public report allowlist strips qualification fields and process
+The public report allowlist strips qualification fields and process
 identities. Retain/review the selected private collector receipt and log alongside
 the public report before interpreting its gauges. Unknown owned-backend/job
-counts, ingress socket counts, database monitoring visibility, effective CPU-set
-allocation, event-loop lag and cohosted generator headroom are **not** written as
+counts without the explicit witness, ingress socket counts, database monitoring
+visibility, effective CPU-set allocation, event-loop lag and generator headroom are **not** written as
 zero. They remain separate campaign requirements; OS sampling and internal
 handles cannot by themselves prove source release or safe capacity.
 
-Collector orphan-session recovery is separate from campaign recovery. The current
-campaign recovery gate requires observed `ownedBackends` and `activeJobs`, which
-this aggregate collector deliberately cannot provide. A successful observation or
-authentication-cleanup smoke therefore leaves campaign recovery unverified and
+Collector orphan-session recovery is separate from campaign recovery. Campaign
+recovery requires qualified `ownedBackends` and `activeJobs`, a fresh authenticated
+read and exact SELECT terminal, independently witnessed source acquisition/release,
+and no active receipt-owned work. Without the opt-in witness and recovery fixture,
+recovery remains unverified. Authentication cleanup alone leaves
 [#135](https://github.com/LandMineDevelopment/schemii/issues/135)/
 [#136](https://github.com/LandMineDevelopment/schemii/issues/136) incomplete.
 
@@ -226,7 +452,9 @@ focused observer regressions do not establish deployment or campaign acceptance.
 
 `--allow-unobserved` is allowed only for smoke protocol work and leaves recovery
 unverified and capacity ineligible. Other recipes require `--observer-file` pointing
-to a private mode-0600 JSON file, refreshed independently at least every 5s:
+to the collector's private mode-0600 output, refreshed independently at least every
+5s. Use the collector rather than writing aggregate counters by hand. This sanitized
+report extract omits private qualifications and is **not** valid collector input:
 
 ```json
 {
@@ -256,6 +484,166 @@ Live collector verification, fully qualified API process count, control-plane
 recovery probe, cancellation deadlines and independently reviewed cleanup remain
 live acceptance requirements. Reports always keep capacityEligible false in this
 foundation until those independent campaign gates are implemented and verified.
+
+## Opt-in run witness and active recovery
+
+The observation helper itself adds no grants, application routes or source writes.
+The explicit disposable provisioner above supplies owned fixtures; for other
+observation-only use the coordinator must provision a disposable,
+**run-exclusive source role** and its exact database and retain the provisioner's
+private authority receipt. Borrowed author roles are unsuitable. The monitor
+connects as the exact source role to observe its own `pg_stat_activity`; no
+administrator or author fallback is permitted. Its separate application name
+excludes its own connection. Pre-existing metadata backends are outside this scope.
+
+All configuration/receipt JSON must be current-user-owned regular files, mode
+0600, in owned mode-0700 directories. The reader walks ancestors through no-follow
+directory descriptors, rejects unsafe ownership/writable ancestors and symlinks,
+opens leaves nonblocking, and checks identity before/after a bounded read. FIFOs,
+devices, replacements and parent aliases cannot supply input or create output.
+The provisioning receipt contains `version: 2`, `status: "ready"` and matching `runId`,
+`kind`, `exclusiveToRun`, `database`, `role`, `applicationName`, `endpoint` and
+`server` fields. It is
+evidence from the provisioner, not a declaration to fabricate for borrowed roles.
+The source config contains the private connection secret:
+
+```json
+{
+  "version": 2, "runId": "load_0123456789abcdef",
+  "authority": {
+    "kind": "exclusive_source_role", "exclusiveToRun": true,
+    "database": "disposable_database", "role": "disposable_run_role",
+    "applicationName": "schemii",
+    "provisioningReceipt": "/private/load/provisioning-private.json",
+    "endpoint": {"host": "127.0.0.1", "port": 5432, "sslmode": "require"},
+    "server": {
+      "address": "127.0.0.1", "port": 5432,
+      "postmasterStart": "2026-11-11T09:00:00.000000+00:00",
+      "databaseOid": 100,
+      "fixtureId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "connection": {
+    "host": "127.0.0.1", "port": 5432,
+    "dbname": "disposable_database", "user": "disposable_run_role",
+    "password": "<from private provisioner>", "sslmode": "require"
+  }
+}
+```
+
+Before source traffic, initialize a **new** ledger and require an empty baseline:
+
+```bash
+.venv/bin/python testing/load/source_monitor.py \
+  --config /private/load/source-config-private.json \
+  --output /private/load/source-private.json
+```
+
+The provisioner sets the disposable database COMMENT to exactly
+`schemii-load:<fixtureId>` using a unique 64-hex fixture ID. It records the actual
+server address/port, PostgreSQL postmaster-start timestamp (UTC, six fractional
+digits), and database OID. Fixed catalog reads under the source role verify all
+these fields on every sample before reading activity. No control-system function,
+extra table, grant or administrator fallback is needed. The declared endpoint
+must exactly match host/port/TLS mode in the connection. Endpoint changes, fixture
+replacement, restart, missing marker or unknown actual identity require a new
+provisioned run; neither baseline nor previous captures may be silently rebound.
+
+Fixed read-only, timeout-bounded activity queries read PID, backend start, database,
+role, application and state. They exclude query text and source rows. Each captured
+backend retains its exact PID plus UTC microsecond start and full target identity.
+Discovery uses the exact run labels, then **every captured PID** is rechecked
+without database/role/application filters. Changed labels or unknown visibility
+invalidate evidence. A fully visible newer backend-start distinguishes a reused
+PID from the old incarnation; the new run-owned incarnation remains live if found.
+Idle backends remain live. Scope change, denied visibility and monitor failure
+invalidate evidence; a failed owned ledger cannot be retried into success.
+Foreign evidence is preserved. A bounded file lock serializes observer/recovery
+samples. More than 10,000 live/captured identities stops observation. Sampling
+proves release of captured sessions, not sessions entirely between samples.
+The v2 ledger carries `serverIdentity`, matching `authority.server`, and complete
+`capturedChecks` with `present`, `absent`, or `pid_reused` per PID/start identity
+(the last includes `observedBackendStart`). `releaseVerified` requires nonempty
+captures, complete rechecks and no live captured identity. Version-1 source
+evidence is deliberately rejected; it cannot establish endpoint/disappearance proof.
+The host monitor uses one separate read-only source connection at a time per
+ledger; it does not consume or appear in the application's admission counters.
+
+After supported preparation, place `ownership-private.json` in the exact run
+directory. `runId` must equal the generated `fixtures-private.json` `tag`:
+
+```json
+{
+  "version": 1, "runId": "load_0123456789abcdef", "workload": "report-1",
+  "fixtureReceipt": "/private/exact-run/fixtures-private.json",
+  "sourceConfig": "/private/load/source-config-private.json",
+  "sourceOutput": "/private/load/source-private.json",
+  "recovery": {
+    "username": "<recorded owner>",
+    "workspaceId": "<run-owned workspace ID>",
+    "consoleId": "<run-owned Console ID>",
+    "workspaceRevision": 1, "settingsRevision": 1
+  }
+}
+```
+
+Pass `--ownership-config /private/exact-run/ownership-private.json` to the normal
+collector with its runtime receipt and administrator options. The source authority
+must match the recovery workspace's fixed target. The coordinator must separately
+provision that owned workspace/Console/profile; this foundation does not widen or
+attach retained fixtures. The engine automatically consumes that same run-local
+configuration, and rejects mismatched run/fixture/workload evidence.
+
+Owned work inspection authenticates each recorded owner and reads only journaled
+execution/job IDs through supported owner APIs. Missing, foreign, expired or
+uncertain IDs are unavailable even if cleanup marked them closed. Execution status
+never proves backend release. Current immutable adapters create no bulk jobs, so
+their authenticated no-job baseline is a real, limited zero. Future bulk adapters
+must journal `{username, id, workspaceId}` in `jobs` and use
+`observeOwnedWork(..., "owned-bulk-job")`; an empty journal cannot qualify them.
+Each sample allows at most 256 owner/ID reads and a four-second cumulative work
+budget (an in-flight read retains its three-second HTTP deadline). Exceeding either
+is unavailable, not partial coverage. Larger campaigns need a separately qualified
+bounded observation strategy. Observer reads remain outside offered stage totals.
+
+Recovery records a private creation intent before a fresh authenticated read and
+managed-read SELECT. It journals the execution before paging, checks one exact
+value plus backend and actual server/fixture identity and terminal state, witnesses that retained backend,
+closes the exact result, and requires independent disappearance. Failed creation
+retains its intent; unknown execution IDs are never guessed. Known failed probes
+cancel only their recorded execution. Probe calls are outside stage arrival rates.
+Cleanup must inspect pending recovery intents before releasing disposable fixtures;
+unknown ownership remains unresolved. The existing campaign cleanup does not
+automatically reconcile these new intents.
+
+API count requires supported Uvicorn argv, verified cgroup membership and endpoint
+namespace PID. Shells are distinguished from API workers; unknown sidecars,
+multiple workers, unreadable argv and replacement cannot qualify one API process.
+Argv/environment are not retained. Generator samples record PID/start, RSS, FDs,
+threads and namespace network bytes/drops. Node adds exact CPU microseconds and
+arrival scheduling lag. External-generator CPU ticks use host `getconf CLK_TCK`
+when available; missing tick frequency leaves CPU duration unknown.
+Namespace traffic is aggregate and CPU affinity is not a measured quota. Network
+capacity, competing traffic and CPU/memory headroom remain unknown, so
+`headroomVerified` stays false. Unsupported event-loop, executor, ingress,
+metadata and source-wait durations stay unknown.
+
+Fast deterministic controls start no launcher or database:
+
+```bash
+node --test testing/load/observer.test.mjs testing/load/runtime.test.mjs \
+  testing/load/ownership.test.mjs testing/load/campaign.test.mjs
+.venv/bin/python -m pytest -q tests/test_load_source_monitor.py
+```
+
+Live oracles are opt-in and have **not** run for this foundation. The coordinator
+may set `SCHEMII_LOAD_SOURCE_LIVE=1` plus `SCHEMII_LOAD_SOURCE_CONFIG` for the Python
+source acquire/release oracle, or `SCHEMII_LOAD_OWNERSHIP_LIVE=1` plus
+`SCHEMII_LOAD_OWNERSHIP_CONFIG` and a new private
+`SCHEMII_LOAD_OWNERSHIP_JOURNAL_DIR` for the Node HTTPS SELECT/release oracle.
+Neither starts/provisions a runtime. Per-lane two-account HTTPS smoke, generator
+qualification, interrupted fixtures, missing workload/cardinality/mix adapters and
+independent review remain pending. `capacityEligible` stays false.
 
 Private state is under `artifacts/load/LOAD_ID`: controller handle/config, sessions,
 create intents and opaque object IDs. Share only the allowlisted `report.json` after

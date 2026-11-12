@@ -29,9 +29,9 @@ class ModelInUseError(RuntimeError):
 
 
 class ModelConflictError(RuntimeError):
-    def __init__(self, current_revision: int):
+    def __init__(self, current_revision: int, message: str = "This model changed in another request. Reload before saving."):
         self.current_revision = current_revision
-        super().__init__("This model changed in another request. Reload before saving.")
+        super().__init__(message)
 
 
 class PreviewConflictError(ModelConflictError):
@@ -100,9 +100,23 @@ class ModelRepository(Protocol):
     def update_preview(self, owner_id: str, model_id: str, preview_id: str, request: PreviewUpdate) -> SavedPreview: ...
     def delete_preview(self, owner_id: str, model_id: str, preview_id: str, expected_revision: int) -> None: ...
     def dashboard_dependencies(self, owner_id: str, model_id: str) -> list[dict[str, str]]: ...
-    def delete(self, owner_id: str, model_id: str, expected_revision: int) -> None: ...
+    def delete(self, owner_id: str, model_id: str, expected_revision: int, *, expected_layout_revision: int | None = None,
+               expected_explore_revision: int | None = None, require_no_previews: bool = False) -> None: ...
     def count_for_connection(self, owner_id: str, connection_id: str) -> int: ...
     def dependencies_for_connection(self, owner_id: str, connection_id: str) -> tuple[ConnectionDependentResource, ...]: ...
+
+
+def _check_delete_revisions(model, expected_revision, expected_layout_revision, expected_explore_revision):
+    if model.revision != expected_revision:
+        raise ModelConflictError(model.revision)
+    for document, expected in (("layout", expected_layout_revision), ("explore", expected_explore_revision)):
+        current = getattr(model, document + "_revision")
+        if expected is not None and current != expected:
+            raise ModelConflictError(current, f"This model's {document} changed in another request. Reload before deleting.")
+
+
+def _previews_prevent_delete(model):
+    return ModelConflictError(model.revision, "This model has saved previews. Review or remove them before deleting.")
 
 
 def _duplicate_snapshot(source, previews, request, document_limit):
@@ -227,11 +241,13 @@ class InMemoryModelRepository(_Dependencies):
                      for dashboard in self._dashboards.list(owner_id)
                      if dashboard.model_id == model_id] if self._dashboards is not None else [])
 
-    def delete(self, owner_id, model_id, expected_revision):
+    def delete(self, owner_id, model_id, expected_revision, *, expected_layout_revision=None,
+               expected_explore_revision=None, require_no_previews=False):
         with self._lock:
             model = self.get(owner_id, model_id)
-            if model.revision != expected_revision:
-                raise ModelConflictError(model.revision)
+            _check_delete_revisions(model, expected_revision, expected_layout_revision, expected_explore_revision)
+            if require_no_previews and self._previews.get((owner_id, model_id)):
+                raise _previews_prevent_delete(model)
             dependencies = self.dashboard_dependencies(owner_id, model_id)
             if dependencies:
                 raise ModelInUseError(dependencies)
@@ -429,11 +445,17 @@ class PostgresModelRepository(_Dependencies):
             self._row(cursor, owner_id, model_id)
             return self._dashboard_dependencies(cursor, owner_id, model_id)
 
-    def delete(self, owner_id, model_id, expected_revision):
+    def delete(self, owner_id, model_id, expected_revision, *, expected_layout_revision=None,
+               expected_explore_revision=None, require_no_previews=False):
         with self._transaction() as cursor:
             model = self._row(cursor, owner_id, model_id, lock=True)
-            if model.revision != expected_revision:
-                raise ModelConflictError(model.revision)
+            _check_delete_revisions(model, expected_revision, expected_layout_revision, expected_explore_revision)
+            if require_no_previews:
+                # Preview writers lock this same parent until their commit.
+                cursor.execute("SELECT 1 FROM schemoo.model_previews WHERE owner_id = %s AND model_id = %s LIMIT 1",
+                               (owner_id, model_id))
+                if cursor.fetchone() is not None:
+                    raise _previews_prevent_delete(model)
             # Dashboard creation locks this same parent until its insert commits.
             dependencies = self._dashboard_dependencies(cursor, owner_id, model_id)
             if dependencies:

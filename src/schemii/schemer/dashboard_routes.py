@@ -1,15 +1,18 @@
 """Save private dashboard definitions independently of current slicer values."""
+
 from contextlib import contextmanager
 from fastapi import APIRouter, Depends, Query, Request, Response
 from schemii.common.api.errors import ApiProblem
 from schemii.common.metadata.models import Principal, get_current_principal
+from schemii.schemoo.domain import source_identity
 from schemii.schemoo.models import ExploreState
 from schemii.schemoo.derived import type_family
 from schemii.schemoo.routes import api_errors
 from schemii.schemoo.service import load_model, model_catalog, plan_query
 from .time_analysis import validate_time_analysis
+from .tile_queries import validate_report_controls
 from .access import available_dashboards, owned_report_services, prepare_dashboard
-from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate
+from .dashboard_models import Dashboard, DashboardCreate, DashboardUpdate, tile_dimensions
 from .dashboard_store import (DashboardNotFoundError, DashboardConflictError,
                               DashboardLimitError, DashboardStorageUnavailableError)
 
@@ -47,7 +50,7 @@ def validate_dashboard(services, owner, body):
     if invalid_optional:
         raise ValueError("Optional dashboard filters must be model scopes marked optional in Schemoo")
     invalid_current_selections = [scope_id for scope_id in body.selections
-                                  if scope_id in scopes and not (
+                                  if scope_id not in scopes or not (
                                       scopes[scope_id].kind == "required" and scopes[scope_id].requirement == "required"
                                       or scope_id in body.optional_filters)]
     if invalid_current_selections:
@@ -55,6 +58,30 @@ def validate_dashboard(services, owner, body):
     if any(selection.active and scope_id not in body.optional_filters
            for scope_id, selection in body.selections.items()):
         raise ValueError("Only exposed optional dashboard filters may be activated")
+
+    def validate_selection_references(selections):
+        # Validate even inactive choices: a later activation must not revive
+        # removed alternatives or inputs. Missing runtime values remain legal.
+        for scope_id, selection in selections.items():
+            scope = scopes[scope_id]
+            alternative = next((item for item in scope.alternatives
+                                if item.id == selection.alternativeId), None)
+            if selection.alternativeId is not None and alternative is None:
+                raise ValueError(f"Filter {scope_id} references an unavailable model alternative")
+            if alternative is None and scope.alternatives:
+                alternative = scope.alternatives[0]
+            # Switching options retains the other options' entered values.
+            # Reject removed inputs, not still-valid values from this scope.
+            inputs = {item.id for option in scope.alternatives for item in option.inputs}
+            if any(key not in inputs for key in selection.values):
+                raise ValueError(f"Filter {scope_id} references an unavailable model input")
+
+    validate_selection_references(body.selections)
+    for tile in body.tiles:
+        if any(key not in scopes or scopes[key].kind == "required" or scopes[key].requirement == "optional"
+               for key in tile.selections):
+            raise ValueError("Tile selections may only override required source-conditional model filters")
+        validate_selection_references(tile.selections)
     if not body.tiles:
         return
     catalog = model_catalog(services, owner, model)
@@ -62,7 +89,7 @@ def validate_dashboard(services, owner, body):
     # model scope; this validation copy only checks authored fields and filters.
     definition = model.definition.model_copy(update={"scopes": []})
     nodes = {node.id: node for node in model.definition.nodes}
-    tables = {table["name"]: table for table in catalog["tables"]}
+    tables = {source_identity(catalog, table): table for table in catalog["tables"]}
 
     def numeric(node_id, column):
         node = nodes.get(node_id)
@@ -77,20 +104,42 @@ def validate_dashboard(services, owner, body):
                     return False
                 return numeric(output.nodeId or node.derivation.source, output.column)
             return numeric(node.derivation.source, column)
-        details = next((c for c in tables[node.table]["columns"] if c["name"] == column), {})
+        details = next((c for c in tables[source_identity(catalog, node.model_dump(exclude_none=True))]["columns"] if c["name"] == column), {})
         return type_family(details) == "numeric"
 
+    from .dashboard_models import base_measures
+    from .measures import MeasureGraph
     for tile in body.tiles:
-        if any(key not in scopes or scopes[key].kind == "required" or scopes[key].requirement == "optional"
-               for key in tile.selections):
-            raise ValueError("Tile selections may only override required source-conditional model filters")
-        for fields in (tile.dimensions + tile.measures, tile.detail_fields):
+        graph=MeasureGraph(tile,catalog,definition)
+        for fields in (tile_dimensions(tile) + base_measures(tile), tile.detail_fields):
             if fields:
-                plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,
+                candidate=plan_query(catalog, definition, ExploreState(root=definition.root, fields=fields,
                     reportFilters=tile.report_filters, limit=tile.limit), model.catalog_fingerprint)
-        validate_time_analysis(tile, catalog, definition)
-        for field in tile.measures:
-            if tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
+                graph.validate_grain(candidate)
+        validate_time_analysis(tile.model_copy(update={"dimensions": tile_dimensions(tile)}) if tile.kind == "pivot" else tile, catalog, definition)
+        validate_report_controls(tile, catalog, definition)
+        from .time_analysis import source_type
+        from schemii.schemoo.derived import normalized_type, output_type, NUMERIC_ORDER
+        available = {(o.table, o.column, o.aggregate, o.kind): o for i, o in enumerate(graph.outputs) if i in graph.visible_indices()}
+        for setting in tile.number_formats:
+            output = setting.output
+            if output.kind.startswith("kpi_"):
+                if tile.kind != "kpi" or not tile.kpi_comparison or (output.table, output.column, output.aggregate, output.kind) not in {
+                    ("@kpi", "baseline", "none", "kpi_baseline"), ("@kpi", "absolute", "none", "kpi_absolute"), ("@kpi", "percent", "none", "kpi_percent")}:
+                    raise ValueError("A formatted KPI comparison was removed. Rebind or remove its format.")
+                continue
+            key = (output.table, output.column, output.aggregate, output.kind)
+            if key not in available:
+                raise ValueError("A formatted output was removed or hidden. Rebind or remove its format.")
+            if output.kind in {"calculated", "change", "percent_change", "running_total"}:
+                continue
+            kind = source_type(catalog, definition, output.table, output.column)
+            if output.aggregate != "none":
+                kind = output_type(output.aggregate, kind)
+            if normalized_type(kind) not in NUMERIC_ORDER:
+                raise ValueError("Number formats and threshold rules require numeric output fields.")
+        for field in base_measures(tile):
+            if field in tile.measures and tile.kind in {"bar", "line", "donut"} and field.aggregate not in {"count", "count_distinct"} and not numeric(field.table, field.column):
                 raise ValueError("Charts require numeric measures")
             if field.aggregate in {"sum", "avg"} and not numeric(field.table, field.column):
                 raise ValueError("SUM and AVG measures require numeric fields")

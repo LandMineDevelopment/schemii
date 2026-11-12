@@ -1,3 +1,5 @@
+import { catalogTable } from "./logical-relationships.js";
+import { nodeColumns } from "./model-columns.js";
 import { conditionSources } from "./derived-conditions.js";
 import { columnComparisonIssue } from "./column-comparisons.js";
 
@@ -9,7 +11,7 @@ export function boundFilterSources(scope) {
 /** Exact authored bindings only; aliases and calculated outputs are not interchangeable. */
 export function columnFilterBindings(draft, nodeId, column) {
   const node = draft.nodes.find(candidate => candidate.id === nodeId);
-  if (!node || node.derivation) return [];
+  if (!node) return [];
   return (draft.scopes || []).flatMap(scope => (scope.alternatives || []).flatMap(alternative => {
     const conditionIndexes = (alternative.conditions || []).flatMap((condition, index) => condition.table === nodeId && condition.column === column ? [index] : []);
     return conditionIndexes.length ? [{scope, alternative, conditionIndexes, conditions: conditionIndexes.map(index => alternative.conditions[index])}] : [];
@@ -70,8 +72,8 @@ export function modelFilterIssues(scope, draft, catalog) {
       if (!input.label?.trim()) add(`input:${input.id}:name`, "Give this report input a name.");
       if (input.domain) {
         const domain = input.domain;
-        const table = domain.nodeId != null ? draft.nodes.find(n => n.id === domain.nodeId)?.table : domain.table;
-        const columns = catalog.tables.find(t => t.name === table)?.columns || [];
+        const source = domain.nodeId != null ? draft.nodes.find(n => n.id === domain.nodeId) : domain;
+        const columns = catalogTable(source,catalog)?.columns || [];
         if (!columns.some(c => c.name === domain.column)) add(`input:${input.id}:domain`, "Choose a valid domain value column.");
         if (domain.labelColumn && !columns.some(c => c.name === domain.labelColumn)) add(`input:${input.id}:domain-label`, "Choose a valid domain display label.");
       }
@@ -84,12 +86,12 @@ export function modelFilterIssues(scope, draft, catalog) {
       if (["in", "not_in"].includes(c.operator) && !c.parameterId && (!Array.isArray(c.value) || !c.value.length)) add(`${key}:value`, "Choose at least one value for IN / NOT IN.");
       if (c.domain && c.value == null) add(`${key}:value`, "Choose a fixed value from the domain list.");
       if (c.domain) {
-        const table = c.domain.nodeId != null ? draft.nodes.find(n => n.id === c.domain.nodeId)?.table : c.domain.table;
-        const columns = catalog.tables.find(t => t.name === table)?.columns || [];
+        const source = c.domain.nodeId != null ? draft.nodes.find(n => n.id === c.domain.nodeId) : c.domain;
+        const columns = catalogTable(source,catalog)?.columns || [];
         if (!columns.some(column => column.name === c.domain.column) || (c.domain.labelColumn && !columns.some(column => column.name === c.domain.labelColumn))) add(`${key}:value`, "Choose a valid fixed-value domain source and display label.");
       }
       const node = draft.nodes.find(n => n.id === c.table);
-      if (!catalog.tables.find(t => t.name === node?.table)?.columns.some(column => column.name === c.column)) add(`${key}:field`, "Choose a valid source column for this condition.");
+      if (!nodeColumns(draft,catalog,node).some(column => column.name === c.column && !column.issue)) add(`${key}:field`, "Choose a valid source column for this condition.");
       if (c.parameterId && !(option.inputs || []).some(p => p.id === c.parameterId)) add(`${key}:value-source`, "Choose a value source; the referenced input was removed.");
     }
   }

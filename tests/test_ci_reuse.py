@@ -2159,7 +2159,7 @@ def test_closed_inspection_donor_preserves_four_original_lanes_and_full_main_ski
         for value in receipt["test_evidence"]["lanes"]
         if value["lane"] == "python"
     )
-    assert len(python["scope"]["planned"]) == 88
+    assert len(python["scope"]["planned"]) == 91
     assert reuse.recheck(receipt, provider, target, root=checkout, now=NOW) == receipt
     jobs = current_inputs(target)
     identity = {

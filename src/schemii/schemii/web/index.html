@@ -53,6 +53,8 @@
         </nav>
       </header>
 
+      <section class="workspace-compatibility" id="workspace-compatibility" aria-label="PostgreSQL import compatibility" hidden></section>
+
       <main class="main-layout" id="main-layout">
         <nav class="layer-switch" aria-label="Workspace layer">
           <button class="active" type="button" data-layer="tables" data-ui-icon-leading="tables" aria-pressed="true" title="Tables">
@@ -98,6 +100,8 @@
           <button id="types-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="schemas" title="Enums and domains" aria-label="Enums and domains"></button>
           <button id="objects-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="objects" title="Browse database objects" aria-label="Browse database objects"></button>
           <span class="rail-divider" data-tool-layers="tables views sql" data-tool-active aria-hidden="true"></span>
+          <button id="create-model-from-schema" class="ui-icon-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="rows" title="Create model from live schema" aria-label="Create model from live schema" disabled></button>
+          <button id="deploy-design-button" class="ui-icon-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="migration" title="Copy design to PostgreSQL target" aria-label="Copy design to PostgreSQL target" hidden disabled></button>
           <button id="review-migration-button" type="button" data-tool-layers="tables views" data-tool-active data-ui-icon="migration" title="Review migration" aria-label="Review migration" disabled></button>
           <button id="postgres-button" type="button" data-tool-layers="tables views sql" data-tool-active data-ui-icon="database" title="PostgreSQL connections" aria-label="PostgreSQL connections"></button>
           <button id="ai-assistant-button" type="button" data-tool-layers="tables views sql" data-tool-active data-ui-icon="assistant" title="AI schema assistant" aria-label="AI schema assistant" aria-expanded="false"></button>
@@ -220,9 +224,10 @@
             </div>
             <div class="views-list" id="views-list"></div>
           </aside>
-          <article class="view-detail" id="view-detail">
-            <div class="empty-panel ui-state surface"><span class="ui-state__mark" aria-hidden="true">VIEW</span><strong>No view selected</strong><p>Open a workspace, then select an ordinary or materialized view from its live catalog.</p></div>
-          </article>
+          <div class="views-content" id="views-content" data-catalog-loaded="false">
+            <div class="views-state" id="views-state" role="status" aria-live="polite"></div>
+            <article class="view-detail" id="view-detail" hidden></article>
+          </div>
         </section>
 
         <section class="sql-workspace layer-panel" id="sql-workspace" data-layer-panel="sql" data-change-scope="sql" aria-label="SQL workspace" hidden>
@@ -358,6 +363,7 @@
               <label class="design-field"><span>Storage</span><select id="design-view-kind"><option value="view">Ordinary view</option><option value="materialized_view">Materialized view</option></select></label>
             </div>
             <label class="check-row design-view-population" id="design-view-population-row" hidden><input id="design-view-populate" type="checkbox" checked /><span>Populate stored results when created</span></label>
+            <p class="materialized-authoring-guidance" id="design-view-maintenance-guidance" role="note" hidden></p>
             <label class="design-field design-view-query"><span>SELECT query body</span><textarea id="design-view-definition" required spellcheck="false" placeholder="SELECT&#10;    customer_id,&#10;    sum(total) AS lifetime_value&#10;FROM orders&#10;GROUP BY customer_id"></textarea><small>Do not enter CREATE VIEW; the design owns the name and storage choice above.</small></label>
           </section>
           <section class="design-view-preview" aria-labelledby="design-view-preview-title">
@@ -547,6 +553,16 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
       </div>
     </dialog>
 
+    <dialog class="ui-dialog migration-dialog" id="design-deployment-dialog" aria-labelledby="design-deployment-title">
+      <div class="ui-dialog__shell">
+        <header class="ui-dialog__head"><div><small>Detached design · reviewed copy</small><h2 id="design-deployment-title">Copy design to PostgreSQL target</h2><p>Save desired metadata first, then review a fresh migration before any PostgreSQL changes. Your detached source and target-only objects stay intact.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close design copy review"></button></header>
+        <div class="deployment-target"><label>Connection<select id="deployment-connection"></select></label><label>Namespace<select id="deployment-namespace"></select></label></div>
+        <div class="migration-review-body" id="deployment-review-body"></div>
+        <div class="form-status migration-status" id="deployment-status" aria-live="polite"></div>
+        <footer class="ui-dialog__actions"><button class="ui-button compact" type="button" data-close-dialog>Cancel</button><button class="ui-button compact" id="review-deployment-button" type="button" disabled>Review copy</button><button class="ui-button compact primary" id="copy-deployment-button" type="button" disabled>Copy and review migration</button></footer>
+      </div>
+    </dialog>
+
     <dialog class="ui-dialog migration-dialog" id="migration-dialog" aria-labelledby="migration-title">
       <div class="ui-dialog__shell">
         <header class="ui-dialog__head"><div><small>Server-authoritative PostgreSQL change</small><h2 id="migration-title">Review migration</h2><p id="migration-copy">Compare the saved design with its PostgreSQL baseline and current target before authorizing any SQL.</p></div><button class="ui-icon-button compact" type="button" data-ui-icon="close" data-close-dialog aria-label="Close migration review"></button></header>
@@ -616,7 +632,7 @@ CASE WHEN quantity &gt; 0 THEN subtotal / quantity END</code></pre></section>
         <button class="ui-icon-button compact" id="ai-assistant-close" data-ui-icon="close" aria-label="Close assistant"></button>
       </header>
       <section class="ai-assistant__context" aria-label="Assistant context">
-        <label><span>Model</span><select id="ai-assistant-model" aria-label="AI model"></select></label>
+        <label><span>Model</span><select id="ai-assistant-model" aria-label="AI model"></select><small class="ai-assistant__current-model" id="ai-assistant-current-model" hidden></small></label>
         <label><span>Reasoning</span><select id="ai-assistant-reasoning" aria-label="AI reasoning level"></select></label>
         <button class="ai-permissions-summary" id="ai-assistant-permissions" type="button"><span>Permissions</span><strong id="ai-assistant-permissions-copy">Explain only</strong></button>
         <p id="ai-assistant-disclosure">The assistant sees the saved workspace design. Every proposed change still requires your review.</p>

@@ -229,7 +229,7 @@ async function runParallel(options, cwd, environment, report, files, started) {
     throw new Error('Ready browser accounts do not match this execution');
   }
   const cases = inventoryCases(report, sourceRoot, options.project, files);
-  const partition = parallelFiles(files, options.project);
+  const partition = parallelFiles(files, options.project, undefined, sourceRoot);
   const meta = metadata('browser', options.project, options.shard);
   const write = writer(resolve(cwd, environment.CI_TELEMETRY_FILE || 'artifacts/ci-timing/browser.jsonl'), meta, { exclusive: true });
   write({ kind: 'start', planned: cases.length });
@@ -378,12 +378,12 @@ export function run(options, cwd = process.cwd()) {
   catch { throw new Error('Invalid Playwright discovery'); }
   const plan = policy
     ? { shards: scopedInventory(report, cwd, options.project, policy).map(files => ({ files })), unknownFiles: [] }
-    : (options.parallel ? balanceParallelFiles : balanceFiles)(inventoryFiles(report, cwd), options.project, undefined, shardCount);
+    : (options.parallel ? balanceParallelFiles : balanceFiles)(inventoryFiles(report, cwd), options.project, undefined, shardCount, cwd);
   const selected = plan.shards[options.shard - 1];
   if (options.plan) {
     console.log(JSON.stringify({ project: options.project, shard: options.shard, shardCount,
       observation: OBSERVATION, ...(policy ? { profile: options.profile } : {}), ...selected,
-      ...(options.parallel && !policy ? parallelFiles(selected.files, options.project) : {}), unknownFiles: plan.unknownFiles }));
+      ...(options.parallel && !policy ? parallelFiles(selected.files, options.project, undefined, cwd) : {}), unknownFiles: plan.unknownFiles }));
     return 0;
   }
   // The existing small reviewed scopes retain their single-process path.

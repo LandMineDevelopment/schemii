@@ -1,4 +1,6 @@
 import { setAssistantDesignSavedHandler } from "./ai-assistant.js";
+import { createProductContext, requireContextAccount } from "#common/product-context.js";
+let schemaHandoffPending = false, schemaHandoffGeneration = 0;
 import { createInspectorDataController } from "./inspector-data.js";
 import { createTableEditor } from "./table-editor.js";
 import { api } from "./api.js";
@@ -97,7 +99,9 @@ import {
   createLatestRequestController,
   createWorkspaceOperationController,
 } from "./request-coordinator.js";
+import { createDesignDeploymentController, detachedDesignEligible } from "./design-deployment.js";
 import { createMigrationReviewController } from "./migration-review.js";
+import { renderWorkspaceCompatibility } from "./compatibility.js";
 import { createSqlConsole } from "./sql-console.js";
 import { syncWorkspaceToolbar } from "./workspace-toolbar.js";
 import { createDesignEditorControllers } from "./design-editors.js";
@@ -187,6 +191,8 @@ const elements = {
   deleteTableButton: byId("delete-table-button"),
   catalogStats: byId("catalog-stats"),
   viewsList: byId("views-list"),
+  viewsState: byId("views-state"),
+  viewsContent: byId("views-content"),
   viewsSearch: byId("views-search"),
   viewDetail: byId("view-detail"),
   refreshViewsButton: byId("refresh-views-button"),
@@ -400,6 +406,8 @@ const elements = {
   migrationDialog: byId("migration-dialog"),
   migrationRebuildHelp: byId("migration-rebuild-help"),
   migrationReviewBody: byId("migration-review-body"),
+  workspaceCompatibility: byId("workspace-compatibility"),
+  designViewMaintenanceGuidance: byId("design-view-maintenance-guidance"),
   migrationStatus: byId("migration-status"),
   refreshMigrationButton: byId("refresh-migration-button"),
   resolveMigrationButton: byId("resolve-migration-button"),
@@ -644,11 +652,26 @@ const migrationReview = createMigrationReviewController({
     resolve: elements.resolveMigrationButton,
     apply: elements.applyMigrationButton,
   },
-  getContext: () => ({ workspace: state.activeWorkspace, design: state.design }),
-  reloadWorkspace: () => loadActiveWorkspace({ clearConflictOnSuccess: true }),
+  getContext: () => ({ workspace: state.activeWorkspace, design: state.design, connectionRevision: connectionById(state.activeWorkspace?.connectionId)?.revision }),
+  reloadWorkspace: reloadMigrationWorkspace,
   confirm: askConfirmation,
   notify: showToast,
   notifyError: errorToast,
+});
+const designDeployment = createDesignDeploymentController({
+  api,
+  elements: {
+    dialog: byId("design-deployment-dialog"), connection: byId("deployment-connection"),
+    namespace: byId("deployment-namespace"), body: byId("deployment-review-body"),
+    status: byId("deployment-status"), review: byId("review-deployment-button"), copy: byId("copy-deployment-button"),
+  },
+  getContext: () => ({ workspace: state.activeWorkspace, design: state.design }),
+  openTarget: async workspace => {
+    const index = state.workspaces.findIndex(item => item.id === workspace.id);
+    if (index < 0) state.workspaces.push(workspace); else state.workspaces[index] = workspace;
+    if (await openWorkspace(workspace)) await migrationReview.open();
+  },
+  notify: showToast,
 });
 const relationDataSource = createRelationDataSource({
   api,
@@ -1054,7 +1077,7 @@ function selectedDesignTable() {
 }
 
 function updateDesignControls() {
-  const designWorkspace = isDesignWorkspace();
+  const designWorkspace = isDesignWorkspace() && Boolean(state.design);
   const busy = state.catalogLoading || state.designSubmitting || state.historySubmitting || state.layoutConflict || tableEditor.hasDraft;
   const selected = selectedDesignTable();
   const selectedView = selectedDesignView();
@@ -1076,9 +1099,9 @@ function updateDesignControls() {
   elements.createIndexButton.title = state.indexAuthoring ? "Cancel index selection" : "Create index";
   elements.deleteTableButton.disabled = !selected || busy;
   elements.createViewButton.disabled = !designWorkspace || busy;
-  elements.browseViewsTool.disabled = !designWorkspace || state.catalogLoading;
+  elements.browseViewsTool.disabled = !state.catalog || state.catalogLoading;
   elements.createViewTool.disabled = !designWorkspace || busy;
-  elements.refreshViewsTool.disabled = !designWorkspace || state.catalogLoading;
+  elements.refreshViewsTool.disabled = !state.activeWorkspace || state.catalogLoading;
   elements.deleteViewTool.disabled = !selectedView || busy;
   const deleteViewLabel = selectedView ? `Delete view ${selectedView.name}` : "Delete selected view";
   elements.deleteViewTool.setAttribute("aria-label", deleteViewLabel);
@@ -1239,6 +1262,7 @@ async function restoreWorkspaceNavigation(navigation, {
 }
 
 function updateHeader() {
+  migrationReview.syncContext();
   updateFitAvailability();
   const designWorkspace = isDesignWorkspace();
   elements.workspaceTitle.textContent = state.activeWorkspace ? workspaceLabel(state.activeWorkspace) : "No workspace open";
@@ -1252,11 +1276,18 @@ function updateHeader() {
   } else if (!state.readiness.ready) {
     elements.runtimeDot.classList.add("error");
     elements.runtimeStatus.textContent = "Server not ready";
+  } else if (state.catalogLoading || (state.activeWorkspace && !state.catalog && !state.catalogError)) {
+    elements.runtimeDot.classList.add("loading");
+    elements.runtimeStatus.textContent = designWorkspace ? "Loading saved design" : "Loading live catalog";
+  } else if (state.catalogError) {
+    elements.runtimeDot.classList.add("error");
+    elements.runtimeStatus.textContent = state.catalog
+      ? (designWorkspace ? "Saved design refresh failed" : "Live catalog refresh failed")
+      : (designWorkspace ? "Saved design load failed" : "Live catalog load failed");
   } else {
     elements.runtimeDot.classList.add("ready");
     if (state.layoutConflict) elements.runtimeStatus.textContent = "Layout saving stopped · conflict";
     else if (state.layoutSaving) elements.runtimeStatus.textContent = "Saving layout";
-    else if (state.catalogLoading) elements.runtimeStatus.textContent = designWorkspace ? "Loading saved design" : "Loading live catalog";
     else elements.runtimeStatus.textContent = `Ready · ${state.readiness.persistence}`;
   }
   elements.saveLayoutButton.disabled = !state.catalog || state.catalogLoading || state.layoutSaving || state.layoutConflict;
@@ -1266,13 +1297,16 @@ function updateHeader() {
     || workspaceOperations.isMutating();
   elements.refreshCatalogButton.title = designWorkspace ? "Refresh saved design" : "Refresh live catalog";
   elements.refreshCatalogButton.setAttribute("aria-label", elements.refreshCatalogButton.title);
-  elements.refreshViewsButton.disabled = state.catalogLoading;
-  elements.createViewButton.disabled = !designWorkspace || state.catalogLoading || state.designSubmitting || state.layoutConflict;
+  elements.refreshViewsButton.disabled = !state.activeWorkspace || state.catalogLoading;
   elements.reloadConflictButton.disabled = state.catalogLoading;
   elements.applyConnectionLayoutButton.disabled = state.catalogLoading;
   updateDesignControls();
+  byId("create-model-from-schema").disabled = !state.activeWorkspace || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft || schemaHandoffPending;
   tableEditor.updateActions();
   elements.downloadCatalogButton.textContent = designWorkspace ? "Download desired design JSON" : "Download live catalog JSON";
+  byId("deploy-design-button").hidden = !detachedDesignEligible(state.activeWorkspace, state.design);
+  byId("deploy-design-button").disabled = !detachedDesignEligible(state.activeWorkspace, state.design)
+    || state.catalogLoading || state.designSubmitting || state.historySubmitting || tableEditor.hasDraft;
   elements.exportDesignSqlButton.disabled = !designWorkspace || !state.design || state.catalogLoading;
   elements.reviewMigrationButton.disabled = !migrationReview.available()
     || state.catalogLoading
@@ -1287,6 +1321,11 @@ function updateHeader() {
     ? "Select a designed table to inspect its columns, constraints, indexes, and relationships."
     : "Select a live table to inspect columns, constraints, indexes, triggers, and relationships.";
   elements.canvas.setAttribute("aria-label", designWorkspace ? "Desired schema table diagram canvas" : "Live table diagram canvas");
+  renderWorkspaceCompatibility(elements.workspaceCompatibility, {
+    workspace: state.activeWorkspace, design: state.design, loading: state.catalogLoading,
+    reviewDisabled: elements.reviewMigrationButton.disabled, exportDisabled: elements.exportDesignSqlButton.disabled,
+    onReview: () => elements.reviewMigrationButton.click(), onExport: () => elements.exportDesignSqlButton.click(),
+  });
   renderSqlTarget();
 }
 
@@ -1307,36 +1346,66 @@ function stateCard(mark, title, copy, actionLabel, onAction, loading = false) {
   });
 }
 
-function renderCatalogState() {
-  replace(elements.catalogState);
+function renderWorkspaceLoadState(container) {
+  replace(container);
   if (!state.startupComplete) {
-    elements.catalogState.append(stateCard("…", "Loading active server state", "Waiting for the session, readiness, connections, and workspaces APIs.", null, null, true));
-    return;
+    container.append(stateCard("…", "Loading active server state", "Waiting for the session, readiness, connections, and workspaces APIs.", null, null, true));
+    return true;
   }
   if (state.runtimeError) {
-    elements.catalogState.append(errorPanel(state.runtimeError, { retryLabel: "Retry server checks", onRetry: bootstrap }));
-    return;
+    container.append(errorPanel(state.runtimeError, { retryLabel: "Retry server checks", onRetry: bootstrap }));
+    return true;
   }
   if (!state.activeWorkspace) {
     const card = stateCard("WS", "Open a schema workspace", "Create a local design or create an editable workspace from PostgreSQL.", "Open workspaces", openWorkspaces);
     const connectionAction = element("button", { className: "ui-button compact", type: "button", text: "Manage connections" });
     connectionAction.addEventListener("click", openConnections);
     card.append(connectionAction);
-    elements.catalogState.append(card);
-    return;
+    container.append(card);
+    return true;
   }
   if (state.catalogLoading) {
-    elements.catalogState.append(stateCard("…", isDesignWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
-    return;
+    container.append(stateCard("…", isDesignWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
+    return true;
   }
   if (state.catalogError) {
-    const panel = errorPanel(state.catalogError, { retryLabel: "Retry catalog", onRetry: refreshCatalog });
+    const panel = errorPanel(state.catalogError, { retryLabel: isDesignWorkspace() ? "Retry saved design" : "Retry catalog", onRetry: refreshCatalog });
+    if (state.catalog) {
+      panel.append(element("p", { text: isDesignWorkspace()
+        ? "Showing the saved design from the last successful load."
+        : "Showing the live catalog from the last successful load." }));
+    }
     if (state.preservedLayout?.workspaceId === state.activeWorkspace.id) {
       panel.append(element("p", { text: "Unsaved table positions remain in this browser and will be reapplied after the live catalog loads." }));
     }
-    elements.catalogState.append(panel);
-    return;
+    container.append(panel);
+    return true;
   }
+  if (!state.catalog) {
+    container.append(stateCard("…", isDesignWorkspace() ? "Loading saved design" : "Loading live catalog", workspaceLabel(state.activeWorkspace), null, null, true));
+    return true;
+  }
+  return false;
+}
+
+function renderViewsWorkspaceState() {
+  renderWorkspaceLoadState(elements.viewsState);
+  const loaded = Boolean(state.catalog);
+  const desired = loaded ? state.catalog.source === "design" : isDesignWorkspace();
+  elements.viewsContent.dataset.catalogLoaded = String(loaded);
+  elements.viewsSourceLabel.textContent = desired ? "Desired schema" : loaded ? "Live PostgreSQL" : "No workspace open";
+  elements.createViewButton.hidden = !desired;
+  elements.viewsSearch.disabled = !loaded;
+  elements.viewDetail.hidden = !loaded;
+  if (!loaded) {
+    replace(elements.viewsList);
+    replace(elements.viewDetail);
+  }
+}
+
+function renderCatalogState() {
+  renderViewsWorkspaceState();
+  if (renderWorkspaceLoadState(elements.catalogState)) return;
   if (state.layoutError && !state.layoutConflict) {
     const panel = errorPanel(state.layoutError, { retryLabel: "Retry layout save", onRetry: saveLayout });
     const reload = element("button", { className: "ui-button compact", type: "button", text: isDesignWorkspace() ? "Reload saved design and layout" : "Reload live catalog and server layout" });
@@ -2438,6 +2507,7 @@ function confirmDeleteWorkspace(workspace) {
 }
 
 function clearActiveWorkspace({ historyMode = "replace" } = {}) {
+  designDeployment.close();
   designEditors.discardDrafts();
   const workspaceId = state.activeWorkspace?.id;
   persistCanvasView();
@@ -2512,6 +2582,7 @@ async function openWorkspace(workspace, { historyMode = "push", navigationReques
     if (!await flushLayoutBeforeTransition() || !request.isCurrent()) return false;
     if (!await designEditors.requestDiscardDrafts() || !request.isCurrent()) return false;
     persistCanvasView();
+    designDeployment.close();
     workspaceOperations.invalidate();
     viewAnalysis.clear();
     resetLayoutSaveState();
@@ -2542,6 +2613,16 @@ async function openWorkspace(workspace, { historyMode = "push", navigationReques
 
 async function loadActiveWorkspace(options = {}) {
   return loadActiveDesign(options);
+}
+
+async function reloadMigrationWorkspace() {
+  const workspaceId = state.activeWorkspace?.id;
+  if (designEditors.hasDraft || tableEditor.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
+  if (!await flushLayoutBeforeTransition()) throw new Error('Resolve the pending layout save before reloading the migration workspace.');
+  if (state.activeWorkspace?.id !== workspaceId) return;
+  if (designEditors.hasDraft || tableEditor.hasDraft) throw new Error('Keep or save the open editor draft before reloading the migration workspace.');
+  await loadActiveWorkspace({ clearConflictOnSuccess: true });
+  if (state.catalogError) throw state.catalogError;
 }
 
 async function loadActiveDesign({ clearConflictOnSuccess = false } = {}) {
@@ -3022,18 +3103,16 @@ function selectView(view, { historyMode = "push" } = {}) {
 }
 
 function renderViews() {
-  const desired = state.catalog?.source === "design";
+  renderViewsWorkspaceState();
   const view = currentCatalogView();
-  elements.viewsSourceLabel.textContent = desired ? "Desired schema" : "Live PostgreSQL";
-  elements.createViewButton.hidden = !desired;
-  renderViewsList(elements.viewsList, {
+  if (state.catalog) renderViewsList(elements.viewsList, {
     catalog: state.catalog,
     query: elements.viewsSearch.value,
     filter: state.viewFilter,
     selectedName: view?.name || null,
     onSelect: selectView,
   });
-  renderSelectedViewDetail();
+  if (state.catalog) renderSelectedViewDetail();
   updateDesignControls();
 }
 
@@ -5046,6 +5125,32 @@ function bindEvents() {
     state.relationPreviewError = null;
     state.relationPreviewPagingError = null;
   });
+  byId("create-model-from-schema").addEventListener("click", async () => {
+    if (schemaHandoffPending || !state.activeWorkspace) return;
+    if (!state.activeWorkspace.connectionId) {
+      askConfirmation({ title: 'Choose a live source for a model', message: 'This detached desired design has no PostgreSQL source. Copy it to a concrete PostgreSQL target and review/apply its migration, then open that database-backed workspace to create a Schemoo model. Undeployed desired DDL cannot be used as a live model source.', label: 'Choose PostgreSQL target', tone: 'primary', callback: () => designDeployment.open() });
+      return;
+    }
+    const originId = state.activeWorkspace.id, handoffTicket = ++schemaHandoffGeneration;
+    schemaHandoffPending = true; updateHeader();
+    try {
+      if (!await flushLayoutBeforeTransition()) return;
+      if (handoffTicket !== schemaHandoffGeneration) return;
+      const origin = state.activeWorkspace;
+      if (origin?.id !== originId) throw new Error('The workspace changed. Send its current live schema again.');
+      const account = await requestJson('/api/v1/auth/me'); requireContextAccount(account, 'schemoo');
+      const workspace = await api.getWorkspace(origin.id);
+      const connection = await api.getConnection(workspace.connectionId);
+      if (handoffTicket !== schemaHandoffGeneration) return;
+      if (state.activeWorkspace?.id !== origin.id || workspace.connectionId !== origin.connectionId || workspace.namespace !== origin.namespace) throw new Error('The workspace source changed. Reload it and send the current live schema.');
+      location.assign(createProductContext('schema', account, { connectionId: workspace.connectionId, connectionOwnerId: connection.ownerId || account.user.id, connectionRevision: connection.revision, namespace: workspace.namespace }));
+    } catch (error) { errorToast(error); }
+    finally { schemaHandoffPending = false; updateHeader(); }
+  });
+  byId("deploy-design-button").addEventListener("click", async () => {
+    elements.objectsDialog.close();
+    await designDeployment.open();
+  });
   elements.reviewMigrationButton.addEventListener("click", async () => {
     elements.objectsDialog.close();
     await migrationReview.open();
@@ -5092,6 +5197,7 @@ function bindEvents() {
     });
   });
   window.addEventListener("pagehide", persistCanvasView);
+  window.addEventListener("pagehide", () => { schemaHandoffGeneration++; });
   window.addEventListener("beforeunload", event => {
     if (!tableEditor.hasDraft && !designEditors.hasDraft && !sqlConsole.hasOpenTransaction()) return;
     event.preventDefault();

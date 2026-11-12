@@ -32,6 +32,7 @@ from schemii.schemoo.models import Contract, ScopeSelection
 from schemii.common.api.errors import ApiProblem
 from .dashboard_routes import dashboard_errors
 from .tile_queries import DashboardPlanning, tile_plan
+from .dashboard_models import base_measures
 from .access import prepare_dashboard, owned_report_services
 
 
@@ -115,7 +116,9 @@ async def stream_dashboard(dashboard_id: str, body: DashboardExecutionRequest, r
                     raise
                 errors.append({"tileId": tile.id, "message": error.message, "code": error.code})
                 continue
-            tiles.append({"tileId": tile.id, "plan": plan})
+            scalar_kpi = (tile.kind == "kpi" and not tile.dimensions
+                          and all(field.aggregate != "none" for field in base_measures(tile)))
+            tiles.append({"tileId": tile.id, "plan": plan, "scalarKpi": scalar_kpi})
         await asyncio.to_thread(planning.check_current)
         return response(services, principal.user_id, model, tiles, errors)
 
@@ -149,7 +152,7 @@ async def export_tile(dashboard_id: str, tile_id: str, request: Request,
             raise ApiProblem(422, "invalid_export_request", "Supply the dashboard revision and optional selection.") from error
         dashboard, services = await asyncio.to_thread(_dashboard, request, principal.user_id, dashboard_id, body, export=True)
         model, plan = await asyncio.to_thread(tile_plan, services, principal.user_id, dashboard,
-                                              tile_id, selection=body.selection, fresh=True)
+                                              tile_id, selection=body.selection, fresh=True, exporting=True)
         return response(services, principal.user_id, model, [{"tileId": tile_id, "plan": plan}], export=True)
 
 

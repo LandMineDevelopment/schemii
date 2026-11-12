@@ -10,14 +10,25 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false, pivot = false, calculated = false, formats = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
+  if(calculated) {
+    const tile=fixture.dashboard.tiles[0];
+    Object.assign(tile,{kind:calculated==='kpi'?'kpi':'bar',title:'Calculated share',dimensions:calculated==='kpi'?[]:[field('org')],measures:[],hiddenMeasures:[field('id','count')],
+      calculations:[{id:'share',label:'Share',operation:'percent_of',left:{output:field('id','count'),scope:'group'},right:{output:field('id','count'),scope:'source_population'},visible:true}],
+      ...(calculated==='kpi'?{kpiComparison:{label:'Target',baseline:{constant:'50'},favorable:'higher'}}:{})});
+  }
+  if (formats) Object.assign(fixture.dashboard.tiles[0], { kind: 'aggregate', numberFormats: [{ output: { table: 'person', column: 'id', aggregate: 'count', kind: 'value' }, style: 'currency', currency: 'EUR', precision: 2, percentScale: 'auto', unit: '', rules: [{ operator: 'lt', value: '0', label: 'Below target', symbol: 'down', tone: 'negative' }] }], formatLocale: 'de-DE' });
   if (jsonCells) {
     fixture.dashboard.tiles[0].kind = 'detail';
     fixture.dashboard.tiles[0].dimensions = [];
     fixture.dashboard.tiles[0].measures = [];
   }
+  if (pivot) Object.assign(fixture.dashboard.tiles[0], { kind: 'pivot', title: 'Workforce pivot', dimensions: [],
+    rowDimensions: [field('org'), field('hired_at')], columnDimensions: [field('name'), field('id')],
+    measures: [field('id', 'avg'), field('id', 'count_distinct')], topN: 100,
+    pivotTotals: { rowSubtotals: true, columnSubtotals: true, rowTotals: true, columnTotals: true, grandTotal: true, maximumColumns: 4, maximumRows: 100 } });
   if (optionalFilter) fixture.model.definition.scopes.push({ id: 'region', label: 'Region', kind: 'conditional', requirement: 'optional', alternatives: [{ id: 'choose', label: 'Choose region', inputs: [{ id: 'region', label: 'Region', type: 'text', defaultValue: '' }], conditions: [{ table: 'person', column: 'org', operator: 'eq', parameterId: 'region' }] }] });
   const warnings = aggregationWarning ? ["COUNT of Personnel.id may be affected by repeated rows from joins. The selected aggregation runs as configured."] : [];
   const repetitionDiagnostics = aggregationWarning ? [{ code: 'measure_repetition', outputIndex: 1,
@@ -38,7 +49,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
   }
   function framesFor(tiles, selection) {
     const snapshotAt = '2026-09-20T12:00:00Z';
-    const planFor = tile => ({ sql: selection ? "SELECT id, name FROM personnel WHERE org = 'HQ' AND id IS NOT NULL;" : 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, repetitionDiagnostics, rowLimit: tile.limit });
+    const planFor = tile => ({ sql: selection ? "SELECT id, name FROM personnel WHERE org = 'HQ' AND id IS NOT NULL;" : 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, repetitionDiagnostics, rowLimit: tile.limit,...(calculated?{calculatedMeasures:[{id:'share',label:'Share',index:calculated==='kpi'?0:1,unit:'percent',scale:100,constituents:[{output:{...field('id','count'),kind:'value'},scope:'group'},{output:{...field('id','count'),kind:'value'},scope:'source_population'}]}],...(calculated==='kpi'?{kpiComparison:{label:'Target',favorable:'higher',indices:[1,2,3,4],percentScale:100}}:{})}:{}) });
     const frames = [{ type: 'start', snapshotAt, tiles: tiles.map(tile => ({ tileId: tile.id, plan: planFor(tile) })), tileErrors: [], limits: { rows: 10000, bytes: 8388608, totalBytes: 33554432 } }];
     for (const tile of tiles) {
       const data = dataFor(tile, selection);
@@ -48,19 +59,33 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
         if (streamError) break;
       }
       frames.push(streamError ? { type: 'error', tileId: tile.id, message: 'Source connection interrupted', code: 'query_failed' }
-        : { type: 'complete', tileId: tile.id, rowCount: rows.length, limitReached: capped, reason: capped ? 'row_limit' : null, snapshotAt });
+        : { type: 'complete', tileId: tile.id, rowCount: rows.length, limitReached: capped, reason: capped ? dashboardCapacity ? 'dashboard_row_limit' : 'row_limit' : null, snapshotAt });
     }
     frames.push({ type: 'end' });
     return frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
   }
   function dataFor(tile, drill) {
+    if(calculated&&!drill) return calculated==='kpi'?{columns:['Share','Target','Absolute variance','Variance (%)','KPI assessment'].map(name=>({name})),rows:[[40,50,-10,-20,'unfavorable']]}:{columns:[{name:'Organization'},{name:'Share'}],rows:[['HQ',40],['Field',60]]};
+    if (formats && !drill) return { rows: [['HQ', '9007199254740993.125'], ['Branch', '-0.0000001'], ['Missing', null]], columns: [{ name: 'org', dataType: 'text' }, { name: 'Count id', dataType: 'numeric' }] };
+    if (pivot && !drill) {
+      const rows = pivot === 'capacity' ? [[null, null, null, null, null, null, 0, 0, 'column_capacity', 5, false, 180, 'capacity']]
+        : [[null, null, null, null, 39.1666666667, 4, 0, 0, 'data', 2, true, 180, 'grand_total'],
+          ['HQ', null, null, null, 46.6666666667, 1, 1, 0, 'data', 2, true, 180, 'subtotal'],
+          ['HQ', '2024-01-01', null, null, 46.6666666667, 1, 2, 0, 'data', 3, true, 180, 'row'],
+          ...['Alex', 'Blake', 'Casey'].map(name => [null, null, name, null, 30, 2, 0, 1, 'data', 3, true, 180, 'subtotal']),
+          [null, null, 'Alex', 1, 30.5, 3, 0, 2, 'data', 3, true, 180, 'column'],
+          ['Org 000', '2024-01-01', 'Casey', 3, 25, 1, 2, 2, 'data', 3, true, 180, 'cell'],
+          ...Array.from({ length: 80 }, (_, index) => [`Org ${String(index).padStart(3, '0')}`, '2024-01-01', 'Alex', 1, index, 1, 2, 2, 'data', 2, true, 180, 'cell']),
+          [null, '2024-01-01', 'Blake', 2, 20, 1, 2, 2, 'data', 2, true, 180, 'cell']];
+      return { rows, columns: ['Organization', 'Hired at', 'Name', 'ID', 'Average person ID', 'Distinct IDs', 'Row grouping depth', 'Column grouping depth', 'Pivot status', 'Column groups', 'Preview rows omitted', 'Qualifying groups', 'Pivot scope'].map(name => ({ name, dataType: 'text' })) };
+    }
     if (jsonCells) return { rows: [[{ a: 1 }, [1, 2], 'A,"B"\nC']], columns: [{ name: 'payload', dataType: 'jsonb' }, { name: 'items', dataType: 'jsonb' }, { name: 'note', dataType: 'text' }], size: tile.limit };
     return drill || tile.kind === 'detail' ? { rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']], columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }], size: tile.limit }
       : multidimensional ? { rows: multidimensional === 'wide' ? Array.from({ length: 150 }, (_, index) => [index, 'Group', index + 1]) : multidimensional === 'many' ? Array.from({ length: 150 }, (_, index) => ['HQ', `Person ${index}`, index + 1]) : [['Branch', 'Alex', 2], ['Branch', 'Blake', 3], ['HQ', 'Alex', 4], ['Remote', 'Alex', 1], ['Remote', 'Blake', 5]], columns: [{ name: 'org', dataType: 'text' }, { name: 'name', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }] }
       : tile.kind === 'kpi' ? { rows: [[3]], columns: [{ name: 'COUNT id', dataType: 'bigint' }], size: tile.limit }
         : { rows: manyBars || manyRows ? Array.from({ length: 500 }, (_, index) => [`Organization ${index + 1}`, index + 1]) : [['HQ', 3], ['Branch', 2]], columns: [{ name: 'org', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }], size: tile.limit };
   }
-  const requests = [], errors = []; page.on('pageerror', error => errors.push(error.message));
+  const requests = [], writes = [], errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.context().route('**/api/v1/**', async route => {
     const request = route.request(), url = new URL(request.url()), body = request.headers()['content-type']?.includes('application/x-www-form-urlencoded') ? JSON.parse(new URLSearchParams(request.postData()).get('payload')) : request.postDataJSON();
     let response;
@@ -71,7 +96,7 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     else if (url.pathname === '/api/v1/schemoo/catalog') response = fixture.catalog;
     else if (url.pathname === '/api/v1/schemer/dashboards') response = { dashboards: multidimensional === 'many' ? [fixture.dashboard, ...Array.from({ length: 4 }, (_, index) => ({ ...fixture.dashboard, id: `other-${index}`, name: `Long multidimensional dashboard ${index}` }))] : [fixture.dashboard] };
     else if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}`) {
-      if (request.method() === 'PUT') fixture.dashboard = { ...fixture.dashboard, ...body, revision: fixture.dashboard.revision + 1 };
+      if (request.method() === 'PUT') { writes.push(body); fixture.dashboard = { ...fixture.dashboard, ...body, revision: fixture.dashboard.revision + 1 }; }
       response = fixture.dashboard;
     } else if (url.pathname === `/api/v1/schemer/dashboards/${dashboardId}/executions/stream`) {
       requests.push({ body, path: url.pathname });
@@ -82,14 +107,14 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
       if (url.pathname.endsWith('/plan')) response = { sql: 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, rowLimit: tile.limit };
       else if (url.pathname.endsWith('/export')) {
         if (body.expectedRevision !== fixture.dashboard.revision) { await route.fulfill({ status: 409, json: { error: { message: 'Dashboard revision changed' } } }); return; }
-        await route.fulfill({ status: 200, contentType: 'text/csv', headers: { 'Content-Disposition': 'attachment; filename="schemer-results.csv"' }, body: 'org,COUNT id\nHQ,3\nBranch,2\n' }); return;
+        await route.fulfill({ status: 200, contentType: 'text/csv', headers: { 'Content-Disposition': 'attachment; filename="schemer-results.csv"' }, body: pivot ? body.selection ? 'id,name,Pivot scope,Row grouping depth,Column grouping depth\n1,Alex,grand_total,0,0\n' : 'Organization,Name,AVG,Row grouping depth,Column grouping depth,Pivot scope\n,,39.1666666667,0,0,grand_total\n' : 'org,COUNT id\nHQ,3\nBranch,2\n' }); return;
       } else {
         await route.fulfill({ status: 200, contentType: 'application/x-ndjson', body: framesFor([tile], body.selection) }); return;
       }
     } else response = {};
     await route.fulfill({ status: 200, json: response });
   });
-  return { fixture, requests, errors };
+  return { fixture, requests, writes, errors, recover: () => { streamError = false; emptyRows = false; } };
 }
 
 test('a changed Schemoo model blocks query refresh until the dashboard is revalidated and updated', async ({ page }) => {
@@ -103,6 +128,7 @@ test('a changed Schemoo model blocks query refresh until the dashboard is revali
   expect(requests).toHaveLength(0);
 
   await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repairs & upgrade', exact: true }).click();
   await expect(update).toBeHidden();
   await expect(page.locator('.analytics-tile')).toContainText('2 groups');
   expect(fixture.dashboard.modelRevision).toBe(2);
@@ -160,6 +186,7 @@ test('refresh checks for a Schemoo model update before it reruns dashboard queri
   expect(requests.filter(request => request.path.endsWith('/executions/stream')).length).toBe(executionsBeforeRefresh);
 
   await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repairs & upgrade', exact: true }).click();
   await expect(page.locator('#model-update')).toBeHidden();
   expect(fixture.dashboard.modelRevision).toBe(2);
   expect(errors).toEqual([]);
@@ -507,7 +534,7 @@ test('capped previews explain the limit and offer a full-result file download', 
     page.once('download', resolve);
     page.context().once('page', popup => popup.once('download', resolve));
   });
-  await expanded.getByRole('button', { name: 'Download full results', exact: true }).click();
+  await expanded.getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toBe('schemer-results.csv');
   expect(requests.filter(request => request.path.endsWith('/export'))).toHaveLength(1);
@@ -521,10 +548,10 @@ test('cached CSV browser download preserves JSON object and array cells', async 
   await expect(tile.locator('.tile-status')).toContainText('1 rows cached');
   await tile.getByRole('heading', { name: 'Positions by org' }).click();
   const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
-  await expect(expanded.getByRole('button', { name: 'Export cached rows as CSV' })).toBeVisible();
+  await expect(expanded.getByRole('button', { name: 'Export cached rows as RAW CSV' })).toBeVisible();
 
   const downloadPromise = page.waitForEvent('download');
-  await expanded.getByRole('button', { name: 'Export cached rows as CSV' }).click();
+  await expanded.getByRole('button', { name: 'Export cached rows as RAW CSV' }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe('schemer-cached-rows.csv');
   expect(await readFile(await download.path(), 'utf8')).toBe(
@@ -596,7 +623,7 @@ test('renaming a dashboard keeps cached full-result downloads valid without reru
     page.once('download', resolve);
     page.context().once('page', popup => popup.once('download', resolve));
   });
-  await expanded.getByRole('button', { name: 'Download full results', exact: true }).click();
+  await expanded.getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
   const download = await downloadEvent;
   expect(download.suggestedFilename()).toBe('schemer-results.csv');
   expect(requests.filter(request => request.path.endsWith('/executions/stream'))).toHaveLength(1);
@@ -708,6 +735,7 @@ test('wide line axes keep their first points visible before horizontal scrolling
   expect(point.x + point.width).toBeLessThan(body.x + body.width);
   expect(point.y + point.height).toBeLessThan(body.y + body.height);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await test.info().attach(`wide-line-visible-points-${test.info().project.name}`, { body: await tile.screenshot(), contentType: 'image/png' });
 });
 
 
@@ -740,4 +768,550 @@ test('bars cluster under one dimension with consistent colors and regroup withou
     { table: 'person', column: 'name', value: 'Alex' },
   ]);
   expect(errors).toEqual([]);
+});
+
+
+test('model upgrade repairs hidden fields locally and saves the new revision in one request', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.model.definition.exposedFields = [field('id')];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('field is no longer exposed');
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  await review.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('button', { name: 'Remove Dimensions 1', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Add dimensions', exact: true }).fill('id');
+  await page.getByRole('option', { name: 'Personnel · id', exact: true }).click();
+  await editor.getByRole('tab', { name: 'Drill-through columns' }).click();
+  await editor.getByRole('button', { name: 'Remove Drill-through columns 2', exact: true }).click();
+  await editor.getByRole('button', { name: 'Apply repair', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  expect(fixture.dashboard.modelRevision).toBe(1);
+  expect(fixture.dashboard.tiles[0].dimensions).toEqual([field('org')]);
+  await expect(review).toContainText('All dashboard references are ready');
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({ expectedRevision: 1, modelRevision: 2, tiles: [{ dimensions: [field('id')], detailFields: [field('id')] }] });
+  expect(errors).toEqual([]);
+});
+
+test('cancel preserves an incompatible dashboard and explicit tile removal permits an empty upgrade', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.dashboard.tiles[0].dimensions = [{ table: 'removed_alias', column: 'old', aggregate: 'none' }];
+  const saved = structuredClone(fixture.dashboard);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  let review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('source was removed from the model');
+  await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+  page.once('dialog', dialog => dialog.accept());
+  await review.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(fixture.dashboard).toEqual(saved); expect(writes).toHaveLength(0);
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+  await expect(review).toContainText('No tiles remain');
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1); expect(writes[0].tiles).toEqual([]);
+  expect(fixture.dashboard.modelRevision).toBe(2); expect(errors).toEqual([]);
+});
+
+test('upgrade review identifies stale comparison operands and inactive scope choices for explicit repair', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.model.definition.exposedFields = [field('org'), field('id'), field('name')];
+  fixture.dashboard.selections.organization.alternativeId = 'old-choice';
+  fixture.dashboard.optionalFilters = ['removed-filter'];
+  fixture.dashboard.selections['removed-filter'] = { active: false, values: {} };
+  fixture.dashboard.tiles[0].reportFilters = [{ id: 'compare', label: 'Old comparison', mode: 'rows', conditions: [{ ...field('id'), operator: 'eq', compareColumn: 'removed-column' }] }];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('removed-column');
+  await review.getByRole('button', { name: 'Remove offered filter', exact: true }).click();
+  await review.getByRole('button', { name: 'Reset saved choice', exact: true }).click();
+  await review.getByRole('button', { name: 'Remove report filter', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes[0].selections).toEqual({}); expect(writes[0].optionalFilters).toEqual([]);
+  expect(writes[0].tiles[0].reportFilters).toEqual([]); expect(errors).toEqual([]);
+});
+
+for (const [status, code] of [[503, 'dashboard_storage_unavailable'], [409, 'dashboard_revision_conflict'], [409, 'model_revision_conflict']]) {
+  test(`upgrade ${code} keeps the saved dashboard and local repairs`, async ({ page }) => {
+    const { fixture, errors } = await mock(page, { modelRevision: 2 });
+    const saved = structuredClone(fixture.dashboard);
+    await page.goto('/schemer');
+    await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+    const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+    await review.getByRole('button', { name: 'Remove Positions by org', exact: true }).click();
+    await page.route(`**/api/v1/schemer/dashboards/${dashboardId}`, route => route.request().method() === 'PUT'
+      ? route.fulfill({ status, json: { error: { code, message: 'Save rejected by server' } } }) : route.fallback());
+    await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+    await expect(review.getByRole('alert')).toContainText('Save rejected by server');
+    await expect(review).toContainText('No tiles remain');
+    expect(fixture.dashboard).toEqual(saved);
+    if (status === 409) await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+    else await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeEnabled();
+    expect(errors).toEqual([]);
+  });
+}
+
+test('missing physical model sources give a reachable Schemoo repair path without saving', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.catalog.tables = [];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('source personnel is missing from the database');
+  await expect(review.getByRole('link', { name: 'Review or repair the source model in Schemoo' })).toHaveAttribute('href', `/schemoo?model=${modelId}`);
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  expect(writes).toHaveLength(0); expect(fixture.dashboard.modelRevision).toBe(1); expect(errors).toEqual([]);
+});
+
+
+
+
+test('sort priorities aggregate-result filters and semantic Top N persist through tile reopen', async ({ page }) => {
+  const { fixture, errors } = await mock(page);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  let editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await editor.getByRole('button', { name: 'Add sort priority' }).click();
+  await editor.getByRole('combobox', { name: 'Sort 1 output', exact: true }).fill('COUNT');
+  await page.getByRole('option', { name: 'COUNT · Personnel · id', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Sort 1 direction', exact: true }).fill('Descending');
+  await page.getByRole('option', { name: 'Descending', exact: true }).click();
+  await editor.getByRole('combobox', { name: 'Sort 1 NULL placement', exact: true }).fill('NULLs first');
+  await page.getByRole('option', { name: 'NULLs first', exact: true }).click();
+  await editor.getByRole('spinbutton', { name: 'Top N results', exact: true }).fill('10');
+  await editor.getByRole('button', { name: 'Add aggregate-result filter' }).click();
+  await editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true }).fill('20');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0]).toMatchObject({ topN: 10, limit: 2,
+    sort: [{ table: 'person', column: 'id', aggregate: 'count', kind: 'value', direction: 'desc', nulls: 'first' }],
+    aggregateFilters: [{ table: 'person', column: 'id', aggregate: 'count', kind: 'value', operator: 'gt', value: 20 }] });
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await expect(editor.getByRole('combobox', { name: 'Sort 1 direction', exact: true })).toHaveValue('Descending');
+  await expect(editor.getByRole('combobox', { name: 'Sort 1 NULL placement', exact: true })).toHaveValue('NULLs first');
+  await expect(editor.getByRole('spinbutton', { name: 'Top N results', exact: true })).toHaveValue('10');
+  await expect(editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true })).toHaveValue('20');
+  const viewport = page.viewportSize();
+  const save = await editor.getByRole('button', { name: 'Apply & run' }).boundingBox();
+  expect(save.y + save.height).toBeLessThanOrEqual(viewport.height + 2);
+  expect(errors).toEqual([]);
+});
+
+test('invalid Top N stays local with a recoverable validation message', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page);
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await editor.getByRole('spinbutton', { name: 'Top N results', exact: true }).fill('2.5');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor.getByRole('alert')).toContainText('positive whole number');
+  expect(writes).toHaveLength(0);
+  await editor.getByRole('spinbutton', { name: 'Top N results', exact: true }).fill('3');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0); expect(fixture.dashboard.tiles[0].topN).toBe(3);
+  expect(errors).toEqual([]);
+});
+
+test('model-upgrade review preserves unavailable sort outputs until an explicit tile repair', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page, { modelRevision: 2 });
+  fixture.dashboard.tiles[0].sort = [{ table: 'person', column: 'removed', aggregate: 'sum', kind: 'value', direction: 'desc', nulls: 'last' }];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Update to v2', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review dashboard model upgrade' });
+  await expect(review).toContainText('Sort 1: choose a selected output');
+  await expect(review.getByRole('button', { name: 'Save repairs & upgrade' })).toBeDisabled();
+  await review.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await expect(editor.getByRole('combobox', { name: 'Sort 1 output', exact: true })).toHaveValue('person · removed (unavailable output)');
+  await editor.getByRole('button', { name: 'Remove sort 1', exact: true }).click();
+  await editor.getByRole('button', { name: 'Apply repair', exact: true }).click();
+  expect(writes).toHaveLength(0);
+  await review.getByRole('button', { name: 'Save repairs & upgrade' }).click();
+  await expect(review).toHaveCount(0);
+  expect(writes).toHaveLength(1); expect(writes[0].tiles[0].sort).toEqual([]); expect(errors).toEqual([]);
+});
+
+
+for (const threshold of ['9007199254740993', '-9007199254740993', '0.10000000000000001', '9.007199254740993e15']) {
+  test(`aggregate threshold ${threshold} remains exact and blocks Apply until corrected`, async ({ page }) => {
+    const { fixture, writes, errors } = await mock(page);
+    await page.goto('/schemer');
+    await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+    const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+    await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+    await editor.getByRole('button', { name: 'Add aggregate-result filter' }).click();
+    const input = editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true });
+    await input.fill(threshold);
+    await editor.getByRole('button', { name: 'Apply & run' }).click();
+    await expect(editor.getByRole('alert')).toContainText('without rounding');
+    await expect(input).toHaveValue(threshold); expect(writes).toHaveLength(0);
+    // Re-rendering the controls must retain the original decimal token too.
+    await editor.getByRole('tab', { name: 'View & fields' }).click();
+    await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+    await expect(input).toHaveValue(threshold);
+    await input.fill('-1.25e-3');
+    await editor.getByRole('button', { name: 'Apply & run' }).click();
+    await expect(editor).toHaveCount(0);
+    expect(fixture.dashboard.tiles[0].aggregateFilters[0].value).toBe(-0.00125);
+    expect(errors).toEqual([]);
+  });
+}
+
+test('offered native time MIN predicate retains malformed values for correction', async ({ page }) => {
+  const { fixture, writes, errors } = await mock(page);
+  fixture.catalog.tables[0].columns.find(column => column.name === 'hired_at').dataType = 'time(3) without time zone';
+  fixture.dashboard.tiles[0].kind = 'aggregate';
+  fixture.dashboard.tiles[0].measures = [field('hired_at', 'min')];
+  await page.goto('/schemer');
+  await page.getByRole('button', { name: 'Edit Positions by org', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await editor.getByRole('tab', { name: 'Sort & result filters' }).click();
+  await editor.getByRole('button', { name: 'Add aggregate-result filter' }).click();
+  const input = editor.getByRole('textbox', { name: 'Result filter 1 value', exact: true });
+  await input.fill('09:00:00+02:00');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor.getByRole('alert')).toContainText('without a UTC offset');
+  await expect(input).toHaveValue('09:00:00+02:00'); expect(writes).toHaveLength(0);
+  await input.fill('09:00:00.123');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  await expect(editor).toHaveCount(0);
+  expect(fixture.dashboard.tiles[0].aggregateFilters[0].value).toBe('09:00:00.123');
+  expect(errors).toEqual([]);
+});
+
+
+test('dashboard capacity is explicit in the card and expanded cached result', async ({ page }) => {
+  await mock(page, { capped: true, dashboardCapacity: true });
+  await page.goto('/schemer');
+  const card = page.locator('.analytics-tile').first();
+  await expect(card.locator('.tile-status')).toContainText('dashboard preview capacity reached');
+  await expect(card.locator('.stream-progress')).toHaveText('Dashboard preview capacity reached · download full results');
+  await card.click();
+  await expect(page.locator('dialog[open] .stream-progress').first()).toHaveText('Dashboard preview capacity reached · download full results');
+});
+
+test('later KPI renders while an earlier detail stream remains pending', async ({ page }) => {
+  const { fixture, errors } = await mock(page, { chartTypes: true });
+  fixture.dashboard.tiles = ['detail', 'kpi'].map(kind => fixture.dashboard.tiles.find(tile => tile.kind === kind));
+  await page.addInitScript(({ dashboardId }) => {
+    const original = window.fetch;
+    window.fetch = (input, options) => {
+      if (!String(input).endsWith(`/api/v1/schemer/dashboards/${dashboardId}/executions/stream`)) return original(input, options);
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({ start(controller) {
+        const emit = frame => controller.enqueue(encoder.encode(JSON.stringify(frame) + '\n'));
+        emit({ type: 'start', snapshotAt: '2026-11-11T12:00:00Z', tiles: ['detail', 'kpi'].map(tileId => ({ tileId, plan: {} })), tileErrors: [] });
+        emit({ type: 'rows', tileId: 'kpi', columns: [{ name: 'COUNT id', dataType: 'bigint' }], rows: [[42]] });
+        emit({ type: 'complete', tileId: 'kpi', rowCount: 1, limitReached: false });
+        window.__issue13Release = () => {
+          emit({ type: 'rows', tileId: 'detail', columns: [{ name: 'id' }, { name: 'name' }], rows: [[1, 'Arrived later']] });
+          emit({ type: 'complete', tileId: 'detail', rowCount: 1, limitReached: false });
+          emit({ type: 'end' }); controller.close();
+        };
+        options?.signal?.addEventListener('abort', () => controller.error(new DOMException('Stopped', 'AbortError')), { once: true });
+      } });
+      return Promise.resolve(new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson' } }));
+    };
+  }, { dashboardId });
+  await page.goto('/schemer');
+  await expect(page.locator('[data-tile-id="kpi"] .tile-body')).toContainText('42');
+  await expect(page.locator('[data-tile-id="kpi"] .tile-status')).toContainText('complete');
+  await expect(page.locator('[data-tile-id="detail"] .tile-status')).toContainText(/loading|Fetching/i);
+  await page.evaluate(() => window.__issue13Release());
+  await expect(page.locator('[data-tile-id="detail"] .tile-body')).toContainText('Arrived later');
+  expect(errors).toEqual([]);
+});
+
+async function displayedAssistant(page) {
+  const state = { attachments: [], providerCalls: 0 };
+  let chat = { id: 'chat_displayed_fixture', dashboardId, revision: 1, status: 'idle',
+    providerId: 'openai', aiModelId: 'fixture-model', title: 'Displayed explanation', modes: { explain_displayed_result: 'ask' }, messages: [], activity: [] };
+  state.withhold = () => { chat = { ...chat, revision: chat.revision + 1, stream: '', messages: [
+    { id: 'displayed-answer', role: 'assistant', transient: true,
+      text: 'This displayed-result explanation was temporary. Attach the displayed result again to explain it; no source query is rerun automatically.' },
+  ] }; };
+  await page.route('**/api/v1/ai/status*', route => route.fulfill({ json: { healthy: true, providers: [
+    { id: 'openai', name: 'OpenAI', authenticated: true, available: true, models: [{ id: 'fixture-model', name: 'Fixture model', status: 'active' }] },
+  ] } }));
+  await page.route('**/api/v1/schemer/ai/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    let response = chat;
+    if (path.endsWith('/settings')) response = { providerId: 'openai', aiModelId: 'fixture-model', modes: { explain_displayed_result: 'ask' },
+      actions: [{ id: 'explain_displayed_result', label: 'Explain displayed result', group: 'Results', readsRows: true }] };
+    else if (path.endsWith('/chats')) response = { chats: [chat] };
+    else if (path.endsWith('/messages') && route.request().method() === 'POST') {
+      state.attachments.push(route.request().postDataJSON());
+      chat = { ...chat, revision: chat.revision + 1, status: 'waiting_approval', pending: {
+        id: `approval_${'d'.repeat(32)}`, kind: 'displayed_result',
+        summary: 'Share the attached displayed sample? This will not query the source.',
+        actions: [{ operation: 'explain_displayed_result', args: {} }],
+      } };
+      response = chat;
+    } else if (path.endsWith('/approval') && route.request().method() === 'POST') {
+      state.providerCalls++;
+      chat = { ...chat, revision: chat.revision + 1, status: 'idle', pending: null,
+        messages: [{ id: 'displayed-answer', role: 'assistant', transient: true, text: 'These unverified displayed rows are a bounded sample, not database totals.' }] };
+      response = chat;
+    }
+    return route.fulfill({ json: response });
+  });
+  return state;
+}
+
+test('explain displayed result freezes current report rows and applied filters without another source request', async ({ page }) => {
+  const { requests, errors } = await mock(page, { manyBars: true });
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile');
+  await expect(tile.locator('.tile-status')).toContainText('500 groups');
+  const sourceRequests = requests.length;
+  await tile.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+  await expect.poll(() => ai.attachments.length).toBe(1);
+  const attachment = ai.attachments[0];
+  expect(attachment).toMatchObject({ acknowledgedProviderId: 'openai', displayedResult: {
+    dashboardId, dashboardRevision: 1, modelId, modelRevision: 1, tileId: 'positions', pane: 'main',
+    snapshotAt: '2026-09-20T12:00:00Z', cachedRows: 500, displayedRows: 500, clientSampleTruncated: true,
+    selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } },
+  } });
+  expect(attachment.displayedResult.rows).toHaveLength(100);
+  expect(attachment.text).not.toContain('Organization 1');
+  await expect(page.getByRole('button', { name: 'Approve batch', exact: true })).toBeVisible();
+  expect(ai.providerCalls).toBe(0);
+  expect(requests).toHaveLength(sourceRequests);
+  await page.getByRole('button', { name: 'Approve batch', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('not database totals');
+  await expect(page.locator('.model-ai-messages')).toContainText('Temporary · not saved');
+  expect(ai.providerCalls).toBe(1); expect(requests).toHaveLength(sourceRequests);
+  expect(errors).toEqual([]);
+});
+
+test('explain displayed detail rows captures the selected drill snapshot and never refreshes it', async ({ page }) => {
+  const { requests, errors } = await mock(page);
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  const tile = page.locator('.analytics-tile'); await expect(tile).toContainText('2 groups');
+  await tile.getByRole('heading', { name: 'Positions by org' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
+  await expanded.getByRole('button', { name: 'HQ: 3. View records', exact: true }).click();
+  await expect(expanded.locator('.drill-body')).toContainText('Casey');
+  const sourceRequests = requests.length;
+  await expanded.getByRole('button', { name: 'Explain displayed detail rows', exact: true }).click();
+  await expect(expanded).toHaveCount(0);
+  await expect.poll(() => ai.attachments.length).toBe(1);
+  expect(ai.attachments[0].displayedResult).toMatchObject({ pane: 'drill', metric: 'values',
+    rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']],
+    drillSelection: { dimensions: [{ table: 'person', column: 'org', value: 'HQ' }], measureIndex: 0 },
+    snapshotAt: '2026-09-20T12:00:00Z', cachedRows: 3, displayedRows: 3 });
+  expect(requests).toHaveLength(sourceRequests); expect(ai.providerCalls).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+for (const pane of ['main', 'drill']) {
+  test(`displayed ${pane} attachment freezes dashboard and saved tile filter provenance`, async ({ page }) => {
+    const { fixture, requests, errors } = await mock(page, { optionalFilter: true });
+    fixture.dashboard.optionalFilters = ['region'];
+    fixture.dashboard.selections.region = { alternativeId: 'choose', active: true, values: { region: 'dashboard region' } };
+    fixture.dashboard.tiles[0].selections = { region: { alternativeId: 'choose', active: true, values: { region: 'tile region' } } };
+    fixture.catalog.tables[0].columns.push({ name: 'threshold', dataType: 'integer' });
+    fixture.dashboard.tiles[0].reportFilters = [{ mode: 'rows', conditions: [{ table: 'person', column: 'id', operator: 'gt', compareColumn: 'threshold' }] }];
+    const ai = await displayedAssistant(page);
+    await page.goto('/schemer');
+    const tile = page.locator('.analytics-tile'); await expect(tile).toContainText('2 groups');
+    if (pane === 'drill') {
+      await tile.getByRole('heading', { name: 'Positions by org' }).click();
+      const expanded = page.getByRole('dialog', { name: 'Positions by org', exact: true });
+      await expanded.getByRole('button', { name: 'HQ: 3. View records', exact: true }).click();
+      await expect(expanded.locator('.drill-body')).toContainText('Casey');
+      await expanded.getByRole('button', { name: 'Explain displayed detail rows', exact: true }).click();
+    } else await tile.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+    const before = requests.length;
+    await expect.poll(() => ai.attachments.length).toBe(1);
+    expect(ai.attachments[0].displayedResult).toMatchObject({ pane,
+      selections: { region: { values: { region: 'dashboard region' } } },
+      tileSelections: { region: { values: { region: 'tile region' } } },
+      reportFilters: [{ conditions: [{ column: 'id', compareColumn: 'threshold' }] }],
+    });
+    expect(requests).toHaveLength(before); expect(ai.providerCalls).toBe(0); expect(errors).toEqual([]);
+  });
+}
+
+test('reopening a withheld displayed explanation replaces old derived text with safe reattachment recovery', async ({ page }) => {
+  const { requests, errors } = await mock(page);
+  const ai = await displayedAssistant(page);
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile')).toContainText('2 groups');
+  await page.getByRole('button', { name: 'Explain displayed result for Positions by org', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve batch', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('not database totals');
+  const before = requests.length; ai.withhold();
+  await page.getByRole('button', { name: 'Conversation history', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Conversation history', exact: true }).getByRole('button', { name: 'Displayed explanation', exact: true }).click();
+  await expect(page.locator('.model-ai-messages')).toContainText('Attach the displayed result again');
+  await expect(page.locator('.model-ai-messages')).not.toContainText('bounded sample, not database totals');
+  expect(requests).toHaveLength(before); expect(ai.providerCalls).toBe(1); expect(errors).toEqual([]);
+});
+
+
+// Both desktop-chromium and the isolated Pixel 7 Android project mount this case.
+test('pivot matrix keeps labelled scrolling headers, totals population and exact grand-total raw export on desktop and Android', async ({ page }) => {
+  const { requests, errors } = await mock(page, { pivot: true });
+  await page.goto('/schemer');
+  await page.locator('.analytics-tile').getByRole('heading', { name: 'Workforce pivot' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Workforce pivot', exact: true });
+  await expect(expanded.locator('.pivot-notice').first()).toContainText('Totals: complete qualifying population before Top N');
+  await expect(expanded).toContainText('Preview row cap reached');
+  await expect(expanded.locator('.pivot-table thead')).toContainText('Average person ID');
+  await expect(expanded.locator('.pivot-table thead')).toContainText('id: 1');
+  const viewport = expanded.getByRole('region', { name: /Workforce pivot pivot/ });
+  const geometry = await viewport.evaluate(node => ({ width: node.clientWidth, content: node.scrollWidth, documentWidth: document.documentElement.clientWidth, bodyWidth: document.documentElement.scrollWidth }));
+  expect(geometry.content).toBeGreaterThan(geometry.width);
+  expect(geometry.bodyWidth).toBeLessThanOrEqual(geometry.documentWidth + 2);
+  expect(await expanded.locator('.pivot-table tbody tr').count()).toBeLessThanOrEqual(52);
+  await viewport.evaluate(node => { node.scrollTop = 2300; node.scrollLeft = 100; node.dispatchEvent(new Event('scroll')); });
+  await expect(expanded.locator('.pivot-table tbody')).toContainText(/Org 04|Org 05/);
+  await viewport.evaluate(node => { node.scrollTop = node.scrollHeight; node.scrollLeft = node.scrollWidth; node.dispatchEvent(new Event('scroll')); });
+  const total = expanded.getByRole('button', { name: /All rows · All columns · Average person ID:.*View contributing records/ });
+  await total.scrollIntoViewIfNeeded(); await total.focus(); await total.press('Enter');
+  await expect(expanded.locator('.drill-body')).toContainText('Alex');
+  const selected = { dimensions: [], measureIndex: 0, pivot: { kind: 'grand_total', rowDepth: 0, columnDepth: 0 } };
+  expect(requests.findLast(request => request.body?.selection).body.selection).toEqual(selected);
+  await expect(expanded.locator('.filter-chips')).toContainText('Pivot grand total');
+  const downloadEvent = new Promise(resolve => { page.once('download', resolve); page.context().once('page', popup => popup.once('download', resolve)); });
+  await expanded.locator('.drill-pane').getByRole('button', { name: 'Download full results · RAW CSV', exact: true }).click();
+  await downloadEvent;
+  expect(requests.findLast(request => request.path.endsWith('/export')).body.selection).toEqual(selected);
+  await expanded.getByRole('button', { name: 'Workforce pivot', exact: true }).click();
+  await expect(expanded.getByRole('button', { name: 'Download full pivot groups · RAW CSV', exact: true })).toBeVisible();
+  for (const [pattern, kind, rd, cd, dimensions] of [
+    [/^HQ · subtotal · All columns · Average person ID:/, 'subtotal', 1, 0, [['org', 'HQ']]],
+    [/^HQ › 2024-01-01 · All columns · Average person ID:/, 'row', 2, 0, [['org', 'HQ'], ['hired_at', '2024-01-01']]],
+    [/^Org 000 › 2024-01-01 · Alex › 1 · Average person ID:/, 'cell', 2, 2, [['org', 'Org 000'], ['hired_at', '2024-01-01'], ['name', 'Alex'], ['id', 1]]],
+    [/^All rows · Alex › 1 · Average person ID:/, 'column', 0, 2, [['name', 'Alex'], ['id', 1]]],
+  ]) {
+    await viewport.evaluate((node, last) => { node.scrollTop = last ? node.scrollHeight : 0; node.dispatchEvent(new Event('scroll')); }, kind === 'column');
+    const button = expanded.getByRole('button', { name: pattern }); await button.scrollIntoViewIfNeeded(); await button.click();
+    await expect(expanded.locator('.drill-body')).toContainText('Alex');
+    expect(requests.findLast(request => request.body?.selection).body.selection).toEqual({
+      dimensions: dimensions.map(([column, value]) => ({ table: 'person', column, value })), measureIndex: 0,
+      pivot: { kind, rowDepth: rd, columnDepth: cd } });
+    await expanded.getByRole('button', { name: 'Workforce pivot', exact: true }).click();
+  }
+  expect(errors).toEqual([]);
+});
+
+test('pivot capacity blocks matrix allocation and offers editable recovery with full CSV still available', async ({ page }) => {
+  const { errors } = await mock(page, { pivot: 'capacity' });
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile .pivot-notice.error')).toContainText('at least 5 column groups');
+  await expect(page.locator('.pivot-table')).toHaveCount(0);
+  await page.locator('.analytics-tile').getByRole('heading', { name: 'Workforce pivot' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Workforce pivot', exact: true });
+  await expect(expanded.getByRole('button', { name: 'Download full pivot groups · RAW CSV', exact: true })).toBeEnabled();
+  await expanded.getByRole('button', { name: 'Close expanded tile' }).click();
+  await page.getByRole('button', { name: 'Edit Workforce pivot', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await expect(editor.getByLabel('Maximum pivot column groups')).toHaveValue('4');
+  await editor.getByLabel('Maximum pivot column groups').fill('6');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  expect(errors).toEqual([]);
+});
+
+for (const state of ['interrupted', 'empty']) {
+  test(`pivot ${state} state explains received groups and recovers with explicit refresh`, async ({ page }) => {
+    const { recover, requests, errors } = await mock(page, { pivot: true, streamError: state === 'interrupted', emptyRows: state === 'empty' });
+    await page.goto('/schemer');
+    const tile = page.locator('.analytics-tile');
+    if (state === 'empty') await expect(tile).toContainText('No qualifying groups');
+    else {
+      await expect(tile).toContainText('Partial pivot: showing received groups; absent cells are not zero');
+      await expect(tile).toContainText('Source connection interrupted');
+    }
+    const before = requests.length; recover();
+    await page.getByRole('button', { name: 'Refresh dashboard', exact: true }).click();
+    await expect(tile).toContainText('89 groups');
+    expect(requests.length).toBeGreaterThan(before);
+    await expect(tile).not.toContainText('Partial pivot:');
+    expect(errors).toEqual([]);
+  });
+}
+
+
+test('calculated measure offers separate constituent populations in the mounted report',async({page})=>{
+  const {requests,errors}=await mock(page,{calculated:true});
+  await page.goto('/schemer');
+  const tile=page.locator('.analytics-tile');await expect(tile).toContainText('Calculated share');
+  await tile.getByRole('heading',{name:'Calculated share',exact:true}).click();
+  const expanded=page.getByRole('dialog',{name:'Calculated share',exact:true});
+  const mark=expanded.getByRole('button',{name:/^HQ: .*View records$/});
+  await mark.click();
+  const chooser=page.getByRole('dialog',{name:'Choose calculation contributing records'});
+  await expect(chooser).toContainText('separate input populations');
+  const geometry=await chooser.evaluate(node=>({viewport:document.documentElement.clientWidth,
+    buttons:[...node.querySelectorAll('button')].map(button=>({left:button.getBoundingClientRect().left,right:button.getBoundingClientRect().right,
+      height:button.getBoundingClientRect().height,content:button.scrollWidth,width:button.clientWidth}))}));
+  for(const button of geometry.buttons) {
+    expect(button.left).toBeGreaterThanOrEqual(0);expect(button.right).toBeLessThanOrEqual(geometry.viewport);
+    expect(button.height).toBeGreaterThanOrEqual(44);expect(button.content).toBeLessThanOrEqual(button.width+1);
+  }
+  await test.info().attach(`calculation-population-geometry-${test.info().project.name}`,{body:JSON.stringify(geometry,null,2),contentType:'application/json'});
+  await test.info().attach(`calculation-populations-${test.info().project.name}`, { body: await page.screenshot(), contentType: 'image/png' });
+  const before=requests.length;
+  await chooser.getByRole('button',{name:'Cancel',exact:true}).click();await expect(chooser).toHaveCount(0);await expect(mark).toBeFocused();
+  await mark.click();await expect(chooser).toBeVisible();await page.keyboard.press('Escape');
+  await expect(chooser).toHaveCount(0);await expect(mark).toBeFocused();expect(requests).toHaveLength(before);
+  await mark.click();await expect(chooser).toBeVisible();
+  await chooser.getByRole('button',{name:/Source-filtered report population/}).click();
+  await expect(page.locator('.drill-body')).toContainText('Alex');
+  expect(requests.findLast(request=>request.body?.selection).body.selection.constituent.scope).toBe('source_population');
+  await expect(page.locator('.filter-chips')).toContainText('source population');
+  expect(errors).toEqual([]);
+});
+
+test('KPI comparison presents target variance and direction as accessible text',async({page})=>{
+  const {errors}=await mock(page,{calculated:'kpi'});await page.goto('/schemer');
+  const comparison=page.getByRole('region',{name:'KPI target and variance'});
+  await expect(comparison).toContainText('Target: 50');await expect(comparison).toContainText('Percentage variance: -20%');
+  await expect(comparison).toContainText('unfavorable · higher is better');expect(errors).toEqual([]);
+});
+
+// Mounted on both desktop Chromium and the Pixel7 Android project; execution is coordinator-owned.
+test('business formats stay readable, keyboard-editable and separate from exact raw CSV', async ({ page }) => {
+  const { errors }=await mock(page,{formats:true});await page.goto('/schemer');
+  await page.locator('.analytics-tile').getByRole('heading',{name:'Positions by org'}).click();
+  const expanded=page.getByRole('dialog',{name:'Positions by org',exact:true});
+  await expect(expanded).toContainText('9.007.199.254.740.993,13');
+  await expect(expanded.locator('td[data-number-tone="negative"]')).toContainText('▼ Below target');
+  await expect(expanded.locator('li[data-number-tone="negative"]')).toContainText('▼ Below target');
+  await expect(expanded).toContainText('NULL');await expect(expanded).toContainText('CSV contains RAW values');
+  await test.info().attach(`business-number-formats-${test.info().project.name}`, { body: await page.screenshot(), contentType: 'image/png' });
+  for(const width of [1440,390,320]) {
+    await page.setViewportSize({width,height:850});
+    const geometry=await expanded.evaluate(node=>({dialog:node.getBoundingClientRect().width,viewport:document.documentElement.clientWidth,body:document.documentElement.scrollWidth}));
+    expect(geometry.dialog).toBeLessThanOrEqual(geometry.viewport);expect(geometry.body).toBeLessThanOrEqual(geometry.viewport+2);
+  }
+  const downloaded=page.waitForEvent('download');await expanded.getByRole('button',{name:'Export cached rows as RAW CSV',exact:true}).click();
+  const download=await downloaded, contents=await readFile(await download.path(),'utf8');
+  expect(contents).toContain('9007199254740993.125');expect(contents).toContain('-0.0000001');expect(contents).not.toContain('€');expect(contents).not.toContain('Below target');
+  await expanded.getByRole('button',{name:'Close expanded tile',exact:true}).click();
+  await page.getByRole('button',{name:'Edit Positions by org',exact:true}).click();
+  const editor=page.getByRole('dialog',{name:'Configure analytics tile'});await editor.getByRole('tab',{name:'Number formats',exact:true}).click();
+  const precision=editor.getByLabel('Format 1 decimal places');await precision.focus();await precision.fill('4');
+  await editor.getByLabel('Format 1 rule 1 threshold').fill('-9007199254740993.000000001');
+  await editor.getByRole('button',{name:'Apply & run',exact:true}).focus();await page.keyboard.press('Enter');
+  await expect(editor).toBeHidden();expect(errors).toEqual([]);
 });

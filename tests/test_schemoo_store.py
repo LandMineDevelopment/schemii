@@ -1,7 +1,9 @@
 """Semantic model metadata isolation, concurrency and privacy contracts."""
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import json
+from threading import Event
 from typing import get_type_hints
 
 import pytest
@@ -11,7 +13,7 @@ from schemii.schemoo.models import (
     ExploreUpdate, LayoutUpdate, ModelCreate, ModelDefinition, ModelUpdate, PreviewCreate, PreviewUpdate,
 )
 from schemii.schemoo.store import (
-    InMemoryModelRepository, PostgresModelRepository, ModelConflictError, ModelLimitError, ModelNotFoundError, ModelDocumentLimitError, PreviewNameConflictError,
+    InMemoryModelRepository, PostgresModelRepository, ModelConflictError, ModelInUseError, ModelLimitError, ModelNotFoundError, ModelDocumentLimitError, PreviewNameConflictError,
 )
 
 
@@ -102,6 +104,134 @@ def test_separate_revisions_prevent_cross_tab_overwrites_without_layout_conflict
         store.delete("alice", model.id, 1)
     store.delete("alice", model.id, 2)
     assert store.list("alice") == []
+
+
+@pytest.mark.parametrize("change", ["layout", "explore", "preview"])
+def test_guarded_delete_preserves_changes_committed_after_cleanup_preflight(change):
+    store = InMemoryModelRepository()
+    model = store.create("alice", request())
+    assert store.list_previews("alice", model.id) == []
+    written, release, deleting = Event(), Event(), Event()
+
+    def write():
+        with store._lock:
+            if change == "layout":
+                store.update_layout("alice", model.id, LayoutUpdate(expected_revision=1,
+                    layout={"positions": [{"id": "people", "x": 19, "y": 23}]}))
+            elif change == "explore":
+                store.update_explore("alice", model.id, ExploreUpdate(expected_revision=1,
+                    explore={"root": "people"}))
+            else:
+                store.create_preview("alice", model.id, PreviewCreate(name="Concurrent saved view", explore={}))
+            written.set()
+            assert release.wait(5)
+
+    def delete():
+        deleting.set()
+        store.delete("alice", model.id, model.revision, expected_layout_revision=model.layout_revision,
+                     expected_explore_revision=model.explore_revision, require_no_previews=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writing = pool.submit(write)
+        try:
+            assert written.wait(5)
+            pending = pool.submit(delete)
+            assert deleting.wait(5)
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.05)
+        finally:
+            release.set()
+        writing.result(timeout=5)
+        current, previews = store.get("alice", model.id), store.list_previews("alice", model.id)
+        with pytest.raises(ModelConflictError, match="saved previews" if change == "preview" else change):
+            pending.result(timeout=5)
+    assert store.get("alice", model.id) == current
+    assert store.list_previews("alice", model.id) == previews
+    assert current.revision == model.revision
+    with pytest.raises(ModelNotFoundError):
+        store.delete("bob", model.id, 1, expected_layout_revision=1,
+                     expected_explore_revision=1, require_no_previews=True)
+    for preview in previews:
+        store.delete_preview("alice", model.id, preview.id, preview.revision)
+    store.delete("alice", model.id, current.revision, expected_layout_revision=current.layout_revision,
+                 expected_explore_revision=current.explore_revision, require_no_previews=True)
+    assert store.list("alice") == []
+
+
+def test_omitted_delete_guards_preserve_deliberate_independent_state_and_preview_cascade_contract():
+    store = InMemoryModelRepository()
+    model = store.create("alice", request())
+    store.update_explore("alice", model.id, ExploreUpdate(expected_revision=1, explore={"root": "people"}))
+    store.create_preview("alice", model.id, PreviewCreate(name="Deliberate cascade", explore={}))
+    store.delete("alice", model.id, 1, expected_layout_revision=1)
+    assert store.list("alice") == [] and ("alice", model.id) not in store._previews
+
+
+@pytest.mark.parametrize("state", ["layout", "explore", "preview", "semantic", "owner", "dependency", "empty", "legacy"])
+def test_postgres_delete_checks_locked_parent_state_before_any_delete(state):
+    model = InMemoryModelRepository().create("alice", request())
+    row = model.model_dump()
+    if state in {"layout", "explore", "semantic"}:
+        row[{"layout": "layout_revision", "explore": "explore_revision", "semantic": "revision"}[state]] = 2
+    previews = [{"id": "preview_concurrent"}] if state in {"preview", "legacy"} else []
+    dependencies = [{"id": "dashboard_sentinel", "name": "Keep this dashboard"}] if state == "dependency" else []
+    original = deepcopy((row, previews, dependencies))
+
+    class Storage:
+        def __init__(self):
+            self.statements, self.rows = [], []
+            self.deleted = self.rolled_back = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, kind, *_args):
+            self.rolled_back = kind is not None
+
+        def cursor(self):
+            return self
+
+        def execute(self, query, parameters):
+            self.statements.append((query, parameters))
+            if query.startswith("SELECT * FROM schemoo.models"):
+                assert query.endswith(" FOR UPDATE")
+                self.rows = [deepcopy(row)] if parameters == ("alice", model.id) else []
+            elif query.startswith("SELECT 1 FROM schemoo.model_previews"):
+                assert parameters == ("alice", model.id)
+                self.rows = [{"exists": 1}] if previews else []
+            elif query.startswith("SELECT id,name FROM schemer.dashboards"):
+                assert parameters == ("alice", model.id)
+                self.rows = deepcopy(dependencies)
+            elif query == "DELETE FROM schemoo.models WHERE owner_id = %s AND id = %s":
+                assert parameters == ("alice", model.id)
+                assert not dependencies
+                self.deleted = True
+                self.rows = []
+            else:
+                raise AssertionError(f"Unexpected storage operation: {query}")
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+        def fetchall(self):
+            return self.rows
+
+    storage = Storage()
+    store = PostgresModelRepository(lambda: storage)
+    guards = {} if state == "legacy" else dict(expected_layout_revision=1, expected_explore_revision=1,
+                                                require_no_previews=True)
+    if state in {"empty", "legacy"}:
+        store.delete("alice", model.id, 1, **guards)
+        assert storage.deleted and not storage.rolled_back
+    else:
+        error = ModelNotFoundError if state == "owner" else ModelInUseError if state == "dependency" else ModelConflictError
+        with pytest.raises(error):
+            store.delete("bob" if state == "owner" else "alice", model.id, 1, **guards)
+        assert not storage.deleted and storage.rolled_back
+    assert (row, previews, dependencies) == original
+    assert storage.statements[0][0].endswith(" FOR UPDATE")
+    if state == "legacy":
+        assert not any("model_previews" in query for query, _ in storage.statements)
 
 
 def test_copies_do_not_mutate_saved_definition():

@@ -106,6 +106,7 @@ def test_developer_route_inspection_derives_flow_objects_and_bounded_source(
     assert {
         objects[item]["qualname"] for item in layout["responseObjectIds"]
     } == {
+        "PostgresObjectIdentity",
         "SchemiiWorkspace",
         "TableColumnDisplayOrder",
         "TablePosition",

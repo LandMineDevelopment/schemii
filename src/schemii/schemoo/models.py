@@ -15,12 +15,18 @@ class Contract(ApiModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class RelationshipColumn(Contract):
+    source: Identifier
+    target: Identifier
+
+
 class ModelEdge(Contract):
     id: Identifier
     relationshipId: Identifier | None = None
     kind: Literal["foreign_key", "logical"] = "foreign_key"
     sourceColumn: Identifier | None = None
     targetColumn: Identifier | None = None
+    columns: list[RelationshipColumn] | None = Field(default=None, min_length=1, max_length=32)
     cardinality: Literal["many_to_many", "many_to_one", "one_to_many", "one_to_one"] = "many_to_many"
     source: Identifier
     target: Identifier
@@ -29,9 +35,11 @@ class ModelEdge(Contract):
     @model_validator(mode="after")
     def relationship_definition(self):
         if self.kind == "logical":
-            if self.relationshipId or not self.sourceColumn or not self.targetColumn:
-                raise ValueError("Logical relationships require two columns and no foreign-key ID.")
-        elif not self.relationshipId or self.sourceColumn or self.targetColumn:
+            from .domain import relationship_columns
+            if self.relationshipId:
+                raise ValueError("Logical relationships cannot reference a foreign-key ID.")
+            relationship_columns(self.model_dump(exclude_none=True))
+        elif not self.relationshipId or self.sourceColumn is not None or self.targetColumn is not None or self.columns is not None:
             raise ValueError("Foreign-key relationships require a live relationship ID and cannot override columns.")
         return self
 
@@ -43,26 +51,60 @@ class SourceColumnContract(Contract):
 
 
 class SourceTableContract(Contract):
+    namespace: Annotated[str, Field(min_length=1, max_length=63)] | None = None
     name: Identifier
     columns: list[SourceColumnContract] = Field(default_factory=list, max_length=1000)
     primaryKey: list[Identifier] = Field(default_factory=list, max_length=32)
+    uniqueKeys: list[Annotated[list[Identifier], Field(max_length=32)]] | None = Field(default=None, max_length=1000)
 
 
 class SourceRelationshipContract(Contract):
     id: Identifier
     name: str = Field(default="", max_length=200)
     sourceTable: Identifier
-    sourceColumn: Identifier
+    sourceColumn: Identifier | None = None
     targetTable: Identifier
-    targetColumn: Identifier
+    targetColumn: Identifier | None = None
+    sourceNamespace: Annotated[str, Field(min_length=1, max_length=63)] | None = None
+    targetNamespace: Annotated[str, Field(min_length=1, max_length=63)] | None = None
+    columns: list[RelationshipColumn] | None = Field(default=None, min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def complete_mapping(self):
+        from .domain import relationship_columns
+        relationship_columns(self.model_dump(exclude_none=True))
+        return self
+
+
+class ParameterDomainContract(Contract):
+    scopeId: Identifier
+    alternativeId: Identifier
+    inputId: Identifier
+    table: Identifier
+    column: Identifier
+    labelColumn: Identifier
+    relationshipId: Identifier | None = None
+    namespace: Annotated[str, Field(min_length=1, max_length=63)] | None = None
 
 
 class SourceContract(Contract):
+    # Documents written before scoped contracts tracked the complete catalog.
+    # New writes explicitly identify model dependencies; never infer scope from size.
+    scope: Literal["catalog", "model"] = "catalog"
     tables: list[SourceTableContract] = Field(default_factory=list, max_length=100)
     relationships: list[SourceRelationshipContract] = Field(default_factory=list, max_length=200)
+    parameterDomains: list[ParameterDomainContract] = Field(default_factory=list, max_length=3840)
+
+    @model_validator(mode="after")
+    def unique_parameter_domains(self):
+        keys = [(item.scopeId, item.alternativeId, item.inputId) for item in self.parameterDomains]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Saved parameter lookup bindings must be unique per scope, option and input.")
+        return self
 
 
 class DomainValues(Contract):
+    namespace: Annotated[str, Field(min_length=1, max_length=63)] | None = None
     nodeId: Identifier | None = None
     table: str = Field(default="", max_length=200)
     column: str = Field(default="", max_length=200)
@@ -123,6 +165,7 @@ class DerivedOutput(Contract):
     nodeId: Identifier | None = None
     column: Identifier
     operand: Identifier | None = None
+    operandNodeId: Identifier | None = None
     distinct: bool = False
     delimiter: str = Field(default=", ", max_length=20)
     conditions: list[DerivedCondition] = Field(default_factory=list, max_length=16)
@@ -147,6 +190,7 @@ class Derivation(Contract):
 
 
 class ModelNode(Contract):
+    namespace: Annotated[str, Field(min_length=1, max_length=63)] | None = None
     id: Identifier
     table: Identifier
     label: str = Field(min_length=1, max_length=100)

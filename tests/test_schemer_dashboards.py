@@ -87,11 +87,20 @@ def test_save_checks_exposure_types_and_optional_scope_ownership(monkeypatch):
             {"name": "id", "dataType": "uuid"}, {"name": "secret", "dataType": "text"}]}], "relationships": []})
     tile = {"id": "tile", "title": "People", "kind": "detail", "detailFields": [FIELD]}
     routes.validate_dashboard(services, "alice", create(tiles=[tile]))
+    # Report control validation uses output contracts without asking for runtime
+    # values of required model slicers.
+    aggregate = {"id": "count", "title": "Count", "kind": "aggregate", "measures": [{**FIELD, "aggregate": "count"}],
+                 "sort": [{**FIELD, "aggregate": "count", "direction": "desc"}], "topN": 5,
+                 "aggregateFilters": [{**FIELD, "aggregate": "count", "operator": "gte", "value": 2}]}
+    routes.validate_dashboard(services, "alice", create(tiles=[aggregate]))
+    with pytest.raises(ApiProblem, match="sort output"):
+        routes.validate_dashboard(services, "alice", create(tiles=[{**aggregate, "sort": [{**FIELD, "column": "secret"}]}]))
     routes.validate_dashboard(services, "alice", create(tiles=[tile], optionalFilters=["optional"],
         selections={"optional": {"active": True}}))
-    # Removed model scopes from an older dashboard are inert and remain readable
-    # until the next client save prunes them.
-    routes.validate_dashboard(services, "alice", create(tiles=[tile], selections={"removed": {}}))
+    # Saved historical dashboards remain readable, but a new save must explicitly
+    # repair stale references, including inactive filter choices.
+    with pytest.raises(ValueError, match="always-evaluated"):
+        routes.validate_dashboard(services, "alice", create(tiles=[tile], selections={"removed": {}}))
     with pytest.raises(ValueError, match="marked optional"):
         routes.validate_dashboard(services, "alice", create(tiles=[tile], optionalFilters=["required"]))
     with pytest.raises(ValueError, match="exposed optional"):
@@ -283,3 +292,190 @@ def test_postgres_storage_errors_do_not_leak_driver_details():
     with pytest.raises(DashboardStorageUnavailableError, match="temporarily unavailable") as caught:
         PostgresDashboardRepository(unavailable).get("alice", "dashboard")
     assert "private" not in str(caught.value)
+
+
+@pytest.mark.parametrize("target", ["dashboard", "tile"])
+@pytest.mark.parametrize("selection,message", [
+    ({"alternativeId": "removed", "active": False}, "unavailable model alternative"),
+    ({"alternativeId": "choose", "values": {"removed": "old"}}, "unavailable model input"),
+    ({"values": {"removed": "old"}}, "unavailable model input"),
+])
+def test_save_rejects_stale_inactive_selection_references(monkeypatch, target, selection, message):
+    from schemii.schemer import dashboard_routes as routes
+    from schemii.schemoo.models import ModelDefinition
+
+    scopes = [{"id": key, "kind": kind, "alternatives": [{
+        "id": "choose", "inputs": [{"id": "value", "type": "text"}], "conditions": [],
+    }]} for key, kind in [("required", "required"), ("conditional", "conditional")]]
+    model = SimpleNamespace(definition=ModelDefinition.model_validate({
+        "root": "people", "nodes": [{"id": "people", "table": "people", "label": "People"}],
+        "scopes": scopes,
+    }), catalog_fingerprint="")
+    services = SimpleNamespace(admin_config=SimpleNamespace(console=SimpleNamespace(maximum_statements_per_run=20)))
+    monkeypatch.setattr(routes, "load_model", lambda *args: model)
+    monkeypatch.setattr(routes, "model_catalog", lambda *args: {
+        "fingerprint": "", "tables": [{"name": "people", "columns": [{"name": "id", "dataType": "integer"}]}], "relationships": [],
+    })
+    tile = {"id": "tile", "title": "People", "kind": "detail", "detailFields": [FIELD]}
+    changes = {"selections": {"required": selection}} if target == "dashboard" else {
+        "tiles": [{**tile, "selections": {"conditional": selection}}],
+    }
+    with pytest.raises(ValueError, match=message):
+        routes.validate_dashboard(services, "alice", create(**changes))
+    # A model input can still be left empty for the viewer to enter later.
+    if target == "dashboard":
+        routes.validate_dashboard(services, "alice", create(selections={"required": {"alternativeId": "choose"}}))
+    else:
+        routes.validate_dashboard(services, "alice", create(tiles=[{**tile, "selections": {"conditional": {"alternativeId": "choose"}}}]))
+    # Other valid options retain their inputs while the viewer switches back
+    # and forth; both dashboard slicers and tile overrides may save that state.
+    for scope in model.definition.scopes:
+        scope.alternatives.append(type(scope.alternatives[0]).model_validate({
+            "id": "other", "inputs": [{"id": "retained", "type": "text"}], "conditions": [],
+        }))
+    retained = {"alternativeId": "choose", "values": {"value": "current", "retained": "other option"}}
+    if target == "dashboard":
+        routes.validate_dashboard(services, "alice", create(selections={"required": retained}))
+    else:
+        routes.validate_dashboard(services, "alice", create(tiles=[{**tile, "selections": {"conditional": retained}}]))
+
+
+@pytest.mark.parametrize("change", ["removed_field", "removed_source"])
+def test_dashboard_repairs_and_model_upgrade_are_one_atomic_save(monkeypatch, change):
+    from fastapi.testclient import TestClient
+    from schemii.main import create_app, create_services
+    from schemii.schemer import dashboard_routes as routes
+    from schemii.schemer.dashboard_store import DashboardStorageUnavailableError
+    from schemii.schemoo.models import ModelCreate, ModelDefinition, ModelUpdate
+
+    services = create_services()
+    app = create_app(services=services)
+    owner = "user_local_prototype"
+    catalog = {"fingerprint": "", "namespace": "public", "tables": [{"name": "people", "columns": [
+        {"name": "id", "dataType": "integer"}, {"name": "name", "dataType": "text"},
+    ]}], "relationships": []}
+    monkeypatch.setattr(routes, "model_catalog", lambda *args: catalog)
+    definition = ModelDefinition.model_validate({
+        "root": "people", "nodes": [{"id": "people", "table": "people", "label": "People"},
+            {"id": "other", "table": "people", "label": "Other role"}],
+        "edges": [{"id": "join", "kind": "logical", "source": "people", "sourceColumn": "id",
+            "target": "other", "targetColumn": "id", "enabled": True}],
+        "exposedFields": [FIELD, {"table": "people", "column": "name"}, {"table": "other", "column": "id"}],
+    })
+    with TestClient(app, base_url="http://localhost") as client:
+        connection = client.post("/api/v1/connections", json={"name": "Warehouse", "host": "localhost",
+            "database": "warehouse", "username": "reader"}).json()
+        model = services.models.create(owner, ModelCreate(name="People", connection_id=connection["id"],
+            database="warehouse", namespace="public"))
+        model = services.models.update(owner, model.id, ModelUpdate(expected_revision=1, name="People", definition=definition))
+        old_field = {"table": "other", "column": "id"} if change == "removed_source" else {"table": "people", "column": "name"}
+        original_tile = {"id": "tile", "title": "People", "kind": "detail", "detailFields": [old_field]}
+        body = {"name": "Repairable", "modelId": model.id, "modelRevision": 2, "tiles": [original_tile]}
+        created = client.post("/api/v1/schemer/dashboards", json=body)
+        assert created.status_code == 201, created.text
+        saved = created.json()
+        path = "/api/v1/schemer/dashboards/" + saved["id"]
+        if change == "removed_source":
+            definition = definition.model_copy(update={"nodes": definition.nodes[:1], "edges": [], "exposedFields": definition.exposedFields[:2]})
+        else:
+            definition = definition.model_copy(update={"exposedFields": [definition.exposedFields[0], definition.exposedFields[2]]})
+        model = services.models.update(owner, model.id, ModelUpdate(expected_revision=2, name="People", definition=definition))
+        request = {**body, "expectedRevision": saved["revision"], "modelRevision": model.revision}
+        failed = client.put(path, json=request)
+        assert failed.status_code == 422, failed.text
+        assert client.get(path).json() == saved
+        repaired = {**request, "tiles": [{**original_tile, "detailFields": [FIELD]}]}
+        assert client.put(path, json={**repaired, "modelRevision": 2}).status_code == 409
+        assert client.get(path).json() == saved
+        update = services.dashboards.update
+
+        def unavailable(*args):
+            raise DashboardStorageUnavailableError("Storage temporarily unavailable")
+
+        monkeypatch.setattr(services.dashboards, "update", unavailable)
+        assert client.put(path, json=repaired).status_code == 503
+        assert client.get(path).json() == saved
+        monkeypatch.setattr(services.dashboards, "update", update)
+        response = client.put(path, json=repaired)
+        assert response.status_code == 200, response.text
+        upgraded = response.json()
+        assert upgraded["revision"] == saved["revision"] + 1
+        assert upgraded["modelRevision"] == model.revision
+        assert upgraded["tiles"][0]["detailFields"] == [{**FIELD, "aggregate": "none"}]
+        assert client.put(path, json=repaired).json()["error"]["code"] == "dashboard_revision_conflict"
+        assert client.get(path).json() == upgraded
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "10", 2147483648])
+def test_topn_requires_a_strict_positive_bounded_integer(value):
+    with pytest.raises(ValidationError):
+        DashboardTile.model_validate({"id": "tile", "title": "People", "kind": "detail", "detailFields": [FIELD], "topN": value})
+
+
+def test_report_controls_roundtrip_independently_of_batch_size_and_reject_bad_predicate_values():
+    body = {"id": "tile", "title": "People", "kind": "aggregate", "measures": [{**FIELD, "aggregate": "count"}],
+            "sort": [{**FIELD, "aggregate": "count", "direction": "desc"}], "topN": 500,
+            "aggregateFilters": [{**FIELD, "aggregate": "count", "operator": "gte", "value": 20}], "limit": 1}
+    tile = DashboardTile.model_validate(body)
+    assert tile.top_n == 500 and tile.limit == 1 and tile.sort[0].nulls == "last"
+    assert DashboardTile.model_validate(tile.model_dump(by_alias=True)) == tile
+    for item in [{"operator": "gt", "value": None}, {"operator": "is_null", "value": 1}, {"operator": "eq", "value": float("nan")}, {"operator": "eq", "value": [1]}]:
+        with pytest.raises(ValidationError):
+            DashboardTile.model_validate({**body, "aggregateFilters": [{**FIELD, "aggregate": "count", **item}]})
+    with pytest.raises(ValidationError, match="unique"):
+        DashboardTile.model_validate({**body, "sort": body["sort"] * 2})
+
+
+@pytest.mark.parametrize("value", [9007199254740993, -9007199254740993, 0.1, -0.125, 1e-8])
+def test_backend_numeric_predicate_json_types_are_not_restricted_by_editor_precision(value):
+    import json
+    from schemii.schemer.dashboard_models import AggregateFilter
+    payload = {**FIELD, "aggregate": "count", "operator": "gte", "value": value}
+    parsed = AggregateFilter.model_validate_json(json.dumps(payload))
+    assert parsed.value == value and type(parsed.value) is type(value)
+    assert json.loads(parsed.model_dump_json(by_alias=True))["value"] == value
+
+
+def test_persisted_pivot_round_trip_keeps_ordered_axes_and_all_total_options():
+    tile = {'id': 'pivot', 'title': 'People pivot', 'kind': 'pivot',
+        'rowDimensions': [{**FIELD, 'column': 'region'}, {**FIELD, 'column': 'team'}],
+        'columnDimensions': [{**FIELD, 'column': 'type'}],
+        'measures': [{**FIELD, 'aggregate': 'count_distinct'}], 'detailFields': [FIELD],
+        'pivotTotals': {'rowSubtotals': False, 'columnSubtotals': True, 'rowTotals': True,
+            'columnTotals': False, 'grandTotal': True, 'maximumColumns': 4, 'maximumRows': 8}}
+    repo = InMemoryDashboardRepository()
+    saved = repo.create('alice', create(tiles=[tile]))
+    wire = saved.model_dump(mode='json', by_alias=True)['tiles'][0]
+    assert [field['column'] for field in wire['rowDimensions']] == ['region', 'team']
+    assert wire['pivotTotals'] == tile['pivotTotals']
+    assert wire['dimensions'] == []
+    wire['rowDimensions'].reverse()
+    assert repo.get('alice', saved.id).tiles[0].row_dimensions[0].column == 'region'
+
+
+def test_calculated_measure_and_exact_kpi_configuration_roundtrip_without_rows():
+    tile={'id':'kpi','title':'Share','kind':'kpi','hiddenMeasures':[{**FIELD,'aggregate':'count'}],
+        'calculations':[{'id':'share','label':'Share','operation':'percent_of',
+            'left':{'output':{**FIELD,'aggregate':'count'},'scope':'group'},
+            'right':{'output':{**FIELD,'aggregate':'count'},'scope':'source_population'}}],
+        'kpiComparison':{'label':'Target','baseline':{'constant':'9007199254740993.000001'},'favorable':'higher'}}
+    repo=InMemoryDashboardRepository();saved=repo.create('alice',create(tiles=[tile]))
+    reopened=repo.get('alice',saved.id).model_dump(mode='json',by_alias=True)
+    assert reopened['tiles'][0]['calculations'][0]['id']=='share'
+    assert reopened['tiles'][0]['kpiComparison']['baseline']['constant']=='9007199254740993.000001'
+    saved.tiles[0].calculations[0].label='Local draft'
+    assert repo.get('alice',saved.id).tiles[0].calculations[0].label=='Share'
+    with pytest.raises(ValidationError):
+        create(tiles=[{**tile,'calculations':[{**tile['calculations'][0],'sql':'SELECT 1'}]}])
+    assert 'rows' not in reopened['tiles'][0]
+
+
+def test_saved_number_format_metadata_is_exact_and_copy_isolated():
+    configured = {'id':'format','title':'Count','kind':'aggregate','measures':[{**FIELD,'aggregate':'count'}],
+        'numberFormats':[{'output':{**FIELD,'aggregate':'count','kind':'value'},'style':'number','precision':4,
+            'rules':[{'operator':'gt','value':'9007199254740993.000000001','label':'High','symbol':'up','tone':'positive'}]}], 'formatLocale':'de-DE'}
+    repo=InMemoryDashboardRepository();saved=repo.create('alice',create(tiles=[configured]))
+    read=repo.get('alice',saved.id)
+    assert read.tiles[0].number_formats[0].rules[0].value=='9007199254740993.000000001'
+    read.tiles[0].number_formats[0].rules[0].value='0'
+    assert repo.get('alice',saved.id).tiles[0].number_formats[0].rules[0].value=='9007199254740993.000000001'

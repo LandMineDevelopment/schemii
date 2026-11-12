@@ -236,17 +236,42 @@ def validate_qa(qa: object, assignment: dict, workspace: Path) -> None:
         "QA run needs its verified deployment from ./test.sh prepare.",
     )
     if qa["browser"] == "native":
+        lanes = manifest.get("lanes")
+        reviewers = manifest.get("reviewerAccounts", [manifest.get("reviewerAccount")])
+        require(
+            isinstance(lanes, list)
+            and all(isinstance(lane, dict) for lane in lanes)
+            and isinstance(reviewers, list)
+            and bool(reviewers)
+            and all(
+                isinstance(username, str)
+                and re.fullmatch(r"[a-zA-Z0-9_.@-]{1,64}", username)
+                for username in reviewers
+            ),
+            "Native QA needs its prepared native backend and explicit reserved reviewer accounts.",
+        )
+        usernames = [lane.get("username") for lane in lanes]
+        reviewer_lanes = [lane for lane in lanes if lane.get("role") == "reviewer"]
+        tester_lanes = [lane for lane in lanes if lane.get("role") == "tester"]
+        parallel = manifest.get("parallel")
         require(
             manifest.get("browser") == "native"
-            and isinstance(manifest.get("runtimeSlots"), int)
-            and manifest["runtimeSlots"] >= manifest.get("parallel", 0) + 2
-            and any(
-                isinstance(lane, dict)
-                and lane.get("role") == "reviewer"
-                and lane.get("username") == manifest.get("reviewerAccount")
-                for lane in manifest.get("lanes", [])
+            and type(manifest.get("runtimeSlots")) is int
+            and type(parallel) is int
+            and 1 <= parallel <= len(tester_lanes) <= 10
+            and manifest["runtimeSlots"] >= parallel + len(reviewers) + 1
+            and len({username.lower() for username in reviewers}) == len(reviewers)
+            and all(isinstance(username, str) for username in usernames)
+            and len({username.lower() for username in usernames}) == len(usernames)
+            and len(tester_lanes) + len(reviewer_lanes) == len(lanes)
+            and len(reviewer_lanes) == len(reviewers)
+            and {lane["username"] for lane in reviewer_lanes} == set(reviewers)
+            and (
+                "reviewerAccounts" not in manifest
+                or manifest.get("reviewerAccount")
+                == (reviewers[0] if len(reviewers) == 1 else None)
             ),
-            "Native QA needs its prepared native backend, observed capacity and reserved reviewer account.",
+            "Native QA needs its prepared native backend, observed capacity and distinct reserved reviewer accounts with matching roles.",
         )
     else:
         require(

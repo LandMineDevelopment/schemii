@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import (
@@ -21,6 +21,7 @@ from typing import (
 
 from schemii.common.postgres.models import PostgresCatalog
 from schemii.schemii.designs.history_retention import prune_postgres_history
+from schemii.schemii.designs.importer import import_postgres_catalog
 from schemii.schemii.designs.models import (
     SchemiiDesignContent,
     SchemiiDesignReplace,
@@ -372,7 +373,23 @@ class InMemoryMigrationRepository:
         self._workspace_claim_guard: (
             Callable[[str, str], ContextManager[None]] | None
         ) = None
-        self._lock = threading.RLock()
+        # Design edits and baseline publication share a lock in the in-memory
+        # adapter. This prevents a baseline race without inverse repo/design
+        # lock ordering when ordinary edits call the execution mutation guard.
+        transaction = getattr(designs, "metadata_transaction", None)
+        self._lock = transaction() if callable(transaction) else threading.RLock()
+
+    @contextmanager
+    def design_copy_guard(self, owner_id: str, source_id: str, target_id: str) -> Iterator[None]:
+        with ExitStack() as stack:
+            if self._workspace_claim_guard is not None:
+                for workspace_id in sorted((source_id, target_id)):
+                    stack.enter_context(
+                        self._workspace_claim_guard(owner_id, workspace_id)
+                    )
+            with self._lock:
+                yield
+
 
     def set_workspace_claim_guard(
         self,
@@ -910,6 +927,7 @@ class InMemoryMigrationRepository:
                 ),
                 operation_kind="checkpoint",
             )
+            coverage = import_postgres_catalog(record.authority.live_catalog)
             baseline = self.create_baseline(
                 owner_id=record.owner_id,
                 workspace_id=record.plan.workspace_id,
@@ -921,8 +939,8 @@ class InMemoryMigrationRepository:
                 design_revision=design.revision,
                 content=live_content,
                 catalog=record.authority.live_catalog,
-                complete=True,
-                issues=[],
+                complete=coverage.summary.complete,
+                issues=[item.model_dump(mode="json", by_alias=True) for item in coverage.summary.issues],
                 source="drift_reconciliation",
                 expected_predecessor_id=record.baseline_id,
             )
@@ -1815,6 +1833,7 @@ class PostgresMigrationRepository:
                     """,
                     (next_design_revision, self._json_dump(retained), record.owner_id, record.plan.workspace_id),
                 )
+                coverage = import_postgres_catalog(record.authority.live_catalog)
                 baseline = self._insert_baseline(
                     cursor,
                     owner_id=record.owner_id,
@@ -1827,8 +1846,8 @@ class PostgresMigrationRepository:
                     design_revision=next_design_revision,
                     content=live_content,
                     catalog=record.authority.live_catalog,
-                    complete=True,
-                    issues=[],
+                    complete=coverage.summary.complete,
+                    issues=[item.model_dump(mode="json", by_alias=True) for item in coverage.summary.issues],
                     source="drift_reconciliation",
                     expected_predecessor_id=record.baseline_id,
                 )

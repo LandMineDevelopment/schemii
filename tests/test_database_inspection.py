@@ -104,6 +104,9 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries(
         "METADATA_QUERY",
         "NAMESPACE_EXISTS_QUERY",
         "NAMESPACES_QUERY",
+        "SAFETY_DEPENDENCIES_QUERY",
+        "SAFETY_OBJECTS_QUERY",
+        "SAFETY_UNKNOWNS_QUERY",
         "TABLES_QUERY",
         "TRIGGERS_QUERY",
         "TYPES_QUERY",
@@ -132,7 +135,11 @@ def test_database_inspection_derives_the_runtime_contract_calls_and_queries(
     } == query_names - {"CONNECTION_TEST_QUERY", "NAMESPACES_QUERY"}
 
     for query in document["queries"]:
-        assert query["statement"] == "SELECT"
+        assert query["statement"] == (
+            "WITH" if query["name"] in {
+                "SAFETY_OBJECTS_QUERY", "SAFETY_DEPENDENCIES_QUERY",
+            } else "SELECT"
+        )
         assert query["location"]["path"] == "schemii/common/postgres/queries.py"
         assert query["location"]["definitionLine"] is not None
         assert query["marker"].startswith("schemii_")

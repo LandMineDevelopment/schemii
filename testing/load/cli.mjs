@@ -8,15 +8,16 @@ import { fileURLToPath } from 'node:url';
 import { root, privateJSON, privateDir, writeJSON, credentials } from '../harness/store.mjs';
 import { deploymentLockPath, sourceIdentity } from '../harness/deployment.mjs';
 import { reserveAccounts, releaseAccounts, withFileLock } from '../harness/leases.mjs';
-import { cleanupFixtures } from './fixtures.mjs';
+import { cleanupFixtures, heldFixture, disposedFixtureConsumer } from './fixtures.mjs';
+import { journalBudget, readSnapshot } from './journal.mjs';
 import { plan, WORKLOADS, validatePlan } from './plan.mjs';
 import { birthTick, requireStopped } from './engine.mjs';
 import { observeChild, stopChild, createRuntime, disposeRuntime, runtimeSocket } from './children.mjs';
 import { LOCAL, PREVIEW } from './http.mjs';
 
 const COMMANDS = {
-  plan: ['recipe', 'workload', 'rate', 'active', 'output'],
-  prepare: ['plan', 'accounts', 'credentials-file', 'state-dir', 'observer-file', 'k6-bin', 'origin', 'allow-unobserved'],
+  plan: ['recipe', 'workload', 'rate', 'active', 'registered', 'fixture-mode', 'profile-mode', 'profiles', 'mix-file', 'soak-seconds', 'output'],
+  prepare: ['plan', 'accounts', 'credentials-file', 'state-dir', 'observer-file', 'k6-bin', 'origin', 'allow-unobserved', 'fixture-authority'],
   run: ['run'], status: ['run'], report: ['run'], cleanup: ['run'],
 };
 export function parse(argv) {
@@ -61,38 +62,55 @@ export async function loadMain(argv) {
   process.umask(0o077);
   const { command, options: o } = parse(argv);
   if (command === 'help') { console.log(`Usage: ./test.sh load plan|prepare|run|status|report|cleanup [options]
-plan --recipe smoke|ramp|confirm|spike|soak --workload ${WORKLOADS.join('|')} --rate 100 --active 2 --output FILE
+plan --recipe smoke|ramp|confirm|spike|soak|lifecycle --workload ${WORKLOADS.join('|')} --rate 100 --active 2 --output FILE
+     [--fixture-mode disposable --registered 1000 --profile-mode private-single|private-multiple|managed-shared|managed-distinct --profiles 2 --mix-file PRIVATE_JSON]
+     [--recipe soak --soak-seconds 1800..3600 (default 3600)]
 prepare --plan FILE --accounts USER1,USER2 --credentials-file PRIVATE_FILE [--state-dir PRIVATE_DIR]
         --observer-file PRIVATE_FILE [--k6-bin HOST_BINARY] [--origin ${LOCAL}|${PREVIEW}]
         [--allow-unobserved: smoke protocol checks only; never capacity evidence]
+Disposable prepare: --plan FILE --fixture-authority PRIVATE_AUTHORITY --observer-file PRIVATE_OUTPUT
+The disposable consumer attaches to an already held representative-load-v1 launcher fixture; it starts no stack.
 run|status|report|cleanup --run LOAD_ID
-No stress run is part of default tests. prepare uses ./start.sh and holds the existing deployment/account leases.
+No stress run is part of default tests. Retained prepare uses ./start.sh and deployment/account leases.
 cleanup deletes only private receipt-owned report fixtures, revokes load sessions and preserves reports.`); return; }
   if (command === 'plan') {
-    const value = plan({ recipe: o.recipe, workload: o.workload, rate: Number(o.rate || 100), active: Number(o.active || 2) });
+    if (o['soak-seconds'] && o.recipe !== 'soak') throw new Error('soak_seconds_requires_soak');
+    const value = plan({ recipe: o.recipe, workload: o.workload, rate: Number(o.rate || 100), active: Number(o.active || 2),
+      registered: o.registered ? Number(o.registered) : undefined, fixtureMode: o['fixture-mode'], profileMode: o['profile-mode'],
+      profiles: o.profiles ? Number(o.profiles) : undefined, mix: o['mix-file'] ? await privateJSON(resolve(o['mix-file'])) : undefined,
+      soakSeconds: o['soak-seconds'] ? Number(o['soak-seconds']) : undefined });
+    if (value.fixtureMode === 'disposable') value.journalBudget = journalBudget(value);
     if (o.output) await writeJSON(resolve(o.output), value);
     console.log(JSON.stringify(value, null, 2)); return value;
   }
   if (command === 'prepare') {
-    if (!o.plan || !o.accounts || !o['credentials-file']) throw new Error('plan_accounts_credentials_required');
-    const spec = validatePlan(await privateJSON(resolve(o.plan)));
-    const accounts = o.accounts.split(',');
-    if (accounts.length !== spec.activeIdentities || new Set(accounts).size !== accounts.length ||
-        accounts.some(name => !/^qa_[a-z_]+_[0-9]{3}$/.test(name))) throw new Error('registered_accounts_must_match_active');
-    const credentialPath = resolve(o['credentials-file']), credentialMap = await credentials(credentialPath);
-    if (accounts.some(name => !credentialMap.has(name))) throw new Error('missing_account_credential');
+    if (!o.plan) throw new Error('plan_required');
+    const input = await privateJSON(resolve(o.plan)), declaredBudget = input.journalBudget; delete input.journalBudget;
+    const spec = validatePlan(input), disposable = spec.fixtureMode === 'disposable';
+    if (disposable && JSON.stringify(declaredBudget) !== JSON.stringify(journalBudget(spec))) throw new Error('journal_budget_changed');
+    if (!disposable && (!o.accounts || !o['credentials-file'])) throw new Error('plan_accounts_credentials_required');
+    if (disposable && (!o['fixture-authority'] || o.accounts || o['credentials-file'] || o['state-dir'] || o['k6-bin'])) throw new Error('explicit_disposable_authority_required');
+    const fixture = disposable ? await heldFixture(resolve(o['fixture-authority'])) : null;
+    const accounts = disposable ? Array.from({ length: spec.registeredIdentities }, (_, index) => `${fixture.tag}_account_${String(index + 1).padStart(4, '0')}`) : o.accounts.split(',');
+    if (!disposable && (accounts.length !== spec.activeIdentities || new Set(accounts).size !== accounts.length ||
+        accounts.some(name => !/^qa_[a-z_]+_[0-9]{3}$/.test(name)))) throw new Error('registered_accounts_must_match_active');
+    const credentialPath = disposable ? null : resolve(o['credentials-file']), credentialMap = disposable ? null : await credentials(credentialPath);
+    if (!disposable && accounts.some(name => !credentialMap.has(name))) throw new Error('missing_account_credential');
     if (o['allow-unobserved'] && spec.recipe !== 'smoke') throw new Error('unobserved_only_smoke');
     if (!o['observer-file'] && !o['allow-unobserved']) throw new Error('observer_required');
     const id = `load-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`, dir = loadPath(id);
     const origin = o.origin || LOCAL;
+    if (disposable && origin !== fixture.origin) throw new Error('fixture_origin_changed');
     if (![LOCAL, PREVIEW].includes(origin)) throw new Error('invalid_origin');
     await privateDir(dir);
     const run = { version: 1, id, accounts, plan: spec, status: 'preparing', createdAt: new Date().toISOString(),
       source: sourceIdentity(root), generator: { location: 'cohosted', node: process.version,
         platform: os.platform(), release: os.release(), architecture: os.arch(), cpuCount: os.availableParallelism(),
-        totalMemoryBytes: os.totalmem(), cpuModel: os.cpus()[0]?.model }, topology: { apiProcesses: 'unverified', source: 'qa-postgres',
-        registeredAccounts: (await privateJSON(join(resolve(o['state-dir'] || join(root, '.schemii/testing')), 'registry.json'))).slots.length,
-        activeIdentities: accounts.length, profileSharing: 'distinct managed profiles' } };
+        totalMemoryBytes: os.totalmem(), cpuModel: os.cpus()[0]?.model }, topology: { apiProcesses: 'unverified', source: disposable ? 'launcher_owned_disposable_source' : 'qa-postgres',
+        registeredAccounts: disposable ? spec.registeredIdentities : (await privateJSON(join(resolve(o['state-dir'] || join(root, '.schemii/testing')), 'registry.json'))).slots.length,
+        activeIdentities: spec.activeIdentities, profileSharing: disposable ? spec.profileMode : 'distinct managed profiles',
+        instrumentation: disposable ? fixture.instrumentation : 'stock', fixtureProfile: disposable ? fixture.profile : null, fixtureAdministrativeIdentities: disposable ? 1 : 0,
+        recoveryIdentity: disposable && spec.workload === 'shared-report' ? 'fixture_administrative' : 'workload_owner', stockCapacityEligible: false } };
     await writeJSON(join(dir, 'manifest-private.json'), run);
     let runtime, launch, child, completion, owner, log;
     try {
@@ -104,12 +122,14 @@ cleanup deletes only private receipt-owned report fixtures, revokes load session
       await writeJSON(join(dir, 'control-private.json'), { socket: runtimeSocket(id), token: randomBytes(32).toString('hex') });
       await writeJSON(join(dir, 'config-private.json'), { credentialPath, stateDir: resolve(o['state-dir'] || join(root, '.schemii/testing')),
         observerFile: o['observer-file'] ? resolve(o['observer-file']) : null, allowUnobserved: !!o['allow-unobserved'],
-        binary: o['k6-bin'] ? resolve(o['k6-bin']) : 'k6', origin });
+        binary: o['k6-bin'] ? resolve(o['k6-bin']) : 'k6', origin,
+        fixtureAuthority: disposable ? resolve(o['fixture-authority']) : null, journalBudget: declaredBudget || null });
       await reserveAccounts({ runId: id, runDir: dir, accounts, root });
       const lock = deploymentLockPath(root), gate = join(dirname(lock), 'qa-startup.lock');
       log = await open(join(dir, 'controller-private.log'), 'a', 0o600);
-      child = spawn('bash', ['-c', 'exec 4> "$1"; flock --wait 180 4 || exit 4; exec 3> "$2"; if flock --nonblock 3; then export SCHEMII_QA_LEASE_MODE=exclusive; else flock --shared --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_MODE=shared; fi; export SCHEMII_QA_LEASE_FD=3 SCHEMII_QA_GATE_FD=4; exec node "$3" "$4"', 'load-controller', gate, lock,
-        join(root, 'testing/load/controller.mjs'), id], { cwd: root, detached: true, stdio: ['ignore', log.fd, log.fd] });
+      child = disposable ? spawn(process.execPath, [join(root, 'testing/load/controller.mjs'), id], { cwd: root, detached: true, stdio: ['ignore', log.fd, log.fd] }) :
+        spawn('bash', ['-c', 'exec 4> "$1"; flock --wait 180 4 || exit 4; exec 3> "$2"; if flock --nonblock 3; then export SCHEMII_QA_LEASE_MODE=exclusive; else flock --shared --nonblock 3 || exit 4; export SCHEMII_QA_LEASE_MODE=shared; fi; export SCHEMII_QA_LEASE_FD=3 SCHEMII_QA_GATE_FD=4; exec node "$3" "$4"', 'load-controller', gate, lock,
+          join(root, 'testing/load/controller.mjs'), id], { cwd: root, detached: true, stdio: ['ignore', log.fd, log.fd] });
       completion = observeChild(child);
       child.unref();
       const birth = child.pid && await birthTick(child.pid);
@@ -164,6 +184,16 @@ cleanup deletes only private receipt-owned report fixtures, revokes load session
       if (run.generatorOwner?.pending) throw new Error('unresolved_generator_launch');
       if (run.generatorOwner?.pid) await requireStopped(run.generatorOwner);
       const config = await privateJSON(join(dir, 'config-private.json'));
+      if (config.fixtureAuthority) {
+        // An attached controller is the only allowed live fixture API actor.
+        // Offline recovery never sends its cookies to the restored canonical app.
+        const binding = await privateJSON(join(dir, 'fixture-attachment-private.json'));
+        const proof = await disposedFixtureConsumer(binding, controllerOwner);
+        await disposeRuntime(o.run, launch.runtime); await releaseAccounts({ runId: o.run, root });
+        run.status = 'cleaned'; run.cleanup = { ...proof, objectsRemaining: 0, authority: 'owned_fixture_disposal' };
+        await writeJSON(join(dir, 'manifest-private.json'), run);
+        console.log(JSON.stringify(run.cleanup)); return run.cleanup;
+      }
       // Reacquire the shared deployment lease while doing supported API cleanup.
       // An exclusive rebuild may finish first; cleanup never starts the app.
       const lease = await open(deploymentLockPath(root), 'a', 0o600);

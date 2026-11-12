@@ -1,5 +1,10 @@
 """Real PostgreSQL round trips for the current-only semantic model repository."""
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from threading import Event
+from time import monotonic, sleep
+
 import pytest
 from pydantic import SecretStr
 
@@ -87,3 +92,111 @@ def test_saved_previews_durable_isolated_bounded_and_cascade(postgres_metadata):
         with metadata.cursor() as cursor:
             cursor.execute("SELECT count(*) AS count FROM schemoo.model_previews WHERE model_id = %s", (model.id,))
             assert cursor.fetchone()["count"] == 0
+
+
+@pytest.mark.parametrize("change", ["layout", "explore", "preview"])
+def test_guarded_model_delete_waits_for_parent_locked_writers_and_preserves_their_state(postgres_metadata, change):
+    harness = postgres_metadata
+    owner = harness.owner_id
+    connection = harness.repositories.connections.create(owner, PostgresConnectionCreate(
+        name="Guarded cleanup source", host="application-postgres", database="application_data", username="application_user"))
+    store = PostgresModelRepository(harness.connection_factory)
+    model = store.create(owner, ModelCreate(name="Owned cleanup", connection_id=connection.id,
+        database=connection.database, namespace="public"))
+    # Cleanup preflight occurs before an independent writer changes state.
+    before = store.get(owner, model.id)
+    assert store.list_previews(owner, model.id) == []
+    written, release, delete_started = Event(), Event(), Event()
+    pids = {}
+    statement = "INSERT INTO schemoo.model_previews" if change == "preview" else "UPDATE schemoo.models"
+
+    @contextmanager
+    def writer_factory():
+        with harness.connection_factory() as metadata:
+            pids["writer"] = metadata.info.backend_pid
+
+            class Cursor:
+                def __init__(self, cursor):
+                    self.cursor = cursor
+
+                def execute(self, query, params=None):
+                    result = self.cursor.execute(query, params)
+                    if query.startswith(statement):
+                        written.set()
+                        assert release.wait(10), "Writer transaction was not released"
+                    return result
+
+                def __getattr__(self, name):
+                    return getattr(self.cursor, name)
+
+            class Connection:
+                @contextmanager
+                def cursor(self):
+                    with metadata.cursor() as cursor:
+                        yield Cursor(cursor)
+
+            yield Connection()
+
+    @contextmanager
+    def delete_factory():
+        with harness.connection_factory() as metadata:
+            pids["delete"] = metadata.info.backend_pid
+            delete_started.set()
+            yield metadata
+
+    writer = PostgresModelRepository(writer_factory)
+    deleting = PostgresModelRepository(delete_factory)
+
+    def write():
+        if change == "layout":
+            return writer.update_layout(owner, model.id, LayoutUpdate(expected_revision=1,
+                layout={"positions": [{"id": "people", "x": 29, "y": 31}]}))
+        if change == "explore":
+            return writer.update_explore(owner, model.id, ExploreUpdate(expected_revision=1,
+                explore={"root": "people"}))
+        return writer.create_preview(owner, model.id, PreviewCreate(name="Concurrent saved preview", explore={}))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writing = pool.submit(write)
+        try:
+            assert written.wait(10), "Writer did not acquire and modify the parent"
+            pending = pool.submit(deleting.delete, owner, model.id, before.revision,
+                expected_layout_revision=before.layout_revision, expected_explore_revision=before.explore_revision,
+                require_no_previews=True)
+            assert delete_started.wait(10)
+            # Observe the real PostgreSQL parent-lock wait rather than relying
+            # only on thread scheduling or an unfinished Python Future.
+            with harness.connection_factory() as observer:
+                with observer.cursor() as cursor:
+                    deadline = monotonic() + 5
+                    while True:
+                        cursor.execute("SELECT pg_blocking_pids(%s) AS blockers", (pids["delete"],))
+                        if pids["writer"] in cursor.fetchone()["blockers"]:
+                            break
+                        assert monotonic() < deadline, "DELETE did not wait for the writer's parent lock"
+                        sleep(0.01)
+            assert not pending.done()
+        finally:
+            release.set()
+        writing.result(timeout=10)
+        with pytest.raises(ModelConflictError, match="saved previews" if change == "preview" else change):
+            pending.result(timeout=10)
+    current, previews = store.get(owner, model.id), store.list_previews(owner, model.id)
+    assert current.revision == before.revision
+    if change == "layout":
+        assert current.layout_revision == 2 and current.layout.positions[0].x == 29
+    elif change == "explore":
+        assert current.explore_revision == 2 and current.explore.root == "people"
+    else:
+        assert [preview.name for preview in previews] == ["Concurrent saved preview"]
+    assert harness.repositories.connections.get(owner, connection.id) == connection
+    with pytest.raises(ModelNotFoundError):
+        store.delete("other-owner", model.id, 1, expected_layout_revision=1,
+                     expected_explore_revision=1, require_no_previews=True)
+    assert store.get(owner, model.id) == current and store.list_previews(owner, model.id) == previews
+    for preview in previews:
+        store.delete_preview(owner, model.id, preview.id, preview.revision)
+    store.delete(owner, model.id, current.revision, expected_layout_revision=current.layout_revision,
+                 expected_explore_revision=current.explore_revision, require_no_previews=True)
+    assert store.list(owner) == []
+    assert harness.repositories.connections.get(owner, connection.id) == connection

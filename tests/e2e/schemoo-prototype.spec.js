@@ -4,6 +4,26 @@ import { chooseModelOption } from "./helpers/schemoo-select.js";
 import { importedDraft } from "../../src/schemii/schemoo/web/model-draft.js";
 import { splitDraft } from "../../src/schemii/schemoo/web/model-state.js";
 
+const ambiguousPathDiagnostic = "Participating relationships contain cycles or ambiguous paths. Disable cycle edges or create separate aliases for the intended route.";
+
+async function addAmbiguousPreviewOutput(page) {
+  await page.getByRole("button", { name: "Explore model", exact: true }).click();
+  await expect(page.locator("#fields .field-name")).toHaveText(["certification_dim · name"]);
+  // The two certification requirements give this selected source parallel routes
+  // from certification_dim. Exposing its fields alone does not activate them.
+  await chooseModelOption(page, "Preview source field", "job_slot_fact · id");
+  await page.getByRole("button", { name: "Add preview output", exact: true }).click();
+  await expect(page.locator("#fields .field-name")).toHaveText(["certification_dim · name", "job_slot_fact · id"]);
+}
+
+async function expectUnusedCyclesAllowed(page) {
+  await expect(page.locator("#plan-status")).toHaveText("0 required connections · Joined detail rows (related records can repeat root rows)");
+  await expect(page.locator("#sql")).toContainText('FROM "public"."certification_dim"');
+  await expect(page.locator("#sql")).not.toContainText(/\bJOIN\b/);
+  await expect(page.locator("#run")).toBeEnabled();
+  await expect(page.locator(".sc-cycle").first()).toBeVisible();
+}
+
 let modelId;
 test.beforeEach(async ({ request }) => {
   const response=await request.get("/api/v1/connections");
@@ -25,11 +45,11 @@ test.afterEach(async({request})=>{
 test("query preview maximizes and restores without losing its contents", async ({ page }) => {
   await page.goto(`/schemoo?model=${modelId}`);
   await expect(page.locator(".sc-node")).toHaveCount(12);
+  await addAmbiguousPreviewOutput(page);
   await page.getByRole("button", { name: "Show query preview", exact: true }).click();
-  // The imported model is cyclic; capture its completed compiler diagnostic.
-  const diagnostic = "Enabled relationships contain cycles or ambiguous paths. Disable cycle edges or create separate aliases.";
-  await expect(page.locator("#plan-status")).toHaveText(diagnostic);
-  await expect(page.locator("#sql")).toHaveText(diagnostic);
+  // Capture the completed diagnostic for the selected ambiguous path.
+  await expect(page.locator("#plan-status")).toHaveText(ambiguousPathDiagnostic);
+  await expect(page.locator("#sql")).toHaveText(ambiguousPathDiagnostic);
   await expect(page.locator("#run")).toBeDisabled();
   const sql = await page.locator("#sql").textContent();
   const split = await page.locator("#query-dock").boundingBox();
@@ -42,7 +62,7 @@ test("query preview maximizes and restores without losing its contents", async (
   await expect(page.locator("#sql")).toHaveText(sql);
   await page.getByRole("button", { name: "Results", exact: true }).click();
   await expect(page.locator("#results")).toBeVisible();
-  await page.screenshot({ path: `artifacts/schemoo-query-expanded-${test.info().project.name}.png` });
+  await test.info().attach("schemoo-query-expanded", { body: await page.screenshot(), contentType: "image/png" });
   await page.getByRole("button", { name: "Restore split view", exact: true }).click();
   await expect(page.locator("#model-shell")).toBeVisible();
   await expect(page.locator("#results")).toBeVisible();
@@ -94,14 +114,23 @@ test("graphical model: cycles, aliases, required scope, temporal alternatives an
   await expect(page.locator(".sc-node")).toHaveCount(12);
   await expect(page.locator(".sc-edge")).toHaveCount(18);
   await expect(page.locator(".sc-cycle").first()).toBeVisible();
+  await page.getByRole("button", { name: "Show query preview", exact: true }).click();
+  await expectUnusedCyclesAllowed(page);
+  await addAmbiguousPreviewOutput(page);
+  await expect(page.locator("#plan-status")).toHaveText(ambiguousPathDiagnostic);
+  await expect(page.locator("#sql")).toHaveText(ambiguousPathDiagnostic);
   await expect(page.locator("#run")).toBeDisabled();
+  await page.getByRole("button", { name: "Remove preview column 2", exact: true }).click();
+  await expect(page.locator("#fields .field-name")).toHaveText(["certification_dim · name"]);
+  await expectUnusedCyclesAllowed(page);
+  await page.getByRole("button", { name: "Close query preview", exact: true }).click();
   if (await page.locator("#inspector").isVisible()) await page.getByRole("button", { name: "Close inspector", exact: true }).click();
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
   const fittedTransform = await page.locator(".sc-stage").getAttribute("style");
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
   await expect(page.locator(".sc-stage")).not.toHaveAttribute("style", fittedTransform);
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  await page.screenshot({ path: `artifacts/schemoo-imported-${test.info().project.name}.png` });
+  await test.info().attach("schemoo-imported", { body: await page.screenshot(), contentType: "image/png" });
   await page.locator('[data-node-id="certification_dim"] .sc-node-header').click();
   await page.getByRole("button", { name: "Create alias", exact: true }).click();
   await expect(page.locator(".sc-node")).toHaveCount(12);
@@ -133,7 +162,7 @@ test("graphical model: cycles, aliases, required scope, temporal alternatives an
   await expect(page.locator("#sql")).toContainText("EXISTS");
   await expect(page.locator("#sql")).toContainText('"org_hier"');
   await expect(page.locator("#error")).toBeHidden();
-  await page.screenshot({ path: `artifacts/schemoo-scoped-sql-${test.info().project.name}.png` });
+  await test.info().attach("schemoo-scoped-sql", { body: await page.screenshot(), contentType: "image/png" });
   await page.getByRole("button", { name: "Close query preview", exact: true }).click();
   await chooseModelOption(page, "Alternative for Time scope", "Active at any point during a period");
   await expect(page.locator("#run")).toBeDisabled();
@@ -160,7 +189,7 @@ test("graphical model: cycles, aliases, required scope, temporal alternatives an
   await expect(page.locator("#run")).toBeEnabled();
   await page.getByRole("button", { name: "Close inspector", exact: true }).click();
   await page.getByRole("button", { name: "Fit model", exact: true }).click();
-  await page.screenshot({ path: `artifacts/schemoo-model-${test.info().project.name}.png` });
+  await test.info().attach("schemoo-model", { body: await page.screenshot(), contentType: "image/png" });
   expect(errors).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
@@ -198,7 +227,7 @@ test("model library creates from an explicit source, persists edits and protects
     await expect(page.getByRole("button",{name:"Save model",exact:true})).toBeDisabled();
     await page.getByRole("button",{name:"Reload saved model and source",exact:true}).click();
     await expect(page.locator("#model-name")).toHaveValue(`${modelName} other tab`);
-    await page.screenshot({path:`artifacts/schemoo-library-${test.info().project.name}.png`});
+    await test.info().attach("schemoo-library", { body: await page.screenshot(), contentType: "image/png" });
     expect(errors).toEqual([]);
   } finally {
     if(createdId){const latest=await (await request.get(`/api/v1/schemoo/models/${createdId}`)).json();await request.delete(`/api/v1/schemoo/models/${createdId}?expected_revision=${latest.revision}`);}

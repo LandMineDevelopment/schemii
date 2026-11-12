@@ -18,6 +18,51 @@ async function databaseWorkspace(request) {
   return workspace;
 }
 
+async function expectEditorContained(page) {
+  await expect.poll(() => page.locator(".sql-editor-panel").evaluate(panel => {
+    const editor = panel.querySelector("textarea").getBoundingClientRect();
+    const footer = panel.querySelector("footer").getBoundingClientRect();
+    const bounds = panel.getBoundingClientRect();
+    return {
+      usableEditor: editor.height >= 260,
+      panelFitsEditorAndControls: bounds.height >= editor.height + 90,
+      editorContained: editor.bottom <= bounds.bottom,
+      footerAfterEditor: footer.top >= editor.bottom,
+      footerContained: footer.bottom <= bounds.bottom,
+      noClippedContent: panel.scrollHeight <= panel.clientHeight + 1,
+    };
+  })).toEqual({
+    usableEditor: true,
+    panelFitsEditorAndControls: true,
+    editorContained: true,
+    footerAfterEditor: true,
+    footerContained: true,
+    noClippedContent: true,
+  });
+}
+
+async function attachConsoleLayout(page, testInfo, name, { captureImage = true } = {}) {
+  const geometry = await page.locator("#sql-workspace").evaluate(workspace => {
+    const bounds = node => {
+      const rect = node.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, height: rect.height, width: rect.width,
+        scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, scrollTop: node.scrollTop };
+    };
+    return {
+      workspace: bounds(workspace), panes: bounds(workspace.querySelector("#sql-panes")),
+      editor: bounds(workspace.querySelector(".sql-editor-panel")),
+      footer: bounds(workspace.querySelector(".sql-editor-panel footer")),
+      resultsHeader: bounds(workspace.querySelector("#show-sql-results")),
+      resultsPanel: bounds(workspace.querySelector(".sql-results-panel")),
+      results: bounds(workspace.querySelector("#sql-results")),
+      toolbar: bounds(document.querySelector("#tool-rail")),
+      guidanceExpanded: document.querySelector(".compatibility-import-details").open,
+    };
+  });
+  await testInfo.attach(`${name}-geometry`, { body: Buffer.from(JSON.stringify(geometry, null, 2)), contentType: "application/json" });
+  if (captureImage) await testInfo.attach(`${name}-layout`, { body: await page.screenshot(), contentType: "image/png" });
+}
+
 test("workspace toolbar follows Tables, Views, and SQL contexts", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);
   await page.goto(`/?workspace=${workspace.id}&layer=tables`);
@@ -119,6 +164,7 @@ test("safe-read Console runs the cursor statement and renders PostgreSQL column 
   expect(editorBox?.y + editorBox?.height).toBeLessThanOrEqual(
     (panelBox?.y ?? 0) + (panelBox?.height ?? 0),
   );
+  await expectEditorContained(page);
   await expect(page.getByRole("button", { name: "Run current statement" })).toBeVisible();
   await editor.fill("SELECT current_database() AS database, 42::integer AS answer;");
   await page.getByRole("button", { name: "Run current statement" }).click();
@@ -132,6 +178,120 @@ test("safe-read Console runs the cursor statement and renders PostgreSQL column 
   await expect(result.locator("tbody")).toContainText(workspace.database);
   await expect(result.locator("tbody")).toContainText("42");
 });
+
+for (const guidance of ["collapsed", "expanded"]) {
+  test(`SQL Console keeps editor, footer, and results reachable with ${guidance} compatibility guidance in a short viewport`, async ({ page, request }, testInfo) => {
+    await page.setViewportSize(testInfo.project.use.isMobile
+      ? { width: 390, height: 620 }
+      : { width: 1280, height: 540 });
+    const workspace = await databaseWorkspace(request);
+    const imported = { ...workspace, importSummary: {
+      ...workspace.importSummary, complete: false,
+      catalogFingerprint: workspace.importSummary?.catalogFingerprint ?? "a".repeat(64),
+      catalogCapturedAt: workspace.importSummary?.catalogCapturedAt ?? "2026-11-11T12:00:00Z",
+      importedObjects: workspace.importSummary?.importedObjects ?? {},
+      migrationGuidance: "Only changes outside the proven protected dependency scope may be reviewed.",
+      issues: [{ category: "table", objectName: "public.partitioned_orders", featureCode: "partitioning",
+        reason: "Partition structure is protected and omitted from the editable design.",
+        dependencyComplete: false, unknownReasons: ["Partition dependency evidence is incomplete."], protectedScope: [] }],
+    } };
+    // Exercise the actual compatibility renderer without changing the retained workspace.
+    await page.route("**/api/v1/schemii/workspaces", async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({ response, json: {
+        ...body, workspaces: body.workspaces.map(item => item.id === workspace.id ? imported : item),
+      } });
+    });
+    await page.route(`**/api/v1/schemii/workspaces/${workspace.id}`, route => route.fulfill({ json: imported }));
+    await page.goto(`/?workspace=${workspace.id}&layer=sql`);
+    const banner = page.locator("#workspace-compatibility");
+    await expect(banner).toBeVisible();
+    await expect(page.locator("#review-migration-button")).toBeEnabled();
+    if (guidance === "expanded") {
+      await banner.getByText("known limits and recovery", { exact: false }).click();
+      await expect(banner.locator("details")).toHaveAttribute("open", "");
+    }
+    await expectEditorContained(page);
+    const panes = page.locator("#sql-panes");
+    await panes.evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await attachConsoleLayout(page, testInfo, "editor");
+    const footer = page.locator(".sql-editor-panel footer");
+    await expect(footer).toBeInViewport({ ratio: 1 });
+    const showResults = page.locator("#show-sql-results");
+    await expect(showResults).toBeInViewport({ ratio: 1 });
+    if (testInfo.project.use.isMobile) {
+      const resultsHeaderBox = await showResults.boundingBox();
+      const railBox = await page.locator("#tool-rail").boundingBox();
+      expect(resultsHeaderBox.y + resultsHeaderBox.height).toBeLessThanOrEqual(railBox.y + 1);
+    }
+    await expect(banner.locator("details")).toHaveJSProperty("open", guidance === "expanded");
+    // The collapsed header is a real pointer target, including above the mobile rail.
+    await showResults.click();
+    await expect(showResults).toHaveAttribute("aria-expanded", "true");
+    await page.locator("#show-sql-editor").click();
+    await expectEditorContained(page);
+
+    const editor = page.getByRole("textbox", { name: "Unsaved SQL draft" });
+    await editor.fill("SELECT number, repeat('wide result ', 50) AS long_value FROM generate_series(1, 150) AS generated(number) ORDER BY number;");
+    await page.getByRole("button", { name: "Run current statement" }).click();
+    await expect(page.locator("#show-sql-results")).toHaveAttribute("aria-expanded", "true");
+    // The inactive editor's hidden content must not hold the results pane open.
+    await expect.poll(() => page.locator(".sql-editor-panel").evaluate(panel =>
+      panel.getBoundingClientRect().height <= panel.querySelector("header").getBoundingClientRect().height + 2,
+    )).toBe(true);
+    const results = page.locator("#sql-results");
+    const rows = results.locator("tbody tr");
+    await expect(rows).toHaveCount(100);
+    await expect(results.locator("thead")).toContainText("integer");
+    await results.scrollIntoViewIfNeeded();
+    await attachConsoleLayout(page, testInfo, "results-before-assertions", { captureImage: false });
+    await expect.poll(() => results.evaluate(node => {
+      const rect = node.getBoundingClientRect();
+      const parents = [node.closest(".sql-results-panel"), node.closest("#sql-panes")];
+      const contained = parents.every(parent => {
+        const outer = parent.getBoundingClientRect();
+        const top = outer.top + parent.clientTop;
+        return rect.top >= top - 1 && rect.bottom <= top + parent.clientHeight + 1;
+      });
+      const style = getComputedStyle(node);
+      const minimumData = [".sql-result-card > header", "thead", "tbody tr"].reduce((height, selector) =>
+        height + node.querySelector(selector).getBoundingClientRect().height, 0,
+      ) + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      // Fractional flex heights can round the outer scroller's edge by <1 CSS px.
+      // The actual column header and data cell below still require full intersection.
+      const inViewport = rect.top >= -1 && rect.bottom <= innerHeight + 1
+        && rect.left >= -1 && rect.right <= innerWidth + 1;
+      return contained && inViewport && node.clientHeight >= minimumData;
+    })).toBe(true);
+    const numberHeader = results.locator("thead th").filter({ hasText: "number" });
+    const firstValue = rows.first().locator("td").first();
+    await expect(numberHeader).toBeInViewport({ ratio: 1 });
+    await expect(firstValue).toHaveText("1");
+    await expect(firstValue).toBeInViewport({ ratio: 1 });
+    await expect.poll(() => results.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+    // Exercise paging through the visible data scroller, as a pointer user does.
+    await results.hover();
+    await page.mouse.wheel(0, await results.evaluate(node => node.scrollHeight));
+    await expect(rows).toHaveCount(150);
+    await expect(rows.last()).toContainText("150");
+    await results.evaluate(node => { node.scrollTop = 0; });
+    await expect(numberHeader).toBeInViewport({ ratio: 1 });
+    await expect(firstValue).toBeInViewport({ ratio: 1 });
+    await expect.poll(() => results.locator(".sql-result-viewport").evaluate(node =>
+      node.scrollWidth > node.clientWidth,
+    )).toBe(testInfo.project.use.isMobile === true);
+    await expect.poll(() => page.locator(".app-shell, #sql-workspace, #sql-panes").evaluateAll(nodes =>
+      nodes.every(node => node.scrollWidth <= node.clientWidth + 1),
+    )).toBe(true);
+    await expect(banner.locator("details")).toHaveJSProperty("open", guidance === "expanded");
+    await attachConsoleLayout(page, testInfo, "results");
+
+    await page.locator("#show-sql-editor").click();
+    await expectEditorContained(page);
+    await expect(editor).toHaveValue(/SELECT number/);
+  });
+}
 
 test("safe-read Console explains rejected mutation without clearing the draft", async ({ page, request }) => {
   const workspace = await databaseWorkspace(request);

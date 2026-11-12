@@ -27,14 +27,50 @@ accounts, prepare two testers plus an independent reviewer:
 ./test.sh run --run RUN_ID
 ```
 
-`--parallel` counts testers; the reviewer has its own reserved account and ready
-lane. Supply observed runtime slots, never a configuration target. The native
-adapter allows ten testers plus one reviewer, requiring coordinator capacity too.
+`--parallel` counts testers; each reviewer has its own reserved selected account
+and ready lane. `--reviewer-account` remains supported for a singleton. Use
+`--reviewer-accounts` for an explicit comma-separated list; the two flags are
+mutually exclusive. Empty, repeated or unselected reviewer usernames are rejected.
+Supply observed runtime slots, never a configuration target. The native adapter
+allows at most ten testers plus the selected reviewers. Every active wave needs
+one coordinator + `--parallel` testers + every reviewer, including reviewers who
+are waiting to inspect evidence. Reviewers cannot also fill tester slots.
 A larger requested mission cannot silently count a smaller wave as equivalent.
 Preparation uses only `./start.sh`, verifies local and Tailscale HTTPS, checks
 permissions/resources and holds the existing deployment lease. Freeze source for
 the entire run. Feature scenarios need their normal fixture resources/access
 checks; a native browser does not grant application permissions.
+
+For ten testers and two role-correct reviewers on an observed 13-slot interface:
+
+```bash
+./test.sh prepare --browser native --controller t3 \
+  --accounts qa_designer_010,qa_designer_011,qa_designer_012,qa_designer_001,qa_modeler_011,qa_modeler_012,qa_report_author_011,qa_report_author_012,qa_report_author_013,qa_viewer_011,qa_designer_014,qa_report_author_014 \
+  --reviewer-accounts qa_designer_014,qa_report_author_014 \
+  --agents 12 --parallel 10 --runtime-slots 13 \
+  --credentials-file /private/retained-credentials.json \
+  --fixtures /private/ready-ten-tester-fixtures.json --tracks lifecycle \
+  --products schemii,schemoo,schemer --viewports desktop,mobile --headless
+```
+
+This names twelve account lanes: ten testers, a Schemii designer reviewer and a
+Schemoo/Schemer report-author reviewer. Verify the actual accounts' effective
+product/resource grants and ready fixture scenarios before dispatch. Mixed-persona
+fixtures must declare their product-specific scenarios, expected capabilities and
+`deniedProducts`; the global product list does not grant access. The account
+names and reviewer role do not establish access. Give each reviewer only the
+cases and owned resources it can actually inspect and reproduce. Neither is an
+all-product administrator. The manifest, `plan`, `doctor` and report distinguish
+tester/reviewer counts and the active slot budget. Preparation and a pending
+tester handoff do not establish application acceptance or overlapping AI work.
+
+In a linked worktree, Codex may execute the primary checkout's trusted assignment
+hook. A passing branch-local guard test does not activate that hook for new
+actors. Integrate the reviewed plural-selection guard into the primary checkout,
+review/trust the changed hook through supported controls and verify fresh provider
+loading before dispatching a plural manifest. Keep the existing supported
+singleton workflow until that activation is established; never bypass reviewer
+role checks or weaken the guard to start a run.
 
 Use the actual prepared checkout, run/lane IDs and native return ID. Each prompt
 contains exactly one standalone assignment, with `qa.browser` set to `native`:
@@ -220,3 +256,146 @@ without these receipts stay review-pending. No declaration in this runbook prove
 live acceptance. Keep the legacy execution path until the pilot and subsequent
 concurrent writable/paging/modal/upload/download/interrupted-write workflows pass
 with independently reviewed desktop/mobile evidence and cleanup parity.
+
+## Later attempts, external review and final verification
+
+New prepared runs use acceptance contract 2. Each checkpoint appends an immutable
+attempt. The displayed execution result is the latest attempt; initial failure/block,
+notes, screenshots and full history stay available. A later pass is review-pending
+until the distinct reviewer accepts that exact attempt and explicitly supplies
+`--args-json '{"historyAcknowledged":true}'` when earlier failed/blocked attempts exist.
+Confirmed defects remain unresolved in their original run; changing source requires
+a **new** prepared run, with fresh deployment/fixtures and independent reproduction.
+The live checkpoint/finish source fence is unchanged.
+
+After both source runs are stopped and owned transports are verified stopped,
+link a historical finding to a current-source passing, image-inspected and exactly
+reviewed reproduction:
+
+```bash
+./test.sh resolve-finding --run CURRENT_RUN --from-run ORIGINAL_RUN \
+  --finding ORIGINAL_FINDING --target-lane TESTER_LANE --scenario CURRENT_CASE \
+  --disposition resolved-defect --provenance 'Original finding and independent review reference' \
+  --note 'Original expected/actual; exact later-source reproduction and observed fix'
+```
+
+For originally unverified findings the explicit adjudications `not-reproduced`,
+`prerequisite-mistake` and `unsupported-action` are also available. A confirmed
+defect cannot be reclassified to avoid remediation. This appends provenance-linked
+receipts to both runs; it does not change the original finding, review or attempts,
+and cannot make old-source execution accepted. The current run imports the original
+finding/image digests and exact reproduction/review proof. Each original image
+must resolve to its authentic retained lane, source, scenario, generation, agent,
+checkpoint attempt and capture digest; replacement bytes are rejected. Historical
+records lacking that binding remain unverified. Ongoing applicability rechecks
+those original proof records, in addition to the later reproduction. Changed files, source,
+latest attempts, reviews, original finding content, or reporter self-review invalidate
+the import. A GitHub issue closure or free-text claim is insufficient.
+
+The coordinator still schedules existing `./ci.sh` checks according to ownership.
+Prepare freezes `verificationBase` to the intended origin/main commit. Use
+`./ci.sh --base VERIFICATION_BASE_SHA` so later ref movement cannot narrow the
+required inventory; receipt imports reject a different comparison base.
+Import their original private receipt after it finishes; this command executes no
+suite and does not substitute a new runner:
+
+```bash
+./test.sh verify-receipt --run CURRENT_RUN --phase focused \
+  --receipt /private/original-local-ci/receipt.json --note 'Original focused receipt provenance'
+./test.sh verify-receipt --run CURRENT_RUN --phase final \
+  --receipt /private/original-local-ci/receipt.json --note 'Original complete selected acceptance'
+```
+
+The import first requires the independent authenticated original-runner record
+from the common Git directory, then reuses the existing change planner and timing/inventory validators,
+checks exact source, command inventory/status, original per-attempt timing records,
+counts, pending scopes and file digests. Feedback can establish only focused checks;
+final acceptance requires the complete applicable plan, no failed/cancelled/missing
+checks and no pending layers. Synthetic or copied receipt bundles and unknown historical originals are rejected;
+the importer never creates missing provenance. Original command lifecycle and
+actual discovered/executed case/source inventories are bound before import.
+Rejected imports append a rejection receipt. Changed
+imported files revoke their applicability. New-run reviewed acceptance requires a
+current final receipt in addition to actual independently reviewed UI cases and
+observed cleanup. Reports show intended, dispatched, started, completed, reviewed,
+first-attempt failures, initial/latest results, and focused/final receipt outcomes.
+
+Same-state image sharing across different scenarios remains unsupported: begin and
+capture each exact assigned scenario. Existing stale/wrong-resource rejection and
+independent image review remain required. Full live integration for #138/#140/#141,
+including provider turns, modal/download behavior, simultaneous writes, interrupted
+writes, paging and cleanup, remains separate acceptance work.
+
+## Explicit same-state capture coverage
+
+Single-case `begin` remains the default. To assess two to four assigned checks
+against **one unchanged visible state**, first finish navigation and functional
+actions, then declare literal case IDs before taking a new screenshot:
+
+```bash
+./test.sh begin --session-file SESSION --scenario CASE_A \
+  --args-json '{"coverage":["CASE_A","CASE_B"],"stateURL":"https://localhost:8001/?workspace=EXACT&tableId=EXACT&table=EXACT"}'
+# Take and actually view a fresh, unnamed native PNG. Import it with capture.
+./test.sh inspect --session-file SESSION --evidence lane-1/image-ID.png \
+  --note 'Concrete visible observations for each named check' \
+  --args-json '{"tool":"view_image","invocation":"actual image viewing reference","coverage":["CASE_A","CASE_B"]}'
+./test.sh checkpoint --session-file SESSION --scenario CASE_A \
+  --functional passed --visual passed --note 'Case A expected/actual functional and visual observations' \
+  --evidence lane-1/image-ID.png
+./test.sh checkpoint --session-file SESSION --scenario CASE_B \
+  --functional passed --visual passed --note 'Case B separate expected/actual observations' \
+  --evidence lane-1/image-ID.png
+```
+
+Use actual assigned IDs and observed URLs. `stateURL` is optional when the assigned
+route already identifies the exact visible state. It can only narrow the same
+assigned workspace route to supported selections. For an explicitly receipted
+workspace, use the existing `url` resource selector as well. All declared checks
+must share the exact product, route, resource set, viewport, source, account,
+lane generation and expected product state. Denial checks use their own captures.
+Each declaration creates distinct scenario-attempt IDs and a digest; each image
+retains the literal members and the connection's activity epoch. Unknown,
+unassigned, duplicate, nested, excessive or mismatched groups fail before capture.
+Old images and historical inspection receipts cannot acquire coverage later.
+
+A fresh activity-aware native provider session is required. The native stdio
+boundary publishes only a monotonic epoch and in-flight action count in private
+session metadata, alongside its existing process/session identities. Potentially
+mutating browser calls increment the epoch **when admitted**, including failed,
+cancelled and queued calls. Replaying a queued call cannot reset it. Screenshots,
+snapshots, console/network reads and explicit tab listing do not increment it;
+unknown tools, navigation, inputs, dialogs, waiting, resize and tab changes do.
+No action payloads or credentials are added to metadata. The isolated adapter uses
+its existing serialized action boundary for the same fence.
+
+An intervening action, pending action, recovery, source/session/generation change
+or changed assignment invalidates remaining group checkpoints. Captures must
+still postdate declaration, have the exact PNG dimensions and retain unchanged
+hash-bound bytes. This fence observes browser tool activity; it does not prove
+that an asynchronous application update has stopped. If the visible state changes
+or is still loading, end the group and capture a newly declared stable state.
+Workers must record the actual state they see.
+
+Checkpoint each member once, with its own functional observations. Completing all
+members ends the group automatically. A partial group blocks another `begin` and
+`finish`; explicitly abandon it with:
+
+```bash
+./test.sh coverage-end --session-file SESSION --note 'Exact remaining blocker or changed state'
+```
+
+Abandonment preserves completed attempts, images and the remaining coverage gap;
+it creates no result for unchecked members. A new begin creates new attempts and
+requires a fresh capture. No nested declaration or retroactive membership exists.
+
+The independent reviewer must actually inspect the image, use
+`inspect --target-lane TESTER_LANE` with an explicit `coverage` array, then submit
+one `review --scenario CASE_ID` per exact case attempt. One actual image-view
+invocation may cover only the explicitly named declared members. A view receipt
+for A does not cover B. Every case keeps separate functional/visual results and
+review verdicts; reports expose declaration membership and incomplete groups.
+This remains cooperative visual evidence, not automated pixel judgment.
+
+Current source controls do not establish provider activation or live application
+acceptance. The coordinator still schedules the actual fresh-context desktop and
+mobile confirmation/download/shared-image pilot and independent pixel review.

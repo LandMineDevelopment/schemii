@@ -75,6 +75,39 @@ state private. No artifacts are uploaded automatically. Record prerequisite,
 setup and execution boundaries honestly; a local elapsed time cannot establish
 hosted queue savings. Preserve failed and blocked attempts.
 
+## Original local execution provenance
+
+The existing local runner now records importable provenance only for its own
+canonical planner selection and actual child invocations. After successful original
+execution, it publishes an authenticated record in the repository common Git
+directory under `local-ci-origins/`, separate from the receipt bundle. That record
+binds the original absolute receipt location and bytes, source/index identity,
+comparison commit, classification, loaded discovery/validation policy bytes,
+command/PID/exit/cleanup observations, original timing bytes, actual discovered
+case IDs and executed case/source/line/attempt/outcome inventories. Executed source
+IDs must resolve to actual versioned/nonignored source files and their original
+content hashes. No environment values, credentials or row contents are recorded.
+
+This is a cooperative local runner ownership boundary. It does not defend against
+an actor controlling the runner process, its source or the private Git directory.
+The private owner key is never exported or included in reports/artifacts. Retain
+that private repository state with the original evidence; missing/corrupt keys or
+origin records do not authorize reconstruction from imported claims.
+
+The QA receipt importer is read-only: it verifies the independent original owner
+record, current source/base/policy and actual original inventories through the
+existing validators. It neither creates provenance nor executes suites. A copied
+receipt, invented single-case lane, changed timing/source inventory, edited owner
+record, cancellation or incomplete required command cannot become accepted.
+Custom/mocked runner plans and synthetic parser controls cannot mint this origin.
+Positive protocol controls use tiny real canonical child executions in disposable
+Git fixtures; they establish the importer/runner contract, not app acceptance.
+
+Historical legitimate receipts without this provenance remain useful retained
+evidence requiring explicit source/scope/execution reconciliation. They are never
+automatically upgraded to new-contract final verification. No hosted Actions,
+new suite runner or reduced discovery is introduced.
+
 ## Selected local acceptance
 
 The planner applies the complete committed/staged/unstaged change and selects the
@@ -342,6 +375,27 @@ their original whole file; retries, skips and acceptance coverage are unchanged.
 The six-stack routing balances the serial cost plus the slower overlapping group,
 rather than dividing a serial plan and leaving its shared phase as the bottleneck.
 
+The routing calibration in `scripts/ci/browser-shards.mjs` records one accepted
+natural local run from November 12, 2026 (source `4497b5c`, local run
+`1794454748157`), with six lanes per device. Its device-specific file costs sum
+first-attempt setup, execution and teardown, including setup/teardown for skips.
+The metadata binds the original private receipt digest, source fingerprint,
+per-file source hashes and sanitized cost totals; it contains no test titles,
+rows, credentials or raw logs. Original receipts remain private.
+
+An unchanged spec uses its historical measured phase cost as a scheduling
+estimate. A changed, missing, unreadable or new spec receives the device's median
+positive calibration cost and appears in `unknownFiles`; it stays scheduled and
+does not gain parallel eligibility. File hashes establish only spec identity:
+application, helper, fixture, host and runtime changes can still change cost.
+These estimates are not measurements of current wall time. Offline balance
+forecasts do not establish the issue128 slowest/fastest wall target of 1.15,
+critical-path savings or ten-run reliability. The next legitimate feature
+acceptance measures the changed routing; subsequent comparable natural runs
+remain the monitoring cohort. Never create sample-only runs to fill it. Local
+acceptance currently executes browser commands sequentially, so redistributing
+files alone does not prove a reduction in that serial elapsed sum.
+
 Actual discovery proves the original case inventory. Child receipts retain
 original source/case identities despite their private working directories, and
 the joined receipt must contain every original case exactly once. Missing,
@@ -577,3 +631,35 @@ or application; it is additionally runnable after `npm ci`. The reporter-free
 ~364ms overhead, not a percentile or controlled benchmark. The 12-case fixture
 subset emitted 7,319 bytes and completed in 0.05s with Python timing enabled.
 Those observations do not establish compatibility or speed on other runtimes.
+
+### Served disposable metadata-pressure boundary
+
+`./start.sh --qualify-metadata-pressure` is an explicit coordinator-owned #134
+qualification path, separate from ordinary acceptance and capacity testing. Its
+launcher, controller and fixed HTTPS probe live in `dev/pressure/`; preparation,
+ownership, restoration and interrupted recovery are described in
+[the testing setup](../testing/README.md#disposable-served-metadata-pressure-qualification-134).
+It requires the committed #135 source witness before creating any runtime
+resources, a source/config-matching healthy retained deployment, and canonical
+exclusive leases. Only fresh disposable metadata/source databases receive
+pressure; retained user metadata is never a target. Fake lifecycle controls prove
+ownership and recovery decisions, not a live served-pressure pass. The current
+recipe uses an explicit fixture-only ASGI owner sampler for saturated peak counts
+and original stock shutdown-completion accounting; missing/stale/forced outcomes
+remain incomplete. This instrumentation has unmeasured overhead and cannot prove
+uninstrumented stock capacity. The bounded held-consumer mode preserves exclusive
+leases and joins its exact consumer group before restoration. Exactly two fixed
+versioned profiles separate small metadata-pressure budgets from representative
+one-API load allocations; `--hold-load-fixture` selects the latter. Actual stock
+metadata composition (normal16/readiness2 for load), source admission and effective
+runtime allocations are checked without changing production defaults. Profile
+binding and a simulated1800s held lifecycle are pure/fake controls. A separate
+launcher-only disposable OS export reuses the reviewed process/cgroup helpers,
+requires exact journal/source/profile/parent/lease identity, and binds the actual
+API separately from Docker init. Missing or changed OS proof prevents held
+authority; configuration receipts cannot substitute for it. Normal runtime
+export restrictions remain unchanged. All actual export/collector qualification
+is still pending. Authored controls
+do not establish a live peak/lifespan/restore pass. Reuse unchanged native/real-PostgreSQL/assembled receipts
+where their original source and scope still apply; run only the missing served
+qualification after independent review and explicit coordinator scheduling.

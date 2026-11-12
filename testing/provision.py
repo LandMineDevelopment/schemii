@@ -146,7 +146,21 @@ def validate_registry(value):
                     raise ValueError("Report-author cleanup marker does not match its retained object ID")
                 if pending["kind"] == "model" and "dashboardId" in author_fixture:
                     raise ValueError("Report-author model cleanup cannot precede its dashboard cleanup")
+        viewer = slot.get("reportViewerFixture")
+        if viewer is not None:
+            if (slot["persona"] != "report_viewer" or not isinstance(viewer, dict)
+                    or set(viewer) != {"authorUsername", "authorAccountId", "modelId", "dashboardId", "connectionId", "namespace"}
+                    or not re.fullmatch(r"qa_report_author_[0-9]{3}", viewer.get("authorUsername", ""))
+                    or viewer.get("namespace") != viewer["authorUsername"]
+                    or not MODEL_ID.fullmatch(viewer.get("modelId", ""))
+                    or not DASHBOARD_ID.fullmatch(viewer.get("dashboardId", ""))
+                    or not re.fullmatch(r"pg_[0-9a-f]{32}", viewer.get("connectionId", ""))
+                    or not isinstance(viewer.get("authorAccountId"), str) or not viewer["authorAccountId"]):
+                raise ValueError("Invalid retained report-viewer pairing")
         usernames.add(name)
+    for slot in value["slots"]:
+        if slot.get("reportViewerFixture"):
+            paired_author(value, slot)
     # qa-v1 retained the same identities and source IDs. Keep those private
     # records portable while deriving the new permission and object fixtures.
     value["fixtureVersion"] = DEFINITIONS["fixtureVersion"]
@@ -198,6 +212,210 @@ def report_author_model_name(username):
 
 def report_author_dashboard_name(username):
     return f"QA report-author dashboard {username}"
+
+
+def paired_author(registry, viewer):
+    pairing = viewer["reportViewerFixture"]
+    author = next((slot for slot in registry["slots"] if slot["username"] == pairing["authorUsername"]), None)
+    if (not author or author["persona"] != "report_author" or author.get("reportAuthorCleanupStarted")
+            or author.get("accountId") != pairing["authorAccountId"]
+            or author.get("connectionId") != pairing["connectionId"]
+            or author.get("schema") != pairing["namespace"]
+            or any(author.get("reportAuthorFixture", {}).get(key) != pairing[key] for key in ("modelId", "dashboardId"))):
+        raise ValueError("Retained report-viewer author/source pairing drift")
+    return author
+
+
+def viewer_access(pairing):
+    """Keep source and dashboard in the same direct role, without tool authoring."""
+    return {"capabilities": ["schemer:access"],
+            "connections": [{"connection_id": pairing["connectionId"], "owner_id": POOL, "allow_authoring": False}],
+            "dashboards": [{"dashboard_id": pairing["dashboardId"], "owner_id": pairing["authorAccountId"],
+                            "connection_id": pairing["connectionId"], "connection_owner_id": POOL,
+                            "can_export": True, "can_drill": True}]}
+
+
+def verify_viewer(user, slot):
+    actual = user.login(slot)
+    if (actual.get("user", {}).get("id") != slot["accountId"] or actual.get("is_admin")
+            or actual.get("capabilities") != ["schemer:access"]):
+        raise ValueError("Effective report-viewer identity or capabilities drift")
+    pairing = slot["reportViewerFixture"]
+    dashboard = user.call("GET", f"/api/v1/schemer/dashboards/{pairing['dashboardId']}")
+    if dashboard.get("id") != pairing["dashboardId"] or dashboard.get("ownerId") != pairing["authorAccountId"] or dashboard.get("modelId") != pairing["modelId"]:
+        raise ValueError("Effective report-viewer dashboard/source drift")
+    user.call("GET", "/api/v1/schemoo/models", expected=403)
+    user.call("GET", "/api/v1/schemii/workspaces", expected=403)
+
+
+def validate_pairing_expectation(value, operation):
+    """Expectations contain only the exact password-free retained projections."""
+    viewer_keys = {"username", "accountId", "provisioned", "reportViewerFixture"}
+    author_keys = {"username", "accountId", "connectionId", "schema", "reportAuthorFixture"}
+    pairing_keys = {"authorUsername", "authorAccountId", "connectionId", "namespace", "modelId", "dashboardId"}
+    if (not isinstance(value, dict) or set(value) != {"schemaVersion", "operation", "viewer", "author"}
+            or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+            or value["operation"] != operation):
+        raise ValueError("Invalid pairing expectation schema or operation")
+    viewer, author = value["viewer"], value["author"]
+    if (not isinstance(viewer, dict) or set(viewer) != viewer_keys
+            or not isinstance(author, dict) or set(author) != author_keys
+            or type(viewer["provisioned"]) is not bool
+            or any(not isinstance(viewer[key], str) or not viewer[key] for key in ("username", "accountId"))
+            or any(not isinstance(author[key], str) or not author[key] for key in ("username", "accountId", "connectionId", "schema"))):
+        raise ValueError("Invalid pairing expectation projections")
+    fixture, pairing = author["reportAuthorFixture"], viewer["reportViewerFixture"]
+    if (not isinstance(fixture, dict) or set(fixture) != {"modelId", "dashboardId"}
+            or any(not isinstance(item, str) or not item for item in fixture.values())
+            or (pairing is not None and (not isinstance(pairing, dict) or set(pairing) != pairing_keys
+                or any(not isinstance(item, str) or not item for item in pairing.values())))):
+        raise ValueError("Invalid pairing expectation fixture projections")
+    return value
+
+
+def read_pairing_expectation(path, operation):
+    """Read once from a private, bounded regular file while provision is locked."""
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("Duplicate pairing expectation key")
+            value[key] = item
+        return value
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 16 * 1024:
+                raise ValueError("Invalid private pairing expectation file")
+            content = stream.read(16 * 1024 + 1)
+            if len(content) > 16 * 1024:
+                raise ValueError("Oversized pairing expectation file")
+        value = json.loads(content.decode("utf-8"), object_pairs_hook=unique_object)
+        return validate_pairing_expectation(value, operation)
+    except (OSError, ValueError, RecursionError) as error:
+        # Neither paths nor supplied expected resource values belong in diagnostics.
+        raise ValueError("Invalid private pairing expectation file or contents") from error
+
+
+def check_pairing_expectation(expected, operation, viewer, author):
+    if expected is None:
+        return
+    validate_pairing_expectation(expected, operation)
+    if (not viewer or not author or type(viewer.get("provisioned")) is not bool
+            or {key: viewer.get(key) for key in expected["viewer"]} != expected["viewer"]
+            or {key: author.get(key) for key in expected["author"]} != expected["author"]):
+        raise ValueError("Pairing expectation does not match retained viewer/author state")
+
+
+def provision_viewer(directory, admin_file, username, author_username, *, expected=None):
+    """Explicit opt-in pairing; never discover or adopt a dashboard by name."""
+    registry = registry_load(directory)
+    slots = {slot["username"]: slot for slot in registry["slots"]}
+    viewer, author = slots.get(username), slots.get(author_username)
+    check_pairing_expectation(expected, "pair", viewer, author)
+    if (not viewer or viewer["persona"] != "report_viewer" or not viewer.get("accountId")
+            or not author or author["persona"] != "report_author" or not author.get("provisioned")
+            or author.get("reportAuthorCleanupStarted") or not author.get("accountId") or not author.get("connectionId")
+            or set(author.get("reportAuthorFixture", {})) != {"modelId", "dashboardId"}):
+        raise ValueError("Viewer pairing requires provisioned retained viewer and complete retained author fixtures")
+    pairing = {"authorUsername": author_username, "authorAccountId": author["accountId"],
+               "connectionId": author["connectionId"], "namespace": author["schema"], **author["reportAuthorFixture"]}
+    if viewer.get("reportViewerFixture") not in (None, pairing):
+        raise ValueError("Retained viewer pairing differs; refusing to replace shared access")
+    admin = Client()
+    try:
+        credentials = json.loads(private_read(admin_file))
+        if not admin.login(credentials.get("admin", credentials)).get("is_admin"):
+            raise ValueError("Viewer pairing requires an application administrator")
+        accounts = {account["username"]: account for account in admin.call("GET", "/api/v1/admin/accounts")}
+        account = accounts.get(username)
+        expected = viewer_access(pairing)
+        empty = {"capabilities": ["schemer:access"], "connections": [], "dashboards": []}
+        if (not account or account["id"] != viewer["accountId"] or account["is_admin"] or account["disabled"]
+                or account["role_ids"] or account["direct_access"] not in (empty, expected)):
+            raise ValueError("Retained viewer account has unrelated access or identity drift")
+        profiles = admin.call("GET", "/api/v1/admin/schemii-connections")["connections"]
+        profile = next((item for item in profiles if item["id"] == author["connectionId"]), None)
+        if (not profile or profile.get("ownerId") != POOL or profile.get("username") != author["schema"]
+                or profile.get("host") != "qa-postgres" or profile.get("database") != "schemii_qa"
+                or not profile.get("credentialStored")):
+            raise ValueError("Shared report source profile drift")
+        owner = Client()
+        try:
+            identity = owner.login(author)
+            if identity.get("user", {}).get("id") != author["accountId"]:
+                raise ValueError("Retained author identity drift")
+            _verify_report_author_model(owner.call("GET", f"/api/v1/schemoo/models/{pairing['modelId']}"), author)
+            _verify_report_author_dashboard(owner.call("GET", f"/api/v1/schemer/dashboards/{pairing['dashboardId']}"), author)
+        finally:
+            owner.logout()
+        # Persist exact dependency before changing grants: uncertain PATCH is
+        # recoverable and cleanup cannot delete the referenced author meanwhile.
+        viewer["reportViewerFixture"] = pairing
+        viewer["provisioned"] = False
+        write_private(directory / "registry.json", registry)
+        if account["direct_access"] != expected:
+            admin.call("PATCH", f"/api/v1/admin/accounts/{viewer['accountId']}", {"direct_access": expected})
+        reader = Client()
+        try:
+            verify_viewer(reader, viewer)
+        finally:
+            reader.logout()
+        viewer["provisioned"] = True
+        write_private(directory / "registry.json", registry)
+        derived_files(directory, registry)
+        return {"account": username, "author": author_username, "dashboardId": pairing["dashboardId"], "verified": True}
+    finally:
+        admin.logout()
+
+
+def unpair_viewer(directory, admin_file, username, author_username, *, expected=None):
+    """Revoke only the exact retained pairing, keeping dependency until verified."""
+    registry = registry_load(directory)
+    slots = {slot["username"]: slot for slot in registry["slots"]}
+    viewer, author = slots.get(username), slots.get(author_username)
+    check_pairing_expectation(expected, "unpair", viewer, author)
+    if not viewer or viewer["persona"] != "report_viewer" or not viewer.get("accountId"):
+        raise ValueError("Unpair requires a retained report viewer")
+    pairing = viewer.get("reportViewerFixture")
+    if not pairing:
+        return {"account": username, "unpaired": True, "changed": False}
+    if pairing["authorUsername"] != author_username:
+        raise ValueError("Unpair author does not match the exact retained pairing")
+    empty = {"capabilities": ["schemer:access"], "connections": [], "dashboards": []}
+    admin = Client()
+    try:
+        credentials = json.loads(private_read(admin_file))
+        if not admin.login(credentials.get("admin", credentials)).get("is_admin"):
+            raise ValueError("Viewer unpairing requires an application administrator")
+        account = next((item for item in admin.call("GET", "/api/v1/admin/accounts") if item["username"] == username), None)
+        if (not account or account["id"] != viewer["accountId"] or account["is_admin"] or account["disabled"]
+                or account["role_ids"] or account["direct_access"] not in (empty, viewer_access(pairing))):
+            raise ValueError("Viewer unpairing refuses changed identity or unrelated access")
+        viewer["provisioned"] = False
+        write_private(directory / "registry.json", registry)
+        if account["direct_access"] != empty:
+            admin.call("PATCH", f"/api/v1/admin/accounts/{viewer['accountId']}", {"direct_access": empty})
+        confirmed = next((item for item in admin.call("GET", "/api/v1/admin/accounts") if item["id"] == viewer["accountId"]), None)
+        if not confirmed or confirmed["direct_access"] != empty:
+            raise ValueError("Viewer grant revocation did not persist")
+        user = Client()
+        try:
+            identity = user.login(viewer)
+            if identity.get("user", {}).get("id") != viewer["accountId"] or identity.get("capabilities") != ["schemer:access"]:
+                raise ValueError("Viewer identity drift after grant revocation")
+            user.call("GET", f"/api/v1/schemer/dashboards/{pairing['dashboardId']}", expected=404)
+        finally:
+            user.logout()
+        viewer.pop("reportViewerFixture")
+        viewer["provisioned"] = True
+        write_private(directory / "registry.json", registry)
+        derived_files(directory, registry)
+        return {"account": username, "unpaired": True, "changed": True}
+    finally:
+        admin.logout()
 
 
 def _verify_report_author_model(model, slot):
@@ -362,6 +580,8 @@ def cleanup_report_author_fixtures(directory, selected):
     slots = [slot for slot in registry["slots"] if slot["username"] in selected]
     if len(slots) != len(selected) or any(slot["persona"] != "report_author" for slot in slots):
         raise ValueError("Select only registered report-author QA accounts")
+    if any(slot.get("reportViewerFixture", {}).get("authorUsername") in selected for slot in registry["slots"]):
+        raise ValueError("Retained shared-viewer references protect these author fixtures; explicitly reconcile viewer access before cleanup")
     totals = {"accounts": [], "removedDashboards": 0, "removedModels": 0}
     for slot in slots:
         fixture = slot.get("reportAuthorFixture")
@@ -483,6 +703,26 @@ def derived_files(directory, registry):
         if slot.get("writableConnectionId"):
             lanes[slot["username"]]["resources"].update(
                 writableConnectionId=slot["writableConnectionId"], writableSchema=slot["writableSchema"])
+        if slot.get("reportViewerFixture"):
+            shared = slot["reportViewerFixture"]
+            lanes[slot["username"]]["resources"].update(
+                scope="explicitly paired populated shared report; no authoring or Schemoo access",
+                sharedNamespace=shared["namespace"], sharedConnectionId=shared["connectionId"],
+                sharedConnectionOwnerId=POOL, sharedAuthor=shared["authorUsername"],
+                schemerDashboardId=shared["dashboardId"], schemooModelId=shared["modelId"])
+            lanes[slot["username"]]["checks"].append({
+                "path": f"/api/v1/schemer/dashboards/{shared['dashboardId']}", "status": 200,
+                "equals": {"id": shared["dashboardId"], "ownerId": shared["authorAccountId"], "modelId": shared["modelId"],
+                           "tiles.0.id": "qa-orders", "tiles.0.kind": "detail", "tiles.0.limit": 100}})
+            lanes[slot["username"]].update(url="/schemer", writeAuthorization={"enabled": False}, scenarios=[{
+                "id": "viewer-shared-report", "product": "schemer", "title": "Read an explicitly shared populated Orders report",
+                "instructions": (f"Open exact shared dashboard {shared['dashboardId']} owned by {shared['authorUsername']}. "
+                                 f"Source namespace is {shared['namespace']}, distinct from your own retained schema {slot['schema']}. "
+                                 "Verify Orders · sample is populated with id, ordered_on, status, amount; source has 513 orders, "
+                                 "report limit is 100 (this is not all-513 paging coverage). Inspect displayed values, refresh, "
+                                 "reload, drill and actual export bytes at each viewport. Do not assume unspecified row ordering. "
+                                 "Verify no author/edit/create or Schemoo access. Never mutate/delete retained dashboard/model/source. "
+                                 "A readiness GET proves access only; record actual UI results separately.")}])
         if slot.get("chatProvider"):
             lanes[slot["username"]]["chatProvider"] = slot["chatProvider"]
         if not persona["product"]:
@@ -611,7 +851,8 @@ def provision(directory, admin_file, selected):
             grants = [{"connection_id": slot["connectionId"], "owner_id": POOL, "allow_authoring": True}] if needs_profile else []
             if slot.get("writableConnectionId"):
                 grants.append({"connection_id": slot["writableConnectionId"], "owner_id": POOL, "allow_authoring": True})
-            access = {"capabilities": persona["capabilities"], "connections": grants, "dashboards": []}
+            access = viewer_access(slot["reportViewerFixture"]) if slot.get("reportViewerFixture") else {
+                "capabilities": persona["capabilities"], "connections": grants, "dashboards": []}
             expected_capabilities = sorted(persona["capabilities"] + (["accounts:provision"] if persona["isAdmin"] else []))
             if slot.get("accountId"):
                 existing = accounts[slot["username"]]
@@ -651,6 +892,10 @@ def provision(directory, admin_file, selected):
                     created = ensure_report_author_fixture(directory, registry, slot, user)
                     counts["createdModels"] += created["models"]
                     counts["createdDashboards"] += created["dashboards"]
+                if slot.get("reportViewerFixture"):
+                    dashboard = user.call("GET", f"/api/v1/schemer/dashboards/{slot['reportViewerFixture']['dashboardId']}")
+                    if dashboard.get("modelId") != slot["reportViewerFixture"]["modelId"]:
+                        raise ValueError("Retained shared dashboard model drift")
             finally:
                 user.logout()
             slot["provisioned"] = True
@@ -817,13 +1062,23 @@ def main():
     writer_parser = subparsers.add_parser("writer", help="Provision one exact marked QA writer target in Schemii")
     writer_parser.add_argument("--admin-credentials", type=Path, required=True)
     writer_parser.add_argument("--account", required=True)
+    viewer_parser = subparsers.add_parser("viewer", help="Explicitly pair a retained viewer with retained author report fixtures")
+    viewer_parser.add_argument("--admin-credentials", type=Path, required=True)
+    viewer_parser.add_argument("--account", required=True)
+    viewer_parser.add_argument("--author", required=True)
+    viewer_parser.add_argument("--expected-pairing-file", type=Path)
+    unpair_parser = subparsers.add_parser("unpair-viewer", help="Revoke only one exact retained shared report pairing")
+    unpair_parser.add_argument("--admin-credentials", type=Path, required=True)
+    unpair_parser.add_argument("--account", required=True)
+    unpair_parser.add_argument("--author", required=True)
+    unpair_parser.add_argument("--expected-pairing-file", type=Path)
     author_cleanup_parser = subparsers.add_parser("cleanup-author", help="Delete only ledgered report-author starter dashboards and models")
     author_cleanup_parser.add_argument("--accounts", required=True, help="Comma-separated retained report-author QA usernames")
     export_parser = subparsers.add_parser("export", help="Export private credentials without deployment-specific IDs")
     export_parser.add_argument("--output", type=Path, required=True)
     import_parser = subparsers.add_parser("import", help="Import private credentials into an empty QA state directory")
     import_parser.add_argument("--input", type=Path, required=True)
-    for child in (initialize_parser, provision_parser, chat_parser, writer_parser, author_cleanup_parser, export_parser, import_parser):
+    for child in (initialize_parser, provision_parser, chat_parser, writer_parser, viewer_parser, unpair_parser, author_cleanup_parser, export_parser, import_parser):
         child.add_argument("--state-dir", type=Path, default=Path(os.environ.get("SCHEMII_QA_STATE_DIRECTORY", ROOT / ".schemii/testing")))
     args = parser.parse_args()
     if args.command == "init" and not 1 <= args.copies <= 100:
@@ -844,6 +1099,12 @@ def main():
             result = provision_chat(directory, args.admin_credentials, args.account, args.model, args.reasoning)
         elif args.command == "writer":
             result = provision_writer(directory, args.admin_credentials, args.account)
+        elif args.command == "viewer":
+            expected = read_pairing_expectation(args.expected_pairing_file, "pair") if args.expected_pairing_file else None
+            result = provision_viewer(directory, args.admin_credentials, args.account, args.author, expected=expected)
+        elif args.command == "unpair-viewer":
+            expected = read_pairing_expectation(args.expected_pairing_file, "unpair") if args.expected_pairing_file else None
+            result = unpair_viewer(directory, args.admin_credentials, args.account, args.author, expected=expected)
         elif args.command == "cleanup-author":
             selected = args.accounts.split(",")
             if any(not re.fullmatch(r"qa_report_author_[0-9]{3}", name) for name in selected):

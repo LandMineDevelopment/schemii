@@ -24,6 +24,7 @@ from .models import (
 )
 from .store import (
     DesignConflictError,
+    DesignCopyGuard,
     DesignHistoryBoundaryError,
     DesignLayoutConflictError,
     DesignMutationBlockedError,
@@ -139,12 +140,15 @@ class PostgresDesignRepository:
         *,
         operation_kind: str = "edit",
         expected_baseline_id: str | None = None,
+        copy_guard: DesignCopyGuard | None = None,
     ) -> SchemiiDesign:
         validate_design_content(request.content)
         serialized = self._content_json(request.content)
         fingerprint = design_fingerprint(request.content)
         with self._transaction() as connection:
             with connection.cursor() as cursor:
+                if copy_guard is not None:
+                    self._check_copy(cursor, owner_id, workspace_id, copy_guard)
                 self._ensure_rows(cursor, owner_id, workspace_id)
                 current_row = self._locked_design_row(cursor, owner_id, workspace_id)
                 current_revision = int(current_row["revision"])
@@ -600,6 +604,76 @@ class PostgresDesignRepository:
         )
         if cursor.fetchone()["active"]:
             raise DesignMutationBlockedError()
+
+    def _check_copy(self, cursor: Any, owner_id: str, workspace_id: str, guard: DesignCopyGuard) -> None:
+        # Lock the saved PostgreSQL identity before both workspace/design rows.
+        # Holding the source row prevents edits invalidating review before commit.
+        cursor.execute(
+            "SELECT revision, database_name FROM metadata.postgres_connections "
+            "WHERE owner_id = %s AND id = %s FOR UPDATE",
+            (guard.connection_owner_id, guard.connection_id),
+        )
+        connection = cursor.fetchone()
+        if connection is None or (
+            connection["revision"],
+            connection["database_name"],
+        ) != (guard.connection_revision, guard.database):
+            raise DesignValidationError(
+                "The target connection changed after review",
+                details={"reason": "copy_review_changed"},
+            )
+        for current_id in sorted((guard.source.workspace_id, workspace_id)):
+            cursor.execute(
+                "SELECT workspace.revision, target.connection_id, target.connection_owner_id, target.database_name, target.namespace "
+                "FROM schemii.workspaces AS workspace LEFT JOIN schemii.workspace_targets AS target "
+                "ON target.owner_id = workspace.owner_id AND target.workspace_id = workspace.id "
+                "WHERE workspace.owner_id = %s AND workspace.id = %s FOR UPDATE OF workspace",
+                (owner_id, current_id),
+            )
+            workspace = cursor.fetchone()
+            if workspace is None:
+                raise DesignWorkspaceNotFoundError("Schemii workspace was not found")
+            if current_id == guard.source.workspace_id:
+                valid = (
+                    workspace["revision"] == guard.source_workspace_revision
+                    and workspace["connection_id"] is None
+                )
+            else:
+                valid = (
+                    workspace["revision"],
+                    workspace["connection_id"],
+                    workspace["connection_owner_id"] or owner_id,
+                    workspace["database_name"],
+                    workspace["namespace"],
+                ) == (
+                    guard.target_workspace_revision,
+                    guard.connection_id,
+                    guard.connection_owner_id,
+                    guard.database,
+                    guard.namespace,
+                )
+            if not valid:
+                raise DesignValidationError(
+                    "A workspace changed after copy review",
+                    details={"reason": "copy_review_changed"},
+                )
+            row = self._locked_design_row(cursor, owner_id, current_id)
+            expected = guard.source if current_id == guard.source.workspace_id else None
+            if row is None or (
+                expected is not None
+                and (row["revision"], row["fingerprint"])
+                != (expected.revision, expected.fingerprint)
+            ):
+                raise DesignValidationError(
+                    "The source design changed after copy review",
+                    details={"reason": "copy_review_changed"},
+                )
+            if expected is None and row["fingerprint"] != guard.target_fingerprint:
+                raise DesignValidationError(
+                    "The target design changed after copy review",
+                    details={"reason": "copy_review_changed"},
+                )
+
 
     @staticmethod
     def _check_baseline(

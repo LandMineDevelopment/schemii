@@ -62,3 +62,31 @@ test("save/reopen retains the RHS while inline editing stays bound to the LHS al
   assert.equal(columnFilterBindings(reopened, "orders", "promised").length, 0);
   assert.equal(columnFilterBindings(reopened, "history", "delivered").length, 0);
 });
+
+test("qualified same-named sources never borrow another schema's comparison types or domain columns",()=>{
+  const {condition,draft,catalog,scope}=fixture();catalog.namespace="one";
+  catalog.tables[0].namespace="one";
+  catalog.tables.push({namespace:"two",name:"orders_table",columns:[{name:"delivered",dataType:"integer"},{name:"promised",dataType:"text"},{name:"lookup",dataType:"integer"}]});
+  draft.nodes[0].namespace="two";
+  assert.deepEqual(comparisonColumns(condition,draft,catalog).map(column=>column.name),["delivered","lookup"]);
+  assert.match(columnComparisonIssue(condition,draft,catalog),/compatible comparison column/);
+  assert.match(modelFilterIssue(scope,draft,catalog),/compatible comparison column/);
+  condition.compareColumn="lookup";
+  assert.equal(modelFilterIssue(scope,draft,catalog),"");
+  scope.alternatives[0].inputs=[{id:"input",label:"Value",type:"integer",domain:{namespace:"two",table:"orders_table",column:"lookup"}}];
+  delete condition.compareColumn;condition.parameterId="input";
+  assert.equal(modelFilterIssue(scope,draft,catalog),"");
+  scope.alternatives[0].inputs[0].domain.namespace="one";
+  assert.match(modelFilterIssue(scope,draft,catalog),/valid domain value column/);
+});
+
+test("calculated comparisons use validated output types and retain invalid references for repair",()=>{
+  const {draft,catalog}=fixture();
+  draft.nodes.push({id:"summary",table:"orders_table",derivation:{kind:"aggregate",source:"orders",groupBy:["delivered"],outputs:[
+    {id:"n",operation:"count",column:"status"},{id:"total",operation:"sum",column:"target"},{id:"date",operation:"min",column:"delivered"},{id:"bad",operation:"sum",column:"status"}]}});
+  const condition={table:"summary",column:"n",operator:"gt",compareColumn:"total"};
+  assert.deepEqual(comparisonColumns(condition,draft,catalog).map(column=>column.name),["n","total"]);
+  assert.equal(columnComparisonIssue(condition,draft,catalog),"");
+  assert.match(columnComparisonIssue({...condition,compareColumn:"date"},draft,catalog),/compatible/);
+  assert.match(columnComparisonIssue({...condition,compareColumn:"bad"},draft,catalog),/compatible/);
+});

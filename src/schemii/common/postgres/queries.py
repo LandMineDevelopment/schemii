@@ -220,6 +220,9 @@ CONSTRAINTS_QUERY = """
            con.convalidated AS validated,
            con.condeferrable AS deferrable,
            con.condeferred AS initially_deferred,
+           con.conislocal AS is_local,
+           con.coninhcount AS inheritance_count,
+           con.connoinherit AS no_inherit,
            CASE WHEN constraint_definition.byte_count <= %s
                 THEN constraint_definition.value
                 ELSE NULL
@@ -401,4 +404,127 @@ READABLE_COLUMNS_QUERY = """
       AND pg_catalog.has_column_privilege(c.oid, a.attnum, 'SELECT')
     ORDER BY c.relname, a.attnum
     LIMIT %s
+"""
+
+# Versioned safety evidence is separate from lossless editable import. All rows
+# are bounded by the same gateway catalog limits and included in the full digest.
+SAFETY_OBJECTS_QUERY = """
+    /* schemii_catalog_safety_objects */
+    WITH settings AS (SELECT %s::int AS maximum, %s::text AS namespace)
+    SELECT CASE WHEN octet_length(descriptor.value) <= settings.maximum THEN descriptor.value END AS descriptor,
+           octet_length(descriptor.value) AS descriptor_bytes
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid=c.reltablespace
+    LEFT JOIN pg_catalog.pg_am am ON am.oid=c.relam
+    CROSS JOIN settings
+    CROSS JOIN LATERAL (SELECT jsonb_build_object(
+      'identity', jsonb_build_object('kind','relation','namespace',n.nspname,'name',c.relname),
+      'relation_kind',c.relkind::text, 'owner',pg_catalog.pg_get_userbyid(c.relowner),'actor',current_user,
+      'acl',COALESCE((SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),
+         'grantee',CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
+         'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantee,a.privilege_type,a.grantor)
+         FROM aclexplode(COALESCE(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) a),'[]'::jsonb),
+      'column_acl',COALESCE((SELECT jsonb_agg(jsonb_build_object('column',att.attname,'ordinal',att.attnum,
+         'grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
+         'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY att.attnum,a.grantee,a.privilege_type,a.grantor)
+         FROM pg_attribute att CROSS JOIN LATERAL aclexplode(att.attacl) a
+         WHERE att.attrelid=c.oid AND att.attnum>0 AND NOT att.attisdropped),'[]'::jsonb),
+      'identity_sequence_owner',(SELECT jsonb_build_object('table',jsonb_build_object('kind','relation','namespace',owner_ns.nspname,'name',owner_table.relname),
+         'column',owner_column.attname,'ordinal',owner_column.attnum,'table_owner',pg_get_userbyid(owner_table.relowner),'dependency_kind',d.deptype::text)
+         FROM pg_depend d JOIN pg_class owner_table ON owner_table.oid=d.refobjid
+         JOIN pg_namespace owner_ns ON owner_ns.oid=owner_table.relnamespace
+         JOIN pg_attribute owner_column ON owner_column.attrelid=owner_table.oid AND owner_column.attnum=d.refobjsubid
+         WHERE c.relkind='S' AND d.classid='pg_class'::regclass AND d.objid=c.oid AND d.objsubid=0
+           AND d.refclassid='pg_class'::regclass AND d.deptype='i' AND owner_column.attidentity IN ('a','d')
+           AND NOT owner_column.attisdropped AND owner_table.relkind IN ('r','p') AND owner_table.relowner=c.relowner
+           AND (SELECT count(*) FROM pg_depend internal WHERE internal.classid='pg_class'::regclass AND internal.objid=c.oid AND internal.deptype='i')=1),
+      'reloptions',to_jsonb(COALESCE(c.reloptions,ARRAY[]::text[])),
+      'tablespace',ts.spcname,'access_method',am.amname,
+      'partition_bound',pg_get_expr(c.relpartbound,c.oid,true),
+      'partition_parents',COALESCE((SELECT jsonb_agg(jsonb_build_object('kind','relation','namespace',pn.nspname,'name',p.relname) ORDER BY pn.nspname,p.relname)
+         FROM pg_inherits i JOIN pg_class p ON p.oid=i.inhparent JOIN pg_namespace pn ON pn.oid=p.relnamespace WHERE i.inhrelid=c.oid),'[]'::jsonb),
+      'indexes',COALESCE((SELECT jsonb_agg(jsonb_build_object('name',ic.relname,'table',c.relname,
+         'definition',pg_get_indexdef(i.indexrelid),'method',iam.amname,'unique',i.indisunique,
+         'valid',i.indisvalid,'predicate',pg_get_expr(i.indpred,i.indrelid,true)) ORDER BY ic.relname)
+         FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_am iam ON iam.oid=ic.relam WHERE i.indrelid=c.oid),'[]'::jsonb),
+      'default_grantees',COALESCE((SELECT jsonb_agg(DISTINCT CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END ORDER BY CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END)
+         FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+         WHERE d.defaclrole=(SELECT oid FROM pg_roles WHERE rolname=current_user)
+           AND d.defaclobjtype='r' AND d.defaclnamespace IN (0,n.oid)),'[]'::jsonb),
+      'properties',jsonb_build_object('persistence',c.relpersistence,'row_security',c.relrowsecurity,
+          'force_row_security',c.relforcerowsecurity,'replica_identity',c.relreplident,
+          'policies',COALESCE((SELECT jsonb_agg(jsonb_build_object('name',pol.polname,'permissive',pol.polpermissive,
+             'command',pol.polcmd,'roles',ARRAY(SELECT CASE WHEN role=0 THEN 'PUBLIC' ELSE pg_get_userbyid(role) END
+                FROM unnest(pol.polroles) role ORDER BY role),
+             'using',pg_get_expr(pol.polqual,pol.polrelid,true),'check',pg_get_expr(pol.polwithcheck,pol.polrelid,true)) ORDER BY pol.polname)
+             FROM pg_policy pol WHERE pol.polrelid=c.oid),'[]'::jsonb))::text
+    )::text AS value) descriptor
+    WHERE n.nspname=settings.namespace AND c.relkind IN ('r','p','v','m','f','S','c')
+    ORDER BY c.relname LIMIT %s
+"""
+
+SAFETY_DEPENDENCIES_QUERY = """
+    /* schemii_catalog_safety_dependencies */
+    WITH settings AS (SELECT %s::int AS maximum, %s::text AS namespace),
+    nodes AS (
+      SELECT 'pg_class'::regclass::oid AS classid,c.oid AS objid,'relation'::text AS kind,n.nspname AS namespace,c.relname AS name,''::text AS signature
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      UNION ALL
+      SELECT 'pg_type'::regclass::oid,t.oid,CASE WHEN c.oid IS NULL AND ec.oid IS NULL THEN 'type' ELSE 'relation' END,n.nspname,COALESCE(c.relname,ec.relname,t.typname),''
+      FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace LEFT JOIN pg_class c ON c.oid=t.typrelid
+      LEFT JOIN pg_type element ON element.oid=t.typelem LEFT JOIN pg_class ec ON ec.oid=element.typrelid
+      UNION ALL
+      SELECT 'pg_proc'::regclass::oid,p.oid,'routine',n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    ), edges AS (
+      SELECT CASE WHEN COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid,pol.polrelid) IS NOT NULL THEN 'pg_class'::regclass ELSE d.classid END AS source_class,
+             COALESCE(r.ev_class,con.conrelid,tr.tgrelid,ad.adrelid,pol.polrelid,d.objid) AS source,
+             d.refclassid AS target_class,d.refobjid AS target,d.deptype::text AS kind
+      FROM pg_depend d
+      LEFT JOIN pg_rewrite r ON d.classid='pg_rewrite'::regclass AND r.oid=d.objid
+      LEFT JOIN pg_constraint con ON d.classid='pg_constraint'::regclass AND con.oid=d.objid AND con.conrelid<>0
+      LEFT JOIN pg_trigger tr ON d.classid='pg_trigger'::regclass AND tr.oid=d.objid
+      LEFT JOIN pg_attrdef ad ON d.classid='pg_attrdef'::regclass AND ad.oid=d.objid
+      LEFT JOIN pg_policy pol ON d.classid='pg_policy'::regclass AND pol.oid=d.objid
+      WHERE d.refclassid IN ('pg_class'::regclass,'pg_type'::regclass,'pg_proc'::regclass)
+      UNION ALL SELECT 'pg_class'::regclass,inhrelid,'pg_class'::regclass,inhparent,'partition' FROM pg_inherits
+    )
+    SELECT CASE WHEN octet_length(descriptor.value)<=settings.maximum THEN descriptor.value END AS descriptor,
+           octet_length(descriptor.value) AS descriptor_bytes
+    FROM (SELECT DISTINCT source_class,source,target_class,target,kind FROM edges) e
+    JOIN nodes sn ON sn.classid=e.source_class AND sn.objid=e.source
+    JOIN nodes tn ON tn.classid=e.target_class AND tn.objid=e.target
+    CROSS JOIN settings
+    CROSS JOIN LATERAL (SELECT jsonb_build_object(
+      'source',jsonb_build_object('kind',sn.kind,'namespace',sn.namespace,'name',sn.name,'signature',sn.signature),
+      'target',jsonb_build_object('kind',tn.kind,'namespace',tn.namespace,'name',tn.name,'signature',tn.signature),'kind',e.kind)::text AS value) descriptor
+    WHERE sn.namespace !~ '^pg_' AND sn.namespace<>'information_schema'
+      AND tn.namespace !~ '^pg_' AND tn.namespace<>'information_schema'
+      AND (sn.kind,sn.namespace,sn.name,sn.signature)<>(tn.kind,tn.namespace,tn.name,tn.signature)
+    ORDER BY sn.namespace,sn.name,sn.signature,tn.namespace,tn.name,tn.signature,e.kind LIMIT %s
+"""
+
+# Policy self-references belong to their preserved table properties. References
+# to other objects remain unknown: an external policy owner may be outside the
+# schema-local preservation inventory, even though its graph edge is collected.
+SAFETY_UNKNOWNS_QUERY = """
+    /* schemii_catalog_safety_unknowns */
+    SELECT
+      EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') AS routine_bodies,
+      EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('f','c'))
+      OR EXISTS(SELECT 1 FROM pg_depend d
+        LEFT JOIN pg_policy pol ON d.classid='pg_policy'::regclass AND pol.oid=d.objid
+        LEFT JOIN pg_class c ON d.refclassid='pg_class'::regclass AND c.oid=d.refobjid
+        LEFT JOIN pg_type t ON d.refclassid='pg_type'::regclass AND t.oid=d.refobjid
+        LEFT JOIN pg_proc p ON d.refclassid='pg_proc'::regclass AND p.oid=d.refobjid
+        JOIN pg_namespace n ON n.oid=COALESCE(c.relnamespace,t.typnamespace,p.pronamespace)
+        WHERE d.classid NOT IN ('pg_class'::regclass,'pg_type'::regclass,'pg_proc'::regclass,
+          'pg_rewrite'::regclass,'pg_constraint'::regclass,'pg_trigger'::regclass,'pg_attrdef'::regclass)
+          AND NOT (d.classid='pg_policy'::regclass AND pol.oid IS NOT NULL
+            AND d.refclassid='pg_class'::regclass AND d.refobjid=pol.polrelid)
+          AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') AS opaque_dependencies,
+      NOT has_schema_privilege(%s,'USAGE') AS inaccessible
 """

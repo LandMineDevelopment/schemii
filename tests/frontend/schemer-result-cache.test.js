@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import * as cacheModule from '../../src/schemii/schemer/web/result-cache.js';
 import { ResultCache, DashboardResultGroup, CacheBudget, readResultStream } from '../../src/schemii/schemer/web/result-cache.js';
+import { createNumberPresentation, decorateNumber } from '../../src/schemii/schemer/web/number-format.js';
 const startFrame = { type: 'start', plan: { outputLabels: ['Readable ID'] }, snapshotAt: '2026-09-20T00:00:00Z' };
 const rows = values => ({ type: 'rows', columns: [{ name: 'output_1' }], rows: values.map(value => [value]) });
 const complete = { type: 'complete', limitReached: false };
@@ -63,4 +67,387 @@ test('chart mark budget bounds multi-series DOM without discarding cached groups
   assert.equal(result.rows.length, 10000);
   assert.equal(chartPreview({ kind: 'detail' }, result), result);
   assert.equal(chartPreview({ kind: 'donut', measures: [{}] }, result).rows.length, 2000);
+});
+
+// Execute the actual viewer handlers and studio cache owner. The small DOM and
+// deferred transport doubles make lifetime decisions observable without a browser
+// or database; backend release and visual acceptance remain separate checks.
+class ViewerElement {
+  constructor(tag, options = {}, children = []) {
+    Object.assign(this, options, { tag, children: [], attributes: {}, removed: false });
+    this.classList = { toggle: () => {}, contains: () => false };
+    for (const [key, value] of Object.entries(options.attrs || {})) this.setAttribute(key, value);
+    this.append(...children);
+  }
+  append(...children) { for (const child of children) { this.children.push(child); if (child instanceof ViewerElement) child.parent = this; } }
+  replaceChildren(...children) { this.children = []; this.append(...children); }
+  setAttribute(key, value) { this.attributes[key] = String(value); }
+  querySelector() { return null; }
+  addEventListener() {}
+  get isConnected() { return !this.removed && (this.tag === 'body' || Boolean(this.parent?.isConnected)); }
+  showModal() { this.open = true; }
+  close() { this.open = false; this.onclose?.(); }
+  escape() { this.oncancel?.({ preventDefault() {} }); this.close(); }
+  remove() { this.removed = true; }
+  click() { this.onclick?.(); }
+  submit() { this.submitted = true; }
+}
+const viewerSource = readFileSync(new URL('../../src/schemii/schemer/web/result-viewer.js', import.meta.url), 'utf8');
+const studioSource = readFileSync(new URL('../../src/schemii/schemer/web/studio.js', import.meta.url), 'utf8');
+function viewerFixture({ budget = new CacheBudget(), result = 'pending' } = {}) {
+  const forms = [];
+  const document = { body: new ViewerElement('body'), createElement: tag => {
+    const node = new ViewerElement(tag); if (tag === 'form') forms.push(node); return node;
+  } };
+  const frames = [], calls = [], streams = new Map(), gates = new Map(), scheduled = [];
+  const mainGate = deferred(), tile = { id: 'tile', title: 'Owned tile', kind: 'aggregate', limit: 2 };
+  let mainSignal;
+  const dashboardGroup = new DashboardResultGroup({ start: async (emit, signal) => {
+    mainSignal = signal; emit({ type: 'start', tiles: [{ tileId: tile.id, plan: {} }], snapshotAt: startFrame.snapshotAt });
+    emit({ ...rows(['main']), tileId: tile.id }); await mainGate.promise; emit({ ...complete, tileId: tile.id });
+  } });
+  const dashboard = { id: 'dashboard', revision: 1 };
+  const context = { ...cacheModule, streams, dashboard, dashboardGroup, browserBudget: budget, API: '/owned',
+    tileStates: new Map(), scheduledCards: new Set(), permissions: { export: true }, selectionBody: () => ({ selections: {} }),
+    document, $: () => ({ querySelectorAll: () => [] }), requestAnimationFrame: callback => scheduled.push(callback),
+    message: () => {}, renderTile: () => {}, readResultStream: async (_url, body, emit, signal) => {
+      const key = body.selection.dimensions[0].value, gate = deferred(); gates.set(key, gate); calls.push({ key, body, signal, emit });
+      emit({ ...startFrame, tiles: [{ tileId: tile.id, plan: startFrame.plan }] });
+      if (result === 'pending') { emit(rows([key])); await gate.promise; emit(rows([`late-${key}`])); emit(complete); }
+      else if (result === 'error') emit({ type: 'error', message: 'Owned error' });
+      else { if (result === 'rows') emit(rows([key])); emit(complete); }
+    } };
+  const getStreamSource = studioSource.slice(studioSource.indexOf('function getStream('), studioSource.indexOf('\nfunction checkLeave('));
+  const getStream = runInNewContext(`${getStreamSource}\ngetStream`, context);
+  const find = (root, predicate) => [root, ...root.children.filter(child => child instanceof ViewerElement).flatMap(child => find(child, predicate))].filter(predicate);
+  const openExpanded = runInNewContext(`${viewerSource.replace(/^import .*;\n/gm, '').replaceAll('export function ', 'function ')}\nopenExpanded`, {
+    createNumberPresentation, decorateNumber, rememberDisplayedVisualization() {},
+    document, element: (tag, options, children) => new ViewerElement(tag, options, children),
+    createIconButton: ({ label }) => new ViewerElement('button', { attrs: { 'aria-label': label } }),
+    scrollPosition: () => ({}), restoreScroll: () => {}, createResultGrid: data => new ViewerElement('grid', { data }),
+    appendStreamStatus: (host, data) => frames.push({ host: host.className, rows: data.rows.map(row => [...row]) }),
+    renderVisualization: (host, _tile, _result, { onDrill }) => { host.onDrill = onDrill; },
+    requestAnimationFrame: callback => scheduled.push(callback), csvContent: () => '', downloadContent: () => {},
+  });
+  const main = getStream(tile), selection = value => ({ dimensions: [{ column: 'group', value }] });
+  const open = () => {
+    openExpanded({ tile, cache: main, createDrillCache: selected => getStream(tile, selected), onRefresh: () => {} });
+    return document.body.children.at(-1);
+  };
+  let dialog = open();
+  const button = label => find(dialog, node => node.attributes['aria-label'] === label)[0];
+  return { main, dashboardGroup, dashboard, streams, calls, frames, gates, budget, forms,
+    createCache: (tile, selected = null) => getStream(tile, selected),
+    select: value => find(dialog, node => node.className === 'expanded-chart-body')[0].onDrill(selection(value)),
+    button, escape: () => dialog.escape(), reopen: () => { dialog = open(); },
+    flush: () => { while (scheduled.length) scheduled.shift()(); },
+    drill: value => getStream(tile, selection(value)), mainSignal: () => mainSignal,
+    async finish() { dialog.close(); for (const gate of gates.values()) gate.resolve(); mainGate.resolve(); await Promise.all([main.pending, ...[...streams.values()].flatMap(group => [...group.drills.values()].map(cache => cache.pending))]); },
+  };
+}
+
+test('switching actual viewer drills aborts A, rejects its late frames and keeps main eager work', async () => {
+  const fixture = viewerFixture();
+  try {
+    await Promise.resolve(); fixture.select('A'); fixture.select('B');
+    assert.equal(fixture.calls[0].signal.aborted, true);
+    assert.equal(fixture.calls[1].signal.aborted, false);
+    fixture.gates.get('A').resolve(); await fixture.drill('A').pending; fixture.flush();
+    assert.deepEqual(fixture.drill('A').rows, [['A']]);
+    assert.deepEqual(fixture.frames.filter(frame => frame.host === 'drill-body').at(-1).rows, [['B']]);
+    assert.equal(fixture.mainSignal().aborted, false);
+    assert.equal(fixture.main.loading, true);
+  } finally { await fixture.finish(); }
+});
+
+for (const close of ['Close detail rows', 'Close expanded tile', 'Escape']) {
+  test(`actual viewer ${close} retires unfinished drill without stopping the main dashboard`, async () => {
+    const fixture = viewerFixture();
+    try {
+      await Promise.resolve(); fixture.select('A');
+      if (close === 'Escape') fixture.escape(); else fixture.button(close).click();
+      assert.equal(fixture.calls[0].signal.aborted, true);
+      assert.equal(fixture.drill('A').listeners.size, 0);
+      assert.equal(fixture.mainSignal().aborted, false);
+      fixture.gates.get('A').resolve(); await fixture.drill('A').pending; fixture.flush();
+      assert.deepEqual(fixture.drill('A').rows, [['A']]);
+    } finally { await fixture.finish(); }
+  });
+}
+
+test('completed retained drill reopens without work and preserves its original preview and fresh export revision', async () => {
+  const fixture = viewerFixture({ result: 'rows' });
+  try {
+    fixture.select('A'); const cache = fixture.drill('A'); await cache.pending;
+    fixture.select('A'); assert.equal(cache.controller.signal.aborted, false);
+    fixture.button('Close detail rows').click(); fixture.select('A');
+    fixture.button('Close expanded tile').click(); fixture.reopen(); fixture.select('A');
+    assert.equal(fixture.drill('A'), cache); assert.equal(fixture.calls.length, 1);
+    assert.equal(cache.snapshotAt, startFrame.snapshotAt); assert.deepEqual(cache.rows, [['A']]);
+    fixture.dashboard.revision = 2; cache.download();
+    // The preview's original rows/plan stay intact; export's form uses current revision.
+    assert.equal(JSON.parse(fixture.forms.at(-1).children[0].value).expectedRevision, 2);
+    assert.equal(fixture.forms.at(-1).submitted, true);
+    assert.equal(cache.controller.signal.aborted, false);
+    assert.deepEqual(cache.rows, [['A']]);
+  } finally { await fixture.finish(); }
+});
+
+for (const result of ['empty', 'error', 'rows']) {
+  test(`studio bounds ${result} drill entries with deterministic recency eviction and budget release`, async () => {
+    const fixture = viewerFixture({ result });
+    try {
+      const first = fixture.drill('0'); await first.loadMore();
+      const caches = [first];
+      for (let index = 1; index < 16; index++) { const cache = fixture.drill(String(index)); caches.push(cache); await cache.loadMore(); }
+      assert.equal(fixture.drill('0'), first); // Touch oldest; selection 1 is now least recent.
+      const second = caches[1];
+      await fixture.drill('16').loadMore();
+      assert.equal(second.disposed, true); assert.notEqual(first.disposed, true);
+      for (let index = 17; index < 64; index++) {
+        await fixture.drill(String(index)).loadMore();
+        assert.equal(fixture.streams.get('tile').drills.size, 16);
+      }
+      const registry = fixture.streams.get('tile').drills;
+      assert.equal(registry.size, 16);
+      assert.equal(second.disposed, true); assert.equal(first.disposed, true);
+      assert.equal(registry.has(JSON.stringify({ dimensions: [{ column: 'group', value: '63' }] })), true);
+      assert.equal(fixture.budget.rows, result === 'rows' ? 17 : 1); // Main plus retained drills only.
+    } finally { await fixture.finish(); }
+  });
+}
+
+for (const limit of [{ rows: 0 }, { bytes: 0 }, { rows: 1 }, { bytes: 112 }]) {
+  test(`exhausted shared ${Object.keys(limit)[0]}=${Object.values(limit)[0]} budget refuses a new query before transport start`, async () => {
+    const fixture = viewerFixture({ budget: new CacheBudget(limit), result: 'empty' });
+    try {
+      await Promise.resolve(); fixture.select('A'); await fixture.drill('A').loadMore();
+      assert.equal(fixture.calls.length, 0);
+      assert.equal(fixture.drill('A').reason, 'browser_budget');
+      assert.equal(fixture.drill('A').limitReached, true);
+      assert.equal(fixture.drill('A').loading, false);
+    } finally { await fixture.finish(); }
+  });
+}
+
+function reservedCaches({ rows: rowLimit = 4, bytes = 100000, ids = ['detail', 'kpi'] } = {}) {
+  const budget = new CacheBudget({ rows: rowLimit, bytes });
+  const group = new DashboardResultGroup({ budget, tileIds: ids, start: async () => {} });
+  const caches = new Map(ids.map(id => [id, new ResultCache({ budget: group.budgetFor(id), start: async () => {} })]));
+  for (const [id, cache] of caches) group.listeners.set(id, frame => cache.accept(frame));
+  group.accept({ type: 'start', tiles: ids.map(tileId => ({ tileId, plan: {} })) });
+  return { budget, group, caches };
+}
+
+test('early detail and drill cannot spend the later main tile protected row allocation', () => {
+  const { budget, group, caches } = reservedCaches();
+  assert.equal(budget.available, false, 'drills see only unreserved capacity');
+  group.accept({ ...rows([1, 2, 3, 4]), tileId: 'detail' });
+  assert.deepEqual(caches.get('detail').rows, [[1], [2]]);
+  assert.equal(caches.get('detail').reason, 'browser_dashboard_budget');
+  assert.equal(group.controller.signal.aborted, false);
+  assert.equal(budget.take(['drill']), 0);
+  group.accept({ ...rows([9, 10]), tileId: 'kpi' });
+  group.accept({ ...complete, tileId: 'kpi' });
+  assert.deepEqual(caches.get('kpi').rows, [[9], [10]]);
+  assert.equal(budget.rows, 4);
+  for (const cache of caches.values()) cache.dispose();
+  assert.equal(budget.rows, 0); assert.equal(budget.bytes, 0); assert.equal(budget.reservations.size, 0);
+});
+
+test('decoded wide Unicode rows respect protected byte shares without starving siblings', () => {
+  const { budget, group, caches } = reservedCaches({ bytes: 600 });
+  group.accept({ ...rows(['😀'.repeat(100)]), tileId: 'detail' });
+  assert.equal(caches.get('detail').rows.length, 0);
+  assert.equal(caches.get('detail').limitReached, true);
+  group.accept({ ...rows(['é', 'small']), tileId: 'kpi' });
+  assert.equal(caches.get('kpi').rows.length, 2);
+  assert.ok(budget.bytes <= 600);
+});
+
+test('unused completed and invalid tile reservations reclaim once while retained rows stay charged', () => {
+  const { budget, group, caches } = reservedCaches({ rows: 6, ids: ['detail', 'empty', 'bad'] });
+  group.accept({ type: 'start', tiles: [{ tileId: 'detail', plan: {} }, { tileId: 'empty', plan: {} }], tileErrors: [{ tileId: 'bad', message: 'Invalid' }] });
+  assert.equal(caches.get('bad').error, 'Invalid');
+  group.accept({ ...rows([1]), tileId: 'detail' });
+  group.accept({ ...complete, tileId: 'empty' });
+  group.accept({ ...complete, tileId: 'empty' });
+  assert.equal(budget.rows, 1); assert.equal(budget.spare('rows'), 3);
+  assert.ok(budget.take(['drill']));
+  group.accept({ ...complete, tileId: 'detail' });
+  assert.equal(budget.rows, 2);
+  caches.get('detail').dispose(); caches.get('detail').dispose();
+  assert.equal(budget.rows, 1);
+});
+
+test('zero-share main tile stops before transport and group close releases unused reservations', async () => {
+  const budget = new CacheBudget({ rows: 1 });
+  const group = new DashboardResultGroup({ budget, tileIds: ['first', 'second'], start: async () => {} });
+  let starts = 0;
+  const second = new ResultCache({ budget: group.budgetFor('second'), start: async () => { starts++; } });
+  await second.loadMore();
+  assert.equal(starts, 0); assert.equal(second.reason, 'browser_dashboard_budget');
+  await group.close(); await group.close();
+  assert.equal(budget.reservations.size, 0); assert.equal(budget.available, true);
+});
+
+
+test('main reservations honor per-cache ceilings and leave excess root capacity for drills', () => {
+  const budget = new CacheBudget({ rows: 30000, bytes: 128 * 1024 * 1024 });
+  const views = budget.register(['first', 'second', 'second']);
+  assert.equal(views.size, 2); assert.equal(budget.reservations.size, 2);
+  assert.equal(views.get('first').rows, 10000);
+  assert.equal(views.get('second').rows, 10000);
+  assert.equal(budget.spare('rows'), 10000);
+  assert.equal(views.get('first').bytes, 24 * 1024 * 1024);
+  assert.ok(budget.take(['drill']));
+  assert.equal(views.get('second').rows, 10000);
+});
+
+test('displayed attachment deep-freezes rows and execution filters without retaining a stream or plan', async () => {
+  const { freezeDisplayedResult } = cacheModule;
+  const budget = new CacheBudget(), cache = new ResultCache({ budget, start: async emit => {
+    emit(startFrame); emit({ type: 'rows', columns: [{ name: 'json', dataType: 'jsonb' }], rows: [[{ nested: ['original'] }]] }); emit(complete);
+  } });
+  await cache.loadMore();
+  const context = { dashboardId: 'dashboard', dashboardRevision: 1, tileId: 'tile', modelId: 'model', modelRevision: 1,
+    pane: 'main', drillSelection: null, selections: { region: { active: true, values: { name: 'applied' } } },
+    tileSelections: { region: { active: true, values: { name: 'tile override' } } },
+    reportFilters: [{ mode: 'rows', conditions: [{ table: 'source', column: 'left', operator: 'eq', compareColumn: 'right' }] }] };
+  const frozen = freezeDisplayedResult(cache.snapshot(), context);
+  cache.rows[0][0].nested[0] = 'later'; context.selections.region.values.name = 'unapplied'; cache.dispose();
+  assert.deepEqual(frozen.rows, [[{ nested: ['original'] }]]);
+  assert.equal(frozen.selections.region.values.name, 'applied');
+  context.tileSelections.region.values.name = 'later tile draft';
+  context.reportFilters[0].conditions[0].compareColumn = 'later_column';
+  assert.equal(frozen.tileSelections.region.values.name, 'tile override');
+  assert.equal(frozen.reportFilters[0].conditions[0].compareColumn, 'right');
+  assert.equal(Object.isFrozen(frozen.reportFilters[0].conditions[0]), true);
+  assert.equal(frozen.snapshotAt, startFrame.snapshotAt);
+  assert.equal(Object.isFrozen(frozen.rows[0][0].nested), true);
+  assert.equal('plan' in frozen, false); assert.equal('controller' in frozen, false);
+  assert.equal(budget.rows, 0); assert.equal(budget.bytes, 0);
+});
+
+test('displayed attachment independently bounds rows and bytes and labels all truncation layers', () => {
+  const { freezeDisplayedResult } = cacheModule;
+  const result = { snapshotAt: startFrame.snapshotAt, columns: [{ name: 'value' }], rows: Array.from({ length: 200 }, (_, i) => [i]),
+    cachedRows: 10000, loading: true, limitReached: true, visualTruncated: true };
+  const frozen = freezeDisplayedResult(result, { pane: 'main' });
+  assert.equal(frozen.rows.length, 100);
+  assert.equal(frozen.cachedRows, 10000); assert.equal(frozen.displayedRows, 200);
+  for (const flag of ['partial', 'cacheTruncated', 'chartTruncated', 'clientSampleTruncated']) assert.equal(frozen[flag], true);
+  const bytes = freezeDisplayedResult({ ...result, rows: [['x'.repeat(1000)]] }, { pane: 'main' }, { maxBytes: 450 });
+  assert.equal(bytes.rows.length, 0); assert.equal(bytes.clientSampleTruncated, true);
+  assert.ok(new TextEncoder().encode(JSON.stringify(bytes)).length <= 450);
+  assert.throws(() => freezeDisplayedResult({ ...result, columns: [{ name: 'x'.repeat(1000) }] }, {}, { maxBytes: 100 }), /metadata exceeds/);
+  assert.throws(() => freezeDisplayedResult(result, { reportFilters: [{ conditions: [{ value: 'x'.repeat(1000) }] }] }, { maxBytes: 450 }), /metadata exceeds/);
+});
+
+test('studio captures saved tile overrides and predicates for main and drill caches before later UI mutation', async () => {
+  const f = viewerFixture({ result: 'empty' });
+  try {
+    f.dashboard.selections = { region: { active: true, values: { value: 'dashboard region' } } };
+    const tile = { id: 'population', kind: 'aggregate', limit: 20,
+      selections: { region: { active: true, values: { value: 'tile region' } } },
+      reportFilters: [{ mode: 'rows', conditions: [{ table: 'source', column: 'left', operator: 'eq', compareColumn: 'right' }] }] };
+    const main = f.createCache(tile), drill = f.createCache(tile, { dimensions: [{ column: 'region', value: 'chosen' }] });
+    tile.selections.region.values.value = 'edited tile'; tile.reportFilters[0].conditions[0].compareColumn = 'edited_column';
+    f.dashboard.selections.region.values.value = 'unapplied UI region';
+    for (const cache of [main, drill]) {
+      assert.equal(cache.displayContext.selections.region.values.value, 'dashboard region');
+      assert.equal(cache.displayContext.tileSelections.region.values.value, 'tile region');
+      assert.equal(cache.displayContext.reportFilters[0].conditions[0].compareColumn, 'right');
+    }
+    assert.equal(main.displayContext.pane, 'main'); assert.equal(drill.displayContext.pane, 'drill');
+    assert.equal(drill.displayContext.drillSelection.dimensions[0].value, 'chosen');
+  } finally { await f.finish(); }
+});
+
+test('displayed visualization captures the selected time metric and independent chart mark truncation', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const tile = { kind: 'line', dimensions: [{ table: 'events', column: 'month' }], measures: [{ table: 'events', column: 'amount' }], timeAnalysis: { comparison: 'previous_period', runningTotal: true } };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['month', 'current', 'previous', 'change', 'percent', 'running'].map(name => ({ name })),
+    rows: Array.from({ length: 2200 }, (_, i) => [`month ${i}`, 100, 50, 50, 100, 500]), cachedRows: 2200 };
+  const displayed = displayedVisualization({ dataset: { timeMetric: 'percent' } }, tile, result);
+  assert.equal(displayed.metric, 'percent'); assert.equal(displayed.visualTruncated, true);
+  assert.equal(displayed.rows.length, 2000); assert.equal(displayed.cachedRows, 2200);
+  assert.deepEqual(displayed.columns.map(column => column.name), ['month', 'percent']);
+  assert.deepEqual(displayed.rows[0], ['month 0', 100]);
+  const frozen = cacheModule.freezeDisplayedResult(displayed, { pane: 'main' });
+  assert.equal(frozen.metric, 'percent'); assert.equal(frozen.chartTruncated, true); assert.equal(frozen.clientSampleTruncated, true);
+});
+
+test('displayed projection keeps calculated-only marks and every complete time-block offset', async () => {
+  const { displayedVisualization, visualizationSelection } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const field = column => ({ table: 'facts', column, aggregate: 'sum' });
+  const tile = { kind: 'bar', dimensions: [field('region'), field('month')], measures: [field('amount'), field('count')],
+    calculations: [{ id: 'share', visible: true }, { id: 'ratio', visible: true }], timeAnalysis: { comparison: 'previous_period', runningTotal: true } };
+  const raw = ['East', '2026-01', 101, 202, 301, 401, 501, 601, 701, 801, 901, 1001, .25, .5];
+  const result = { snapshotAt: startFrame.snapshotAt, columns: raw.map((_, i) => ({ name: `output ${i}` })), rows: [raw],
+    plan: { calculatedMeasures: [{ id: 'share', index: 12, label: 'Share' }, { id: 'ratio', index: 13, label: 'Ratio' }] } };
+  for (const [metric, indices] of [['values', [2, 4, 3, 8, 12, 13]], ['change', [5, 9]], ['percent', [6, 10]], ['running', [7, 11]]]) {
+    const host = { dataset: { timeMetric: metric } }, selection = visualizationSelection(host, tile, result);
+    assert.deepEqual(selection.series.map(item => item.column), indices);
+    assert.deepEqual(displayedVisualization(host, tile, result).rows, [[...raw.slice(0, 2), ...indices.map(i => raw[i])]]);
+  }
+  const only = { kind: 'bar', dimensions: [field('region')], measures: [], hiddenMeasures: [field('amount')], calculations: [{ id: 'share', visible: true }] };
+  const calculated = { ...result, columns: [{ name: 'Region' }, { name: 'Share' }], rows: [['East', .25]], plan: { calculatedMeasures: [{ id: 'share', index: 1, label: 'Share' }] } };
+  assert.deepEqual(displayedVisualization({ dataset: {} }, only, calculated).rows, [['East', .25]]);
+  assert.deepEqual(displayedVisualization({ dataset: {} }, { ...only, kind: 'donut' }, calculated).rows, [['East', .25]]);
+  assert.deepEqual(displayedVisualization({ dataset: {} }, { ...tile, kind: 'donut' }, result).rows, [['East', '2026-01', 101]]);
+  const many = { ...result, rows: Array.from({ length: 750 }, (_, i) => [`Region ${i}`, ...raw.slice(1)]) };
+  const selected = displayedVisualization({ dataset: {} }, tile, many);
+  assert.equal(selected.rows.length, Math.floor(2000 / 6)); assert.equal(selected.cachedRows, 750); assert.equal(selected.visualTruncated, true);
+  const frozen = cacheModule.freezeDisplayedResult(selected, { pane: 'main' });
+  many.rows[0][12] = 'later'; assert.equal(frozen.rows[0].at(-2), .25);
+  assert.equal(frozen.rows.length, 100); assert.equal(frozen.displayedRows, 333); assert.equal(frozen.cachedRows, 750);
+  assert.equal(frozen.chartTruncated, true); assert.equal(frozen.clientSampleTruncated, true); assert.equal('plan' in frozen, false);
+});
+
+test('displayed KPI includes only the first visible value and all target/variance/status outputs', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const tile = { kind: 'kpi', dimensions: [], measures: [], calculations: [{ id: 'share', visible: true }] };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['Share', 'Goal', 'Absolute variance', 'Variance (%)', 'KPI assessment', 'Not displayed'].map(name => ({ name })),
+    rows: [[25, 10, 15, 150, 'favorable', 999], [88, 77, 66, 55, 'unfavorable', 444]],
+    plan: { calculatedMeasures: [{ id: 'share', index: 0, unit: 'percent' }], kpiComparison: { label: 'Goal', favorable: 'higher', indices: [1, 2, 3, 4], baselineUnit: 'percent', absoluteUnit: 'percentage_points' } } };
+  const displayed = displayedVisualization({ dataset: {} }, tile, result);
+  assert.deepEqual(displayed.rows, [[25, 10, 15, 150, 'favorable']]);
+  assert.deepEqual(displayed.columns.map(item => item.name), ['Share', 'Goal', 'Absolute variance', 'Percentage variance', 'KPI assessment (higher is better)']);
+  const frozen = cacheModule.freezeDisplayedResult(displayed, { pane: 'main' });
+  assert.equal(frozen.displayedRows, 1); assert.equal(frozen.cachedRows, 2); assert.deepEqual(frozen.rows[0], [25, 10, 15, 150, 'favorable']);
+});
+
+test('projected column semantics retain stable outputs, actual currency/locale/rules and every time percent offset', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const output = { table: 'facts', column: 'amount', aggregate: 'sum', kind: 'value' };
+  const tile = { kind: 'bar', dimensions: [{ table: 'facts', column: 'month' }], measures: [output], formatLocale: 'de-DE', numberFormats: [{ output,
+    style: 'currency', currency: 'EUR', precision: 2, unit: 'net', percentScale: 'auto', rules: [{ operator: 'gt', value: '100', label: 'Above goal', tone: 'positive', symbol: 'check' }] }], timeAnalysis: { comparison: 'previous_period', runningTotal: true } };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['Month', 'Current', 'Previous', 'Absolute', 'Percent', 'Running'].map(name => ({ name, dataType: 'numeric' })), rows: [['2026-01', '9007199254740993.10', 17, 23, 35.5, 73]] };
+  const currency = displayedVisualization({ dataset: {} }, tile, result), frozen = cacheModule.freezeDisplayedResult(currency, { pane: 'main' });
+  assert.deepEqual(frozen.columns[1].output, output); assert.equal(frozen.columns[1].display.currency, 'EUR'); assert.equal(frozen.columns[1].display.locale, 'de-DE');
+  assert.equal(frozen.columns[1].display.minimumFractionDigits, 2); assert.equal(frozen.columns[1].display.maximumFractionDigits, 2);
+  assert.equal(frozen.columns[1].display.rules[0].label, 'Above goal'); assert.equal(frozen.rows[0][1], '9007199254740993.10');
+  tile.numberFormats[0].rules[0].label = 'Later'; tile.numberFormats[0].currency = 'USD';
+  assert.equal(frozen.columns[1].display.currency, 'EUR'); assert.equal(frozen.columns[1].display.rules[0].label, 'Above goal');
+  assert.equal(Object.isFrozen(frozen.columns[1].display.rules[0]), true);
+  const percent = displayedVisualization({ dataset: { timeMetric: 'percent' } }, tile, result);
+  assert.deepEqual(percent.rows, [['2026-01', 35.5]]);
+  assert.equal(percent.columns[1].output.kind, 'percent_change'); assert.equal(percent.columns[1].display.style, 'percent'); assert.equal(percent.columns[1].display.queryScale, 100);
+  assert.throws(() => cacheModule.freezeDisplayedResult(currency, {}, { maxBytes: 300 }), /metadata exceeds/);
+});
+
+test('calculated percent and KPI baseline/variance keep raw fractions and explicit percentage-point presentation', async () => {
+  const { displayedVisualization } = await import('../../src/schemii/schemer/web/visualizations.js');
+  const output = { table: '@report', column: 'ratio', aggregate: 'none', kind: 'calculated' };
+  const tile = { kind: 'kpi', dimensions: [], measures: [], calculations: [{ id: 'ratio', operation: 'divide', visible: true }],
+    formatLocale: 'en-US', numberFormats: [{ output, style: 'percent', precision: 1, currency: null, percentScale: 'fraction', unit: '', rules: [] }] };
+  const result = { snapshotAt: startFrame.snapshotAt, columns: ['Ratio', 'Goal', 'Absolute', 'Percent', 'Status'].map(name => ({ name, dataType: name === 'Status' ? 'text' : 'numeric' })), rows: [[.4, .25, .15, 60, 'favorable']],
+    plan: { calculatedMeasures: [{ id: 'ratio', index: 0, output, unit: 'number', scale: 1 }], kpiComparison: { label: 'Goal', favorable: 'higher', indices: [1, 2, 3, 4], baselineUnit: 'number', baselineScale: 1, absoluteUnit: 'number', absoluteScale: 1 } } };
+  const frozen = cacheModule.freezeDisplayedResult(displayedVisualization({ dataset: {} }, tile, result), { pane: 'main' });
+  assert.deepEqual(frozen.rows, [[.4, .25, .15, 60, 'favorable']]);
+  assert.deepEqual(frozen.columns.map(column => column.display?.output.kind), ['calculated', 'kpi_baseline', 'kpi_absolute', 'kpi_percent', undefined]);
+  assert.equal(frozen.columns[0].display.percentScale, 'fraction'); assert.equal(frozen.columns[0].display.queryScale, 1);
+  assert.equal(frozen.columns[1].display.style, 'percent'); assert.equal(frozen.columns[2].display.unit, 'percentage points');
+  assert.equal(frozen.columns[2].display.displayScale, 100); assert.equal(frozen.columns[2].display.queryScale, 1); assert.equal(frozen.columns[3].display.queryScale, 100);
 });

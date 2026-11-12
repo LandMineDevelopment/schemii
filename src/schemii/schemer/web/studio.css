@@ -106,9 +106,72 @@ h1,h2,h3,p { margin:0; } h1 { font-size:25px; line-height:1.25; font-weight:600;
 }
 
 /* The editor footer remains reachable when labels or browser text are enlarged. */
+.model-upgrade-dialog { width:min(780px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); }
+.model-upgrade-dialog[open] { display:grid; grid-template-rows:auto auto minmax(0,1fr) auto; }
+.model-upgrade-dialog>p { padding:12px 18px 0; line-height:1.5; }
+.model-upgrade-body { min-height:0; overflow:auto; padding:16px 18px; display:grid; gap:16px; }
+.model-upgrade-body>.hint { line-height:1.6; }
+.model-repair-link { font-size:12px; color:var(--accent-bright); overflow-wrap:anywhere; }
+.upgrade-section { min-width:0; padding:14px; border:1px solid var(--line); border-radius:6px; display:grid; gap:12px; }
+.upgrade-section h3 { font-size:14px; overflow-wrap:anywhere; }
+.upgrade-section .actions { justify-content:flex-start; flex-wrap:wrap; }
+.upgrade-section .ui-button { white-space:normal; overflow-wrap:anywhere; }
+.upgrade-issue { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; font-size:12px; color:var(--danger); }
+.upgrade-issue p { flex:1 1 240px; overflow-wrap:anywhere; line-height:1.5; }
+.model-upgrade-dialog .ui-dialog__actions { flex-wrap:wrap; }
+.model-upgrade-dialog .ui-dialog__actions .error-message { flex-basis:100%; overflow-wrap:anywhere; }
+.model-upgrade-dialog .ui-dialog__actions .ui-button { min-height:40px; white-space:normal; }
 .tile-editor .ui-dialog__actions { flex-wrap: wrap; }
 .tile-editor .ui-dialog__actions > .ui-button { min-height: 40px; font-size: var(--ui-type-control); white-space: normal; }
 @media (max-width: 600px) {
+  .model-upgrade-dialog .ui-dialog__actions .ui-button { flex:1 1 auto; }
+  .model-upgrade-body { padding:12px; }
   .tile-editor-body { min-height: 0; }
   .tile-editor .ui-dialog__actions > .ui-button { flex: 1 1 auto; }
 }
+
+/* Pivot-specific matrix: the shared flat grid keeps its existing contract. */
+.pivot-viewport { max-width:100%; max-height:65vh; min-height:120px; overflow:auto; overscroll-behavior:contain; border:1px solid var(--line,#303b48); border-radius:8px; scrollbar-gutter:stable; }
+.tile-body .pivot-viewport { max-height:360px; }
+.pivot-table { border-collapse:separate; border-spacing:0; width:max-content; min-width:100%; font-size:12px; font-variant-numeric:tabular-nums; }
+.pivot-table th,.pivot-table td { box-sizing:border-box; height:44px; min-width:110px; max-width:300px; padding:8px 10px; white-space:nowrap; text-align:right; border-right:1px solid #29333f; border-bottom:1px solid #29333f; }
+.pivot-table thead { position:sticky; top:0; z-index:3; background:#19212c; }
+.pivot-table thead th { font-weight:600; text-align:center; color:#d2dce8; }
+.pivot-table .pivot-row-label,.pivot-table .pivot-corner { position:sticky; left:0; text-align:left; background:#151d27; z-index:2; min-width:160px; }
+.pivot-table .pivot-corner { z-index:4; }
+.pivot-table .pivot-total,.pivot-total-row td,.pivot-total-row th { background:#20233a; font-weight:650; }
+.pivot-drill { display:block; width:100%; border:0; padding:4px 0; background:transparent; color:inherit; text-align:inherit; font:inherit; cursor:pointer; }
+.pivot-drill:hover { color:#d4baff; text-decoration:underline; }
+.pivot-drill:focus-visible,.pivot-viewport:focus-visible { outline:2px solid #ae90ed; outline-offset:-2px; }
+.pivot-notice { margin:8px 0; color:#a3afbf; font-size:12px; line-height:1.5; }
+.pivot-notice.error { color:#e8a1a7; }
+.pivot-option { display:flex; align-items:center; gap:9px; min-height:36px; }
+@media(max-width:640px) { .pivot-table { font-size:12px; } .pivot-table th,.pivot-table td { min-width:100px; padding:6px 8px; height:44px; } .pivot-table .pivot-row-label,.pivot-table .pivot-corner { min-width:130px; max-width:180px; } .pivot-drill { min-height:32px; } .pivot-option { min-height:44px; } }
+.calculated-measures{display:grid;gap:1rem}.measure-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.8rem;border:1px solid var(--border);border-radius:10px;padding:1rem}.measure-operand{display:grid;gap:.5rem;min-width:0}.kpi-comparison{display:grid;gap:.4rem;font-size:.95rem}.kpi-comparison p{margin:0;overflow-wrap:anywhere}@media(max-width:650px){.measure-card{grid-template-columns:minmax(0,1fr)}}
+.calculation-populations-dialog[open] { display:grid;gap:12px;padding:20px;overflow:auto; }
+.calculation-populations-dialog :is(h2,p) { margin:0;line-height:1.5;overflow-wrap:anywhere; }
+.calculation-populations-dialog > .ui-button { width:100%;min-width:0;min-height:44px;white-space:normal;overflow-wrap:anywhere;text-align:left;line-height:1.5; }
+.calculation-populations-dialog > .ui-button:last-child { width:auto;justify-self:end; }
+
+/* Formatting is decoration of the bounded visible window, never a row store. */
+[data-number-tone="positive"] { color:#91d7ae; }
+[data-number-tone="caution"] { color:#f1ce83; }
+[data-number-tone="negative"] { color:#f3a4ad; }
+.number-format-editor { display:grid; gap:16px; min-width:0; }
+.number-format-card,.number-rule { border:1px solid #3c4556; border-radius:8px; padding:12px; display:grid; gap:10px; min-width:0; }
+.number-rule { background:#161e2b; }
+.number-format-card input { width:100%; box-sizing:border-box; min-width:0; }
+.number-format-card .ui-button { min-height:40px; white-space:normal; }
+.bar-number { max-width:250px; overflow:hidden; text-overflow:ellipsis; }
+.chart-condition { fill:#e8cf8d; font-size:11px; }
+.chart-legend,.bar-series-legend { flex-wrap:wrap; overflow-wrap:anywhere; }
+.pivot-table td[data-number-tone],.data-grid td[data-number-tone] { max-width:320px; overflow:hidden; text-overflow:ellipsis; }
+.export-snapshot-note { white-space:normal; max-width:42rem; }
+@media(max-width:640px) { .number-format-card,.number-rule { padding:10px; } .number-format-card input,.number-format-card .ui-button { min-height:44px; } .bar-number { max-width:145px; } }
+.editor-tabs { overflow-x:auto; }
+.editor-tabs > button { flex:0 0 auto; }
+@media(max-width:600px) { .editor-tabs { flex-wrap:nowrap; padding-bottom:10px; } }
+.number-format-legend { margin:6px 0 12px; font-size:12px; max-width:100%; overflow-wrap:anywhere; }
+.number-format-legend summary { cursor:pointer; min-height:28px; }
+.number-format-legend[open] { max-height:220px; overflow:auto; padding:8px; border:1px solid var(--line); border-radius:6px; }
+.number-format-legend ol { padding-left:22px; }

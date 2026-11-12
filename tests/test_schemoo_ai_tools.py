@@ -116,7 +116,83 @@ def test_writes_keep_revision_guards_and_independent_documents(services, model):
     assert layout["revision"] == 2 and layout["layoutRevision"] == 2
     explore = run(services, "update_explore", {"expectedRevision": 1, "explore": EXPLORE}, model["id"])
     assert explore["exploreRevision"] == 2
+    run(services, "create_preview", {"name": "Deliberate cascade", "explore": EXPLORE}, model["id"])
+    before = services.models.get("alice", model["id"])
+    previews = services.models.list_previews("alice", model["id"])
+    with pytest.raises(ApiProblem) as stale:
+        run(services, "delete_model", {"expectedRevision": 1}, model["id"])
+    assert stale.value.code == "model_revision_conflict"
+    assert stale.value.details == {"currentRevision": 2}
+    assert services.models.get("alice", model["id"]) == before
+    assert services.models.list_previews("alice", model["id"]) == previews
     assert run(services, "delete_model", {"expectedRevision": 2}, model["id"]) == {"status": "succeeded"}
+    assert run(services, "list_models") == {"models": []}
+    assert ("alice", model["id"]) not in services.models._previews
+
+
+def test_delete_tool_schema_preserves_optional_native_guard_contract():
+    schema = ai_tools.tool_definitions()[0]["parameters"]["$defs"]["DeleteArguments"]
+    properties = schema["properties"]
+    assert schema["required"] == ["expectedRevision"]
+    for name in ("expectedLayoutRevision", "expectedExploreRevision"):
+        assert {"minimum": 1, "type": "integer"} in properties[name]["anyOf"]
+        assert properties[name]["default"] is None
+    assert properties["requireNoPreviews"]["enum"] == ["true", "false"]
+    assert properties["requireNoPreviews"]["default"] == "false"
+
+
+@pytest.mark.parametrize("guards", [
+    {"expectedLayoutRevision": 0}, {"expectedExploreRevision": 0},
+    {"requireNoPreviews": True}, {"requireNoPreviews": "TRUE"},
+    {"requireNoPreviews": "1"}, {"ownerId": "bob"},
+])
+def test_delete_tool_rejects_invalid_guards_and_owner_injection(guards):
+    with pytest.raises(ValidationError):
+        ai_tools.validate_action({"operation": "delete_model", "args": {"expectedRevision": 1, **guards}})
+
+
+@pytest.mark.parametrize("document", ["layout", "explore"])
+def test_assistant_delete_honors_each_optional_document_guard_and_owner_boundary(services, model, document):
+    update = ({"layout": {"positions": [{"id": "people", "x": 15, "y": 25}]}}
+              if document == "layout" else {"explore": EXPLORE})
+    run(services, "update_" + document, {"expectedRevision": 1, **update}, model["id"])
+    run(services, "create_preview", {"name": "Keep until deliberate deletion", "explore": EXPLORE}, model["id"])
+    before = services.models.get("alice", model["id"])
+    previews = services.models.list_previews("alice", model["id"])
+    guard = "expected" + document.title() + "Revision"
+    args = {"expectedRevision": 1, guard: 1, "requireNoPreviews": "false"}
+    with pytest.raises(ApiProblem) as stale:
+        run(services, "delete_model", args, model["id"])
+    assert stale.value.code == "model_revision_conflict"
+    assert stale.value.details == {"currentRevision": 2}
+    assert document in str(stale.value)
+    assert services.models.get("alice", model["id"]) == before
+    assert services.models.list_previews("alice", model["id"]) == previews
+    with pytest.raises(ApiProblem) as forbidden:
+        run(services, "delete_model", args, model["id"], owner="bob")
+    assert forbidden.value.status_code == 404
+    assert run(services, "delete_model", {**args, guard: 2}, model["id"]) == {"status": "succeeded"}
+    assert run(services, "list_models") == {"models": []}
+    assert ("alice", model["id"]) not in services.models._previews
+
+
+def test_assistant_delete_honors_preview_absence_guard_and_recovers_after_preview_removal(services, model):
+    preview = run(services, "create_preview", {"name": "Keep this preview", "explore": EXPLORE}, model["id"])
+    before = services.models.get("alice", model["id"])
+    previews = services.models.list_previews("alice", model["id"])
+    args = {"expectedRevision": 1, "expectedLayoutRevision": 1,
+            "expectedExploreRevision": 1, "requireNoPreviews": "true"}
+    with pytest.raises(ApiProblem) as blocked:
+        run(services, "delete_model", args, model["id"])
+    assert blocked.value.code == "model_revision_conflict"
+    assert "saved previews" in str(blocked.value)
+    assert services.models.get("alice", model["id"]) == before
+    assert services.models.list_previews("alice", model["id"]) == previews
+    with pytest.raises(ApiProblem) as forbidden:
+        run(services, "delete_model", args, model["id"], owner="bob")
+    assert forbidden.value.status_code == 404
+    run(services, "delete_preview", {"previewId": preview["previewId"], "expectedRevision": 1}, model["id"])
+    assert run(services, "delete_model", args, model["id"]) == {"status": "succeeded"}
     assert run(services, "list_models") == {"models": []}
 
 
@@ -389,7 +465,9 @@ def test_ai_logical_connection_rejects_types_and_preserves_starting_table(servic
     assert 't0."name" AS "People.name"' in planned["sql"]
 
 
-def test_model_dependencies_use_native_owner_scoped_contract_and_block_assistant_delete(services, model):
+@pytest.mark.parametrize("guards", [{}, {"expectedLayoutRevision": 1,
+    "expectedExploreRevision": 1, "requireNoPreviews": "true"}])
+def test_model_dependencies_use_native_owner_scoped_contract_and_block_assistant_delete(services, model, guards):
     from schemii.schemer.dashboard_models import DashboardCreate
     from schemii.schemer.dashboard_store import InMemoryDashboardRepository
 
@@ -407,7 +485,7 @@ def test_model_dependencies_use_native_owner_scoped_contract_and_block_assistant
         run(services, "model_dependencies", model=model["id"], owner="bob")
     assert unauthorized.value.status_code == 404
     with pytest.raises(ApiProblem) as blocked:
-        run(services, "delete_model", {"expectedRevision": 1}, model=model["id"])
+        run(services, "delete_model", {"expectedRevision": 1, **guards}, model=model["id"])
     assert blocked.value.status_code == 409
     assert blocked.value.code == "model_in_use"
     assert blocked.value.details == expected

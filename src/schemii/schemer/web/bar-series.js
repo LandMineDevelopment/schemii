@@ -10,6 +10,7 @@ export function dimensionName(tile, index) {
 }
 export function barDimensionValue(tile, index, value) {
   if (value === null) return 'NULL';
+  if (tile.formatDimension) { const formatted=tile.formatDimension(index,value);if(formatted!==undefined) return formatted; }
   const field = tile.dimensions[index], time = tile.timeAnalysis;
   if (time && time.table === field.table && time.column === field.column && typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const date = new Date(`${value}T00:00:00Z`);
@@ -24,6 +25,7 @@ export function barDimensionValue(tile, index, value) {
   return String(value);
 }
 export function barMeasureName(tile, column) {
+  if(tile.outputMeasureNames?.[column]) return tile.outputMeasureNames[column];
   const offset = tile.dimensions.length, count = tile.measures.length;
   const comparison = tile.timeAnalysis && tile.timeAnalysis.comparison !== 'none';
   const width = (comparison ? 3 : 0) + (tile.timeAnalysis?.runningTotal ? 1 : 0);

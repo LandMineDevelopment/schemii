@@ -1,14 +1,164 @@
+import { sourceIdentity, sourceLabel } from "./logical-relationships.js";
 import { requestJson } from "#common/http.js";
+import { assertProductContext, requireContextAccount, CONTEXT_LIMITS } from "#common/product-context.js";
 import { element } from "#common/dom.js";
 import { createIconButton } from "#common/ui.js";
 import { confirmModelDeletion } from "./model-deletion.js";
 export { confirmModelDeletion } from "./model-deletion.js";
 import { namedAction } from "#common/named-action.js";
 import { modelSelect, disposeSelects } from "./select.js";
-import { importedDraft } from "./model-draft.js";
+import { importedDraft, defaultSourceSelection } from "./model-draft.js";
 import { splitDraft } from "./model-state.js";
 
 const API = "/api/v1/schemoo";
+// An attempt belongs to the consumed context and account, not a mounted form.
+// Never evict pending/unknown outcomes: the server may already have committed.
+const contextCreations = new Map();
+const contextCreation = context => context && contextCreations.get(context)?.get(context.ownerId);
+function reserveContextCreation(context, body) {
+  for (const [key, owners] of contextCreations) {
+    for (const [owner, attempt] of owners) {
+      if (['rejected', 'reconciled'].includes(attempt.state) && attempt.expiresAt <= Date.now()) owners.delete(owner);
+    }
+    if (!owners.size) contextCreations.delete(key);
+  }
+  if (contextCreation(context)) throw new Error('This context already has a create attempt. Review its saved outcome instead of repeating it.');
+  if ([...contextCreations.values()].reduce((count, owners) => count + owners.size, 0) >= CONTEXT_LIMITS.records) throw new Error('This tab has reached its model creation review limit. Inspect the pending saved outcomes before starting another create attempt.');
+  const attempt = { ownerId: context.ownerId, expiresAt: context.expiresAt, state: 'pending', name: body.name,
+    connectionId: body.connectionId, connectionOwnerId: context.payload.connectionOwnerId, namespace: body.namespace };
+  if (!contextCreations.has(context)) contextCreations.set(context, new Map());
+  contextCreations.get(context).set(context.ownerId, attempt);
+  return attempt;
+}
+function recordCreatedModel(attempt, model) {
+  const receipt = Object.fromEntries(['id', 'ownerId', 'revision', 'layoutRevision', 'exploreRevision', 'connectionId', 'connectionOwnerId', 'namespace'].map(key => [key, model[key]]));
+  if (!/^model_[0-9a-f]{32}$/.test(receipt.id) || receipt.ownerId !== attempt.ownerId
+      || ['revision', 'layoutRevision', 'exploreRevision'].some(key => !Number.isSafeInteger(receipt[key]) || receipt[key] < 1)
+      || receipt.connectionId !== attempt.connectionId || (receipt.connectionOwnerId || receipt.ownerId) !== attempt.connectionOwnerId || receipt.namespace !== attempt.namespace) {
+    attempt.state = 'uncertain';
+    throw new Error('The create response could not be verified. Inspect your saved models; this context will not repeat creation.');
+  }
+  attempt.receipt = receipt; attempt.state = 'succeeded';
+}
+
+export async function resolveSchemaContext(context, request = requestJson) {
+  const account = await request('/api/v1/auth/me');
+  assertProductContext(context, account, 'schemoo');
+  const { connections } = await request('/api/v1/connections?product=schemoo');
+  const source = connections.find(item => item.id === context.payload.connectionId);
+  if (!source) throw new Error('This exact PostgreSQL connection is unavailable in Schemoo. Ask for access or return to Schemii and choose another live source.');
+  if ((source.ownerId || account.user.id) !== context.payload.connectionOwnerId || source.revision !== context.payload.connectionRevision) throw new Error('The saved source connection changed. Return to Schemii and send its current context again.');
+  const schemas = await request(`/api/v1/connections/${encodeURIComponent(source.id)}/namespaces?product=schemoo`, { timeoutMs: 30000 });
+  if (!schemas.namespaces.some(item => item.name === context.payload.namespace && !item.system)) throw new Error('This source schema is no longer accessible. Return to Schemii and choose a current live source.');
+  assertProductContext(context, await request('/api/v1/auth/me'), 'schemoo');
+  return source;
+}
+
+export function sourceSelectionControl(catalog, { initial = defaultSourceSelection(catalog), onChange = () => {} } = {}) {
+  const selected = new Map(initial.map(item => [sourceIdentity(item,catalog), new Set(item.columns)]));
+  const getSelection = () => [...selected].map(([identity, columns]) => {
+    const [namespace,table] = JSON.parse(identity), physical=catalog.tables.find(item=>sourceIdentity(item,catalog)===identity);
+    return {table,...(physical?.namespace?{namespace}:{}),columns:[...columns]};
+  });
+  const host = element("section", { className: "source-selection", attrs: { "aria-label": "Model sources and fields" } });
+  const summary = element("p", { className: "hint", attrs: { role: "status" } });
+  const search = element("input", { type: "search", attrs: { "aria-label": "Search sources", placeholder: "Search source names" } });
+  const list = element("div", { className: "source-selection-list" });
+  const error = element("p", { className: "warning", attrs: { role: "alert" } });
+  const notify = () => {
+    const selection = getSelection(), count = selection.reduce((total, item) => total + item.columns.length, 0);
+    summary.textContent = `${selection.length} of ${catalog.tables.length} sources · ${count.toLocaleString()} fields selected. Limit: 100 sources, 200 connections, 1,000 exposed fields.`;
+    let failure = ""; try { importedDraft(catalog, selection); } catch (issue) { failure = issue.message; }
+    error.textContent = failure; error.hidden = !failure;
+    onChange({ valid: !failure, selection });
+  };
+  const render = () => {
+    list.replaceChildren();
+    const query = search.value.trim().toLocaleLowerCase(), tables = catalog.tables.filter(table => sourceLabel(table,catalog).toLocaleLowerCase().includes(query));
+    for (const table of tables.slice(0, 100)) {
+      const identity=sourceIdentity(table,catalog), labelText=sourceLabel(table,catalog);
+      const checkbox = element("input", { type: "checkbox", attrs: { "aria-label": `Include source ${labelText}` } });
+      checkbox.checked = selected.has(identity); checkbox.disabled = !table.columns.length;
+      const row = element("div", { className: "source-selection-row" });
+      const label = element("label", { className: "source-selection-source" }, [checkbox, element("strong", { text: labelText }), element("small", { text: `${table.columns.length.toLocaleString()} fields` })]);
+      const details = element("details", { hidden: !checkbox.checked });
+      const fields = element("div", { className: "source-selection-fields" });
+      const fieldSearch = element("input", { type: "search", attrs: { "aria-label": `Search fields in ${labelText}`, placeholder: "Search fields" } });
+      let populated = false;
+      const renderFields = () => {
+        fields.replaceChildren(); populated = true;
+        const query = fieldSearch.value.trim().toLocaleLowerCase();
+        for (const column of table.columns.filter(column => column.name.toLocaleLowerCase().includes(query)).slice(0, 100)) {
+          const choice = element("input", { type: "checkbox", attrs: { "aria-label": `Expose ${labelText}.${column.name}` } });
+          choice.checked = selected.get(identity)?.has(column.name) || false;
+          choice.onchange = () => { if (choice.checked) selected.get(identity).add(column.name); else selected.get(identity).delete(column.name); notify(); };
+          fields.append(element("label", {}, [choice, element("span", { text: column.name }), element("small", { text: column.dataType || "" })]));
+        }
+        if (table.columns.filter(column => column.name.toLocaleLowerCase().includes(query)).length > 100) fields.append(element("p", { className: "hint", text: "Showing the first 100 matches. Search to find more fields." }));
+      };
+      fieldSearch.oninput = renderFields;
+      const all = element("button", { type: "button", className: "ui-button", text: "All fields", attrs: { "aria-label": `Select all fields in ${labelText}` } });
+      all.onclick = () => { selected.set(identity, new Set(table.columns.map(column => column.name))); renderFields(); notify(); };
+      const none = element("button", { type: "button", className: "ui-button", text: "Clear fields", attrs: { "aria-label": `Clear fields in ${labelText}` } });
+      none.onclick = () => { selected.set(identity, new Set()); renderFields(); notify(); };
+      details.append(element("summary", { text: "Choose exposed fields" }), fieldSearch, element("div", { className: "source-selection-actions" }, [all, none]), fields);
+      details.ontoggle = () => { if (details.open && !populated) renderFields(); };
+      checkbox.onchange = () => {
+        if (checkbox.checked) {
+          const first = table.columns.find(column => column.name === "name") || table.columns.find(column => column.name === "id") || table.columns[0];
+          selected.set(identity, new Set([first.name]));
+        } else selected.delete(identity);
+        details.hidden = !checkbox.checked; if (checkbox.checked) { details.open = true; renderFields(); } notify();
+      };
+      row.append(label, details); list.append(row);
+    }
+    if (!tables.length) list.append(element("p", { className: "hint", text: "No matching accessible sources." }));
+    else if (tables.length > 100) list.append(element("p", { className: "hint", text: "Showing the first 100 matches. Search to find other sources." }));
+  };
+  search.oninput = render;
+  const all = element("button", { type: "button", className: "ui-button", text: "Select all sources and fields" });
+  all.disabled = !defaultSourceSelection(catalog).length;
+  all.onclick = () => { selected.clear(); for (const item of defaultSourceSelection(catalog)) selected.set(sourceIdentity(item,catalog), new Set(item.columns)); render(); notify(); };
+  const clear = element("button", { type: "button", className: "ui-button", text: "Clear selection" });
+  clear.onclick = () => { selected.clear(); render(); notify(); };
+  host.append(element("h4", { text: "Choose sources and exposed fields" }), element("p", { className: "hint", text: "Start with the sources you need. Only checked fields become report outputs; keys and joins are retained automatically. More sources and fields can be added later." }), search,
+    element("div", { className: "source-selection-actions" }, [all, clear]), summary, list, error);
+  render(); notify();
+  return { element: host, getSelection };
+}
+
+export function openSourceSelection(catalog, onSelect) {
+  return new Promise(resolve => {
+    const previous = document.activeElement;
+    const dialog = element("dialog", { className: "ui-dialog source-selection-dialog", attrs: { "aria-label": "Add model sources and fields" } });
+    const form = element("form"), submit = element("button", { type: "submit", className: "ui-button primary", text: "Add selection" });
+    const error = element("p", { className: "warning", attrs: { role: "alert" } });
+    let currentCatalog=catalog;
+    const selectionHost=element("div"), schemas=element("fieldset"), reload=element("button",{type:"button",className:"ui-button",text:"Load selected schemas"});
+    let included=new Set(catalog.namespaces || [catalog.namespace]), ticket=0;
+    let selection=sourceSelectionControl(currentCatalog,{initial:[],onChange:({valid})=>{submit.disabled=!valid;}});selectionHost.append(selection.element);
+    reload.onclick=async()=>{
+      const current=++ticket;reload.disabled=true;submit.disabled=true;schemas.inert=true;error.textContent="Loading accessible sources…";
+      try {
+        const next=await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(catalog.connectionId)}&namespace=${encodeURIComponent(catalog.namespace)}${[...included].map(value=>`&namespaces=${encodeURIComponent(value)}`).join("")}`,{timeoutMs:30000});
+        if(current!==ticket || !dialog.open)return;
+        currentCatalog=next;selection=sourceSelectionControl(next,{initial:[],onChange:({valid})=>{submit.disabled=!valid;}});selectionHost.replaceChildren(selection.element);error.textContent="";
+      }catch(failure){if(current===ticket && dialog.open)error.textContent=failure.message;}finally{if(current===ticket && dialog.open){reload.disabled=false;schemas.inert=false;}}
+    };
+    if(catalog.connectionId)void requestJson(`/api/v1/connections/${encodeURIComponent(catalog.connectionId)}/namespaces?product=schemoo`).then(data=>{
+      if(!dialog.open)return;schemas.append(element("legend",{text:"Source schemas"}));
+      for(const item of data.namespaces.filter(item=>!item.system)){
+        const include=element("input",{type:"checkbox",attrs:{"aria-label":`Include schema ${item.name}`}});include.checked=included.has(item.name);include.disabled=(catalog.namespaces || [catalog.namespace]).includes(item.name);
+        include.onchange=()=>{if(include.checked)included.add(item.name);else included.delete(item.name);submit.disabled=true;};schemas.append(element("label",{},[include,item.name]));
+      }
+    }).catch(failure=>{if(dialog.open)error.textContent=failure.message;});
+    const cancel = element("button", { type: "button", className: "ui-button", text: "Cancel" }); cancel.onclick = () => dialog.close();
+    form.onsubmit = event => { event.preventDefault(); if (submit.disabled) return; try { onSelect(selection.getSelection(),currentCatalog); dialog.close(); } catch (failure) { error.textContent = failure.message; } };
+    dialog.addEventListener("close", () => { dialog.remove(); if (previous?.isConnected) previous.focus(); resolve(); }, { once: true });
+    form.append(element("h2", { text: "Add model sources and fields" }), ...(catalog.connectionId?[schemas,reload]:[]), selectionHost, error, element("div", { className: "ui-dialog__actions" }, [cancel, submit]));
+    dialog.append(form); document.body.append(dialog); dialog.showModal(); selection.element.querySelector("input").focus();
+  });
+}
 
 let libraryTicket = 0;
 let refreshActions = [];
@@ -16,19 +166,35 @@ export function refreshModelLibraryActions() {
   if (!document.getElementById("model-library")?.open) return;
   for (const refresh of refreshActions) refresh();
 }
-export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete = () => true, onAssistant = null } = {}) {
+export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete = () => true, onAssistant = null, sourceContext = null } = {}) {
   const ticket = ++libraryTicket;
   refreshActions = [];
   const dialog = document.getElementById("model-library"), content = document.getElementById("library-content");
+  const current = () => ticket === libraryTicket && dialog.open;
+  if (sourceContext) {
+    const abandon = () => { if (current()) { libraryTicket++; dialog.close(); } };
+    window.addEventListener('pagehide', abandon, { once: true });
+    dialog.addEventListener('close', () => window.removeEventListener('pagehide', abandon), { once: true });
+  }
   disposeSelects(content); content.replaceChildren(element("p", { text: "Loading your models and connections…", attrs: { role: "status" } }));
   if (!dialog.open) dialog.showModal();
   try {
+    const retained = contextCreation(sourceContext);
+    if (retained) requireContextAccount(await requestJson('/api/v1/auth/me'), 'schemoo', retained.ownerId);
+    else if (sourceContext) await resolveSchemaContext(sourceContext);
     const [{ models }, { connections }] = await Promise.all([requestJson(`${API}/models`), requestJson("/api/v1/connections?product=schemoo")]);
     if (ticket !== libraryTicket || !dialog.open) return;
     content.replaceChildren();
     const status = element("p", { className: "hint", attrs: { role: "status" } });
-    const choose = async model => { try { if (await onOpen(model.id) !== false) dialog.close(); } catch (error) { status.textContent = error.message; } };
-    if (!models.length && onAssistant) {
+    const choose = async model => {
+      if (!current()) return false;
+      try {
+        const opened = await onOpen(model.id);
+        if (opened !== false && current()) { dialog.close(); return true; }
+      } catch (error) { if (current()) status.textContent = error.message; }
+      return false;
+    };
+    if (!models.length && onAssistant && !sourceContext) {
       const assistant = element("button", { type: "button", className: "ui-button primary", text: "Create with model assistant" });
       assistant.onclick = () => { dialog.close(); onAssistant(); };
       content.append(element("p", { className: "hint", text: "Describe the model you want and let the assistant create it." }), assistant);
@@ -74,9 +240,8 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
                 }
               },
             });
-            if (copied) {
-              await openModelLibrary(onOpen, { onDeleted, canDelete });
-              if (await onOpen(copied.id) !== false) dialog.close();
+            if (copied && current()) {
+              if (!await choose(copied) && current()) await openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant, sourceContext });
             }
           } catch (error) {
             const target = content.querySelector('[role="status"]');
@@ -101,42 +266,154 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
       }
       const refresh = createIconButton({ icon: "refresh", label: "Refresh models" });
       refresh.title = "Refresh models";
-      refresh.onclick = () => openModelLibrary(onOpen, { onDeleted, canDelete });
+      refresh.onclick = () => openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant, sourceContext });
       content.append(element("div", { className: "model-list-heading" }, [element("h3", { text: "Your saved models" }), refresh]), list);
     } else content.append(element("p", { className: "hint", text: "No saved models yet. Create one from an existing PostgreSQL connection. This does not change the database." }));
+    // Read a reservation again after the metadata awaits: another form may have
+    // dispatched while this replacement library was loading.
+    const previousAttempt = contextCreation(sourceContext);
+    if (previousAttempt) {
+      const review = element('form', { className: 'model-create-form' });
+      review.onsubmit = event => event.preventDefault();
+      const create = element('button', { type: 'submit', className: 'ui-button primary', text: 'Create model' }); create.disabled = true;
+      const refresh = element('button', { type: 'button', className: 'ui-button', text: 'Review model list' });
+      refresh.onclick = () => openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant, sourceContext });
+      const descriptions = {
+        pending: 'This creation is still pending. Its request may already have saved a model. Refresh this review to check its outcome; this context will not repeat the request.',
+        uncertain: 'The create outcome is uncertain. Inspect your owned saved models above. A matching name alone does not identify the original creation; this context will not repeat the request.',
+        rejected: 'The server rejected this creation. No saved model was acknowledged. Repair the reported problem and send a new context from Schemii for a new intentional attempt.',
+        succeeded: 'The create response identified a saved model. Review that exact owned model below; this context will not create another copy.',
+        reconciled: 'The exact saved creation was checked. This context will not create another copy.',
+      };
+      status.textContent = descriptions[previousAttempt.state];
+      if (previousAttempt.failure) status.textContent += ` ${previousAttempt.failure.message}`;
+      review.append(element('h3', { text: `Review creation of ${previousAttempt.name}` }), create, refresh,
+        element('a', { text: 'Return to Schemii for a new source context', attrs: { href: '/' } }));
+      if (previousAttempt.receipt) {
+        const inspect = element('button', { type: 'button', className: 'ui-button', text: `Review saved model ${previousAttempt.name}` });
+        inspect.onclick = async () => {
+          if (inspect.disabled || !current()) return;
+          inspect.disabled = true;
+          try {
+            requireContextAccount(await requestJson('/api/v1/auth/me'), 'schemoo', previousAttempt.ownerId);
+            const saved = await requestJson(`${API}/models/${encodeURIComponent(previousAttempt.receipt.id)}`);
+            requireContextAccount(await requestJson('/api/v1/auth/me'), 'schemoo', previousAttempt.ownerId);
+            if (!current()) return;
+            if (Object.entries(previousAttempt.receipt).some(([key, value]) => saved[key] !== value)) throw new Error('That saved model changed or is no longer available. Inspect the owned model list; this context will not repeat creation.');
+            previousAttempt.state = 'reconciled';
+            await choose(saved);
+          } catch (error) { if (current()) status.textContent = error.message; }
+          finally { inspect.disabled = false; }
+        };
+        review.append(inspect);
+      }
+      content.append(review, status); return;
+    }
     if (!connections.length) { content.append(element("p", { text: "Add a PostgreSQL connection in Schemii first." }), element("a", { text: "Open Schemii", attrs: { href: "/" } }), status); return; }
     const form = element("form", { className: "model-create-form" });
     const name = element("input", { attrs: { "aria-label": "Model name", maxlength: "128", required: "", placeholder: "Organization model" } });
-    let connectionId = "", namespace = "", namespaceTicket = 0;
-    const namespaceHost = element("div");
+    if (sourceContext) {
+      name.value = `${sourceContext.payload.namespace} model`.slice(0, 128);
+      content.append(element('a', { text: 'Choose another model or source', attrs: { href: '/schemoo' } }), element('h3', { text: 'Review schema context from Schemii' }), element('p', { className: 'hint', text: 'This reads the current live PostgreSQL schema, not undeployed desired design changes. Review the name, sources and fields; nothing is created until Create model.' }));
+    }
+    let connectionId = "", namespace = "", includedNamespaces = new Set(), namespaceTicket = 0, catalog = null, selection = null, creating = false, creationUncertain = false, contextBlocked = false;
+    const namespaceHost = element("div"), sourceHost = element("div"), extraSchemas=element("fieldset");
     const create = element("button", { type: "submit", className: "ui-button primary", text: "Create model" }); create.disabled = true;
-    const connection = modelSelect("Source connection", [["", "Choose connection"], ...connections.map(c => [c.id, `${c.name} · ${c.database} · ${c.username}`])], "", async value => {
-      connectionId = value; namespace = ""; create.disabled = true;
+    const reload = element("button", { type: "button", className: "ui-button", text: "Reload sources" }); reload.hidden = true;
+    const loadSources = async () => {
+      const ticket = ++namespaceTicket, initial = selection?.getSelection();
+      catalog = null; selection = null; sourceHost.replaceChildren(); create.disabled = true; reload.disabled = true;
+      if (!connectionId || !namespace) return;
+      status.textContent = "Loading accessible sources…";
+      try {
+        const next = await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(connectionId)}&namespace=${encodeURIComponent(namespace)}${[...includedNamespaces].map(value=>`&namespaces=${encodeURIComponent(value)}`).join("")}`, { timeoutMs: 30000 });
+        if (ticket !== namespaceTicket || !dialog.open || libraryTicket !== libraryTicketAtOpen) return;
+        if (!next.tables.some(table => table.columns?.length)) throw new Error("This schema has no accessible sources with readable fields. Choose another schema or check its read permissions.");
+        catalog = next;
+        selection = sourceSelectionControl(catalog, { ...(initial ? { initial } : {}), onChange: ({ valid }) => { create.disabled = !valid || creationUncertain || contextBlocked || !!contextCreation(sourceContext); } });
+        sourceHost.append(selection.element);
+        status.textContent = defaultSourceSelection(catalog).length ? "Review sources and fields before creating the model." : "This schema exceeds one model's limits. Choose a smaller set of sources and fields.";
+      } catch (error) { if (ticket === namespaceTicket && dialog.open) status.textContent = error.message; }
+      finally { if (ticket === namespaceTicket) reload.disabled = false; }
+    };
+    const libraryTicketAtOpen = ticket;
+    reload.onclick = loadSources;
+    const selectConnection = async value => {
+      connectionId = value; namespace = ""; includedNamespaces=new Set(); extraSchemas.replaceChildren(); catalog = null; selection = null; create.disabled = true; reload.hidden = true;
       const ticket = ++namespaceTicket;
-      disposeSelects(namespaceHost); namespaceHost.replaceChildren();
+      disposeSelects(namespaceHost); namespaceHost.replaceChildren(); sourceHost.replaceChildren();
       if (!value) return;
       status.textContent = "Loading visible schemas…";
       try {
         const data = await requestJson(`/api/v1/connections/${value}/namespaces?product=schemoo`, { timeoutMs: 30000 });
-        if (ticket !== namespaceTicket) return;
+        if (ticket !== namespaceTicket || !dialog.open || libraryTicket !== libraryTicketAtOpen) return;
         const available = data.namespaces.filter(n => !n.system);
-        namespaceHost.append(modelSelect("Source schema", [["", "Choose schema"], ...available.map(n => [n.name, n.name])], "", value => { namespace = value; create.disabled = !namespace; }));
-        status.textContent = available.length ? "" : "No accessible non-system schemas on this connection.";
-      } catch (error) { if (ticket === namespaceTicket) status.textContent = error.message; }
-    });
-    form.append(element("h3", { text: "Create a model" }), element("label", { className: "stack" }, ["Model name", name]), element("label", { className: "stack" }, ["Connection", connection]), namespaceHost, create);
+        const selectSchema = value => {
+          namespace = value; selection = null; includedNamespaces=new Set(value?[value]:[]); extraSchemas.replaceChildren();
+          if(value) {
+            extraSchemas.append(element("legend",{text:"Additional source schemas"}));
+            for(const item of available.filter(item=>item.name!==value)) {
+              const include=element("input",{type:"checkbox",attrs:{"aria-label":`Include schema ${item.name}`}});
+              include.onchange=()=>{if(include.checked)includedNamespaces.add(item.name);else includedNamespaces.delete(item.name);void loadSources();};
+              extraSchemas.append(element("label",{},[include,item.name]));
+            }
+          }
+          reload.hidden = !value; return loadSources();
+        };
+        const schemaPicker = modelSelect("Source schema", [["", "Choose schema"], ...available.map(n => [n.name, n.name])], sourceContext?.payload.namespace || "", selectSchema);
+        namespaceHost.append(schemaPicker);
+        if (sourceContext) { schemaPicker.inert = true; schemaPicker.querySelector('input').disabled = true; await selectSchema(sourceContext.payload.namespace); }
+        else status.textContent = available.length ? "" : "No accessible non-system schemas on this connection.";
+      } catch (error) { if (ticket === namespaceTicket && dialog.open) status.textContent = error.message; }
+    };
+    const connection = modelSelect("Source connection", [["", "Choose connection"], ...connections.map(c => [c.id, `${c.name} · ${c.database} · ${c.username}`])], sourceContext?.payload.connectionId || "", selectConnection);
+    if (sourceContext) { connection.inert = true; connection.querySelector('input').disabled = true; }
+    const review = element("button", { type: "button", className: "ui-button", text: "Review model list" });
+    review.onclick = () => openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant, sourceContext });
+    form.append(element("h3", { text: "Create a model" }), element("label", { className: "stack" }, ["Model name", name]), element("label", { className: "stack" }, ["Connection", connection]), namespaceHost, extraSchemas, reload, sourceHost, element("div", { className: "source-selection-actions" }, [create, review]));
     form.onsubmit = async event => {
-      event.preventDefault(); if (!connectionId || !namespace || !name.value.trim()) return;
-      form.inert = true; status.textContent = "Inspecting source and creating model…";
+      event.preventDefault(); if (creating || create.disabled || contextCreation(sourceContext) || !catalog || !selection || !name.value.trim()) return;
+      creating = true; form.inert = true; status.textContent = "Creating selected model…";
+      const reviewedCatalog = catalog, reviewedSelection = selection;
+      let posted = false, attempt;
       try {
-        const catalog = await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(connectionId)}&namespace=${encodeURIComponent(namespace)}`, { timeoutMs: 30000 });
-        if (!catalog.tables.length) throw new Error("This schema has no visible tables to model.");
-        const parts = splitDraft(importedDraft(catalog));
-        const model = await requestJson(`${API}/models`, { method: "POST", body: { name: name.value.trim(), connectionId, namespace, ...parts, catalogFingerprint: catalog.fingerprint }, timeoutMs: 30000 });
-        await choose(model);
-      } catch (error) { status.textContent = error.message; }
-      finally { form.inert = false; }
+        if (sourceContext) await resolveSchemaContext(sourceContext);
+        if (!current()) return;
+        if (catalog !== reviewedCatalog || selection !== reviewedSelection) throw new Error('The source review changed. Review its fields again before creating.');
+        const parts = splitDraft(importedDraft(catalog, selection.getSelection()));
+        const body = { name: name.value.trim(), connectionId, namespace, ...parts, catalogFingerprint: catalog.fingerprint, catalogNamespaces: catalog.namespaces || [namespace] };
+        if (sourceContext) attempt = reserveContextCreation(sourceContext, body);
+        posted = true;
+        const model = await requestJson(`${API}/models`, { method: "POST", body, timeoutMs: 30000 });
+        if (attempt) recordCreatedModel(attempt, model);
+        if (!current()) return;
+        create.disabled = true;
+        const opened = await choose(model);
+        if (attempt && opened) attempt.state = 'reconciled';
+        if (!opened && current()) await openModelLibrary(onOpen, { onDeleted, canDelete, onAssistant, sourceContext });
+      } catch (error) {
+        if (attempt) attempt.failure = { status: error.status || null, message: String(error.message || 'Creation failed without a confirmed outcome.').slice(0, 400) };
+        if (attempt && attempt.state === 'pending') {
+          attempt.state = [400, 401, 403, 404, 409, 413, 422, 429].includes(error.status) ? 'rejected' : 'uncertain';
+        }
+        if (!current()) return;
+        status.textContent = error.message;
+        if (attempt) {
+          create.disabled = true;
+          status.textContent += attempt.state === 'rejected' ? ' The server rejected this attempt. Repair the problem and send a new source context from Schemii.' : ' Review the model list to inspect the uncertain outcome. This context will not repeat creation.';
+          return;
+        }
+        if (sourceContext && !posted) { contextBlocked = true; create.disabled = true; status.textContent += ' Return to Schemii and send a fresh live-source context.'; }
+        else if (error.code === "model_source_changed") { create.disabled = true; status.textContent += " Use Reload sources to review the updated selection."; }
+        else if (sourceContext && [403, 404, 409].includes(error.status)) { contextBlocked = true; create.disabled = true; status.textContent += ' Return to Schemii and send a fresh live-source context.'; }
+        else if (!error.status || error.status >= 500) {
+          creationUncertain = true; create.disabled = true;
+          status.textContent += " Review the model list to check whether this model was saved. This uncertain request will not be repeated.";
+        }
+      }
+      finally { creating = false; form.inert = false; }
     };
     content.append(form, status);
-  } catch (error) { if (ticket === libraryTicket && dialog.open) content.replaceChildren(element("p", { className: "warning", text: error.message })); }
+    if (sourceContext) await selectConnection(sourceContext.payload.connectionId);
+  } catch (error) { if (ticket === libraryTicket && dialog.open) content.replaceChildren(element("p", { className: "warning", text: error.message }), ...(sourceContext ? [element('a', { text: 'Return to Schemii and send a current live source', attrs: { href: '/' } }), element('a', { text: 'Open model library without context', attrs: { href: '/schemoo' } })] : [])); }
 }

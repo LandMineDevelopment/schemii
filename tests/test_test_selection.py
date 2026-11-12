@@ -1765,7 +1765,7 @@ def test_inspection_complete_closure_independent_minimum_and_backup_contract():
     policy = coverage_policy(INSPECTION_PROFILE)
     assert PYTHON_PATHS[INSPECTION_PROFILE] == INSPECTION_PYTHON
     assert len(policy["python"]["files"]) == 8
-    assert sum(map(len, policy["python"]["files"].values())) == 87
+    assert sum(map(len, policy["python"]["files"].values())) == 90
     assert len(policy["python"]["files"][INSPECTION_TEST]) == 7
     assert (
         len(policy["frozen_sha256"]) == 9
@@ -1827,7 +1827,7 @@ def inspection_scope(key, extra=False):
 def test_inspection_dynamic_helper_plan_adds_complete_first_attempt_passes_only():
     key = ("python", "none", 0)
     scope = inspection_scope(key, extra=True)
-    assert len(scope["planned"]) == 88 and valid_scope(INSPECTION_PROFILE, key, scope)
+    assert len(scope["planned"]) == 91 and valid_scope(INSPECTION_PROFILE, key, scope)
     assert valid_scope(INSPECTION_PROFILE, key, inspection_scope(key))
 
 

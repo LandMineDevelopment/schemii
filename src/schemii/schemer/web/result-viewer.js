@@ -1,9 +1,14 @@
+import { createNumberPresentation, decorateNumber } from './number-format.js';
 import { scrollPosition, restoreScroll, createResultGrid, appendStreamStatus } from './scroll-results.js';
 import { element } from '#common/dom.js';
 import { createIconButton, downloadContent } from '#common/ui.js';
-import { renderVisualization } from './visualizations.js';
+import { renderVisualization, displayedVisualization, rememberDisplayedVisualization } from './visualizations.js';
 import { csvContent } from './report-state.js';
 function icon(name, label, callback) { const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.onclick = callback; return button; }
+function requestTime(value) {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.valueOf()) ? date.toLocaleString(undefined, { timeZoneName: 'short' }) : 'unavailable';
+}
 export function openSql(plan, title = 'Executed SQL') {
   const dialog = element('dialog', { className: 'ui-dialog sql-dialog', attrs: { 'aria-label': title } });
   const status = element('p', { className: 'hint', attrs: { role: 'status' } });
@@ -36,7 +41,8 @@ function gridInteractions(host, result) {
   });
   viewport.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('td:not(.drill-mark)')) { event.preventDefault(); event.target.click(); } });
 }
-export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh, canExport = true, canDrill = true, canViewSql = true }) {
+export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh, onExplain, canExport = true, canDrill = true, canViewSql = true }) {
+  const detailTile = { ...tile, kind: 'detail', dimensions: [], measures: [] };
   const dialog = element('dialog', { className: 'expanded-dialog', attrs: { 'aria-label': tile.title } });
   const chartPane = element('section', { className: 'expanded-chart-pane' });
   const chartBody = element('div', { className: 'expanded-chart-body' });
@@ -49,51 +55,95 @@ export function openExpanded({ tile, modelId, cache, createDrillCache, onRefresh
   const chips = element('div', { className: 'filter-chips' });
   const chartStatus = element('span', { className: 'viewer-status', attrs: { role: 'status' } });
   const detailStatus = element('span', { className: 'viewer-status', attrs: { role: 'status' } });
+  const detailFreshness = element('p', { className: 'hint drill-freshness' });
+  const detailTiming = element('p', { className: 'hint drill-request-times', attrs: { role: 'status' } });
   const chartActions = element('div', { className: 'actions' });
   const detailActions = element('div', { className: 'actions' });
   const chart = !['detail', 'aggregate'].includes(tile.kind);
-  let detailCache, unsubscribeDrill, mainScheduled = false, detailScheduled = false;
+  let detailCache, detailSelection, reusedDrill = false, unsubscribeDrill, mainScheduled = false, detailScheduled = false;
   const scheduleMain = () => { if (!mainScheduled) { mainScheduled = true; requestAnimationFrame(() => { mainScheduled = false; renderMain(); }); } };
   const scheduleDetails = () => { if (!detailScheduled) { detailScheduled = true; requestAnimationFrame(() => { detailScheduled = false; renderDetails(); }); } };
   function pane(which) { dialog.classList.toggle('show-details', which === 'details'); chartTitle.setAttribute('aria-expanded', which === 'chart'); detailTitle.setAttribute('aria-expanded', which === 'details'); }
-  chartTitle.onclick = () => pane('chart'); detailTitle.onclick = () => pane('details');
+  chartTitle.onclick = () => { if (detailCache?.hasMore) void detailCache.close(); pane('chart'); };
+  detailTitle.onclick = () => pane('details');
+  function releaseDrill() {
+    unsubscribeDrill?.(); unsubscribeDrill = null;
+    if (detailCache?.hasMore) void detailCache.close();
+    detailCache = null; detailSelection = null;
+    detailBody.replaceChildren(); detailFooter.replaceChildren(); chips.replaceChildren();
+  }
+  function selectDrill(selected, { refresh = false } = {}) {
+    if (refresh) releaseDrill();
+    const next = createDrillCache(selected, { refresh });
+    reusedDrill = next.started;
+    if (next !== detailCache) { releaseDrill(); detailCache = next; unsubscribeDrill = detailCache.subscribe(scheduleDetails); }
+    detailSelection = selected;
+    chips.replaceChildren(...(selected.constituent ? [element('span',{text:`Calculation constituent · ${selected.constituent.scope.replaceAll('_',' ')}`})] : []),...(selected.pivot ? [element('span', { text: `Pivot ${selected.pivot.kind.replaceAll('_', ' ')} · complete qualifying scope` })] : []), ...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
+    detailPane.hidden = false; pane('details'); renderDetails(); void detailCache.loadMore();
+  }
   function footer(host, stream) {
     host.replaceChildren(); if (!stream) return;
     const data = stream.snapshot();
-    host.append(element('span', { className: 'hint', text: `${data.rows.length} cached · ${data.loading ? 'receiving rows' : data.error ? 'interrupted' : data.limitReached ? 'Preview limit reached' : 'end of result'}` }),
-      ...(canExport ? [icon('download', 'Export cached rows as CSV', () => downloadContent(csvContent(data), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8'))] : []));
+    host.append(element('span', { className: 'hint', text: `${data.rows.length} cached · ${data.loading ? 'receiving rows' : data.error ? 'interrupted' : data.limitReached ? 'Preview limit reached' : 'end of result'}` }));
+    if (canExport) {
+      const scope = stream !== cache && (tile.kind==='pivot' || detailSelection?.constituent) ? detailSelection : null;
+      const serialized = scope ? JSON.stringify(scope) : '';
+      const cached = icon('download', tile.kind === 'pivot' && stream === cache ? 'Export cached pivot groups with scope as RAW CSV' : 'Export cached rows as RAW CSV', () => {
+        const scoped = scope?.constituent ? {...data,columns:[...data.columns,...['Calculated measure','Constituent population','Calculation selection'].map(name=>({name}))],rows:data.rows.map(row=>[...row,data.plan?.calculationScope?.label || 'Calculation',data.plan?.calculationScope?.population || scope.constituent.scope,JSON.stringify(data.plan?.calculationScope || scope)])} : scope ? { ...data, columns: [...data.columns, ...['Pivot scope', 'Row grouping depth', 'Column grouping depth', 'Pivot selection'].map(name => ({ name }))],
+          rows: data.rows.map(row => [...row, scope.pivot.kind, scope.pivot.rowDepth, scope.pivot.columnDepth, serialized]) } : data;
+        downloadContent(csvContent(scoped), 'schemer-cached-rows.csv', 'text/csv;charset=utf-8');
+      });
+      // Preserve exact selection metadata without expanding an otherwise small
+      // cached drill into an unbounded in-memory CSV. Full CSV streams on server.
+      if (serialized.length * data.rows.length > 8 * 1024 * 1024) {
+        cached.disabled = true; cached.title = 'Pivot scope metadata exceeds the cached CSV budget. Use Download full results to stream the exact scope.';
+        host.append(element('small', { className: 'hint', text: cached.title }));
+      }
+      host.append(cached);
+    }
     if (!canExport) return;
-    const download = element('button', { type: 'button', className: 'ui-button', text: 'Download full results', attrs: { title: 'Runs the full query against a fresh snapshot. Results may differ from this preview.' } });
+    const download = element('button', { type: 'button', className: 'ui-button', text: tile.kind === 'pivot' && stream === cache ? 'Download full pivot groups · RAW CSV' : 'Download full results · RAW CSV', attrs: { title: 'Runs the full query against a fresh snapshot. Results may differ from this preview.' } });
     download.onclick = () => stream.download?.(); download.disabled = !stream.download; host.append(download);
-    host.append(element('small', { className: 'export-snapshot-note', text: 'Full download uses a fresh snapshot.' }));
+    host.append(element('small', { className: 'export-snapshot-note', text: 'CSV contains RAW values, without display formatting or indicators. Full download uses a fresh snapshot.' }));
   }
   function renderMain() {
     if (!dialog.isConnected) return;
     const position = scrollPosition(chartBody), result = cache.snapshot();
-    renderVisualization(chartBody, tile, result, { modelId, onDrill: !canDrill || tile.kind === 'detail' ? null : selected => {
-      unsubscribeDrill?.(); detailCache = createDrillCache(selected); unsubscribeDrill = detailCache.subscribe(scheduleDetails);
-      chips.replaceChildren(...selected.dimensions.map(d => element('span', { text: `${d.column}: ${d.value === null ? 'NULL' : d.value}` })));
-      detailPane.hidden = false; pane('details'); renderDetails(); void detailCache.loadMore();
-    } });
+    renderVisualization(chartBody, tile, result, { modelId, onDrill: !canDrill || tile.kind === 'detail' ? null : selectDrill });
     gridInteractions(chartBody, result); appendStreamStatus(chartBody, result); restoreScroll(chartBody, position);
-    chartStatus.textContent = `${cache.rows.length} ${chart ? 'groups' : 'rows'} cached${cache.snapshotAt ? ` · Started ${new Date(cache.snapshotAt).toLocaleString()}` : ''}`;
+    chartStatus.textContent = `${cache.rows.length} ${chart ? 'groups' : 'rows'} cached · Report request started: ${requestTime(cache.snapshotAt)}`;
+    if (detailCache) scheduleDetails();
     footer(chartFooter, cache);
   }
   function renderDetails() {
     if (!dialog.isConnected || !detailCache) return;
     const position = scrollPosition(detailBody), data = detailCache.snapshot();
-    detailBody.replaceChildren(createResultGrid(data)); gridInteractions(detailBody, data); appendStreamStatus(detailBody, data); restoreScroll(detailBody, position);
+    const present=createNumberPresentation(detailTile,data);
+    rememberDisplayedVisualization(detailBody, detailTile, data, present);
+    detailBody.replaceChildren(createResultGrid(data,(row,index)=>{[...row.querySelectorAll('td')].forEach((cell,column)=>decorateNumber(cell,present(data.rows[index][column],column)));})); gridInteractions(detailBody, data); appendStreamStatus(detailBody, data); restoreScroll(detailBody, position);
     detailStatus.textContent = `Model detail rows · ${data.rows.length} cached${data.plan?.warnings?.some(w => w.includes('repeat') || w.includes('DISTINCT')) ? ' · Related or repeated rows may differ from the measure count' : ''}`;
+    detailFreshness.textContent = reusedDrill && data.snapshotAt
+      ? 'Earlier cached drill result. Refresh detail rows to query current source data. Results may differ from the report.'
+      : 'Drill investigates current source data when requested. Results may differ from the report.';
+    const drillTime = data.snapshotAt ? `Drill request started: ${requestTime(data.snapshotAt)}`
+      : data.loading ? 'Awaiting drill request start' : data.reason === 'browser_budget' ? 'No drill request started: browser cache budget reached' : 'Drill request start time unavailable';
+    detailTiming.textContent = `Report request started: ${requestTime(cache.snapshotAt)}. ${drillTime}.`;
     footer(detailFooter, detailCache);
   }
   if (canViewSql) chartActions.append(icon('sql', 'Show tile SQL', () => { if (cache.plan) openSql(cache.plan, `${tile.title} · SQL`); }));
+  if (onExplain) chartActions.append(icon('assistant', 'Explain displayed result', () => {
+    void onExplain(cache, displayedVisualization(chartBody, tile, cache.snapshot())); dialog.close();
+  }));
   chartActions.append( icon('refresh', 'Refresh tile', () => { dialog.close(); onRefresh(); }), icon('close', 'Close expanded tile', () => dialog.close()));
   if (canViewSql) detailActions.append(icon('sql', 'Show detail SQL', () => { if (detailCache?.plan) openSql(detailCache.plan, 'Detail rows · SQL'); }));
-  detailActions.append( icon('close', 'Close detail rows', () => { detailPane.hidden = true; pane('chart'); }));
+  if (onExplain) detailActions.append(icon('assistant', 'Explain displayed detail rows', () => {
+    if (detailCache) { void onExplain(detailCache, displayedVisualization(detailBody, detailTile, detailCache.snapshot())); dialog.close(); }
+  }));
+  detailActions.append(icon('refresh', 'Refresh detail rows', () => { if (detailSelection) selectDrill(detailSelection, { refresh: true }); }), icon('close', 'Close detail rows', () => { releaseDrill(); detailPane.hidden = true; pane('chart'); }));
   chartPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [chartTitle, chartStatus]), chartActions]), chartBody, chartFooter);
-  detailPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [detailTitle, chips, detailStatus]), detailActions]), detailBody, detailFooter);
+  detailPane.append(element('header', { className: 'expanded-pane-header' }, [element('div', {}, [detailTitle, chips, detailStatus, detailFreshness, detailTiming]), detailActions]), detailBody, detailFooter);
   dialog.append(chartPane, detailPane);
   const unsubscribe = cache.subscribe(scheduleMain);
-  dialog.onclose = () => { unsubscribe(); unsubscribeDrill?.(); dialog.remove(); };
+  dialog.onclose = () => { unsubscribe(); releaseDrill(); dialog.remove(); };
   document.body.append(dialog); pane('chart'); dialog.showModal(); renderMain(); void cache.loadMore();
 }

@@ -1,27 +1,31 @@
 """Dashboard-scoped assistant actions; current grants remain the authority."""
 from __future__ import annotations
 
+from copy import deepcopy
 from functools import reduce
+import hashlib
+import json
 from operator import or_
 import secrets
 from types import SimpleNamespace
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, create_model
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError, create_model, model_validator
 
 from schemii.common.ai.tool_schema import provider_schema
 from schemii.common.api.errors import ApiProblem
-from schemii.schemoo.models import Contract, ScopeSelection
+from schemii.schemoo.models import Contract, ScopeSelection, ReportFilter
 from schemii.schemoo.service import load_model, model_catalog, domain_query
 from schemii.schemoo.routes import ParameterValuesRequest
 from .access import available_dashboards, prepare_dashboard
-from .dashboard_models import DashboardUpdate
+from .dashboard_models import DashboardUpdate, MeasureOperand, FormatOutput, OutputNumberFormat
 from .dashboard_store import DashboardNotFoundError, DashboardConflictError
 from .tile_queries import tile_plan
 
 SUBJECT_KEY = "dashboardId"
 SUBJECT_LABEL = "dashboard"
 READ_ACTION = "get_dashboard"
+DISPLAYED_ACTION = "explain_displayed_result"
 TOOL_NAME = "schemer_actions"
 REPLAY_ACTIONS = {"execute_tile", "plan_tile", "drill_tile", "parameter_values"}
 
@@ -51,6 +55,13 @@ not a patch. Saved tiles use model field references and compiled report queries.
 There is no raw SQL or source-write tool. A tile's optional filter selections in
 plan_tile, execute_tile or drill_tile apply only to that run; they do not update the
 saved dashboard. Drill requires a separate report grant and one chart-point selection.
+Pivot results are long-form groups with explicit row/column grouping depths; NULL
+values are not totals. Use the returned pivot axes and scope metadata for a cell,
+row, column, subtotal or grand-total drill. Totals cover the complete qualifying
+population before Top N, and may exceed displayed cells. Column-capacity status
+rows are diagnostics, not data. Never sum displayed averages or distinct counts.
+Named report calculations use aggregate output references and explicit group, source_population or qualifying_groups scopes. Ratios divide complete aggregate inputs; percent_of has scale 100. A calculated mark has separate constituent populations. For drill_tile choose one returned constituent explicitly; do not invent a single detail population for a ratio. Numeric constants and KPI baselines preserve exact authored values, with an explicit favorable direction.
+Model summary inputs describe per-owner values, not original raw-child averages.
 get_dashboard returns only exposed filter scope, alternative and input IDs needed
 for parameter_values; never guess internal IDs or browse filters outside that list.
 List dashboards only for navigation; this
@@ -59,6 +70,9 @@ specific saved tile, use its returned bounded sample, cite the tile and sampling
 limits, and avoid claiming totals from a partial sample. Rows and row-derived
 answers are temporary and must not be stored as durable chat history. A new run
 reads current data; it cannot recover an expired historical result.
+Explain displayed result is a separate user attachment permission, not an action
+tool. Ask the user to attach the displayed result with its button; never substitute
+an execution or silently rerun a query for an attachment.
 """
 
 
@@ -68,6 +82,8 @@ def _descriptor(label, path, method, *, group="Dashboards", mutates=False, rows=
             "destructive": False}
 
 ACTIONS = {
+    DISPLAYED_ACTION: _descriptor("Explain displayed result", "/ai/chats/{chat_id}/messages", "POST", group="Results", rows=True,
+        description="Share a bounded client-supplied copy of the displayed result for explanation. Never runs a source query."),
     "list_dashboards": _descriptor("List available dashboards", "/dashboards", "GET",
         description="List dashboard IDs and names currently available to this user."),
     "get_dashboard": _descriptor("Read dashboard", "/dashboards/{dashboard_id}", "GET",
@@ -102,12 +118,178 @@ class DrillDimension(Contract):
     column: str = Field(min_length=1, max_length=200)
     value: str | int | float | bool | None
 
+class PivotDrillScope(Contract):
+    kind: Literal["cell", "row", "column", "subtotal", "grand_total"]
+    row_depth: int = Field(strict=True, ge=0, le=4)
+    column_depth: int = Field(strict=True, ge=0, le=3)
+
 class DrillSelection(Contract):
     dimensions: list[DrillDimension] = Field(max_length=64)
-    measure_index: int = Field(ge=0)
+    measure_index: int = Field(strict=True, ge=0)
+    pivot: PivotDrillScope | None = None
+    constituent: MeasureOperand | None = None
 
 class DrillTile(Tile):
     selection: DrillSelection
+
+class DisplayedNumberPresentation(OutputNumberFormat):
+    """The same bounded format descriptor used by the mounted presentation."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    locale: str = Field(min_length=1, max_length=64)
+    localeMode: Literal["viewer", "report"]
+    queryUnit: Literal["number", "percent", "percentage_points"]
+    queryScale: int = Field(ge=1, le=100)
+    displayScale: int = Field(ge=1, le=100)
+    minimumFractionDigits: int = Field(ge=0, le=12)
+    maximumFractionDigits: int = Field(ge=0, le=12)
+
+    @model_validator(mode="after")
+    def valid_presentation(self):
+        if self.queryScale not in (1, 100) or self.displayScale not in (1, 100) or self.minimumFractionDigits > self.maximumFractionDigits:
+            raise ValueError("Invalid displayed number presentation")
+        return self
+
+
+class DisplayedColumn(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: str = Field(max_length=256)
+    type: str = Field(default="unknown", max_length=256)
+    output: FormatOutput | None = None
+    display: DisplayedNumberPresentation | None = None
+
+
+class DisplayedPivotProjection(BaseModel):
+    """Bounded client view metadata; never source or execution authority."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["pivot"]
+    status: Literal["data", "capacity", "invalid"]
+    rowStart: int = Field(ge=0, le=10000)
+    rowEnd: int = Field(ge=0, le=10000)
+    rowGroups: int = Field(ge=0, le=10000)
+    columnGroups: int = Field(ge=0, le=10000)
+    rowAxes: int = Field(ge=1, le=4)
+    columnAxes: int = Field(ge=1, le=3)
+    rowsOmitted: bool
+    notice: str = Field(max_length=512)
+
+
+class DisplayedDiagnosticProjection(BaseModel):
+    """Only the bounded visible notice is shared when no facts are rendered."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["bar", "line", "donut", "detail", "aggregate", "kpi"]
+    status: Literal["diagnostic", "empty", "loading", "error"]
+    notice: str = Field(min_length=1, max_length=512)
+
+
+class DisplayedResult(BaseModel):
+    """Client evidence, never a query plan or a source authorization."""
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    dashboardId: str = Field(pattern=r"^dashboard_[0-9a-f]{32}$")
+    dashboardRevision: int = Field(ge=1)
+    modelId: str = Field(pattern=r"^model_[0-9a-f]{32}$")
+    modelRevision: int = Field(ge=1)
+    tileId: str = Field(min_length=1, max_length=100)
+    snapshotAt: str = Field(min_length=1, max_length=64)
+    pane: Literal["main", "drill"]
+    metric: Literal["values", "change", "percent", "running"] = "values"
+    barGroupIndex: int = Field(default=0, ge=0, le=63)
+    selections: dict[str, ScopeSelection] = Field(default_factory=dict, max_length=20)
+    tileSelections: dict[str, ScopeSelection] | None = Field(default=None, max_length=20)
+    reportFilters: list[ReportFilter] | None = Field(default=None, max_length=32)
+    drillSelection: DrillSelection | None = None
+    projection: DisplayedPivotProjection | DisplayedDiagnosticProjection | None = None
+    columns: list[DisplayedColumn] = Field(max_length=128)
+    rows: list[list[JsonValue]] = Field(max_length=10000)
+    cachedRows: int = Field(ge=0, le=10000)
+    displayedRows: int = Field(ge=0, le=10000)
+    partial: bool
+    cacheTruncated: bool
+    chartTruncated: bool
+    clientSampleTruncated: bool
+
+
+def validate_displayed_result(value):
+    # Pydantic's default request errors include the invalid input. Do not reflect
+    # row values or filter parameters into an error/validation response.
+    try:
+        result = DisplayedResult.model_validate(value)
+        if (result.displayedRows > result.cachedRows or len(result.rows) > result.displayedRows
+                or any(len(row) != len(result.columns) for row in result.rows)
+                or (isinstance(result.projection, DisplayedPivotProjection) and not
+                    0 <= result.projection.rowStart <= result.projection.rowEnd <= result.projection.rowGroups)
+                or (isinstance(result.projection, DisplayedDiagnosticProjection) and
+                    (result.rows or result.columns or result.displayedRows))
+                or (result.pane == "drill") != (result.drillSelection is not None)):
+            raise ValueError("Invalid displayed result shape")
+        return result
+    except (ValidationError, ValueError, TypeError):
+        raise ApiProblem(422, "ai_displayed_result_invalid", "The displayed attachment is invalid. Attach the result again.") from None
+
+
+def _displayed_metadata(services, owner, dashboard_id, request, packet):
+    """Current metadata only: no catalog, query planning, connection or cursor."""
+    auth = getattr(request.app.state, "auth", None)
+    token = getattr(request, "cookies", {}).get("schemii_session")
+    if auth is not None and auth.enabled:
+        user = auth.resolve(token)
+        if (not user or user.get("id") != owner or user.get("disabled")
+                or "schemer:access" not in auth.capabilities(owner)):
+            raise ApiProblem(403, "ai_displayed_access_changed", "Sign in again and attach the displayed result again.")
+    bundle = authorize(services, owner, dashboard_id, request)
+    dashboard = bundle.dashboard
+    model = bundle.services.models.get(owner, dashboard.model_id)
+    tile = next((item for item in dashboard.tiles if item.id == packet["tileId"]), None)
+    if (packet["dashboardId"] != dashboard_id or dashboard.revision != packet["dashboardRevision"]
+            or packet["modelId"] != dashboard.model_id or packet["modelRevision"] != dashboard.model_revision
+            or model.revision != dashboard.model_revision or tile is None):
+        raise ApiProblem(409, "ai_displayed_result_stale", "The dashboard, model or tile changed. Attach a current displayed result.")
+    if packet["pane"] == "drill" and not bundle.permissions["drill"]:
+        raise ApiProblem(403, "ai_displayed_drill_forbidden", "Your report access no longer permits detail rows.")
+    tile_selections = {key: _json(value) for key, value in tile.selections.items()}
+    report_filters = [_json(value) for value in tile.report_filters]
+    if (packet.get("tileSelections") is not None and packet["tileSelections"] != tile_selections
+            or packet.get("reportFilters") is not None and packet["reportFilters"] != report_filters):
+        raise ApiProblem(409, "ai_displayed_result_stale", "The saved tile filters changed. Attach a current displayed result.")
+    selections = packet.get("dashboardSelections", packet["selections"])
+    if not bundle.permissions["edit"]:
+        for scope_id in set(selections) - set(dashboard.optional_filters):
+            saved = dashboard.selections.get(scope_id)
+            if saved is None or selections[scope_id] != _json(saved):
+                raise ApiProblem(403, "ai_displayed_filter_forbidden", "The displayed filter context is no longer available.")
+    profile = bundle.services.connections.get(owner, model.connection_id)
+    access = getattr(bundle.services, "report_access", None)
+    identity = {"owner": owner, "product": "schemer", "dashboard": dashboard.id, "dashboardRevision": dashboard.revision,
+        "tile": _json(tile),
+        "model": model.id, "modelRevision": model.revision,
+        "modelSource": [model.connection_owner_id, model.connection_id, model.database, model.namespace],
+        "source": [getattr(profile, name, None) for name in
+            ("owner_id", "id", "revision", "host", "port", "database", "username", "ownership")],
+        "grant": getattr(access, "grant", None), "permissions": bundle.permissions,
+        "session": hashlib.sha256(str(token).encode()).hexdigest()}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest(), tile_selections, report_filters
+
+
+def displayed_binding(services, owner, dashboard_id, request, packet):
+    return _displayed_metadata(services, owner, dashboard_id, request, packet)[0]
+
+
+def capture_displayed(services, owner, dashboard_id, request, value):
+    from schemii.common.ai.results import bounded_page
+
+    packet = validate_displayed_result(value).model_dump(mode="json", by_alias=True)
+    binding, tile_selections, report_filters = _displayed_metadata(services, owner, dashboard_id, request, packet)
+    # Saved tile metadata is authoritative at these exact revisions. Preserve the
+    # viewer's frozen dashboard selections separately, then mirror tile_plan's
+    # override order without loading a catalog or compiling/executing a query.
+    packet["dashboardSelections"] = deepcopy(packet["selections"])
+    packet["tileSelections"] = tile_selections
+    packet["selections"] = {**packet["selections"], **tile_selections}
+    packet["reportFilters"] = report_filters
+    packet = bounded_page(services, packet)
+    # Keep this ASCII notice shorter than bounded_page's reserved notice, so
+    # replacing it cannot increase the already enforced provider byte budget.
+    packet["sampling"]["notice"] = "Unverified client sample, not totals. Rows retain raw values; display gives units/scales. Pivot depth/scope separates NULL and totals."
+    return packet, binding
 
 class ParameterValues(Contract):
     scope_id: str = Field(min_length=1, max_length=200)
@@ -135,8 +317,19 @@ def tool_definitions():
              "parameters": provider_schema(ActionBatch.model_json_schema(by_alias=True))}]
 
 
+def _drill_selection_document(selection):
+    # NULL is required dimension data, not an absent optional field. The legacy
+    # compiler rejects an extra pivot key, so omit only that optional metadata.
+    return selection.model_dump(mode="json", by_alias=True,
+        exclude={field for field in ("pivot","constituent") if getattr(selection,field) is None})
+
+
 def validate_action(action):
-    return _ACTION.validate_python(action).model_dump(mode="json", by_alias=True, exclude_none=True)
+    parsed = _ACTION.validate_python(action)
+    document = parsed.model_dump(mode="json", by_alias=True)
+    if parsed.operation == "drill_tile":
+        document["args"]["selection"] = _drill_selection_document(parsed.args.selection)
+    return document
 
 
 def receipt_action(action):
@@ -251,6 +444,9 @@ def _run_tile(bundle, tile_id, selections=None, selection=None):
     dashboard, services, owner = _selected_dashboard(bundle, selections), bundle.services, bundle.owner
     model, plan = tile_plan(services, owner, dashboard, tile_id, selection=selection, fresh=True)
     return {"dashboardId": dashboard.id, "tileId": tile_id,
+            **{key:plan[key] for key in ("calculatedMeasures","kpiComparison","calculationScope","calculationPopulation") if plan.get(key) is not None},
+            **({"pivot": plan["pivot"], "warnings": plan.get("warnings", [])} if plan.get("pivot") else {}),
+            **({"pivotScope": plan["pivotScope"]} if plan.get("pivotScope") else {}),
             **_sample_plan(bundle, model, plan)}
 
 
@@ -275,6 +471,10 @@ def _sample_plan(bundle, model, plan):
             services.report_access.check()
         from schemii.common.ai.results import bounded_page
         page_data = _json(page)
+        labels=plan.get("outputLabels",[])
+        for index,column in enumerate(page_data["columns"]):
+            if index<len(labels):
+                column["name"]=labels[index]
         sample = bounded_page(services, {"rows": page_data["rows"],
             "columns": page_data["columns"],
             "nextCursor": page_data.get("nextCursor"), "truncated": page_data["truncated"]})
@@ -339,7 +539,7 @@ def execute_action(bundle, owner, dashboard_id, action):
         if name == "drill_tile":
             if not current.permissions["drill"]:
                 raise ApiProblem(403, "report_action_forbidden", "This report does not allow detail drill.")
-            selection = args.selection.model_dump(mode="json", by_alias=True)
+            selection = _drill_selection_document(args.selection)
             return _run_tile(current, args.tile_id, selections, selection)
         if name == "execute_tile":
             return _run_tile(current, args.tile_id, selections)

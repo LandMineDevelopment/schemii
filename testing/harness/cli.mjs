@@ -5,7 +5,8 @@ import { readFile, writeFile, open, rm, access } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { root, runPath, readJSON, privateJSON, writeJSON, privateDir, credentials, reportHTML, stamp } from './store.mjs';
-import { deploymentLockPath } from './deployment.mjs';
+import { deploymentLockPath, sourceIdentity } from './deployment.mjs';
+import { importVerification, importRemediation, acceptance } from './native.mjs';
 import { reserveAccounts, reserveAvailable, releaseAccounts, availableAccounts, withFileLock, withAvailableAccounts } from './leases.mjs';
 import { expandFixtureScenario } from './prerequisites.mjs';
 const stateDir=resolve(process.env.SCHEMII_QA_STATE_DIRECTORY || join(root,'.schemii/testing'));
@@ -18,6 +19,8 @@ const help = `Usage: ./test.sh COMMAND [options]
   cleanup-sweep Delete only exact-prefix objects from a stopped owned sweep
   cleanup-author-fixture Delete selected report-author starter dashboards and models
   provision-chat Grant one retained designer access to the tested shared AI model
+  unpair-viewer Revoke only one exact retained viewer/author pairing
+  provision-viewer Pair one retained viewer with an explicit retained author report
   provision-writer Prepare and attach one isolated writable Schemii QA target
   reset-writer Reset one marked writable QA target after a run
   verify-writer Verify one marked writable QA target is empty
@@ -38,7 +41,8 @@ const help = `Usage: ./test.sh COMMAND [options]
   native-auth Record visibly authenticated account identity and fresh image
   native-bind Bind claimed native lane to its live thread connection before login
   resource-receipt Record exact owned UI creation ID/name/time and fresh image
-  begin      Begin an assigned scenario before fresh captures (--scenario ID)
+  begin      Begin a case; optional args coverage declares 2–4 same-state case IDs
+  coverage-end Explicitly abandon a partial shared group (--note reason)
   capture    Export a selected native screenshot/download (--args-json)
   inspect    Record hash-bound image viewing and expected/actual observations
   inspect-download Verify actual downloaded bytes against an expected oracle
@@ -48,6 +52,8 @@ const help = `Usage: ./test.sh COMMAND [options]
   heartbeat  Renew an agent’s ownership lease using its session file
   finish     Release a completed lane after all scenarios have results
   status     Read durable progress
+  verify-receipt Import an original focused/final local CI receipt; never executes suites
+  resolve-finding Link retained finding to independently reviewed new-run reproduction
   report     Generate an HTML report
   advance    Prepare the next wave after all active lanes finish
   recover    Close/reopen one lane, invalidate old handles, repeat preflight
@@ -59,6 +65,8 @@ Setup:     --copies-per-persona 20 --admin-credentials /private/admin.json
 Author:    --accounts qa_report_author_001[,qa_report_author_002]
 Chat:      --account qa_designer_001 --admin-credentials /private/admin.json
            [--model gpt-6-luna --reasoning default]
+Viewer:    --account qa_report_viewer_001 --author qa_report_author_001
+           --admin-credentials /private/admin.json [--expected-pairing-file FILE]
 Writer:    --account qa_designer_010 --admin-credentials /private/admin.json
 Data:      --space qa_modeler_001|all
 Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
@@ -66,7 +74,8 @@ Selection: --persona modeler --agents 1..10 OR --accounts USER1,USER2
            --tracks lifecycle,canvas,rules,query,chat --parallel 1..10
            --viewports desktop,mobile --fixtures /path/manifest.json
            --credentials-file /private/accounts.json --headless
-Native:    --browser native --controller t3 --reviewer-account USER --runtime-slots N
+Native:    --browser native --controller t3 --reviewer-accounts USER1,USER2 --runtime-slots N
+           --reviewer-account USER remains supported for one reviewer
            Native UI tools act directly; session CLI records ownership/evidence only.
 Workers:   --controller t3|codex --agent-model MODEL --agent-reasoning EFFORT
            --agent-timeout SECONDS
@@ -74,6 +83,10 @@ Workers:   --controller t3|codex --agent-model MODEL --agent-reasoning EFFORT
 Run:       --run RUN_ID
 Claim:     --lane LANE_ID --agent AGENT_ID
 Action:    --session-file FILE --kind snapshot --args-json '{"...":"..."}'
+Shared:    begin --session-file FILE --scenario CASE_A
+           --args-json '{"coverage":["CASE_A","CASE_B"],"stateURL":"EXACT_CURRENT_URL"}'
+           inspect --args-json '{"tool":"view_image","invocation":"ACTUAL_VIEW","coverage":["CASE_A","CASE_B"]}'
+           checkpoint each case separately; intervening browser actions fence reuse.
 Checkpoint:--session-file FILE --scenario ID --functional passed|failed|blocked
            --visual passed|failed|blocked --note TEXT --evidence FILE1,FILE2
 Finding:   --session-file FILE --scenario ID --title TEXT
@@ -89,13 +102,13 @@ Exit codes: 0 success, 1 failure, 2 invalid args, 3 awaiting agent dispatch,
 `;
 function invalid(message) { return Object.assign(new Error(message), { exitCode: 2 }); }
 function blocked(message) { return Object.assign(new Error(message), { exitCode: 4 }); }
-const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona','reviewer-account','runtime-slots'];
+const selectionOptions = ['accounts','products','tracks','parallel','viewports','fixtures','browser','controller','agents','agent-model','agent-reasoning','agent-timeout','persona','reviewer-account','reviewer-accounts','runtime-slots'];
 const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
   'cleanup-author-fixture': ['accounts'],
-  'cleanup-sweep': ['run','workspace-fixtures'],
-  'provision-writer': ['account','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
+  'cleanup-sweep': ['run','workspace-fixtures','reset-writers'],
+  'provision-writer': ['account','admin-credentials'], 'provision-viewer': ['account','author','admin-credentials','expected-pairing-file'], 'unpair-viewer': ['account','author','admin-credentials','expected-pairing-file'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
   plan: [...selectionOptions,'headless'],
@@ -107,6 +120,7 @@ const commandOptions = {
   'native-auth': ['session-file','args-json'],
   'resource-receipt': ['session-file','args-json'],
   begin: ['session-file','scenario','args-json'],
+  'coverage-end': ['session-file','note'],
   capture: ['session-file','args-json'],
   inspect: ['session-file','evidence','note','args-json','target-lane'],
   'inspect-download': ['session-file','evidence','args-json'],
@@ -114,7 +128,7 @@ const commandOptions = {
   checkpoint: ['session-file','scenario','functional','visual','note','evidence'],
   finding: ['session-file','scenario','title','severity','steps','expected','actual','evidence'],
   finish: ['session-file'], heartbeat: ['session-file'],
-  status: ['run'], report: ['run'], advance: ['run'], recover: ['run','lane'],
+  status: ['run'], report: ['run'], 'verify-receipt':['run','receipt','phase','note'], 'resolve-finding':['run','from-run','finding','target-lane','scenario','disposition','provenance','note'], advance: ['run'], recover: ['run','lane'],
   resume: ['run'], stop: ['run'], cleanup: ['run'],
 };
 function parse(argv) {
@@ -124,7 +138,7 @@ function parse(argv) {
   for (let i = 0; i < rest.length; i++) {
     const key = rest[i].replace(/^--/, '');
     if (!rest[i].startsWith('--') || !allowed.has(key) || key in options) throw invalid(`Invalid or repeated option for ${command}: ${rest[i]}`);
-    if (['headless','json','help'].includes(key)) options[key] = true;
+    if (['headless','json','help','reset-writers'].includes(key)) options[key] = true;
     else { if (!rest[i+1] || rest[i+1].startsWith('--') || !rest[i+1].trim()) throw invalid(`--${key} needs a value.`); options[key] = rest[++i]; }
   }
   return { command, options };
@@ -144,7 +158,12 @@ async function selection(o, reservedAccounts) {
   const controller = o.controller || 't3';
   if (!['t3','codex'].includes(controller)) throw new Error('--controller must be t3 or codex.');
   if (browser === 'native' && controller !== 't3') throw new Error('--browser native requires --controller t3 and thread-owned schemii_browser tools.');
-  if (o.agents !== undefined && !(browser === 'native' ? /^(?:[1-9]|10|11)$/ : /^(?:[1-9]|10)$/).test(o.agents)) throw new Error('--agents must be 1 through 10 (11 including reserved reviewer for native).');
+  if (o['reviewer-account'] !== undefined && o['reviewer-accounts'] !== undefined) throw new Error('--reviewer-account and --reviewer-accounts are mutually exclusive.');
+  const reviewerAccounts = o['reviewer-accounts'] !== undefined ? o['reviewer-accounts'].split(',').map(x => x.trim()) : o['reviewer-account'] !== undefined ? [o['reviewer-account'].trim()] : [];
+  if (reviewerAccounts.some(a => !/^[a-zA-Z0-9_.@-]{1,64}$/.test(a)) || new Set(reviewerAccounts.map(a => a.toLowerCase())).size !== reviewerAccounts.length) throw new Error('Reviewer accounts must be a nonempty list of unique usernames.');
+  if (browser === 'native' && !reviewerAccounts.length) throw new Error('Native QA requires --reviewer-account or --reviewer-accounts naming separately selected accounts.');
+  const maxAgents = browser === 'native' ? 10 + reviewerAccounts.length : 10;
+  if (o.agents !== undefined && (!/^[1-9][0-9]*$/.test(o.agents) || !Number.isSafeInteger(Number(o.agents)) || Number(o.agents) > maxAgents)) throw new Error(`--agents must be 1 through ${maxAgents} (${browser === 'native' ? 'at most ten testers plus the selected reviewers' : 'testers'}).`);
   const defaultAccounts = Array.from({length: Number(o.agents || 2)}, (_,i)=>`qa_subagent_${String(i+1).padStart(2,'0')}`).join(',');
   let persona=null,poolCandidates=[];
   if(o.persona) {
@@ -174,13 +193,16 @@ async function selection(o, reservedAccounts) {
   if (o.parallel !== undefined && !/^(?:[1-9]|10)$/.test(o.parallel)) throw new Error('--parallel must be an integer from 1 through 10.');
   const parallel = Number(o.parallel || Math.min(2, accounts.length));
   if (!Number.isInteger(parallel) || parallel < 1 || parallel > 10 || parallel > accounts.length) throw new Error('Parallelism must be 1–10 and no greater than the selected accounts.');
-  const reviewerAccount = o['reviewer-account'] || null;
+  const reviewerAccount = reviewerAccounts.length === 1 ? reviewerAccounts[0] : null;
+  const testerCount = accounts.length - reviewerAccounts.length;
   const runtimeSlots = o['runtime-slots'] === undefined ? null : Number(o['runtime-slots']);
   if (browser === 'native') {
-    if (!reviewerAccount || !accounts.includes(reviewerAccount) || accounts.length < 2) throw new Error('Native QA requires --reviewer-account naming a separately selected account.');
-    if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + 2) throw new Error('Native QA requires observed --runtime-slots for active testers plus coordinator and independent reviewer.');
-    if (parallel > accounts.length - 1) throw new Error('Native --parallel counts testers; reserve one selected reviewer account separately.');
-  } else if (reviewerAccount || runtimeSlots !== null) throw new Error('--reviewer-account and --runtime-slots currently require --browser native.');
+    if (reviewerAccounts.some(a => !accounts.includes(a))) throw new Error('Every reviewer account must be a separately selected --accounts member.');
+    if (testerCount < 1 || testerCount > 10) throw new Error('Native QA requires 1–10 tester accounts, distinct from all selected reviewer accounts.');
+    if (!/^[0-9]+$/.test(o['runtime-slots'] || '') || !Number.isSafeInteger(runtimeSlots) || runtimeSlots < parallel + reviewerAccounts.length + 1) throw new Error('Native QA requires observed --runtime-slots for active testers plus one coordinator and every selected reviewer.');
+    if (parallel > testerCount) throw new Error('Native --parallel counts testers; reserve every selected reviewer account separately.');
+  } else if (reviewerAccounts.length || runtimeSlots !== null) throw new Error('--reviewer-account, --reviewer-accounts and --runtime-slots currently require --browser native.');
+  const actorCounts = { coordinators: 1, testers: testerCount, reviewers: reviewerAccounts.length, activeTesters: parallel, requiredSlots: parallel + reviewerAccounts.length + 1 };
   const products = list(o.products, 'schemoo');
   if (products.some(x => !['schemii','schemoo','schemer'].includes(x))) throw new Error('Unknown product.');
   const tracks = list(o.tracks, 'harness');
@@ -220,7 +242,7 @@ async function selection(o, reservedAccounts) {
       if (Object.hasOwn(s, 'product') && !products.includes(s.product)) throw new Error(`Scenario ${s.id} product must be one of the selected products.`);
       return (s.product ? [s.product] : products).flatMap(product => viewports.map(viewportName => expandFixtureScenario(s,product,viewportName)));
     });
-    return { id: `lane-${i+1}`, username, products, track, role: username === reviewerAccount ? 'reviewer' : 'tester', status: 'queued', generation: 0,
+    return { id: `lane-${i+1}`, username, products, track, role: reviewerAccounts.includes(username) ? 'reviewer' : 'tester', status: 'queued', generation: 0,
       viewport: viewports[0] === 'mobile' ? {width:390,height:844} : {width:1280,height:800},
       viewports, resources: spec.resources || {}, checks, url: spec.url,
       persona:persona?.id || spec.persona || null, expectedCapabilities:spec.expectedCapabilities, deniedProducts:spec.deniedProducts || [], writeAuthorization,
@@ -229,7 +251,7 @@ async function selection(o, reservedAccounts) {
   for (const l of lanes) {
     if (!l.scenarios.length || new Set(l.scenarios.map(x=>x.id)).size !== l.scenarios.length || l.scenarios.some(x=>!/^[a-z0-9-]+$/.test(x.id || ''))) throw new Error('Scenario IDs must be unique kebab-case values.');
   }
-  return { browser, reviewerAccount, runtimeSlots, accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
+  return { browser, reviewerAccount, reviewerAccounts, actorCounts, runtimeSlots, accounts, persona:persona?.id || null, poolCandidates, agents:accounts.length, parallel, controller, agentModel, agentReasoning, agentTimeout, products, tracks, viewports, lanes, headless:!!o.headless,
     baseURL:'https://localhost:8001',previewURL:'https://omarchy.taile4f57f.ts.net',
     fixtureMode:o.fixtures ? 'declared-retained-resources' : 'harness-only-no-app-data-writes',
     fixtureVersion:fixture.version || fixture.fixtureVersion || null,
@@ -323,7 +345,7 @@ async function execute(command,o) {
   }
   if(command==='cleanup-sweep') {
     if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||'')||!o['workspace-fixtures'])throw invalid('cleanup-sweep requires --run RUN and --workspace-fixtures MAP.');
-    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures']),'--state-dir',stateDir]);return;
+    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures']),'--state-dir',stateDir,...(o['reset-writers']?['--reset-writers']:[])]);return;
   }
   if(command==='cleanup-author-fixture') {
     if(!o.accounts)throw invalid('--accounts is required; name each retained report-author fixture to delete.');
@@ -342,6 +364,12 @@ async function execute(command,o) {
     await runCommand('python',['testing/provision.py','chat','--admin-credentials',resolve(o['admin-credentials']),
       '--account',o.account,'--model',o.model||'gpt-6-luna','--reasoning',o.reasoning||'default','--state-dir',stateDir]);
     return;
+  }
+  if(['provision-viewer','unpair-viewer'].includes(command)) {
+    if(!/^qa_report_viewer_[0-9]{3}$/.test(o.account||'')||!/^qa_report_author_[0-9]{3}$/.test(o.author||'')||!o['admin-credentials'])throw invalid('provision-viewer needs --account VIEWER --author AUTHOR --admin-credentials FILE.');
+    await privateJSON(resolve(o['admin-credentials']));
+    return withFileLock(deploymentLockPath(root),()=>withAvailableAccounts([o.account,o.author],()=>
+      runCommand('python',['testing/provision.py',command==='unpair-viewer'?'unpair-viewer':'viewer','--account',o.account,'--author',o.author,'--admin-credentials',resolve(o['admin-credentials']),'--state-dir',stateDir,...(o['expected-pairing-file']?['--expected-pairing-file',o['expected-pairing-file']]:[])]),{root}));
   }
   if(command==='provision-writer') {
     if(!o['admin-credentials']||!o.account)throw invalid('--admin-credentials and --account are required.');
@@ -385,7 +413,7 @@ async function execute(command,o) {
       await access(chromium.executablePath());
       if(!config.headless&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new Error('No display available. Use explicit --headless for functional-only browser operation.');
     } catch(error) { throw blocked(`Prerequisite check failed: ${error instanceof SyntaxError ? 'Malformed private credential JSON.' : error.message}`); }
-    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:config.browser === 'native' ? 'thread-owned-native-after-claim' : 'isolated-processes',accounts:config.accounts,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
+    if(command==='doctor'){console.log(JSON.stringify({dependencies:'ready',browser:config.browser === 'native' ? 'thread-owned-native-after-claim' : 'isolated-processes',accounts:config.accounts,reviewerAccount:config.reviewerAccount,reviewerAccounts:config.reviewerAccounts,actorCounts:config.actorCounts,runtimeSlots:config.runtimeSlots,requestedParallel:config.parallel,controller:config.controller,agentModel:config.agentModel,agentReasoning:config.agentReasoning,agentTimeout:config.agentTimeout,agentCapacity:config.controller==='codex'?'Independent Codex CLI workers; capacity limited by --parallel (maximum 10).':'Coordinator must verify live runtime slots before claiming lanes.',browserPreflight:'pending prepare'},null,2));return;}
     const id=`qa-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`,dir=runPath(id);
     await privateDir(dir);
     const runtime=join('/tmp',`schemii-qa-${process.getuid()}`,id);
@@ -393,7 +421,7 @@ async function execute(command,o) {
     const control={socket:join(runtime,'controller.sock'),token:randomBytes(32).toString('hex')};
     await writeJSON(join(dir,'control.json'),control);
     await writeJSON(join(dir,'private.json'),{credentialPath});
-    let run={id,...config,status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
+    let run={id,...config,acceptanceContract:2,verificationBase:execFileSync('git',['-C',root,'rev-parse','--verify','origin/main^{commit}'],{encoding:'utf8'}).trim(),status:'preparing',createdAt:stamp(),updatedAt:stamp(),root,summary:'Browser preflight pending.'};
     await writeJSON(join(dir,'manifest.json'),run);
     await writeJSON(join(dir,'controller-owner.json'),{pid:process.pid,birthTick:await birthTick(process.pid)});
     const result=await withFileLock(join(dir,'lifecycle.lock'),async()=>{
@@ -420,7 +448,7 @@ async function execute(command,o) {
     });
     console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
-  if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','capture','inspect','inspect-download','review'].includes(command)) {
+  if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','coverage-end','capture','inspect','inspect-download','review'].includes(command)) {
     if(!o['session-file'])throw invalid('--session-file is required.');
     if(command==='action'&&!o.kind)throw invalid('--kind is required.');
     if(command==='checkpoint'&&(!o.scenario||!['passed','failed','blocked'].includes(o.functional)||!['passed','failed','blocked'].includes(o.visual)))throw invalid('Checkpoint requires --scenario and passed|failed|blocked values for --functional and --visual.');
@@ -437,7 +465,44 @@ async function execute(command,o) {
   if(command==='claim'&&!o.agent)throw invalid('--agent is required.');
   const dir=runPath(o.run),run=await readJSON(join(dir,'manifest.json'));
   if(command==='status'){console.log(JSON.stringify(run,null,2));return;}
-  if(command==='report') {const path=join(dir,'report.html');await writeFile(path,reportHTML(run),{mode:0o600});console.log(JSON.stringify({report:path,status:run.status}));return;}
+  if(command==='report') {const path=join(dir,'report.html');await writeFile(path,reportHTML({...run,acceptance:acceptance(run)}),{mode:0o600});console.log(JSON.stringify({report:path,status:run.status}));return;}
+  if(['verify-receipt','resolve-finding'].includes(command)) {
+    // Offline imports never weaken the live source fence or edit a leased run.
+    let originalDir=null;
+    if(command==='resolve-finding') {
+      if(!/^qa-[a-z0-9-]{6,80}$/.test(o['from-run']||'')||o['from-run']===o.run)throw invalid('resolve-finding needs a distinct original --from-run.');
+      originalDir=runPath(o['from-run']);
+    }
+    const locked=[...new Set([dir,originalDir].filter(Boolean))].sort();
+    const withImports=(index,task)=>index===locked.length?task():withFileLock(join(locked[index],'lifecycle.lock'),()=>withImports(index+1,task));
+    return withImports(0,async()=>{
+      await requireStoppedOwner(dir);
+      const latest=await readJSON(join(dir,'manifest.json'));
+      const now=sourceIdentity(root);
+      if(now.commit!==latest.deployment?.identity?.commit||now.fingerprint!==latest.deployment?.identity?.fingerprint)throw new Error('Changed source requires a new prepared run.');
+      try {
+        if(command==='verify-receipt') {
+          if(!o.receipt||!['focused','final'].includes(o.phase)||!o.note)throw invalid('verify-receipt needs --receipt FILE --phase focused|final --note PROVENANCE.');
+          const receipt=importVerification(latest,resolve(o.receipt),{root,phase:o.phase,note:o.note});
+          console.log(JSON.stringify(receipt,null,2));
+        } else {
+          {
+            await requireStoppedOwner(originalDir);
+            const originalPath=join(originalDir,'manifest.json'),currentPath=join(dir,'manifest.json');
+            const original=await readJSON(originalPath);
+            const receipt=importRemediation(original,latest,o.finding,{targetLane:o['target-lane'],scenario:o.scenario,disposition:o.disposition,provenance:o.provenance,note:o.note},{originalPath,currentPath});
+            // Append to the original first; a partial write preserves its failure
+            // and cannot grant acceptance to the new run. Reconcile before retry.
+            await writeJSON(originalPath,original);await writeFile(join(originalDir,'report.html'),reportHTML(original),{mode:0o600});
+            console.log(JSON.stringify(receipt,null,2));
+          }
+        }
+      } finally {
+        latest.acceptance=acceptance(latest);await writeJSON(join(dir,'manifest.json'),latest);
+        await writeFile(join(dir,'report.html'),reportHTML(latest),{mode:0o600});
+      }
+    });
+  }
   if(command==='resume') {
     if(['complete','passed','execution-complete','finished-with-gaps'].includes(run.status)) {
       const report=join(dir,'report.html');

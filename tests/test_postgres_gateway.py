@@ -75,6 +75,12 @@ class FakeConnection:
         return FakeCursor(self)
 
     def rows_for(self, query: str) -> list[dict[str, Any]]:
+        # Existing transport fixtures have no newly collected dependency proof.
+        # Model that absence explicitly; never give these doubles safety authority.
+        if "schemii_catalog_safety_objects" in query or "schemii_catalog_safety_dependencies" in query:
+            return []
+        if "schemii_catalog_safety_unknowns" in query:
+            return [{"routine_bodies": True, "opaque_dependencies": False, "inaccessible": False}]
         for marker, rows in self.responses.items():
             if marker in query:
                 return rows
@@ -637,9 +643,11 @@ def test_introspection_maps_all_domains_in_one_read_only_snapshot() -> None:
         "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
     ]
     for query, parameters in connection.executed:
-        if "schemii_catalog_" in query and "metadata" not in query:
+        if "schemii_catalog_safety_unknowns" in query:
+            assert parameters == ("public",)
+        elif "schemii_catalog_" in query and "metadata" not in query:
             assert parameters[-2] == "public"
-    assert sum(name is not None for name in connection.cursor_names) == 8
+    assert sum(name is not None for name in connection.cursor_names) == 10
     assert connection.rollbacks == 1
     assert connection.closed is True
 
@@ -819,3 +827,93 @@ def test_console_cancel_is_admitted_when_query_and_monitor_slots_are_occupied():
     finally:
         observer.close()
         query.close()
+
+
+@pytest.mark.parametrize('namespace', ['reporting', 'A "schema"'])
+def test_migration_binds_authored_sql_to_exact_reviewed_namespace(monkeypatch, namespace):
+    from types import SimpleNamespace
+
+    statements = ['CREATE TYPE "Status" AS ENUM (\'new\');',
+                  'CREATE FUNCTION "Value"() RETURNS integer LANGUAGE SQL AS $$ SELECT 1 $$;',
+                  'CREATE TRIGGER "Changed" AFTER INSERT ON "Rows" FOR EACH ROW EXECUTE FUNCTION external.handler();']
+    factory = FakeConnectFactory({'pg_advisory_xact_lock': [], 'pg_current_xact_id': [{'transaction_id': '42'}],
+        **{statement: [] for statement in statements}})
+    gateway = PsycopgPostgresGateway(connect_factory=factory)
+    catalog = SimpleNamespace(fingerprint='exact-reviewed-fingerprint')
+    monkeypatch.setattr(gateway, '_introspect_connection', lambda *_: catalog)
+    monkeypatch.setattr(gateway, '_target_identity', lambda *_: {'database': 'analytics'})
+    gateway.execute_migration(resolved_connection(), namespace, catalog.fingerprint, statements,
+        on_started=lambda *_: None, on_intended=lambda *_: None)
+    connection = factory.connections[0]
+    sql = [query for query, _ in connection.executed]
+    setting = 'SET LOCAL search_path TO "' + namespace.replace('"', '""') + '", pg_catalog'
+    assert sql.index(setting) < min(sql.index(statement) for statement in statements)
+    assert all(statement in sql for statement in statements)
+    assert connection.commits == 1 and connection.closed
+    # Owned connection cleanup rolls back any residual transaction after commit.
+
+
+@pytest.mark.parametrize("phase", ["namespace", "first_statement", "later_statement"])
+def test_migration_namespace_or_authored_sql_denial_rolls_back_before_commit(monkeypatch, phase):
+    from types import SimpleNamespace
+    from psycopg.errors import InsufficientPrivilege
+    from schemii.common.postgres.errors import PostgresMigrationExecutionError, PostgresQueryError
+
+    statement = 'CREATE FUNCTION value() RETURNS integer LANGUAGE SQL AS $$ SELECT 1 $$;'
+    earlier = 'CREATE TYPE status AS ENUM (\'new\');'
+    statements = [earlier, statement] if phase == "later_statement" else [statement]
+    factory = FakeConnectFactory({'pg_advisory_xact_lock': [], 'pg_current_xact_id': [{'transaction_id': '42'}],
+                                 earlier: []})
+    gateway = PsycopgPostgresGateway(connect_factory=factory)
+    catalog = SimpleNamespace(fingerprint='reviewed')
+    monkeypatch.setattr(gateway, '_introspect_connection', lambda *_: catalog)
+    monkeypatch.setattr(gateway, '_target_identity', lambda *_: {'database': 'analytics'})
+    original_rows = FakeConnection.rows_for
+
+    def deny(connection, query):
+        if (phase == "namespace" and query.startswith("SET LOCAL search_path")) or query == statement:
+            raise InsufficientPrivilege("denied fixture")
+        return original_rows(connection, query)
+
+    monkeypatch.setattr(FakeConnection, 'rows_for', deny)
+    expected = PostgresQueryError if phase == "namespace" else PostgresMigrationExecutionError
+    with pytest.raises(expected) as denied:
+        gateway.execute_migration(resolved_connection(), 'restricted', catalog.fingerprint, statements,
+            on_started=lambda *_: None, on_intended=lambda *_: None)
+    if phase == "namespace":
+        assert isinstance(denied.value, PostgresQueryError)
+        assert denied.value.sqlstate == "42501"
+    else:
+        assert isinstance(denied.value, PostgresMigrationExecutionError)
+        assert denied.value.completed_step_count == (1 if phase == "later_statement" else 0)
+    connection = factory.connections[0]
+    assert connection.commits == 0 and connection.rollbacks == 1 and connection.closed
+
+
+def test_incremental_returning_uses_first_pgresult_type_metadata_before_scalar_caps(monkeypatch):
+    from decimal import Decimal
+    from types import SimpleNamespace
+    import threading
+    from psycopg import pq
+    from schemii.common.postgres.console import gateway, incremental
+    from tests.test_raw_console import PgResult
+    big=9007199254740993
+    oids=(20,3802,1016,1700)
+    row=(big,big,[big],Decimal('-12345678901234567890.123456789'))
+    class TypedResult(PgResult):
+        def __init__(self,status,rows=()):
+            super().__init__(status,rows);self.nfields=len(oids)
+        def ftype(self,index): return oids[index]
+    responses=iter([TypedResult(pq.ExecStatus.SINGLE_TUPLE,[row]),TypedResult(pq.ExecStatus.TUPLES_OK),None])
+    pg=SimpleNamespace(transaction_status=pq.TransactionStatus.INTRANS,send_query_params=lambda *args:None,set_single_row_mode=lambda:None)
+    connection=SimpleNamespace(lock=threading.RLock(),info=SimpleNamespace(encoding='utf-8'),pgconn=pg,_start_query=lambda:None,wait=lambda action:next(responses) if action=='fetch' else None)
+    class Loader:
+        def set_pgresult(self,response,set_loaders): self.response=response
+        def load_row(self,index,factory): return self.response.rows[index]
+    monkeypatch.setattr(incremental.generators,'send',lambda pg:None)
+    monkeypatch.setattr(incremental.generators,'fetch',lambda pg:'fetch')
+    monkeypatch.setattr(incremental,'Transformer',lambda connection:Loader())
+    monkeypatch.setattr(gateway,'_console_type_names',lambda *args:{20:'bigint',3802:'jsonb',1016:'bigint[]',1700:'numeric'})
+    result,=gateway.execute_console_statements(connection,['UPDATE x RETURNING values'])
+    assert result.rows == ((str(big),big,[big],str(row[-1])),)
+    assert [column.data_type for column in result.columns] == ['bigint','jsonb','bigint[]','numeric']

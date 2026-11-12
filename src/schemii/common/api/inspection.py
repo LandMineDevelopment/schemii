@@ -33,9 +33,9 @@ DEVELOPER_ROUTES_PATH = "/_developer/routes"
 _MAX_CALLS_PER_ROUTE = 24
 _MAX_DEPENDENCIES_PER_ROUTE = 24
 _MAX_MODELS_PER_ROLE = 32
-# Admin AI provider routes add two inspectable objects beyond the previous
-# 640-object bound. Retain bounded headroom for the full registered API graph.
-_MAX_OBJECTS = DEFAULT_OBJECT_LIMIT * 4 + 64
+# Model and report authoring contracts exceed the previous 704-object bound.
+# Retain bounded headroom for the full registered API graph.
+_MAX_OBJECTS = DEFAULT_OBJECT_LIMIT * 4 + 128
 _MAX_ROUTES = 256
 _MAX_DOCSTRING_CHARACTERS = DEFAULT_DOCSTRING_LIMIT
 _MAX_HIGHLIGHT_SEGMENTS = DEFAULT_HIGHLIGHT_SEGMENT_LIMIT

@@ -8,7 +8,7 @@ from sqlglot import exp, parse_one
 
 from schemii.schemoo.catalog import source_issues
 from schemii.schemoo.models import ModelDefinition
-from schemii.schemoo.prototype import compile_preview
+from schemii.schemoo.prototype import ModelValidationError, analyze_model, compile_preview, validate_definition
 
 
 CATALOG = {
@@ -84,6 +84,65 @@ def test_list_is_ordered_and_uses_author_labels():
 def test_unused_derived_source_costs_no_join_or_aggregation():
     sql = compile_preview(CATALOG, request(fields=[{"table": "people", "column": "id"}]))["sql"]
     assert "JOIN" not in sql and "COUNT" not in sql
+
+
+def cyclic_summary():
+    catalog = deepcopy(CATALOG)
+    for table in catalog["tables"][1:]:
+        table["columns"][0]["dataType"] = "text"
+    query = request()
+    query["edges"] = [{"id": edge["id"], "relationshipId": edge["id"], "source": edge["sourceTable"],
+                       "target": edge["targetTable"]} for edge in catalog["relationships"]]
+    query["edges"].append({"id": "contributors", "kind": "logical", "source": "cert", "sourceColumn": "person_id",
+                           "target": "assignment", "targetColumn": "person_id"})
+    return catalog, query
+
+
+def test_unused_calculation_and_unused_contributors_do_not_block_preview():
+    catalog, query = cyclic_summary()
+    query["fields"] = [{"table": "people", "column": "id"}]
+    assert compile_preview(catalog, query)["usedRelationships"] == []
+    outputs = query["nodes"][-1]["derivation"]["outputs"]
+    outputs.append({"id": "owners", "label": "Owners", "operation": "count_distinct", "column": "id"})
+    query["fields"] = [{"table": "derived", "column": "owners"}]
+    plan = compile_preview(catalog, query)
+    assert plan["usedRelationships"] == ["derived:derived"]
+    assert 'COUNT(DISTINCT t0."id")' in plan["sql"]
+    assert '"main"."cert"' not in plan["sql"]
+
+
+def test_selected_calculated_contributor_rejects_ambiguous_inner_route():
+    catalog, query = cyclic_summary()
+    with pytest.raises(ModelValidationError, match="ambiguous") as error:
+        compile_preview(catalog, query)
+    assert error.value.details["cycleEdges"] == ["cert_fk", "assignment_fk", "contributors"]
+    assert error.value.details["ambiguousRelationships"] == ["cert_fk"]
+
+
+def test_unused_calculated_condition_accepts_any_possible_contributor_route():
+    catalog, query = cyclic_summary()
+    query["nodes"][-1]["derivation"]["outputs"][0]["conditions"] = [
+        {"table": "assignment", "column": "name", "operator": "eq", "value": "A"}]
+    query["fields"] = [{"table": "people", "column": "id"}]
+    assert compile_preview(catalog, query)["usedRelationships"] == []
+    assert validate_definition(catalog, query) == analyze_model(catalog, query)
+    query["fields"] = [{"table": "derived", "column": "n"}]
+    with pytest.raises(ModelValidationError, match="ambiguous"):
+        compile_preview(catalog, query)
+
+
+def test_unused_calculated_condition_still_rejects_separate_cyclic_branch():
+    catalog, query = cyclic_summary()
+    query["nodes"] += [{"id": node, "table": "cert"} for node in ("other_cert", "third_cert")]
+    query["edges"] += [{"id": node, "relationshipId": "cert_fk", "source": node, "target": "people"}
+                       for node in ("other_cert", "third_cert")]
+    query["edges"].append({"id": "other_contributors", "kind": "logical", "source": "other_cert", "sourceColumn": "person_id",
+                           "target": "third_cert", "targetColumn": "person_id"})
+    query["nodes"][3]["derivation"]["outputs"][0]["conditions"] = [
+        {"table": "other_cert", "column": "name", "operator": "eq", "value": "A"}]
+    query["fields"] = [{"table": "people", "column": "id"}]
+    with pytest.raises(ValueError, match="separate relationship branch"):
+        compile_preview(catalog, query)
 
 
 def source_summary(**changes):
@@ -378,8 +437,8 @@ def test_output_condition_accepts_intermediate_source_without_adding_join():
 
 
 @pytest.mark.parametrize("condition, message", [
-    ({"table": "missing", "column": "name", "operator": "eq", "value": "A"}, "unknown physical"),
-    ({"table": "cert", "column": "missing", "operator": "eq", "value": "A"}, "unknown physical"),
+    ({"table": "missing", "column": "name", "operator": "eq", "value": "A"}, "unknown source"),
+    ({"table": "cert", "column": "missing", "operator": "eq", "value": "A"}, "unknown source"),
     ({"table": "assignment", "column": "name", "operator": "eq", "value": "A"}, "separate relationship branch"),
     ({"table": "cert", "column": "name", "operator": "eq", "parameterId": "p"}, "parameter bindings"),
     ({"table": "cert", "column": "name", "operator": "in", "value": []}, "at least one"),
@@ -429,6 +488,10 @@ def test_unused_output_conditions_are_not_executed_and_drift_detects_their_sourc
 @pytest.mark.parametrize("kind,column", [("row", "total"), ("aggregate", "n")])
 def test_reaggregating_calculated_values_warns_about_outer_branch_multiplication(kind, column):
     query = request(kind, fields=[{"table": "derived", "column": column, "aggregate": "sum"}, {"table": "assignment", "column": "name"}])
+    if kind == "aggregate":
+        with pytest.raises(ValueError, match="materialized grain"):
+            compile_preview(CATALOG, query)
+        return
     result = compile_preview(CATALOG, query)
     assert any("repeated rows from joins" in warning for warning in result["warnings"])
     diagnostic, = result["repetitionDiagnostics"]
@@ -442,3 +505,254 @@ def test_summary_values_can_be_summed_without_a_multiplying_branch():
     plan = compile_preview(CATALOG, query)
     assert plan["repetitionDiagnostics"] == []
     assert execute(plan["sql"]) == [(3,)]
+
+
+def composed_row_query():
+    query = request("row")
+    query["nodes"].insert(0, {"id":"downstream", "table":"people", "label":"Downstream", "derivation":{
+        "kind":"row", "source":"people", "outputs":[{"id":"scaled", "label":"Scaled compensation", "operation":"multiply",
+            "nodeId":"derived", "column":"total", "operandNodeId":"people", "operand":"allowance"}]}})
+    query["fields"] = [{"table":"people","column":"id"},{"table":"downstream","column":"scaled"}]
+    return query
+
+
+def test_composed_rows_are_topologically_validated_and_filter_the_same_case_expression():
+    query = composed_row_query()
+    query["nodes"][-1]["derivation"]["outputs"][0]["conditions"] = [{"table":"people","column":"salary","operator":"gt","value":80}]
+    query["reportFilters"] = [{"mode":"rows","conditions":[{"table":"downstream","column":"scaled","operator":"gt","value":100}]}]
+    plan = compile_preview(CATALOG,query)
+    assert "JOIN" not in plan["sql"]
+    assert sorted(execute(plan["sql"])) == [(1,2400)]
+    query["nodes"].reverse()
+    assert execute(compile_preview(CATALOG,query)["sql"]) == [(1,2400)]
+
+
+def test_same_node_outputs_can_reference_later_authored_fields():
+    query = request("row")
+    output = query["nodes"][-1]["derivation"]["outputs"]
+    output.insert(0,{"id":"scaled","label":"Scaled","operation":"multiply","nodeId":"derived","column":"total","operand":"allowance"})
+    query["fields"][1]["column"] = "scaled"
+    assert sorted(execute(compile_preview(CATALOG,query)["sql"])) == [(1,2400),(2,900),(3,0)]
+
+
+@pytest.mark.parametrize("mode",["rows","exists","not_exists"])
+def test_filter_only_certification_count_is_materialized_without_display_or_unrelated_branches(mode):
+    query = source_summary(fields=[{"table":"people","column":"id"}],reportFilters=[{"mode":mode,"conditions":[{"table":"derived","column":"n","operator":"gt","value":1}]}])
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"])) == ([(2,),(3,)] if mode=="not_exists" else [(1,)])
+    assert "assignment" not in plan["sql"] and "STRING_AGG" not in plan["sql"]
+    assert "COUNT(" in plan["sql"]
+
+
+@pytest.mark.parametrize("mode",["rows","exists","not_exists"])
+def test_count_zero_uses_the_same_unmatched_value_in_select_and_each_filter_mode(mode):
+    query = source_summary(reportFilters=[{"mode":mode,"conditions":[{"table":"derived","column":"n","operator":"eq","value":0}]}])
+    actual = sorted(execute(compile_preview(CATALOG,query)["sql"]))
+    assert actual == ([(1,2),(2,1)] if mode=="not_exists" else [(3,0)])
+
+
+def test_summary_model_predicate_runs_after_grouping_and_preserves_keep_unmatched_vs_require_matching():
+    for behavior,expected in [("keep_unmatched",[(1,2),(2,0),(3,0)]),("require_matching",[(1,2)])]:
+        query = source_summary(scopes=[{"id":"enough","kind":"required","rowBehavior":behavior,"alternatives":[{"id":"a","inputs":[{"id":"minimum","type":"integer","defaultValue":1}],"conditions":[{"table":"derived","column":"n","operator":"gt","parameterId":"minimum"}]}]}])
+        plan = compile_preview(CATALOG,query)
+        assert sorted(execute(plan["sql"])) == expected
+        assert plan["parameterValues"] == {"enough":{"minimum":1}}
+        assert "GROUP BY" in plan["sql"] and "COUNT(" in plan["sql"]
+
+
+def test_row_on_materialized_count_and_safe_reaggregation_do_not_flatten_aggregates():
+    query = source_summary()
+    query["nodes"].insert(0,{"id":"computed","table":"people","label":"Computed","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"value","label":"Count plus allowance","operation":"add","nodeId":"derived","column":"n","operand":"allowance"}]}})
+    query["fields"] = [{"table":"people","column":"id"},{"table":"computed","column":"value"}]
+    assert sorted(execute(compile_preview(CATALOG,query)["sql"])) == [(1,22),(2,11),(3,0)]
+    query["fields"] = [{"table":"computed","column":"value","aggregate":"sum"}]
+    assert execute(compile_preview(CATALOG,query)["sql"]) == [(33,)]
+    query["fields"].append({"table":"assignment","column":"name"})
+    with pytest.raises(ValueError,match="materialized grain"):
+        compile_preview(CATALOG,query)
+
+
+def test_missing_self_and_transitive_cycles_have_actionable_field_paths():
+    query = composed_row_query()
+    query["nodes"][0]["derivation"]["outputs"][0]["column"] = "missing"
+    with pytest.raises(ValueError,match=r"downstream.scaled.*derived.missing"):
+        compile_preview(CATALOG,query)
+    query = composed_row_query()
+    query["nodes"][-1]["derivation"]["outputs"][0].update(nodeId="downstream",column="scaled")
+    with pytest.raises(ValueError,match=r"dependency cycle.*downstream.scaled.*derived.total"):
+        compile_preview(CATALOG,query)
+
+
+def test_summary_of_materialized_summary_and_row_source_are_not_flattened():
+    query = source_summary()
+    query["nodes"].insert(0,{"id":"nested","table":"cert","label":"Nested","derivation":{
+        "kind":"aggregate","source":"derived","groupBy":["person_id"],"outputs":[{"id":"again","label":"Again","operation":"sum","column":"n"}]}})
+    query["fields"] = [{"table":"people","column":"id"},{"table":"nested","column":"again"}]
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"])) == [(1,2),(2,1),(3,None)]
+    assert plan["sql"].count("GROUP BY") >= 2
+    assert "SUM(COUNT" not in plan["sql"]
+    query["nodes"][0] = {"id":"nested","table":"cert","label":"Nested","derivation":{
+        "kind":"row","source":"derived","outputs":[{"id":"again","label":"Again","operation":"add","column":"n","operand":"n"}]}}
+    assert sorted(execute(compile_preview(CATALOG,query)["sql"])) == [(1,4),(2,2),(3,0)]
+
+
+def test_invalid_numeric_inputs_and_cross_grain_rows_fail_before_sql():
+    catalog = deepcopy(CATALOG)
+    for column in catalog["tables"][0]["columns"]:
+        column["dataType"] = "integer"
+    catalog["tables"][0]["columns"][1]["dataType"] = "text"
+    with pytest.raises(ValueError,match=r"numeric.*derived.total.*text"):
+        compile_preview(catalog,request("row"))
+    query = request("row")
+    query["nodes"][-1]["derivation"]["outputs"][0].update(nodeId="cert",column="active")
+    with pytest.raises(ValueError,match=r"derived.total.*grain"):
+        compile_preview(CATALOG,query)
+
+
+def test_dependency_scope_and_filter_only_row_do_not_activate_unused_summary():
+    query = composed_row_query()
+    query["fields"] = [{"table":"people","column":"id"}]
+    query["scopes"] = [{"id":"positive","kind":"conditional","rowBehavior":"require_matching","alternatives":[{"id":"a","conditions":[{"table":"downstream","column":"scaled","operator":"gt","value":1000}]}]}]
+    query["reportFilters"] = [{"mode":"rows","conditions":[{"table":"downstream","column":"scaled","operator":"gt","value":0}]}]
+    plan = compile_preview(CATALOG,query)
+    assert execute(plan["sql"]) == [(1,)]
+    assert plan["activeScopes"] == ["positive"]
+    assert "cert" not in plan["sql"] and "assignment" not in plan["sql"]
+
+
+def test_distinct_field_dag_still_rejects_mutually_recursive_summary_stages():
+    query = request()
+    query["nodes"][-1]["derivation"]["outputs"] = [
+        {"id":"first","label":"First","operation":"count","nodeId":"cert","column":"name"},
+        {"id":"second","label":"Second","operation":"sum","nodeId":"other","column":"leaf"}]
+    query["nodes"].append({"id":"other","table":"people","label":"Other","derivation":{
+        "kind":"aggregate","source":"people","groupBy":["id"],"outputs":[
+            {"id":"nested","label":"Nested","operation":"sum","nodeId":"derived","column":"first"},
+            {"id":"leaf","label":"Leaf","operation":"count","column":"id"}]}})
+    query["fields"] = [{"table":"derived","column":"first"}]
+    with pytest.raises(ValueError,match=r"summary stage cycle.*derived.*other"):
+        compile_preview(CATALOG,query)
+
+
+def test_summary_output_condition_includes_its_filter_only_upstream_calculated_field():
+    query = source_summary()
+    query["nodes"].append({"id":"conditional","table":"people","label":"Conditional","derivation":{
+        "kind":"aggregate","source":"people","groupBy":["id"],"outputs":[{"id":"n","label":"N","operation":"count","column":"id",
+            "conditions":[{"table":"derived","column":"n","operator":"gt","value":1}]}]}})
+    query["fields"] = [{"table":"people","column":"id"},{"table":"conditional","column":"n"}]
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"])) == [(1,1),(2,0),(3,0)]
+    assert "FILTER (WHERE COALESCE" in plan["sql"]
+
+
+def test_calculated_operand_source_contract_tracks_its_actual_qualified_leaf():
+    from schemii.schemoo.catalog import model_source_contract
+    query = source_summary()
+    query["nodes"].append({"id":"row","table":"people","label":"Row","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"value","label":"Value","operation":"add","nodeId":"derived","column":"n","operandNodeId":"people","operand":"salary"}]}})
+    definition = ModelDefinition.model_validate({"root":"people","nodes":query["nodes"],"exposedFields":[{"table":"row","column":"value"}]}).model_dump(exclude_none=True)
+    contract = model_source_contract(CATALOG,definition)
+    assert "salary" in {column["name"] for table in contract["tables"] if table["name"]=="people" for column in table["columns"]}
+    assert not source_issues(CATALOG,{**definition,"sourceContract":contract})
+    changed = deepcopy(CATALOG)
+    changed["tables"][0]["columns"] = [column for column in changed["tables"][0]["columns"] if column["name"]!="salary"]
+    assert any(issue.get("severity")=="breaking" for issue in source_issues(changed,{**definition,"sourceContract":contract}))
+
+
+@pytest.mark.parametrize("data_type,expected",[
+    ("timestamp(6) with time zone","timestamp with time zone"),
+    ("timestamp(6) without time zone","timestamp without time zone"),
+    ("timestamp(6)","timestamp"),("timestamptz","timestamp with time zone"),
+    ("time(3) with time zone","time with time zone"),("time(3) without time zone","time without time zone"),
+    ("time(3)","time"),("timetz","time with time zone"),("numeric(12, 2)","numeric"),
+])
+@pytest.mark.parametrize("operation",["min","max"])
+def test_calculated_extrema_preserve_temporal_type_suffixes(data_type,expected,operation):
+    from schemii.schemoo.prototype import model_field_details
+    catalog = deepcopy(CATALOG)
+    catalog["tables"][0]["columns"][1]["dataType"] = data_type
+    query = request()
+    query["nodes"][-1]["derivation"]["outputs"] = [{"id":"typed","label":"Typed","operation":operation,"column":"salary"}]
+    assert model_field_details(catalog,query,"derived","typed")["dataType"] == expected
+
+
+def test_distinct_dotted_field_tuples_remain_valid_in_backend_metadata_and_sql():
+    from schemii.schemoo.prototype import model_field_details
+    catalog = deepcopy(CATALOG)
+    for column in catalog["tables"][0]["columns"]:
+        column["dataType"] = "integer"
+    query = request("row")
+    query["nodes"][-1] = {"id":"a.b","table":"people","label":"Outer","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"c","label":"C","operation":"add","nodeId":"a","column":"b.c","operand":"allowance"}]}}
+    query["nodes"].append({"id":"a","table":"people","label":"Inner","derivation":{"kind":"row","source":"people","outputs":[
+        {"id":"b.c","label":"B.C","operation":"add","column":"salary","operand":"allowance"}]}})
+    query["fields"] = [{"table":"people","column":"id"},{"table":"a.b","column":"c"}]
+    assert model_field_details(catalog,query,"a.b","c")["dataType"] == "integer"
+    assert sorted(execute(compile_preview(catalog,query)["sql"])) == [(1,140),(2,100),(3,40)]
+
+
+def nested_join_key_query(explicit=False,nullable=False):
+    query = source_summary()
+    groups = ["person_id","n"]
+    if nullable:
+        groups.append("maybe")
+        query["nodes"][-1]["derivation"]["outputs"].append({"id":"maybe","label":"Maybe","operation":"min","column":"name",
+            "conditions":[{"table":"cert","column":"active","operator":"gt","value":9}]})
+    definition = {"kind":"aggregate","source":"derived","groupBy":groups,"outputs":[{"id":"again","label":"Again","operation":"sum","column":"n"}]}
+    if explicit:
+        definition["connection"] = {"target":"derived","columns":[{"source":column,"target":column} for column in groups]}
+    query["nodes"].append({"id":"nested","table":"cert","label":"Nested","derivation":definition})
+    query["fields"] = [{"table":"nested","column":"again"}]
+    return query
+
+
+@pytest.mark.parametrize("explicit",[False,True])
+@pytest.mark.parametrize("reverse",[False,True])
+def test_hidden_calculated_composite_join_keys_are_projected_at_their_own_stage(explicit,reverse):
+    query = nested_join_key_query(explicit)
+    if reverse:
+        query["nodes"].reverse()
+        next(node for node in query["nodes"] if node["id"]=="nested")["derivation"]["groupBy"].reverse()
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == [(1,),(2,),(None,)]
+    assert "assignment" not in plan["sql"] and "STRING_AGG" not in plan["sql"]
+    query["fields"].append({"table":"derived","column":"n"})
+    assert sorted(execute(compile_preview(CATALOG,query)["sql"]),key=repr) == [(1,1),(2,2),(None,0)]
+
+
+def test_hidden_nullable_noncount_join_key_uses_the_existing_implicit_null_safe_mapping():
+    query = nested_join_key_query(nullable=True)
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == [(1,),(2,),(None,)]
+    assert "IS NOT DISTINCT FROM" in plan["sql"] and "MIN(" in plan["sql"]
+    assert 'COALESCE(t1."maybe"' not in plan["sql"]
+
+
+@pytest.mark.parametrize("mode,expected",[("rows",[(1,)]),("exists",[(1,)]),("not_exists",[(2,),(3,)])])
+def test_hidden_calculated_join_keys_are_available_to_filter_only_correlations(mode,expected):
+    query = nested_join_key_query()
+    query["fields"] = [{"table":"people","column":"id"}]
+    query["reportFilters"] = [{"mode":mode,"conditions":[{"table":"nested","column":"again","operator":"gt","value":1}]}]
+    assert sorted(execute(compile_preview(CATALOG,query)["sql"]),key=repr) == expected
+
+
+@pytest.mark.parametrize("behavior,expected",[("keep_unmatched",[(2,),(None,),(None,)]),("require_matching",[(2,)])])
+def test_hidden_mapping_count_keys_preserve_post_group_scope_qualification(behavior,expected):
+    query = nested_join_key_query()
+    query["scopes"] = [{"id":"enough","kind":"required","rowBehavior":behavior,"alternatives":[{"id":"a","inputs":[{"id":"minimum","type":"integer","defaultValue":1}],
+        "conditions":[{"table":"derived","column":"n","operator":"gt","parameterId":"minimum"}]}]}]
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == expected
+    assert plan["parameterValues"] == {"enough":{"minimum":1}}
+
+
+def test_hidden_join_keys_do_not_activate_an_unrelated_conditional_scope():
+    query = nested_join_key_query()
+    query["scopes"] = [{"id":"unrelated","kind":"conditional","alternatives":[{"id":"a","inputs":[{"id":"missing","type":"text"}],
+        "conditions":[{"table":"assignment","column":"name","operator":"eq","parameterId":"missing"}]}]}]
+    plan = compile_preview(CATALOG,query)
+    assert sorted(execute(plan["sql"]),key=repr) == [(1,),(2,),(None,)]
+    assert plan["activeScopes"] == [] and plan["parameterValues"] == {}
+    assert "assignment" not in plan["sql"] and "STRING_AGG" not in plan["sql"]

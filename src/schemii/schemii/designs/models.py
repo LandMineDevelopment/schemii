@@ -125,6 +125,9 @@ class DesignColumn(ApiModel):
     name: DesignIdentifier
     data_type: Annotated[str, Field(min_length=1, max_length=512)]
     nullable: bool = True
+    not_null_constraint_name: DesignIdentifier | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     default_expression: DesignExpression | None = None
     identity: Literal["always", "by_default"] | None = None
     generated_expression: DesignExpression | None = None
@@ -629,3 +632,37 @@ class SchemiiDesignExport(ApiModel):
     media_type: Literal["application/sql", "application/json"]
     content: Annotated[str, Field(max_length=16 * 1024 * 1024)]
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DesignDeploymentReviewRequest(ApiModel):
+    """Choose an existing exact target and explicit semantic collision decisions."""
+
+    target_workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{32}$")
+    resolutions: dict[str, Literal["keep", "incoming"]] = Field(default_factory=dict, max_length=50_000)
+
+
+class DesignDeploymentCopyRequest(DesignDeploymentReviewRequest):
+    review_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DesignDeploymentCollision(ApiModel):
+    key: str
+    label: str
+    target: dict[str, Any]
+    incoming: dict[str, Any]
+    resolution: Literal["keep", "incoming"] | None = None
+
+
+class DesignDeploymentPreview(ApiModel):
+    source_workspace_id: str
+    target_workspace_id: str
+    source_revision: DesignRevision
+    target_revision: DesignRevision
+    target_label: str
+    target_changes: DesignChangeSummary
+    live_drift: bool
+    summary: DesignChangeSummary
+    collisions: list[DesignDeploymentCollision]
+    warnings: list[str]
+    ready: bool
+    review_digest: str

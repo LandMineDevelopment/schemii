@@ -8,6 +8,7 @@ from sqlglot import exp, parse_one
 from schemii.common.api.errors import ApiProblem
 from schemii.schemer.dashboard_models import DashboardTile, TimeAnalysis
 from schemii.schemoo.derived import type_family
+from schemii.schemoo.domain import source_identity
 from schemii.schemoo.models import ModelDefinition
 
 Catalog = Mapping[str, Any]
@@ -21,34 +22,17 @@ def source_type(
 ) -> str:
     node = next(node for node in definition.nodes if node.id == table)
     if node.derivation:
-        output = next(
-            (item for item in node.derivation.outputs if item.id == column), None
+        from schemii.schemoo.prototype import model_field_details
+
+        details = model_field_details(
+            catalog, definition.model_dump(exclude_none=True), table, column
         )
-        if output:
-            if output.operation in {
-                "count",
-                "count_distinct",
-                "sum",
-                "avg",
-                "add",
-                "subtract",
-                "multiply",
-                "divide",
-            }:
-                return "numeric"
-            if output.operation == "list":
-                return "text"
-            return source_type(
-                catalog,
-                definition,
-                output.nodeId or node.derivation.source,
-                output.column,
-            )
-        return source_type(catalog, definition, node.derivation.source, column)
+        return details.get("dataType", "")
     details = next(
         c
         for t in catalog["tables"]
-        if t["name"] == node.table
+        if source_identity(catalog, t)
+        == source_identity(catalog, node.model_dump(exclude_none=True))
         for c in t["columns"]
         if c["name"] == column
     )
