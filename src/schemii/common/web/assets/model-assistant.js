@@ -32,7 +32,8 @@ export function createProductAssistant({
   allowEmptySubject = false,
 }) {
   let chat = null, settings = null, runtime = null, available = [], pollTimer, loginTimer, login = null;
-  let busy = false, opened = false, contextId = null, generation = 0, transcriptKey = "";
+  let busy = false, opened = false, contextId = null, generation = 0, transcriptKey = "", draftRevision = 0;
+  let submission = null;
   let elapsedTimer = null, activityCard = null, activityRun = null, activityChatId = null;
   const revisions = new Map(), observedMutations = new Map();
   const panel = element("aside", { className: "model-ai", attrs: { id: "model-ai", "aria-label": title, "aria-hidden": "true", inert: "" } });
@@ -64,8 +65,15 @@ export function createProductAssistant({
       render(); sourceSelect.focus();
       return;
     }
+    const ticket = ++generation, id = subject(), draft = draftRevision;
     busy = true; controls();
-    try { await newChat(); input.focus(); } finally { busy = false; render(); }
+    try {
+      if (await newChat(ticket, id)) {
+        if (draft === draftRevision) input.value = "";
+        input.focus();
+      }
+    } catch (error) { if (ownsContext(ticket, id)) tell(error.message, true); }
+    finally { if (ownsContext(ticket, id)) { busy = false; render(); } }
   }), "new-chat");
   const retry = button("Refresh", () => void guard(async () => { if (chat) await refresh(); else await load(); }));
   const form = element("form", { className: "model-ai-composer" }, [input, element("div", {}, [el("small", "Enter to send · Shift + Enter for a new line"), cancel, send])]);
@@ -89,6 +97,7 @@ export function createProductAssistant({
   function selected() { return available.find(item => modelValue(item.providerId, item.id) === modelSelect.value); }
   function hasContext() { return allowEmptySubject || Boolean(getSubjectId()); }
   function subject() { return getSubjectId() || ""; }
+  function ownsContext(ticket, id) { return generation === ticket && subject() === id; }
   function needsSource() { return allowEmptySubject && !subject(); }
   function sourceReady() { return !needsSource() || Boolean(sourceSelect.value); }
   async function loadSources() {
@@ -255,28 +264,49 @@ export function createProductAssistant({
     const next = await requestJson(`${api}/chats/${encodeURIComponent(id)}`);
     if (generation === ticket && chat?.id === id) await accept(next);
   }
-  async function newChat() {
+  async function newChat(ticket, id) {
     const choice = selected(); if (!choice || !hasContext()) throw new Error(`Choose a saved ${subjectLabel} and connect an AI provider first.`);
-    const next = await requestJson(`${api}/chats`, { method: "POST", body: { [subjectKey]: subject(), ...(needsSource() ? { sourceConnectionId: sourceSelect.value } : {}), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForSelection(runtime, choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
-    generation++; input.value = ""; transcriptKey = ""; await accept(next); tell("Started a new conversation. Previous conversations remain in history.");
+    const next = await requestJson(`${api}/chats`, { method: "POST", body: { [subjectKey]: id, ...(needsSource() ? { sourceConnectionId: sourceSelect.value } : {}), providerId: choice.providerId, aiModelId: choice.id, modes: chat?.modes || settings?.modes || {}, reasoningEffort: reasoningForSelection(runtime, choice, chat?.reasoningEffort || settings?.reasoningEffort) } });
+    if (!ownsContext(ticket, id)) return null;
+    transcriptKey = ""; await accept(next);
+    if (!ownsContext(ticket, id) || chat?.id !== next.id) return null;
+    tell("Started a new conversation. Previous conversations remain in history.");
+    return next;
   }
   async function load() {
     const id = subject(); if (!hasContext()) { tell(`Open or create a saved ${subjectLabel} to start a conversation.`); render(); return; }
     const ticket = ++generation; contextId = id;
     await loadSources();
+    if (!ownsContext(ticket, id)) return;
     const [nextSettings, nextRuntime, list] = await Promise.all([requestJson(`${api}/settings`), requestJson(aiStatusPath(productLabel.toLowerCase(), id)), requestJson(`${api}/chats?${subjectQueryKey}=${encodeURIComponent(id)}`)]);
     if (ticket !== generation || subject() !== id) return;
     settings = nextSettings; runtime = nextRuntime;
     if (chat?.[subjectKey] !== id) chat = null;
     populateModels();
     if (chat) await refresh();
-    else if (list.chats?.length) await accept(await requestJson(`${api}/chats/${encodeURIComponent(list.chats[0].id)}`));
+    else if (list.chats?.length) {
+      const next = await requestJson(`${api}/chats/${encodeURIComponent(list.chats[0].id)}`);
+      if (!ownsContext(ticket, id)) return;
+      await accept(next);
+    }
     else render();
     if (!runtime.healthy) tell(runtime.message || "The AI runtime is unavailable. Check provider settings.", true);
   }
   async function open() {
     opened = true; panel.classList.add("open"); panel.inert = false; panel.setAttribute("aria-hidden", "false"); trigger.setAttribute("aria-expanded", "true");
-    busy = true; controls(); await guard(load); busy = false; render(); input.focus();
+    // Reopening the same subject must not invalidate a prompt already being
+    // submitted. A different subject still loads under a new generation.
+    if (submission && ownsContext(submission.ticket, submission.id)) render();
+    else await loadCurrentContext();
+    if (opened) input.focus();
+  }
+  async function loadCurrentContext() {
+    const id = subject();
+    busy = true; controls();
+    const pending = load(), ticket = generation;
+    try { await pending; }
+    catch (error) { if (ownsContext(ticket, id)) tell(error.message, true); }
+    finally { if (ownsContext(ticket, id)) { busy = false; render(); } }
   }
   function close() {
     opened = false; clearTimeout(pollTimer); clearInterval(elapsedTimer); elapsedTimer = null; trigger.focus(); panel.inert = true; panel.classList.remove("open"); panel.setAttribute("aria-hidden", "true"); trigger.setAttribute("aria-expanded", "false");
@@ -291,7 +321,7 @@ export function createProductAssistant({
     } catch (error) { tell(error.message, true); await guard(refresh); }
     finally { busy = false; transcriptKey = ""; render(); }
   }
-  input.addEventListener("input", controls);
+  input.addEventListener("input", () => { draftRevision++; controls(); });
   input.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); } });
   panel.addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); close(); } });
   form.onsubmit = async event => {
@@ -300,14 +330,24 @@ export function createProductAssistant({
     const provider = runtime?.providers?.find(item => item.id === providerId);
     const acknowledgment = providerId === "opencode";
     if (acknowledgment && !confirm(`${provider?.privacy || provider?.privacyNotice || "This provider may use prompts and responses for training."}\n\nSend this message and conversation context to this provider?`)) return;
-    busy = true; controls(); tell();
+    const ticket = ++generation, id = subject(), draft = draftRevision, submittedDraft = input.value;
+    const ownsSubmission = () => ownsContext(ticket, id);
+    let target = chat;
+    submission = { ticket, id };
+    input.value = ""; busy = true; controls(); tell();
     try {
-      if (!chat) await newChat();
-      const id = chat.id, ticket = generation;
-      const next = await requestJson(`${api}/chats/${encodeURIComponent(id)}/messages`, { method: "POST", body: { text, expectedRevision: chat.revision, acknowledgeProviderDataPolicy: acknowledgment } });
-      if (generation === ticket && chat?.id === id) { input.value = ""; await accept(next); scroll.scrollTop = scroll.scrollHeight; }
-    } catch (error) { if (!input.value) input.value = text; tell(error.message, true); await guard(refresh); }
-    finally { busy = false; render(); }
+      if (!target) target = await newChat(ticket, id);
+      if (!target || !ownsSubmission() || chat?.id !== target.id) return;
+      const next = await requestJson(`${api}/chats/${encodeURIComponent(target.id)}/messages`, { method: "POST", body: { text, expectedRevision: target.revision, acknowledgeProviderDataPolicy: acknowledgment } });
+      if (ownsSubmission() && chat?.id === target.id) { await accept(next); if (ownsSubmission()) scroll.scrollTop = scroll.scrollHeight; }
+    } catch (error) {
+      if (!ownsSubmission()) return;
+      if (draft === draftRevision && !input.value) input.value = submittedDraft;
+      tell(error.message, true); await guard(refresh);
+    } finally {
+      if (submission?.ticket === ticket) submission = null;
+      if (ownsSubmission()) { busy = false; render(); }
+    }
   };
   modelSelect.onchange = () => void guard(async () => {
     const choice = selected(); if (!choice || busy) return;
@@ -434,7 +474,7 @@ export function createProductAssistant({
     async subjectChanged() {
       if (contextId === getSubjectId()) return;
       generation++; chat = null; transcriptKey = ""; input.value = ""; tell(); clearTimeout(pollTimer); clearInterval(elapsedTimer); elapsedTimer = null; contextId = getSubjectId();
-      if (opened) { busy = true; controls(); await guard(load); busy = false; render(); }
+      if (opened) await loadCurrentContext();
     },
   };
 }
