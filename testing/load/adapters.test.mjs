@@ -9,10 +9,10 @@ import { loadMain, loadPath } from './cli.mjs';
 import { readSnapshot } from './journal.mjs';
 
 const tag = 'load_0123456789abcdef', executionId = `cex_${'a'.repeat(32)}`, resultId = `res_${'b'.repeat(32)}`;
-function sqlFixture({ wide = false, wrong = false, malformed = false } = {}) {
+function sqlFixture({ wide = false, wrong = false, malformed = false, empty = false, short = false } = {}) {
   const rows = Array.from({ length: wide ? 129 : 513 }, (_, index) => [index + 1, 'owned-nonce', ...(wide ? ['W', 'X', 'Y', 'Z'].map(value => value.repeat(8192)) : [])]);
   const columns = ['id', 'owner_nonce', ...(wide ? ['c1', 'c2', 'c3', 'c4'] : [])];
-  const account = { username: 'owned-user', userId: 'owned-id', fixtureTag: tag, source: { schema: tag + '_u0001' },
+  const account = { username: 'owned-user', userId: 'owned-id', fixtureTag: tag, source: { schema: tag + '_u0001', nonce: 'owned-nonce' },
     workspace: { id: `ws_${'c'.repeat(32)}`, revision: 1 }, settings: { revision: 1, rowPageSize: 100 }, oracles: { [wide ? 'wide' : 'sql']: oracleFor(columns, rows) } };
   const calls = [], intents = [], updates = []; let captured = false;
   const client = { async json(method, path, body, expected, options) {
@@ -22,6 +22,7 @@ function sqlFixture({ wide = false, wrong = false, malformed = false } = {}) {
     assert(captured, 'source must be independently captured before paging');
     const offset = path.includes('?') ? Number(new URL(path, 'https://localhost:8001').searchParams.get('cursor')) : 0;
     const selected = rows.slice(offset, offset + 100).map(row => [...row]); if (wrong && offset === 0) selected[0][1] = 'foreign-nonce';
+    if (empty) selected.length = 0; else if (short) selected.pop();
     return { executionId, resultId, columns: columns.map(name => ({ name })), rows: selected, truncated: false,
       expiresAt: new Date(Date.now() + 900000).toISOString(), nextCursor: malformed ? '' : offset + 100 < rows.length ? String(offset + 100) : null };
   } };
@@ -54,6 +55,16 @@ test('idle recipe requires the real1800second window; no-op or interrupted waits
   const f = sqlFixture(); let requested;
   await assert.rejects(f.run({ workload: 'idle-expiry', idleWait: async ms => { requested = ms; } }), /real_idle_window_not_elapsed/);
   assert.equal(requested, 1800000); assert(f.calls.some(value => value.operation === 'control'));
+});
+test('idle validates exact first-page count, order and owner values before entering the real wait', async () => {
+  for (const options of [{ wrong: true }, { empty: true }, { short: true }]) {
+    const f = sqlFixture(options); let reached = false;
+    await assert.rejects(f.run({ workload: 'idle-expiry', idleWait: async () => { reached = true; throw new Error('should_not_wait'); } }), /wrong_or_duplicate_rows|wrong_row_count/);
+    assert.equal(reached, false); assert(f.calls.some(value => value.operation === 'control'));
+  }
+  const f = sqlFixture(); let reached = false;
+  await assert.rejects(f.run({ workload: 'idle-expiry', idleWait: async ms => { assert.equal(ms, 1800000); reached = true; throw new Error('stop_before_real_idle'); } }), /stop_before_real_idle/);
+  assert(reached); assert(!f.updates.some(value => value.status === 'expired')); // No fake expiry success.
 });
 test('weighted mix has exact reproducible counts and excludes destructive/lifecycle writers', () => {
   const counts = {};

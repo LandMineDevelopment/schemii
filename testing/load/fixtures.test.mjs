@@ -7,13 +7,14 @@ import os from 'node:os';
 import https from 'node:https';
 import tls from 'node:tls';
 import { EventEmitter } from 'node:events';
-import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest, prepareOwnedFixtures, cleanupOwnedFixtures, createOwnedResource, heldFixture, disposedFixtureConsumer, fixtureCommand, LOAD_FIXTURE_PROFILE } from './fixtures.mjs';
+import { prepareFixtures, cleanupFixtures, compiledColumns, rowOracles, streamRequest, prepareOwnedFixtures, cleanupOwnedFixtures, createOwnedResource, heldFixture, disposedFixtureConsumer, fixtureCommand, LOAD_FIXTURE_PROFILE, resourceFingerprint } from './fixtures.mjs';
 import { plan } from './plan.mjs';
 import { readSnapshot, writeSnapshot } from './journal.mjs';
 import { NDJSONOracle, CSVOracle } from './protocol.mjs';
 import { privateJSON, writeJSON } from '../harness/store.mjs';
 import { ProtocolFailure } from './protocol.mjs';
 import { HTTPClient, LOCAL, PREVIEW } from './http.mjs';
+import { runJourney } from './adapters.mjs';
 
 test('held consumer binds the fixed representative profile, source mapping and fresh owner; restored cleanup requires joined exact consumer', async t => {
   const dir = await mkdtemp(join(os.tmpdir(), 'schemii-held-fixture-')); t.after(() => rm(dir, { recursive: true, force: true }));
@@ -88,7 +89,7 @@ async function disposable(t, options = {}) {
   const tag = 'load_0123456789abcdef', pool = 'user_schemii_connection_pool', adminName = 'pressure_' + 'f'.repeat(32), adminId = 'user_fixture_admin';
   const users = new Map([[adminName, { id: adminId, username: adminName, password: 'fixture-admin-password', display_name: 'fixture', is_admin: true, direct_access: { capabilities: [] } }],
     ['retained-peer', { id: 'untouched-peer', username: 'retained-peer', is_admin: false, display_name: 'Retained peer' }]]);
-  const stores = new Map(), state = { serial: 0, source: false, failOnce: null, writes: [], revoked: [], drift: false };
+  const stores = new Map(), state = { serial: 0, source: false, failOnce: null, writes: [], revoked: [], drift: false, deletes: [], details: [] };
   const store = name => { if (!stores.has(name)) stores.set(name, []); return stores.get(name); };
   const authority = { version: 1, kind: 'schemii-pressure-load-hold', status: 'held', profile: LOAD_FIXTURE_PROFILE, tag, path: join(dir, 'authority.json'), origin: LOCAL,
     admin: { username: adminName, userId: adminId, password: 'fixture-admin-password' }, sourceWitnessConfig: join(dir, 'source-monitor-config.json'),
@@ -115,12 +116,14 @@ async function disposable(t, options = {}) {
       const capabilities = [...new Set([...(user?.direct_access?.capabilities || []), ...roleStore.filter(role => role.user_ids.includes(user?.id)).flatMap(role => role.capabilities)])];
       if (path === '/api/v1/auth/me') return { user: userPublic(user), capabilities };
       if (path === '/api/v1/schemii/console/settings') return { revision: 1, rowPageSize: 100 };
+      if (path.endsWith('/previews')) return { previews: store(path) };
       if (path.endsWith('/plan')) return { sql: 'fixture-plan' };
       if (path === '/api/v1/admin/accounts' && method === 'GET') return [...users.values()].map(userPublic);
       if (path === '/api/v1/schemii/workspaces/postgres') {
         const journal = await readSnapshot(join(dir, 'fixtures-private.json'));
         assert(journal.resources.some(item => item.kind === 'workspace' && item.phase === 'sent' && item.ownerId === user.id));
-        const workspace = { id: `ws_${(++state.serial).toString(16).padStart(32, '0')}`, ownerId: user.id, name: body.namespace, revision: 1, ...body };
+        const workspace = { id: `ws_${(++state.serial).toString(16).padStart(32, '0')}`, ownerId: user.id, name: body.namespace, revision: 1,
+          createdAt: '2026-11-12T00:00:00Z', updatedAt: '2026-11-12T00:00:00Z', ...body };
         store('/api/v1/schemii/workspaces').push(workspace); return { created: true, workspace };
       }
       const collections = ['/api/v1/admin/accounts', '/api/v1/admin/roles', '/api/v1/admin/schemii-connections', '/api/v1/connections', '/api/v1/schemii/workspaces', '/api/v1/schemoo/models', '/api/v1/schemer/dashboards'];
@@ -129,13 +132,20 @@ async function disposable(t, options = {}) {
       const isAdmin = collection.startsWith('/api/v1/admin/'), entries = collection === '/api/v1/admin/accounts' ? [...users.values()] : store(collection);
       const key = collection.endsWith('connections') ? 'connections' : collection.endsWith('workspaces') ? 'workspaces' : collection.endsWith('models') ? 'models' : 'dashboards';
       const visible = item => isAdmin || item.ownerId === user?.id || collection.endsWith('dashboards') && roleStore.some(role => role.user_ids.includes(user?.id) && role.dashboards.some(grant => grant.dashboard_id === item.id));
-      if (method === 'GET' && path === collection) return isAdmin && !collection.endsWith('schemii-connections') ? entries.map(value => collection.endsWith('accounts') ? userPublic(value) : value) : { [key]: entries.filter(visible) };
+      if (method === 'GET' && path === collection) {
+        if (isAdmin && !collection.endsWith('schemii-connections')) return entries.map(value => collection.endsWith('accounts') ? userPublic(value) : value);
+        return { [key]: entries.filter(visible).map(item => { const value = structuredClone(item); delete value.password;
+          if (collection.endsWith('models')) for (const field of ['definition', 'layout', 'explore']) delete value[field];
+          return value; }) };
+      }
       if (method === 'POST') {
+        if (!collection.endsWith('accounts') && !collection.endsWith('roles')) assert(entries.filter(visible).length < (collection.endsWith('workspaces') ? 1000 : 100), 'actual owner resource quota');
         const journal = await readSnapshot(join(dir, 'fixtures-private.json'));
         assert(journal.resources.some(item => item.collection === collection && item.phase === 'sent' && item.label === (body.name || body.username)));
         state.writes.push({ method, collection });
         const prefix = collection.endsWith('accounts') ? 'user' : collection.endsWith('roles') ? 'role' : collection.endsWith('connections') ? 'pg' : collection.endsWith('models') ? 'model' : 'dashboard';
         const item = { ...body, id: `${prefix}_${(++state.serial).toString(16).padStart(32, '0')}`, revision: 1,
+          ...(prefix === 'model' ? { layoutRevision: 1, exploreRevision: 1 } : {}),
           ...(!['user', 'role'].includes(prefix) ? { ownerId: collection.endsWith('schemii-connections') ? pool : user.id } : {}) };
         if (collection.endsWith('accounts')) users.set(item.username, item); else entries.push(item);
         if (state.failOnce === collection) { state.failOnce = null; throw new ProtocolFailure('http_transport_failure'); }
@@ -143,9 +153,19 @@ async function disposable(t, options = {}) {
       }
       const id = path.slice(collection.length + 1).split('?')[0], item = entries.find(value => value.id === id && visible(value));
       if (!item) throw new Error('fake_not_found');
-      if (method === 'GET') return state.drift ? { ...item, ownerId: 'foreign' } : item;
+      if (method === 'GET') { state.details.push(path); const value = structuredClone(state.drift ? { ...item, ownerId: 'foreign' } : item); delete value.password; return value; }
+      if (method === 'PATCH' && collection.endsWith('workspaces')) {
+        assert.equal(body.expectedRevision, item.revision); item.name = body.name; item.revision++;
+        item.updatedAt = '2026-11-12T00:00:01Z'; return structuredClone(item);
+      }
       if (method === 'DELETE') {
         assert(item.id !== adminId && item.id !== 'untouched-peer');
+        state.deletes.push(path);
+        if (!collection.endsWith('accounts') && !collection.endsWith('roles')) {
+          const query = new URL(path, LOCAL).searchParams;
+          assert.equal(query.get(collection.endsWith('models') ? 'expected_revision' : 'expectedRevision'), String(item.revision));
+          if (collection.endsWith('models')) { assert.equal(query.get('expected_layout_revision'), String(item.layoutRevision)); assert.equal(query.get('expected_explore_revision'), String(item.exploreRevision)); assert.equal(query.get('require_no_previews'), 'true'); }
+        }
         if (collection.endsWith('accounts')) users.delete(item.username); else entries.splice(entries.indexOf(item), 1);
         return null;
       }
@@ -159,7 +179,7 @@ async function disposable(t, options = {}) {
     state.source = action === 'prepare'; await writeSnapshot(receiptPath, result); return result;
   };
   const spec = plan({ fixtureMode: 'disposable', workload: options.workload || 'sql-page', active: options.active || 2, registered: options.registered || 10,
-    profileMode: options.profileMode || 'private-single' });
+    profileMode: options.profileMode || 'private-single', profiles: options.profiles });
   return { dir, spec, users, state, stores, authority, FakeClient,
     prepare: () => prepareOwnedFixtures({ dir, spec, authority, Client: FakeClient, provisionSource, readColumns: async () => ['Orders.id'] }),
     cleanup: receipt => cleanupOwnedFixtures({ dir, receipt, authority, Client: FakeClient, provisionSource }) };
@@ -199,6 +219,64 @@ test('1000 registered identities do not create1000 active profiles or alter reta
   assert.equal((await readSnapshot(join(f.dir, 'population-private.json'))).accounts.length, 1000);
   assert.equal(receipt.resources.filter(item => item.kind === 'private-profile').length, 1);
   assert.equal(f.users.get('retained-peer').id, 'untouched-peer');
+});
+test('SQL profile topology supports100 profiles without unrequested models or dashboards', async t => {
+  const f = await disposable(t, { registered: 1, active: 1, profileMode: 'private-multiple', profiles: 100 });
+  const receipt = await f.prepare();
+  assert.equal(receipt.accounts[0].profiles.length, 100); assert.equal(receipt.accounts[0].variants.length, 100);
+  assert.equal(receipt.resources.filter(value => value.kind === 'model' || value.kind === 'dashboard').length, 0);
+  assert.equal(receipt.population.topology.dashboardsPerOwner, 0); assert(f.users.has('retained-peer'));
+});
+test('cleanup quarantines same-name revision and content drift across all revisioned resource kinds', async t => {
+  for (const kind of ['dashboard', 'model', 'workspace', 'private-profile', 'managed-profile']) {
+    const f = await disposable(t, { registered: 1, active: 1, workload: kind === 'dashboard' ? 'report-1' : kind === 'model' ? 'compile' : 'sql-page',
+      profileMode: kind === 'managed-profile' ? 'managed-shared' : 'private-single' });
+    const receipt = await f.prepare(), record = receipt.resources.find(value => value.kind === kind), item = f.stores.get(record.collection).find(value => value.id === record.value.id);
+    item.revision++; item.name = record.value.name; item.peerContent = true;
+    await assert.rejects(f.cleanup(receipt), /cleanup_resource_changed/);
+    assert(f.stores.get(record.collection).some(value => value.id === item.id)); assert(!f.state.deletes.some(path => path.includes(item.id)));
+    const saved = await readSnapshot(join(f.dir, 'fixtures-private.json')); assert.equal(saved.cleanupState.status, 'quarantined'); assert.equal(saved.cleanupState.resourceKey, record.key);
+  }
+});
+test('model layout/explore/content drift and saved previews are fenced using detail rather than library projections', async t => {
+  for (const change of ['layoutRevision', 'exploreRevision', 'definition', 'preview']) {
+    const f = await disposable(t, { registered: 1, active: 1, workload: 'compile' }), receipt = await f.prepare();
+    const record = receipt.resources.find(value => value.kind === 'model'), item = f.stores.get(record.collection).find(value => value.id === record.value.id);
+    if (change === 'preview') f.stores.set(`${record.collection}/${item.id}/previews`, [{ id: 'peer-preview' }]);
+    else if (change === 'definition') item.definition = { peer: true }; else item[change]++;
+    await assert.rejects(f.cleanup(receipt), change === 'preview' ? /cleanup_model_previews_changed/ : /cleanup_resource_changed/);
+    assert(!f.state.deletes.some(path => path.includes(item.id))); assert(f.state.details.includes(`${record.collection}/${item.id}`));
+  }
+});
+test('only acknowledged own metadata changes advance the recorded deletion state', async t => {
+  const f = await disposable(t, { registered: 1, active: 1, workload: 'metadata-write' }), receipt = await f.prepare(), account = receipt.accounts[0];
+  const client = new f.FakeClient({ cookie: account.cookie }), save = () => writeSnapshot(join(f.dir, 'fixtures-private.json'), receipt);
+  await runJourney({ workload: 'metadata-write', account, client, sequence: 1, save,
+    onIntent: async value => { receipt.intents.push({ ...value, status: 'pending' }); await save(); return receipt.intents.length - 1; },
+    finishIntent: async (index, value) => { Object.assign(receipt.intents[index], value); await save(); } });
+  const workspace = receipt.resources.find(value => value.kind === 'workspace'); assert.equal(workspace.value.revision, 1); assert.equal(account.workspace.revision, 2);
+  await f.cleanup(receipt); assert(f.state.deletes.includes(`${workspace.collection}/${workspace.value.id}?expectedRevision=2`));
+  const g = await disposable(t, { registered: 1, active: 1, workload: 'metadata-write' }), pending = await g.prepare(), current = pending.resources.find(value => value.kind === 'workspace');
+  pending.intents.push({ kind: 'metadata', id: current.value.id, username: pending.accounts[0].username, expectedRevision: 1, revision: 2, name: 'unknown', status: 'closed' });
+  await assert.rejects(g.cleanup(pending), /cleanup_mutation_evidence_incomplete/); assert(!g.state.deletes.some(path => path.includes(current.value.id)));
+});
+test('account access drift remains quarantined after its known resource cleanup', async t => {
+  const f = await disposable(t, { registered: 1, active: 1 }), receipt = await f.prepare(), account = receipt.accounts[0];
+  f.users.get(account.username).direct_access = { capabilities: ['schemer:access'], connections: [], dashboards: [] };
+  await assert.rejects(f.cleanup(receipt), /cleanup_account_changed/); assert(f.users.has(account.username));
+  assert.equal((await readSnapshot(join(f.dir, 'fixtures-private.json'))).cleanupState.status, 'quarantined');
+});
+test('lost resource visibility records an actionable quarantine without deleting or claiming cleanup', async t => {
+  const f = await disposable(t, { registered: 1, active: 1 }), receipt = await f.prepare(), resource = receipt.resources.find(value => value.kind === 'workspace');
+  const original = f.FakeClient.prototype.json;
+  f.FakeClient.prototype.json = async function(method, path, body) {
+    if (method === 'GET' && path === `${resource.collection}/${resource.value.id}`) throw new ProtocolFailure('unexpected_http_403');
+    return original.call(this, method, path, body);
+  };
+  await assert.rejects(f.cleanup(receipt), /unexpected_http_403/);
+  const saved = await readSnapshot(join(f.dir, 'fixtures-private.json'));
+  assert.equal(saved.cleanupState.status, 'quarantined'); assert.equal(saved.cleanupState.resourceKey, resource.key); assert.notEqual(saved.cleaned, true);
+  assert(!f.state.deletes.some(path => path.includes(resource.value.id))); assert(f.state.source);
 });
 test('unknown send is never replayed from absence, name collisions/ambiguous adoption preserve peers', async t => {
   const dir = await mkdtemp(join(os.tmpdir(), 'schemii-resource-intent-')); t.after(() => rm(dir, { recursive: true, force: true }));

@@ -54,6 +54,59 @@ test('test.sh load produces the bounded plan without preparation or application 
   assert.equal(plan.capacityEligible, false);
   assert.deepEqual(plan.stages, [{ name: 'smoke', callsPerMinute: 100, seconds: 6, measured: true }]);
 });
+test('supported CLI exposes a bounded30minute soak without hand-editing its plan', () => {
+  const result = command(['load', 'plan', '--recipe', 'soak', '--soak-seconds', '1800', '--fixture-mode', 'disposable']);
+  assert.equal(result.status, 0, result.stderr); const value = JSON.parse(result.stdout);
+  assert.equal(value.soakSeconds, 1800); assert.equal(value.stages[1].seconds, 1800);
+  for (const args of [['--recipe', 'smoke', '--soak-seconds', '1800'], ['--recipe', 'soak', '--soak-seconds', '1799']]) {
+    const invalid = command(['load', 'plan', ...args]); assert.equal(invalid.status, 1); assert.match(invalid.stderr, /soak_seconds/);
+  }
+});
+
+test('actual controller module reads its attached snapshot before heartbeat/provisioning and enforces remaining hold', async t => {
+  const dir = await mkdtemp(join(os.tmpdir(), 'schemii-load-attach-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const attachment = join(dir, 'attachment.json');
+  await writeJSON(attachment, { status: 'attached', consumer: { pid: 123, start: '789', uid: process.getuid() } });
+  const source = `import vm from 'node:vm';import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import {join} from 'node:path';
+    import {readSnapshot as actualReader} from ${JSON.stringify(new URL('./journal.mjs', import.meta.url).href)};
+    const input=JSON.parse(process.argv[1]),events=[],writes=[],intervals=[];let handler;
+    const run={id:'load-unit-attach',plan:input.plan,source:{fingerprint:'unit'}},budget={unit:true};
+    const fixture={directory:input.directory,tag:'load_0123456789abcdef',run:'pressure_'+ 'a'.repeat(32),nonce:'b'.repeat(64),admin:{username:'unit-admin',password:'unit-only'},sourceWitnessConfig:'/unit/source.json',osRuntimeReceiptObjectSha256:'unit-os',expiresAt:new Date(Date.now()+(input.remainingSeconds||3600)*1000).toISOString()};
+    const actor={username:'unit-owner',userId:'unit-user',workspace:{id:'ws_'+ 'c'.repeat(32),ownerId:'unit-user',revision:1},settings:{revision:1}};
+    const files={'manifest-private.json':run,'config-private.json':{fixtureAuthority:'/unit/authority.json',journalBudget:budget,observerFile:'/unit/observer.json'},'control-private.json':{socket:'/unit/socket',token:'a'.repeat(64)},'controller-launch.json':{version:1,runId:run.id,runtime:{}}};
+    const unexpected=name=>()=>{throw new Error('unexpected_'+name)};
+    const record=async(path,value)=>{writes.push({path,value:structuredClone(value)})};
+    const imports={
+      'node:net':{default:{createServer:callback=>{handler=callback;return {once(){},listen(_path,done){done()}}}}},'node:fs/promises':{chmod:async()=>{}},'node:path':{join},'node:crypto':{timingSafeEqual:(a,b)=>a.equals(b)},'node:util':{isDeepStrictEqual:(a,b)=>JSON.stringify(a)===JSON.stringify(b)},
+      '../harness/store.mjs':{root:input.directory,privateJSON:async path=>structuredClone(files[path.split('/').at(-1)]),writeJSON:record,credentials:unexpected('credentials')},
+      '../harness/deployment.mjs':{startDeployment:unexpected('deployment'),sourceIdentity:()=>({fingerprint:'unit'})},'../harness/leases.mjs':{releaseAccounts:unexpected('accounts')},
+      './fixtures.mjs':{prepareFixtures:unexpected('retained'),cleanupFixtures:unexpected('cleanup'),heldFixture:async()=>{events.push('authority');return fixture},fixtureCommand:async(_fixture,action)=>{events.push(action);return {attachmentFile:input.attachment}},prepareOwnedFixtures:async()=>{events.push('provision');return {kind:'disposable',accounts:[actor]}}},
+      './engine.mjs':{executePlan:async()=>{events.push('execute');return {failures:[]}},verifyK6:unexpected('k6'),observation:async()=>({appRssBytes:1,appMemoryLimitBytes:100}),requireStopped:unexpected('stopped')},
+      './cli.mjs':{loadPath:()=>input.directory},'./children.mjs':{disposeRuntime:unexpected('dispose'),runtimeSocket:()=>'/unit/socket',awaitControllerHandoff:async()=>{}},
+      './journal.mjs':{readSnapshot:async(...args)=>{events.push('snapshot');return actualReader(...args)},writeSnapshot:record,journalBudget:()=>budget,openJournal:async()=>{events.push('journal');return {}}},
+      './ownership.mjs':{sampleSource:async()=>{events.push('source-baseline')}},'./runtime.mjs':{readPrivateJSON:async()=>({runtimeReceiptSha256:'unit-os'}),processIdentity:async()=>({pid:123,birthTick:'789'})}
+    };
+    const context=vm.createContext({process:{argv:['','',run.id],pid:123,umask(){},getuid:()=>input.uid,once(){},exit:unexpected('exit')},AbortController,Buffer,setInterval:callback=>{intervals.push(callback);return 1},clearInterval(){}});
+    const module=new vm.SourceTextModule(await readFile(input.controller,'utf8'),{context});
+    await module.link(specifier=>{const values=imports[specifier];assert(values,'unmocked '+specifier);return new vm.SyntheticModule(Object.keys(values),function(){for(const [key,value] of Object.entries(values))this.setExport(key,value)},{context})});
+    await module.evaluate({timeout:1000});
+    assert.equal(writes.at(-1).value.status,'ready');assert(writes.some(value=>value.path.endsWith('/fixture-attachment-private.json')));assert.equal(intervals.length,1);
+    intervals[0]();await new Promise(setImmediate);await new Promise(setImmediate);
+    assert(events.includes('heartbeat'));assert(events.indexOf('snapshot')<events.indexOf('journal'));assert(events.indexOf('journal')<events.indexOf('provision'));
+    assert(writes.some(value=>value.path.endsWith('/observer-credentials-private.json')));
+    let response;
+    if(input.attemptRun)response=await new Promise(resolve=>{let receive;const socket={setTimeout(){},on(name,callback){if(name==='data')receive=callback},removeAllListeners(){},end(value){resolve(JSON.parse(value))},destroy:unexpected('socket_destroy')};handler(socket);receive(JSON.stringify({token:'a'.repeat(64),command:'run'})+'\\n')});
+    console.log(JSON.stringify({events,status:writes.at(-1).value.status,response,realExternalEffects:false}));`;
+  for (const remainingSeconds of [null, 1800, 2100]) {
+    const result = spawnSync(process.execPath, ['--experimental-vm-modules', '--input-type=module', '-e', source, JSON.stringify({
+      directory: dir, attachment, uid: process.getuid(), controller: join(root, 'testing/load/controller.mjs'), remainingSeconds, attemptRun: remainingSeconds !== null,
+      plan: plan({ fixtureMode: 'disposable', ...(remainingSeconds ? { recipe: 'soak', soakSeconds: 1800 } : {}) }) })], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr); const observed = JSON.parse(result.stdout);
+    if (remainingSeconds === null) assert.equal(observed.status, 'ready');
+    else if (remainingSeconds === 1800) { assert.equal(observed.response.error, 'fixture_hold_too_short'); assert(!observed.events.includes('execute')); }
+    else { assert.equal(observed.response.ok, true); assert(observed.events.includes('execute')); }
+  }
+});
 
 test('load entry rejects an unknown option and a traversal run before any resource action', () => {
   for (const args of [['load', 'prepare', '--bypass-lease'], ['load', 'run', '--run', '../peer']]) {
@@ -181,6 +234,7 @@ test('actual controller prepares before observation exists and admits no arrival
     export async function fixtureCommand(){throw new Error('fixture_retained_only');}
     export function ordinaryRequest(){throw new Error('fixture_no_http');}
     export function streamRequest(){throw new Error('fixture_no_http');}
+    export function resourceFingerprint(){throw new Error('fixture_no_metadata');}
   `);
   const engine = join(checkout, 'testing/load/engine.mjs'), source = await readFile(engine, 'utf8');
   const marker = '  const results = [], before = await observation(observerFile);';

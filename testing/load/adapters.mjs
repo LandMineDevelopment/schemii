@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
+import { isDeepStrictEqual as same } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { HTTPClient } from './http.mjs';
-import { RowOracle, NDJSONOracle, CSVOracle, ProtocolFailure } from './protocol.mjs';
-import { ordinaryRequest, streamRequest, fixtureExecutions } from './fixtures.mjs';
+import { RowOracle, oracleFor, NDJSONOracle, CSVOracle, ProtocolFailure } from './protocol.mjs';
+import { ordinaryRequest, streamRequest, resourceFingerprint, fixtureExecutions } from './fixtures.mjs';
 
 const fail = code => { throw new ProtocolFailure(code); };
 const identifier = value => {
@@ -52,13 +53,14 @@ export async function runJourney({ workload, account, client, signal, sequence =
     control.metadataBusy = true;
     try {
       const current = await json(client, 'GET', `/api/v1/schemii/workspaces/${account.workspace.id}`, undefined, 200, 'metadata_read', signal);
-      if (current.ownerId !== account.userId || current.id !== account.workspace.id) fail('metadata_owner_changed');
+      if (current.ownerId !== account.userId || current.id !== account.workspace.id || !same(current, account.workspace)) fail('metadata_owner_changed');
       const name = `${account.fixtureTag}_metadata_${sequence}`;
-      const intent = await onIntent({ kind: 'metadata', username: account.username, id: current.id, expectedRevision: current.revision, name });
+      const intent = await onIntent({ kind: 'metadata', username: account.username, id: current.id, expectedRevision: current.revision, beforeDigest: resourceFingerprint(current), name });
       const updated = await json(client, 'PATCH', `/api/v1/schemii/workspaces/${current.id}`, { expectedRevision: current.revision, name }, 200, 'metadata_write', signal);
       if (updated.id !== current.id || updated.ownerId !== account.userId || updated.name !== name || updated.revision !== current.revision + 1) fail('metadata_revision_failed');
-      account.workspace.revision = updated.revision; account.workspace.name = name; await save();
-      await finishIntent(intent, { status: 'closed', revision: updated.revision });
+      if (!same({ ...updated, name: current.name, revision: current.revision, ...(current.updatedAt === undefined ? {} : { updatedAt: current.updatedAt }) }, current)) fail('metadata_content_changed');
+      Object.assign(account.workspace, updated); await save();
+      await finishIntent(intent, { status: 'closed', revision: updated.revision, updatedAt: updated.updatedAt, afterDigest: resourceFingerprint(updated) });
     } finally { control.metadataBusy = false; }
     return;
   }
@@ -98,13 +100,19 @@ export async function runJourney({ workload, account, client, signal, sequence =
         if (pageNumber > 10000) fail('sql_page_budget');
         if (workload === 'idle-expiry') {
           if (pageNumber !== 1 || !cursor || !Number.isFinite(Date.parse(page.expiresAt)) || Date.parse(page.expiresAt) > Date.now() + 1800000) fail('idle_contract_unqualified');
+          const count = Math.min(account.settings.rowPageSize, account.oracles.sql.rows);
+          if (!Number.isSafeInteger(count) || count < 1 || count >= account.oracles.sql.rows || typeof account.source.nonce !== 'string' || !account.source.nonce) fail('idle_prefix_oracle_required');
+          const prefix = new RowOracle(oracleFor(columns, Array.from({ length: count }, (_, index) => [index + 1, account.source.nonce])));
+          prefix.columns(page.columns.map(value => value.name));
+          for (const row of page.rows) prefix.row(row);
+          prefix.finish(); // A complete initial-page oracle, not a full-result claim.
           const idleStarted = performance.now();
           await idleWait(1800000);
           // Tests may interrupt/inspect the wait, never replace elapsed time.
           if (performance.now() - idleStarted < 1800000) fail('real_idle_window_not_elapsed');
           const expired = await client.request({ path: `${path}?cursor=${encodeURIComponent(cursor)}`, operation: 'result_page', signal });
           if (expired.status !== 410 || !['console_result_gone', 'console_result_replay_required'].includes(expired.data?.error?.code)) fail('idle_expiry_not_observed');
-          await finishIntent(intent, { status: 'expired', idleSeconds: 1800, independentRelease: 'pending_witness' });
+          await finishIntent(intent, { status: 'expired', idleSeconds: 1800, validatedPrefixRows: count, independentRelease: 'pending_witness' });
           closed = true; return;
         }
       } while (cursor);

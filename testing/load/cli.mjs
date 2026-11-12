@@ -16,7 +16,7 @@ import { observeChild, stopChild, createRuntime, disposeRuntime, runtimeSocket }
 import { LOCAL, PREVIEW } from './http.mjs';
 
 const COMMANDS = {
-  plan: ['recipe', 'workload', 'rate', 'active', 'registered', 'fixture-mode', 'profile-mode', 'profiles', 'mix-file', 'output'],
+  plan: ['recipe', 'workload', 'rate', 'active', 'registered', 'fixture-mode', 'profile-mode', 'profiles', 'mix-file', 'soak-seconds', 'output'],
   prepare: ['plan', 'accounts', 'credentials-file', 'state-dir', 'observer-file', 'k6-bin', 'origin', 'allow-unobserved', 'fixture-authority'],
   run: ['run'], status: ['run'], report: ['run'], cleanup: ['run'],
 };
@@ -64,6 +64,7 @@ export async function loadMain(argv) {
   if (command === 'help') { console.log(`Usage: ./test.sh load plan|prepare|run|status|report|cleanup [options]
 plan --recipe smoke|ramp|confirm|spike|soak|lifecycle --workload ${WORKLOADS.join('|')} --rate 100 --active 2 --output FILE
      [--fixture-mode disposable --registered 1000 --profile-mode private-single|private-multiple|managed-shared|managed-distinct --profiles 2 --mix-file PRIVATE_JSON]
+     [--recipe soak --soak-seconds 1800..3600 (default 3600)]
 prepare --plan FILE --accounts USER1,USER2 --credentials-file PRIVATE_FILE [--state-dir PRIVATE_DIR]
         --observer-file PRIVATE_FILE [--k6-bin HOST_BINARY] [--origin ${LOCAL}|${PREVIEW}]
         [--allow-unobserved: smoke protocol checks only; never capacity evidence]
@@ -73,9 +74,11 @@ run|status|report|cleanup --run LOAD_ID
 No stress run is part of default tests. Retained prepare uses ./start.sh and deployment/account leases.
 cleanup deletes only private receipt-owned report fixtures, revokes load sessions and preserves reports.`); return; }
   if (command === 'plan') {
+    if (o['soak-seconds'] && o.recipe !== 'soak') throw new Error('soak_seconds_requires_soak');
     const value = plan({ recipe: o.recipe, workload: o.workload, rate: Number(o.rate || 100), active: Number(o.active || 2),
       registered: o.registered ? Number(o.registered) : undefined, fixtureMode: o['fixture-mode'], profileMode: o['profile-mode'],
-      profiles: o.profiles ? Number(o.profiles) : undefined, mix: o['mix-file'] ? await privateJSON(resolve(o['mix-file'])) : undefined });
+      profiles: o.profiles ? Number(o.profiles) : undefined, mix: o['mix-file'] ? await privateJSON(resolve(o['mix-file'])) : undefined,
+      soakSeconds: o['soak-seconds'] ? Number(o['soak-seconds']) : undefined });
     if (value.fixtureMode === 'disposable') value.journalBudget = journalBudget(value);
     if (o.output) await writeJSON(resolve(o.output), value);
     console.log(JSON.stringify(value, null, 2)); return value;

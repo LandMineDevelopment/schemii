@@ -7,8 +7,9 @@ import { HTTPClient } from './http.mjs';
 import { oracleFor, ProtocolFailure } from './protocol.mjs';
 import { privateJSON, writeJSON, root } from '../harness/store.mjs';
 import { readPrivateJSON, processIdentity } from './runtime.mjs';
-import { readSnapshot, writeSnapshot, readFixtureSecret, journalRecords } from './journal.mjs';
+import { readSnapshot, writeSnapshot, readFixtureSecret, journalRecords, journalBudget } from './journal.mjs';
 import { sampleSource } from './ownership.mjs';
+import { fixtureTopology } from './plan.mjs';
 
 const bad = code => { throw new ProtocolFailure(code); };
 const readConfig = path => readSnapshot(path, 1024 * 1024);
@@ -217,11 +218,17 @@ const CAPS = ['schemii:access', 'schemoo:access', 'schemer:access', 'schemer:aut
 const contains = (actual, expected) => expected !== null && typeof expected === 'object' ?
   actual !== null && typeof actual === 'object' && Object.entries(expected).every(([key, value]) => contains(actual[key], value)) : actual === expected;
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export function resourceFingerprint(value) {
+  const ordered = value => Array.isArray(value) ? value.map(ordered) : value && typeof value === 'object' ?
+    Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
+  return digest(ordered(value));
+}
 export function populationSpec(spec) {
   if (spec.fixtureMode !== 'disposable' || !Number.isSafeInteger(spec.registeredIdentities) || spec.registeredIdentities < spec.activeIdentities || spec.registeredIdentities > 1000 ||
       spec.profilesPerOwner < 1 || spec.profilesPerOwner > 100 || spec.profileMode === 'managed-distinct' && spec.activeIdentities > 100) bad('invalid_population_spec');
+  journalBudget(spec); // The durable envelope must fit before the first mutation.
   const lanes = spec.workload === 'mix' ? spec.mix.map(item => item.workload) : [spec.workload];
-  return { registered: spec.registeredIdentities, active: spec.activeIdentities, mode: spec.profileMode, profiles: spec.profilesPerOwner,
+  return { registered: spec.registeredIdentities, active: spec.activeIdentities, mode: spec.profileMode, profiles: spec.profilesPerOwner, topology: fixtureTopology(spec),
     wide: lanes.includes('wide-rows'), shared: lanes.includes('shared-report'), viewersOnly: spec.workload === 'shared-report' };
 }
 // Fixed launcher profile, never caller-selected tuning. The effective runtime
@@ -391,7 +398,7 @@ export async function createOwnedResource({ receipt, save, client, key, kind, co
     if (candidates.length > 1) bad('ambiguous_owned_create');
     if (candidates.length === 1) {
       if (item.phase !== 'sent') bad('unowned_resource_collision');
-      item.value = candidates[0];
+      item.value = structuredClone(['account', 'role'].includes(kind) ? candidates[0] : await client.json('GET', `${collection}/${candidates[0].id}`));
       if (kind === 'account') {
         if (!verifyAdoption) bad('account_secret_proof_required');
         await verifyAdoption(item.value);
@@ -399,7 +406,7 @@ export async function createOwnedResource({ receipt, save, client, key, kind, co
     } else {
       if (item.phase === 'sent') bad('uncertain_create_requires_reconciliation');
       item.phase = 'sent'; await save();
-      item.value = await client.json('POST', collection, body, 201);
+      item.value = structuredClone(await client.json('POST', collection, body, 201));
     }
   }
   const expected = { ...body }; delete expected.password; delete expected.role_ids; delete expected.direct_access;
@@ -436,6 +443,11 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
     const identity = await admin.login({ username: authority.admin.username, password: authority.admin.password }, authority.admin.userId);
     receipt.adminCookie = admin.cookie; await save();
     if (identity.is_admin !== true) bad('fixture_admin_required');
+    if (shape.mode.startsWith('managed-')) {
+      const existing = await admin.json('GET', '/api/v1/admin/schemii-connections');
+      const ownedReady = receipt.resources.filter(value => value.kind === 'managed-profile' && value.phase === 'ready').length;
+      if (existing.connections.length + shape.topology.managedProfiles - ownedReady > 100) bad('managed_owner_profile_limit');
+    }
     for (const entry of population.accounts) {
       const user = await owned(admin, `account-${entry.index}`, 'account', '/api/v1/admin/accounts', null, {
         username: entry.username, display_name: `${receipt.tag}_${entry.index}`, password: entry.password, is_admin: false,
@@ -493,30 +505,33 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
       }
       account.variants = [];
       for (const [profileIndex, selectedProfile] of account.profiles.entries()) {
-      account.source = { ...account.source, connectionId: selectedProfile.id };
-      const before = await client.json('GET', '/api/v1/schemii/workspaces');
-      let workspaceItem = receipt.resources.find(value => value.key === `workspace-${account.index}-${profileIndex}`);
-      if (!workspaceItem) {
-        if (before.workspaces.some(value => value.connectionId === account.source.connectionId && value.namespace === source.name)) bad('unowned_workspace_target');
-        workspaceItem = { key: `workspace-${account.index}-${profileIndex}`, kind: 'workspace', collection: '/api/v1/schemii/workspaces', listKey: 'workspaces', ownerId: account.userId,
-          expected: { connectionId: account.source.connectionId, namespace: source.name }, phase: 'sent' }; receipt.resources.push(workspaceItem); await save();
-        const opened = await client.json('POST', '/api/v1/schemii/workspaces/postgres', { connectionId: account.source.connectionId, namespace: source.name }, 201);
-        if (opened.created !== true) bad('unowned_workspace_target');
-        workspaceItem.value = opened.workspace; workspaceItem.phase = 'ready'; await save();
-      }
-      if (!workspaceItem.value || workspaceItem.value.ownerId !== account.userId || !contains(workspaceItem.value, workspaceItem.expected)) bad('workspace_authority_changed');
-      account.workspace = workspaceItem.value;
-      account.settings = await client.json('GET', '/api/v1/schemii/console/settings');
-      account.model = await owned(client, `model-${account.index}-${profileIndex}`, 'model', '/api/v1/schemoo/models', 'models', {
-        name: `${receipt.tag}_model_${account.index}_${profileIndex}`, connectionId: account.source.connectionId, database: account.source.database, namespace: source.name, definition: fixtureSpec.definition }, account.userId);
-      const compiled = await client.json('POST', `/api/v1/schemoo/models/${account.model.id}/plan`, { expectedRevision: account.model.revision, explore });
-      Object.assign(account.oracles, rowOracles(await readColumns(compiled.sql)));
-      account.dashboards = {};
-      for (const count of [1, 5, 20]) account.dashboards[count] = await owned(client, `dashboard-${account.index}-${profileIndex}-${count}`, 'dashboard', '/api/v1/schemer/dashboards', 'dashboards', {
-        name: `${receipt.tag}_dashboard_${account.index}_${profileIndex}_${count}`, modelId: account.model.id, modelRevision: account.model.revision,
-        tiles: Array.from({ length: count }, (_, i) => ({ id: `tile-${i + 1}`, title: `Rows ${i + 1}`, kind: 'detail', detailFields: fields })) }, account.userId);
-      account.variants.push({ source: account.source, workspace: account.workspace, model: account.model, dashboards: account.dashboards, oracles: { ...account.oracles } });
-      await save();
+        account.source = { ...account.source, connectionId: selectedProfile.id };
+        const before = await client.json('GET', '/api/v1/schemii/workspaces');
+        let workspaceItem = receipt.resources.find(value => value.key === `workspace-${account.index}-${profileIndex}`);
+        if (!workspaceItem) {
+          if (before.workspaces.some(value => value.connectionId === account.source.connectionId && value.namespace === source.name)) bad('unowned_workspace_target');
+          workspaceItem = { key: `workspace-${account.index}-${profileIndex}`, kind: 'workspace', collection: '/api/v1/schemii/workspaces', listKey: 'workspaces', ownerId: account.userId,
+            expected: { connectionId: account.source.connectionId, namespace: source.name }, phase: 'sent' }; receipt.resources.push(workspaceItem); await save();
+          const opened = await client.json('POST', '/api/v1/schemii/workspaces/postgres', { connectionId: account.source.connectionId, namespace: source.name }, 201);
+          if (opened.created !== true) bad('unowned_workspace_target');
+          workspaceItem.value = structuredClone(opened.workspace); workspaceItem.phase = 'ready'; await save();
+        }
+        if (!workspaceItem.value || workspaceItem.value.ownerId !== account.userId || !contains(workspaceItem.value, workspaceItem.expected)) bad('workspace_authority_changed');
+        account.workspace = structuredClone(workspaceItem.value);
+        account.settings = await client.json('GET', '/api/v1/schemii/console/settings');
+        account.model = undefined;
+        if (shape.topology.modelsRequired) {
+          account.model = await owned(client, `model-${account.index}-${profileIndex}`, 'model', '/api/v1/schemoo/models', 'models', {
+            name: `${receipt.tag}_model_${account.index}_${profileIndex}`, connectionId: account.source.connectionId, database: account.source.database, namespace: source.name, definition: fixtureSpec.definition }, account.userId);
+          const compiled = await client.json('POST', `/api/v1/schemoo/models/${account.model.id}/plan`, { expectedRevision: account.model.revision, explore });
+          Object.assign(account.oracles, rowOracles(await readColumns(compiled.sql)));
+        }
+        account.dashboards = {};
+        for (const count of shape.topology.dashboardCounts) account.dashboards[count] = await owned(client, `dashboard-${account.index}-${profileIndex}-${count}`, 'dashboard', '/api/v1/schemer/dashboards', 'dashboards', {
+          name: `${receipt.tag}_dashboard_${account.index}_${profileIndex}_${count}`, modelId: account.model.id, modelRevision: account.model.revision,
+          tiles: Array.from({ length: count }, (_, i) => ({ id: `tile-${i + 1}`, title: `Rows ${i + 1}`, kind: 'detail', detailFields: fields })) }, account.userId);
+        account.variants.push({ source: account.source, workspace: account.workspace, model: account.model, dashboards: account.dashboards, oracles: { ...account.oracles } });
+        await save();
       }
       Object.assign(account, account.variants[0]);
     }
@@ -548,7 +563,7 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
           if (before.workspaces.some(value => value.connectionId === profile.id && value.namespace === first.name)) bad('unowned_recovery_workspace');
           recovery = { key: 'recovery-workspace', kind: 'workspace', collection: '/api/v1/schemii/workspaces', listKey: 'workspaces', ownerId: authority.admin.userId,
             expected: { connectionId: profile.id, namespace: first.name }, phase: 'sent' }; receipt.resources.push(recovery); await save();
-          recovery.value = (await admin.json('POST', '/api/v1/schemii/workspaces/postgres', { connectionId: profile.id, namespace: first.name }, 201)).workspace;
+          recovery.value = structuredClone((await admin.json('POST', '/api/v1/schemii/workspaces/postgres', { connectionId: profile.id, namespace: first.name }, 201)).workspace);
           recovery.phase = 'ready'; await save();
         }
         if (!recovery.value || recovery.value.ownerId !== authority.admin.userId || !contains(recovery.value, recovery.expected)) bad('recovery_workspace_changed');
@@ -558,7 +573,7 @@ export async function prepareOwnedFixtures({ dir, spec, authority, Client = HTTP
     }
     if (!shape.viewersOnly && receipt.accounts.length > 1) for (let i = 0; i < receipt.accounts.length; i++) {
       const current = receipt.accounts[i], peer = receipt.accounts[(i + 1) % receipt.accounts.length], client = clients.get(current.username);
-      for (const path of [`/api/v1/schemoo/models/${peer.model.id}`, `/api/v1/schemii/workspaces/${peer.workspace.id}`,
+      for (const path of [...(peer.model ? [`/api/v1/schemoo/models/${peer.model.id}`] : []), `/api/v1/schemii/workspaces/${peer.workspace.id}`,
         ...(!managed ? [`/api/v1/connections/${peer.source.connectionId}`] : [])]) {
         if (![403, 404].includes((await client.request({ path })).status)) bad('cross_owner_access');
       }
@@ -586,6 +601,12 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
   const authority = supplied || await heldFixture(receipt.authorityFile);
   if (authority.tag !== receipt.tag || authority.kind !== 'schemii-pressure-load-hold' || authority.status !== 'held' || !same(authority.profile, receipt.profile)) bad('cleanup_fixture_authority_changed');
   const save = () => writeSnapshot(join(dir, 'fixtures-private.json'), receipt);
+  const quarantine = async (reason, item, observed) => {
+    receipt.cleanupState = { status: 'quarantined', reason, resourceKey: item?.key || null,
+      expectedRevision: item?.value?.revision ?? null, observedRevision: observed?.revision ?? null,
+      recovery: 'Preserve this resource. Review the private intent and drift, or complete exact owned fixture disposal before offline cleanup.' };
+    await save(); bad(reason);
+  };
   const population = await readSnapshot(join(dir, 'population-private.json'));
   const admin = new Client({ origin: origin || authority.origin, maxBytes: 16 * 1024 * 1024 }), clients = new Map();
   for (const field of ['adminCookie', 'cleanupAdminCookie']) if (receipt[field]) {
@@ -599,6 +620,7 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
   }
   await admin.login({ username: authority.admin.username, password: authority.admin.password }, authority.admin.userId);
   receipt.cleanupAdminCookie = admin.cookie; await save();
+  let activeCleanupKey = null;
   try {
     clients.set(authority.admin.userId, admin);
     const survivingAccounts = await admin.json('GET', '/api/v1/admin/accounts');
@@ -608,7 +630,8 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
         if (!receipt.executionCleanupComplete || receipt.resources.some(item => item.ownerId === entry.userId && item.phase !== 'deleted')) bad('cleanup_account_missing');
         continue;
       }
-      if (surviving.username !== entry.username || surviving.is_admin || surviving.disabled) bad('cleanup_account_changed');
+      if (surviving.username !== entry.username || surviving.is_admin || surviving.disabled)
+        await quarantine('cleanup_account_changed', receipt.resources.find(value => value.kind === 'account' && value.value?.id === entry.userId), surviving);
       const client = new Client({ origin: origin || authority.origin, cookie: receipt.accounts.find(value => value.username === entry.username)?.cookie });
       clients.set(entry.userId, client);
       const current = await client.request({ path: '/api/v1/auth/me' });
@@ -651,11 +674,12 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
       await save();
       if (observed.losses || observed.operations.some(entry => entry.unknown || !entry.receipts.length || !['complete', 'failed'].includes(entry.request))) bad('cleanup_fixture_observation_unknown');
     }
-    if (!receipt.executionCleanupComplete) for (const intent of [...(receipt.intents || []), ...pending.values()]) {
+    const allIntents = [...(receipt.intents || []), ...pending.values()];
+    if (!receipt.executionCleanupComplete) for (const intent of allIntents) {
       if (intent.kind === 'session' && intent.cookie) {
         const session = new Client({ origin: origin || authority.origin, cookie: intent.cookie });
         try { await session.logout(); intent.cookie = null; intent.status = 'closed'; await save(); } finally { session.close(); }
-      } else if (intent.kind !== 'session' && (intent.status === 'pending' || intent.kind === 'execution' && !intent.executionId)) bad('unresolved_journey_mutation');
+      } else if (intent.kind !== 'session' && (intent.status === 'pending' || intent.kind === 'execution' && !intent.executionId)) await quarantine('unresolved_journey_mutation');
     }
     let sharedPending = false;
     if (!receipt.executionCleanupComplete) for (const entry of executions.values()) {
@@ -701,29 +725,58 @@ export async function cleanupOwnedFixtures({ dir, receipt, origin, Client = HTTP
     }
     for (const item of [...receipt.resources].reverse()) {
       if (item.phase === 'deleted') continue;
-      if (!item.value?.id) bad('uncertain_create_requires_reconciliation');
+      activeCleanupKey = item.key;
+      if (!item.value?.id) await quarantine('uncertain_create_requires_reconciliation', item);
       const client = item.ownerId && item.ownerId !== POOL && item.ownerId !== authority.admin.userId ? clients.get(item.ownerId) : admin;
       if (!client) bad('resource_cleanup_owner_unknown');
       const listing = await client.json('GET', item.collection), current = (item.listKey ? listing[item.listKey] : listing).find(value => value.id === item.value.id);
       if (current) {
         if (item.kind === 'account') {
-          if (current.username !== item.value.username || current.display_name !== item.value.display_name || current.is_admin) bad('cleanup_account_changed');
+          const keys = ['id', 'username', 'display_name', 'is_admin', 'disabled'];
+          if (!same(Object.fromEntries(keys.map(key => [key, current[key]])), Object.fromEntries(keys.map(key => [key, item.value[key]]))) ||
+              current.direct_access !== undefined && !same(current.direct_access, item.expected.direct_access) || (current.role_ids || []).length)
+            await quarantine('cleanup_account_changed', item, current);
         } else if (item.kind === 'role') {
-          if (!same(Object.fromEntries(Object.keys(item.expected).map(key => [key, current[key]])), item.expected)) bad('cleanup_role_changed');
+          if (!same(Object.fromEntries(Object.keys(item.expected).map(key => [key, current[key]])), item.expected)) await quarantine('cleanup_role_changed', item, current);
         } else {
-          if (current.ownerId !== item.ownerId || item.kind !== 'workspace' && current.name !== item.value.name ||
-              item.kind === 'workspace' && !contains(current, item.expected)) bad('cleanup_resource_changed');
+          let expected = structuredClone(item.value);
+          if (item.kind === 'workspace') for (const intent of allIntents.filter(value => value.kind === 'metadata' && value.id === item.value.id)) {
+            const actor = receipt.accounts.find(value => value.username === intent.username);
+            if (intent.status !== 'closed' || actor?.userId !== item.ownerId || intent.expectedRevision !== expected.revision ||
+                intent.beforeDigest !== resourceFingerprint(expected) || intent.revision !== expected.revision + 1) await quarantine('cleanup_mutation_evidence_incomplete', item);
+            expected = { ...expected, name: intent.name, revision: intent.revision, ...(intent.updatedAt === undefined ? {} : { updatedAt: intent.updatedAt }) };
+            if (intent.afterDigest !== resourceFingerprint(expected)) await quarantine('cleanup_mutation_evidence_incomplete', item);
+          }
+          // Library projections omit content (notably model documents). Compare
+          // the full detail against creation plus acknowledged owned mutations.
+          const detail = await client.json('GET', `${item.collection}/${item.value.id}`);
+          if (detail.ownerId !== item.ownerId || !Number.isSafeInteger(expected.revision) || expected.revision < 1 || !same(detail, expected))
+            await quarantine('cleanup_resource_changed', item, detail);
+          if (item.kind === 'model') {
+            if (!Number.isSafeInteger(expected.layoutRevision) || expected.layoutRevision < 1 || !Number.isSafeInteger(expected.exploreRevision) || expected.exploreRevision < 1) await quarantine('cleanup_model_revision_unknown', item);
+            const previews = await client.json('GET', `${item.collection}/${item.value.id}/previews`);
+            if (!Array.isArray(previews.previews) || previews.previews.length) await quarantine('cleanup_model_previews_changed', item);
+          }
+          item.deleteExpected = expected;
         }
         item.phase = 'delete_pending'; await save();
-        const revision = ['model', 'private-profile'].includes(item.kind) ? `?expected_revision=${current.revision}` :
-          ['workspace', 'dashboard', 'managed-profile'].includes(item.kind) ? `?expectedRevision=${current.revision}` : '';
+        const expected = item.deleteExpected || item.value;
+        const revision = item.kind === 'model' ? `?expected_revision=${expected.revision}&expected_layout_revision=${expected.layoutRevision}&expected_explore_revision=${expected.exploreRevision}&require_no_previews=true` :
+          ['workspace', 'dashboard', 'managed-profile', 'private-profile'].includes(item.kind) ? `?expectedRevision=${expected.revision}` : '';
         await client.json('DELETE', `${item.collection}/${current.id}${revision}`, undefined, 204);
       }
       item.phase = 'deleted'; await save();
     }
     await provisionSource('cleanup', join(dir, 'source-fixture-config-private.json'), join(dir, 'source-fixture-private.json'));
-    receipt.ready = false; receipt.cleaned = true; await save();
+    receipt.ready = false; receipt.cleaned = true; receipt.cleanupState = { status: 'cleaned', previousReason: receipt.cleanupState?.reason || null }; await save();
     return { objectsRemaining: 0, registeredAccountsDeleted: population.accounts.length, sessionsRevoked: true, sourceSchemasDeleted: receipt.population.active };
+  } catch (error) {
+    if (receipt.cleanupState?.status !== 'quarantined') {
+      receipt.cleanupState = { status: 'quarantined', reason: 'cleanup_evidence_unavailable', resourceKey: activeCleanupKey,
+        recovery: 'Preserve remaining resources. Restore exact owner visibility and review the private receipt, or complete owned fixture disposal before offline cleanup.' };
+      await save();
+    }
+    throw error;
   } finally {
     for (const client of clients.values()) if (client !== admin) client.close();
     try { await admin.logout(); delete receipt.cleanupAdminCookie; await save(); } finally { admin.close(); }
