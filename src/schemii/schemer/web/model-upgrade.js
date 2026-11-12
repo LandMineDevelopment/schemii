@@ -1,6 +1,5 @@
-import { dashboardUpdate, fieldKey, tileErrors } from './dashboard-state.js';
+import { dashboardUpdate, fieldKey, tileErrors, tileAggregateChoices } from './dashboard-state.js';
 import { nodeColumns } from '#model/model-columns.js';
-import { aggregateChoices } from './report-state.js';
 import { columnComparisonIssue } from '#model/column-comparisons.js';
 
 // This object is independent of both the displayed dashboard and loaded context.
@@ -46,15 +45,15 @@ export function modelUpgradeIssues(draft, model, catalog) {
   for (const tile of draft.tiles) {
     const add = (message, extra = {}) => issues.push({ tileId: tile.id, message, ...extra });
     for (const message of tileErrors(tile, model, catalog)) add(message);
-    for (const [key, label] of [['dimensions', 'Dimension'], ['measures', 'Measure'], ['detailFields', 'Detail column']]) {
-      for (const field of tile[key]) {
+    for (const [key, label] of [['dimensions', 'Dimension'], ['rowDimensions', 'Pivot row dimension'], ['columnDimensions', 'Pivot column dimension'], ['measures', 'Measure'], ['detailFields', 'Detail column']]) {
+      for (const field of tile[key] || []) {
         const problem = fieldProblem(field);
         if (problem) add(`${label}: ${problem}`);
         else if (key === 'measures') {
           const node = nodes.get(field.table);
           const type = nodeColumns(definition, catalog, node).find(column => column.name === field.column)?.dataType || '';
           const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])(?:\b|\()/i.test(type);
-          const choices = aggregateChoices(definition, catalog, field);
+          const choices = tileAggregateChoices(tile, definition, catalog, field);
           const raw = field.aggregate === 'none' && (node?.derivation?.kind !== 'aggregate' || !node.derivation.outputs.some(output => output.id === field.column));
           if (raw || !choices.some(([value]) => value === field.aggregate) || ['bar', 'line', 'donut'].includes(tile.kind) && !['count', 'count_distinct'].includes(field.aggregate) && !numeric) add(`Measure ${field.table} · ${field.column}: aggregation is no longer compatible with this field.`);
         }

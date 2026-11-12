@@ -17,7 +17,7 @@ from schemii.schemoo.service import document, load_model, model_catalog, plan_qu
 from schemii.schemoo.prototype import _literal
 from .models import ReportQuery
 from .time_analysis import bucket_expression, compile_time_analysis, validate_time_analysis, source_type
-from .dashboard_models import ReportOutput
+from .dashboard_models import ReportOutput, tile_dimensions
 
 
 def _problem(message):
@@ -33,7 +33,7 @@ def _output_key(field):
 
 
 def report_outputs(tile):
-    fields = tile.detail_fields if tile.kind == "detail" else [*tile.dimensions, *tile.measures]
+    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *tile.measures]
     outputs = [ReportOutput(**document(field)) for field in fields]
     time = getattr(tile, "time_analysis", None)
     if time:
@@ -161,7 +161,7 @@ class DashboardPlanning:
 
 
 def tile_report_query(dashboard, tile, selections=None):
-    fields = tile.detail_fields if tile.kind == "detail" else [*tile.dimensions, *tile.measures]
+    fields = tile.detail_fields if tile.kind == "detail" else [*tile_dimensions(tile), *tile.measures]
     return ReportQuery(model_id=dashboard.model_id, expected_revision=dashboard.model_revision,
                        explore=ExploreState(fields=fields, selections=dashboard.selections if selections is None else selections,
                                             reportFilters=tile.report_filters, limit=tile.limit))
@@ -235,7 +235,7 @@ def _ordered(plan, sql, page_size, text_order_fields=(), *, ordering=(), filters
 
 
 def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection=None, fresh=False,
-              planning=None):
+              planning=None, exporting=False):
     """Return (saved model, unbounded SQL plan) for one retained execution.
 
     selection is {dimensions: [{table, column, value}], measureIndex: int}.
@@ -265,36 +265,54 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     catalog = planning.model_catalog() if planning is not None else model_catalog(services, owner, model, fresh=fresh)
     original = plan_query(catalog, model.definition, query.explore, model.catalog_fingerprint, _bounded=False)
     time_analysis = getattr(tile, "time_analysis", None)
-    time_kind = validate_time_analysis(tile, catalog, model.definition)
+    dimensions = tile_dimensions(tile)
+    time_tile = tile.model_copy(update={"dimensions": dimensions}) if tile.kind == "pivot" else tile
+    time_kind = validate_time_analysis(time_tile, catalog, model.definition)
     _, ordering, filters = validate_report_controls(tile, catalog, model.definition)
     parent_statement = parse_one(original["sql"], read="postgres")
     if time_analysis:
-        parent_statement, metadata = compile_time_analysis(tile, parent_statement, catalog, model.definition)
+        parent_statement, metadata = compile_time_analysis(time_tile, parent_statement, catalog, model.definition)
         metadata["warnings"] = [*original.get("warnings", []), *metadata["warnings"]]
         original.update(metadata)
     parent_plan = _ordered(original, parent_statement, tile.limit,
                           _text_order_fields(catalog, model.definition, query.explore.fields),
                           ordering=ordering, filters=filters, top_n=getattr(tile, "top_n", None))
+    if tile.kind == "pivot":
+        from .pivot import compile_pivot, pivot_selection
+        qualifying = _ordered(original, parent_statement.copy(), tile.limit,
+            _text_order_fields(catalog, model.definition, query.explore.fields),
+            ordering=ordering, filters=filters)
+        if selection is None:
+            return model, compile_pivot(catalog, model, tile, query, original, qualifying, parent_plan, exporting=exporting)
+        selection, scope = pivot_selection(tile, selection)
+        if scope != "cell":
+            parent_plan = qualifying
     if selection is None:
         return model, parent_plan
     if hasattr(selection, "model_dump"):
         selection = selection.model_dump(mode="json", by_alias=True)
     if tile.kind == "detail" or not tile.detail_fields:
         _problem("Choose drill-through detail columns in the tile editor first.")
+    pivot_depths = {key: selection.pop(key) for key in ("rowDepth", "columnDepth")} if tile.kind == "pivot" else {}
     if not isinstance(selection, dict) or set(selection) != {"dimensions", "measureIndex"}:
         _problem("Select the dimensions and measure of a tile result.")
     measure_index = selection["measureIndex"]
     if type(measure_index) is not int or not 0 <= measure_index < len(tile.measures):
         _problem("The selected measure does not belong to this tile.")
     values = selection["dimensions"]
-    if not isinstance(values, list) or len(values) != len(tile.dimensions):
+    expected_dimensions = dimensions if tile.kind != "pivot" else [
+        *tile.row_dimensions[:pivot_depths["rowDepth"]],
+        *tile.column_dimensions[:pivot_depths["columnDepth"]]]
+    if not isinstance(values, list) or len(values) != len(expected_dimensions):
         _problem("Supply exactly the dimensions displayed by this tile.")
     selected = {}
     for item in values:
         if not isinstance(item, dict) or set(item) != {"table", "column", "value"}:
             _problem("A dimension selection needs its table, column and value.")
+        if not isinstance(item["table"], str) or not isinstance(item["column"], str):
+            _problem("A selected dimension must name a saved table and column.")
         key = item["table"], item["column"]
-        if key in selected or key not in {_key(field) for field in tile.dimensions}:
+        if key in selected or key not in {_key(field) for field in expected_dimensions}:
             _problem("The selected dimensions do not match this tile.")
         value = item["value"]
         if value is not None and not isinstance(value, (str, int, float, bool)):
@@ -343,8 +361,19 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
                     _problem("Select a valid calendar bucket date.")
                 literal = exp.Cast(this=literal, to=exp.DataType.build("date"))
             conditions.append(exp.EQ(this=expression, expression=literal))
-        index = next(index for index, field in enumerate(tile.dimensions) if _key(field) == key)
+        index = next(index for index, field in enumerate(dimensions) if _key(field) == key)
         parent_conditions.append(exp.NullSafeEQ(this=exp.column(f"output_{index + 1}", table="qualifying_parent", quoted=True), expression=literal.copy()))
+    if tile.kind == "pivot":
+        # Every contributing leaf group must qualify, even within a subtotal.
+        # Correlating only the clicked prefix would admit filtered-out cells.
+        parent_conditions = []
+        for index, field in enumerate(dimensions):
+            expression = column(_key(field))
+            if time_analysis and _key(field) == (time_analysis.table, time_analysis.column):
+                expression = bucket_expression(expression, time_analysis, time_kind)
+            parent_conditions.append(exp.NullSafeEQ(
+                this=exp.column(f"output_{index + 1}", table="qualifying_parent", quoted=True),
+                expression=expression))
     # Qualify against the complete final parent relation. Never push a selected
     # group into that relation before its windows, filters, ranking and top-N.
     parent = exp.select(exp.Literal.number(1)).from_(parse_one(parent_plan["sql"], read="postgres").subquery("qualifying_parent"))
@@ -363,5 +392,19 @@ def tile_plan(services, owner, dashboard, tile_id, *, selections=None, selection
     if measure.aggregate == "count_distinct":
         warnings.append("These are raw contributing rows; repeated values count once in COUNT DISTINCT.")
     plan.update(warnings=warnings, grain="Raw rows contributing to the selected measure", drill=True)
+    if tile.kind == "pivot":
+        plan["pivotScope"] = {"kind": scope, **pivot_depths, "dimensions": values,
+                              "measureIndex": measure_index, "population": "qualifying groups before Top N" if scope != "cell" else "selected qualifying cell"}
+        warnings.append("Pivot totals drill into the complete qualifying population before Top N; contributors are never top-N limited.")
+    if tile.kind == "pivot" and exporting:
+        import json
+        # A raw CSV is independently interpretable after it leaves the report.
+        # Fixed scope columns retain the exact typed selection without changing
+        # contributor membership, grouping or row limits.
+        scope_columns = [exp.Literal.string(scope).as_("Pivot scope", quoted=True),
+            exp.Literal.number(pivot_depths["rowDepth"]).as_("Row grouping depth", quoted=True),
+            exp.Literal.number(pivot_depths["columnDepth"]).as_("Column grouping depth", quoted=True),
+            exp.Literal.string(json.dumps(plan["pivotScope"], ensure_ascii=False, allow_nan=False)).as_("Pivot selection", quoted=True)]
+        statement = statement.select(*scope_columns)
     return model, _ordered(plan, statement, tile.limit,
                         _text_order_fields(catalog, model.definition, tile.detail_fields))

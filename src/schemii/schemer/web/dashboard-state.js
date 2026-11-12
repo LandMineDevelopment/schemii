@@ -2,10 +2,26 @@ import { timeAnalysisErrors } from './time-analysis.js';
 import { availableFields, aggregateChoices } from './report-state.js';
 import { nodeColumns, fieldLabel } from '#model/model-columns.js';
 
-export const TILE_TYPES = [['detail', 'Detail report'], ['aggregate', 'Aggregation report'], ['bar', 'Bar chart'], ['line', 'Line chart'], ['donut', 'Donut chart'], ['kpi', 'KPI']];
+export const TILE_TYPES = [['detail', 'Detail report'], ['aggregate', 'Aggregation report'], ['bar', 'Bar chart'], ['line', 'Line chart'], ['donut', 'Donut chart'], ['kpi', 'KPI'], ['pivot', 'Pivot table']];
+export const pivotDefaults = () => ({ rowSubtotals: true, columnSubtotals: true, rowTotals: true, columnTotals: true, grandTotal: true, maximumColumns: 12, maximumRows: 100 });
+export const tileDimensions = tile => tile.kind === 'pivot' ? [...(tile.rowDimensions || []), ...(tile.columnDimensions || [])] : tile.dimensions;
+export function tileAggregateChoices(tile, draft, catalog, field) {
+  if (tile.kind !== 'pivot') return aggregateChoices(draft, catalog, field);
+  const node = draft.nodes.find(node => node.id === field.table);
+  if (node?.derivation?.kind !== 'aggregate') return aggregateChoices(draft, catalog, field).filter(([value]) => value !== 'none');
+  const column = nodeColumns(draft, catalog, node).find(column => column.name === field.column);
+  if (!column) return [];
+  const type = (column.dataType || '').replace(/\(\d+(?:,\s*\d+)?\)/g, '').trim().toLowerCase();
+  const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])$/.test(type);
+  const comparable = numeric || /^(date|timestamp|time|text|character|varchar)/.test(type);
+  const distinct = comparable || /^(boolean|uuid|bytea|jsonb|inet|cidr|macaddr)$/.test(type);
+  return [['count', 'Count of per-owner values'], ...(distinct ? [['count_distinct', 'Count distinct per-owner values']] : []),
+    ...(numeric ? [['sum', 'Sum of per-owner values'], ['avg', 'Average of per-owner values']] : []),
+    ...(comparable ? [['min', 'Minimum per-owner value'], ['max', 'Maximum per-owner value']] : [])];
+}
 export const fieldKey = field => JSON.stringify([field.table, field.column]);
 export function newTile() {
-  return { id: crypto.randomUUID(), title: '', kind: 'bar', dimensions: [], measures: [], detailFields: [], reportFilters: [], sort: [], aggregateFilters: [], topN: null, limit: 100 };
+  return { id: crypto.randomUUID(), title: '', kind: 'bar', dimensions: [], rowDimensions: [], columnDimensions: [], pivotTotals: pivotDefaults(), measures: [], detailFields: [], reportFilters: [], sort: [], aggregateFilters: [], topN: null, limit: 100 };
 }
 export function tileErrors(tile, model, catalog) {
   const errors = [];
@@ -16,8 +32,21 @@ export function tileErrors(tile, model, catalog) {
   if (['kpi', 'donut'].includes(tile.kind) && tile.measures.length !== 1) errors.push('Choose one measure for this view.');
   if (tile.kind === 'kpi' && tile.dimensions.length) errors.push('A KPI has no grouping dimensions.');
   if (tile.kind !== 'detail' && !tile.detailFields.length) errors.push('Choose the columns to show when drilling into this tile.');
-  if (tile.dimensions.length + tile.measures.length > 64 || tile.detailFields.length > 64) errors.push('Choose no more than 64 output columns.');
-  return [...errors, ...timeAnalysisErrors(tile), ...reportControlErrors(tile, model, catalog)];
+  if (tileDimensions(tile).length + tile.measures.length > 64 || tile.detailFields.length > 64) errors.push('Choose no more than 64 output columns.');
+  if (tile.kind === 'pivot') {
+    const axes = tileDimensions(tile), totals = { ...pivotDefaults(), ...tile.pivotTotals };
+    if (!tile.rowDimensions?.length || !tile.columnDimensions?.length || tile.dimensions.length) errors.push('Choose separate pivot row and column dimensions.');
+    if (tile.rowDimensions?.length > 4 || tile.columnDimensions?.length > 3 || tile.measures.length > 8) errors.push('Pivot limits: four row dimensions, three column dimensions and eight measures.');
+    if (new Set([...axes, ...tile.measures, ...tile.detailFields].map(fieldKey)).size > 64) errors.push('Pivot and detail columns together support at most 64 semantic inputs.');
+    if (new Set(axes.map(fieldKey)).size !== axes.length) errors.push('A field can occur on only one pivot axis.');
+    if (model && catalog) for (const field of tile.measures) {
+      if (field.aggregate && field.aggregate !== 'none' && !tileAggregateChoices(tile, model.definition, catalog, field).some(([value]) => value === field.aggregate)) errors.push(`Measure ${field.column}: choose a compatible explicit aggregation for this field.`);
+    }
+    if (tile.measures.some(field => (field.aggregate || 'none') === 'none')) errors.push('Pivot measures need an explicit aggregation. A model summary value is not a raw-row total.');
+    if (!Number.isInteger(totals.maximumColumns) || totals.maximumColumns < 1 || totals.maximumColumns > 24 || !Number.isInteger(totals.maximumRows) || totals.maximumRows < 1 || totals.maximumRows > 200) errors.push('Choose 1–24 column groups and 1–200 preview rows.');
+    if (tile.timeAnalysis && ((tile.timeAnalysis.comparison || 'none') !== 'none' || tile.timeAnalysis.runningTotal)) errors.push('Pivot calendar grouping supports period values. Use a report or chart for comparisons and running totals.');
+  }
+  return [...errors, ...timeAnalysisErrors({ ...tile, dimensions: tileDimensions(tile) }), ...reportControlErrors(tile, model, catalog)];
 }
 export const reportOutputKey = output => JSON.stringify([output.table, output.column, output.aggregate || 'none', output.kind || 'value']);
 // Compare decimal values without first rounding either token through Number.
@@ -57,7 +86,7 @@ export function validTimeFilterValue(value, type) {
   return true;
 }
 export function reportOutputs(tile, model, catalog) {
-  const fields = tile.kind === 'detail' ? tile.detailFields : [...tile.dimensions, ...tile.measures];
+  const fields = tile.kind === 'detail' ? tile.detailFields : [...tileDimensions(tile), ...tile.measures];
   const make = (field, kind = 'value') => {
     const node = model?.definition.nodes.find(node => node.id === field.table);
     let dataType = model ? nodeColumns(model.definition, catalog, node).find(column => column.name === field.column)?.dataType || '' : '';

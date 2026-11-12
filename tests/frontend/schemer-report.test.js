@@ -38,7 +38,7 @@ test('Schemer controls use registered shared icons', () => {
 });
 
 
-import { dashboardUpdate, reportOutputs, reportOutputKey, reportControlErrors, numericFilterValue, validTimeFilterValue } from '../../src/schemii/schemer/web/dashboard-state.js';
+import { dashboardUpdate, reportOutputs, reportOutputKey, reportControlErrors, numericFilterValue, validTimeFilterValue, tileDimensions, pivotDefaults, tileErrors, TILE_TYPES, fieldChoices, tileAggregateChoices } from '../../src/schemii/schemer/web/dashboard-state.js';
 import vm from 'node:vm';
 const reportTile = () => ({ id: 'report', title: 'Revenue', kind: 'bar', dimensions: [{ table: 'person', column: 'name', aggregate: 'none' }],
   measures: [{ table: 'person', column: 'salary', aggregate: 'sum' }], detailFields: [{ table: 'person', column: 'name', aggregate: 'none' }], reportFilters: [], selections: {}, limit: 2 });
@@ -93,7 +93,7 @@ test('only enabled time outputs can be used and their order matches complete win
 });
 
 const tileEditorSource = readFileSync(new URL('../../src/schemii/schemer/web/tile-editor.js', import.meta.url), 'utf8');
-function editorFixture({ tile = reportTile(), sourceModel = model, schema = catalog } = {}) {
+function editorFixture({ tile = reportTile(), sourceModel = model, schema = catalog, pivot = false } = {}) {
   const nodes = [], saves = [];
   const element = (tag, options = {}, children = []) => {
     const node = { tag, ...options, textContent: options.text || '', children: [...children], open: false,
@@ -106,8 +106,8 @@ function editorFixture({ tile = reportTile(), sourceModel = model, schema = cata
     createIconButton: ({ label }) => element('button', { text: label }),
     modelSelect: (label, choices, selected, change) => element('select', { text: label, choices, selected, change }),
     disposeSelects() {}, timeDimensions: () => [], fieldLabel: (_draft, _catalog, field) => field.column,
-    aggregateChoices, fieldChoices: () => [], fieldKey: field => JSON.stringify([field.table, field.column]),
-    TILE_TYPES: [['bar', 'Bar']], tileErrors: (tile, source, schema) => reportControlErrors(tile, source, schema), reportOutputs, reportOutputKey, numericFilterValue,
+    aggregateChoices, fieldChoices: (...args) => pivot ? fieldChoices(...args) : [], fieldKey: field => JSON.stringify([field.table, field.column]),
+    TILE_TYPES, tileErrors: (tile, source, schema) => pivot ? tileErrors(tile, source, schema) : reportControlErrors(tile, source, schema), reportOutputs, reportOutputKey, numericFilterValue, tileDimensions, pivotDefaults, tileAggregateChoices,
     tile, model: sourceModel, catalog: schema, onSave: async tile => saves.push(structuredClone(tile)),
   });
   vm.runInContext(tileEditorSource.replace(/^import .*;\n/gm, '').replace('export function openTileEditor', 'function openTileEditor'), context);
@@ -197,3 +197,68 @@ for (const [type, value, valid] of [
     assert(aggregateChoices(model.definition, schema, tile.measures[0]).some(([aggregate]) => aggregate === 'min'));
   });
 }
+
+test('actual editor persists independent pivot axes, explicit measures and bounded total options', async () => {
+  const f = editorFixture({ tile: { ...reportTile(), kind: 'pivot', dimensions: [], rowDimensions: [{ table: 'person', column: 'name', aggregate: 'none' }], columnDimensions: [{ table: 'person', column: 'salary', aggregate: 'none' }] }, pivot: true });
+  const cap = f.node('Maximum pivot column groups'); cap.value = '4'; cap.oninput();
+  const subtotal = f.node('Row subtotals'); subtotal.checked = false; subtotal.onchange();
+  const aggregation = f.node('Measure 1 aggregation'); assert.ok(aggregation.choices.every(([value]) => value !== 'none'));
+  aggregation.change('avg'); await f.node('Apply & run').onclick();
+  assert.equal(f.saves[0].kind, 'pivot'); assert.equal(f.saves[0].rowDimensions[0].column, 'name');
+  assert.equal(f.saves[0].columnDimensions[0].column, 'salary'); assert.equal(f.saves[0].measures[0].aggregate, 'avg');
+  assert.equal(f.saves[0].pivotTotals.maximumColumns, 4); assert.equal(f.saves[0].pivotTotals.rowSubtotals, false);
+});
+
+function summaryFixture(type = 'numeric') {
+  const sourceModel = { definition: { root: 'owner', nodes: [{ id: 'owner', table: 'owners', label: 'Owners' },
+    { id: 'summary', table: 'owners', label: 'Per owner', derivation: { kind: 'aggregate', source: 'owner', groupBy: ['id'], outputs: [{ id: 'value', label: 'Summary', operation: type === 'numeric' ? 'avg' : 'max', column: 'value' }] } }], edges: [], scopes: [] } };
+  const schema = { tables: [{ name: 'owners', primaryKey: ['id'], columns: [{ name: 'id', dataType: 'integer' }, { name: 'region', dataType: 'text' }, { name: 'category', dataType: 'text' }, { name: 'value', dataType: type }] }], relationships: [] };
+  const f = column => ({ table: 'owner', column, aggregate: 'none' });
+  const tile = { id: 'pivot', title: 'Per-owner values', kind: 'pivot', dimensions: [], rowDimensions: [f('region')], columnDimensions: [f('category')], measures: [], detailFields: [f('id')], reportFilters: [], selections: {}, limit: 100 };
+  return { sourceModel, schema, tile, pivot: true };
+}
+
+test('actual editor requires deliberate numeric per-owner pivot aggregation, saves and reopens without rewriting it', async () => {
+  const config = summaryFixture(), f = editorFixture(config);
+  const choices = fieldChoices(config.sourceModel, config.schema, '', true), index = choices.findIndex(field => field.table === 'summary' && field.column === 'value');
+  assert.ok(index >= 0); f.node('Add measures').change(String(index));
+  let selector = f.node('Measure 1 aggregation');
+  assert.ok(selector.choices.some(([value]) => value === 'avg'));
+  assert.ok(selector.choices.some(([value, label]) => value === 'avg' && /per-owner/.test(label)));
+  assert.equal(selector.selected, 'none');
+  await f.node('Apply & run').onclick(); assert.equal(f.saves.length, 0);
+  selector.change('avg'); await f.node('Apply & run').onclick();
+  assert.equal(f.saves[0].measures[0].aggregate, 'avg');
+  const reopened = editorFixture({ ...config, tile: f.saves[0] });
+  assert.equal(reopened.node('Measure 1 aggregation').selected, 'avg');
+  reopened.node('Measure 1 aggregation').change('sum'); await reopened.node('Apply & run').onclick();
+  assert.equal(reopened.saves[0].measures[0].aggregate, 'sum');
+});
+
+for (const type of ['date', 'timestamp with time zone', 'text']) {
+  test(`actual editor offers only compatible explicit ${type} summary extrema/count and preserves nonpivot Summary value`, async () => {
+    const config = summaryFixture(type), f = editorFixture(config);
+    const choices = fieldChoices(config.sourceModel, config.schema, '', true), index = choices.findIndex(field => field.table === 'summary' && field.column === 'value');
+    f.node('Add measures').change(String(index));
+    const selector = f.node('Measure 1 aggregation');
+    assert.ok(selector.choices.some(([value]) => value === 'min'));
+    assert.ok(selector.choices.some(([value]) => value === 'count_distinct'));
+    assert.ok(selector.choices.every(([value]) => !['sum', 'avg'].includes(value)));
+    selector.change('max'); await f.node('Apply & run').onclick(); assert.equal(f.saves[0].measures[0].aggregate, 'max');
+    const ordinary = { ...f.saves[0], kind: 'aggregate', dimensions: [...config.tile.rowDimensions, ...config.tile.columnDimensions], rowDimensions: [], columnDimensions: [], measures: [{ table: 'summary', column: 'value', aggregate: 'none' }] };
+    const legacy = editorFixture({ ...config, tile: ordinary });
+    assert.deepEqual(Array.from(legacy.node('Measure 1 aggregation').choices, pair => Array.from(pair)), [['none', 'Summary value']]);
+    await legacy.node('Apply & run').onclick(); assert.equal(legacy.saves[0].measures[0].aggregate, 'none');
+  });
+}
+
+test('actual pivot editor retains an incompatible saved summary aggregation until explicitly repaired', async () => {
+  const config = summaryFixture('date');
+  config.tile.measures = [{ table: 'summary', column: 'value', aggregate: 'avg' }];
+  const f = editorFixture(config);
+  await f.node('Apply & run').onclick(); assert.equal(f.saves.length, 0);
+  assert.equal(f.node('Measure 1 aggregation').selected, 'avg');
+  f.node('Measure 1 aggregation').change('min'); await f.node('Apply & run').onclick();
+  assert.equal(f.saves[0].measures[0].aggregate, 'min');
+  assert.equal(config.tile.measures[0].aggregate, 'avg');
+});

@@ -10,7 +10,7 @@ function fixtures() {
   const dashboard = { id: dashboardId, revision: 1, modelId, modelRevision: 1, name: 'Workforce overview', optionalFilters: [], selections: { organization: { alternativeId: 'choose', values: { org: 'HQ' } } }, tiles: [tile] };
   return { model, dashboard, catalog: { tables: [{ name: 'personnel', columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }, { name: 'org', dataType: 'text' }, { name: 'hired_at', dataType: 'date' }] }], relationships: [] } };
 }
-async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false } = {}) {
+async function mock(page, { emptySlicers = false, chartTypes = false, manyBars = false, aggregationWarning = false, manyRows = false, modelRevision = 1, optionalFilter = false, capped = false, dashboardCapacity = false, streamError = false, emptyRows = false, multidimensional = false, jsonCells = false, pivot = false } = {}) {
   const fixture = fixtures();
   fixture.model.revision = modelRevision;
   if (jsonCells) {
@@ -18,6 +18,10 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     fixture.dashboard.tiles[0].dimensions = [];
     fixture.dashboard.tiles[0].measures = [];
   }
+  if (pivot) Object.assign(fixture.dashboard.tiles[0], { kind: 'pivot', title: 'Workforce pivot', dimensions: [],
+    rowDimensions: [field('org'), field('hired_at')], columnDimensions: [field('name'), field('id')],
+    measures: [field('id', 'avg'), field('id', 'count_distinct')], topN: 100,
+    pivotTotals: { rowSubtotals: true, columnSubtotals: true, rowTotals: true, columnTotals: true, grandTotal: true, maximumColumns: 4, maximumRows: 100 } });
   if (optionalFilter) fixture.model.definition.scopes.push({ id: 'region', label: 'Region', kind: 'conditional', requirement: 'optional', alternatives: [{ id: 'choose', label: 'Choose region', inputs: [{ id: 'region', label: 'Region', type: 'text', defaultValue: '' }], conditions: [{ table: 'person', column: 'org', operator: 'eq', parameterId: 'region' }] }] });
   const warnings = aggregationWarning ? ["COUNT of Personnel.id may be affected by repeated rows from joins. The selected aggregation runs as configured."] : [];
   const repetitionDiagnostics = aggregationWarning ? [{ code: 'measure_repetition', outputIndex: 1,
@@ -54,6 +58,18 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
     return frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
   }
   function dataFor(tile, drill) {
+    if (pivot && !drill) {
+      const rows = pivot === 'capacity' ? [[null, null, null, null, null, null, 0, 0, 'column_capacity', 5, false, 180, 'capacity']]
+        : [[null, null, null, null, 39.1666666667, 4, 0, 0, 'data', 2, true, 180, 'grand_total'],
+          ['HQ', null, null, null, 46.6666666667, 1, 1, 0, 'data', 2, true, 180, 'subtotal'],
+          ['HQ', '2024-01-01', null, null, 46.6666666667, 1, 2, 0, 'data', 3, true, 180, 'row'],
+          ...['Alex', 'Blake', 'Casey'].map(name => [null, null, name, null, 30, 2, 0, 1, 'data', 3, true, 180, 'subtotal']),
+          [null, null, 'Alex', 1, 30.5, 3, 0, 2, 'data', 3, true, 180, 'column'],
+          ['Org 000', '2024-01-01', 'Casey', 3, 25, 1, 2, 2, 'data', 3, true, 180, 'cell'],
+          ...Array.from({ length: 80 }, (_, index) => [`Org ${String(index).padStart(3, '0')}`, '2024-01-01', 'Alex', 1, index, 1, 2, 2, 'data', 2, true, 180, 'cell']),
+          [null, '2024-01-01', 'Blake', 2, 20, 1, 2, 2, 'data', 2, true, 180, 'cell']];
+      return { rows, columns: ['Organization', 'Hired at', 'Name', 'ID', 'Average person ID', 'Distinct IDs', 'Row grouping depth', 'Column grouping depth', 'Pivot status', 'Column groups', 'Preview rows omitted', 'Qualifying groups', 'Pivot scope'].map(name => ({ name, dataType: 'text' })) };
+    }
     if (jsonCells) return { rows: [[{ a: 1 }, [1, 2], 'A,"B"\nC']], columns: [{ name: 'payload', dataType: 'jsonb' }, { name: 'items', dataType: 'jsonb' }, { name: 'note', dataType: 'text' }], size: tile.limit };
     return drill || tile.kind === 'detail' ? { rows: [[1, 'Alex'], [2, 'Blake'], [3, 'Casey']], columns: [{ name: 'id', dataType: 'integer' }, { name: 'name', dataType: 'text' }], size: tile.limit }
       : multidimensional ? { rows: multidimensional === 'wide' ? Array.from({ length: 150 }, (_, index) => [index, 'Group', index + 1]) : multidimensional === 'many' ? Array.from({ length: 150 }, (_, index) => ['HQ', `Person ${index}`, index + 1]) : [['Branch', 'Alex', 2], ['Branch', 'Blake', 3], ['HQ', 'Alex', 4], ['Remote', 'Alex', 1], ['Remote', 'Blake', 5]], columns: [{ name: 'org', dataType: 'text' }, { name: 'name', dataType: 'text' }, { name: 'COUNT id', dataType: 'bigint' }] }
@@ -82,14 +98,14 @@ async function mock(page, { emptySlicers = false, chartTypes = false, manyBars =
       if (url.pathname.endsWith('/plan')) response = { sql: 'SELECT org, COUNT(id) FROM personnel GROUP BY org;', warnings, rowLimit: tile.limit };
       else if (url.pathname.endsWith('/export')) {
         if (body.expectedRevision !== fixture.dashboard.revision) { await route.fulfill({ status: 409, json: { error: { message: 'Dashboard revision changed' } } }); return; }
-        await route.fulfill({ status: 200, contentType: 'text/csv', headers: { 'Content-Disposition': 'attachment; filename="schemer-results.csv"' }, body: 'org,COUNT id\nHQ,3\nBranch,2\n' }); return;
+        await route.fulfill({ status: 200, contentType: 'text/csv', headers: { 'Content-Disposition': 'attachment; filename="schemer-results.csv"' }, body: pivot ? body.selection ? 'id,name,Pivot scope,Row grouping depth,Column grouping depth\n1,Alex,grand_total,0,0\n' : 'Organization,Name,AVG,Row grouping depth,Column grouping depth,Pivot scope\n,,39.1666666667,0,0,grand_total\n' : 'org,COUNT id\nHQ,3\nBranch,2\n' }); return;
       } else {
         await route.fulfill({ status: 200, contentType: 'application/x-ndjson', body: framesFor([tile], body.selection) }); return;
       }
     } else response = {};
     await route.fulfill({ status: 200, json: response });
   });
-  return { fixture, requests, writes, errors };
+  return { fixture, requests, writes, errors, recover: () => { streamError = false; emptyRows = false; } };
 }
 
 test('a changed Schemoo model blocks query refresh until the dashboard is revalidated and updated', async ({ page }) => {
@@ -1008,3 +1024,86 @@ test('later KPI renders while an earlier detail stream remains pending', async (
   await expect(page.locator('[data-tile-id="detail"] .tile-body')).toContainText('Arrived later');
   expect(errors).toEqual([]);
 });
+
+// Both desktop-chromium and the isolated Pixel 7 Android project mount this case.
+test('pivot matrix keeps labelled scrolling headers, totals population and exact grand-total raw export on desktop and Android', async ({ page }) => {
+  const { requests, errors } = await mock(page, { pivot: true });
+  await page.goto('/schemer');
+  await page.locator('.analytics-tile').getByRole('heading', { name: 'Workforce pivot' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Workforce pivot', exact: true });
+  await expect(expanded.locator('.pivot-notice').first()).toContainText('Totals: complete qualifying population before Top N');
+  await expect(expanded).toContainText('Preview row cap reached');
+  await expect(expanded.locator('.pivot-table thead')).toContainText('Average person ID');
+  await expect(expanded.locator('.pivot-table thead')).toContainText('id: 1');
+  const viewport = expanded.getByRole('region', { name: /Workforce pivot pivot/ });
+  const geometry = await viewport.evaluate(node => ({ width: node.clientWidth, content: node.scrollWidth, documentWidth: document.documentElement.clientWidth, bodyWidth: document.documentElement.scrollWidth }));
+  expect(geometry.content).toBeGreaterThan(geometry.width);
+  expect(geometry.bodyWidth).toBeLessThanOrEqual(geometry.documentWidth + 2);
+  expect(await expanded.locator('.pivot-table tbody tr').count()).toBeLessThanOrEqual(52);
+  await viewport.evaluate(node => { node.scrollTop = 2300; node.scrollLeft = 100; node.dispatchEvent(new Event('scroll')); });
+  await expect(expanded.locator('.pivot-table tbody')).toContainText(/Org 04|Org 05/);
+  await viewport.evaluate(node => { node.scrollTop = node.scrollHeight; node.scrollLeft = node.scrollWidth; node.dispatchEvent(new Event('scroll')); });
+  const total = expanded.getByRole('button', { name: /All rows · All columns · Average person ID:.*View contributing records/ });
+  await total.scrollIntoViewIfNeeded(); await total.focus(); await total.press('Enter');
+  await expect(expanded.locator('.drill-body')).toContainText('Alex');
+  const selected = { dimensions: [], measureIndex: 0, pivot: { kind: 'grand_total', rowDepth: 0, columnDepth: 0 } };
+  expect(requests.findLast(request => request.body?.selection).body.selection).toEqual(selected);
+  await expect(expanded.locator('.filter-chips')).toContainText('Pivot grand total');
+  const downloadEvent = new Promise(resolve => { page.once('download', resolve); page.context().once('page', popup => popup.once('download', resolve)); });
+  await expanded.locator('.drill-pane').getByRole('button', { name: 'Download full results', exact: true }).click();
+  await downloadEvent;
+  expect(requests.findLast(request => request.path.endsWith('/export')).body.selection).toEqual(selected);
+  await expanded.getByRole('button', { name: 'Workforce pivot', exact: true }).click();
+  await expect(expanded.getByRole('button', { name: 'Download full pivot groups', exact: true })).toBeVisible();
+  for (const [pattern, kind, rd, cd, dimensions] of [
+    [/^HQ · subtotal · All columns · Average person ID:/, 'subtotal', 1, 0, [['org', 'HQ']]],
+    [/^HQ › 2024-01-01 · All columns · Average person ID:/, 'row', 2, 0, [['org', 'HQ'], ['hired_at', '2024-01-01']]],
+    [/^Org 000 › 2024-01-01 · Alex › 1 · Average person ID:/, 'cell', 2, 2, [['org', 'Org 000'], ['hired_at', '2024-01-01'], ['name', 'Alex'], ['id', 1]]],
+    [/^All rows · Alex › 1 · Average person ID:/, 'column', 0, 2, [['name', 'Alex'], ['id', 1]]],
+  ]) {
+    await viewport.evaluate((node, last) => { node.scrollTop = last ? node.scrollHeight : 0; node.dispatchEvent(new Event('scroll')); }, kind === 'column');
+    const button = expanded.getByRole('button', { name: pattern }); await button.scrollIntoViewIfNeeded(); await button.click();
+    await expect(expanded.locator('.drill-body')).toContainText('Alex');
+    expect(requests.findLast(request => request.body?.selection).body.selection).toEqual({
+      dimensions: dimensions.map(([column, value]) => ({ table: 'person', column, value })), measureIndex: 0,
+      pivot: { kind, rowDepth: rd, columnDepth: cd } });
+    await expanded.getByRole('button', { name: 'Workforce pivot', exact: true }).click();
+  }
+  expect(errors).toEqual([]);
+});
+
+test('pivot capacity blocks matrix allocation and offers editable recovery with full CSV still available', async ({ page }) => {
+  const { errors } = await mock(page, { pivot: 'capacity' });
+  await page.goto('/schemer');
+  await expect(page.locator('.analytics-tile .pivot-notice.error')).toContainText('at least 5 column groups');
+  await expect(page.locator('.pivot-table')).toHaveCount(0);
+  await page.locator('.analytics-tile').getByRole('heading', { name: 'Workforce pivot' }).click();
+  const expanded = page.getByRole('dialog', { name: 'Workforce pivot', exact: true });
+  await expect(expanded.getByRole('button', { name: 'Download full pivot groups', exact: true })).toBeEnabled();
+  await expanded.getByRole('button', { name: 'Close expanded tile' }).click();
+  await page.getByRole('button', { name: 'Edit Workforce pivot', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Configure analytics tile' });
+  await expect(editor.getByLabel('Maximum pivot column groups')).toHaveValue('4');
+  await editor.getByLabel('Maximum pivot column groups').fill('6');
+  await editor.getByRole('button', { name: 'Apply & run' }).click();
+  expect(errors).toEqual([]);
+});
+
+for (const state of ['interrupted', 'empty']) {
+  test(`pivot ${state} state explains received groups and recovers with explicit refresh`, async ({ page }) => {
+    const { recover, requests, errors } = await mock(page, { pivot: true, streamError: state === 'interrupted', emptyRows: state === 'empty' });
+    await page.goto('/schemer');
+    const tile = page.locator('.analytics-tile');
+    if (state === 'empty') await expect(tile).toContainText('No qualifying groups');
+    else {
+      await expect(tile).toContainText('Partial pivot: showing received groups; absent cells are not zero');
+      await expect(tile).toContainText('Source connection interrupted');
+    }
+    const before = requests.length; recover();
+    await page.getByRole('button', { name: 'Refresh dashboard', exact: true }).click();
+    await expect(tile).toContainText('89 groups');
+    expect(requests.length).toBeGreaterThan(before);
+    await expect(tile).not.toContainText('Partial pivot:');
+    expect(errors).toEqual([]);
+  });
+}
