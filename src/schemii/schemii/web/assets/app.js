@@ -3467,16 +3467,16 @@ function applyDesignHistoryMutation(mutation, { cue = true, render = true } = {}
   if (cue) showDesignChanges(beforeContent, mutation.design.content);
 }
 
-async function applyDesignHistoryPreview(delta, { isCurrent = () => true } = {}) {
+async function applyDesignHistoryPreview(delta, { isCurrent = () => true, mutation = null } = {}) {
   const beforeContent = state.design.content;
-  const afterContent = applyJsonDelta(state.design.content, delta);
+  const afterContent = mutation?.design.content || applyJsonDelta(state.design.content, delta);
   const targets = designChangeTargets(beforeContent, afterContent);
   const prepared = await prepareDesignChangeTransition(targets, { reveal: true });
   if (!isCurrent()) {
     changeTransitions.restore(prepared);
     return { presentation: null };
   }
-  const design = {
+  const design = mutation?.design || {
     ...state.design,
     content: afterContent,
   };
@@ -3541,6 +3541,10 @@ async function executeDesignHistoryMoveConfirmed(direction) {
   try {
     const result = await performDesignHistoryMove({
       state, direction, operation,
+      // View analysis uses server-side source columns, including wildcard
+      // expansion. Do not analyze an optimistic design against the old server.
+      deferPreview: Boolean(state.design.content.views?.length
+        || applyJsonDelta(state.design.content, state.designHistory?.[direction]?.delta || []).views?.length),
       applyPreview: applyDesignHistoryPreview,
       requestMove: (move, ...args) => api[move === "undo" ? "undoDesign" : "redoDesign"](...args),
       applyMutation: applyDesignHistoryMutation,

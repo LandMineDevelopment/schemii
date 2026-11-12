@@ -3,6 +3,7 @@
 // without replacing the already mounted optimistic detail surface.
 export async function performDesignHistoryMove({
   state, direction, operation, applyPreview, requestMove, applyMutation, restorePreview,
+  deferPreview = false,
 }) {
   const workspaceId = state.activeWorkspace.id;
   const expectedDesignRevision = state.design.revision;
@@ -20,7 +21,7 @@ export async function performDesignHistoryMove({
   let previewApplied = false;
   let presentation = null;
   try {
-    if (delta.length) {
+    if (delta.length && !deferPreview) {
       const preview = await applyPreview(delta, { isCurrent });
       if (!isCurrent()) return null;
       presentation = preview.presentation;
@@ -30,6 +31,20 @@ export async function performDesignHistoryMove({
       signal: operation.signal,
     });
     if (!isCurrent()) return null;
+    if (delta.length && deferPreview) {
+      try {
+        const preview = await applyPreview(delta, { isCurrent, mutation });
+        if (!isCurrent()) return null;
+        presentation = preview.presentation;
+        previewApplied = true;
+      } catch (error) {
+        if (!isCurrent()) return null;
+        // The server already committed: recovery must install its confirmed
+        // state, never roll back to the pre-request design.
+        applyMutation(mutation, { cue: false, render: true });
+        return { error };
+      }
+    }
     const previewMatches = previewApplied
       && JSON.stringify(state.design.content) === JSON.stringify(mutation.design.content);
     applyMutation(mutation, { cue: !previewMatches, render: !previewMatches });

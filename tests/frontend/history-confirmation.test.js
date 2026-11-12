@@ -100,6 +100,51 @@ test("navigation during asynchronous preview preparation cannot submit a stale h
   assert.deepEqual(f.calls, []);
 });
 
+test("server-dependent history presentation waits for confirmation and receives the authoritative design", async () => {
+  const f = fixture(), assembled = deferred();
+  f.args.deferPreview = true;
+  f.args.applyPreview = async (delta, { mutation, isCurrent }) => {
+    assert.equal(isCurrent(), true);
+    assert.equal(mutation.design.revision, 9);
+    f.calls.push("confirmed-analysis");
+    await assembled.promise;
+    f.state.design = mutation.design;
+    return { presentation: { headline: "Confirmed view" } };
+  };
+  const pending = performDesignHistoryMove(f.args);
+  await f.requested.promise;
+  assert.deepEqual(f.calls, ["request"]);
+  assert.equal(f.state.design.content, f.before);
+  f.response.resolve(f.mutation({ tables: [{ id: "people", columns: [{ name: "server_quantity" }] }] }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.calls, ["request", "confirmed-analysis"]);
+  assembled.resolve();
+  await pending;
+  assert.deepEqual(f.calls, ["request", "confirmed-analysis", { apply: { cue: false, render: false } }]);
+});
+
+test("failed server-dependent presentation retains the committed design instead of rolling back", async () => {
+  const f = fixture(), failure = new Error("Presentation failed");
+  f.args.deferPreview = true;
+  f.args.applyPreview = async () => { throw failure; };
+  const pending = performDesignHistoryMove(f.args);
+  const confirmed = f.mutation({ tables: [] });
+  f.response.resolve(confirmed);
+  assert.deepEqual(await pending, { error: failure });
+  assert.equal(f.state.design, confirmed.design);
+  assert.deepEqual(f.calls, ["request", { apply: { cue: false, render: true } }]);
+});
+
+test("rejected deferred history never prepares or rolls back an uncommitted view", async () => {
+  const f = fixture(), failure = new Error("Revision conflict");
+  f.args.deferPreview = true;
+  const pending = performDesignHistoryMove(f.args);
+  f.response.reject(failure);
+  assert.deepEqual(await pending, { error: failure });
+  assert.equal(f.state.design.content, f.before);
+  assert.deepEqual(f.calls, ["request"]);
+});
+
 test("a history error rolls back once and returns the original error for application reload policy", async () => {
   const f = fixture(), error = Object.assign(new Error("Design changed"), { code: "design_changed" });
   const pending = performDesignHistoryMove(f.args);
