@@ -182,9 +182,17 @@ def _equivalent_value(
     left: Any,
     right: Any,
     check_column_types: Mapping[str, Mapping[str, str]] | None = None,
+    catalog: PostgresCatalog | None = None,
 ) -> bool:
     if left is _MISSING or right is _MISSING:
         return left is right
+    if (
+        catalog is not None
+        and isinstance(left, str)
+        and isinstance(right, str)
+        and re.fullmatch(r"views\[[^]]+\]\.definition", path)
+    ):
+        return view_definitions_equivalent(catalog.namespace, left, right, catalog)
     if isinstance(left, str) and isinstance(right, str) and path.endswith(".expression"):
         match = re.fullmatch(r"tables\[([^]]+)\]\.checks\[[^]]+\]\.expression", path)
         if match and check_column_types and match[1] in check_column_types:
@@ -204,6 +212,7 @@ def _equivalent_value(
                 left_items[identifier],
                 right_items[identifier],
                 check_column_types,
+                catalog,
             )
             for identifier in left_items
         )
@@ -221,13 +230,14 @@ def _equivalent_value(
                 left[key],
                 right[key],
                 check_column_types,
+                catalog,
             )
             for key in left
         )
     if isinstance(left, list) and isinstance(right, list):
         return len(left) == len(right) and all(
             _equivalent_value(
-                f"{path}[{index}]", left_item, right_item, check_column_types
+                f"{path}[{index}]", left_item, right_item, check_column_types, catalog
             )
             for index, (left_item, right_item) in enumerate(zip(left, right))
         )
@@ -273,16 +283,32 @@ class _Merger:
         self,
         resolutions: dict[str, str] | None = None,
         check_column_types: Mapping[str, Mapping[str, str]] | None = None,
+        catalog: PostgresCatalog | None = None,
+        not_null_name_nullability: Mapping[str, bool] | None = None,
     ) -> None:
         self.external: list[MigrationExternalChange] = []
         self.conflicts: list[MigrationConflict] = []
         self.resolutions = resolutions or {}
         self.check_column_types = check_column_types or {}
+        self.catalog = catalog
+        self.not_null_name_nullability = not_null_name_nullability or {}
 
     def merge(self, baseline: Any, desired: Any, live: Any, path: str) -> Any:
         if desired is _MISSING and live is _MISSING:
             return _MISSING
-        if _equivalent_value(path, desired, live, self.check_column_types):
+        if desired is _MISSING and path in self.not_null_name_nullability:
+            if self.not_null_name_nullability[path]:
+                if live == baseline:
+                    return _MISSING
+                return self._conflict(path, baseline, desired, live, "direct")
+            # An absent requested name keeps the exact native name; it is not a
+            # request to rename or remove an existing NOT NULL constraint.
+            if live != baseline:
+                self._external(path, baseline, live)
+            return _copy(live)
+        if _equivalent_value(
+            path, desired, live, self.check_column_types, self.catalog
+        ):
             return _copy(desired)
 
         if baseline is not _MISSING:
@@ -330,11 +356,17 @@ class _Merger:
                     result.append(merged)
             return result
 
-        if _equivalent_value(path, desired, baseline, self.check_column_types):
-            if not _equivalent_value(path, live, baseline, self.check_column_types):
+        if _equivalent_value(
+            path, desired, baseline, self.check_column_types, self.catalog
+        ):
+            if not _equivalent_value(
+                path, live, baseline, self.check_column_types, self.catalog
+            ):
                 self._external(path, baseline, live)
             return _copy(live)
-        if _equivalent_value(path, live, baseline, self.check_column_types):
+        if _equivalent_value(
+            path, live, baseline, self.check_column_types, self.catalog
+        ):
             return _copy(desired)
 
         return self._conflict(path, baseline, desired, live, "direct")
@@ -643,6 +675,12 @@ def preservation_matches(
         PostgresObjectIdentity(kind="relation", namespace=before.namespace, name=name)
         for name in mutable_relations
     )
+    view_queries = {
+        PostgresObjectIdentity(
+            kind="relation", namespace=item.namespace, name=item.name
+        ): item.query_definition
+        for item in (*before.views, *before.materialized_views)
+    }
 
     def projection(catalog: PostgresCatalog):
         evidence = catalog.safety
@@ -667,7 +705,21 @@ def preservation_matches(
                     signature=getattr(item, "identity_arguments", ""),
                 )
                 if key in scope:
-                    rows[key] = item.model_dump(mode="json")
+                    value = item.model_dump(mode="json")
+                    query = value.get("query_definition")
+                    original = view_queries.get(key)
+                    if (
+                        original is not None
+                        and isinstance(query, str)
+                        and view_definitions_equivalent(
+                            before.namespace, original, query, catalog
+                        )
+                    ):
+                        # pg_get_viewdef qualification follows the connection's
+                        # search path. Preserve its proven binding, while all
+                        # other protected attributes still compare exactly.
+                        value["query_definition"] = original
+                    rows[key] = value
         mutable = {
             PostgresObjectIdentity(
                 kind="relation", namespace=before.namespace, name=name
@@ -709,7 +761,16 @@ def reconcile_designs(
                 column.data_type, live_columns[column.name].data_type
             ).disposition == "equivalent"
         }
-    merger = _Merger(resolutions, check_column_types)
+    merger = _Merger(
+        resolutions,
+        check_column_types,
+        catalog,
+        {
+            f"tables[{table.id}].columns[{column.id}].not_null_constraint_name": column.nullable
+            for table in desired.tables
+            for column in table.columns
+        },
+    )
     merged_document = merger.merge(
         baseline.model_dump(mode="json"),
         desired.model_dump(mode="json"),
@@ -800,6 +861,8 @@ def _column_definition(column: DesignColumn) -> str:
     elif column.default_expression is not None:
         parts.append(f"DEFAULT {column.default_expression.strip()}")
     if not column.nullable:
+        if column.not_null_constraint_name is not None:
+            parts.append(f"CONSTRAINT {_quote(column.not_null_constraint_name)}")
         parts.append("NOT NULL")
     return " ".join(parts)
 
@@ -1512,11 +1575,45 @@ def _plan_table_column_changes(
             ))
         if old.nullable != new.nullable:
             action = "DROP NOT NULL" if new.nullable else "SET NOT NULL"
-            plan.pending.append(_PendingStep(
-                52, "column", path, "alter_nullability",
-                f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};",
-                data_movement=not new.nullable,
-            ))
+            statement = f"ALTER TABLE {_qualified(plan.namespace, active_name)} ALTER COLUMN {_quote(current_column_name)} {action};"
+            if not new.nullable and new.not_null_constraint_name is not None:
+                statement = (
+                    f"ALTER TABLE {_qualified(plan.namespace, active_name)} ADD CONSTRAINT "
+                    f"{_quote(new.not_null_constraint_name)} NOT NULL {_quote(current_column_name)};"
+                )
+            plan.pending.append(
+                _PendingStep(
+                    52,
+                    "column",
+                    path,
+                    "alter_nullability",
+                    statement,
+                    data_movement=not new.nullable,
+                )
+            )
+        elif (
+            not new.nullable
+            and new.not_null_constraint_name is not None
+            and old.not_null_constraint_name != new.not_null_constraint_name
+        ):
+            if old.not_null_constraint_name is None:
+                plan.blocking.append(
+                    MigrationWarning(
+                        code="not_null_constraint_identity_unavailable",
+                        message="The existing NOT NULL constraint identity must be inspected before naming it",
+                        object_path=path,
+                    )
+                )
+            else:
+                plan.pending.append(
+                    _PendingStep(
+                        53,
+                        "constraint",
+                        path,
+                        "rename_not_null_constraint",
+                        f"ALTER TABLE {_qualified(plan.namespace, active_name)} RENAME CONSTRAINT {_quote(old.not_null_constraint_name)} TO {_quote(new.not_null_constraint_name)};",
+                    )
+                )
 
 
 def _plan_table_constraint_changes(
@@ -2162,6 +2259,7 @@ def _plan_view_changes(plan: _MigrationPlan) -> None:
                             f"views.{after.name}.acl.{index}",
                             "preserve_privileges",
                             sql,
+                            order=index,
                         )
                     )
                 continue
@@ -2284,6 +2382,22 @@ def compile_migration_steps(
         pending=[],
         blocking=[],
     )
+    if (
+        catalog is not None
+        and catalog.server_version_num < 180000
+        and any(
+            column.not_null_constraint_name is not None
+            for table in desired.tables
+            for column in table.columns
+        )
+    ):
+        plan.blocking.append(
+            MigrationWarning(
+                code="named_not_null_requires_postgresql_18",
+                message="Named NOT NULL constraints require PostgreSQL 18 or later",
+                object_path="schema",
+            )
+        )
     _plan_physical_column_rebuilds(plan, rebuild_table_ids, populated_rebuild_table_ids)
     _plan_relationship_changes(plan)
     _plan_table_changes(plan)

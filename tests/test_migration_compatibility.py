@@ -1068,3 +1068,434 @@ def test_quoted_routine_overloads_keep_exact_source_identity_signatures():
         )
         for signature in ("value integer", "value text")
     }
+
+
+def ordinary_not_null_catalog(**constraint_changes):
+    from schemii.common.postgres.models import PostgresNotNullConstraint
+
+    source = mixed()
+    constraint = PostgresNotNullConstraint(
+        **{
+            "name": 'exact "NN"',
+            "table": "ordinary",
+            "columns": ("id",),
+            "definition": "NOT NULL id",
+            "validated": True,
+            "is_local": True,
+            "inheritance_count": 0,
+            "no_inherit": False,
+            **constraint_changes,
+        }
+    )
+    table = source.tables[1].model_copy(update={"not_null_constraints": (constraint,)})
+    return build_postgres_catalog(
+        **source.model_dump(
+            exclude={
+                "fingerprint",
+                "captured_at",
+                "tables",
+                "safety",
+                "server_version",
+                "server_version_num",
+            }
+        ),
+        tables=(table,),
+        server_version="18.0",
+        server_version_num=180000,
+        safety=source.safety.model_copy(
+            update={"preservation": (source.safety.preservation[1],)}
+        ),
+        captured_at=source.captured_at,
+    )
+
+
+def test_native_not_null_name_roundtrips_without_assuming_generated_name_origin():
+    from schemii.schemii.migrations.planner import new_baseline_content
+
+    catalog = ordinary_not_null_catalog()
+    imported = import_postgres_catalog(catalog)
+    assert imported.summary.complete
+    current = imported.content
+    assert current.tables[0].columns[0].not_null_constraint_name == 'exact "NN"'
+    created = current.model_copy(deep=True)
+    created.tables[0].columns[0].not_null_constraint_name = None
+    candidate, issues, complete = new_baseline_content(catalog, created)
+    assert complete and not issues
+    assert candidate.tables[0].columns[0].not_null_constraint_name == 'exact "NN"'
+    assert compile_migration_steps("public", candidate, created, catalog=catalog) == (
+        [],
+        [],
+    )
+    empty = current.model_copy(update={"tables": []})
+    steps, blockers = compile_migration_steps("public", empty, current, catalog=catalog)
+    assert not blockers and 'CONSTRAINT "exact ""NN""" NOT NULL' in steps[0].sql
+    renamed = current.model_copy(deep=True)
+    renamed.tables[0].columns[0].name = "renamed.id"
+    renamed.tables[0].columns[0].not_null_constraint_name = "new.name"
+    steps, blockers = compile_migration_steps(
+        "public", current, renamed, catalog=catalog
+    )
+    assert not blockers
+    assert any(
+        'RENAME CONSTRAINT "exact ""NN""" TO "new.name"' in step.sql for step in steps
+    )
+    nullable = current.model_copy(deep=True)
+    nullable.tables[0].columns[0].nullable = True
+    nullable.tables[0].columns[0].not_null_constraint_name = None
+    steps, blockers = compile_migration_steps(
+        "public", current, nullable, catalog=catalog
+    )
+    assert not blockers and len(steps) == 1 and "DROP NOT NULL" in steps[0].sql
+    drop_review = reconcile_designs(current, nullable, catalog)
+    assert (
+        not drop_review.conflicts and drop_review.merged.tables[0].columns[0].nullable
+    )
+    keep_review = reconcile_designs(current, created, catalog)
+    assert (
+        not keep_review.conflicts
+        and keep_review.merged.tables[0].columns[0].not_null_constraint_name
+        == 'exact "NN"'
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"is_local": None},
+        {"inheritance_count": None},
+        {"no_inherit": None},
+        {"is_local": False},
+        {"inheritance_count": 1},
+        {"no_inherit": True},
+        {"validated": False},
+    ],
+)
+def test_not_null_unknown_inherited_noinherit_and_unvalidated_contracts_stay_protected(
+    changes,
+):
+    catalog = ordinary_not_null_catalog(**changes)
+    imported = import_postgres_catalog(catalog)
+    assert not imported.summary.complete and imported.summary.issues
+    assert imported.content.tables[0].columns[0].not_null_constraint_name is None
+    changed = imported.content.model_copy(deep=True)
+    changed.tables[0].columns[0].nullable = True
+    assert not migration_compatibility(
+        catalog, imported.content, changed
+    ).operation_safe
+
+
+def test_multiple_not_null_names_do_not_import_a_guessed_single_constraint():
+    before = ordinary_not_null_catalog()
+    table = before.tables[0]
+    constraints = table.not_null_constraints + (
+        table.not_null_constraints[0].model_copy(update={"name": "another"}),
+    )
+    catalog = build_postgres_catalog(
+        **before.model_dump(exclude={"fingerprint", "captured_at", "tables"}),
+        tables=(table.model_copy(update={"not_null_constraints": constraints}),),
+        captured_at=before.captured_at,
+    )
+    result = import_postgres_catalog(catalog)
+    assert not result.summary.complete and len(result.summary.issues) == 2
+    assert result.content.tables[0].columns[0].not_null_constraint_name is None
+
+
+def test_named_not_null_does_not_guess_an_unknown_native_identity_or_erase_a_concurrent_rename():
+    unknown = ordinary_not_null_catalog(is_local=None)
+    live = import_postgres_catalog(unknown).content
+    desired = live.model_copy(deep=True)
+    desired.tables[0].columns[0].not_null_constraint_name = "requested"
+    _, blockers = compile_migration_steps("public", live, desired, catalog=unknown)
+    assert any(
+        item.code == "not_null_constraint_identity_unavailable" for item in blockers
+    )
+    known = ordinary_not_null_catalog()
+    baseline = import_postgres_catalog(known).content
+    nullable = baseline.model_copy(deep=True)
+    nullable.tables[0].columns[0].nullable = True
+    nullable.tables[0].columns[0].not_null_constraint_name = None
+    changed = ordinary_not_null_catalog(name="concurrently_renamed")
+    assert reconcile_designs(baseline, nullable, changed).conflicts
+    older = build_postgres_catalog(
+        **known.model_dump(
+            exclude={
+                "fingerprint",
+                "captured_at",
+                "server_version",
+                "server_version_num",
+            }
+        ),
+        server_version="17.0",
+        server_version_num=170000,
+        captured_at=known.captured_at,
+    )
+    _, blockers = compile_migration_steps(
+        "public", baseline.model_copy(update={"tables": []}), baseline, catalog=older
+    )
+    assert any(
+        item.code == "named_not_null_requires_postgresql_18" for item in blockers
+    )
+
+
+def view_binding_catalog(query):
+    from schemii.common.postgres.models import PostgresMaterializedView
+
+    namespace = 'Cache "schema"'
+    return build_postgres_catalog(
+        database="data",
+        namespace=namespace,
+        server_version="18.0",
+        server_version_num=180000,
+        server_timezone="UTC",
+        captured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        tables=(
+            PostgresTable(
+                namespace=namespace,
+                name="source_data",
+                kind="table",
+                is_partition=False,
+                columns=(
+                    PostgresColumn(
+                        name="value", ordinal=1, data_type="integer", nullable=True
+                    ),
+                ),
+            ),
+        ),
+        relationships=(),
+        functions=(),
+        views=(),
+        materialized_views=(
+            PostgresMaterializedView(
+                namespace=namespace,
+                name="saved",
+                columns=(
+                    PostgresColumn(
+                        name="value", ordinal=1, data_type="integer", nullable=True
+                    ),
+                ),
+                query_definition=query,
+                populated=True,
+            ),
+        ),
+    )
+
+
+def test_search_path_only_live_view_qualification_is_not_a_three_way_edit_conflict():
+    catalog = view_binding_catalog('SELECT value FROM "Cache ""schema""".source_data')
+    baseline = import_postgres_catalog(catalog).content
+    baseline.views[0].definition = "SELECT value FROM source_data"
+    desired = baseline.model_copy(deep=True)
+    desired.views[
+        0
+    ].definition = 'SELECT value FROM "Cache ""schema""".source_data WHERE value >= 2'
+    result = reconcile_designs(baseline, desired, catalog)
+    assert not result.conflicts and not result.external_changes
+    assert result.merged.views[0].definition == desired.views[0].definition
+
+
+@pytest.mark.parametrize(
+    "baseline_query,live_query",
+    [
+        (
+            "SELECT value FROM external.source_data",
+            'SELECT value FROM "Cache ""schema""".source_data',
+        ),
+        (
+            "WITH source_data AS (SELECT 1 AS value) SELECT value FROM source_data",
+            'WITH source_data AS (SELECT 1 AS value) SELECT value FROM "Cache ""schema""".source_data',
+        ),
+    ],
+)
+def test_three_way_view_comparison_retains_external_and_cte_binding_changes(
+    baseline_query, live_query
+):
+    catalog = view_binding_catalog(live_query)
+    baseline = import_postgres_catalog(catalog).content
+    baseline.views[0].definition = baseline_query
+    desired = baseline.model_copy(deep=True)
+    desired.views[0].definition = baseline_query + " WHERE value >= 2"
+    assert reconcile_designs(baseline, desired, catalog).conflicts
+
+
+def test_materialized_acl_replay_preserves_privileges_past_single_digit_step_numbers():
+    from pglast import parse_sql
+    from schemii.common.postgres.models import PostgresGrant
+
+    before = materialized_catalog()
+    privileges = (
+        "DELETE",
+        "INSERT",
+        "MAINTAIN",
+        "REFERENCES",
+        "SELECT",
+        "TRIGGER",
+        "TRUNCATE",
+        "UPDATE",
+    )
+    acl = tuple(
+        PostgresGrant(
+            grantor="author", grantee="author", privilege=privilege, grantable=False
+        )
+        for privilege in privileges
+    )
+    acl += (
+        PostgresGrant(
+            grantor="author", grantee="reader", privilege="SELECT", grantable=True
+        ),
+    )
+    catalog = build_postgres_catalog(
+        **before.model_dump(exclude={"fingerprint", "captured_at", "safety"}),
+        safety=before.safety.model_copy(
+            update={
+                "preservation": (
+                    before.safety.preservation[0].model_copy(update={"acl": acl}),
+                )
+            }
+        ),
+        captured_at=before.captured_at,
+    )
+    live = import_postgres_catalog(catalog).content
+    desired = live.model_copy(deep=True)
+    desired.views[0].definition = "SELECT 2 AS value"
+    steps, blockers = compile_migration_steps("public", live, desired, catalog=catalog)
+    assert not blockers
+    # Replay the emitted PostgreSQL grants rather than asserting a path/sort implementation.
+    rights = {
+        "author": {(privilege, False) for privilege in privileges},
+        "default_reader": {("SELECT", False)},
+    }
+    replay = [step for step in steps if step.operation == "preserve_privileges"]
+    assert len(replay) > 10
+    for step in replay:
+        grant = parse_sql(step.sql)[0].stmt
+        for role in grant.grantees:
+            current = rights.setdefault(role.rolename or "PUBLIC", set())
+            if grant.is_grant:
+                current.update(
+                    (item.priv_name.upper(), grant.grant_option)
+                    for item in grant.privileges
+                )
+            elif grant.privileges is None:
+                current.clear()
+            else:
+                names = {item.priv_name.upper() for item in grant.privileges}
+                current.difference_update(
+                    item for item in list(current) if item[0] in names
+                )
+    assert {role: value for role, value in rights.items() if value} == {
+        "author": {(privilege, False) for privilege in privileges},
+        "reader": {("SELECT", True)},
+    }
+
+
+def protected_view_catalog(query):
+    from schemii.common.postgres.models import PostgresIndex
+
+    source = view_binding_catalog(query)
+    namespace = source.namespace
+    base = mixed().safety.preservation[1]
+    table = base.model_copy(update={"identity": relation("source_data", namespace)})
+    view = base.model_copy(
+        update={
+            "identity": relation("saved", namespace),
+            "relation_kind": "m",
+            "indexes": (
+                PostgresIndex(
+                    name="saved_idx",
+                    table="saved",
+                    definition='CREATE INDEX saved_idx ON "Cache ""schema""".saved(value)',
+                    method="btree",
+                    unique=False,
+                    valid=True,
+                ),
+            ),
+        }
+    )
+    return build_postgres_catalog(
+        **source.model_dump(
+            exclude={"fingerprint", "captured_at", "safety", "fingerprint_version"}
+        ),
+        safety=PostgresSafetyEvidence(
+            version=2,
+            preservation=(table, view),
+            dependency_complete=True,
+            unknown_reasons=(),
+            dependencies=(
+                PostgresDependency(
+                    source=view.identity, target=table.identity, kind="n"
+                ),
+                PostgresDependency(
+                    source=relation("saved_idx", namespace),
+                    target=view.identity,
+                    kind="a",
+                ),
+            ),
+        ),
+        captured_at=source.captured_at,
+    )
+
+
+def test_protected_view_preservation_accepts_only_proven_same_binding_representation():
+    before = protected_view_catalog(
+        'SELECT value FROM "Cache ""schema""".source_data WHERE value >= 2'
+    )
+    current = import_postgres_catalog(before).content
+    compatibility = migration_compatibility(before, current, current)
+    assert relation("saved", before.namespace) in compatibility.protected_scope
+    after = protected_view_catalog("SELECT value FROM source_data WHERE value >= 2")
+    assert preservation_matches(before, after, compatibility)
+    changed = protected_view_catalog("SELECT value FROM source_data WHERE value > 2")
+    assert not preservation_matches(before, changed, compatibility)
+    unpopulated = build_postgres_catalog(
+        **after.model_dump(
+            exclude={"fingerprint", "captured_at", "materialized_views"}
+        ),
+        materialized_views=(
+            after.materialized_views[0].model_copy(update={"populated": False}),
+        ),
+        captured_at=after.captured_at,
+    )
+    assert not preservation_matches(before, unpopulated, compatibility)
+    different_column = build_postgres_catalog(
+        **after.model_dump(
+            exclude={"fingerprint", "captured_at", "materialized_views"}
+        ),
+        materialized_views=(
+            after.materialized_views[0].model_copy(
+                update={
+                    "columns": (
+                        PostgresColumn(
+                            name="changed",
+                            ordinal=1,
+                            data_type="integer",
+                            nullable=True,
+                        ),
+                    )
+                }
+            ),
+        ),
+        captured_at=after.captured_at,
+    )
+    assert not preservation_matches(before, different_column, compatibility)
+
+
+@pytest.mark.parametrize(
+    "old_query,new_query",
+    [
+        (
+            "SELECT value FROM external.source_data",
+            'SELECT value FROM "Cache ""schema""".source_data',
+        ),
+        (
+            "WITH source_data AS (SELECT 1 AS value) SELECT value FROM source_data",
+            'WITH source_data AS (SELECT 1 AS value) SELECT value FROM "Cache ""schema""".source_data',
+        ),
+    ],
+)
+def test_protected_view_preservation_never_erases_external_or_cte_shadow_changes(
+    old_query, new_query
+):
+    before, after = protected_view_catalog(old_query), protected_view_catalog(new_query)
+    current = import_postgres_catalog(before).content
+    compatibility = migration_compatibility(before, current, current)
+    assert not preservation_matches(before, after, compatibility)

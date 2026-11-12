@@ -628,3 +628,81 @@ def test_exports_are_deterministic_quoted_and_bound_to_the_saved_revision() -> N
     )
     assert '"formatVersion": 1' in json_export.content
     assert '"dataType": "bigint"' in json_export.content
+
+
+# Original pre-NN3239 authored wire and digest, independent of the new builder.
+PRE_NN_DESIGN_JSON = '{"functions":[],"relationships":[],"tables":[{"checks":[],"columns":[{"data_type":"bigint","default_expression":null,"generated_expression":null,"generated_source_column_ids":[],"id":"column_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","identity":null,"name":"value","nullable":false}],"id":"table_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","indexes":[],"keys":[],"name":"items"}],"triggers":[],"types":[],"views":[]}'
+PRE_NN_DESIGN_DIGEST = (
+    "52912927f6e5aac6191e04665f6e7da99ca812fb8da5f26027470ce21d63fdac"
+)
+
+
+def test_old_authored_wire_hash_is_unchanged_and_exact_named_not_null_roundtrips():
+    import json
+
+    legacy = SchemiiDesignContent.model_validate_json(PRE_NN_DESIGN_JSON)
+    assert design_fingerprint(legacy) == PRE_NN_DESIGN_DIGEST
+    assert authored_content_document(legacy) == json.loads(PRE_NN_DESIGN_JSON)
+    named = legacy.model_copy(deep=True)
+    named.tables[0].columns[0].not_null_constraint_name = 'exact "NN"'
+    repository = InMemoryDesignRepository()
+    saved = repository.replace(
+        OWNER,
+        WORKSPACE,
+        SchemiiDesignReplace(expected_design_revision=0, content=named),
+    )
+    reopened = repository.get(OWNER, WORKSPACE)
+    assert reopened.fingerprint == saved.fingerprint != PRE_NN_DESIGN_DIGEST
+    assert (
+        reopened.content.tables[0].columns[0].not_null_constraint_name == 'exact "NN"'
+    )
+    assert (
+        SchemiiDesignContent.model_validate_json(reopened.content.model_dump_json())
+        .tables[0]
+        .columns[0]
+        .not_null_constraint_name
+        == 'exact "NN"'
+    )
+    exported = export_design(
+        reopened,
+        SchemiiDesignExportRequest(
+            expected_design_revision=saved.revision, format="postgresql_sql"
+        ),
+    )
+    assert 'CONSTRAINT "exact ""NN""" NOT NULL' in exported.content
+
+
+@pytest.mark.parametrize(
+    "name,nullable", [("é" * 32, False), ("bad\0name", False), ("named", True)]
+)
+def test_not_null_constraint_names_require_valid_bounded_nonnullable_contract(
+    name, nullable
+):
+    design = SchemiiDesignContent.model_validate_json(PRE_NN_DESIGN_JSON)
+    design.tables[0].columns[0].not_null_constraint_name = name
+    design.tables[0].columns[0].nullable = nullable
+    with pytest.raises(DesignValidationError):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=design),
+        )
+
+
+def test_not_null_constraint_names_cannot_collide_with_key_or_other_not_null_names():
+    design = content()
+    design.tables[0].columns[0].not_null_constraint_name = design.tables[0].keys[0].name
+    with pytest.raises(DesignValidationError, match="unique"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=design),
+        )
+    design.tables[0].columns[0].not_null_constraint_name = "one_name"
+    design.tables[0].columns[1].not_null_constraint_name = "one_name"
+    with pytest.raises(DesignValidationError, match="unique"):
+        InMemoryDesignRepository().replace(
+            OWNER,
+            WORKSPACE,
+            SchemiiDesignReplace(expected_design_revision=0, content=design),
+        )

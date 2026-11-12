@@ -918,6 +918,20 @@ def test_real_identity_sequence_internal_owner_allows_create_and_edit(owned_sour
     )
     owner = sequence.identity_sequence_owner
     assert owner is not None and owner.table.name == "orders.region"
+    if catalog.server_version_num >= 180000:
+        not_null = catalog.tables[0].not_null_constraints[0]
+        assert (
+            not_null.is_local
+            and not_null.inheritance_count == 0
+            and not not_null.no_inherit
+        )
+        assert (
+            f.designs.get("owner", f.workspace.id)
+            .content.tables[0]
+            .columns[0]
+            .not_null_constraint_name
+            == not_null.name
+        )
     assert (owner.column, owner.ordinal, owner.dependency_kind) == ("id.code", 1, "i")
     assert sequence.owner == owner.table_owner
     assert any(
@@ -938,6 +952,35 @@ def test_real_identity_sequence_internal_owner_allows_create_and_edit(owned_sour
     assert result.status == "succeeded" and result.sync_status == "succeeded"
     with source.connect() as connection:
         assert connection.execute(sql.SQL('INSERT INTO {}.{} DEFAULT VALUES RETURNING {}').format(sql.Identifier(namespace),sql.Identifier('orders.region'),sql.Identifier('id.code'))).fetchone()==(1,)
+    if catalog.server_version_num >= 180000:
+        desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+        desired.tables.append(
+            DesignTable(
+                id="table_" + "1" * 32,
+                name="explicit_identity",
+                columns=[
+                    DesignColumn(
+                        id="column_" + "2" * 32,
+                        name="value",
+                        data_type="bigint",
+                        identity="by_default",
+                        nullable=False,
+                        not_null_constraint_name="exact identity NN",
+                    )
+                ],
+            )
+        )
+        save(f, desired)
+        named = review(f)
+        assert named.apply_capable
+        _, result = apply(f, named)
+        assert result.status == "succeeded" and result.sync_status == "succeeded"
+        exact = next(
+            table
+            for table in f.gateway.introspect(f.profile, namespace).tables
+            if table.name == "explicit_identity"
+        )
+        assert exact.not_null_constraints[0].name == "exact identity NN"
 
 
 def test_real_materialized_column_only_grants_survive_refresh_and_block_replacement(
@@ -1035,3 +1078,108 @@ def test_real_materialized_column_only_grants_survive_refresh_and_block_replacem
     assert changed.fingerprint != after.fingerprint
     with pytest.raises(PostgresMigrationStaleError):
         f.gateway.execute_migration(f.profile,namespace,after.fingerprint,['SELECT 1;'],on_started=lambda *_:None,on_intended=lambda *_:None)
+
+
+def test_real_named_not_null_roundtrip_rename_nullable_and_new_explicit_name(
+    owned_source,
+):
+    source = owned_source
+    namespace = 'Named NN "scope"'
+    q = sql.Identifier(namespace)
+    with source.connect() as connection:
+        if connection.info.server_version < 180000:
+            pytest.skip(
+                "native named NOT NULL catalog identities require PostgreSQL 18"
+            )
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(q))
+        connection.execute(
+            sql.SQL(
+                'CREATE TABLE {}.items ("id.code" bigint CONSTRAINT "exact NN" NOT NULL)'
+            ).format(q)
+        )
+    f = services(source, namespace)
+    saved = f.designs.get("owner", f.workspace.id)
+    assert saved.content.tables[0].columns[0].not_null_constraint_name == "exact NN"
+    desired = saved.content.model_copy(deep=True)
+    desired.tables[0].columns[0].name = "renamed.id"
+    desired.tables[0].columns[0].not_null_constraint_name = 'new "NN"'
+    save(f, desired)
+    plan = review(f)
+    assert plan.apply_capable
+    assert any("RENAME CONSTRAINT" in step.sql for step in plan.steps)
+    _, result = apply(f, plan)
+    assert result.status == "succeeded" and result.sync_status == "succeeded"
+    catalog = f.gateway.introspect(f.profile, namespace)
+    assert catalog.tables[0].not_null_constraints[0].name == 'new "NN"'
+    desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+    desired.tables[0].columns[0].nullable = True
+    desired.tables[0].columns[0].not_null_constraint_name = None
+    save(f, desired)
+    plan = review(f)
+    assert plan.apply_capable and any(
+        "DROP NOT NULL" in step.sql for step in plan.steps
+    )
+    _, result = apply(f, plan)
+    assert result.status == "succeeded" and result.sync_status == "succeeded"
+    assert not f.gateway.introspect(f.profile, namespace).tables[0].not_null_constraints
+    desired = f.designs.get("owner", f.workspace.id).content.model_copy(deep=True)
+    desired.tables[0].columns[0].nullable = False
+    desired.tables[0].columns[0].not_null_constraint_name = "added.not_null"
+    save(f, desired)
+    plan = review(f)
+    assert plan.apply_capable and any(
+        'ADD CONSTRAINT "added.not_null" NOT NULL' in step.sql for step in plan.steps
+    )
+    _, result = apply(f, plan)
+    assert result.status == "succeeded" and result.sync_status == "succeeded"
+    assert (
+        f.gateway.introspect(f.profile, namespace)
+        .tables[0]
+        .not_null_constraints[0]
+        .name
+        == "added.not_null"
+    )
+    assert f.repository.current_baseline("owner", f.workspace.id).complete
+
+
+def test_real_not_null_noinherit_and_inherited_contracts_remain_explicitly_protected(
+    owned_source,
+):
+    source = owned_source
+    namespace = 'NN inheritance "scope"'
+    q = sql.Identifier(namespace)
+    with source.connect() as connection:
+        if connection.info.server_version < 180000:
+            pytest.skip(
+                "native named NOT NULL catalog identities require PostgreSQL 18"
+            )
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(q))
+        connection.execute(
+            sql.SQL(
+                "CREATE TABLE {}.parent (value bigint CONSTRAINT parent_nn NOT NULL)"
+            ).format(q)
+        )
+        connection.execute(
+            sql.SQL("CREATE TABLE {}.child () INHERITS ({}.parent)").format(q, q)
+        )
+        connection.execute(
+            sql.SQL(
+                "CREATE TABLE {}.local_only (value bigint CONSTRAINT local_nn NOT NULL NO INHERIT)"
+            ).format(q)
+        )
+    f = services(source, namespace)
+    catalog = f.gateway.introspect(f.profile, namespace)
+    child = next(item for item in catalog.tables if item.name == "child")
+    local = next(item for item in catalog.tables if item.name == "local_only")
+    assert child.not_null_constraints[0].inheritance_count > 0
+    assert local.not_null_constraints[0].no_inherit
+    imported = import_postgres_catalog(catalog)
+    assert not imported.summary.complete
+    for name in ("child", "local_only"):
+        assert (
+            next(item for item in imported.content.tables if item.name == name)
+            .columns[0]
+            .not_null_constraint_name
+            is None
+        )
+        assert any(item.identity.name == name for item in imported.summary.issues)

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+
+
 import {
   alignRelationshipColumnTypes,
   createDesignRelationship,
@@ -1029,4 +1031,18 @@ test("migration snapshot reload preserves editor drafts and pending layout and r
   state.catalogError = new Error("snapshot unavailable"); await assert.rejects(reload, /snapshot unavailable/);
   const navigation = runInNewContext(`(${body})`, { Error, state, tableEditor, designEditors: editors, flushLayoutBeforeTransition: async () => { state.activeWorkspace = { id: "other" }; return true; }, loadActiveWorkspace: async () => { reads += 1; } });
   const before = reads; await navigation(); assert.equal(reads, before); assert.equal(state.activeWorkspace.id, "other");
+
+});
+
+test("ordinary named NOT NULL metadata survives editor-value rebuilds by stable column ID", () => {
+  const table = createDesignTable("source", [{ name: "value", dataType: "integer", nullable: false, primary: false }], () => uuids[0]);
+  table.columns[0].notNullConstraintName = 'exact "NN"';
+  const content = { tables: [table], relationships: [], functions: [], views: [] };
+  const row = { id: table.columns[0].id, name: "renamed", dataType: "integer", nullable: false, primary: false };
+  const kept = updateDesignTable(content, table.id, "renamed_table", [row]);
+  assert.equal(kept.columns[0].notNullConstraintName, 'exact "NN"');
+  const nullable = updateDesignTable(content, table.id, table.name, [{ ...row, nullable: true }]);
+  assert.equal(Object.hasOwn(nullable.columns[0], "notNullConstraintName"), false);
+  const renamed = updateDesignTable(content, table.id, table.name, [{ ...row, notNullConstraintName: "new.name" }]);
+  assert.equal(renamed.columns[0].notNullConstraintName, "new.name");
 });

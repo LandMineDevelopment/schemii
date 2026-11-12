@@ -70,6 +70,10 @@ def _postgresql_sql(design: SchemiiDesign, include_drops: bool) -> str:
             elif column.default_expression is not None:
                 parts.append(f"DEFAULT {column.default_expression.strip()}")
             if not column.nullable:
+                if column.not_null_constraint_name is not None:
+                    parts.append(
+                        f"CONSTRAINT {_quote(column.not_null_constraint_name)}"
+                    )
                 parts.append("NOT NULL")
             definitions.append("    " + " ".join(parts))
         for key in table.keys:
