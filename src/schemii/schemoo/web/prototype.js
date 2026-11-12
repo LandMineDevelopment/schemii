@@ -18,14 +18,14 @@ import { createQueryPlanView, parseQueryPlan } from "#common/query-plan.js";
 import { confirmAction } from "#common/confirmation.js";
 import { formatElapsed } from "#common/elapsed-time.js";
 import { readExecution } from "/assets/common/query-execution.js";
-import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions } from "./model-library.js";
+import { openModelLibrary, confirmModelDeletion, refreshModelLibraryActions, openSourceSelection } from "./model-library.js";
 import { createPreviewLibrary } from "./preview-library.js";
 import { installProductNavigation } from "#common/product-navigation.js";
 import { nodeColumns } from "./model-columns.js";
 import { openDerivedSource } from "./derived-dialog.js";
 import { repetitionDiagnostics, repetitionNotice, summarySeed } from "./repetition.js";
 import { conditionSummary } from "./derived-conditions.js";
-import { reconcileSourceCatalog, acceptSourceIssue } from "./source-reconciliation.js";
+import { reconcileSourceCatalog, acceptSourceIssue, addSourceSelection } from "./source-reconciliation.js";
 import { createModelAssistant } from "#common/model-assistant.js";
 
 const $ = id => document.getElementById(id), API = "/api/v1/schemoo";
@@ -83,11 +83,21 @@ function sourceIssueNotice(issue) {
 }
 function sourceAdditionText() {
   const parts=[];
-  if(sourceAdditions.tables.length)parts.push(`${sourceAdditions.tables.length} new table${sourceAdditions.tables.length===1?"":"s"}`);
-  if(sourceAdditions.columns.length)parts.push(`${sourceAdditions.columns.length} new column${sourceAdditions.columns.length===1?"":"s"}`);
-  if(sourceAdditions.relationships.length)parts.push(`${sourceAdditions.relationships.length} new connection${sourceAdditions.relationships.length===1?"":"s"} (disabled)`);
+  if(sourceAdditions.tables.length)parts.push(`${sourceAdditions.tables.length} available source${sourceAdditions.tables.length===1?"":"s"}`);
+  if(sourceAdditions.columns.length)parts.push(`${sourceAdditions.columns.length} available field${sourceAdditions.columns.length===1?"":"s"}`);
+  if(sourceAdditions.relationships.length)parts.push(`${sourceAdditions.relationships.length} available connection${sourceAdditions.relationships.length===1?"":"s"} (add explicitly)`);
   return parts.join(" · ");
 }
+const addSources = element("button", {type:"button",className:"ui-button",text:"Add sources and fields"});
+$("graph-status").after(addSources);
+addSources.onclick = async () => {
+  if(!catalog || saveBlocked())return;
+  const currentDraft=draft,currentCatalog=catalog;
+  await openSourceSelection(currentCatalog,selection=>{
+    if(draft!==currentDraft || catalog!==currentCatalog || saveBlocked())throw new Error("The model changed. Close this dialog and review its sources again.");
+    sourceAdditions=addSourceSelection(draft,catalog,selection);refreshForms();changed({structure:true});
+  });
+};
 function currentSourceIssues(){return diagnostics.issues || diagnostics.sourceIssues || [];}
 function renderObjectSourceIssues(){
   $("object-source-issues")?.remove();
@@ -281,7 +291,7 @@ function renderSelection() {
     if (!catalog.tables.some(t => t.name === node.table)) {
       host.append(element("p", { className:"warning", text:"This source table is unavailable. Choose its intended replacement; columns and relationships will be validated, not guessed." }),
         modelSelect("Replacement source table", [["", "Choose replacement source"], ...catalog.tables.map(t => [t.name,t.name])], "", value => {
-          if (!value) return; node.table=value; ensureAliasConnections(draft,catalog); refreshForms(); changed();
+          if (!value) return; node.table=value; ensureAliasConnections(draft,catalog,new Set([node.id])); refreshForms(); changed();
         }));
     }
     const label = element("input", { attrs: { "aria-label": "Object label", maxlength: 100 } }); label.value = node.label;
@@ -417,7 +427,7 @@ function renderTableColumns() {
 function addAlias(table, label, source = draft.nodes.find(n => n.table === table)) {
   const copy = { id: `alias_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`, table, label };
   canvas?.placeNode(copy, source);
-  draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog); selected={node:copy.id}; refreshForms(); changed();
+  draft.nodes.push(copy); inheritAliasExposure(draft, source?.id, copy.id); ensureAliasConnections(draft,catalog,new Set([copy.id])); selected={node:copy.id}; refreshForms(); changed();
   inspectSelection();
   $("table-pane").scrollTop=0;
 }
@@ -427,25 +437,11 @@ function addTable(table) {
   }
   const source = catalog.tables.find(candidate => candidate.name === table);
   if (!source) { showError(`“${table}” is not available from this source.`); return; }
-  const position = catalog.positions?.find(candidate => candidate.name === table);
-  const node = { id: table, table, label: table,
-    ...(Number.isFinite(position?.x) && Number.isFinite(position?.y) ? { x: position.x, y: position.y } : {}) };
-  draft.nodes.push(node);
-  const canonical = new Map(draft.nodes.filter(candidate => !candidate.derivation && candidate.id === candidate.table)
-    .map(candidate => [candidate.table, candidate.id]));
-  const tuples = new Set(draft.edges.map(edge => JSON.stringify([edge.relationshipId, edge.source, edge.target])));
-  const ids = new Set(draft.edges.map(edge => edge.id));
-  for (const relationship of catalog.relationships) {
-    const sourceId = canonical.get(relationship.sourceTable), targetId = canonical.get(relationship.targetTable);
-    if (!sourceId || !targetId) continue;
-    const tuple = JSON.stringify([relationship.id, sourceId, targetId]);
-    if (tuples.has(tuple)) continue;
-    let id = `source_fk_${relationship.id}`, suffix = 2;
-    while (ids.has(id)) id = `source_fk_${relationship.id}_${suffix++}`;
-    draft.edges.push({ id, relationshipId: relationship.id, source: sourceId, target: targetId, enabled: false });
-    ids.add(id); tuples.add(tuple);
-  }
-  ensureAliasConnections(draft, catalog);
+  try { addSourceSelection(draft, catalog, [{ table, columns: source.columns.map(column => column.name) }]); }
+  catch (error) { showError(error.message); return; }
+  const node = draft.nodes.find(candidate => !candidate.derivation && candidate.table === table);
+  ensureAliasConnections(draft, { ...catalog, relationships: catalog.relationships.filter(relationship =>
+    relationship.sourceTable === table || relationship.targetTable === table) });
   selected = { node: node.id }; diagnostics = {}; refreshForms(); changed({ structure: true }); inspectSelection();
   $("table-pane").scrollTop = 0;
 }
@@ -725,7 +721,7 @@ async function loadModel(id) {
   refreshForms();canvas.render();initialLayout=splitDraft(draft).layout;changed();$("workbench").inert=false;
   void previewLibrary.load(model.id);
   void assistant.modelChanged();
-  if (model.catalogFingerprint !== catalog.fingerprint && !sourceAdditionText()) showError("The source schema changed. Your model is preserved. Review the labeled source changes before saving. Reload never replaces your model with a fresh import.");
+  if (model.definition.sourceContract?.scope !== "model" && model.catalogFingerprint !== catalog.fingerprint && !sourceAdditionText()) showError("The source schema changed. Your model is preserved. Review the labeled source changes before saving. Reload never replaces your model with a fresh import.");
   return true;
 }
 

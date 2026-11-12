@@ -3,11 +3,11 @@
 from schemii.common.api.errors import ApiProblem
 from pydantic import ValidationError
 from sqlglot import exp, parse_one
-from .catalog import source_issues
+from .catalog import source_issues, model_source_contract
 from .models import ModelDefinition, ModelUpdate, ExploreState
 from .store import ModelConflictError
 from .prototype import analyze_model, compile_preview, validate_definition
-from .domain import domain_table
+from .domain import parameter_domain
 
 
 def document(value):
@@ -81,6 +81,11 @@ def patch_model_definition(services, owner, model_id, body):
     # requests rather than acknowledging a no-op as a successful edit.
     validation = definition.model_copy(update={"exposedFields": [*(definition.exposedFields or []), *body.expose]})
     validate_model_definition(catalog, validation)
+    try:
+        definition = ModelDefinition.model_validate({**document(definition), "sourceContract": model_source_contract(
+            catalog, document(definition), document(current.definition))})
+    except (ValidationError, ValueError) as error:
+        raise ApiProblem(422, "invalid_model_definition", "Selected sources or their required dependencies are unavailable or exceed the source-contract limits.") from error
     return services.models.update(owner, model_id, ModelUpdate(
         expected_revision=body.expected_revision, name=body.name if body.name is not None else current.name,
         definition=definition, catalog_fingerprint=current.catalog_fingerprint))
@@ -120,7 +125,7 @@ def plan_query(catalog, definition, explore, fingerprint="", *, _bounded=True,
     except ValueError as error:
         raise ApiProblem(422, "invalid_model_query", str(error),
                          details={**diagnostics, **getattr(error, "details", {})}) from error
-    if fingerprint and fingerprint != catalog["fingerprint"]:
+    if fingerprint and fingerprint != catalog["fingerprint"] and (rules.get("sourceContract") or {}).get("scope") != "model":
         result["warnings"].append("The source schema changed since this model was saved. Referenced objects were revalidated; the model was not replaced.")
     result["warnings"].extend(issue["message"] for issue in issues)
     return {**diagnostics, **result, "sourceIssues": issues, "catalogFingerprint": catalog["fingerprint"]}
@@ -148,26 +153,16 @@ def domain_query(catalog, model, body):
     parameter = next((p for p in (alternative or {}).get("inputs", []) if p["id"] == body.parameter_id), None)
     if parameter is None:
         raise ApiProblem(422, "unknown_model_parameter", "This parameter is not part of the saved model. Save your model changes first.")
-    domain = parameter.get("domain")
-    if domain:
-        try:
-            table = domain_table(domain, definition["nodes"])
-        except ValueError as error:
-            raise ApiProblem(422, "parameter_unbound", str(error)) from error
-        column = domain["column"]
-        label = domain.get("labelColumn") or column
-    else:
-        condition = next((c for c in alternative["conditions"] if c.get("parameterId") == body.parameter_id), None)
-        node = next((n for n in definition["nodes"] if n["id"] == (condition or {}).get("table")), None)
-        if not node or not condition.get("column"):
-            raise ApiProblem(422, "parameter_unbound", "Bind this parameter to a source column before browsing values.")
-        table, column = node["table"], condition["column"]
-        fk = next((r for r in catalog["relationships"] if (r["sourceTable"], r["sourceColumn"]) == (table, column)), None)
-        if parameter["type"] != "source" and fk:
-            table, column = fk["targetTable"], fk["targetColumn"]
-        columns = next((t["columns"] for t in catalog["tables"] if t["name"] == table), [])
-        label = "name" if parameter["type"] != "source" and any(c["name"] == "name" for c in columns) else column
-    return domain_values_plan(catalog, table, column, label, body.search)
+    try:
+        lookup = parameter_domain(catalog, definition, alternative, parameter, scope_id=body.scope_id)
+    except ValueError as error:
+        raise ApiProblem(422, "parameter_unbound", str(error)) from error
+    if not lookup:
+        raise ApiProblem(422, "parameter_unbound", "Bind this parameter to a source column before browsing values.")
+    issues = source_issues(catalog, definition)
+    if any(issue.get("severity", "breaking") == "breaking" for issue in issues):
+        raise ApiProblem(422, "model_source_drift", "Source references need repair before browsing parameter values.", details={"issues": issues})
+    return domain_values_plan(catalog, lookup["table"], lookup["column"], lookup["labelColumn"], body.search)
 
 
 def domain_values_plan(catalog, table, column, label, search=""):

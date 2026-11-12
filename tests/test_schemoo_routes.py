@@ -44,6 +44,7 @@ def test_explicit_source_and_multiple_models_without_workspace(setup):
     assert api.app.state.services.workspaces.list(model["ownerId"]) == []
     created = api.post("/api/v1/schemoo/models", json={"name": "Second", "connectionId": model["connectionId"], "namespace": "public"})
     assert created.status_code == 201
+    assert created.json()["definition"]["sourceContract"] == {"scope": "model", "tables": [], "relationships": [], "parameterDomains": []}
     assert len(api.get("/api/v1/schemoo/models").json()["models"]) == 2
     assert api.get("/api/v1/schemoo/prototype/catalog").status_code == 404
 
@@ -211,12 +212,12 @@ def test_plans_load_saved_rules_and_cannot_accept_raw_sql(setup):
         assert api.post(url, json={**body, **injected}).status_code == 422
 
 
-def test_drift_preserves_saved_rules_and_unrelated_changes_warn(setup):
+def test_drift_preserves_saved_rules_and_unrelated_changes_are_ignored(setup):
     api, model, catalog, _ = setup
     url = f"/api/v1/schemoo/models/{model['id']}"
     catalog["fingerprint"] = "two"
     plan = api.post(url + "/plan", json={"expectedRevision": 1, "explore": EXPLORE})
-    assert any("schema changed" in w for w in plan.json()["warnings"])
+    assert not any("schema changed" in w for w in plan.json()["warnings"])
     catalog["tables"] = []
     failed = api.post(url + "/plan", json={"expectedRevision": 1, "explore": EXPLORE})
     assert failed.status_code == 422
@@ -457,3 +458,162 @@ def test_model_deletion_reports_dashboards_and_preserves_source_connection(setup
     assert api.get(url + "/dependencies").status_code == 404
     assert api.get(f"/api/v1/connections/{model['connectionId']}").status_code == 200
     assert len(calls) == catalog_calls  # Dependency checks/deletion never contact the source database.
+
+
+def test_large_catalog_subset_create_save_patch_and_unselected_drift(setup):
+    api, initial, catalog, _ = setup
+    catalog["tables"].extend({"name": f"unused_{i}", "primaryKey": ["id"], "columns": [{"name": "id", "dataType": "integer"}]} for i in range(101))
+    catalog["tables"][0]["columns"].extend({"name": f"value_{i}", "dataType": "text"} for i in range(1001))
+    selected = {**DEFINITION, "exposedFields": [{"table": "people", "column": "name"}],
+                "sourceContract": {"scope": "catalog", "tables": [], "relationships": []}}
+    response = api.post("/api/v1/schemoo/models", json={"name": "Bounded", "connectionId": initial["connectionId"],
+        "namespace": "public", "definition": selected, "explore": EXPLORE, "catalogFingerprint": "one"})
+    assert response.status_code == 201, response.text
+    model = response.json(); url = f"/api/v1/schemoo/models/{model['id']}"
+    contract = model["definition"]["sourceContract"]
+    assert contract["scope"] == "model" and len(contract["tables"]) == 1
+    assert [column["name"] for column in contract["tables"][0]["columns"]] == ["name"]
+    catalog["tables"][1]["columns"][0]["dataType"] = "uuid"
+    catalog["tables"][0]["columns"][2]["dataType"] = "boolean"
+    catalog["fingerprint"] = "unrelated"
+    plan = api.post(url + "/plan", json={"expectedRevision": 1, "explore": EXPLORE})
+    assert plan.status_code == 200, plan.text
+    assert plan.json()["sourceIssues"] == [] and not any("schema changed" in warning for warning in plan.json()["warnings"])
+    forged = deepcopy(model["definition"])
+    forged["sourceContract"] = {"scope": "catalog", "tables": [{"name": "invented", "columns": []}], "relationships": []}
+    saved = api.put(url, json={"expectedRevision": 1, "name": "Bounded", "definition": forged}).json()
+    assert saved["definition"]["sourceContract"] == contract
+    patched = api.patch(url, json={"expectedRevision": 2, "expose": [{"table": "people", "column": "value_1000"}]}).json()
+    assert [column["name"] for column in patched["definition"]["sourceContract"]["tables"][0]["columns"]] == ["name", "value_1000"]
+    catalog["tables"][0]["columns"][-1]["dataType"] = "integer"
+    blocked = api.post(url + "/plan", json={"expectedRevision": 3, "explore": EXPLORE})
+    assert blocked.status_code == 422 and blocked.json()["error"]["code"] == "model_source_drift"
+
+
+def test_source_selection_empty_draft_compatibility_inaccessible_stale_and_overlimit_errors(setup):
+    api, model, catalog, _ = setup
+    base = {"name": "Selection", "connectionId": model["connectionId"], "namespace": "public"}
+    empty = api.post("/api/v1/schemoo/models", json=base)
+    assert empty.status_code == 201 and empty.json()["definition"]["sourceContract"]["tables"] == []
+    stale = api.post("/api/v1/schemoo/models", json={**base, "definition": DEFINITION, "catalogFingerprint": "old"})
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "model_source_changed"
+    inaccessible = {**DEFINITION, "exposedFields": [{"table": "people", "column": "hidden"}]}
+    rejected = api.post("/api/v1/schemoo/models", json={**base, "definition": inaccessible})
+    assert rejected.status_code == 422 and "unavailable" in rejected.json()["error"]["message"]
+    catalog["tables"][0]["columns"].extend({"name": f"value_{i}", "dataType": "text"} for i in range(1001))
+    rejected = api.post("/api/v1/schemoo/models", json={**base, "definition": DEFINITION})
+    assert rejected.status_code == 422 and rejected.json()["error"]["code"] == "model_source_limit"
+    catalog["tables"][0]["columns"] = []
+    rejected = api.post("/api/v1/schemoo/models", json={**base, "definition": DEFINITION})
+    assert rejected.status_code == 422 and "readable" in rejected.json()["error"]["message"]
+
+
+def test_saved_source_baseline_cannot_be_forged_or_omitted_and_requires_live_acknowledgement(setup):
+    api, model, catalog, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    catalog["tables"][0]["columns"][1]["nullable"] = False
+    forged = deepcopy(model["definition"])
+    forged["sourceContract"]["tables"][0]["columns"] = []
+    response = api.put(url, json={"expectedRevision": 1, "name": "Still drifting", "definition": forged})
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert saved["definition"]["sourceContract"]["tables"][0]["columns"][1]["nullable"] is True
+    assert api.post(url + "/plan", json={"expectedRevision": 2, "explore": EXPLORE}).status_code == 422
+    acknowledged = deepcopy(saved["definition"])
+    acknowledged["sourceContract"]["tables"][0]["columns"][1]["nullable"] = False
+    saved = api.put(url, json={"expectedRevision": 2, "name": "Reviewed", "definition": acknowledged})
+    assert saved.status_code == 200, saved.text
+    assert api.post(url + "/plan", json={"expectedRevision": 3, "explore": EXPLORE}).status_code == 200
+
+
+def test_legacy_contract_without_scope_is_readable_and_migrates_on_save(setup):
+    api, model, _, _ = setup
+    from schemii.schemoo.models import ModelDefinition, ModelUpdate
+    services = api.app.state.services
+    legacy = deepcopy(model["definition"]); legacy["sourceContract"].pop("scope")
+    definition = ModelDefinition.model_validate(legacy)
+    assert definition.sourceContract.scope == "catalog"
+    services.models.update(model["ownerId"], model["id"], ModelUpdate(expected_revision=1, name="Legacy", definition=definition))
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    read = api.get(url).json()
+    assert read["definition"]["sourceContract"]["scope"] == "catalog"
+    migrated = api.put(url, json={"expectedRevision": 2, "name": "Selected", "definition": legacy})
+    assert migrated.status_code == 200, migrated.text
+    assert migrated.json()["definition"]["sourceContract"]["scope"] == "model"
+
+
+def _incomplete_domain_scope(domain):
+    return {"id": "source_picker", "kind": "conditional", "alternatives": [{"id": "choice", "inputs": [
+        {"id": "picked", "type": "source", "domain": domain}], "conditions": [
+        {"table": "people", "column": "id", "parameterId": "picked", "domain": domain}]}]}
+
+
+@pytest.mark.parametrize("domain", [
+    {}, {"table": "", "column": "", "labelColumn": ""},
+    {"table": "people", "column": ""}, {"nodeId": "people", "column": "", "labelColumn": "name"},
+])
+def test_name_only_save_preserves_persisted_incomplete_domain_draft(setup, domain):
+    from schemii.schemoo.models import ModelDefinition, ModelUpdate
+    api, model, _, _ = setup
+    # Seed a typed saved draft through the repository, representing documents
+    # accepted before source contracts became server-derived. PUT only renames it.
+    definition = ModelDefinition.model_validate({**model["definition"], "exposedFields": [
+        {"table": "people", "column": "id"}], "scopes": [_incomplete_domain_scope(domain)]})
+    saved = api.app.state.services.models.update(model["ownerId"], model["id"], ModelUpdate(
+        expected_revision=model["revision"], name=model["name"], definition=definition))
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    before = api.get(url).json()
+    response = api.put(url, json={"expectedRevision": saved.revision, "name": "Renamed draft", "definition": before["definition"]})
+    assert response.status_code == 200, response.text
+    renamed = response.json()
+    assert renamed["revision"] == saved.revision + 1 and renamed["name"] == "Renamed draft"
+    assert renamed["definition"]["scopes"] == before["definition"]["scopes"]
+    assert renamed["definition"]["sourceContract"]["scope"] == "model"
+    assert [table["name"] for table in renamed["definition"]["sourceContract"]["tables"]] == ["people"]
+    assert api.get(url).json() == renamed
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH"])
+def test_incomplete_domain_can_bind_through_put_or_patch_and_adds_server_dependencies(setup, method):
+    api, model, catalog, _ = setup
+    catalog["tables"].append({"name": "lookup", "columns": [
+        {"name": "id", "dataType": "uuid"}, {"name": "label", "dataType": "text"}, {"name": "unused", "dataType": "text"}]})
+    definition = {**model["definition"], "exposedFields": [{"table": "people", "column": "id"}],
+                  "scopes": [_incomplete_domain_scope({})]}
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    incomplete = api.put(url, json={"expectedRevision": model["revision"], "name": "In progress", "definition": definition})
+    assert incomplete.status_code == 200, incomplete.text
+    saved = incomplete.json()
+    assert [table["name"] for table in saved["definition"]["sourceContract"]["tables"]] == ["people"]
+    scope = _incomplete_domain_scope({"table": "lookup", "column": "id", "labelColumn": "label"})
+    if method == "PUT":
+        bound_definition = {**saved["definition"], "scopes": [scope]}
+        # A forged empty contract cannot omit the newly bound physical lookup.
+        bound_definition["sourceContract"] = {"scope": "model", "tables": [], "relationships": []}
+        response = api.put(url, json={"expectedRevision": saved["revision"], "name": "Bound", "definition": bound_definition})
+    else:
+        response = api.patch(url, json={"expectedRevision": saved["revision"], "scopes": {"upsert": [scope]}})
+    assert response.status_code == 200, response.text
+    bound = response.json()
+    tables = {table["name"]: table for table in bound["definition"]["sourceContract"]["tables"]}
+    assert set(tables) == {"people", "lookup"}
+    assert [column["name"] for column in tables["lookup"]["columns"]] == ["id", "label"]
+    assert bound["definition"]["exposedFields"] == saved["definition"]["exposedFields"]
+    # Domain references are dependencies even when absent from nodes/outputs.
+    catalog["tables"][1]["columns"][1]["dataType"] = "uuid"
+    drift = api.post(url + "/plan", json={"expectedRevision": bound["revision"], "explore": {"root": "people", "fields": [{"table": "people", "column": "id"}]}})
+    assert drift.status_code == 422 and drift.json()["error"]["code"] == "model_source_drift"
+    assert any(issue["table"] == "lookup" and issue.get("column") == "label" for issue in drift.json()["error"]["details"]["issues"])
+
+
+@pytest.mark.parametrize("domain", [
+    {"table": "missing", "column": ""}, {"nodeId": "missing", "column": ""},
+    {"table": "people", "column": "missing"}, {"table": "people", "column": "", "labelColumn": "missing"},
+])
+def test_incomplete_domain_saves_still_reject_nonempty_unknown_references(setup, domain):
+    api, model, _, _ = setup
+    url = f"/api/v1/schemoo/models/{model['id']}"
+    definition = {**model["definition"], "scopes": [_incomplete_domain_scope(domain)]}
+    rejected = api.put(url, json={"expectedRevision": model["revision"], "name": "Must not persist", "definition": definition})
+    assert rejected.status_code == 422, rejected.text
+    assert api.get(url).json() == model
