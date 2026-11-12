@@ -779,7 +779,7 @@ def inspection_policy() -> dict:
         BROWSER_PROJECTS
     ):
         raise ValueError("Invalid inspection coverage projects")
-    counts = dict(zip(INSPECTION_PYTHON, (7, 8, 3, 21, 8, 29, 4, 7)))
+    counts = dict(zip(INSPECTION_PYTHON, (7, 8, 3, 24, 8, 29, 4, 7)))
     for project, inventory in [
         ("python", policy["python"]),
         *policy["browser"].items(),
