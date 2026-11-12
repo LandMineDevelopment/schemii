@@ -95,7 +95,7 @@ const commandOptions = {
   help: [], '--help': [], '-h': [], personas: [],
   setup: ['copies-per-persona','admin-credentials'], 'provision-chat': ['account','admin-credentials','model','reasoning'],
   'cleanup-author-fixture': ['accounts'],
-  'cleanup-sweep': ['run','workspace-fixtures'],
+  'cleanup-sweep': ['run','workspace-fixtures','reset-writers'],
   'provision-writer': ['account','admin-credentials'], 'provision-viewer': ['account','author','admin-credentials'], 'reset-writer': ['account'], 'verify-writer': ['account'],
   reset: ['space'], 'verify-data': ['space'], 'check-reset': ['space'],
   'export-credentials': ['output'], 'import-credentials': ['input'],
@@ -125,7 +125,7 @@ function parse(argv) {
   for (let i = 0; i < rest.length; i++) {
     const key = rest[i].replace(/^--/, '');
     if (!rest[i].startsWith('--') || !allowed.has(key) || key in options) throw invalid(`Invalid or repeated option for ${command}: ${rest[i]}`);
-    if (['headless','json','help'].includes(key)) options[key] = true;
+    if (['headless','json','help','reset-writers'].includes(key)) options[key] = true;
     else { if (!rest[i+1] || rest[i+1].startsWith('--') || !rest[i+1].trim()) throw invalid(`--${key} needs a value.`); options[key] = rest[++i]; }
   }
   return { command, options };
@@ -324,7 +324,7 @@ async function execute(command,o) {
   }
   if(command==='cleanup-sweep') {
     if(!/^qa-[a-z0-9-]{6,80}$/.test(o.run||'')||!o['workspace-fixtures'])throw invalid('cleanup-sweep requires --run RUN and --workspace-fixtures MAP.');
-    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures']),'--state-dir',stateDir]);return;
+    await runCommand('python',['-m','testing.harness.cleanup_schemii_sweep','--run',o.run,'--workspace-fixtures',resolve(o['workspace-fixtures']),'--state-dir',stateDir,...(o['reset-writers']?['--reset-writers']:[])]);return;
   }
   if(command==='cleanup-author-fixture') {
     if(!o.accounts)throw invalid('--accounts is required; name each retained report-author fixture to delete.');
