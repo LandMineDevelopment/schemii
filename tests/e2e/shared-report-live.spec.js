@@ -188,9 +188,15 @@ test('managed developer profile keeps its exact identity through both HTTPS orig
   const contexts = [], resources = [], failures = [];
   let profile, user, role, roleBody;
   try {
+    const administrator = await checked(await request.get('/api/v1/auth/me'));
+    expect(administrator.is_admin).toBe(true);
+    expect(administrator.capabilities).toContain('schemii:access');
     profile = await checked(await request.post('/api/v1/admin/schemii-connections', { data: {
       ...fixture.connection, name: `QA scoped developer ${suffix}`,
     } }), 201);
+    expect(profile).toMatchObject({ ownerId: 'user_schemii_connection_pool', ownership: 'schemii',
+      revision: 1, host: fixture.connection.host, port: fixture.connection.port ?? 5432,
+      database: fixture.connection.database, username: fixture.connection.username });
     expect(JSON.stringify(profile)).not.toContain(fixture.connection.password);
     user = await checked(await request.post('/api/v1/admin/accounts', { data: {
       ...credentials, display_name: 'QA scoped developer', is_admin: false,
@@ -212,20 +218,40 @@ test('managed developer profile keeps its exact identity through both HTTPS orig
       await page.getByLabel('Password', { exact: true }).fill(credentials.password);
       await page.getByRole('button', { name: 'Sign in', exact: true }).click();
       await expect(page).not.toHaveURL(/\/login/);
+      const identity = await checked(await context.request.get('/api/v1/auth/me'));
+      expect(identity.user).toMatchObject({ id: user.id, username: credentials.username,
+        is_admin: false, disabled: false });
+      expect(identity.user.id).not.toBe(administrator.user.id);
+      expect(identity.is_admin).toBe(false);
+      expect(identity.capabilities).toEqual(['schemii:access']);
       const visible = await checked(await context.request.get('/api/v1/connections'));
       expect(visible.connections.map(item => item.id)).toEqual([profile.id]);
+      expect(visible.connections[0]).toMatchObject({ id: profile.id, ownerId: profile.ownerId,
+        ownership: 'schemii', revision: profile.revision, host: profile.host, port: profile.port,
+        database: profile.database, username: profile.username });
       expect(JSON.stringify(visible)).not.toContain(fixture.connection.password);
       expect((await context.request.get('/api/v1/schemoo/models')).status()).toBe(403);
       expect((await context.request.get('/api/v1/schemer/dashboards')).status()).toBe(403);
+      const previouslyOpened = resources[0]?.workspace;
       const importedResponse = await context.request.post('/api/v1/schemii/workspaces/postgres', {
         data: { connectionId: profile.id, namespace: fixture.namespace },
       });
-      expect([200, 201]).toContain(importedResponse.status());
-      const workspace = (await importedResponse.json()).workspace;
+      const imported = await importedResponse.json();
+      const workspace = imported.workspace;
       const owned = { context, workspace, session: null, executions: [] };
-      resources.push(owned);
-      expect(workspace.ownerId).toBe(user.id);
-      expect(workspace.connectionOwnerId).toBe(profile.ownerId);
+      if (workspace?.id) resources.push(owned);
+      expect(importedResponse.status()).toBe(previouslyOpened ? 200 : 201);
+      expect(imported.created).toBe(!previouslyOpened);
+      expect(workspace).toMatchObject({ connectionId: profile.id, database: profile.database,
+        namespace: fixture.namespace, revision: previouslyOpened?.revision ?? 1 });
+      if (previouslyOpened) expect(workspace.id).toBe(previouslyOpened.id);
+      // Workspace ownership is proved by authenticated, actor-scoped access;
+      // credential ownership is public on the exact managed profile above.
+      const workspacePath = `/api/v1/schemii/workspaces/${workspace.id}`;
+      expect(await checked(await context.request.get(workspacePath))).toEqual(workspace);
+      const listed = await checked(await context.request.get('/api/v1/schemii/workspaces'));
+      expect(listed.workspaces).toEqual([workspace]);
+      expect((await request.get(workspacePath)).status()).toBe(404);
       await page.goto(`/?workspace=${workspace.id}&layer=sql`);
       await expect(page.getByRole('heading', { name: 'SQL Console' })).toBeVisible();
       const editor = page.getByRole('textbox', { name: 'Unsaved SQL draft' });

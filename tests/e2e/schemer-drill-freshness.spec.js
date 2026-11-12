@@ -81,7 +81,9 @@ test('current drill discloses report/drill times, cached reopen is query-free, R
   await expect(details.locator('.drill-request-times')).not.toHaveText(firstTimes);
   await expect(details.locator('.drill-request-times')).toContainText(`Drill request started: ${expectedTimes[2]}`);
   expect(f.requests.filter(request => request.body.selection)).toHaveLength(2);
-  await expect(details.locator('.export-snapshot-note')).toHaveText('Full download uses a fresh snapshot.');
+  const exportNote = details.locator('.export-snapshot-note');
+  await expect(exportNote).toContainText('Full download uses a fresh snapshot.');
+  await expect(exportNote).toContainText('CSV contains RAW values, without display formatting or indicators.');
   f.change([[4, 'Arrived before full export']]);
   const downloadEvent = new Promise(resolve => {
     page.once('download', resolve); page.context().once('page', popup => popup.once('download', resolve));
