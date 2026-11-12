@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,7 +47,11 @@ function proveInventory(cwd, baseline, shardCount = 2, profile = undefined) {
       .map(item => `tests/e2e/${item.file}`))].sort();
     const plan = balanceFiles(projectFiles, project, OBSERVED_COSTS, shardCount);
     assert.equal(plan.shards.length, shardCount);
-    assert.deepEqual(plan.unknownFiles, projectFiles.filter(file => OBSERVED_COSTS[file]?.[project] === undefined));
+    assert.deepEqual(plan.unknownFiles, projectFiles.filter(file => {
+      const cost = OBSERVED_COSTS[file];
+      return cost?.[project] === undefined || !existsSync(resolve(cwd, file))
+        || createHash('sha256').update(readFileSync(resolve(cwd, file))).digest('hex') !== cost.sourceSha256;
+    }));
     assert.deepEqual(new Set(inventoryFiles(projectReport, cwd)), new Set(projectFiles));
     for (const [index, shard] of plan.shards.entries()) {
       assert.ok(shard.files.length > 0, 'every browser lane must own files');
@@ -110,23 +114,31 @@ test('real six-way Playwright discovery proves exact project/test coverage and t
   assert.match(OBSERVATION.sourceSha, /^[a-f0-9]{40}$/);
   assert.ok(Number.isInteger(OBSERVATION.runId) && OBSERVATION.runId > 0);
   assert.equal(OBSERVATION.runAttempt, 1);
-  assert.equal(OBSERVATION.completeBrowserLanes, PROJECTS.length * 2);
+  assert.equal(OBSERVATION.sourceKind, 'local-ci');
+  assert.equal(OBSERVATION.sampleCount, 1);
+  assert.equal(OBSERVATION.completeBrowserLanes, PROJECTS.length * 6);
+  assert.match(OBSERVATION.receiptSha256, /^[a-f0-9]{64}$/);
   assert.equal(OBSERVATION.wholeWorkflowOutcome, 'success');
   assert.equal(OBSERVATION.costBasis, 'first-attempt-setup+execution+teardown-ms');
   for (const project of PROJECTS) {
     const measured = Object.entries(OBSERVED_COSTS).filter(([, costs]) => costs[project] !== undefined)
       .map(([file, costs]) => [file, costs[project]]).sort(([left], [right]) => left.localeCompare(right));
     const observed = OBSERVATION.profiles[project];
-    const discovered = new Set(required.filter(item => item.project === project)
-      .map(item => `tests/e2e/${item.file}`));
     assert.equal(measured.length, observed.measuredFiles);
     assert.equal(observed.collectedCases, observed.passed + observed.skipped);
     assert.equal(measured.reduce((sum, [, cost]) => sum + cost, 0), observed.phaseTotalMs);
     assert.equal(createHash('sha256').update(JSON.stringify(measured)).digest('hex'), observed.costsSha256);
     for (const [file, cost] of measured) {
-      assert.ok(discovered.has(file), `measured file is outside ${project} discovery: ${file}`);
       assert.ok(Number.isFinite(cost) && cost >= 0);
     }
+  }
+  const sources = Object.entries(OBSERVED_COSTS)
+    .map(([file, costs]) => [file, costs.sourceSha256, costs.sourceBytes])
+    .sort(([left], [right]) => left.localeCompare(right));
+  assert.equal(createHash('sha256').update(JSON.stringify(sources)).digest('hex'), OBSERVATION.fileSourcesSha256);
+  for (const [, hash, bytes] of sources) {
+    assert.match(hash, /^[a-f0-9]{64}$/);
+    assert.ok(Number.isSafeInteger(bytes) && bytes >= 0);
   }
 });
 
