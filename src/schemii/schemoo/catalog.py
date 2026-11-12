@@ -397,7 +397,6 @@ def source_issues(catalog, definition):
     nodes = {n["id"]: source_identity(catalog, n) for n in definition.get("nodes", [])}
     derived_columns = {n["id"]: set(n["derivation"].get("groupBy", [])) | {out["id"] for out in n["derivation"].get("outputs", [])}
                        for n in definition.get("nodes", []) if n.get("derivation")}
-    relationships = {r["id"] for r in catalog["relationships"]}
     issues = []
     for node, table in nodes.items():
         if table not in tables:

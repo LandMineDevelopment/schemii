@@ -95,17 +95,17 @@ export function openSourceSelection(catalog, onSelect) {
     let included=new Set(catalog.namespaces || [catalog.namespace]), ticket=0;
     let selection=sourceSelectionControl(currentCatalog,{initial:[],onChange:({valid})=>{submit.disabled=!valid;}});selectionHost.append(selection.element);
     reload.onclick=async()=>{
-      const current=++ticket;reload.disabled=true;submit.disabled=true;error.textContent="Loading accessible sources…";
+      const current=++ticket;reload.disabled=true;submit.disabled=true;schemas.inert=true;error.textContent="Loading accessible sources…";
       try {
         const next=await requestJson(`${API}/catalog?connection_id=${encodeURIComponent(catalog.connectionId)}&namespace=${encodeURIComponent(catalog.namespace)}${[...included].map(value=>`&namespaces=${encodeURIComponent(value)}`).join("")}`,{timeoutMs:30000});
         if(current!==ticket || !dialog.open)return;
         currentCatalog=next;selection=sourceSelectionControl(next,{initial:[],onChange:({valid})=>{submit.disabled=!valid;}});selectionHost.replaceChildren(selection.element);error.textContent="";
-      }catch(failure){if(current===ticket && dialog.open)error.textContent=failure.message;}finally{if(current===ticket && dialog.open)reload.disabled=false;}
+      }catch(failure){if(current===ticket && dialog.open)error.textContent=failure.message;}finally{if(current===ticket && dialog.open){reload.disabled=false;schemas.inert=false;}}
     };
     if(catalog.connectionId)void requestJson(`/api/v1/connections/${encodeURIComponent(catalog.connectionId)}/namespaces?product=schemoo`).then(data=>{
       if(!dialog.open)return;schemas.append(element("legend",{text:"Source schemas"}));
       for(const item of data.namespaces.filter(item=>!item.system)){
-        const include=element("input",{type:"checkbox",attrs:{"aria-label":`Include schema ${item.name}`}});include.checked=included.has(item.name);include.disabled=item.name===catalog.namespace;
+        const include=element("input",{type:"checkbox",attrs:{"aria-label":`Include schema ${item.name}`}});include.checked=included.has(item.name);include.disabled=(catalog.namespaces || [catalog.namespace]).includes(item.name);
         include.onchange=()=>{if(include.checked)included.add(item.name);else included.delete(item.name);submit.disabled=true;};schemas.append(element("label",{},[include,item.name]));
       }
     }).catch(failure=>{if(dialog.open)error.textContent=failure.message;});
@@ -259,7 +259,7 @@ export async function openModelLibrary(onOpen, { onDeleted = () => {}, canDelete
             extraSchemas.append(element("legend",{text:"Additional source schemas"}));
             for(const item of available.filter(item=>item.name!==value)) {
               const include=element("input",{type:"checkbox",attrs:{"aria-label":`Include schema ${item.name}`}});
-              include.onchange=()=>{if(include.checked)includedNamespaces.add(item.name);else includedNamespaces.delete(item.name);selection=null;void loadSources();};
+              include.onchange=()=>{if(include.checked)includedNamespaces.add(item.name);else includedNamespaces.delete(item.name);void loadSources();};
               extraSchemas.append(element("label",{},[include,item.name]));
             }
           }

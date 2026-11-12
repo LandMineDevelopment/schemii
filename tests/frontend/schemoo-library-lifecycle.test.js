@@ -1,3 +1,4 @@
+import { sourceIdentity, sourceLabel, sameSource } from "../../src/schemii/schemoo/web/logical-relationships.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
@@ -19,9 +20,9 @@ test("the visible add-table action preserves unrelated relationships and alias e
     { id: "unrelated", sourceTable: "b", sourceColumn: "id", targetTable: "c", targetColumn: "id" },
   ];
   const app = readFileSync(new URL("prototype.js", web), "utf8");
-  const action = app.slice(app.indexOf("function addTable(table) {"), app.indexOf("function renderAliasTools()"));
-  runInNewContext(`${action}\naddTable('d');`, {
-    draft, catalog: source, addSourceSelection, ensureAliasConnections,
+  const action = app.slice(app.indexOf("function addTable(identity) {"), app.indexOf("function renderAliasTools()"));
+  runInNewContext(`${action}\naddTable(sourceIdentity({table:'d'},catalog));`, {
+    draft, catalog: source, addSourceSelection, ensureAliasConnections, sourceIdentity, sourceLabel, sameSource,
     selected: null, diagnostics: {},
     showError(message) { throw new Error(message); },
     refreshForms() {}, changed() {}, inspectSelection() {}, $: () => ({}),
@@ -60,7 +61,7 @@ async function libraryFixture() {
   const source = readFileSync(new URL("model-library.js", web), "utf8")
     .replace(/^import .*;\n/gm, "").replace(/^export \{.*;\n/gm, "").replace(/^export /gm, "");
   const runtime = runInNewContext(`${source}\n({ openModelLibrary })`, {
-    importedDraft, defaultSourceSelection, splitDraft, structuredClone,
+    importedDraft, defaultSourceSelection, splitDraft, structuredClone, sourceIdentity, sourceLabel,
     requestJson: async (url, options = {}) => {
       if (options.method === "POST") return post.promise;
       if (url.endsWith("/models")) return { models: [] };

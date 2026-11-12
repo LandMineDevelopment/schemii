@@ -1,4 +1,4 @@
-import { sourceIdentity, sourceNodeId, sameSource, relationshipColumns } from "./logical-relationships.js";
+import { sourceIdentity, sourceNodeId, sameSource, edgeRelationship } from "./logical-relationships.js";
 import { catalogContract, importedDraft, MODEL_LIMITS } from "./model-draft.js";
 
 const relationshipFields = ["id","name","sourceTable","sourceColumn","targetTable","targetColumn","sourceNamespace","targetNamespace","columns"];
@@ -10,7 +10,7 @@ export function reconcileSourceCatalog(draft,catalog) {
   const modeled=new Set(draft.nodes.filter(node=>!node.derivation).map(node=>sourceIdentity(node,catalog)));
   const baseline=draft.sourceContract;
   const priorTables=new Map((baseline?.tables || []).map(table=>[sourceIdentity(table,catalog),new Set(table.columns.map(column=>column.name))]));
-  const priorRelationships=new Set((draft.edges || []).map(edge=>edge.relationshipId));
+  const priorRelationships=new Set((draft.edges || []).map(edge=>edgeRelationship(edge,catalog,draft.nodes)?.id || edge.relationshipId));
   for(const table of catalog.tables || []) {
     if(!modeled.has(sourceIdentity(table,catalog))) result.tables.push(table.name);
     else for(const column of table.columns) if(!priorTables.get(sourceIdentity(table,catalog))?.has(column.name)) result.columns.push(`${table.name}.${column.name}`);
@@ -53,7 +53,7 @@ export function addSourceSelection(draft,catalog,selection) {
       if(!fields.has(key)) {next.exposedFields.push({...field,table});fields.add(key);}
     }
   }
-  const tuples=new Set(next.edges.map(edge=>edgeKey(edge.relationshipId,edge.source,edge.target))),edgeIds=new Set(next.edges.map(edge=>edge.id));
+  const tuples=new Set(next.edges.map(edge=>edgeKey(edgeRelationship(edge,catalog,draft.nodes)?.id || edge.relationshipId,edge.source,edge.target))),edgeIds=new Set(next.edges.map(edge=>edge.id));
   for(const relationship of catalog.relationships || []) {
     // An explicit field/source addition can offer connections to its selected
     // sources; it must not import unrelated newly discovered relationships.
@@ -91,10 +91,11 @@ export function acceptSourceIssue(draft,catalog,issue) {
     return draft.sourceContract.relationships.length<before;
   }
   if(issue.kind==="changed_relationship") {
-    const current=catalogContract(catalog).relationships.find(relationship=>relationship.id===issue.relationshipId);
+    const resolved=edgeRelationship({relationshipId:issue.relationshipId},catalog);
+    const current=resolved && catalogContract({relationships:[resolved]}).relationships[0];
     const index=draft.sourceContract.relationships.findIndex(relationship=>relationship.id===issue.relationshipId);
     if(!current||index<0)return false;
-    draft.sourceContract.relationships[index]=Object.fromEntries(relationshipFields.filter(key=>key in current).map(key=>[key,structuredClone(current[key])]));
+    draft.sourceContract.relationships[index]={...Object.fromEntries(relationshipFields.filter(key=>key in current).map(key=>[key,structuredClone(current[key])])),id:issue.relationshipId};
     for(const edge of draft.edges || []) if(edge.relationshipId===issue.relationshipId)edge.enabled=false;
     return true;
   }

@@ -1,4 +1,4 @@
-import { catalogTable, sourceIdentity, sameSource, sourceLabel, relationshipColumns, mappingLabel } from "./logical-relationships.js";
+import { catalogTable, sameSource, sourceLabel } from "./logical-relationships.js";
 import { element } from "#common/dom.js";
 import { createIconButton } from "/assets/common/ui.js";
 import { helpButton, helpHeading } from "./help.js";

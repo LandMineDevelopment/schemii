@@ -31,11 +31,15 @@ export function relationshipColumns(relationship) {
 export const mappingLabel = (relationship, side) => relationshipColumns(relationship).map(pair => pair[side]).join(" + ");
 
 /** Legacy IDs resolve only inside the saved default schema; never first-match. */
-export function edgeRelationship(edge, catalog) {
+export function edgeRelationship(edge, catalog, nodes = null) {
   if (edge.kind === "logical") return edge;
-  const exact = catalog.relationships.filter(relation => relation.id === edge.relationshipId);
+  const compatible = relation => !nodes || ["source","target"].every(side=>{
+    const node=nodes.find(node=>node.id===edge[side]);
+    return node && sourceIdentity(node,catalog)===sourceIdentity(relation,catalog,side);
+  });
+  const exact = catalog.relationships.filter(relation => relation.id === edge.relationshipId && compatible(relation));
   if (exact.length) return exact.length === 1 ? exact[0] : undefined;
-  const matches = catalog.relationships.filter(relation => relation.legacyId === edge.relationshipId
+  const matches = catalog.relationships.filter(relation => compatible(relation) && relation.legacyId === edge.relationshipId
     && (relation.sourceNamespace || catalog.namespace || "public") === (catalog.namespace || "public")
     && (relation.targetNamespace || catalog.namespace || "public") === (catalog.namespace || "public"));
   return matches.length === 1 ? matches[0] : undefined;

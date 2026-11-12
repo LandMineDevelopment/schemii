@@ -352,3 +352,21 @@ Date-range columns support the filter comparison **Contains date**
 dates are also supported. The server validates the `daterange` source and date
 value. Existing scope requirement, unmatched-row behavior, and AI model-edit
 permissions apply. Adding a range filter does not create columns or indexes.
+
+### Qualified and composite relationships
+
+A model can select up to 16 schemas on its one PostgreSQL connection. Source
+identity is the separate `namespace` and `table` pair; dots remain literal name
+characters. Existing nodes without a namespace resolve in the model's saved
+namespace, preserving node IDs, aliases, layout, filters and saved previews.
+
+Imported foreign keys retain every ordered column pair from PostgreSQL. Logical
+relationships accept `columns: [{source, target}, ...]` with up to 32 distinct
+pairs; all equalities must match. Existing scalar `sourceColumn`/`targetColumn`
+relationships remain readable. Edit a logical relationship to add, remove or
+repair pairs. Foreign-key mappings remain owned by the live catalog.
+
+Each selected endpoint and column requires current schema USAGE and SELECT under
+the same execution identity, including shared reports. Keys and every join pair
+remain scoped contract dependencies. Scalar parameter pickers require an explicit
+domain for composite or ambiguous foreign keys rather than guessing one pair.

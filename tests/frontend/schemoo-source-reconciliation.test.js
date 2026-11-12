@@ -94,3 +94,10 @@ test("reopening new sources and relationships cannot push a model beyond its bou
   const before=structuredClone(draft);const result=reconcileSourceCatalog(draft,current);
   assert.equal(result.relationships.length,202);assert.deepEqual(draft,before);
 });
+
+test("legacy FK hashes preserve authored refs and cannot duplicate or acknowledge another namespace",()=>{
+  const catalog={namespace:"one",tables:[{namespace:"one",name:"left",columns:[{name:"id"}]},{namespace:"one",name:"right",columns:[{name:"id"}]},{namespace:"two",name:"right",columns:[{name:"id",dataType:"changed"}]}],relationships:[{id:"qualified",legacyId:"legacy",name:"fk",sourceNamespace:"one",sourceTable:"left",sourceColumn:"id",targetNamespace:"one",targetTable:"right",targetColumn:"id",columns:[{source:"id",target:"id"}]}]};
+  const draft={root:"left",nodes:[{id:"left",table:"left"},{id:"right",table:"right"}],edges:[{id:"old",relationshipId:"legacy",source:"left",target:"right",enabled:true}],exposedFields:[{table:"left",column:"id"}],sourceContract:{scope:"model",tables:[{namespace:"one",name:"right",columns:[{name:"id",dataType:"old"}]}],relationships:[]}};
+  assert.equal(acceptSourceIssue(draft,catalog,{kind:"changed_column",namespace:"two",table:"right",column:"id",acknowledge:true}),false);
+  assert.equal(reconcileSourceCatalog(draft,catalog).relationships.length,0);
+});

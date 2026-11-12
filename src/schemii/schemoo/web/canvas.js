@@ -141,7 +141,7 @@ export function createModelCanvas({ host, catalog, getDraft, onChange, onSelectN
     for (const edge of getDraft().edges) {
       const source = nodes.get(edge.source), target = nodes.get(edge.target);
       if (!source || !target) continue;
-      const relation = edgeRelationship(edge, catalog);
+      const relation = edgeRelationship(edge, catalog,getDraft().nodes);
       if (!relation) continue;
       const a = position(source), b = position(target);
       const self = source.id === target.id;

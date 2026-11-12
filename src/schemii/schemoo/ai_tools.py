@@ -189,7 +189,7 @@ class ModelReference(Contract):
 class CatalogArguments(Contract):
     connection_id: str = Field(pattern=r"^pg_[0-9a-f]{32}$")
     namespace: str = Field(min_length=1, max_length=63)
-    namespaces: list[str] | None = Field(default=None, max_length=16)
+    namespaces: list[Annotated[str, Field(min_length=1, max_length=63)]] | None = Field(default=None, max_length=16)
 
 
 class DeleteArguments(ModelReference):

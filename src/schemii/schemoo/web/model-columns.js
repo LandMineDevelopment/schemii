@@ -1,4 +1,4 @@
-import { catalogTable, sourceIdentity, sameSource, sourceLabel, relationshipColumns, mappingLabel } from "./logical-relationships.js";
+import { catalogTable } from "./logical-relationships.js";
 /** Resolve authored outputs separately from physical catalog columns. */
 export function nodeColumns(draft, catalog, node) {
   if (!node) return [];

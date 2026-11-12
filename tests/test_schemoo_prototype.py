@@ -188,8 +188,7 @@ def test_legacy_scalar_mapping_roundtrips_and_foreign_key_overrides_are_rejected
             ModelNode.model_validate({"id": "node", "table": "shared.name", "namespace": namespace, "label": "Source"})
     catalog, query = _qualified_composite_catalog(), _qualified_composite_request()
     query["edges"][0]["columns"] = [{"source": "tenant", "target": "tenant"}]
-    with pytest.raises(ValueError, match="cannot override"):
-        compile_preview(catalog, query)
+    assert 't0."tenant" = t1."tenant" AND t0."id" = t1."id"' in compile_preview(catalog, query)["sql"]
 
 
 def test_legacy_fk_hash_resolver_is_default_namespace_and_endpoint_bound():

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import cached_property
 import math
+import json
 import re
 from uuid import UUID
 from .domain import domain_source, source_identity, relationship_columns, resolve_relationship
@@ -133,8 +134,8 @@ class _Model:
         self.column_details = {source_identity(catalog, table): {column["name"]: column for column in table["columns"]} for table in catalog["tables"]}
         self.table_details = {source_identity(catalog, table): table for table in catalog["tables"]}
         self.nodes, self.keys = {}, {}
-        default_nodes = [{"id": name if namespace == catalog.get("namespace", "public") else str((namespace, name)),
-                          "table": name, "namespace": namespace} for namespace, name in self.tables]
+        default_nodes = [{"id": name if namespace == catalog.get("namespace", "public") else json.dumps([namespace, name], ensure_ascii=False, separators=(",", ":")),
+                          "table": name, "namespace": namespace, "label": (name if namespace == catalog.get("namespace", "public") else f"{namespace}.{name}")[:100]} for namespace, name in self.tables]
         for node in _list(request.get("nodes", default_nodes), "Nodes", 100):
             key = _id(node.get("id"), "Node ID")
             if node.get("namespace") is not None and (not isinstance(node["namespace"], str) or not 1 <= len(node["namespace"]) <= 63):
@@ -148,19 +149,27 @@ class _Model:
             label = node.get("label", key)
             if not isinstance(label, str) or not label.strip() or len(label.strip()) > 100:
                 raise ValueError("Model object labels must be nonempty text of at most 100 characters.")
-            if node.get("namespace") is not None and (not isinstance(node["namespace"], str) or not 1 <= len(node["namespace"]) <= 63):
-                raise ValueError("Source namespaces must be nonempty identifiers of at most 63 characters.")
             self.nodes[key] = {**node, "label": label.strip()}
             self.keys[key] = source_identity(catalog, node)
         derived.configure(self)
-        catalog_edges = {edge["id"]: edge for edge in catalog.get("relationships", [])}
         if "edges" in request:
             raw_edges = request["edges"]
         else:
             enabled = request.get("relationships", [])
-            if not isinstance(enabled, list) or any(not isinstance(key, str) or key not in catalog_edges for key in enabled):
+            if not isinstance(enabled, list) or any(not isinstance(key, str) for key in enabled):
                 raise ValueError("Enabled relationships must identify known relationships.")
-            raw_edges = [{"id": key, "relationshipId": key, "source": catalog_edges[key]["sourceTable"], "target": catalog_edges[key]["targetTable"], "enabled": True} for key in dict.fromkeys(enabled)]
+            raw_edges = []
+            for key in dict.fromkeys(enabled):
+                relationship = resolve_relationship(catalog, key)
+                if relationship is None:
+                    raise ValueError("Enabled relationships must identify known relationships.")
+                endpoints = {}
+                for side in ("source", "target"):
+                    candidates = [node for node in self.nodes if self.keys[node] == source_identity(catalog, relationship, side) and node not in self.derived]
+                    if len(candidates) != 1:
+                        raise ValueError("Choose explicit relationship source and target occurrences when aliases share a physical source.")
+                    endpoints[side] = candidates[0]
+                raw_edges.append({"id": key, "relationshipId": key, **endpoints, "enabled": True})
         self.edges = {}
         self.graph = {key: [] for key in self.nodes}
         for item in _list(raw_edges, "Edges", 200):
@@ -188,21 +197,12 @@ class _Model:
                 live = resolve_relationship(catalog, relationship, self.nodes, item)
                 if item.get("kind", "foreign_key") != "foreign_key" or not isinstance(relationship, str) or live is None:
                     raise ValueError("Edges need a known foreign key with matching qualified source and target tables.")
-                if any(item.get(name) is not None for name in ("columns", "sourceColumn", "targetColumn")):
-                    raise ValueError("Foreign-key relationships cannot override catalog-owned column mappings.")
+                # Public JSON rejects overrides; historical direct compiler
+                # dictionaries still discard them and use the full live mapping.
                 edge = {**item, **live, "id": key, "source": item["source"], "target": item["target"], "enabled": item.get("enabled", True), "columns": relationship_columns(live)}
                 for side in ("source", "target"):
                     for pair in edge["columns"]:
                         self.validate({"table": item[side], "column": pair[side]})
-            if logical:
-                signature = sorted((pair["source"], pair["target"]) for pair in edge["columns"])
-                for other in self.edges.values():
-                    if other.get("kind") != "logical":
-                        continue
-                    reverse = other["source"] == edge["target"] and other["target"] == edge["source"]
-                    if ((other["source"], other["target"]) == (edge["source"], edge["target"]) or reverse) and signature == sorted(
-                            (pair["target"], pair["source"]) if reverse else (pair["source"], pair["target"]) for pair in other["columns"]):
-                        raise ValueError("This logical relationship already exists; edit its ordered mapping.")
             if type(item.get("enabled", True)) is not bool:
                 raise ValueError("Relationship enabled must be a boolean.")
             self.edges[key] = edge
@@ -902,13 +902,15 @@ class _PreviewCompiler:
                 if not edge.get("derived") and (node == edge["source"] or edge.get("kind") == "logical"):
                     side = "source" if node == edge["source"] else "target"
                     columns = [pair[side] for pair in relationship_columns(edge)]
-                    if not any(set(unique) <= set(columns) for unique in derived.unique_keys(self.model, node)):
+                    table = self.model.table_details[self.model.keys[node]]
+                    equality_keys = [table.get("primaryKey", []), *table.get("uniqueKeys", [])]
+                    if not any(unique and set(unique) <= set(columns) for unique in equality_keys):
                         relationships.append({
                             "id": key,
                             "fromNode": previous,
                             "toNode": node,
-                            "source": {"node": edge["source"], "label": self.model.nodes[edge["source"]]["label"], "column": ", ".join(pair["source"] for pair in relationship_columns(edge)), "columns": [pair["source"] for pair in relationship_columns(edge)]},
-                            "target": {"node": edge["target"], "label": self.model.nodes[edge["target"]]["label"], "column": ", ".join(pair["target"] for pair in relationship_columns(edge)), "columns": [pair["target"] for pair in relationship_columns(edge)]},
+                            "source": {"node": edge["source"], "label": self.model.nodes[edge["source"]]["label"], "column": ", ".join(pair["source"] for pair in relationship_columns(edge)), **({"columns": [pair["source"] for pair in relationship_columns(edge)]} if len(relationship_columns(edge)) > 1 else {})},
+                            "target": {"node": edge["target"], "label": self.model.nodes[edge["target"]]["label"], "column": ", ".join(pair["target"] for pair in relationship_columns(edge)), **({"columns": [pair["target"] for pair in relationship_columns(edge)]} if len(relationship_columns(edge)) > 1 else {})},
                             "path": [{"node": item, "label": self.model.nodes[item]["label"]} for item in [*path_nodes, node]],
                         })
                 queue.append((node, [*path_nodes, node]))

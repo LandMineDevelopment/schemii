@@ -1,4 +1,4 @@
-import { sourceIdentity } from "./logical-relationships.js";
+import { sourceIdentity, edgeRelationship } from "./logical-relationships.js";
 // Aliases are model occurrences, never new physical tables or copied database objects.
 export function isAlias(node) {
   return Boolean(node && !node.derivation && node.id !== node.table && node.id !== JSON.stringify([node.namespace,node.table]));
@@ -30,7 +30,7 @@ export function ensureAliasConnections(draft, catalog) {
   const nodes = draft.nodes || [];
   const canonical = new Map(nodes.filter(node => !node.derivation && !isAlias(node)).map(node => [sourceIdentity(node,catalog), node.id]));
   const edges = draft.edges ||= [];
-  const tuples = new Set(edges.map(edge => edgeKey(edge.relationshipId, edge.source, edge.target)));
+  const tuples = new Set(edges.map(edge => edgeKey(edgeRelationship(edge,catalog,draft.nodes)?.id || edge.relationshipId, edge.source, edge.target)));
   const ids = new Set(edges.map(edge => edge.id));
   let added = 0;
   for (const alias of nodes.filter(isAlias)) {
