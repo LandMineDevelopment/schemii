@@ -169,7 +169,11 @@ def merge_content(
         document[key[0]].append(item)
     try:
         content = SchemiiDesignContent.model_validate(document)
-        validate_design_content(content)
+        # Retaining an unresolved target definition alongside incoming children
+        # can be temporarily invalid. Expose the choices before validating the
+        # fully resolved combination; unresolved previews are never copy-ready.
+        if all(item.resolution for item in collisions):
+            validate_design_content(content)
     except ValueError as error:
         raise DesignValidationError(
             "These collision choices do not form a valid design. Keep the target definitions or revise the detached design before copying."

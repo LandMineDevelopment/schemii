@@ -189,6 +189,65 @@ def accepted(f, resolution="incoming"):
     return review(f, {item.key: resolution for item in first.collisions})
 
 
+def test_initial_review_exposes_choices_before_validating_provisional_generated_columns(
+    fixture,
+):
+    def generated(offset, incoming):
+        ids = {
+            name: f"column_{offset + index:032x}"
+            for index, name in enumerate(["c", "a", "b"], 1)
+        }
+        columns = [
+            {"id": ids[name], "name": name, "dataType": "integer"}
+            for name in ["c", "a"]
+        ]
+        if incoming:
+            columns.append(
+                {
+                    "id": ids["b"],
+                    "name": "b",
+                    "dataType": "integer",
+                    "generatedExpression": "a + 1",
+                    "generatedSourceColumnIds": [ids["a"]],
+                }
+            )
+        else:
+            columns[1].update(
+                generatedExpression="c + 1", generatedSourceColumnIds=[ids["c"]]
+            )
+        return SchemiiDesignContent.model_validate(
+            {
+                "tables": [
+                    {"id": f"table_{offset + 4:032x}", "name": "T", "columns": columns}
+                ]
+            }
+        )
+
+    f = fixture
+    for workspace, incoming, offset in [(f.source, True, 0), (f.target, False, 100)]:
+        before = f.designs.get(OWNER, workspace.id)
+        f.designs.replace(
+            OWNER,
+            workspace.id,
+            SchemiiDesignReplace(
+                expected_design_revision=before.revision,
+                content=generated(offset, incoming),
+            ),
+        )
+    first = review(f)
+    assert not first.ready and len(first.collisions) == 1
+    choices = {first.collisions[0].key: "incoming"}
+    resolved = review(f, choices)
+    assert resolved.ready
+    with pytest.raises(DesignValidationError):
+        merge_content(
+            generated(0, True),
+            generated(100, False),
+            f.target.id,
+            {first.collisions[0].key: "keep"},
+        )
+
+
 def copy_request(preview):
     return DesignDeploymentCopyRequest(
         target_workspace_id=preview.target_workspace_id,
