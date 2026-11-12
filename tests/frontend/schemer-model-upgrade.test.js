@@ -279,3 +279,22 @@ test('stale pivot upgrade reviews both axes and preserves every grouping and tot
   assert.deepEqual(modelUpgradeIssues(draft, model, catalog), []);
   assert.equal(tile.columnDimensions[0].column, 'gone');
 });
+
+for (const aggregate of ['avg', 'sum']) {
+  test(`saved explicit per-owner pivot ${aggregate} survives atomic upgrade while stale types require repair`, () => {
+    const { model, catalog, dashboard, tile } = data();
+    model.definition.nodes.push({ id: 'summary', table: 'person', label: 'Per owner', derivation: { kind: 'aggregate', source: 'people', groupBy: ['id'], outputs: [{ id: 'value', label: 'Owner maximum', operation: 'max', column: 'id' }] } });
+    Object.assign(tile, { kind: 'pivot', dimensions: [], rowDimensions: [field('name')], columnDimensions: [field('id')], measures: [{ table: 'summary', column: 'value', aggregate }] });
+    const draft = modelUpgradeDraft(dashboard, model);
+    assert.deepEqual(modelUpgradeIssues(draft, model, catalog), []);
+    assert.equal(draft.tiles[0].measures[0].aggregate, aggregate);
+    catalog.tables[0].columns.find(column => column.name === 'id').dataType = 'date';
+    assert.ok(modelUpgradeIssues(draft, model, catalog).some(issue => /compatible.*aggregation|aggregation.*compatible/.test(issue.message)));
+    draft.tiles[0].measures[0].aggregate = 'max';
+    assert.deepEqual(modelUpgradeIssues(draft, model, catalog), []);
+    assert.equal(tile.measures[0].aggregate, aggregate); // Repair is local until the existing atomic save.
+    Object.assign(draft.tiles[0], { kind: 'aggregate', dimensions: [field('name')], rowDimensions: [], columnDimensions: [], measures: [{ table: 'summary', column: 'value', aggregate: 'none' }] });
+    assert.deepEqual(modelUpgradeIssues(draft, model, catalog), []);
+    assert.equal(draft.tiles[0].measures[0].aggregate, 'none');
+  });
+}

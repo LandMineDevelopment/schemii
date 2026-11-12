@@ -4,10 +4,9 @@ import { createIconButton } from '#common/ui.js';
 import { modelSelect, disposeSelects } from '#model/select.js';
 import { renderReportFilters, renderParameterValues } from '#model/filter-controls.js';
 import { fieldLabel } from '#model/model-columns.js';
-import { aggregateChoices } from './report-state.js';
 import { timeDimensions } from './time-analysis.js';
 import { renderTimeAnalysis } from './time-analysis-editor.js';
-import { TILE_TYPES, tileErrors, fieldChoices, fieldKey, reportOutputs, reportOutputKey, tileDimensions, pivotDefaults, numericFilterValue } from './dashboard-state.js';
+import { TILE_TYPES, tileErrors, fieldChoices, fieldKey, reportOutputs, reportOutputKey, tileDimensions, pivotDefaults, numericFilterValue, tileAggregateChoices } from './dashboard-state.js';
 
 function icon(name, label, onClick, disabled = false) {
   const button = createIconButton({ icon: name, label, className: 'ui-button' }); button.onclick = onClick; button.disabled = disabled; return button;
@@ -48,8 +47,11 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
     const selectHost = element('div');
     const select = modelSelect(`Add ${title.toLowerCase()}`, choices.map((field, index) => [String(index), field.label]), '', value => {
       const field = choices[Number(value)]; if (!field || current[key].length >= 64) return;
-      const options = aggregateChoices(modelDraft, catalog, field);
-      const aggregate = measure ? (options.find(([value]) => value === 'count')?.[0] || 'none') : 'none';
+      const options = tileAggregateChoices(current, modelDraft, catalog, field);
+      const summary = modelDraft.nodes.find(node => node.id === field.table)?.derivation?.kind === 'aggregate';
+      // A model summary has existing semantic meaning. Require a deliberate
+      // per-owner aggregation instead of choosing COUNT or AVG for the author.
+      const aggregate = measure && !(current.kind === 'pivot' && summary) ? (options.find(([value]) => value === 'count')?.[0] || 'none') : 'none';
       if (current[key].some(f => fieldKey(f) === fieldKey(field) && f.aggregate === aggregate)) { error.textContent = 'That output is already selected. Choose another aggregation on the existing output before adding it again.'; return; }
       current[key].push({ table: field.table, column: field.column, aggregate }); render();
     });
@@ -69,8 +71,10 @@ export function openTileEditor({ tile, model, catalog, onSave, onLoadDomain, sav
         row.append(grouping);
       }
       if (measure) {
-        const opts = aggregateChoices(modelDraft, catalog, field).filter(([value]) => value !== 'none' || current.kind !== 'pivot' && model.definition.nodes.find(n => n.id === field.table)?.derivation?.kind === 'aggregate');
-        row.append(modelSelect(`Measure ${index + 1} aggregation`, opts, field.aggregate, value => { field.aggregate = value; }));
+        const summary = modelDraft.nodes.find(node => node.id === field.table)?.derivation?.kind === 'aggregate';
+        const opts = tileAggregateChoices(current, modelDraft, catalog, field).filter(([value]) => value !== 'none' || summary);
+        if (current.kind === 'pivot' && summary && field.aggregate === 'none') opts.unshift(['none', 'Choose aggregation of per-owner values']);
+        row.append(modelSelect(`Measure ${index + 1} aggregation`, opts, field.aggregate, value => { field.aggregate = value; render(); }));
       }
       const move = direction => { const [field] = current[key].splice(index, 1); current[key].splice(index + direction, 0, field); render(); };
       row.append(element('div', { className: 'actions' }, [icon('earlier', `Move ${title} ${index + 1} earlier`, () => move(-1), index === 0), icon('later', `Move ${title} ${index + 1} later`, () => move(1), index === current[key].length - 1), icon('close', `Remove ${title} ${index + 1}`, () => { current[key].splice(index, 1); clearMissingTimeDimension(); render(); })]));

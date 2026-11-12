@@ -6,6 +6,20 @@ import { nodeColumns, fieldLabel } from '#model/model-columns.js';
 export const TILE_TYPES = [['detail', 'Detail report'], ['aggregate', 'Aggregation report'], ['bar', 'Bar chart'], ['line', 'Line chart'], ['donut', 'Donut chart'], ['kpi', 'KPI'], ['pivot', 'Pivot table']];
 export const pivotDefaults = () => ({ rowSubtotals: true, columnSubtotals: true, rowTotals: true, columnTotals: true, grandTotal: true, maximumColumns: 12, maximumRows: 100 });
 export const tileDimensions = tile => tile.kind === 'pivot' ? [...(tile.rowDimensions || []), ...(tile.columnDimensions || [])] : tile.dimensions;
+export function tileAggregateChoices(tile, draft, catalog, field) {
+  if (tile.kind !== 'pivot') return aggregateChoices(draft, catalog, field);
+  const node = draft.nodes.find(node => node.id === field.table);
+  if (node?.derivation?.kind !== 'aggregate') return aggregateChoices(draft, catalog, field).filter(([value]) => value !== 'none');
+  const column = nodeColumns(draft, catalog, node).find(column => column.name === field.column);
+  if (!column) return [];
+  const type = (column.dataType || '').replace(/\(\d+(?:,\s*\d+)?\)/g, '').trim().toLowerCase();
+  const numeric = /^(smallint|integer|bigint|numeric|decimal|real|double precision|int[248]|float[48])$/.test(type);
+  const comparable = numeric || /^(date|timestamp|time|text|character|varchar)/.test(type);
+  const distinct = comparable || /^(boolean|uuid|bytea|jsonb|inet|cidr|macaddr)$/.test(type);
+  return [['count', 'Count of per-owner values'], ...(distinct ? [['count_distinct', 'Count distinct per-owner values']] : []),
+    ...(numeric ? [['sum', 'Sum of per-owner values'], ['avg', 'Average of per-owner values']] : []),
+    ...(comparable ? [['min', 'Minimum per-owner value'], ['max', 'Maximum per-owner value']] : [])];
+}
 export const fieldKey = field => JSON.stringify([field.table, field.column]);
 export function newTile() {
   return { id: crypto.randomUUID(), title: '', kind: 'bar', dimensions: [], rowDimensions: [], columnDimensions: [], pivotTotals: pivotDefaults(), measures: [], hiddenMeasures: [], calculations: [], kpiComparison: null, detailFields: [], reportFilters: [], sort: [], aggregateFilters: [], topN: null, limit: 100 };
@@ -27,6 +41,9 @@ export function tileErrors(tile, model, catalog) {
     if (tile.rowDimensions?.length > 4 || tile.columnDimensions?.length > 3 || tile.measures.length > 8) errors.push('Pivot limits: four row dimensions, three column dimensions and eight measures.');
     if (new Set([...axes, ...tile.measures, ...tile.detailFields].map(fieldKey)).size > 64) errors.push('Pivot and detail columns together support at most 64 semantic inputs.');
     if (new Set(axes.map(fieldKey)).size !== axes.length) errors.push('A field can occur on only one pivot axis.');
+    if (model && catalog) for (const field of tile.measures) {
+      if (field.aggregate && field.aggregate !== 'none' && !tileAggregateChoices(tile, model.definition, catalog, field).some(([value]) => value === field.aggregate)) errors.push(`Measure ${field.column}: choose a compatible explicit aggregation for this field.`);
+    }
     if (tile.measures.some(field => (field.aggregate || 'none') === 'none')) errors.push('Pivot measures need an explicit aggregation. A model summary value is not a raw-row total.');
     if (!Number.isInteger(totals.maximumColumns) || totals.maximumColumns < 1 || totals.maximumColumns > 24 || !Number.isInteger(totals.maximumRows) || totals.maximumRows < 1 || totals.maximumRows > 200) errors.push('Choose 1–24 column groups and 1–200 preview rows.');
     if (tile.timeAnalysis && ((tile.timeAnalysis.comparison || 'none') !== 'none' || tile.timeAnalysis.runningTotal)) errors.push('Pivot calendar grouping supports period values. Use a report or chart for comparisons and running totals.');

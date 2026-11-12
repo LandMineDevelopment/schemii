@@ -542,3 +542,208 @@ def test_distinct_count_drill_includes_its_own_nonnull_inputs_when_another_measu
     assert any(
         "repeated values count once" in warning for warning in compiled["warnings"]
     )
+
+
+def calendar_context(monkeypatch, **changes):
+    context = fixture(
+        monkeypatch,
+        **{
+            "rowDimensions": [field("region")],
+            "columnDimensions": [field("at")],
+            "measures": [
+                field("at", operation) for operation in ("count_distinct", "min", "max")
+            ],
+            "detailFields": [field("id"), field("at")],
+            "timeAnalysis": {"table": "facts", "column": "at", "granularity": "month"},
+            **changes,
+        },
+    )
+    context[3]["tables"][0]["columns"].append({"name": "at", "dataType": "date"})
+    return context
+
+
+CALENDAR_DATA = [
+    (1, "East", "One", "2024-01-15"),
+    (2, "East", "One", "2024-01-16"),
+    (3, "East", "Two", "2024-01-16"),
+    (4, "West", "One", "2024-02-10"),
+    (5, None, "One", "2024-01-17"),
+    (6, "East", "One", None),
+    (7, "East", "One", "2024-03-01"),
+]
+
+
+def execute_calendar(statement):
+    # Bounded offline semantic control: only calendar-month/date casts are
+    # adapted. PostgreSQL type/timezone acceptance has a separate live oracle.
+    def translate(node):
+        if isinstance(node, exp.TimestampTrunc):
+            assert node.args["unit"].name == "MONTH"
+            return exp.Anonymous(
+                this="DATE",
+                expressions=[node.this.copy(), exp.Literal.string("start of month")],
+            )
+        if isinstance(node, exp.Cast) and node.args["to"].is_type("date"):
+            return node.this.copy()
+        if isinstance(node, exp.ByteString):
+            return exp.Literal.string(node.this)
+        return node
+
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            "ATTACH DATABASE ':memory:' AS public; CREATE TABLE public.facts(id INTEGER,region TEXT,team TEXT,at TEXT);"
+        )
+        connection.executemany(
+            "INSERT INTO public.facts VALUES(?,?,?,?)", CALENDAR_DATA
+        )
+        sql = (
+            parse_one(statement, read="postgres")
+            .transform(translate)
+            .transform(translate)
+            .sql(dialect="sqlite")
+        )
+        return connection.execute(sql).fetchall()
+
+
+@pytest.mark.parametrize("exporting", [False, True])
+def test_calendar_axis_preserves_raw_count_distinct_min_max_for_every_total_grain(
+    monkeypatch, exporting
+):
+    context = calendar_context(monkeypatch)
+    rows = execute_calendar(plan(context, exporting=exporting)["sql"])
+    grand = next(row for row in rows if row[5:7] == (0, 0))
+    assert grand[2:5] == (5, "2024-01-15", "2024-03-01")
+    row_total = next(row for row in rows if row[0] == "East" and row[5:7] == (1, 0))
+    assert row_total[2:5] == (3, "2024-01-15", "2024-03-01")
+    column_total = next(
+        row for row in rows if row[1] == "2024-01-01" and row[5:7] == (0, 1)
+    )
+    assert column_total[2:5] == (3, "2024-01-15", "2024-01-17")
+    leaf = next(
+        row for row in rows if row[:2] == ("East", "2024-01-01") and row[5:7] == (1, 1)
+    )
+    assert leaf[2:5] == (2, "2024-01-15", "2024-01-16")
+    null_region = next(
+        row for row in rows if row[:2] == (None, "2024-01-01") and row[5:7] == (1, 1)
+    )
+    assert null_region[2:5] == (1, "2024-01-17", "2024-01-17")
+    assert all(
+        row[1] is None or row[1] in {"2024-01-01", "2024-02-01", "2024-03-01"}
+        for row in rows
+    )
+
+
+def test_calendar_raw_measure_totals_keep_source_filters_qualification_and_topn(
+    monkeypatch,
+):
+    context = calendar_context(
+        monkeypatch,
+        topN=1,
+        sort=[{**field("at", "count_distinct"), "direction": "desc"}],
+        reportFilters=[
+            {
+                "mode": "rows",
+                "conditions": [
+                    {"table": "facts", "column": "id", "operator": "gte", "value": 2}
+                ],
+            }
+        ],
+        aggregateFilters=[
+            {**field("at", "count_distinct"), "operator": "gte", "value": 1}
+        ],
+    )
+    rows = execute_calendar(plan(context)["sql"])
+    assert sum(row[5:7] == (1, 1) for row in rows) == 1
+    assert next(row for row in rows if row[5:7] == (0, 0))[2:5] == (
+        4,
+        "2024-01-16",
+        "2024-03-01",
+    )
+    selected = scope("grand_total", 0, 0)
+    assert {row[0] for row in execute_calendar(plan(context, selected)["sql"])} == {
+        2,
+        3,
+        4,
+        5,
+        7,
+    }
+
+
+@pytest.mark.parametrize("measure", [0, 1, 2])
+def test_calendar_measure_contributors_and_raw_csv_keep_dates_not_buckets(
+    monkeypatch, measure
+):
+    context = calendar_context(monkeypatch)
+    selected = scope(
+        "cell", 1, 1, [("region", "East"), ("at", "2024-01-01")], measure=measure
+    )
+    for exporting in [False, True]:
+        rows = execute_calendar(plan(context, selected, exporting=exporting)["sql"])
+        assert {row[:2] for row in rows} == {
+            (1, "2024-01-15"),
+            (2, "2024-01-16"),
+            (3, "2024-01-16"),
+        }
+
+
+def test_calendar_row_axis_and_prefix_subtotal_retain_raw_measure_grain(monkeypatch):
+    transposed = calendar_context(
+        monkeypatch, rowDimensions=[field("at")], columnDimensions=[field("region")]
+    )
+    rows = execute_calendar(plan(transposed)["sql"])
+    assert next(row for row in rows if row[5:7] == (0, 0))[2:5] == (
+        5,
+        "2024-01-15",
+        "2024-03-01",
+    )
+    assert next(row for row in rows if row[0] == "2024-01-01" and row[5:7] == (1, 0))[
+        2:5
+    ] == (3, "2024-01-15", "2024-01-17")
+    context = calendar_context(
+        monkeypatch, rowDimensions=[field("region"), field("team")]
+    )
+    rows = execute_calendar(plan(context)["sql"])
+    subtotal = next(
+        row
+        for row in rows
+        if row[:3] == ("East", None, "2024-01-01") and row[6:8] == (1, 1)
+    )
+    assert subtotal[3:6] == (2, "2024-01-15", "2024-01-16")
+    selected = scope("subtotal", 1, 1, [("region", "East"), ("at", "2024-01-01")])
+    assert {row[0] for row in execute_calendar(plan(context, selected)["sql"])} == {
+        1,
+        2,
+        3,
+    }
+
+
+def test_calendar_internal_raw_and_axis_aliases_have_distinct_ast_roles(monkeypatch):
+    from schemii.schemer.pivot import raw_inputs
+    from schemii.schemoo.service import plan_query
+
+    dashboard, tile, model, catalog = calendar_context(monkeypatch)
+    query = tile_queries.tile_report_query(dashboard, tile)
+    original = plan_query(catalog, model.definition, query.explore, "", _bounded=False)
+    _, sql, measures, axes = raw_inputs(catalog, model, tile, query, original)
+    key = ("facts", "at")
+    assert measures[key] != axes[key]
+    assert axes[("facts", "region")] == measures[("facts", "region")]
+    projections = {
+        node.alias: node.this for node in parse_one(sql, read="postgres").expressions
+    }
+    assert isinstance(projections[measures[key]], exp.Column)
+    assert projections[measures[key]].name == "at"
+    assert projections[axes[key]].find(exp.TimestampTrunc) is not None
+    compiled = parse_one(
+        plan((dashboard, tile, model, catalog))["sql"], read="postgres"
+    )
+    reaggregates = [
+        node
+        for node in compiled.find_all(exp.AggFunc)
+        if isinstance(node, (exp.Count, exp.Min, exp.Max))
+    ]
+    assert not any(
+        column.name == axes[key]
+        for aggregate in reaggregates
+        for column in aggregate.find_all(exp.Column)
+    )

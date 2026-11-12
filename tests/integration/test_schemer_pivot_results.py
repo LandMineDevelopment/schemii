@@ -44,7 +44,14 @@ def compile_pivot(monkeypatch):
     monkeypatch.setattr(tile_queries, "load_model", lambda *args: model)
     monkeypatch.setattr(tile_queries, "model_catalog", lambda *args, **kwargs: catalog)
 
-    def compile(*, selection=None, exporting=False, **changes):
+    def compile(
+        *,
+        selection=None,
+        exporting=False,
+        source_kind="timestamp with time zone",
+        **changes,
+    ):
+        catalog["tables"][0]["columns"][-1]["dataType"] = source_kind
         tile = DashboardTile.model_validate(
             {
                 "id": "pivot",
@@ -259,3 +266,78 @@ def test_empty_qualified_population_keeps_zero_distinct_null_average_and_no_cont
         "pivot": {"kind": "grand_total", "rowDepth": 0, "columnDepth": 0},
     }
     assert run(execute, compile_pivot(selection=selected, **changes)) == []
+
+
+@pytest.mark.parametrize(
+    "source_kind,values,expected_min,expected_max,bucket",
+    [
+        (
+            "date",
+            "(1,'East'::text,'A'::text,'One'::text,10::numeric,'same'::text,DATE '2024-01-15'),(2,'East','A','One',20,'same',DATE '2024-01-16')",
+            "2024-01-15",
+            "2024-01-16",
+            "2024-01-01",
+        ),
+        (
+            "timestamp with time zone",
+            "(1,'East'::text,'A'::text,'One'::text,10::numeric,'same'::text,TIMESTAMPTZ '2024-01-31 23:30Z'),(2,'East','A','One',20,'same',TIMESTAMPTZ '2024-02-01 00:30Z')",
+            "2024-01-31T23:30:00+00:00",
+            "2024-02-01T00:30:00+00:00",
+            "2024-01-01",
+        ),
+    ],
+)
+def test_calendar_axis_same_raw_measure_count_distinct_min_max_at_every_grain_and_csv(
+    execute, compile_pivot, source_kind, values, expected_min, expected_max, bucket
+):
+    from datetime import date, datetime
+
+    minimum = (
+        date.fromisoformat(expected_min)
+        if source_kind == "date"
+        else datetime.fromisoformat(expected_min)
+    )
+    maximum = (
+        date.fromisoformat(expected_max)
+        if source_kind == "date"
+        else datetime.fromisoformat(expected_max)
+    )
+    changes = {
+        "source_kind": source_kind,
+        "columnDimensions": [field("occurred")],
+        "measures": [
+            field("occurred", aggregate)
+            for aggregate in ("count_distinct", "min", "max")
+        ],
+        "detailFields": [field("id"), field("occurred")],
+        "topN": 1,
+        "timeAnalysis": {
+            "table": "facts",
+            "column": "occurred",
+            "granularity": "month",
+            "timezone": "America/New_York",
+        },
+    }
+    for exporting in [False, True]:
+        rows = run(execute, compile_pivot(exporting=exporting, **changes), values)
+        assert {tuple(row[5:7]) for row in rows} == {(1, 1), (1, 0), (0, 1), (0, 0)}
+        assert all(row[2:5] == [2, minimum, maximum] for row in rows)
+        assert all(
+            row[1] is None or row[1] == date.fromisoformat(bucket) for row in rows
+        )
+    for measure in range(3):
+        selected = {
+            "dimensions": [
+                {"table": "facts", "column": "region", "value": "East"},
+                {"table": "facts", "column": "occurred", "value": bucket},
+            ],
+            "measureIndex": measure,
+            "pivot": {"kind": "cell", "rowDepth": 1, "columnDepth": 1},
+        }
+        rows = run(
+            execute,
+            compile_pivot(selection=selected, exporting=True, **changes),
+            values,
+        )
+        assert {tuple(row[:2]) for row in rows} == {(1, minimum), (2, maximum)}
+        assert all(row[-4:-1] == ["cell", 1, 1] for row in rows)

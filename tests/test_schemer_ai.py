@@ -281,3 +281,55 @@ def test_assistant_pivot_result_keeps_bounded_scope_metadata_and_semantic_warnin
     assert result['pivot'] == metadata and result['warnings'] == [warning]
     assert result['sample']['rows'][0][3:5] == [0, 0]
     assert 'SQL' not in result
+
+
+@pytest.mark.parametrize('kind,values', [
+    ('cell', [('region', None), ('category', 'A')]), ('row', [('region', None)]),
+    ('column', [('category', None)]), ('subtotal', [('region', None)]),
+    ('grand_total', []), ('legacy', [('region', None)]),
+    ('cell', [('region', 'East'), ('category', 'A')]), ('legacy', [('region', 'East')]),
+])
+def test_required_null_drill_value_survives_full_action_validation_revalidation_execution(report, monkeypatch, kind, values):
+    from schemii.schemer import tile_queries
+    from schemii.schemer.dashboard_models import DashboardUpdate
+    f = lambda name, aggregate='none': {'table': 'sales', 'column': name, 'aggregate': aggregate}
+    tile = {'id': 'pivot', 'title': 'Sales', 'kind': 'aggregate' if kind == 'legacy' else 'pivot',
+        'dimensions': [f('region')] if kind == 'legacy' else [],
+        'rowDimensions': [] if kind == 'legacy' else [f('region'), *([f('team')] if kind == 'subtotal' else [])],
+        'columnDimensions': [] if kind == 'legacy' else [f('category')],
+        'measures': [f('id', 'count')], 'detailFields': [f('id'), f('region')], 'limit': 1}
+    current = report.dashboard.model_dump(exclude={'id', 'owner_id', 'revision', 'created_at', 'updated_at'})
+    report.services.dashboards.update('author', report.dashboard.id, DashboardUpdate(**{**current, 'tiles': [tile]}, expected_revision=1))
+    catalog = {'namespace': 'public', 'fingerprint': '', 'tables': [{'name': 'sales', 'columns': [
+        {'name': name, 'dataType': 'integer' if name == 'id' else 'text'} for name in ['id', 'region', 'category', 'team', 'secret']]}], 'relationships': []}
+    monkeypatch.setattr(tile_queries, 'model_catalog', lambda *args, **kwargs: catalog)
+    captured = []
+    monkeypatch.setattr(ai_tools, '_sample_plan', lambda bundle, model, plan: captured.append(plan) or {'sample': {'rows': []}})
+    selected = {'dimensions': [{'table': 'sales', 'column': name, 'value': value} for name, value in values], 'measureIndex': 0}
+    if kind != 'legacy':
+        rd, cd = {'cell': (1, 1), 'row': (1, 0), 'column': (0, 1), 'subtotal': (1, 0), 'grand_total': (0, 0)}[kind]
+        selected['pivot'] = {'kind': kind, 'rowDepth': rd, 'columnDepth': cd}
+    action = {'operation': 'drill_tile', 'args': {'tileId': 'pivot', 'selection': selected}}
+    normalized = ai_tools.validate_action(action)
+    assert normalized['args']['selection'] == selected
+    assert ai_tools.validate_action(normalized) == normalized
+    bundle = ai_tools.authorize(report.services, 'author', report.dashboard.id, report.request)
+    result = ai_tools.execute_action(bundle, 'author', report.dashboard.id, normalized)
+    assert captured[0]['drill'] is True and result['sample'] == {'rows': []}
+    if any(value is None for _, value in values):
+        assert 'IS NULL' in captured[0]['sql']
+    if kind != 'legacy':
+        assert result['pivotScope']['kind'] == kind
+    else:
+        assert 'pivot' not in normalized['args']['selection']
+
+
+def test_null_drill_round_trip_retains_current_viewer_drill_grant_requirement(report, monkeypatch):
+    selected = {'dimensions': [{'table': 'sales', 'column': 'region', 'value': None}], 'measureIndex': 0}
+    action = ai_tools.validate_action({'operation': 'drill_tile', 'args': {'tileId': 'tile', 'selection': selected}})
+    bundle = ai_tools.authorize(report.services, 'viewer', report.dashboard.id, report.request)
+    calls = []
+    monkeypatch.setattr(ai_tools, '_run_tile', lambda *args: calls.append('executed'))
+    with pytest.raises(ApiProblem) as denied:
+        ai_tools.execute_action(bundle, 'viewer', report.dashboard.id, ai_tools.validate_action(action))
+    assert denied.value.status_code == 403 and calls == []

@@ -147,8 +147,19 @@ def tool_definitions():
              "parameters": provider_schema(ActionBatch.model_json_schema(by_alias=True))}]
 
 
+def _drill_selection_document(selection):
+    # NULL is required dimension data, not an absent optional field. The legacy
+    # compiler rejects an extra pivot key, so omit only that optional metadata.
+    return selection.model_dump(mode="json", by_alias=True,
+        exclude={"pivot"} if selection.pivot is None else set())
+
+
 def validate_action(action):
-    return _ACTION.validate_python(action).model_dump(mode="json", by_alias=True, exclude_none=True)
+    parsed = _ACTION.validate_python(action)
+    document = parsed.model_dump(mode="json", by_alias=True)
+    if parsed.operation == "drill_tile":
+        document["args"]["selection"] = _drill_selection_document(parsed.args.selection)
+    return document
 
 
 def receipt_action(action):
@@ -353,7 +364,7 @@ def execute_action(bundle, owner, dashboard_id, action):
         if name == "drill_tile":
             if not current.permissions["drill"]:
                 raise ApiProblem(403, "report_action_forbidden", "This report does not allow detail drill.")
-            selection = args.selection.model_dump(mode="json", by_alias=True, exclude_none=True)
+            selection = _drill_selection_document(args.selection)
             return _run_tile(current, args.tile_id, selections, selection)
         if name == "execute_tile":
             return _run_tile(current, args.tile_id, selections)
