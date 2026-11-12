@@ -82,13 +82,13 @@ def file_lock(path: Path):
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
+        yield descriptor
     finally:
         os.close(descriptor)
 
 
 @contextmanager
-def cleanup_guard(run_file: Path):
+def cleanup_guard(run_file: Path, *, lease=None):
     """Use the same flock files/order as CLI fixture cleanup and allocation.
 
     Lifecycle comes first, as in resume/cleanup. Deployment is then exclusive,
@@ -101,7 +101,7 @@ def cleanup_guard(run_file: Path):
     with file_lock(run_file.with_name("lifecycle.lock")):
         run = json.loads(run_file.read_text())
         require_stopped(run, run_file)
-        with file_lock(common / "qa-deployment.lock"):
+        with file_lock(common / "qa-startup.lock") as gate, file_lock(common / "qa-deployment.lock") as deployment:
             with file_lock(common / "qa-account-reservations.lock"):
                 run = json.loads(run_file.read_text())
                 require_stopped(run, run_file)
@@ -110,6 +110,8 @@ def cleanup_guard(run_file: Path):
                         raise ValueError("Invalid run account")
                     if os.path.lexists(common / "qa-account-leases" / (username.lower() + ".json")):
                         raise ValueError(f"Account {username} is reserved by an active or unresolved run; clean up that run first")
+                if lease is not None:
+                    lease.extend((deployment, gate))
                 yield run
 
 
@@ -163,7 +165,11 @@ def owned_workspaces(workspaces: dict, run: dict, run_file: Path) -> dict[str, s
             key, created_key = kind + "WorkspaceId", kind + "Created"
             value = fixture.get(key)
             expected = resources.get(key)
-            if kind == "writer" and username not in WRITERS:
+            declared_writer = (username in workspaces.get("writerAccounts", [])
+                               and resources.get("writableSchema") == "qa_write_designer_" + username[-3:]
+                               and isinstance(resources.get("writableConnectionId"), str)
+                               and resources["writableConnectionId"] == fixture.get("writerConnectionId"))
+            if kind == "writer" and username not in WRITERS and not declared_writer:
                 if value is not None or expected is not None or fixture.get(created_key) is not False:
                     raise ValueError(f"Unexpected writer fixture for {username}")
                 continue
@@ -178,9 +184,73 @@ def owned_workspaces(workspaces: dict, run: dict, run_file: Path) -> dict[str, s
     return result
 
 
-def cleanup(state: Path, workspace_file: Path, run_file: Path) -> dict:
-    with cleanup_guard(run_file) as run:
-        return _cleanup(state, workspace_file, run_file, run)
+def cleanup(state: Path, workspace_file: Path, run_file: Path, *, reset_writers=False) -> dict:
+    lease = []
+    with cleanup_guard(run_file, lease=lease) as run:
+        if reset_writers:
+            reset_owned_writers(state, workspace_file, run_file, run, lease, validate_only=True)
+        result = _cleanup(state, workspace_file, run_file, run)
+        if reset_writers:
+            if result["pending"]:
+                raise ValueError("Reconcile unledgered app objects before writer reset")
+            result["writers"] = reset_owned_writers(state, workspace_file, run_file, run, lease)
+        return result
+
+
+def reset_owned_writers(state, workspace_file, run_file, run, lease, *, invoke=None, validate_only=False):
+    """Only caller-held stopped-run, deployment and account guards authorize reset."""
+    workspaces = json.loads(workspace_file.read_text())
+    owned_workspaces(workspaces, run, run_file)
+    slots = {slot["username"]: slot for slot in registry_load(state)["slots"]}
+    targets = []
+    for lane in run["lanes"]:
+        resources, username = lane.get("resources", {}), lane["username"]
+        if not resources.get("writerWorkspaceId"):
+            continue
+        slot = slots.get(username, {})
+        if (resources.get("writableSchema") != "qa_write_designer_" + username[-3:]
+                or slot.get("writableSchema") != resources["writableSchema"]
+                or not re.fullmatch(r"pg_[0-9a-f]{32}", resources.get("writableConnectionId", ""))
+                or slot.get("writableConnectionId") != resources["writableConnectionId"]
+                or workspaces["lanes"][username].get("writerCreated") is not True):
+            raise ValueError("Writer reset requires exact owned marked profile/schema/workspace")
+        targets.append(username)
+    if validate_only:
+        return targets
+    report_path = run_file.with_name("writer-cleanup.json")
+    report = json.loads(report_path.read_text()) if report_path.exists() else {"run": run["id"], "attempts": []}
+    if report.get("run") != run["id"]:
+        raise ValueError("Writer cleanup receipt belongs to another run")
+    for username in targets:
+        attempt = {"account": username, "schema": slots[username]["writableSchema"], "status": "pending", "commands": []}
+        report["attempts"].append(attempt)
+        write_private(report_path, report)
+        try:
+            for action in ("--reset-testing-writable", "--verify-testing-writable"):
+                command = ["./start.sh", action, username]
+                entry = {"command": command, "status": "pending"}
+                attempt["commands"].append(entry)
+                write_private(report_path, report)
+                if invoke is not None:
+                    invoke(command)
+                else:
+                    log_path = run_file.with_name(f"writer-cleanup-{username}-{len(report['attempts'])}-{len(attempt['commands'])}.log")
+                    with log_path.open("w", opener=lambda name, flags: os.open(name, flags | os.O_EXCL, 0o600)) as log:
+                        subprocess.run(["bash", "-c", 'exec 3<&"$1" 4<&"$2"; shift 2; exec "$@"', "owned-writer-cleanup",
+                                        *map(str, lease), *command], cwd=ROOT, check=True, stdout=log, stderr=log,
+                                       pass_fds=tuple(lease), env={**os.environ, "SCHEMII_QA_LEASE_FD": "3",
+                                                               "SCHEMII_QA_GATE_FD": "4", "SCHEMII_QA_LEASE_MODE": "exclusive",
+                                                               "SCHEMII_QA_STATE_DIRECTORY": str(state.resolve())})
+                    entry["log"] = str(log_path)
+                entry["status"] = "passed"
+                write_private(report_path, report)
+            attempt["status"] = "verified-empty"
+        except Exception:
+            attempt["status"] = "failed"
+            raise
+        finally:
+            write_private(report_path, report)
+    return {"verifiedEmpty": targets, "receipt": str(report_path)}
 
 
 def _cleanup(state: Path, workspace_file: Path, run_file: Path, run: dict) -> dict:
@@ -275,10 +345,11 @@ def main() -> None:
     parser.add_argument("--run", required=True)
     parser.add_argument("--workspace-fixtures", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, default=ROOT / ".schemii/testing")
+    parser.add_argument("--reset-writers", action="store_true", help="After owned app cleanup, reset and verify only exact marked owned writer targets")
     args = parser.parse_args()
     if not args.run.startswith("qa-") or "/" in args.run or ".." in args.run:
         parser.error("--run needs an exact harness run ID")
-    result = cleanup(args.state_dir, args.workspace_fixtures, ROOT / "artifacts/qa" / args.run / "manifest.json")
+    result = cleanup(args.state_dir, args.workspace_fixtures, ROOT / "artifacts/qa" / args.run / "manifest.json", reset_writers=args.reset_writers)
     print(json.dumps({"run": args.run, "removed": result, "credentials": "preserved"}))
     if result["pending"]:
         raise SystemExit(4)
