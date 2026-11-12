@@ -8,6 +8,8 @@ import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:pat
 import { readWorkspaceNavigation } from '../../src/schemii/schemii/web/assets/workspace-navigation.js';
 import { workerCleanupReasons } from './leases.mjs';
 import { sourceIdentity } from './deployment.mjs';
+import { coverageIDs, declareCoverage, assertCoverageActivity, captureSupports, inspectionCoverage, inspectionSupports } from './evidence.mjs';
+export { captureSupports } from './evidence.mjs';
 
 export const nativeMode = run => run.browser === 'native';
 export function nativeBrowserRoots(root) {
@@ -60,7 +62,8 @@ export async function readNativeSession(directory, browserRoot) {
   for (const [pid, tick] of [[metadata.pid, metadata.birth_tick], [metadata.child_pid, metadata.child_birth_tick]]) {
     if (!Number.isSafeInteger(pid) || pid < 1 || String(tick) !== (await processIdentity(pid))?.birthTick) throw new Error('Native connection process ownership is stale.');
   }
-  return { directory: target, sessionId: metadata.session_id, pid: metadata.pid, birthTick: String(metadata.birth_tick), childPid: metadata.child_pid, childBirthTick: String(metadata.child_birth_tick), guardianPid: metadata.guardian_pid, guardianBirthTick: String(metadata.guardian_birth_tick), dev: info.dev, ino: info.ino };
+  if (metadata.activity !== undefined && (!metadata.activity || typeof metadata.activity !== 'object' || Object.keys(metadata.activity).sort().join() !== 'epoch,pending,schema' || metadata.activity.schema !== 1 || !Number.isSafeInteger(metadata.activity.epoch) || metadata.activity.epoch < 0 || !Number.isSafeInteger(metadata.activity.pending) || metadata.activity.pending < 0 || metadata.activity.pending > 256)) throw new Error('Native activity metadata is invalid.');
+  return { activity: metadata.activity, directory: target, sessionId: metadata.session_id, pid: metadata.pid, birthTick: String(metadata.birth_tick), childPid: metadata.child_pid, childBirthTick: String(metadata.child_birth_tick), guardianPid: metadata.guardian_pid, guardianBirthTick: String(metadata.guardian_birth_tick), dev: info.dev, ino: info.ino };
 }
 export async function bindNative(run, lane, directory, browserRoot) {
   if (!nativeMode(run) || run.controller !== 't3' || lane.status !== 'claimed' || !lane.agent) throw new Error('Native binding requires a claimed native T3 lane.');
@@ -79,6 +82,8 @@ export async function assertNativeConnection(lane, browserRoot) {
   if (!binding || binding.closedAt || binding.agent !== lane.agent || binding.generation !== lane.generation) throw new Error('Bind this claimed generation to its own native connection before login or evidence.');
   const actual = await readNativeSession(binding.directory, browserRoot);
   if (actual.dev !== binding.dev || actual.ino !== binding.ino || actual.pid !== binding.pid || actual.birthTick !== binding.birthTick || actual.childPid !== binding.childPid || actual.childBirthTick !== binding.childBirthTick) throw new Error('Native connection ownership changed.');
+  if (binding.activity && (!actual.activity || actual.activity.epoch < binding.activity.epoch)) throw new Error('Native browser activity watermark cannot reset.');
+  binding.activity = actual.activity;
   return binding;
 }
 export async function nativeBrowserProcesses(binding) {
@@ -186,16 +191,65 @@ function scenarioURL(run, lane, scenario, expectedState, requestedURL) {
   if (url.origin !== new URL(run.baseURL).origin || url.username || url.password) throw new Error('Scenario route must stay on its assigned application origin.');
   return url.href;
 }
+export function browserState(run, lane) {
+  return nativeMode(run) ? { session: lane.native?.sessionId, activity: lane.native?.activity }
+    : { session: `isolated-${lane.id}-${lane.generation}`, activity: lane.browserActivity || {schema:1,epoch:0,pending:0} };
+}
+export function activeScenario(lane, scenarioId = lane.currentScenario?.scenario) {
+  const active = lane.currentScenario;
+  if (!active?.coverage) return active?.scenario === scenarioId ? active : null;
+  const member = active.coverage.declaration.members.find(item => item.scenario === scenarioId);
+  return member ? { ...active, scenario: member.scenario, id: member.attempt } : null;
+}
+export function endCoverage(lane, note, at = new Date().toISOString()) {
+  const group = lane.coverageGroups?.find(item => item.coverage.sha256 === lane.currentScenario?.coverage?.sha256);
+  if (!group || group.endedAt) throw new Error('No active shared coverage group.');
+  const reason = requiredText(note, 'Coverage end reason');
+  group.endedAt = at; group.reason = reason;
+  group.status = group.completed.length === group.coverage.declaration.members.length ? 'completed' : 'abandoned';
+  lane.currentScenario = null;
+  return group;
+}
 export function beginScenario(run, lane, scenarioId, request = {}, now = new Date().toISOString()) {
-  const scenario = lane.scenarios.find(item => item.id === scenarioId);
-  if (!scenario) throw new Error('Begin requires an assigned scenario.');
-  if (!run.deployment?.identity?.fingerprint) throw new Error('Scenario requires a verified source identity.');
-  const url = scenarioURL(run, lane, scenario, request.expectedState || 'product', request.url);
-  const session = { id: randomUUID(), scenario: scenario.id, generation: lane.generation, agent: lane.agent, startedAt: now,
-    expectedState: request.expectedState || 'product', url, viewport: scenario.viewport, source: run.deployment.identity.fingerprint,
-    resources: scenario.resources || lane.resources, phase: 'scenario' };
+  if (lane.currentScenario?.coverage) throw new Error('Finish every declared case or explicitly coverage-end the partial group before another begin; nested groups are not allowed.');
+  const ids = request.coverage === undefined ? [scenarioId] : coverageIDs(request.coverage, scenarioId);
+  const contexts = ids.map(id => {
+    const scenario = lane.scenarios.find(item => item.id === id);
+    if (!scenario) throw new Error('Begin requires an assigned scenario.');
+    if (!run.deployment?.identity?.fingerprint) throw new Error('Scenario requires a verified source identity.');
+    const url = scenarioURL(run, lane, scenario, request.expectedState || 'product', request.url);
+    const session = { id: randomUUID(), scenario: scenario.id, generation: lane.generation, agent: lane.agent, startedAt: now,
+      product: scenario.product, assignmentURL:url, requestedURL:request.url || null, expectedState: request.expectedState || 'product', url, viewport: structuredClone(scenario.viewport), source: run.deployment.identity.fingerprint,
+      resources: structuredClone(scenario.resources || lane.resources), phase: 'scenario' };
+    if (request.stateURL !== undefined) {
+      if (ids.length === 1) throw new Error('stateURL belongs to an explicit shared coverage declaration.');
+      const actual = new URL(request.stateURL, run.baseURL);
+      if (!captureRouteMatches(lane, session, actual, new URL(url))) throw new Error('Shared state route/resource is not assigned.');
+      session.url = actual.href;
+    }
+    return session;
+  });
+  const session = contexts[0];
+  if (ids.length > 1) {
+    const state = browserState(run, lane);
+    session.coverage = declareCoverage(contexts, {lane:lane.id,...state,at:now});
+    lane.coverageGroups ||= [];
+    lane.coverageGroups.push({coverage:structuredClone(session.coverage),completed:[],status:'active'});
+  }
   lane.currentScenario = session;
   return session;
+}
+function assertSharedState(run, lane) {
+  const coverage = lane.currentScenario?.coverage;
+  if (!coverage) return;
+  const d = coverage.declaration, state = browserState(run, lane);
+  assertCoverageActivity(coverage, state.session, state.activity);
+  if (d.lane !== lane.id || d.agent !== lane.agent || d.generation !== lane.generation || d.source !== run.deployment?.identity?.fingerprint) throw new Error('Shared coverage lane, generation or source changed.');
+  for (const member of d.members) {
+    const scenario = lane.scenarios.find(item => item.id === member.scenario);
+    if (!scenario || scenario.product !== d.product || !isDeepStrictEqual(scenario.viewport,d.viewport) || !isDeepStrictEqual(scenario.resources || lane.resources,d.resources)
+        || !captureRouteMatches(lane,{...lane.currentScenario,scenario:member.scenario},new URL(d.url),new URL(scenarioURL(run,lane,scenario,d.expectedState,d.requestedURL || undefined)))) throw new Error('Shared coverage assigned context changed.');
+  }
 }
 const selectionParameters = new Set(['layer', 'tableId', 'table', 'viewId', 'view', 'viewKind']);
 function captureRouteMatches(lane, active, actual, expected) {
@@ -220,10 +274,12 @@ function captureRouteMatches(lane, active, actual, expected) {
 export function assertCaptureState(run, lane, input, now = new Date().toISOString()) {
   const active = lane.currentScenario;
   if (!active || active.phase !== 'scenario' || active.generation !== lane.generation || active.agent !== lane.agent || active.source !== run.deployment?.identity?.fingerprint) throw new Error('Evidence requires a current scenario-begin in this claimed generation/source.');
+  assertSharedState(run,lane);
   const actual = new URL(input.url, run.baseURL), expected = new URL(active.url);
+  if (active.coverage && actual.href !== expected.href) throw new Error('Shared capture route/state changed; declare a new group.');
   if (!captureRouteMatches(lane, active, actual, expected)) throw new Error('Capture route/resource does not match the current assigned scenario.');
   if (input.viewport?.width !== active.viewport.width || input.viewport?.height !== active.viewport.height) throw new Error('Capture viewport does not match the current assigned scenario.');
-  return { scenario: active.scenario, scenarioAttempt: active.id, generation: active.generation, agent: lane.agent, source: active.source,
+  return { ...(active.coverage ? {coverage:structuredClone(active.coverage),browserSession:browserState(run,lane).session,product:active.product,expectedState:active.expectedState} : {}), scenario: active.scenario, scenarioAttempt: active.id, generation: active.generation, agent: lane.agent, source: active.source,
     resources: active.resources, phase: 'scenario', url: actual.href, viewport: { ...active.viewport }, at: now };
 }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -249,6 +305,7 @@ export async function importNativeFile(run, lane, file, { runDir, browserRoot, k
     extension = source.split('.').at(-1).toLowerCase();
     if (!['csv', 'json', 'txt', 'sql'].includes(extension)) throw new Error('Download inspection supports bounded CSV, JSON, SQL or text.');
   } else throw new Error('Unsupported native evidence kind.');
+  await assertNativeConnection(lane,browserRoot); assertSharedState(run,lane);
   const target = join(runDir, lane.id, `${kind}-${randomUUID()}.${extension}`);
   await mkdir(dirname(target), { recursive: true, mode: 0o700 });
   await writeFile(target, bytes, { mode: 0o600, flag: 'wx' });
@@ -287,16 +344,19 @@ export async function recordNativeResource(run,lane,input,options) {
     lane.resources.cleanupReceipts ||= [];lane.resources.cleanupReceipts.push(receipt);return receipt;
   } finally { lane.currentScenario=prior; }
 }
-export function currentCapture(run, lane, path, { inspection = false } = {}) {
-  const active = lane.currentScenario;
+export function currentCapture(run, lane, path, { inspection = false, scenario = lane.currentScenario?.scenario } = {}) {
+  const active = activeScenario(lane,scenario);
   const capture = (lane.captures || []).find(item => item.path === path);
-  if (!active || !capture || capture.kind !== 'image' || capture.phase !== 'scenario' || capture.scenario !== active.scenario || capture.scenarioAttempt !== active.id || capture.generation !== lane.generation || capture.agent !== lane.agent || capture.source !== run.deployment?.identity?.fingerprint) throw new Error('Visual evidence must belong to this current scenario, generation, resource and source.');
-  if (inspection && !(capture.inspections || []).some(item => item.agent === lane.agent && item.sha256 === capture.sha256)) throw new Error('Visual evidence needs an explicit image delivery/view receipt and expected/actual inspection.');
+  assertSharedState(run,lane);
+  if (!active || !capture || capture.kind !== 'image' || capture.phase !== 'scenario' || !captureSupports(capture,scenario,active.id,lane.id) || capture.generation !== lane.generation || capture.agent !== lane.agent || capture.source !== run.deployment?.identity?.fingerprint
+      || capture.coverage && capture.coverage.sha256 !== active.coverage?.sha256) throw new Error('Visual evidence must belong to this current scenario, generation, resource and source.');
+  if (inspection && !(capture.inspections || []).some(item => item.agent === lane.agent && inspectionSupports(capture,item,scenario,active.id))) throw new Error('Visual evidence needs an explicit image delivery/view receipt and expected/actual inspection for this case.');
   return capture;
 }
 export function inspectionReceipt(capture, agent, input) {
   if (!['native-inline-image', 'view_image'].includes(input.tool)) throw new Error('Image inspection must record native inline delivery or view_image invocation.');
-  const receipt = { id: randomUUID(), agent, tool: input.tool, invocation: requiredText(input.invocation, 'Image invocation', 1000), note: requiredText(input.note, 'Expected/actual image inspection'), sha256: capture.sha256, at: new Date().toISOString(), assurance: 'worker-attestation-requires-independent-review' };
+  const receipt = { id: randomUUID(), agent, tool: input.tool, invocation: requiredText(input.invocation, 'Image invocation', 1000), note: requiredText(input.note, 'Expected/actual image inspection'), sha256: capture.sha256,
+    ...inspectionCoverage(capture,input.coverage), at: new Date().toISOString(), assurance: 'worker-attestation-requires-independent-review' };
   capture.inspections ||= []; capture.inspections.push(receipt);
   return receipt;
 }
@@ -330,11 +390,11 @@ export function recordReview(run, reviewer, target, scenarioId, input) {
   const scenario = target.scenarios.find(item => item.id === scenarioId), attempt = scenario?.attempts?.at(-1);
   if (!attempt || !attempt.id || attempt.source !== run.deployment?.identity?.fingerprint) throw new Error('Review requires a recorded current-source attempt.');
   if (!['accepted', 'confirmed-defect', 'prerequisite-mistake', 'unsupported-action', 'not-reproduced'].includes(input.verdict)) throw new Error('Review needs an explicit adjudication verdict.');
-  const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path) && capture.phase === 'scenario' && capture.scenario === scenarioId && capture.generation === attempt.generation && capture.scenarioAttempt === attempt.scenarioAttempt && capture.source === attempt.source && capture.agent === attempt.reviewer);
+  const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path) && capture.phase === 'scenario' && captureSupports(capture,scenarioId,attempt.scenarioAttempt,target.id) && capture.generation === attempt.generation && capture.source === attempt.source && capture.agent === attempt.reviewer);
   if (input.verdict === 'accepted' && (attempt.functional !== 'passed' || attempt.visual !== 'passed')) throw new Error('A failed or blocked attempt cannot become accepted.');
   const priorFailures = (scenario.attempts || []).slice(0, -1).filter(item => item.functional !== 'passed' || item.visual !== 'passed');
   if (input.verdict === 'accepted' && priorFailures.length && input.historyAcknowledged !== true) throw new Error('Review must explicitly acknowledge the preserved failed/blocked attempt history.');
-  if (!captures.some(capture => capture.kind === 'image' && (capture.inspections || []).some(item => item.agent === reviewer.agent && item.sha256 === capture.sha256))) throw new Error('Reviewer must inspect the target attempt image and record its hash-bound receipt first.');
+  if (!captures.some(capture => capture.kind === 'image' && (capture.inspections || []).some(item => item.agent === reviewer.agent && inspectionSupports(capture,item,scenarioId,attempt.scenarioAttempt)))) throw new Error('Reviewer must inspect the target attempt image and record its hash-bound receipt first.');
   const receipt = { id: randomUUID(), reviewerLane: reviewer.id, agent: reviewer.agent, username: reviewer.username, nativeSession: reviewer.native?.sessionId,
     targetLane: target.id, scenario: scenarioId, attempt: attempt.id, source: run.deployment.identity.fingerprint,
     verdict: input.verdict, note: requiredText(input.note, 'Review expected/actual reason'), evidence: input.evidence || [], provenance: input.provenance || 'assigned-reviewer-session',
@@ -351,7 +411,14 @@ export function recordReview(run, reviewer, target, scenarioId, input) {
 }
 
 export function recordCheckpoint(run, lane, scenario, input, evidence, at = new Date().toISOString()) {
-  const attempt = { id: randomUUID(), generation: lane.generation, scenarioAttempt: lane.currentScenario?.id,
+  const active = activeScenario(lane,scenario.id);
+  if (lane.currentScenario?.coverage) {
+    assertSharedState(run,lane);
+    const group = lane.coverageGroups.find(item => item.coverage.sha256 === lane.currentScenario.coverage.sha256);
+    if (!active || !group || group.endedAt || group.completed.includes(scenario.id)) throw new Error('Shared checkpoint requires an uncompleted declared case attempt.');
+    group.completed.push(scenario.id);
+  }
+  const attempt = { id: randomUUID(), generation: lane.generation, scenarioAttempt: active?.id,
     source: run.deployment.identity.fingerprint, functional: input.functional, visual: input.visual,
     note: input.note, evidence, reviewer: lane.agent, at };
   scenario.attempts ||= [];
@@ -360,6 +427,8 @@ export function recordCheckpoint(run, lane, scenario, input, evidence, at = new 
   Object.assign(scenario, { functional: attempt.functional, visual: attempt.visual, latestAttemptId: attempt.id,
     note: scenario.attempts.map((item, index) => `Attempt ${index + 1}: ${item.note}`).join('\n'),
     evidence: [...new Set([...(scenario.evidence || []), ...evidence])], reviewer: lane.agent, at });
+  const group = lane.coverageGroups?.find(item => item.coverage.sha256 === lane.currentScenario?.coverage?.sha256);
+  if (group && group.completed.length === group.coverage.declaration.members.length) endCoverage(lane,'Every declared case has its own checkpoint.',at);
   return attempt;
 }
 
@@ -449,7 +518,7 @@ function reproductionProof(run, targetLane, scenarioId) {
       || (nativeMode(run) && (!review.nativeSession || review.nativeSession === target.native?.sessionId))) throw new Error('Remediation requires a current-source passing reproduction and exact independent accepted review.');
   const captures = (target.captures || []).filter(capture => attempt.evidence.includes(capture.path));
   if (!captures.some(capture => capture.kind === 'image' && capture.sha256 && capture.source === attempt.source
-      && capture.scenarioAttempt === attempt.scenarioAttempt && capture.inspections?.some(item => item.agent === review.agent && item.sha256 === capture.sha256))) throw new Error('Remediation review lacks hash-bound original image inspection.');
+      && captureSupports(capture,scenarioId,attempt.scenarioAttempt,target.id) && capture.inspections?.some(item => item.agent === review.agent && inspectionSupports(capture,item,scenarioId,attempt.scenarioAttempt)))) throw new Error('Remediation review lacks hash-bound original image inspection.');
   return { targetLane, scenarioId, attempt, review, captures: captures.map(capture => ({ path: capture.path, sha256: capture.sha256 })) };
 }
 function originalFindingProof(run, finding, manifestPath) {
@@ -464,20 +533,20 @@ function originalFindingProof(run, finding, manifestPath) {
     if (matched.length !== 1) throw new Error('Original evidence needs one authentic retained capture.');
     const capture = matched[0];
     const attempts = (scenario.attempts || []).filter(attempt => attempt.evidence?.includes(path)
-      && attempt.scenarioAttempt === capture.scenarioAttempt && attempt.generation === capture.generation
+      && captureSupports(capture,finding.scenario,attempt.scenarioAttempt,lane.id) && attempt.generation === capture.generation
       && attempt.source === source && attempt.reviewer === finding.agent);
-    if (capture.kind !== 'image' || capture.phase !== 'scenario' || capture.scenario !== finding.scenario
+    if (capture.kind !== 'image' || capture.phase !== 'scenario' || !captureSupports(capture,finding.scenario,attempts[0]?.scenarioAttempt,lane.id)
         || capture.source !== source || capture.agent !== finding.agent || !capture.scenarioAttempt
         || !Number.isSafeInteger(capture.generation) || capture.generation < 1
         || !/^[0-9a-f]{64}$/.test(capture.sha256 || '') || attempts.length !== 1 || !attempts[0].id
         || finding.source && finding.source !== source
-        || finding.scenarioAttempt && finding.scenarioAttempt !== capture.scenarioAttempt
+        || finding.scenarioAttempt && finding.scenarioAttempt !== attempts[0]?.scenarioAttempt
         || finding.generation !== undefined && finding.generation !== capture.generation) throw new Error('Original capture and checkpoint attempt/source/scenario binding is missing or changed.');
     const file = ownedImportFile(dirname(manifestPath), path);
     if (file.sha256 !== capture.sha256) throw new Error('Original evidence bytes differ from the authentic retained capture digest.');
     captures.push({ capture: { path: capture.path, kind: capture.kind, phase: capture.phase, scenario: capture.scenario,
       scenarioAttempt: capture.scenarioAttempt, generation: capture.generation, source: capture.source,
-      agent: capture.agent, sha256: capture.sha256, viewport: capture.viewport, url: capture.url, resources: capture.resources }, attempt: attempts[0] });
+      agent: capture.agent, sha256: capture.sha256, ...(capture.coverage ? {coverage:capture.coverage,browserSession:capture.browserSession,product:capture.product,expectedState:capture.expectedState} : {}), viewport: capture.viewport, url: capture.url, resources: capture.resources }, attempt: attempts[0] });
   }
   if (new Set(finding.evidence).size !== finding.evidence.length) throw new Error('Original finding evidence cannot repeat capture paths.');
   return { finding, source, lane: lane.id, username: lane.username, scenario: scenario.id, captures };
@@ -527,6 +596,7 @@ export function acceptance(run) {
   }
   for (const receipt of run.importedFindings || []) if (!remediationCurrent(receipt, run)) reasons.push(`${receipt.findingId}: imported remediation evidence changed or no longer matches current source/review`);
   for (const lane of run.lanes) for (const reason of workerCleanupReasons(lane)) reasons.push(`${lane.id}: ${reason}`);
+  for (const lane of testers) if (lane.coverageGroups?.some(group=>!group.endedAt)) reasons.push(`${lane.id}: partial shared capture coverage remains active`);
   for (const lane of testers) for (const scenario of lane.scenarios) {
     const attempt = scenario.attempts?.at(-1);
     if (scenario.functional !== 'passed' || scenario.visual !== 'passed') reasons.push(`${lane.id}/${scenario.id}: execution gap`);
@@ -542,7 +612,7 @@ export function acceptance(run) {
   if (nativeMode(run)) for (const lane of run.lanes) if (lane.native && (lane.native.cleanup?.transport !== 'stopped' || lane.native.cleanup?.guardian !== 'stopped' || lane.native.cleanup?.temporaryOutput !== 'removed-observed' || lane.native.releaseAttempts?.at(-1)?.status === 'pending')) reasons.push(`${lane.id}: native transport cleanup pending`);
   return { status: reasons.length ? 'review-pending' : 'reviewed-acceptance', reasons, intended: testers.reduce((sum, lane) => sum + lane.scenarios.length, 0),
     dispatched: testers.reduce((sum, lane) => sum + (lane.dispatchedAt ? lane.scenarios.length : 0), 0),
-    started: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.attempts?.length || lane.currentScenario?.scenario === s.id).length, 0),
+    started: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.attempts?.length || !!activeScenario(lane,s.id)).length, 0),
     completed: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.functional !== 'not-run' && s.visual !== 'not-run').length, 0),
     firstAttemptFailures: testers.reduce((sum, lane) => sum + lane.scenarios.filter(s => s.attempts?.[0] && (s.attempts[0].functional !== 'passed' || s.attempts[0].visual !== 'passed')).length, 0), reviewed };
 }

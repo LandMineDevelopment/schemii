@@ -41,7 +41,8 @@ const help = `Usage: ./test.sh COMMAND [options]
   native-auth Record visibly authenticated account identity and fresh image
   native-bind Bind claimed native lane to its live thread connection before login
   resource-receipt Record exact owned UI creation ID/name/time and fresh image
-  begin      Begin an assigned scenario before fresh captures (--scenario ID)
+  begin      Begin a case; optional args coverage declares 2–4 same-state case IDs
+  coverage-end Explicitly abandon a partial shared group (--note reason)
   capture    Export a selected native screenshot/download (--args-json)
   inspect    Record hash-bound image viewing and expected/actual observations
   inspect-download Verify actual downloaded bytes against an expected oracle
@@ -79,6 +80,10 @@ Workers:   --controller t3|codex --agent-model MODEL --agent-reasoning EFFORT
 Run:       --run RUN_ID
 Claim:     --lane LANE_ID --agent AGENT_ID
 Action:    --session-file FILE --kind snapshot --args-json '{"...":"..."}'
+Shared:    begin --session-file FILE --scenario CASE_A
+           --args-json '{"coverage":["CASE_A","CASE_B"],"stateURL":"EXACT_CURRENT_URL"}'
+           inspect --args-json '{"tool":"view_image","invocation":"ACTUAL_VIEW","coverage":["CASE_A","CASE_B"]}'
+           checkpoint each case separately; intervening browser actions fence reuse.
 Checkpoint:--session-file FILE --scenario ID --functional passed|failed|blocked
            --visual passed|failed|blocked --note TEXT --evidence FILE1,FILE2
 Finding:   --session-file FILE --scenario ID --title TEXT
@@ -112,6 +117,7 @@ const commandOptions = {
   'native-auth': ['session-file','args-json'],
   'resource-receipt': ['session-file','args-json'],
   begin: ['session-file','scenario','args-json'],
+  'coverage-end': ['session-file','note'],
   capture: ['session-file','args-json'],
   inspect: ['session-file','evidence','note','args-json','target-lane'],
   'inspect-download': ['session-file','evidence','args-json'],
@@ -431,7 +437,7 @@ async function execute(command,o) {
     });
     console.log(JSON.stringify(result,null,2));if(result.status==='blocked')process.exitCode=4;return;
   }
-  if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','capture','inspect','inspect-download','review'].includes(command)) {
+  if(['action','checkpoint','finding','finish','heartbeat','native-bind','native-auth','resource-receipt','begin','coverage-end','capture','inspect','inspect-download','review'].includes(command)) {
     if(!o['session-file'])throw invalid('--session-file is required.');
     if(command==='action'&&!o.kind)throw invalid('--kind is required.');
     if(command==='checkpoint'&&(!o.scenario||!['passed','failed','blocked'].includes(o.functional)||!['passed','failed','blocked'].includes(o.visual)))throw invalid('Checkpoint requires --scenario and passed|failed|blocked values for --functional and --visual.');

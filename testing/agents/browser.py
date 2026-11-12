@@ -190,7 +190,11 @@ def _orphan_metadata(descriptor: int, name: str) -> dict | None:
     if not isinstance(data, dict) or set(data) not in (
         required,
         required | guardian_fields,
+        required | {"activity"},
+        required | guardian_fields | {"activity"},
     ):
+        return None
+    if "activity" in data and not valid_activity(data["activity"]):
         return None
     if (
         type(data["schema"]) is not int
@@ -660,6 +664,19 @@ class Backend:
             raise ShutdownRequested(deferred_signal[0])
 
 
+def valid_activity(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"schema", "epoch", "pending"}
+        and type(value["schema"]) is int
+        and value["schema"] == 1
+        and type(value["epoch"]) is int
+        and 0 <= value["epoch"] <= 2**53 - 1
+        and type(value["pending"]) is int
+        and 0 <= value["pending"] <= MAX_PENDING_REQUESTS
+    )
+
+
 class Relay:
     """Keep the native endpoint while explicitly closed generations are released."""
 
@@ -669,6 +686,11 @@ class Relay:
         self.client_frames, self.backend_frames = Frames(), Frames()
         self.to_client, self.to_backend = bytearray(), bytearray()
         self.requests, self.inflight, self.callbacks = {}, {}, set()
+        # Connection-local, nonsecret state fence. Admission invalidates old
+        # captures, including queued/failed/cancelled actions; replay cannot reset it.
+        self.activity_epoch = 0
+        self.activity_pending = set()
+        self.publish_activity()
         self.deferred = []
         self.closing = None
         self.initialize = self.identity = self.private_id = None
@@ -682,6 +704,49 @@ class Relay:
         for descriptor in (incoming, outgoing):
             self.original_blocking[descriptor] = os.get_blocking(descriptor)
             os.set_blocking(descriptor, False)
+
+    def publish_activity(self):
+        session = self.backend.session
+        if isinstance(session, Session):
+            _update_metadata(
+                session,
+                activity={
+                    "schema": 1,
+                    "epoch": self.activity_epoch,
+                    "pending": len(self.activity_pending),
+                },
+            )
+
+    def admit_activity(self, message: dict):
+        if message["method"] != "tools/call":
+            return
+        params = message.get("params", {})
+        name = params.get("name") if isinstance(params, dict) else None
+        readonly = name in {
+            "browser_take_screenshot",
+            "browser_snapshot",
+            "browser_console_messages",
+            "browser_network_requests",
+        } or (
+            name == "browser_tabs"
+            and isinstance(params.get("arguments"), dict)
+            and params["arguments"].get("action") == "list"
+        )
+        identity = _request_id(message)
+        if readonly or identity in self.activity_pending:
+            return
+        if self.activity_epoch >= 2**53 - 1:
+            raise ProtocolError(
+                "Browser activity counter exhausted; use a fresh thread."
+            )
+        self.activity_epoch += 1
+        self.activity_pending.add(identity)
+        self.publish_activity()
+
+    def complete_activity(self, identity):
+        if identity in self.activity_pending:
+            self.activity_pending.remove(identity)
+            self.publish_activity()
 
     def queue(self, target: bytearray, raw: bytes):
         target.extend(raw)
@@ -747,6 +812,8 @@ class Relay:
             self.queue(self.to_backend, raw)
             return
         if "id" not in message:
+            if message["method"] == "tools/call":
+                raise ProtocolError("Browser tool calls require request identities.")
             if message["method"] == "notifications/cancelled":
                 params = message.get("params", {})
                 if not isinstance(params, dict):
@@ -758,6 +825,7 @@ class Relay:
                     if "id" in queued and _request_id(queued) == cancelled:
                         self.deferred.pop(index)
                         self.requests.pop(cancelled)
+                        self.complete_activity(cancelled)
                         self.error(
                             cancelled, "MCP request cancelled before execution.", -32800
                         )
@@ -789,6 +857,7 @@ class Relay:
             return
         self.requests[identity] = message["method"]
         self.check_budget()
+        self.admit_activity(message)
         if self.closing or self.private_id is not None or self.backend.process is None:
             self.deferred.append((message, raw))
         elif (
@@ -903,6 +972,8 @@ class Relay:
         if identity not in self.inflight:
             raise ProtocolError("Unmatched MCP backend response.")
         method = self.inflight.pop(identity)
+        if not self.closing or identity != _request_id(self.closing[0]):
+            self.complete_activity(identity)
         if method == "initialize" and "error" not in message:
             self.identity = self.negotiated(message.get("result"))
         if method == "tools/list" and "error" not in message:
@@ -939,6 +1010,7 @@ class Relay:
                 self.closing[2] = raw
                 return
             self.closing = None
+            self.complete_activity(identity)
         self.requests.pop(identity)
         self.queue(self.to_client, raw)
 
@@ -958,6 +1030,7 @@ class Relay:
                 if cancelled:
                     self.closing = None
                     self.requests.pop(identity)
+                    self.complete_activity(identity)
                     self.queue(self.to_client, response)
                     return
                 try:
@@ -972,10 +1045,12 @@ class Relay:
                     raise
                 self.closing = None
                 self.requests.pop(identity)
+                self.complete_activity(identity)
                 self.queue(self.to_client, response)
             elif cancelled:
                 self.closing = None
                 self.requests.pop(identity)
+                self.complete_activity(identity)
                 self.error(identity, "MCP request cancelled before execution.", -32800)
             else:
                 self.forward(message, raw)
@@ -995,6 +1070,7 @@ class Relay:
                         "No successful MCP initialization can be restored."
                     )
                 self.backend.start()
+                self.publish_activity()
                 self.backend_frames = Frames()
                 self.expiry = time.monotonic() + OUTPUT_SWEEP_SECONDS
                 value = f"schemii-private-{secrets.token_hex(16)}"

@@ -448,3 +448,20 @@ generation/scenario binding for every evidence image and checks its retained has
 against actual bytes before import. Missing legacy provenance stays unverified;
 replacing an image or changing its original proof invalidates later applicability.
 Original failures and historical findings remain intact.
+
+### Declared same-state images
+
+`begin --scenario CASE_A --args-json '{"coverage":["CASE_A","CASE_B"]}'`
+explicitly declares two to four assigned checks before one fresh screenshot.
+They must have the same exact product/resource/route/viewport/expected state and
+current lane/source/session generation. Optional `stateURL` fixes the actual
+supported workspace selection. Native sharing requires fresh activity-aware
+browser metadata; older sessions retain single-case behavior.
+
+`inspect` must name the viewed members in `args-json.coverage`. Checkpoint each
+case separately; the reviewer also inspects explicit members and reviews each
+case separately. Any intervening potentially mutating browser call invalidates
+remaining reuse, including failed/in-flight actions. `coverage-end --note REASON`
+explicitly abandons a partial group without filling its gaps. Historical images
+cannot be upgraded to shared scope. See the [complete declaration and activity
+contract](../../docs/native-qa-acceptance.md#explicit-same-state-capture-coverage).
