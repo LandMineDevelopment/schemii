@@ -61,7 +61,7 @@ REQUIRED_SOURCE_WITNESS_SHA256 = (
 )
 # Integration must pin the independently reviewed constrained #135 consumer tree.
 # Empty intentionally denies attachment; it cannot authorize older detached engines.
-REQUIRED_CONSUMER_TREE_SHA256 = ""
+REQUIRED_CONSUMER_TREE_SHA256 = "3fcc08b190c528bf890969e60b02d9901f767661a7e6cd3cbb53de753fcb005d"
 SERVICES = {"metadata", "source", "observer-init", "schemii", "ingress"}
 ASSETS = (
     "start.sh",
