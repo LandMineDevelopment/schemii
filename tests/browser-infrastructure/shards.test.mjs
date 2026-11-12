@@ -45,7 +45,7 @@ function proveInventory(cwd, baseline, shardCount = 2, profile = undefined) {
       cases({ suites: [suite] }).some(item => item.project === project)) };
     const projectFiles = [...new Set(required.filter(item => item.project === project)
       .map(item => `tests/e2e/${item.file}`))].sort();
-    const plan = balanceFiles(projectFiles, project, OBSERVED_COSTS, shardCount);
+    const plan = balanceFiles(projectFiles, project, OBSERVED_COSTS, shardCount, cwd);
     assert.equal(plan.shards.length, shardCount);
     assert.deepEqual(plan.unknownFiles, projectFiles.filter(file => {
       const cost = OBSERVED_COSTS[file];
@@ -87,10 +87,10 @@ test('real six-way Playwright discovery proves exact project/test coverage and t
   for (const project of PROJECTS) {
     const expected = required.filter(item => item.project === project);
     const files = [...new Set(expected.map(item => `tests/e2e/${item.file}`))];
-    const plan = balanceParallelFiles(files, project, OBSERVED_COSTS, 6);
+    const plan = balanceParallelFiles(files, project, OBSERVED_COSTS, 6, root);
     const routed = [];
     for (const lane of plan.shards) {
-      const phases = parallelFiles(lane.files, project);
+      const phases = parallelFiles(lane.files, project, OBSERVED_COSTS, root);
       const assigned = [...phases.serial, ...phases.parallel.flat()];
       assert.deepEqual([...assigned].sort(), [...lane.files].sort());
       assert.equal(new Set(assigned).size, assigned.length);
@@ -167,6 +167,52 @@ test('a freshly added nested spec is discovered and scheduled exactly once per i
     const required = proveInventory(directory, baseline, 6);
     assert.equal(required.filter(item => item.file === 'nested/brand-new.spec.js').length, 2);
     assert.equal(required.length, 12);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('the actual CLI hashes its discovered checkout when the scheduler lives in another source root', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'schemii-foreign-shard-source-'));
+  try {
+    mkdirSync(resolve(directory, 'tests/e2e'), { recursive: true });
+    symlinkSync(resolve(root, 'node_modules'), resolve(directory, 'node_modules'), 'dir');
+    writeFileSync(resolve(directory, 'package.json'), '{"type":"module"}');
+    writeFileSync(resolve(directory, 'playwright.config.js'), `
+      import { defineConfig } from '@playwright/test';
+      import { manifestPattern } from ${JSON.stringify(new URL('../../scripts/ci/browser-shards.mjs', import.meta.url).href)};
+      export default defineConfig({ testDir:'./tests/e2e', workers:1, fullyParallel:false,
+        testMatch:manifestPattern(process.env.SCHEMII_E2E_FILE_MANIFEST),
+        projects:[{name:'desktop-chromium'},{name:'android-chromium',grepInvert:/@request-only/}] });
+    `);
+    const files = ['accounts', 'query-diagnostics', 'design-editor-lifecycle', 'schemoo-prototype',
+      'sql-console', 'inspector-data', 'new-unreviewed-source'].map(name => `tests/e2e/${name}.spec.js`).sort();
+    for (const file of files) writeFileSync(resolve(directory, file), `
+      import { test } from '@playwright/test';
+      test('source identity is specific to this disposable checkout', async () => {});
+    `);
+    for (const project of PROJECTS) for (const overlap of [false, true]) {
+      const expected = (overlap ? balanceParallelFiles : balanceFiles)(files, project, OBSERVED_COSTS, 6, directory);
+      const index = overlap
+        ? expected.shards.findIndex(shard => parallelFiles(shard.files, project, OBSERVED_COSTS, directory).parallel.length === 2)
+        : 0;
+      assert.ok(index >= 0, 'exercise a real two-group source-root partition');
+      const args = [resolve(root, 'scripts/ci/run-browser-shard.mjs'), `--project=${project}`,
+        `--shard=${index + 1}/6`, '--profile=full', '--plan', ...(overlap ? ['--parallel=2'] : [])];
+      const environment = { ...process.env };
+      for (const key of ['SCHEMII_E2E_FILE_MANIFEST', 'SCHEMII_E2E_PARALLEL_ACCOUNTS_FILE', 'SCHEMII_E2E_PROCESS_INDEX', 'SCHEMII_E2E_SOURCE_ROOT']) delete environment[key];
+      const result = spawnSync(process.execPath, args, { cwd: directory, env: environment, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+      assert.equal(result.status, 0, result.stderr + result.stdout);
+      const actual = JSON.parse(result.stdout);
+      // Six existing filenames have different bytes in this discovered source.
+      // Their unchanged module-checkout copies cannot validate these costs.
+      assert.deepEqual(actual.unknownFiles, files);
+      assert.deepEqual(actual.files, expected.shards[index].files);
+      assert.equal(actual.estimatedMs, expected.shards[index].estimatedMs);
+      if (overlap) {
+        const partition = parallelFiles(actual.files, project, OBSERVED_COSTS, directory);
+        assert.deepEqual(actual.serial, partition.serial);
+        assert.deepEqual(actual.parallel, partition.parallel);
+      }
+    }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
