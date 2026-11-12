@@ -52,6 +52,7 @@ async function mock(page, state) {
       const id = path.endsWith('/models') ? `model_${'e'.repeat(32)}` : `dashboard_${'f'.repeat(32)}`;
       json = { id, ownerId, database: 'sales_db', revision: 1, layoutRevision: 1, exploreRevision: 1, catalogFingerprint: state.catalog.fingerprint, ...body };
       state.creates.push({ path, body }); state.saved.push(json);
+      if (path.endsWith('/models') && state.holdModelCreate) await state.holdModelCreate.promise;
       if (state.uncertain) return route.fulfill({ status: 503, json: { error: { message: 'Response lost after controlled save' } } });
     } else if (path.endsWith('/context')) json = { model: state.model, catalog: state.catalog, permissions: { edit: true, export: true, drill: true } };
     else if (path.endsWith('/executions/stream')) return route.fulfill({ contentType: 'application/x-ndjson', body: JSON.stringify({ type: 'start', snapshotAt: new Date().toISOString(), tiles: [], tileErrors: [] }) + '\n' + JSON.stringify({ type: 'end' }) + '\n' });
@@ -112,12 +113,42 @@ test('uncertain model creation survives review-list refresh without a second POS
   await page.goto(await stage(page, state, 'schema'));
   const review = page.locator('#model-library'), confirm = review.getByRole('button', { name: 'Create model', exact: true });
   await expect(confirm).toBeEnabled(); await confirm.click();
-  await expect(review).toContainText('uncertain request will not be repeated');
+  await expect(review).toContainText('This context will not repeat creation');
   await review.getByRole('button', { name: 'Review model list', exact: true }).click();
   await expect(confirm).toBeDisabled();
-  await expect(review).toContainText('possible saved model');
+  await expect(review).toContainText('A matching name alone does not identify the original creation');
+  await expect(review.getByRole('button', { name: /^Review saved model/ })).toHaveCount(0);
   expect(state.creates).toHaveLength(1);
 });
+
+for (const outcome of ['success', 'error']) {
+  test(`pending model create remains reserved after close/reopen and late ${outcome}`, async ({ page }) => {
+    const state = fixture(); state.uncertain = outcome === 'error';
+    let release; state.holdModelCreate = { promise: new Promise(resolve => { release = resolve; }) };
+    await mock(page, state); await page.goto(await stage(page, state, 'schema'));
+    const review = page.locator('#model-library'), confirm = review.getByRole('button', { name: 'Create model', exact: true });
+    await expect(confirm).toBeEnabled(); await confirm.click();
+    await expect.poll(() => state.creates.length).toBe(1);
+    await page.getByRole('button', { name: 'Close model library', exact: true }).click();
+    await page.getByRole('button', { name: 'Open models', exact: true }).click();
+    await expect(review).toContainText('creation is still pending');
+    await expect(confirm).toBeDisabled();
+    await review.locator('form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(state.creates).toHaveLength(1); release();
+    await expect(review).toContainText('creation is still pending');
+    await expect.poll(async () => {
+      await review.getByRole('button', { name: 'Review model list', exact: true }).click();
+      return review.textContent();
+    }).toMatch(outcome === 'success' ? /create response identified a saved model/ : /create outcome is uncertain/);
+    await expect(confirm).toBeDisabled();
+    if (outcome === 'success') await expect(review.getByRole('button', { name: 'Review saved model sales model', exact: true })).toBeVisible();
+    else {
+      await expect(review).toContainText('create outcome is uncertain');
+      await expect(review.getByRole('button', { name: /^Review saved model/ })).toHaveCount(0);
+    }
+    expect(state.creates).toHaveLength(1);
+  });
+}
 
 test('saved preview reaches Schemer naming and tile review before unrelated-dashboard fallback', async ({ page }) => {
   const state = fixture(); await mock(page, state);
