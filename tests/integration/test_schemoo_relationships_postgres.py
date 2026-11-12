@@ -103,7 +103,9 @@ def qualified_sources(postgres_metadata):
 
             class ReaderGateway(PsycopgPostgresGateway):
                 def _connect(self, target):
-                    connection = psycopg.connect(dsn, password=password, row_factory=dict_row)
+                    connection = psycopg.connect(
+                        dsn, password=password, row_factory=dict_row
+                    )
                     connection.execute(
                         sql.SQL("SET ROLE {}").format(sql.Identifier(role))
                     )

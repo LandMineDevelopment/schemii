@@ -182,11 +182,17 @@ def test_prefix_subtotals_and_matrix_caps_leave_full_totals_and_csv_intact(
     )
 
 
+@pytest.mark.parametrize("calendar_axis", ["row", "column"])
+@pytest.mark.parametrize("exporting", [False, True])
 def test_zoned_calendar_pivot_totals_reaggregate_period_inputs_and_drill_bucket(
-    execute, compile_pivot
+    execute, compile_pivot, calendar_axis, exporting
 ):
+    row, column = (
+        ("occurred", "category") if calendar_axis == "row" else ("category", "occurred")
+    )
     changes = {
-        "rowDimensions": [field("occurred")],
+        "rowDimensions": [field(row)],
+        "columnDimensions": [field(column)],
         "timeAnalysis": {
             "table": "facts",
             "column": "occurred",
@@ -194,21 +200,28 @@ def test_zoned_calendar_pivot_totals_reaggregate_period_inputs_and_drill_bucket(
             "timezone": "America/New_York",
         },
     }
-    rows = run(execute, compile_pivot(**changes))
+    rows = run(execute, compile_pivot(exporting=exporting, **changes))
     assert next(row for row in rows if row[4:6] == [0, 0])[2] == pytest.approx(
         Decimal(235) / 6
     )
     assert next(row for row in rows if row[4:6] == [0, 0])[3] == 3
     selected = {
         "dimensions": [
-            {"table": "facts", "column": "occurred", "value": "2024-03-10"},
-            {"table": "facts", "column": "category", "value": "A"},
+            {
+                "table": "facts",
+                "column": name,
+                "value": "2024-03-10" if name == "occurred" else "A",
+            }
+            for name in (row, column)
         ],
         "measureIndex": 0,
         "pivot": {"kind": "cell", "rowDepth": 1, "columnDepth": 1},
     }
     assert {
-        row[0] for row in run(execute, compile_pivot(selection=selected, **changes))
+        row[0]
+        for row in run(
+            execute, compile_pivot(selection=selected, exporting=exporting, **changes)
+        )
     } == {1, 2, 4, 6, 7}
 
 

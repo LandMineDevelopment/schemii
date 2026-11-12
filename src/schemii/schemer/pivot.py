@@ -217,7 +217,13 @@ def compile_pivot(
         )
 
     results = []
-    for r, c in grouping_depths(tile):
+    # PostgreSQL resolves UNION types from left to right. Start with the leaf,
+    # whose axes are typed even when empty, before totals project untyped NULLs.
+    depths = grouping_depths(tile)
+    for r, c in [
+        (rows, columns),
+        *(depth for depth in depths if depth != (rows, columns)),
+    ]:
         retained = [*range(r), *range(rows, rows + c)]
         leaf = (r, c) == (rows, columns)
         if leaf:
